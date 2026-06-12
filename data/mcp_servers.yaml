@@ -10,3 +10,10 @@ servers:
     connection_config:
       command: python -m athena.tools.server
     source: builtin
+
+  - server_id: chrome-devtools
+    name: Chrome DevTools
+    transport: stdio
+    connection_config:
+      command: npx -y chrome-devtools-mcp@latest --slim --headless
+    source: external

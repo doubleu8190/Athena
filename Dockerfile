@@ -13,9 +13,26 @@ FROM python:3.14-slim AS runtime
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies: curl, Node.js 22.x (for chrome-devtools-mcp),
+# Chromium (Puppeteer system dep), and shared libraries required by Chromium.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends \
+    nodejs \
+    chromium \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libgbm1 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
@@ -40,6 +57,12 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV SQLITE_DB_PATH=/data/athena.db
 ENV DATA_DIR=/data
+
+# chrome-devtools-mcp: use system Chromium instead of Puppeteer's bundled download
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Opt out of chrome-devtools-mcp telemetry
+ENV CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=true
 
 EXPOSE 8000
 

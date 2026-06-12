@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from athena.logging_config import get_logger
 
-import yaml
-
+logger = get_logger(__name__)
 
 # ── Default paths (overridable via env vars) ──────────────────────────
 
@@ -25,22 +26,6 @@ DEFAULT_LLM_CONFIG_PATH = Path(
 DEFAULT_MCP_SERVERS_CONFIG = Path(
     os.environ.get("MCP_SERVERS_CONFIG", DEFAULT_DATA_DIR / "mcp_servers.yaml")
 )
-
-
-if __name__ == "__main__":
-    print("DEFAULT_DATA_DIR", DEFAULT_DATA_DIR)
-    print("DEFAULT_SYSTEM_CONFIG_PATH", DEFAULT_SYSTEM_CONFIG_PATH)
-    print("DEFAULT_USER_CONFIG_PATH", DEFAULT_USER_CONFIG_PATH)
-    print("DEFAULT_LLM_CONFIG_PATH", DEFAULT_LLM_CONFIG_PATH)
-    print("DEFAULT_MCP_SERVERS_CONFIG", DEFAULT_MCP_SERVERS_CONFIG)
-    if not DEFAULT_SYSTEM_CONFIG_PATH.exists():
-        print(f"Warning: {DEFAULT_SYSTEM_CONFIG_PATH} does not exist")
-    if not DEFAULT_USER_CONFIG_PATH.exists():
-        print(f"Warning: {DEFAULT_USER_CONFIG_PATH} does not exist")
-    if not DEFAULT_LLM_CONFIG_PATH.exists():
-        print(f"Warning: {DEFAULT_LLM_CONFIG_PATH} does not exist")
-    if not DEFAULT_MCP_SERVERS_CONFIG.exists(): 
-        print(f"Warning: {DEFAULT_MCP_SERVERS_CONFIG} does not exist")  
 # ── Configuration dataclasses ──────────────────────────────────────────
 
 
@@ -177,6 +162,9 @@ class Config:
 
     @classmethod
     def _load_system_config(cls) -> SystemConfig:
+        if not DEFAULT_SYSTEM_CONFIG_PATH.exists():
+            logger.warning(f"Warning: {DEFAULT_SYSTEM_CONFIG_PATH} does not exist")
+            
         data = cls._load_yaml(DEFAULT_SYSTEM_CONFIG_PATH)
         system_data = data.get("system", {})
         harness_data = data.get("harness", {})
@@ -200,6 +188,8 @@ class Config:
 
     @classmethod
     def _load_llm_config(cls) -> LLMConfig:
+        if not DEFAULT_LLM_CONFIG_PATH.exists():
+            logger.warning(f"Warning: {DEFAULT_LLM_CONFIG_PATH} does not exist")
         data = cls._load_yaml(DEFAULT_LLM_CONFIG_PATH)
         providers_raw = data.get("providers", {})
         providers = {}
@@ -219,6 +209,8 @@ class Config:
 
     @classmethod
     def _load_user_config(cls) -> UserConfig:
+        if not DEFAULT_USER_CONFIG_PATH.exists():
+            logger.warning(f"Warning: {DEFAULT_USER_CONFIG_PATH} does not exist")
         data = cls._load_yaml(DEFAULT_USER_CONFIG_PATH)
         user_data = data.get("user", {})
         return UserConfig(
@@ -235,6 +227,8 @@ class Config:
 
     @classmethod
     def _load_mcp_servers_seed(cls) -> list[dict[str, Any]]:
+        if not DEFAULT_MCP_SERVERS_CONFIG.exists(): 
+            logger.warning(f"Warning: {DEFAULT_MCP_SERVERS_CONFIG} does not exist")  
         data = cls._load_yaml(DEFAULT_MCP_SERVERS_CONFIG)
         return data.get("servers", [])
 

@@ -1,0 +1,10 @@
+# user.yaml — User identity configuration
+# Channels with empty user_id are disabled.
+
+user:
+  telegram:
+    user_id: ""          # Set your Telegram user ID (numeric string)
+  web:
+    user_id: "admin"     # Web console identity
+  wechat:
+    user_id: ""          # Set your WeChat wxid

@@ -1,0 +1,189 @@
+# docker-compose.yml — Athena development deployment
+#
+# Services:
+#   redis           — Session cache + Celery broker/backend
+#   athena-core     — FastAPI application (API + Core engine)
+#   celery-worker   — Background task execution + recovery
+#   skill-proxy     — Squid proxy for skill network isolation
+#   elasticsearch   — Log indexing and search (single node)
+#   logstash        — Log aggregation, parsing, and routing
+#   kibana          — Log visualization and dashboards
+#   filebeat        — Docker container log collection
+#   kibana-setup    — One-shot Kibana dashboard import
+
+services:
+  # ── Infrastructure ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - ./data/redis:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Athena Core ────────────────────────────────────────────────────
+  athena-core:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - SQLITE_DB_PATH=/data/athena.db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_POLL_TIMEOUT=30
+      - WECHAT_BOT_TOKEN=${WECHAT_BOT_TOKEN:-}
+      - WECHAT_ILINK_BOT_ID=${WECHAT_ILINK_BOT_ID:-}
+      - USER_CONFIG_PATH=/data/user.yaml
+      - SYSTEM_CONFIG_PATH=/data/athena.yaml
+      - MCP_SERVERS_CONFIG=/data/mcp_servers.yaml
+      - LLM_CONFIG_PATH=/data/llm.yaml
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-dev-key-change-me}
+      - DEVICE_PSK=${DEVICE_PSK:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PROMETHEUS_ENABLED=true
+    depends_on:
+      redis:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "alembic upgrade head && uvicorn athena.main:app --host 0.0.0.0 --port 8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "app=athena,component=core"
+
+  # ── Celery Worker ─────────────────────────────────────────────────
+  celery-worker:
+    build: .
+    command: celery -A athena.worker worker -l info --concurrency=8
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - SQLITE_DB_PATH=/data/athena.db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 1
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "app=athena,component=worker"
+
+  # ── Skill Proxy (Squid) ───────────────────────────────────────────
+  skill-proxy:
+    image: squid:latest
+    restart: unless-stopped
+    volumes:
+      - ./data/squid/squid.conf:/etc/squid/squid.conf
+      - ./data/squid/acl/:/etc/squid/acl/
+    ports:
+      - "3128:3128"
+    networks:
+      - skill-net
+
+  # ── Elasticsearch ─────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.4
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - xpack.monitoring.collection.enabled=true
+      - http.cors.enabled=true
+      - http.cors.allow-origin=*
+    volumes:
+      - ./data/elasticsearch:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qE 'green|yellow'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ── Logstash ──────────────────────────────────────────────────────
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.17.4
+    restart: unless-stopped
+    environment:
+      - LS_JAVA_OPTS=-Xms256m -Xmx256m
+      - LS_OPTS=--pipeline.unsafe_shutdown
+    volumes:
+      - ./deploy/logstash/pipelines/:/usr/share/logstash/pipeline/
+      - ./deploy/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml
+      - ./data/athena.db:/data/athena.db:ro
+      - ./deploy/logstash/drivers/:/usr/share/logstash/drivers/
+    ports:
+      - "5044:5044"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # ── Kibana ────────────────────────────────────────────────────────
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.4
+    restart: unless-stopped
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+      - XPACK_SECURITY_ENABLED=false
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENABLED=false
+    ports:
+      - "5601:5601"
+    volumes:
+      - ./deploy/kibana/kibana.yml:/usr/share/kibana/config/kibana.yml
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # ── Filebeat ──────────────────────────────────────────────────────
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.17.4
+    restart: unless-stopped
+    user: root
+    volumes:
+      - ./deploy/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: filebeat -e --strict.perms=false
+    depends_on:
+      - logstash
+
+  # ── Kibana Setup (one-shot) ───────────────────────────────────────
+  kibana-setup:
+    image: curlimages/curl:latest
+    depends_on:
+      - kibana
+    volumes:
+      - ./deploy/kibana/dashboards/:/dashboards:ro
+      - ./deploy/kibana/setup.sh:/setup.sh:ro
+    entrypoint: ["/bin/sh", "/setup.sh"]
+    restart: "no"
+
+networks:
+  skill-net:
+    driver: bridge

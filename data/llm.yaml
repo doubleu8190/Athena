@@ -1,0 +1,26 @@
+# llm.yaml — LLM Provider configuration
+# Only providers with native Function Calling support are compatible.
+
+default_provider: openai
+fallback_chain:
+  - anthropic
+
+providers:
+  openai:
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o
+    max_tokens: 4096
+    temperature: 0.7
+
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    temperature: 0.7
+
+  litellm:
+    api_key_env: LITELLM_API_KEY
+    base_url: http://litellm:4000
+    model: gpt-4o
+    max_tokens: 4096
+    temperature: 0.7

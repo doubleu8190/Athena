@@ -1,0 +1,37 @@
+# Ignore build artifacts
+__pycache__/
+*.py[codz]
+*.so
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+.ruff_cache/
+.mypy_cache/
+
+# Data (contains runtime state, not source)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/squid/acl/*.conf
+data/wechat_credentials.json
+
+# Docker
+docker-compose.override.yml
+
+# Environment
+.env
+.envrc
+
+# Test artifacts
+htmlcov/
+.coverage
+.pytest_cache/

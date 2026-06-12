@@ -1,0 +1,21 @@
+# athena.yaml — System-global configuration
+# All values shown are defaults. Omit this file to use defaults.
+
+system:
+  max_fallback_depth: 1
+  global_max_concurrent_tasks: 8
+  session_idle_timeout_minutes: 30
+  session_expire_hours: 24
+
+harness:
+  circuit_breaker_threshold: 3
+  cooling_off_defaults:
+    low: 0
+    medium: 15
+    high: 30
+    critical: 60
+
+mcp:
+  heartbeat_interval_seconds: 30
+  reconnect_backoff_max_seconds: 60
+  tools_list_refresh_on_reconnect: true

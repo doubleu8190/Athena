@@ -1,0 +1,9 @@
+# Logstash pipeline definitions
+- pipeline.id: athena-app-logs
+  path.config: "/usr/share/logstash/pipeline/app_logs.conf"
+  pipeline.workers: 1
+
+- pipeline.id: athena-sqlite-sync
+  path.config: "/usr/share/logstash/pipeline/sqlite_sync.conf"
+  pipeline.workers: 1
+  schedule: { every: "30s" }

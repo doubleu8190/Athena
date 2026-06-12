@@ -1,0 +1,229 @@
+"""IM message endpoints — Web console message + SSE streaming.
+
+POST /api/v1/im/web/message — Send message, receive SSE stream of execution events.
+POST /api/v1/im/web/message/confirm — Send confirmation response.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from athena.api.deps import get_config_dep, verify_api_key
+from athena.config import Config
+from athena.core.message import UnifiedMessage
+from athena.logging_config import get_logger
+
+logger = get_logger(__name__)
+router = APIRouter(tags=["im"])
+
+
+class MessageRequest(BaseModel):
+    content: str
+    session_id: str | None = None
+    attachments: list[dict[str, Any]] | None = None
+
+
+class ConfirmRequest(BaseModel):
+    task_id: str
+    step: int
+    approved: bool
+
+
+@router.post("/im/web/message")
+async def web_message(
+    req: MessageRequest,
+    request: Request,
+    config: Config = Depends(get_config_dep),
+    api_key: str = Depends(verify_api_key),
+):
+    """Send a message via the Web console channel.
+
+    Returns an SSE stream with execution progress events:
+    - plan_generating, plan_generated
+    - subtask_started, subtask_completed, subtask_failed, subtask_skipped, subtask_fallback
+    - confirm_required, confirm_timeout, confirm_result
+    - task_completed, task_failed
+    - error
+    """
+    user = config.user.web
+    if not user.user_id:
+        raise HTTPException(status_code=400, detail="Web channel is not configured")
+
+    # Build UnifiedMessage
+    unified = UnifiedMessage(
+        message_id=f"web_{asyncio.get_event_loop().time()}",
+        channel="web",
+        user_id=user.user_id,
+        content=req.content,
+        attachments=req.attachments or [],
+        chat_type="private",
+    )
+
+    async def sse_event_stream():
+        """Generate SSE events for the execution pipeline."""
+        try:
+            # Yield plan_generating
+            yield _sse_event("plan_generating", {"task_id": "pending"})
+
+            # Get Core components from app state
+            app_state = request.app.state
+            gateway_manager = app_state.gateway_manager
+            web_adapter = gateway_manager.get_adapter("web")
+
+            # Get or create session
+            from athena.core.context import ContextManager
+            redis_client = getattr(app_state, 'redis', None)
+            if redis_client:
+                context_mgr = ContextManager(config, redis_client)
+            else:
+                from athena.models.redis import get_redis_client
+                context_mgr = ContextManager(config, get_redis_client(config.redis_url))
+
+            session_ctx = await context_mgr.get_or_create_session(
+                unified.user_id, unified.channel, unified.chat_id or unified.user_id
+            )
+
+            # Inject context for LLM
+            messages = await context_mgr.inject_context(
+                session_ctx, unified.content, unified.user_id
+            )
+
+            # Call Planner
+            from athena.core.llm_provider.manager import LLMProviderManager
+            from athena.core.planner import Planner
+
+            llm_mgr = LLMProviderManager(config)
+            tool_registry = getattr(app_state, 'tool_registry', None)
+            planner = Planner(llm_mgr, tool_registry)
+
+            plan = await planner.generate_plan(unified, session_ctx)
+
+            yield _sse_event("plan_generated", {
+                "task_id": plan.task_id,
+                "subtask_count": len(plan.subtasks),
+                "summary": f"Generated {len(plan.subtasks)} subtasks",
+            })
+
+            # Execute plan
+            from athena.core.harness import HarnessEngine
+            from athena.core.executor import Executor
+
+            harness = HarnessEngine(config)
+            await harness.start()
+
+            mcp_client = getattr(app_state, 'mcp_client', None)
+            executor = Executor(
+                config=config,
+                context_manager=context_mgr,
+                harness_engine=harness,
+                mcp_client=mcp_client,
+                tool_registry=tool_registry,
+            )
+
+            # Stream subtask execution events
+            for subtask in plan.subtasks:
+                yield _sse_event("subtask_started", {
+                    "step": subtask.step,
+                    "tool_name": subtask.tool_name,
+                    "intent": subtask.intent,
+                })
+
+            # Execute all subtasks
+            result = await executor.execute(plan, session_ctx, "web")
+
+            # Send subtask results as SSE events
+            for r in result.get("results", []):
+                if r["status"] == "success":
+                    yield _sse_event("subtask_completed", {
+                        "step": r["step"],
+                        "status": "success",
+                        "output_preview": str(r.get("output", ""))[:200],
+                    })
+                elif r["status"] == "fallback_used":
+                    yield _sse_event("subtask_fallback", {
+                        "step": r["step"],
+                        "original_tool": r.get("fallback_from", ""),
+                        "fallback_tool": r.get("tool_name", ""),
+                        "reason": "primary tool failed after retries",
+                    })
+                elif r["status"] == "skipped":
+                    yield _sse_event("subtask_skipped", {
+                        "step": r["step"],
+                        "reason": "non-critical failure",
+                        "error": r.get("error", ""),
+                    })
+                else:
+                    yield _sse_event("subtask_failed", {
+                        "step": r["step"],
+                        "status": r["status"],
+                        "error": r.get("error", ""),
+                    })
+
+            # Final result
+            if result["status"] == "completed":
+                yield _sse_event("task_completed", {
+                    "task_id": plan.task_id,
+                    "summary": "All steps completed",
+                })
+            else:
+                yield _sse_event("task_failed", {
+                    "task_id": plan.task_id,
+                    "error": f"Task {result['status']}",
+                })
+
+            await harness.stop()
+
+        except Exception as e:
+            logger.error("web_sse_error", error=str(e))
+            yield _sse_event("error", {"code": "EXECUTION_ERROR", "message": str(e)})
+
+    return StreamingResponse(
+        sse_event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/im/web/message/confirm")
+async def web_confirm(
+    req: ConfirmRequest,
+    request: Request,
+    config: Config = Depends(get_config_dep),
+    api_key: str = Depends(verify_api_key),
+):
+    """Submit a confirmation response from the Web console."""
+    gateway_manager = request.app.state.gateway_manager
+    web_adapter = gateway_manager.get_adapter("web")
+
+    if web_adapter:
+        # Resolve the confirmation future
+        # The nonce lookup happens via the confirmation manager
+        logger.info(
+            "web_confirm_received",
+            task_id=req.task_id,
+            step=req.step,
+            approved=req.approved,
+        )
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {"task_id": req.task_id, "step": req.step, "approved": req.approved},
+        }
+
+    raise HTTPException(status_code=404, detail="Web adapter not found")
+
+
+def _sse_event(event_type: str, data: dict) -> str:
+    """Format a Server-Sent Events message."""
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event_type}\ndata: {payload}\n\n"

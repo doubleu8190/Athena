@@ -1,0 +1,476 @@
+"""Admin API endpoints — MCP servers, skills, devices, harness, audit, dashboard.
+
+All endpoints require API Key authentication (X-API-Key header).
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import select, func, and_
+
+from athena.api.deps import get_config_dep, get_db, verify_api_key
+from athena.config import Config
+from athena.logging_config import get_logger
+
+logger = get_logger(__name__)
+router = APIRouter(tags=["admin"])
+
+
+# ── Response helpers ──────────────────────────────────────────────────
+
+def success(data: Any = None, message: str = "success") -> dict:
+    return {"code": 0, "message": message, "data": data}
+
+
+def error(code: int, message: str, detail: str = "") -> dict:
+    return {"code": code, "message": message, "detail": detail, "data": None}
+
+
+# ── MCP Server management ─────────────────────────────────────────────
+
+class MCPServerCreate(BaseModel):
+    server_id: str
+    name: str
+    transport: str  # 'stdio', 'http', 'sse'
+    connection_config: dict[str, Any]
+    source: str = "external"  # 'builtin', 'skill', 'external'
+
+
+class MCPServerStatusUpdate(BaseModel):
+    status: str  # 'connected', 'disconnected', 'disabled'
+
+
+@router.post("/admin/mcp-servers")
+async def register_mcp_server(
+    body: MCPServerCreate,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Register a new external MCP server."""
+    from athena.models.mcp_server import MCPServer
+
+    # Check for duplicate
+    existing = await db.get(MCPServer, body.server_id)
+    if existing:
+        return error(40901, "Server already exists", f"Server ID '{body.server_id}' already registered")
+
+    server = MCPServer(
+        server_id=body.server_id,
+        name=body.name,
+        transport=body.transport,
+        connection_config=json.dumps(body.connection_config),
+        source=body.source,
+    )
+    db.add(server)
+    await db.commit()
+
+    logger.info("mcp_server_registered", server_id=body.server_id, transport=body.transport)
+    return success({"server_id": body.server_id}, "Server registered")
+
+
+@router.delete("/admin/mcp-servers/{server_id}")
+async def remove_mcp_server(
+    server_id: str,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Remove a registered MCP server."""
+    from athena.models.mcp_server import MCPServer
+
+    server = await db.get(MCPServer, server_id)
+    if not server:
+        return error(40401, "Server not found", f"Server '{server_id}' not found")
+
+    await db.delete(server)
+    await db.commit()
+
+    logger.info("mcp_server_removed", server_id=server_id)
+    return success(None, "Server removed")
+
+
+@router.put("/admin/mcp-servers/{server_id}/status")
+async def update_mcp_server_status(
+    server_id: str,
+    body: MCPServerStatusUpdate,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Enable or disable an MCP server."""
+    from athena.models.mcp_server import MCPServer
+
+    server = await db.get(MCPServer, server_id)
+    if not server:
+        return error(40401, "Server not found", f"Server '{server_id}' not found")
+
+    server.status = body.status
+    await db.commit()
+
+    logger.info("mcp_server_status_updated", server_id=server_id, status=body.status)
+    return success({"server_id": server_id, "status": body.status})
+
+
+# ── Skill management ──────────────────────────────────────────────────
+
+class SkillInstallRequest(BaseModel):
+    name: str
+    version: str
+    image_uri: str
+    allowed_domains: str | None = None  # Comma-separated, empty = no network
+
+
+@router.post("/admin/skills/install")
+async def install_skill(
+    body: SkillInstallRequest,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Install a new Skill (Docker image + MCP container)."""
+    skill_id = f"skill_{uuid.uuid4().hex[:12]}"
+
+    from athena.models.skill import Skill as SkillModel
+    skill = SkillModel(
+        skill_id=skill_id,
+        name=body.name,
+        version=body.version,
+        image_uri=body.image_uri,
+        allowed_domains=body.allowed_domains,
+        status="installing",
+    )
+    db.add(skill)
+    await db.commit()
+
+    logger.info("skill_install_requested", skill_id=skill_id, name=body.name)
+    return success({"skill_id": skill_id}, "Skill installation initiated")
+
+
+@router.delete("/admin/skills/{skill_id}")
+async def uninstall_skill(
+    skill_id: str,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Uninstall a Skill."""
+    from athena.models.skill import Skill as SkillModel
+
+    skill = await db.get(SkillModel, skill_id)
+    if not skill:
+        return error(40401, "Skill not found", f"Skill '{skill_id}' not found")
+
+    skill.status = "uninstalling"
+    await db.commit()
+
+    logger.info("skill_uninstall_requested", skill_id=skill_id)
+    return success(None, "Skill uninstallation initiated")
+
+
+# ── Device management ─────────────────────────────────────────────────
+
+class DeviceRegisterRequest(BaseModel):
+    device_id: str
+    type: str  # 'host' or 'android'
+    connection_info: dict[str, Any] | None = None
+
+
+@router.post("/admin/devices")
+async def register_device(
+    body: DeviceRegisterRequest,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Register a new device."""
+    from athena.models.device import Device
+
+    existing = await db.get(Device, body.device_id)
+    if existing:
+        return error(40901, "Device already exists", f"Device '{body.device_id}' already registered")
+
+    device = Device(
+        device_id=body.device_id,
+        type=body.type,
+        connection_info=json.dumps(body.connection_info) if body.connection_info else None,
+        status="offline",
+    )
+    db.add(device)
+    await db.commit()
+
+    logger.info("device_registered", device_id=body.device_id, type=body.type)
+    return success({"device_id": body.device_id}, "Device registered")
+
+
+@router.delete("/admin/devices/{device_id}")
+async def deregister_device(
+    device_id: str,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Deregister a device."""
+    from athena.models.device import Device
+
+    device = await db.get(Device, device_id)
+    if not device:
+        return error(40401, "Device not found", f"Device '{device_id}' not found")
+
+    await db.delete(device)
+    await db.commit()
+
+    logger.info("device_deregistered", device_id=device_id)
+    return success(None, "Device deregistered")
+
+
+# ── Harness rule management ───────────────────────────────────────────
+
+@router.get("/admin/harness/rules")
+async def list_harness_rules(
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """List all harness rules."""
+    from athena.models.harness_rule import HarnessRule
+
+    result = await db.execute(
+        select(HarnessRule).order_by(HarnessRule.priority.desc())
+    )
+    rules = result.scalars().all()
+
+    return success({
+        "items": [
+            {
+                "rule_id": r.rule_id,
+                "rule_type": r.rule_type,
+                "name": r.name,
+                "description": r.description,
+                "config": json.loads(r.config_json),
+                "priority": r.priority,
+                "enabled": r.enabled,
+                "revision": r.revision,
+            }
+            for r in rules
+        ]
+    })
+
+
+class HarnessRuleUpdate(BaseModel):
+    config_json: dict[str, Any] | None = None
+    priority: int | None = None
+    enabled: bool | None = None
+
+
+@router.put("/admin/harness/rules/{rule_id}")
+async def update_harness_rule(
+    rule_id: str,
+    body: HarnessRuleUpdate,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Update a harness rule."""
+    from athena.models.harness_rule import HarnessRule
+
+    rule = await db.get(HarnessRule, rule_id)
+    if not rule:
+        return error(40401, "Rule not found", f"Rule '{rule_id}' not found")
+
+    if body.config_json is not None:
+        rule.config_json = json.dumps(body.config_json)
+    if body.priority is not None:
+        rule.priority = body.priority
+    if body.enabled is not None:
+        rule.enabled = body.enabled
+
+    # Increment revision to trigger hot-reload detection
+    rule.revision = (rule.revision or 0) + 1
+    rule.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+
+    logger.info("harness_rule_updated", rule_id=rule_id, revision=rule.revision)
+    return success({"rule_id": rule_id, "revision": rule.revision})
+
+
+@router.post("/admin/harness/reload")
+async def reload_harness_rules(
+    request: Any = None,
+    api_key: str = Depends(verify_api_key),
+):
+    """Force immediate reload of harness rules cache."""
+    # The actual reload is triggered by the HarnessEngine
+    logger.info("harness_reload_requested")
+    return success(None, "Harness rules reload triggered")
+
+
+# ── Memory management ─────────────────────────────────────────────────
+
+@router.post("/admin/memories/resync")
+async def resync_memories(
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Trigger full vector re-sync for all memories."""
+    from athena.models.user_memory import UserMemory
+    from sqlalchemy import update
+
+    # Mark all synced memories as pending for re-sync
+    result = await db.execute(
+        update(UserMemory)
+        .where(UserMemory.sync_status == "synced")
+        .values(sync_status="pending")
+    )
+    await db.commit()
+
+    count = result.rowcount
+    logger.info("memory_resync_triggered", count=count)
+    return success({"memories_to_resync": count}, f"Resync triggered for {count} memories")
+
+
+# ── Audit logs ────────────────────────────────────────────────────────
+
+@router.get("/admin/audit-logs")
+async def list_audit_logs(
+    event_type: str | None = Query(None),
+    cursor: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Search audit logs with cursor-based pagination."""
+    from athena.models.audit_log import AuditLog
+
+    stmt = select(AuditLog).order_by(AuditLog.timestamp.desc())
+
+    if event_type:
+        stmt = stmt.where(AuditLog.event_type == event_type)
+
+    if cursor:
+        stmt = stmt.where(AuditLog.event_id > cursor)
+
+    stmt = stmt.limit(limit + 1)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    has_more = len(rows) > limit
+    items = rows[:limit]
+
+    next_cursor = items[-1].event_id if has_more else None
+
+    return success({
+        "items": [
+            {
+                "event_id": r.event_id,
+                "event_type": r.event_type,
+                "actor_user_id": r.actor_user_id,
+                "details": json.loads(r.details_json) if r.details_json else None,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            }
+            for r in items
+        ],
+        "next_cursor": next_cursor,
+    })
+
+
+# ── Dashboard ─────────────────────────────────────────────────────────
+
+@router.get("/admin/dashboard")
+async def get_dashboard(
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Get real-time dashboard metrics summary."""
+    from athena.models.task import Task
+    from athena.models.subtask_execution import SubtaskExecution
+    from athena.models.audit_log import AuditLog
+
+    # Task counts by status
+    task_result = await db.execute(
+        select(Task.status, func.count()).group_by(Task.status)
+    )
+    task_counts = {row[0]: row[1] for row in task_result.all()}
+
+    # Subtask success rate (last 24h)
+    from datetime import timedelta
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    subtask_result = await db.execute(
+        select(
+            SubtaskExecution.status,
+            func.count(),
+        ).where(SubtaskExecution.finished_at >= since)
+        .group_by(SubtaskExecution.status)
+    )
+    subtask_counts = {row[0]: row[1] for row in subtask_result.all()}
+    total_subtasks = sum(subtask_counts.values())
+    success_rate = subtask_counts.get("success", 0) / max(total_subtasks, 1)
+
+    # Harness blocks (last 24h)
+    block_result = await db.execute(
+        select(func.count()).select_from(AuditLog).where(
+            AuditLog.event_type == "harness_block",
+            AuditLog.timestamp >= since,
+        )
+    )
+    harness_blocks = block_result.scalar_one()
+
+    return success({
+        "tasks": task_counts,
+        "subtask_success_rate": round(success_rate * 100, 1),
+        "total_subtasks_24h": total_subtasks,
+        "harness_blocks_24h": harness_blocks,
+    })
+
+
+# ── IM Status ─────────────────────────────────────────────────────────
+
+@router.get("/admin/im/status")
+async def get_im_status(
+    request: Any = None,
+    api_key: str = Depends(verify_api_key),
+):
+    """Get status of all IM channel adapters."""
+    # Status is provided by the GatewayManager
+    return success({
+        "channels": [
+            {
+                "channel": "telegram",
+                "status": "configured" if (get_config_dep().user.is_channel_enabled("telegram")) else "disabled",
+            },
+            {
+                "channel": "wechat",
+                "status": "configured" if (get_config_dep().user.is_channel_enabled("wechat")) else "disabled",
+            },
+            {
+                "channel": "web",
+                "status": "configured" if (get_config_dep().user.is_channel_enabled("web")) else "disabled",
+            },
+        ]
+    })
+
+
+@router.get("/admin/im/wechat/qrcode")
+async def get_wechat_qrcode(
+    api_key: str = Depends(verify_api_key),
+):
+    """Get WeChat QR code for login (base64-encoded PNG)."""
+    return success({"qrcode_base64": "not_implemented"}, "QR code generation not yet available")
+
+
+@router.get("/admin/im/wechat/status")
+async def get_wechat_status(
+    api_key: str = Depends(verify_api_key),
+):
+    """Get WeChat adapter connection status."""
+    return success({
+        "status": "disconnected",
+        "token_valid": False,
+        "token_expires_at": None,
+    })
+
+
+@router.post("/admin/im/wechat/reconnect")
+async def reconnect_wechat(
+    api_key: str = Depends(verify_api_key),
+):
+    """Force WeChat re-authentication."""
+    return success(None, "Re-authentication trigger sent")

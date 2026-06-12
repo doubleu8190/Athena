@@ -1,0 +1,12 @@
+# mcp_servers.yaml — MCP Server seed configuration
+# This file is ONLY used as an initialization seed when the database is empty.
+# Runtime modifications must be made via the Admin API.
+# The file will NOT be re-read after initial import.
+
+servers:
+  - server_id: builtin-core
+    name: Athena Built-in Tools
+    transport: stdio
+    connection_config:
+      command: python -m athena.tools.server
+    source: builtin

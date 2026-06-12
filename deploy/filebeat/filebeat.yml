@@ -1,0 +1,28 @@
+# Filebeat configuration — Athena container log collection
+# Collects JSON logs from Docker containers, filters by app=athena label,
+# and forwards to Logstash.
+
+filebeat.inputs:
+  - type: container
+    enabled: true
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    json.keys_under_root: true
+    json.add_error_key: true
+    json.overwrite_keys: true
+
+    processors:
+      - add_docker_metadata:
+          host: "unix:///var/run/docker.sock"
+      - drop_event:
+          when:
+            not:
+              regexp:
+                docker.container.labels.app: "athena"
+
+output.logstash:
+  hosts: ["logstash:5044"]
+  loadbalance: true
+
+logging.level: info
+logging.to_files: false

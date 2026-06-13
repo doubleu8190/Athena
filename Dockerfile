@@ -1,6 +1,6 @@
 # Dockerfile — Athena Core multi-stage build
 
-FROM python:3.14-slim AS builder
+FROM python:3.14.6 AS builder
 
 WORKDIR /app
 COPY pyproject.toml ./
@@ -9,17 +9,16 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir alembic
 
 # ── Runtime stage ────────────────────────────────────────────────────
-FROM python:3.14-slim AS runtime
+FROM python:3.14.6 AS runtime
 
 WORKDIR /app
 
 # Install runtime dependencies: curl, Node.js 22.x (for chrome-devtools-mcp),
 # Chromium (Puppeteer system dep), and shared libraries required by Chromium.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends \
     curl \
     gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends \
     nodejs \
     chromium \
     libasound2 \

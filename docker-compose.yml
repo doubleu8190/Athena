@@ -144,7 +144,7 @@ services:
     volumes:
       - ./deploy/logstash/pipelines/:/usr/share/logstash/pipeline/
       - ./deploy/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml
-      - ./data/athena.db:/data/athena.db:ro
+      - ./data:/data:ro
       - ./deploy/logstash/drivers/:/usr/share/logstash/drivers/
     ports:
       - "5044:5044"
@@ -160,7 +160,7 @@ services:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - SERVER_NAME=kibana
       - XPACK_SECURITY_ENABLED=false
-      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENABLED=false
+
     ports:
       - "5601:5601"
     volumes:

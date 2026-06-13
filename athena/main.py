@@ -72,12 +72,6 @@ async def lifespan(app: FastAPI):
     await mcp_client.start()
     app.state.mcp_client = mcp_client
 
-    # Prometheus metrics
-    if config.prometheus_enabled:
-        instrumentator = Instrumentator()
-        instrumentator.instrument(app).expose(app, endpoint="/metrics")
-        logger.info("prometheus_enabled")
-
     logger.info("athena_started")
 
     yield
@@ -124,6 +118,12 @@ def create_app(config: Config | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Prometheus metrics — must be added before app starts
+    if cfg.prometheus_enabled:
+        instrumentator = Instrumentator()
+        instrumentator.instrument(app).expose(app, endpoint="/metrics")
+        logger.info("prometheus_enabled")
 
     # Register routes
     from athena.api.health import router as health_router

@@ -6,12 +6,12 @@ Uses Anthropic's Messages API with native tool use support.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from anthropic import AsyncAnthropic
 
 from athena.core.llm_provider.base import LLMProvider, LLMResponse
+from athena.core.secrets import get_secret
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -45,7 +45,7 @@ class AnthropicProvider(LLMProvider):
 
     def _get_client(self) -> AsyncAnthropic:
         if self._client is None:
-            api_key = os.environ.get(self._api_key_env, "")
+            api_key = get_secret(self._api_key_env, "")
             kwargs = {"api_key": api_key}
             if self._base_url:
                 kwargs["base_url"] = self._base_url

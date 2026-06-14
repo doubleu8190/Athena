@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import secrets
 import struct
 from datetime import datetime, timezone
@@ -23,6 +22,7 @@ from pathlib import Path
 
 from athena.config import Config
 from athena.core.message import UnifiedMessage
+from athena.core.secrets import get_secret
 from athena.gateway.base import (
     AdapterInfo,
     AdapterState,
@@ -80,8 +80,8 @@ class WeChatAdapter(BaseIMAdapter):
             logger.info("wechat_credentials_restored")
         else:
             # Check for env-configured credentials
-            env_token = os.environ.get("WECHAT_BOT_TOKEN", "")
-            env_bot_id = os.environ.get("WECHAT_ILINK_BOT_ID", "")
+            env_token = get_secret("WECHAT_BOT_TOKEN", "")
+            env_bot_id = get_secret("WECHAT_ILINK_BOT_ID", "")
             if env_token and env_bot_id:
                 self._bot_token = env_token
                 self._ilink_bot_id = env_bot_id

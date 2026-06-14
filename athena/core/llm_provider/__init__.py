@@ -7,6 +7,7 @@ from athena.core.llm_provider.base import LLMProvider, LLMResponse
 from athena.core.llm_provider.manager import LLMProviderManager
 from athena.core.llm_provider.openai import OpenAIProvider
 from athena.core.llm_provider.anthropic import AnthropicProvider
+from athena.core.llm_provider.deepseek import DeepSeekProvider
 from athena.core.llm_provider.litellm import LiteLLMProvider
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "LLMProviderManager",
     "OpenAIProvider",
     "AnthropicProvider",
+    "DeepSeekProvider",
     "LiteLLMProvider",
 ]

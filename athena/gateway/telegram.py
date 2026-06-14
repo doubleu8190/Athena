@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from athena.config import Config
 from athena.core.message import UnifiedMessage
+from athena.core.secrets import get_secret
 from athena.gateway.base import (
     AdapterInfo,
     AdapterState,
@@ -38,7 +39,7 @@ class TelegramAdapter(BaseIMAdapter):
 
     def __init__(self, config: Config):
         self.config = config
-        self._token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        self._token = get_secret("TELEGRAM_BOT_TOKEN", "")
         self._poll_timeout = int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "30"))
         self._state = AdapterState.DISCONNECTED
         self._last_heartbeat: datetime | None = None

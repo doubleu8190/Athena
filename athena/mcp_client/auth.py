@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from cryptography.fernet import Fernet
-import os
+
+from athena.core.secrets import get_secret
 
 # Key for AES-256-GCM token encryption. In production, this should be
-# injected via environment variable.
-_ENCRYPTION_KEY = os.environ.get(
-    "ATHENA_ENCRYPTION_KEY",
-    Fernet.generate_key().decode() if not os.environ.get("ATHENA_ENCRYPTION_KEY") else "",
-)
+# injected via Docker Compose Secrets or environment variable.
+_ENCRYPTION_KEY = get_secret("ATHENA_ENCRYPTION_KEY", "")
+if not _ENCRYPTION_KEY:
+    _ENCRYPTION_KEY = Fernet.generate_key().decode()
 
 _fernet: Fernet | None = None
 

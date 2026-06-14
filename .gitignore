@@ -217,3 +217,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Docker Compose Secrets — contains runtime keys/tokens
+# Each file holds one secret; the filename is the secret name.
+# See docker-compose.yml for the expected secret names.
+secrets/
+# Allow the example template (so new contributors know what to create)
+!secrets/example/

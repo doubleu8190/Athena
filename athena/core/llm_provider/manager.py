@@ -11,6 +11,7 @@ from athena.config import Config, LLMConfig
 from athena.core.llm_provider.base import LLMProvider, LLMResponse
 from athena.core.llm_provider.openai import OpenAIProvider
 from athena.core.llm_provider.anthropic import AnthropicProvider
+from athena.core.llm_provider.deepseek import DeepSeekProvider
 from athena.core.llm_provider.litellm import LiteLLMProvider
 from athena.logging_config import get_logger
 
@@ -48,6 +49,12 @@ class LLMProviderManager:
                 model=pdata.model,
                 base_url=pdata.base_url,
             )
+        elif "deepseek" in name.lower():
+            return DeepSeekProvider(
+                api_key_env=pdata.api_key_env,
+                model=pdata.model,
+                base_url=pdata.base_url,
+            )
         elif "litellm" in name.lower():
             return LiteLLMProvider(
                 api_key_env=pdata.api_key_env,
@@ -55,7 +62,7 @@ class LLMProviderManager:
                 base_url=pdata.base_url or "http://litellm:4000",
             )
         else:
-            # Default to OpenAI-compatible (covers OpenAI, DeepSeek, etc.)
+            # Default to OpenAI-compatible (covers OpenAI, vLLM, etc.)
             return OpenAIProvider(
                 api_key_env=pdata.api_key_env,
                 model=pdata.model,

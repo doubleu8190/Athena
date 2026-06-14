@@ -7,6 +7,8 @@ import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from athena.core.secrets import get_secret
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -117,10 +119,10 @@ class Config:
         default_factory=lambda: os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
     )
     admin_api_key: str = field(
-        default_factory=lambda: os.environ.get("ADMIN_API_KEY", "")
+        default_factory=lambda: get_secret("ADMIN_API_KEY", "")
     )
     device_psk: str = field(
-        default_factory=lambda: os.environ.get("DEVICE_PSK", "")
+        default_factory=lambda: get_secret("DEVICE_PSK", "")
     )
     log_level: str = field(
         default_factory=lambda: os.environ.get("LOG_LEVEL", "INFO")

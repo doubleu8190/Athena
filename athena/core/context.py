@@ -238,8 +238,9 @@ class ContextManager:
     ) -> str:
         """Retrieve user memories relevant to the current conversation.
 
-        Tries semantic search via RAG Skill first, falls back to simple
-        key-based query if vector store is unavailable.
+        Uses semantic search via RAG Skill. If RAG is unavailable or the
+        search fails, returns an empty string — we don't fall back to
+        keyword search because it cannot provide semantic relevance.
         """
         try:
             from athena.core.memory import MemoryStore
@@ -253,9 +254,20 @@ class ContextManager:
             results = await store.semantic_search(user_id, query, top_k=5)
             if results:
                 ctx.injected_memories = [m.memory_id for m in results]
+                logger.debug(
+                    "memories_injected",
+                    count=len(results),
+                    session_id=ctx.session_id,
+                    sources=[m.meta_json.get("source", "unknown") for m in results],
+                )
                 return "\n".join(f"- {m.value}" for m in results)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "memory_injection_failed",
+                error=str(e),
+                user_id=user_id,
+                session_id=ctx.session_id,
+            )
 
         return ""
 

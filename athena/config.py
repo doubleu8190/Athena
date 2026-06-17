@@ -109,6 +109,9 @@ class Config:
     sqlite_db_path: str = field(
         default_factory=lambda: os.environ.get("SQLITE_DB_PATH", "/data/athena.db")
     )
+    chroma_persist_dir: str = field(
+        default_factory=lambda: os.environ.get("CHROMA_PERSIST_DIR", "/data/chroma")
+    )
     redis_url: str = field(
         default_factory=lambda: os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     )

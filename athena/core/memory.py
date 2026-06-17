@@ -2,7 +2,7 @@
 
 Architecture:
 - SQLite stores memory metadata and original text (synchronous).
-- Vector embeddings managed by RAG Skill (Chroma/Qdrant) via MCP tools.
+- Vector embeddings managed by RAGManager (Chroma) via athena.core.rag.
 - Async eventually-consistent sync: SQLite write → Celery task → Vector store → SQLite writeback.
 
 Sync status lifecycle:
@@ -11,8 +11,9 @@ Sync status lifecycle:
     synced → (update) → pending (new upsert needed)
     any → (delete) → deleted → (Celery delete_vector) → physical delete from SQLite
 
-Fallback: when vector store is unavailable, semantic_search degrades to
-simple_query (key prefix + updated_at ordering) with a warning annotation.
+Semantic search requires RAGManager. Without it, semantic_search returns
+an empty list — we don't fall back to keyword search because the two
+retrieval models are fundamentally incomparable.
 """
 
 from __future__ import annotations
@@ -47,14 +48,15 @@ class MemoryStore:
     """Manages user memories with async vector sync.
 
     Provides:
-    - semantic_search: via RAG Skill MCP tools (with SQLite fallback)
+    - semantic_search: via RAGManager (Chroma vector search)
     - simple_query: key-based SQLite query
     - upsert: write memory + enqueue vector sync
     - delete: mark for deletion + enqueue vector deletion
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, rag_manager: Any | None = None):
         self.config = config
+        self._rag_manager = rag_manager
 
     # ── Search ────────────────────────────────────────────────────────
 
@@ -66,29 +68,32 @@ class MemoryStore:
     ) -> list[Memory]:
         """Semantic search via RAG Skill vector store.
 
-        Falls back to simple_query if vector store is unavailable.
+        Returns results from the vector store only. Does NOT fall back to
+        simple_query — if RAG is unavailable, returns an empty list.
+        Keyword-based retrieval and semantic search are fundamentally
+        different models; a silent fallback would inject irrelevant
+        memories and mislead the caller about result quality.
+
         Results include a "source" annotation in meta_json.
         """
         try:
-            # Try calling RAG Skill's semantic_search MCP tool
-            from athena.mcp_client.registry import ToolRegistry
-
-            # In production, this would be the registry from app state
-            # For now, use the simple_query fallback
             results = await self._vector_search(user_id, query, top_k)
             for r in results:
                 r.meta_json["source"] = "vector"
             return results
+        except NotImplementedError:
+            logger.info(
+                "vector_search_unavailable",
+                user_id=user_id,
+            )
         except Exception as e:
-            logger.warning(
-                "vector_search_failed_fallback_to_simple",
+            logger.error(
+                "vector_search_error",
                 error=str(e),
                 user_id=user_id,
             )
-            results = await self.simple_query(user_id, "", limit=top_k)
-            for r in results:
-                r.meta_json["source"] = "sqlite_fallback"
-            return results
+
+        return []
 
     async def _vector_search(
         self,
@@ -96,10 +101,39 @@ class MemoryStore:
         query: str,
         top_k: int,
     ) -> list[Memory]:
-        """Internal: call RAG Skill's semantic_search MCP tool."""
-        # This would use the MCP client to call the RAG Skill
-        # For now, raise to trigger fallback
-        raise NotImplementedError("Vector search requires RAG Skill to be installed")
+        """Internal: search Chroma via RAGManager.
+
+        Raises NotImplementedError if RAGManager is not configured.
+        """
+        if self._rag_manager is None:
+            raise NotImplementedError(
+                "Vector search requires RAGManager to be configured"
+            )
+
+        results = await self._rag_manager.semantic_search(
+            user_id=user_id,
+            query=query,
+            top_k=top_k,
+        )
+
+        # Map RAGManager dict results to Memory objects
+        memories: list[Memory] = []
+        for item in results:
+            meta = item.get("metadata", {})
+            memories.append(Memory(
+                memory_id=item["memory_id"],
+                user_id=user_id,
+                key=meta.get("key", ""),
+                value=item.get("text", ""),
+                vector_id=item["memory_id"],  # Chroma uses memory_id as doc ID
+                sync_status="synced",
+                meta_json={
+                    "source": "vector",
+                    "score": item.get("score", 0.0),
+                    **meta,
+                },
+            ))
+        return memories
 
     async def simple_query(
         self,

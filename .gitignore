@@ -224,3 +224,14 @@ __marimo__/
 secrets/
 # Allow the example template (so new contributors know what to create)
 !secrets/example/
+
+# Frontend (React/Vite)
+node_modules/
+frontend/dist/
+
+# Data directory — runtime/generated files excluded; YAML configs kept
+/data/*
+# Keep YAML configuration files
+!/data/*.yaml
+# Keep directory placeholder
+!/data/.gitkeep

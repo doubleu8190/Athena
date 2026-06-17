@@ -136,6 +136,13 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.include_router(admin_router, prefix="/api/v1")
     app.include_router(device_router, prefix="/api/v1")
 
+    # Production mode: serve frontend static files (SPA fallback)
+    frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
+    if frontend_dist.exists():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+        logger.info("frontend_static_mounted", path=str(frontend_dist))
+
     return app
 
 

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_fastapi_instrumentator import Instrumentator
-
 from athena.config import Config, get_config, set_config
 from athena.logging_config import get_logger, setup_logging
 
@@ -119,12 +118,6 @@ def create_app(config: Config | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Prometheus metrics — must be added before app starts
-    if cfg.prometheus_enabled:
-        instrumentator = Instrumentator()
-        instrumentator.instrument(app).expose(app, endpoint="/metrics")
-        logger.info("prometheus_enabled")
-
     # Register routes
     from athena.api.health import router as health_router
     from athena.api.im import router as im_router
@@ -142,6 +135,41 @@ def create_app(config: Config | None = None) -> FastAPI:
         from fastapi.staticfiles import StaticFiles
         app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
         logger.info("frontend_static_mounted", path=str(frontend_dist))
+
+    # Prometheus metrics — custom middleware + endpoint (no third-party instrumentator)
+    if cfg.prometheus_enabled:
+        from starlette.requests import Request
+        from starlette.responses import Response
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        from athena.api.metrics import (
+            athena_http_requests_total,
+            athena_http_request_duration_seconds,
+        )
+
+        @app.get("/metrics", include_in_schema=False)
+        async def metrics():
+            return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+        @app.middleware("http")
+        async def metrics_middleware(request: Request, call_next):
+            if request.url.path == "/metrics":
+                return await call_next(request)
+            start = time.monotonic()
+            response = await call_next(request)
+            duration = time.monotonic() - start
+            endpoint = request.url.path
+            athena_http_requests_total.labels(
+                method=request.method,
+                endpoint=endpoint,
+                status_code=str(response.status_code),
+            ).inc()
+            athena_http_request_duration_seconds.labels(
+                method=request.method,
+                endpoint=endpoint,
+            ).observe(duration)
+            return response
+
+        logger.info("prometheus_enabled")
 
     return app
 

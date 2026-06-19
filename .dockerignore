@@ -31,6 +31,10 @@ docker-compose.override.yml
 .env
 .envrc
 
+# Frontend (built inside Docker via multi-stage)
+frontend/node_modules/
+frontend/dist/
+
 # Test artifacts
 htmlcov/
 .coverage

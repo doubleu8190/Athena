@@ -25,6 +25,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
       - ./data/redis:/data
     command: redis-server --appendonly yes
@@ -36,6 +38,7 @@ services:
 
   # ── Athena Core ────────────────────────────────────────────────────
   athena-core:
+    # Prerequisite: Build the base image first — sh scripts/build-base.sh
     build: .
     ports:
       - "8000:8000"
@@ -43,6 +46,7 @@ services:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
+      - TZ=Asia/Shanghai
       - SQLITE_DB_PATH=/data/athena.db
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
@@ -73,12 +77,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    labels:
+      - "app=athena"
+      - "component=core"
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-        labels: "app=athena,component=core"
 
   # ── Celery Worker ─────────────────────────────────────────────────
   celery-worker:
@@ -88,6 +94,7 @@ services:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
+      - TZ=Asia/Shanghai
       - SQLITE_DB_PATH=/data/athena.db
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
@@ -99,6 +106,9 @@ services:
       - openai_api_key
       - anthropic_api_key
       - athena_encryption_key
+    labels:
+      - "app=athena"
+      - "component=worker"
     depends_on:
       redis:
         condition: service_healthy
@@ -109,12 +119,13 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-        labels: "app=athena,component=worker"
 
   # ── Skill Proxy (Squid) ───────────────────────────────────────────
   skill-proxy:
     image: ubuntu/squid:latest
     restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
       - ./data/squid/squid.conf:/etc/squid/squid.conf
       - ./data/squid/acl/:/etc/squid/acl/
@@ -128,6 +139,7 @@ services:
     image: docker.elastic.co/elasticsearch/elasticsearch:9.4.2
     restart: unless-stopped
     environment:
+      - TZ=Asia/Shanghai
       - discovery.type=single-node
       - ES_JAVA_OPTS=-Xms512m -Xmx512m
       - xpack.security.enabled=false
@@ -150,11 +162,13 @@ services:
     image: docker.elastic.co/logstash/logstash:9.4.2
     restart: unless-stopped
     environment:
+      - TZ=Asia/Shanghai
       - LS_JAVA_OPTS=-Xms256m -Xmx256m
       - LS_OPTS=--pipeline.unsafe_shutdown
     volumes:
       - ./deploy/logstash/pipelines/:/usr/share/logstash/pipeline/
       - ./deploy/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml
+      - ./deploy/logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml
       - ./data:/data:ro
       - ./deploy/logstash/drivers/:/usr/share/logstash/drivers/
     ports:
@@ -168,6 +182,7 @@ services:
     image: docker.elastic.co/kibana/kibana:9.4.2
     restart: unless-stopped
     environment:
+      - TZ=Asia/Shanghai
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - SERVER_NAME=kibana
       - XPACK_SECURITY_ENABLED=false
@@ -185,6 +200,8 @@ services:
     image: docker.elastic.co/beats/filebeat:9.4.2
     restart: unless-stopped
     user: root
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
       - ./deploy/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
@@ -192,17 +209,6 @@ services:
     command: filebeat -e --strict.perms=false
     depends_on:
       - logstash
-
-  # ── Kibana Setup (one-shot) ───────────────────────────────────────
-  kibana-setup:
-    image: curlimages/curl:latest
-    depends_on:
-      - kibana
-    volumes:
-      - ./deploy/kibana/dashboards/:/dashboards:ro
-      - ./deploy/kibana/setup.sh:/setup.sh:ro
-    entrypoint: ["/bin/sh", "/setup.sh"]
-    restart: "no"
 
 networks:
   skill-net:

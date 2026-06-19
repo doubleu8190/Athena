@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import os
 from typing import AsyncGenerator
 
-from fastapi import Depends, HTTPException, Security
+from fastapi import Depends, Security
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from athena.config import Config, get_config
 from athena.models import get_session_maker
 from athena.models.redis import get_redis_client
-from athena.logging_config import get_logger
-
-logger = get_logger(__name__)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -53,37 +49,9 @@ async def verify_api_key(
     api_key: str | None = Security(api_key_header),
     config: Config = Depends(get_config_dep),
 ) -> str:
-    """Verify the X-API-Key header against the configured admin key.
+    """Admin API key verification — currently a no-op (LAN-only deployment).
 
-    Returns the validated API key on success.
-    Raises HTTPException(401) on failure.
+    When Athena is deployed on a public network, re-add key validation here.
+    All admin endpoints already pass through this dependency.
     """
-    configured_key = config.admin_api_key
-    if not configured_key:
-        # No key configured — allow all (development mode)
-        logger.warning("api_key_not_configured_allowing_all")
-        return api_key or "dev-mode"
-
-    if not api_key:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "code": 40101,
-                "message": "Missing API Key",
-                "detail": "X-API-Key header is required",
-                "data": None,
-            },
-        )
-
-    if api_key != configured_key:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "code": 40101,
-                "message": "Invalid API Key",
-                "detail": "The provided API key is invalid",
-                "data": None,
-            },
-        )
-
-    return api_key
+    return "lan-mode"

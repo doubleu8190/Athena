@@ -6,4 +6,3 @@
 - pipeline.id: athena-sqlite-sync
   path.config: "/usr/share/logstash/pipeline/sqlite_sync.conf"
   pipeline.workers: 1
-  schedule: { every: "30s" }

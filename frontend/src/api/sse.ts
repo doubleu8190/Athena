@@ -1,5 +1,3 @@
-import { useAuthStore } from '../stores/authStore'
-
 export interface SSECallbacks {
   onEvent: (eventType: string, data: Record<string, unknown>) => void
   onError: (error: Error) => void
@@ -12,9 +10,7 @@ export function createSSEStream(
   callbacks: SSECallbacks
 ): AbortController {
   const controller = new AbortController()
-  const apiKey = useAuthStore.getState().apiKey
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (apiKey) headers['X-API-Key'] = apiKey
 
   const { onEvent, onError, onDone } = callbacks
 

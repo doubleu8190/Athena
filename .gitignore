@@ -225,6 +225,9 @@ secrets/
 # Allow the example template (so new contributors know what to create)
 !secrets/example/
 
+# Logstash JDBC drivers (downloaded separately)
+deploy/logstash/drivers/*.jar
+
 # Frontend (React/Vite)
 node_modules/
 frontend/dist/

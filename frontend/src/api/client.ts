@@ -1,5 +1,3 @@
-import { useAuthStore } from '../stores/authStore'
-
 const API_BASE = '/api/v1'
 
 interface ApiError {
@@ -22,14 +20,7 @@ class ApiRequestError extends Error {
 }
 
 function getHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  }
-  const apiKey = useAuthStore.getState().apiKey
-  if (apiKey) {
-    headers['X-API-Key'] = apiKey
-  }
-  return headers
+  return { 'Content-Type': 'application/json' }
 }
 
 async function request<T>(
@@ -49,15 +40,6 @@ async function request<T>(
   }
 
   const res = await fetch(url, fetchOptions)
-
-  // Handle auth errors
-  if (res.status === 401) {
-    useAuthStore.getState().clearApiKey()
-    throw new ApiRequestError(
-      { code: 40101, message: 'Authentication failed', detail: 'Invalid or missing API key', data: null },
-      401
-    )
-  }
 
   if (!res.ok) {
     let errBody: ApiError = { code: res.status, message: res.statusText, data: null }

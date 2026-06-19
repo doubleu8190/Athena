@@ -1,0 +1,63 @@
+# Dockerfile.base — Athena base image with system deps and Python packages
+#
+# Build:  docker build -f Dockerfile.base -t athena-base:latest .
+# Rebuild only when pyproject.toml or system dependencies change.
+
+FROM python:3.14.6-slim
+
+WORKDIR /app
+
+# ── System dependencies ──────────────────────────────────────────────
+# build-essential: C compiler toolchain for any Python packages that
+# compile from source (rare with wheels, but safe default for slim image).
+# Chromium + shared libs: for Puppeteer (chrome-devtools-mcp).
+# Node.js 22.x: runtime for chrome-devtools-mcp.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends \
+    nodejs \
+    chromium \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libgbm1 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Python dependencies ──────────────────────────────────────────────
+# Same as the current builder stage — reads pyproject.toml to resolve
+# and install all ~170 dependencies (torch, transformers, chromadb, etc.)
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir . && \
+    pip install --no-cache-dir alembic
+
+# ── Non-root user and directories ────────────────────────────────────
+RUN addgroup --system athena && \
+    adduser --system --no-create-home --ingroup athena athena && \
+    mkdir -p /data /workspace && \
+    chown -R athena:athena /data /workspace
+
+# ── Stable environment variables ─────────────────────────────────────
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV SQLITE_DB_PATH=/data/athena.db
+ENV DATA_DIR=/data
+
+# chrome-devtools-mcp: use system Chromium instead of Puppeteer's bundled download
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Opt out of chrome-devtools-mcp telemetry
+ENV CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=true
+
+EXPOSE 8000

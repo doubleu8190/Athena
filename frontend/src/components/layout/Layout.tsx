@@ -3,7 +3,6 @@ import { Outlet } from 'react-router'
 import Sidebar from './Sidebar'
 import Header from './Header'
 import Toast from '../shared/Toast'
-import ApiKeyBanner from '../shared/ApiKeyBanner'
 
 export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -30,7 +29,6 @@ export default function Layout() {
       {/* Main content area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         <Header onMenuClick={() => setSidebarOpen(true)} />
-        <ApiKeyBanner />
         <main className="flex-1 overflow-y-auto">
           <Outlet />
         </main>

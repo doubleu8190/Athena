@@ -89,7 +89,7 @@ class ContextManager:
         # Check Redis first
         key = f"session:{session_id}"
         data = await self.redis.get(key)
-
+        logger.info("checking_session", method="redis", found=(data is not None))
         if data:
             ctx = self._deserialize(data)
             ctx.last_active_at = time.time()
@@ -98,7 +98,7 @@ class ContextManager:
             if ctx.status == "idle":
                 ctx.status = "active"
 
-            logger.info("session_reused", status=ctx.status)
+            logger.info("session reused", status=ctx.status)
             return ctx
 
         # Check SQLite for expired session with snapshot
@@ -113,6 +113,7 @@ class ContextManager:
             )
             db_session = result.scalar_one_or_none()
 
+        logger.info("checking_session", method="sqlite", found=(db_session is not None))
         if db_session and db_session.context_snapshot:
             # Restore from snapshot
             snapshot = json.loads(db_session.context_snapshot)
@@ -127,7 +128,7 @@ class ContextManager:
                 ex=self._session_idle_timeout,
             )
 
-            logger.info("session_restored_from_snapshot")
+            logger.info("session restored from snapshot")
             return ctx
 
         # Fresh session
@@ -148,6 +149,7 @@ class ContextManager:
                 chat_id=chat_id,
                 status="active",
             )
+            logger.info("creating_new_session", session_id=session_id)
             session.add(db_session)
             await session.commit()
 

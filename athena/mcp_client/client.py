@@ -187,6 +187,7 @@ class MCPClient:
         self.config = config
         self.registry = registry
         self._connections: dict[str, ServerConnection] = {}
+        self._connecting: set[str] = set()  # server_ids currently attempting connection
         self._heartbeat_task: asyncio.Task | None = None
         self._running = False
 
@@ -200,10 +201,10 @@ class MCPClient:
             from sqlalchemy import select
             from athena.models.mcp_server import MCPServer
             result = await session.execute(
-                select(MCPServer).where(MCPServer.status != "disconnected")
+                select(MCPServer).where(MCPServer.enabled == True)
             )
             servers = result.scalars().all()
-
+        logger.info("mcp_client_starting", found_servers=servers)
         for server in servers:
             await self.connect_server(server.server_id)
 
@@ -254,30 +255,30 @@ class MCPClient:
             connection_config=config_json,
         )
 
-        if await conn.connect():
-            self._connections[server_id] = conn
+        self._connecting.add(server_id)
+        try:
+            if await conn.connect():
+                self._connections[server_id] = conn
+                self._connecting.discard(server_id)
 
-            # Update server status
-            async with session_maker() as session:
-                from sqlalchemy import update
-                from athena.models.mcp_server import MCPServer
-                await session.execute(
-                    update(MCPServer)
-                    .where(MCPServer.server_id == server_id)
-                    .values(status="connected")
-                )
-                await session.commit()
+                # Discover and register tools
+                tools = await conn.list_tools()
+                source = server_record.source
+                await self.registry.register(server_id, tools, source)
 
-            # Discover and register tools
-            tools = await conn.list_tools()
-            source = server_record.source
-            await self.registry.register(server_id, tools, source)
-            return True
+                # Update Prometheus metrics
+                self._update_metrics()
+                return True
 
-        return False
+            self._connecting.discard(server_id)
+            return False
+        except Exception:
+            self._connecting.discard(server_id)
+            raise
 
     async def disconnect_server(self, server_id: str) -> None:
         """Disconnect a server and mark its tools as stale."""
+        self._connecting.discard(server_id)
         conn = self._connections.pop(server_id, None)
         if conn:
             await conn.disconnect()
@@ -285,18 +286,40 @@ class MCPClient:
         # Mark tools as stale
         await self.registry.mark_stale(server_id)
 
-        # Update server status
-        db_path = self.config.sqlite_db_path
-        session_maker = get_session_maker(db_path)
-        async with session_maker() as session:
-            from sqlalchemy import update
-            from athena.models.mcp_server import MCPServer
-            await session.execute(
-                update(MCPServer)
-                .where(MCPServer.server_id == server_id)
-                .values(status="disconnected")
-            )
-            await session.commit()
+        # Update Prometheus metrics
+        self._update_metrics()
+
+    def get_connection_status(self, server_id: str) -> str:
+        """Return connection status: 'connected', 'disconnected', or 'connecting'.
+
+        This is a computed (in-memory) status — it is NOT persisted to the database.
+        The database only stores whether the server is enabled (admin intent).
+        """
+        if server_id in self._connecting:
+            return "connecting"
+        conn = self._connections.get(server_id)
+        if conn and conn.connected:
+            return "connected"
+        return "disconnected"
+
+    def get_all_connection_statuses(self) -> dict[str, str]:
+        """Return connection status for all known server IDs."""
+        all_ids: set[str] = set(self._connections.keys()) | self._connecting
+        # Also include servers the registry knows about
+        for tool in self.registry._tools.values():
+            all_ids.add(tool.source_server_id)
+        return {sid: self.get_connection_status(sid) for sid in all_ids}
+
+    def _update_metrics(self) -> None:
+        """Push current connection states to the Prometheus gauge."""
+        try:
+            from athena.api.metrics import athena_mcp_server_status
+            for server_id in self._connections:
+                athena_mcp_server_status.labels(server_id=server_id).set(1)
+            for server_id in self._connecting:
+                athena_mcp_server_status.labels(server_id=server_id).set(0)
+        except ImportError:
+            pass
 
     async def call_tool(
         self,

@@ -47,7 +47,7 @@ async def seed_mcp_servers(config: Config) -> None:
                 name=entry["name"],
                 transport=entry["transport"],
                 connection_config=json.dumps(entry.get("connection_config", {})),
-                status="disconnected",
+                enabled=True,
                 source=entry.get("source", "external"),
             )
             session.add(server)

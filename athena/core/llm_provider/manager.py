@@ -43,19 +43,19 @@ class LLMProviderManager:
     def _create_provider(self, name: str, pdata: Any) -> LLMProvider | None:
         """Create a provider instance based on configuration."""
         # Determine provider class by name convention
-        if "anthropic" in name.lower():
+        if name.lower().startswith("anthropic"):
             return AnthropicProvider(
                 api_key_env=pdata.api_key_env,
                 model=pdata.model,
                 base_url=pdata.base_url,
             )
-        elif "deepseek" in name.lower():
+        elif name.lower().startswith("deepseek"):
             return DeepSeekProvider(
                 api_key_env=pdata.api_key_env,
                 model=pdata.model,
                 base_url=pdata.base_url,
             )
-        elif "litellm" in name.lower():
+        elif name.lower().startswith("litellm"):
             return LiteLLMProvider(
                 api_key_env=pdata.api_key_env,
                 model=pdata.model,

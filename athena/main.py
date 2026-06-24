@@ -126,7 +126,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(im_router, prefix="/api/v1")
-    app.include_router(admin_router, prefix="/api/v1")
+    app.include_router(admin_router, prefix="/api/v1/admin")
     app.include_router(device_router, prefix="/api/v1")
 
     # Production mode: serve frontend static files (SPA fallback)

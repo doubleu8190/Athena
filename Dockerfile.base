@@ -3,7 +3,7 @@
 # Build:  docker build -f Dockerfile.base -t athena-base:latest .
 # Rebuild only when pyproject.toml or system dependencies change.
 
-FROM python:3.14.6-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 

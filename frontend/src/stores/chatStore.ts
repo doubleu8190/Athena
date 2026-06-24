@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import { sendMessage, sendConfirm, type MessageRequest } from '../api/endpoints/chat'
 import type { SSECallbacks } from '../api/sse'
 
@@ -53,7 +54,9 @@ interface ChatState {
 
 let messageCounter = 0
 
-export const useChatStore = create<ChatState>((set, get) => ({
+export const useChatStore = create<ChatState>()(
+  persist(
+    (set, get) => ({
   sessions: [],
   activeSessionId: null,
   messages: [],
@@ -341,4 +344,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ isStreaming: false, abortController: null })
     }
   },
-}))
+    }),
+    {
+      name: 'athena-chat-store',
+      partialize: (state) => ({
+        sessions: state.sessions,
+        activeSessionId: state.activeSessionId,
+      }),
+    }
+  )
+)

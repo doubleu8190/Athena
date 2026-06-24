@@ -20,6 +20,7 @@ from athena.core.llm_provider.manager import LLMProviderManager
 from athena.core.message import UnifiedMessage
 from athena.core.context import SessionContext
 from athena.logging_config import bind_context, get_logger
+from athena.mcp_client.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -112,7 +113,7 @@ class Planner:
     Returns a structured TaskPlan for the Executor.
     """
 
-    def __init__(self, llm_manager: LLMProviderManager, tool_registry):
+    def __init__(self, llm_manager: LLMProviderManager, tool_registry: ToolRegistry):
         self.llm = llm_manager
         self.tool_registry = tool_registry
 
@@ -120,12 +121,18 @@ class Planner:
         self,
         message: UnifiedMessage,
         session_ctx: SessionContext,
+        context_messages: list[dict[str, Any]] | None = None,
     ) -> TaskPlan:
         """Generate a task plan from a user message.
 
         Args:
             message: The unified user message.
             session_ctx: Current session context with history and memories.
+            context_messages: Optional pre-built messages list from
+                ContextManager.inject_context(). When provided, used
+                directly (planner system prompt is always prepended).
+                When None, falls back to building minimal context from
+                session_ctx alone.
 
         Returns:
             A TaskPlan with ordered subtasks and dependencies.
@@ -142,18 +149,25 @@ class Planner:
         system_prompt = PLANNER_SYSTEM_PROMPT.format(tools_description=tools_desc)
 
         # Build messages for LLM
+        # Planner's own system prompt always comes first
         messages = [{"role": "system", "content": system_prompt}]
 
-        # Add conversation summary if present
-        if session_ctx.conversation_summary:
-            messages.append({
-                "role": "system",
-                "content": f"[Previous context]\n{session_ctx.conversation_summary}",
-            })
+        if context_messages is not None:
+            # Use pre-built rich context from ContextManager.inject_context().
+            # Already contains: system(summary+memories) + message_history
+            # + current user message. No need to re-add conversation
+            # summary or user message.
+            messages.extend(context_messages)
+        else:
+            # Fallback: build minimal context from session_ctx alone.
+            if session_ctx.conversation_summary:
+                messages.append({
+                    "role": "system",
+                    "content": f"[Previous context]\n{session_ctx.conversation_summary}",
+                })
+            messages.append({"role": "user", "content": message.content})
 
-        # Add the current user message
-        messages.append({"role": "user", "content": message.content})
-
+        logger.info("planner messages_built", planner_messages = messages)
         # Call LLM (no tools for planning — the plan IS the output)
         try:
             response = await self.llm.generate(
@@ -162,7 +176,7 @@ class Planner:
                 max_tokens=4096,
                 temperature=0.3,  # Lower temperature for structured planning
             )
-
+            logger.info("planner llm_response", llm_response=response)
             # Parse the JSON plan from the response
             plan_json = self._parse_plan(response.text)
 

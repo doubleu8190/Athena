@@ -32,9 +32,9 @@ class MCPServer(Base):
     #                  client_id, client_secret_env, scopes, encrypted_token (AES-256-GCM)
     #   stdio: command
     #   http: url
-    status: Mapped[str] = mapped_column(
-        String, default="disconnected"
-    )  # 'connected', 'disconnected', 'connecting'
+    enabled: Mapped[bool] = mapped_column(
+        default=True
+    )  # Admin intent: whether this server should be connected
     source: Mapped[str] = mapped_column(
         String, default="external"
     )  # 'builtin', 'skill', 'external'

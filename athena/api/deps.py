@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import AsyncGenerator
 
-from fastapi import Depends, Security
+from fastapi import Depends, Request, Security
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,3 +55,10 @@ async def verify_api_key(
     All admin endpoints already pass through this dependency.
     """
     return "lan-mode"
+
+
+# ── MCP Client ──────────────────────────────────────────────────────────
+
+async def get_mcp_client(request: Request):
+    """FastAPI dependency: get the MCPClient from app state."""
+    return request.app.state.mcp_client

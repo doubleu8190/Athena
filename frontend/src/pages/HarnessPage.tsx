@@ -5,6 +5,7 @@ import Table, { type Column } from '../components/shared/Table'
 import Modal from '../components/shared/Modal'
 import EmptyState from '../components/shared/EmptyState'
 import { showToast } from '../components/shared/Toast'
+import { Shield } from 'lucide-react'
 
 export default function HarnessPage() {
   const { checkAuth } = useAuthStore()
@@ -126,7 +127,7 @@ export default function HarnessPage() {
       render: (r) => (
         <button
           onClick={() => openEdit(r)}
-          className="text-xs px-2 py-1 rounded bg-bg-elevated text-text-secondary hover:text-text-primary transition-colors"
+          className="text-xs px-2.5 py-1 rounded-xl bg-bg-elevated text-text-secondary hover:text-text-primary transition-all"
         >
           Edit
         </button>
@@ -135,7 +136,7 @@ export default function HarnessPage() {
   ]
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-8 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-text-primary">Harness Rules</h1>
@@ -144,14 +145,14 @@ export default function HarnessPage() {
         <button
           onClick={handleReload}
           disabled={reloading}
-          className="px-4 py-2 bg-bg-elevated border border-border text-text-secondary rounded-lg text-sm font-medium hover:bg-border transition-colors disabled:opacity-50"
+          className="px-4 py-2 bg-bg-elevated border border-border text-text-secondary rounded-xl text-sm font-medium hover:bg-border transition-all disabled:opacity-50"
         >
           {reloading ? 'Reloading...' : '↻ Reload Cache'}
         </button>
       </div>
 
       {rules.length === 0 && !loading ? (
-        <EmptyState icon="🛡️" title="No Harness Rules" description="No security rules configured." />
+        <EmptyState icon={<Shield size={48} />} title="No Harness Rules" description="No security rules configured." />
       ) : (
         <Table
           columns={columns}
@@ -177,17 +178,17 @@ export default function HarnessPage() {
               value={editConfig}
               onChange={(e) => setEditConfig(e.target.value)}
               rows={12}
-              className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary font-mono focus:outline-none focus:border-accent"
+              className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary font-mono focus:outline-none focus:border-accent"
             />
           </div>
           <div className="flex justify-end gap-3 pt-2">
-            <button onClick={() => setEditingRule(null)} className="px-4 py-2 bg-bg-elevated text-text-secondary rounded-lg text-sm hover:bg-border transition-colors">
+            <button onClick={() => setEditingRule(null)} className="px-4 py-2 bg-bg-elevated text-text-secondary rounded-xl text-sm hover:bg-border transition-all">
               Cancel
             </button>
             <button
               onClick={handleSave}
               disabled={submitting}
-              className="px-4 py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent-hover transition-colors disabled:opacity-50"
+              className="px-4 py-2 bg-accent text-white rounded-xl text-sm font-medium hover:bg-accent-hover transition-all disabled:opacity-50 shadow-soft"
             >
               {submitting ? 'Saving...' : 'Save Changes'}
             </button>

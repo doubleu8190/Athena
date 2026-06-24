@@ -4,6 +4,7 @@ import { getAuditLogs, type AuditLog } from '../api/endpoints/admin'
 import Table, { type Column } from '../components/shared/Table'
 import EmptyState from '../components/shared/EmptyState'
 import { showToast } from '../components/shared/Toast'
+import { ClipboardList } from 'lucide-react'
 
 export default function AuditPage() {
   const { checkAuth } = useAuthStore()
@@ -77,7 +78,7 @@ export default function AuditPage() {
   const EVENT_TYPES = ['', 'harness_block', 'task_completed', 'task_failed', 'subtask_completed', 'subtask_failed', 'session_created', 'session_expired']
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-8 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-text-primary">Audit Logs</h1>
@@ -90,7 +91,7 @@ export default function AuditPage() {
         <select
           value={eventType}
           onChange={(e) => { setEventType(e.target.value); setCursor(undefined) }}
-          className="px-3 py-2 bg-bg-surface border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+          className="px-3 py-2 bg-bg-surface border border-border rounded-xl text-sm text-text-primary focus:outline-none focus:border-accent"
         >
           <option value="">All event types</option>
           {EVENT_TYPES.filter(Boolean).map((t) => (
@@ -100,7 +101,7 @@ export default function AuditPage() {
       </div>
 
       {logs.length === 0 && !loading ? (
-        <EmptyState icon="📋" title="No Audit Logs" description="No system events recorded yet." />
+        <EmptyState icon={<ClipboardList size={48} />} title="No Audit Logs" description="No system events recorded yet." />
       ) : (
         <>
           <Table
@@ -113,7 +114,7 @@ export default function AuditPage() {
 
           {/* Expandable details */}
           {expandedRow && (
-            <div className="mt-2 border border-border rounded-lg bg-bg-surface p-4">
+            <div className="mt-2 shadow-soft rounded-xl bg-bg-surface p-4">
               <h3 className="text-sm font-semibold text-text-primary mb-2">Event Details</h3>
               <pre className="text-xs text-text-secondary overflow-x-auto whitespace-pre-wrap font-mono">
                 {JSON.stringify(
@@ -131,7 +132,7 @@ export default function AuditPage() {
               <button
                 onClick={() => fetchLogs(false)}
                 disabled={loading}
-                className="px-6 py-2 bg-bg-elevated border border-border text-text-secondary rounded-lg text-sm hover:bg-border transition-colors disabled:opacity-50"
+                className="px-6 py-2 bg-bg-elevated border border-border text-text-secondary rounded-xl text-sm hover:bg-border transition-all disabled:opacity-50"
               >
                 {loading ? 'Loading...' : 'Load More'}
               </button>

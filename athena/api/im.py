@@ -54,12 +54,15 @@ async def web_message(
     user = config.user.web
     if not user.user_id:
         raise HTTPException(status_code=400, detail="Web channel is not configured")
+    if not req.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required for web messages")
 
     # Build UnifiedMessage
     unified = UnifiedMessage(
         message_id=f"web_{asyncio.get_event_loop().time()}",
         channel="web",
         user_id=user.user_id,
+        session_id=req.session_id,
         content=req.content,
         attachments=req.attachments or [],
         chat_type="private",
@@ -73,6 +76,7 @@ async def web_message(
 
             # Get Core components from app state
             app_state = request.app.state
+            tool_registry = app_state.tool_registry
             gateway_manager = app_state.gateway_manager
             web_adapter = gateway_manager.get_adapter("web")
 
@@ -85,8 +89,10 @@ async def web_message(
                 from athena.models.redis import get_redis_client
                 context_mgr = ContextManager(config, get_redis_client(config.redis_url))
 
+            # In the web channel, the frontend's session_id serves as the chat_id
+            # (there is no separate "chat" concept — each browser session IS a chat)
             session_ctx = await context_mgr.get_or_create_session(
-                unified.user_id, unified.channel, unified.chat_id or unified.user_id
+                unified.user_id, unified.channel, unified.session_id
             )
 
             # Inject context for LLM
@@ -99,10 +105,11 @@ async def web_message(
             from athena.core.planner import Planner
 
             llm_mgr = LLMProviderManager(config)
-            tool_registry = getattr(app_state, 'tool_registry', None)
             planner = Planner(llm_mgr, tool_registry)
 
-            plan = await planner.generate_plan(unified, session_ctx)
+            plan = await planner.generate_plan(
+                unified, session_ctx, context_messages=messages
+            )
 
             yield _sse_event("plan_generated", {
                 "task_id": plan.task_id,

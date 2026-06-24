@@ -15,7 +15,8 @@ export interface MCPServer {
   transport: string
   connection_config: Record<string, unknown>
   source: string
-  status: string
+  enabled: boolean
+  connection_status?: string  // 'connected' | 'disconnected' | 'connecting' — computed, not persisted
   created_at?: string
   updated_at?: string
 }
@@ -91,8 +92,8 @@ export function deleteMCPServer(serverId: string) {
   return api.delete<{ code: number; data: null }>(`/admin/mcp-servers/${serverId}`)
 }
 
-export function updateMCPServerStatus(serverId: string, status: string) {
-  return api.put<{ code: number; data: MCPServer }>(`/admin/mcp-servers/${serverId}/status`, { status })
+export function updateMCPServerStatus(serverId: string, enabled: boolean) {
+  return api.put<{ code: number; data: MCPServer }>(`/admin/mcp-servers/${serverId}/status`, { enabled })
 }
 
 // ── Skills ──────────────────────────────────────────────────────────────
@@ -107,7 +108,7 @@ export function installSkill(body: {
   image_uri: string
   allowed_domains?: string
 }) {
-  return api.post<{ code: number; data: Skill }>('/admin/skills/install', body)
+  return api.post<{ code: number; data: Skill }>('/admin/skills', body)
 }
 
 export function uninstallSkill(skillId: string) {

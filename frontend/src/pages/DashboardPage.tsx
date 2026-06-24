@@ -4,6 +4,7 @@ import { useAuthStore } from '../stores/authStore'
 import MetricCard from '../components/dashboard/MetricCard'
 import SuccessGauge from '../components/dashboard/SuccessGauge'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import { CheckCircle, RefreshCw, Hourglass, XCircle, BarChart3, Shield, Server, Wrench, Smartphone, ClipboardList, MessageSquare } from 'lucide-react'
 
 export default function DashboardPage() {
   const { metrics, isLoading, error, fetchMetrics } = useDashboardStore()
@@ -17,14 +18,14 @@ export default function DashboardPage() {
   const getTaskCount = (status: string) => metrics?.tasks?.[status] ?? 0
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="mb-6">
+    <div className="p-8 max-w-6xl mx-auto">
+      <div className="mb-8">
         <h1 className="text-2xl font-bold text-text-primary">Dashboard</h1>
         <p className="text-sm text-text-secondary mt-1">System overview and real-time metrics</p>
       </div>
 
       {error && (
-        <div className="mb-6 px-4 py-3 bg-error/10 border border-error/30 rounded-lg text-sm text-error">
+        <div className="mb-6 px-4 py-3 bg-error/5 border border-error/20 rounded-xl text-sm text-error">
           Failed to load metrics: {error}
         </div>
       )}
@@ -34,32 +35,32 @@ export default function DashboardPage() {
         <MetricCard
           title="Completed Tasks"
           value={getTaskCount('completed')}
-          icon="✅"
+          icon={<CheckCircle size={24} />}
           color="success"
         />
         <MetricCard
           title="Running Tasks"
           value={getTaskCount('running')}
-          icon="🔄"
+          icon={<RefreshCw size={24} />}
           color="accent"
         />
         <MetricCard
           title="Pending Tasks"
           value={getTaskCount('pending')}
-          icon="⏳"
+          icon={<Hourglass size={24} />}
           color="warning"
         />
         <MetricCard
           title="Failed Tasks"
           value={getTaskCount('failed')}
-          icon="❌"
+          icon={<XCircle size={24} />}
           color="error"
         />
       </div>
 
       {/* Subtask metrics */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <div className="bg-bg-surface border border-border rounded-xl p-6 flex items-center justify-center">
+        <div className="bg-bg-surface shadow-soft rounded-2xl p-6 flex items-center justify-center">
           <SuccessGauge percentage={metrics?.subtask_success_rate ?? 0} />
         </div>
         <div className="space-y-4">
@@ -67,36 +68,36 @@ export default function DashboardPage() {
             title="Total Subtasks (24h)"
             value={metrics?.total_subtasks_24h ?? 0}
             subtitle="Last 24 hours"
-            icon="📊"
+            icon={<BarChart3 size={24} />}
           />
           <MetricCard
             title="Harness Blocks (24h)"
             value={metrics?.harness_blocks_24h ?? 0}
             subtitle="Security rule triggers"
-            icon="🛡️"
+            icon={<Shield size={24} />}
             color={metrics?.harness_blocks_24h ? 'warning' : 'default'}
           />
         </div>
       </div>
 
       {/* Quick links */}
-      <div className="border border-border rounded-xl bg-bg-surface p-5">
+      <div className="shadow-soft rounded-2xl bg-bg-surface p-6">
         <h2 className="text-sm font-semibold text-text-primary mb-4">Quick Actions</h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           {[
-            { label: 'MCP Servers', href: '/admin/mcp-servers', icon: '🔌' },
-            { label: 'Skills', href: '/admin/skills', icon: '🛠️' },
-            { label: 'Devices', href: '/admin/devices', icon: '📱' },
-            { label: 'Harness Rules', href: '/admin/harness', icon: '🛡️' },
-            { label: 'Audit Logs', href: '/admin/audit', icon: '📋' },
-            { label: 'Chat Console', href: '/console', icon: '💬' },
+            { label: 'MCP Servers', href: '/admin/mcp-servers', icon: Server },
+            { label: 'Skills', href: '/admin/skills', icon: Wrench },
+            { label: 'Devices', href: '/admin/devices', icon: Smartphone },
+            { label: 'Harness Rules', href: '/admin/harness', icon: Shield },
+            { label: 'Audit Logs', href: '/admin/audit', icon: ClipboardList },
+            { label: 'Chat Console', href: '/console', icon: MessageSquare },
           ].map((link) => (
             <a
               key={link.href}
               href={link.href}
-              className="flex flex-col items-center gap-2 p-4 bg-bg rounded-lg border border-border-subtle hover:border-accent/30 hover:bg-bg-elevated transition-all text-center"
+              className="flex flex-col items-center gap-2 p-4 bg-bg shadow-soft rounded-xl hover:shadow-card-hover hover:-translate-y-0.5 transition-all text-center"
             >
-              <span className="text-2xl">{link.icon}</span>
+              <link.icon size={28} className="text-text-secondary" />
               <span className="text-xs text-text-secondary">{link.label}</span>
             </a>
           ))}

@@ -6,6 +6,8 @@ import Modal from '../components/shared/Modal'
 import StatusBadge from '../components/shared/StatusBadge'
 import EmptyState from '../components/shared/EmptyState'
 import { showToast } from '../components/shared/Toast'
+import ConfirmModal from '../components/shared/ConfirmModal'
+import { Smartphone } from 'lucide-react'
 
 export default function DevicesPage() {
   const { checkAuth } = useAuthStore()
@@ -14,6 +16,7 @@ export default function DevicesPage() {
   const [showModal, setShowModal] = useState(false)
   const [form, setForm] = useState({ device_id: '', type: 'host', connection_info: '' })
   const [submitting, setSubmitting] = useState(false)
+  const [deregisterTarget, setDeregisterTarget] = useState<string | null>(null)
 
   useEffect(() => { checkAuth() }, [checkAuth])
 
@@ -64,11 +67,12 @@ export default function DevicesPage() {
     }
   }
 
-  const handleDeregister = async (deviceId: string) => {
-    if (!window.confirm(`Deregister device "${deviceId}"?`)) return
+  const handleDeregister = async () => {
+    if (!deregisterTarget) return
     try {
-      await deregisterDevice(deviceId)
+      await deregisterDevice(deregisterTarget)
       showToast('Device deregistered', 'success')
+      setDeregisterTarget(null)
       await fetchDevices()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to deregister device', 'error')
@@ -106,8 +110,8 @@ export default function DevicesPage() {
       header: 'Actions',
       render: (d) => (
         <button
-          onClick={() => handleDeregister(d.device_id)}
-          className="text-xs px-2 py-1 rounded bg-bg-elevated text-error hover:bg-error/10 transition-colors"
+          onClick={() => setDeregisterTarget(d.device_id)}
+          className="text-xs px-2.5 py-1 rounded-xl bg-bg-elevated text-error hover:bg-error/10 transition-all"
         >
           Deregister
         </button>
@@ -116,7 +120,7 @@ export default function DevicesPage() {
   ]
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-8 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-text-primary">Devices</h1>
@@ -124,7 +128,7 @@ export default function DevicesPage() {
         </div>
         <button
           onClick={() => setShowModal(true)}
-          className="px-4 py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent-hover transition-colors"
+          className="px-4 py-2 bg-accent text-white rounded-xl text-sm font-medium hover:bg-accent-hover transition-all shadow-soft"
         >
           + Register Device
         </button>
@@ -132,7 +136,7 @@ export default function DevicesPage() {
 
       {devices.length === 0 && !loading ? (
         <EmptyState
-          icon="📱"
+          icon={<Smartphone size={48} />}
           title="No Devices"
           description="Register a device to connect it to Athena."
           action={{ label: 'Register Device', onClick: () => setShowModal(true) }}
@@ -147,6 +151,16 @@ export default function DevicesPage() {
         />
       )}
 
+      <ConfirmModal
+        open={!!deregisterTarget}
+        title="Deregister Device"
+        message={`Are you sure you want to deregister device "${deregisterTarget}"? This action cannot be undone.`}
+        confirmLabel="Deregister"
+        confirmColor="error"
+        onConfirm={handleDeregister}
+        onCancel={() => setDeregisterTarget(null)}
+      />
+
       <Modal open={showModal} title="Register Device" onClose={() => setShowModal(false)} size="md">
         <div className="space-y-4">
           <div>
@@ -154,7 +168,7 @@ export default function DevicesPage() {
             <input
               value={form.device_id}
               onChange={(e) => setForm({ ...form, device_id: e.target.value })}
-              className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+              className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary focus:outline-none focus:border-accent"
               placeholder="e.g. macbook-pro-01"
             />
           </div>
@@ -163,7 +177,7 @@ export default function DevicesPage() {
             <select
               value={form.type}
               onChange={(e) => setForm({ ...form, type: e.target.value })}
-              className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+              className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary focus:outline-none focus:border-accent"
             >
               <option value="host">host</option>
               <option value="android">android</option>
@@ -175,18 +189,18 @@ export default function DevicesPage() {
               value={form.connection_info}
               onChange={(e) => setForm({ ...form, connection_info: e.target.value })}
               rows={4}
-              className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary font-mono focus:outline-none focus:border-accent"
+              className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary font-mono focus:outline-none focus:border-accent"
               placeholder='{"hostname": "device.local", "port": 22}'
             />
           </div>
           <div className="flex justify-end gap-3 pt-2">
-            <button onClick={() => setShowModal(false)} className="px-4 py-2 bg-bg-elevated text-text-secondary rounded-lg text-sm hover:bg-border transition-colors">
+            <button onClick={() => setShowModal(false)} className="px-4 py-2 bg-bg-elevated text-text-secondary rounded-xl text-sm hover:bg-border transition-all">
               Cancel
             </button>
             <button
               onClick={handleRegister}
               disabled={submitting}
-              className="px-4 py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent-hover transition-colors disabled:opacity-50"
+              className="px-4 py-2 bg-accent text-white rounded-xl text-sm font-medium hover:bg-accent-hover transition-all disabled:opacity-50 shadow-soft"
             >
               {submitting ? 'Registering...' : 'Register'}
             </button>

@@ -5,10 +5,10 @@ export default function SessionList() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 py-3 border-b border-border">
+      <div className="px-4 py-3 border-b border-border-subtle">
         <button
           onClick={createSession}
-          className="w-full px-4 py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent-hover transition-colors"
+          className="w-full px-4 py-2.5 bg-accent text-white rounded-xl text-sm font-medium hover:bg-accent-hover transition-all shadow-soft"
         >
           + New Session
         </button>
@@ -24,8 +24,10 @@ export default function SessionList() {
             <button
               key={session.id}
               onClick={() => selectSession(session.id)}
-              className={`w-full text-left px-4 py-3 border-b border-border-subtle transition-colors hover:bg-bg-elevated ${
-                session.id === activeSessionId ? 'bg-bg-elevated border-l-2 border-l-accent' : ''
+              className={`w-full text-left px-4 py-3 transition-all ${
+                session.id === activeSessionId
+                  ? 'bg-accent/5 border-l-[3px] border-l-accent'
+                  : 'hover:bg-bg-elevated border-l-[3px] border-l-transparent'
               }`}
             >
               <div className="text-sm text-text-primary truncate font-medium">

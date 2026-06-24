@@ -6,6 +6,8 @@ import Modal from '../components/shared/Modal'
 import StatusBadge from '../components/shared/StatusBadge'
 import EmptyState from '../components/shared/EmptyState'
 import { showToast } from '../components/shared/Toast'
+import ConfirmModal from '../components/shared/ConfirmModal'
+import { Server } from 'lucide-react'
 
 export default function MCPServersPage() {
   const { checkAuth } = useAuthStore()
@@ -14,6 +16,7 @@ export default function MCPServersPage() {
   const [showModal, setShowModal] = useState(false)
   const [form, setForm] = useState({ server_id: '', name: '', transport: 'stdio', connection_config: '{}', source: 'external' })
   const [submitting, setSubmitting] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
   useEffect(() => { checkAuth() }, [checkAuth])
 
@@ -64,11 +67,12 @@ export default function MCPServersPage() {
     }
   }
 
-  const handleDelete = async (serverId: string) => {
-    if (!window.confirm(`Delete MCP server "${serverId}"?`)) return
+  const handleDelete = async () => {
+    if (!deleteTarget) return
     try {
-      await deleteMCPServer(serverId)
+      await deleteMCPServer(deleteTarget)
       showToast('MCP Server deleted', 'success')
+      setDeleteTarget(null)
       await fetchServers()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to delete server', 'error')
@@ -76,10 +80,10 @@ export default function MCPServersPage() {
   }
 
   const handleToggle = async (server: MCPServer) => {
-    const newStatus = server.status === 'disabled' ? 'connected' : 'disabled'
+    const newEnabled = !server.enabled
     try {
-      await updateMCPServerStatus(server.server_id, newStatus)
-      showToast(`Server ${newStatus === 'disabled' ? 'disabled' : 'enabled'}`, 'success')
+      await updateMCPServerStatus(server.server_id, newEnabled)
+      showToast(`Server ${newEnabled ? 'enabled' : 'disabled'}`, 'success')
       await fetchServers()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to update status', 'error')
@@ -91,9 +95,14 @@ export default function MCPServersPage() {
     { key: 'name', header: 'Name' },
     { key: 'transport', header: 'Transport' },
     {
-      key: 'status',
-      header: 'Status',
-      render: (s) => <StatusBadge status={s.status} />,
+      key: 'enabled',
+      header: 'Enabled',
+      render: (s) => <StatusBadge status={s.enabled ? 'enabled' : 'disabled'} />,
+    },
+    {
+      key: 'connection_status',
+      header: 'Connection',
+      render: (s) => <StatusBadge status={s.connection_status || 'unknown'} />,
     },
     { key: 'source', header: 'Source' },
     {
@@ -103,13 +112,13 @@ export default function MCPServersPage() {
         <div className="flex gap-2">
           <button
             onClick={() => handleToggle(s)}
-            className="text-xs px-2 py-1 rounded bg-bg-elevated text-text-secondary hover:text-text-primary transition-colors"
+            className="text-xs px-2.5 py-1 rounded-xl bg-bg-elevated text-text-secondary hover:text-text-primary transition-all"
           >
-            {s.status === 'disabled' ? 'Enable' : 'Disable'}
+            {s.enabled ? 'Disable' : 'Enable'}
           </button>
           <button
-            onClick={() => handleDelete(s.server_id)}
-            className="text-xs px-2 py-1 rounded bg-bg-elevated text-error hover:bg-error/10 transition-colors"
+            onClick={() => setDeleteTarget(s.server_id)}
+            className="text-xs px-2.5 py-1 rounded-xl bg-bg-elevated text-error hover:bg-error/10 transition-all"
           >
             Delete
           </button>
@@ -119,7 +128,7 @@ export default function MCPServersPage() {
   ]
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-8 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-text-primary">MCP Servers</h1>
@@ -127,7 +136,7 @@ export default function MCPServersPage() {
         </div>
         <button
           onClick={() => setShowModal(true)}
-          className="px-4 py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent-hover transition-colors"
+          className="px-4 py-2 bg-accent text-white rounded-xl text-sm font-medium hover:bg-accent-hover transition-all shadow-soft"
         >
           + Register Server
         </button>
@@ -135,7 +144,7 @@ export default function MCPServersPage() {
 
       {servers.length === 0 && !loading ? (
         <EmptyState
-          icon="🔌"
+          icon={<Server size={48} />}
           title="No MCP Servers"
           description="Register your first MCP server to extend Athena's capabilities."
           action={{ label: 'Register Server', onClick: () => setShowModal(true) }}
@@ -150,6 +159,16 @@ export default function MCPServersPage() {
         />
       )}
 
+      <ConfirmModal
+        open={!!deleteTarget}
+        title="Delete MCP Server"
+        message={`Are you sure you want to delete MCP server "${deleteTarget}"? This action cannot be undone.`}
+        confirmLabel="Delete"
+        confirmColor="error"
+        onConfirm={handleDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
       <Modal open={showModal} title="Register MCP Server" onClose={() => setShowModal(false)} size="lg">
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
@@ -158,7 +177,7 @@ export default function MCPServersPage() {
               <input
                 value={form.server_id}
                 onChange={(e) => setForm({ ...form, server_id: e.target.value })}
-                className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+                className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary focus:outline-none focus:border-accent"
                 placeholder="e.g. my-server"
               />
             </div>
@@ -167,7 +186,7 @@ export default function MCPServersPage() {
               <input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+                className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary focus:outline-none focus:border-accent"
                 placeholder="e.g. My MCP Server"
               />
             </div>
@@ -178,7 +197,7 @@ export default function MCPServersPage() {
               <select
                 value={form.transport}
                 onChange={(e) => setForm({ ...form, transport: e.target.value })}
-                className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+                className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary focus:outline-none focus:border-accent"
               >
                 <option value="stdio">stdio</option>
                 <option value="http">http</option>
@@ -190,7 +209,7 @@ export default function MCPServersPage() {
               <select
                 value={form.source}
                 onChange={(e) => setForm({ ...form, source: e.target.value })}
-                className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+                className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary focus:outline-none focus:border-accent"
               >
                 <option value="external">external</option>
                 <option value="builtin">builtin</option>
@@ -204,21 +223,21 @@ export default function MCPServersPage() {
               value={form.connection_config}
               onChange={(e) => setForm({ ...form, connection_config: e.target.value })}
               rows={6}
-              className="w-full px-3 py-2 bg-bg border border-border rounded-lg text-sm text-text-primary font-mono focus:outline-none focus:border-accent"
+              className="w-full px-3 py-2 bg-bg border border-border rounded-xl text-sm text-text-primary font-mono focus:outline-none focus:border-accent"
               placeholder='{"command": "python", "args": ["-m", "my_mcp_server"]}'
             />
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <button
               onClick={() => setShowModal(false)}
-              className="px-4 py-2 bg-bg-elevated text-text-secondary rounded-lg text-sm hover:bg-border transition-colors"
+              className="px-4 py-2 bg-bg-elevated text-text-secondary rounded-xl text-sm hover:bg-border transition-all"
             >
               Cancel
             </button>
             <button
               onClick={handleCreate}
               disabled={submitting}
-              className="px-4 py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent-hover transition-colors disabled:opacity-50"
+              className="px-4 py-2 bg-accent text-white rounded-xl text-sm font-medium hover:bg-accent-hover transition-all disabled:opacity-50 shadow-soft"
             >
               {submitting ? 'Creating...' : 'Register'}
             </button>

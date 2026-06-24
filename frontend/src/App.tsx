@@ -7,6 +7,18 @@ import SkillsPage from './pages/SkillsPage'
 import DevicesPage from './pages/DevicesPage'
 import HarnessPage from './pages/HarnessPage'
 import AuditPage from './pages/AuditPage'
+import EmptyState from './components/shared/EmptyState'
+
+function NotFound() {
+  return (
+    <div className="p-6 max-w-6xl mx-auto">
+      <EmptyState
+        title="Page Not Found"
+        description="The page you are looking for doesn't exist or has been moved."
+      />
+    </div>
+  )
+}
 
 export default function App() {
   return (
@@ -20,6 +32,7 @@ export default function App() {
         <Route path="/admin/devices" element={<DevicesPage />} />
         <Route path="/admin/harness" element={<HarnessPage />} />
         <Route path="/admin/audit" element={<AuditPage />} />
+        <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
   )

@@ -18,6 +18,13 @@ servers:
       command: python -m athena.tools.rag_server
     source: builtin
 
+  - server_id: weather
+    name: Weather Query
+    transport: stdio
+    connection_config:
+      command: python -m athena.tools.weather_server
+    source: builtin
+
   - server_id: chrome-devtools
     name: Chrome DevTools
     transport: stdio

@@ -1,31 +1,32 @@
 import type { TaskProgress, SubtaskProgress } from '../../stores/chatStore'
+import { Circle, Loader2, CheckCircle2, XCircle, Slash, CornerDownRight } from 'lucide-react'
 
 interface SubtaskCardProps {
   task: TaskProgress
 }
 
-const statusConfig: Record<SubtaskProgress['status'], { icon: string; color: string; label: string }> = {
-  pending: { icon: '○', color: 'text-text-muted', label: 'Pending' },
-  running: { icon: '◌', color: 'text-accent', label: 'Running' },
-  completed: { icon: '✓', color: 'text-success', label: 'Done' },
-  failed: { icon: '✗', color: 'text-error', label: 'Failed' },
-  skipped: { icon: '⊘', color: 'text-warning', label: 'Skipped' },
-  fallback: { icon: '↳', color: 'text-warning', label: 'Fallback' },
+const statusConfig: Record<SubtaskProgress['status'], { Icon: typeof Circle; color: string; label: string }> = {
+  pending: { Icon: Circle, color: 'text-text-muted', label: 'Pending' },
+  running: { Icon: Loader2, color: 'text-accent', label: 'Running' },
+  completed: { Icon: CheckCircle2, color: 'text-success', label: 'Done' },
+  failed: { Icon: XCircle, color: 'text-error', label: 'Failed' },
+  skipped: { Icon: Slash, color: 'text-warning', label: 'Skipped' },
+  fallback: { Icon: CornerDownRight, color: 'text-warning', label: 'Fallback' },
 }
 
 function SubtaskRow({ subtask }: { subtask: SubtaskProgress }) {
-  const config = statusConfig[subtask.status]
+  const { Icon, color, label } = statusConfig[subtask.status]
 
   return (
-    <div className="flex items-start gap-3 py-2 px-3 rounded-lg hover:bg-bg/50 transition-colors">
-      <span className={`mt-0.5 text-sm font-bold ${config.color} ${subtask.status === 'running' ? 'animate-spin' : ''}`}>
-        {config.icon}
+    <div className="flex items-start gap-3 py-2 px-3 rounded-xl hover:bg-bg/50 transition-colors">
+      <span className={`mt-0.5 ${color} ${subtask.status === 'running' ? 'animate-spin' : ''}`}>
+        <Icon size={16} />
       </span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm font-medium text-text-primary">{subtask.tool_name}</span>
-          <span className={`text-xs px-1.5 py-0.5 rounded-full ${config.color} bg-current/10`}>
-            {config.label}
+          <span className={`text-xs px-1.5 py-0.5 rounded-full ${color} bg-current/10`}>
+            {label}
           </span>
         </div>
         {subtask.intent && (
@@ -49,21 +50,21 @@ function SubtaskRow({ subtask }: { subtask: SubtaskProgress }) {
 
 export default function SubtaskCard({ task }: SubtaskCardProps) {
   const completedCount = task.subtasks.filter((s) => s.status === 'completed').length
-  const statusColor = task.status === 'completed' ? 'border-success/30' : task.status === 'failed' ? 'border-error/30' : 'border-accent/30'
+  const statusAccent = task.status === 'completed' ? 'border-t-success/50' : task.status === 'failed' ? 'border-t-error/50' : 'border-t-accent/50'
 
   return (
-    <div className={`border ${statusColor} bg-bg-surface rounded-xl overflow-hidden`}>
+    <div className={`shadow-soft bg-bg-surface rounded-2xl overflow-hidden border-t-[3px] ${statusAccent}`}>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border-subtle">
         <div className="flex items-center gap-2">
           {task.status === 'executing' && (
             <span className="w-2 h-2 bg-accent rounded-full animate-pulse" />
           )}
           {task.status === 'completed' && (
-            <span className="text-success font-bold">✓</span>
+            <CheckCircle2 size={16} className="text-success" />
           )}
           {task.status === 'failed' && (
-            <span className="text-error font-bold">✗</span>
+            <XCircle size={16} className="text-error" />
           )}
           <span className="text-sm font-medium text-text-primary">
             Task {task.task_id.slice(0, 8)}
@@ -81,14 +82,14 @@ export default function SubtaskCard({ task }: SubtaskCardProps) {
         ))}
         {task.subtasks.length === 0 && task.status === 'generating' && (
           <div className="flex items-center gap-2 px-4 py-4 text-sm text-text-muted">
-            <span className="animate-spin">◌</span>
+            <Loader2 size={16} className="animate-spin" />
             Generating plan...
           </div>
         )}
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-border bg-bg/30">
+      <div className="px-4 py-2.5 border-t border-border-subtle bg-bg/30">
         <p className="text-xs text-text-muted truncate">{task.summary}</p>
         {task.error && (
           <p className="text-xs text-error mt-1">{task.error}</p>

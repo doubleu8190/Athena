@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { AlertTriangle } from 'lucide-react'
 import Modal from '../shared/Modal'
 
 interface ConfirmModalProps {
@@ -25,11 +26,11 @@ export default function ConfirmModal({ open, taskId, step, description, onConfir
     <Modal open={open} title="Confirmation Required" onClose={() => {}} size="sm">
       <div className="space-y-4">
         <div className="flex items-center gap-2 text-sm text-text-secondary">
-          <span className="text-warning text-lg">⚠</span>
+          <AlertTriangle size={20} className="text-warning" />
           <span>A subtask requires your approval to proceed.</span>
         </div>
 
-        <div className="bg-bg rounded-lg px-4 py-3 space-y-2 text-sm">
+        <div className="bg-bg rounded-xl px-4 py-3 space-y-2 text-sm">
           <div className="flex justify-between">
             <span className="text-text-muted">Task</span>
             <span className="text-text-primary font-mono text-xs">{taskId}</span>
@@ -50,14 +51,14 @@ export default function ConfirmModal({ open, taskId, step, description, onConfir
           <button
             onClick={() => handleAction(false)}
             disabled={loading}
-            className="px-4 py-2 bg-bg-elevated text-text-secondary rounded-lg text-sm font-medium hover:bg-border transition-colors disabled:opacity-50"
+            className="px-4 py-2 bg-bg-elevated text-text-secondary rounded-xl text-sm font-medium hover:bg-border transition-all disabled:opacity-50"
           >
             Deny
           </button>
           <button
             onClick={() => handleAction(true)}
             disabled={loading}
-            className="px-4 py-2 bg-success text-white rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+            className="px-4 py-2 bg-success text-white rounded-xl text-sm font-medium hover:opacity-90 transition-all shadow-soft disabled:opacity-50"
           >
             {loading ? 'Processing...' : 'Approve'}
           </button>

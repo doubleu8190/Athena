@@ -1,11 +1,14 @@
 import { useState, useRef, useCallback, type KeyboardEvent } from 'react'
+import { Send, Square } from 'lucide-react'
 
 interface ChatInputProps {
   onSend: (content: string) => void
+  onStop?: () => void
   disabled?: boolean
+  isStreaming?: boolean
 }
 
-export default function ChatInput({ onSend, disabled }: ChatInputProps) {
+export default function ChatInput({ onSend, onStop, disabled, isStreaming }: ChatInputProps) {
   const [content, setContent] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -14,7 +17,6 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
     if (!trimmed || disabled) return
     onSend(trimmed)
     setContent('')
-    // Reset textarea height
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -35,7 +37,7 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
   }
 
   return (
-    <div className="border-t border-border bg-bg-surface px-4 py-3">
+    <div className="bg-bg-surface shadow-soft px-4 py-3">
       <div className="flex items-end gap-3 max-w-4xl mx-auto">
         <textarea
           ref={textareaRef}
@@ -46,21 +48,29 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
           placeholder="Type a message... (Ctrl+Enter to send)"
           rows={1}
           disabled={disabled}
-          className="flex-1 px-4 py-2.5 bg-bg border border-border rounded-xl text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent transition-colors disabled:opacity-50"
+          className="flex-1 px-4 py-2.5 bg-bg border border-border rounded-2xl text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all disabled:opacity-50"
         />
-        <button
-          onClick={handleSend}
-          disabled={disabled || !content.trim()}
-          className="flex-shrink-0 px-4 py-2.5 bg-accent text-white rounded-xl text-sm font-medium hover:bg-accent-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13" />
-            <polygon points="22 2 15 22 11 13 2 9 22 2" />
-          </svg>
-        </button>
+        {isStreaming && onStop ? (
+          <button
+            onClick={onStop}
+            className="flex-shrink-0 p-2.5 bg-error text-white rounded-full text-sm font-medium hover:opacity-90 transition-all shadow-soft"
+            aria-label="Stop streaming"
+          >
+            <Square size={16} fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            onClick={handleSend}
+            disabled={disabled || !content.trim()}
+            className="flex-shrink-0 px-5 py-2.5 bg-gradient-to-r from-accent to-accent-hover text-white rounded-full text-sm font-medium hover:opacity-90 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-soft"
+            aria-label="Send message"
+          >
+            <Send size={16} />
+          </button>
+        )}
       </div>
-      {disabled && (
-        <p className="text-center text-xs text-text-muted mt-2">Streaming response...</p>
+      {isStreaming && (
+        <p className="text-center text-xs text-text-muted mt-2 animate-pulse">Streaming response...</p>
       )}
     </div>
   )

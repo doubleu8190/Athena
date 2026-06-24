@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Athena — Personal AI Assistant (Preview)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        brand: { 50: '#fff7ed', 100: '#ffedd5', 200: '#fed7aa', 300: '#fdba74', 400: '#fb923c', 500: '#f97316', 600: '#ea580c', 700: '#c2410c', 800: '#9a3412', 900: '#7c2d12' }
+      }
+    }
+  }
+}
+</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  * { font-family: 'Inter', system-ui, sans-serif; }
+  body { margin: 0; }
+  /* Subtle transition for theme switch */
+  .theme-transition { transition: background-color 0.3s, color 0.3s, border-color 0.3s; }
+  /* Pulse for live indicator */
+  @keyframes pulse-green { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
+  .live-pulse { animation: pulse-green 2s ease-in-out infinite; }
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #666; border-radius: 3px; }
+</style>
+</head>
+<body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 theme-transition h-screen flex overflow-hidden">
+
+<!-- ====== SIDEBAR ====== -->
+<aside class="w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0 theme-transition">
+  <!-- Logo -->
+  <div class="h-12 flex items-center gap-2 px-4 border-b border-gray-200 dark:border-gray-800">
+    <span class="text-xl">🦉</span>
+    <span class="font-semibold text-sm tracking-tight">Athena</span>
+  </div>
+
+  <!-- Nav Items -->
+  <nav class="flex-1 py-2 px-2 space-y-0.5 overflow-y-auto">
+    <a href="#" onclick="switchPage('chat')" id="nav-chat"
+       class="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium bg-brand-50 dark:bg-brand-950 text-brand-700 dark:text-brand-300 theme-transition">
+      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+      Chat
+    </a>
+    <a href="#" onclick="switchPage('dashboard')" id="nav-dashboard"
+       class="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 theme-transition">
+      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 16a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-3zm10-3a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1h-4a1 1 0 01-1-1v-7z"/></svg>
+      Dashboard
+    </a>
+    <a href="#" onclick="switchPage('mcp')" id="nav-mcp"
+       class="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 theme-transition">
+      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/></svg>
+      MCP Servers
+    </a>
+    <a href="#" onclick="switchPage('skills')" id="nav-skills"
+       class="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 theme-transition">
+      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+      Skills
+    </a>
+    <a href="#" onclick="switchPage('devices')" id="nav-devices"
+       class="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 theme-transition">
+      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+      Devices
+    </a>
+    <a href="#" onclick="switchPage('harness')" id="nav-harness"
+       class="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 theme-transition">
+      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+      Harness
+    </a>
+    <a href="#" onclick="switchPage('audit')" id="nav-audit"
+       class="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 theme-transition">
+      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+      Audit Logs
+    </a>
+  </nav>
+
+  <!-- Bottom: theme toggle + version -->
+  <div class="p-2 border-t border-gray-200 dark:border-gray-800 space-y-1.5">
+    <button onclick="toggleTheme()" class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 theme-transition">
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" id="sun-icon"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+      <svg class="w-3.5 h-3.5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24" id="moon-icon"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+      <span id="theme-label">Light Mode</span>
+    </button>
+    <div class="text-[10px] text-gray-400 dark:text-gray-600 text-center">Athena v0.1.0</div>
+  </div>
+</aside>
+
+<!-- ====== MAIN ====== -->
+<div class="flex-1 flex flex-col overflow-hidden">
+  <!-- Header -->
+  <header class="h-14 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-6 shrink-0 theme-transition">
+    <h1 class="font-semibold text-base" id="page-title">Chat</h1>
+    <div class="flex items-center gap-3">
+      <span class="w-8 h-8 rounded-full bg-brand-100 dark:bg-brand-900 flex items-center justify-center text-brand-600 dark:text-brand-400 text-sm font-semibold">U</span>
+    </div>
+  </header>
+
+  <!-- Content Area -->
+  <main class="flex-1 overflow-auto">
+
+  <!-- ====== PAGE: CHAT ====== -->
+  <div id="page-chat" class="h-full flex">
+    <!-- Session List -->
+    <div class="w-64 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0 theme-transition">
+      <div class="p-3 border-b border-gray-200 dark:border-gray-800">
+        <button class="w-full py-2 px-3 text-sm font-medium bg-brand-500 hover:bg-brand-600 text-white rounded-lg transition-colors">
+          + New Session
+        </button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-2 space-y-1">
+        <div class="px-3 py-2.5 rounded-lg bg-brand-50 dark:bg-brand-950 border border-brand-200 dark:border-brand-800 cursor-pointer">
+          <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">帮我分析一下这个项目...</div>
+          <div class="text-xs text-gray-400 mt-0.5">2 min ago</div>
+        </div>
+        <div class="px-3 py-2.5 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer theme-transition">
+          <div class="text-sm text-gray-700 dark:text-gray-300 truncate">查询天气预报</div>
+          <div class="text-xs text-gray-400 mt-0.5">1 hour ago</div>
+        </div>
+        <div class="px-3 py-2.5 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer theme-transition">
+          <div class="text-sm text-gray-700 dark:text-gray-300 truncate">部署新的 MCP Server</div>
+          <div class="text-xs text-gray-400 mt-0.5">Yesterday</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chat Area -->
+    <div class="flex-1 flex flex-col bg-gray-50 dark:bg-gray-950 theme-transition">
+      <!-- Messages -->
+      <div class="flex-1 overflow-y-auto p-6 space-y-6">
+        <!-- User Message -->
+        <div class="flex justify-end">
+          <div class="max-w-[70%] bg-brand-500 text-white rounded-2xl rounded-br-md px-4 py-3 shadow-sm">
+            <p class="text-sm leading-relaxed">帮我分析一下这个项目的架构，列出主要的模块和依赖关系。</p>
+          </div>
+        </div>
+
+        <!-- AI Response -->
+        <div class="flex gap-3 max-w-[85%]">
+          <span class="text-xl shrink-0 mt-0.5">🦉</span>
+          <div class="space-y-4 min-w-0">
+            <!-- Plan -->
+            <div class="bg-white dark:bg-gray-900 rounded-xl p-4 border border-gray-200 dark:border-gray-800 shadow-sm theme-transition">
+              <div class="flex items-center gap-2 mb-3">
+                <svg class="w-4 h-4 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">Plan — 3 subtasks</span>
+              </div>
+              <div class="space-y-1.5">
+                <div class="flex items-center gap-2 text-sm">
+                  <span class="w-5 h-5 rounded-full bg-green-100 dark:bg-green-900 flex items-center justify-center text-xs">✓</span>
+                  <span class="text-gray-500 line-through">Scan project structure</span>
+                </div>
+                <div class="flex items-center gap-2 text-sm">
+                  <span class="w-5 h-5 rounded-full bg-blue-100 dark:bg-blue-900 flex items-center justify-center text-xs text-blue-600 dark:text-blue-400 font-medium">2</span>
+                  <span class="text-gray-900 dark:text-gray-100">Analyze module dependencies</span>
+                  <span class="ml-auto flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 text-xs font-medium">
+                    <span class="w-1.5 h-1.5 bg-blue-500 rounded-full live-pulse"></span> Running
+                  </span>
+                </div>
+                <div class="flex items-center gap-2 text-sm">
+                  <span class="w-5 h-5 rounded-full bg-gray-100 dark:bg-gray-800 flex items-center justify-center text-xs text-gray-400">3</span>
+                  <span class="text-gray-500">Summarize architecture</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Subtask Card -->
+            <div class="bg-white dark:bg-gray-900 rounded-xl p-4 border border-yellow-200 dark:border-yellow-800 bg-yellow-50/30 dark:bg-yellow-950/20 shadow-sm theme-transition">
+              <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center gap-2">
+                  <svg class="w-4.5 h-4.5 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                  <span class="text-sm font-semibold text-gray-800 dark:text-gray-200">Confirm: Write file</span>
+                </div>
+                <span class="text-xs px-2 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 font-medium">⚠ HIGH RISK</span>
+              </div>
+              <p class="text-sm text-gray-500 dark:text-gray-400 mb-3">About to write <code class="text-xs bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">/etc/config/system.yaml</code></p>
+              <div class="flex gap-2">
+                <button class="px-4 py-1.5 text-sm font-medium bg-green-500 hover:bg-green-600 text-white rounded-lg transition-colors">Approve</button>
+                <button class="px-4 py-1.5 text-sm font-medium bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors">Deny</button>
+              </div>
+            </div>
+
+            <!-- Markdown Response -->
+            <div class="bg-white dark:bg-gray-900 rounded-xl p-5 border border-gray-200 dark:border-gray-800 shadow-sm theme-transition prose prose-sm dark:prose-invert max-w-none">
+              <p class="text-sm leading-relaxed text-gray-700 dark:text-gray-300">项目采用 <strong>FastAPI 后端 + Celery 任务队列</strong> 架构，主要模块包括：</p>
+              <ul class="list-disc pl-5 mt-2 space-y-1 text-sm">
+                <li><strong>Gateway Layer</strong>: 多通道适配器 (Telegram, WeChat, Web Console)</li>
+                <li><strong>Core Engine</strong>: 上下文管理、任务规划器、安全执行引擎</li>
+                <li><strong>MCP Layer</strong>: 工具注册中心与协议客户端</li>
+              </ul>
+              <div class="mt-3 rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 overflow-hidden">
+                <div class="flex items-center justify-between px-3 py-1.5 bg-gray-100 dark:bg-gray-800 text-xs text-gray-500 font-mono">
+                  <span>python</span>
+                  <span>main.py</span>
+                </div>
+                <pre class="p-3 text-xs overflow-x-auto"><code><span class="text-blue-600">from</span> fastapi <span class="text-blue-600">import</span> FastAPI
+<span class="text-blue-600">from</span> athena.core <span class="text-blue-600">import</span> Planner, Executor
+
+app = FastAPI()
+<span class="text-green-600"># Core engine components</span>
+planner = Planner()
+executor = Executor()</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Streaming indicator -->
+        <div class="flex gap-3 max-w-[85%]">
+          <span class="text-xl shrink-0 mt-0.5">🦉</span>
+          <div class="bg-white dark:bg-gray-900 px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm theme-transition">
+            <span class="inline-block w-2 h-4 bg-brand-500 rounded-sm animate-pulse"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input -->
+      <div class="p-4 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 theme-transition">
+        <div class="flex items-end gap-3 max-w-4xl mx-auto">
+          <textarea rows="1" placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
+            class="flex-1 resize-none rounded-xl border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent theme-transition placeholder-gray-400"></textarea>
+          <button class="px-5 py-3 bg-brand-500 hover:bg-brand-600 text-white rounded-xl text-sm font-medium transition-colors flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+            Send
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== PAGE: DASHBOARD (hidden by default) ====== -->
+  <div id="page-dashboard" class="p-6 hidden space-y-6">
+    <!-- Metric Cards -->
+    <div class="grid grid-cols-4 gap-4">
+      <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 theme-transition">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Completed</div>
+            <div class="text-3xl font-bold mt-1 text-green-600 dark:text-green-400">1,247</div>
+          </div>
+          <div class="w-10 h-10 rounded-full bg-green-100 dark:bg-green-950 flex items-center justify-center">
+            <svg class="w-5 h-5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+          </div>
+        </div>
+        <div class="text-xs text-gray-400 mt-3">+12% vs last week</div>
+      </div>
+      <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 theme-transition">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Running</div>
+            <div class="text-3xl font-bold mt-1 text-blue-600 dark:text-blue-400">3</div>
+          </div>
+          <div class="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-950 flex items-center justify-center">
+            <svg class="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+        </div>
+        <div class="text-xs text-gray-400 mt-3">2 tasks approaching timeout</div>
+      </div>
+      <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 theme-transition">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Pending</div>
+            <div class="text-3xl font-bold mt-1 text-amber-600 dark:text-amber-400">8</div>
+          </div>
+          <div class="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-950 flex items-center justify-center">
+            <svg class="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </div>
+        </div>
+        <div class="text-xs text-gray-400 mt-3">4 awaiting confirmation</div>
+      </div>
+      <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 theme-transition">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Failed</div>
+            <div class="text-3xl font-bold mt-1 text-red-600 dark:text-red-400">23</div>
+          </div>
+          <div class="w-10 h-10 rounded-full bg-red-100 dark:bg-red-950 flex items-center justify-center">
+            <svg class="w-5 h-5 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </div>
+        </div>
+        <div class="text-xs text-gray-400 mt-3">-5% vs last week</div>
+      </div>
+    </div>
+
+    <!-- Success Gauge + Stats -->
+    <div class="grid grid-cols-3 gap-4">
+      <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 flex flex-col items-center theme-transition">
+        <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">Success Rate (24h)</div>
+        <div class="relative w-36 h-36">
+          <svg viewBox="0 0 100 100" class="w-full h-full -rotate-90">
+            <circle cx="50" cy="50" r="42" fill="none" stroke="currentColor" class="text-gray-100 dark:text-gray-800" stroke-width="8"/>
+            <circle cx="50" cy="50" r="42" fill="none" stroke="currentColor" class="text-green-500" stroke-width="8"
+                    stroke-dasharray="264" stroke-dashoffset="40" stroke-linecap="round"/>
+          </svg>
+          <div class="absolute inset-0 flex flex-col items-center justify-center">
+            <span class="text-2xl font-bold text-green-600 dark:text-green-400">84.6%</span>
+            <span class="text-[10px] text-gray-400 mt-0.5">success</span>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 theme-transition col-span-2">
+        <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-4">Quick Access</div>
+        <div class="grid grid-cols-3 gap-3">
+          <a href="#" onclick="switchPage('mcp')" class="p-4 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 theme-transition text-center cursor-pointer">
+            <div class="text-2xl mb-1">🔌</div>
+            <div class="text-sm font-medium">MCP Servers</div>
+          </a>
+          <a href="#" onclick="switchPage('skills')" class="p-4 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 theme-transition text-center cursor-pointer">
+            <div class="text-2xl mb-1">🧩</div>
+            <div class="text-sm font-medium">Skills</div>
+          </a>
+          <a href="#" onclick="switchPage('devices')" class="p-4 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 theme-transition text-center cursor-pointer">
+            <div class="text-2xl mb-1">📱</div>
+            <div class="text-sm font-medium">Devices</div>
+          </a>
+          <a href="#" onclick="switchPage('harness')" class="p-4 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 theme-transition text-center cursor-pointer">
+            <div class="text-2xl mb-1">🛡️</div>
+            <div class="text-sm font-medium">Harness</div>
+          </a>
+          <a href="#" onclick="switchPage('audit')" class="p-4 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 theme-transition text-center cursor-pointer">
+            <div class="text-2xl mb-1">📋</div>
+            <div class="text-sm font-medium">Audit Logs</div>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== PAGE: MCP SERVERS (table example, hidden by default) ====== -->
+  <div id="page-mcp" class="p-6 hidden space-y-4">
+    <!-- Action Bar -->
+    <div class="flex items-center justify-between">
+      <h2 class="text-lg font-semibold">MCP Servers</h2>
+      <button class="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-sm font-medium transition-colors">+ Register Server</button>
+    </div>
+    <!-- Table -->
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden theme-transition">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-200 dark:border-gray-800">
+            <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Server ID</th>
+            <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Name</th>
+            <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Transport</th>
+            <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Status</th>
+            <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Connection</th>
+            <th class="text-right py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/30 theme-transition">
+            <td class="py-3 px-4 font-mono text-xs">filesystem</td>
+            <td class="py-3 px-4 font-medium">Filesystem Tool</td>
+            <td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">stdio</span></td>
+            <td class="py-3 px-4"><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-950 text-green-700 dark:text-green-400"><span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span> Enabled</span></td>
+            <td class="py-3 px-4"><span class="inline-flex items-center gap-1 text-green-600 dark:text-green-400 text-xs"><span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span> Connected</span></td>
+            <td class="py-3 px-4 text-right">
+              <button class="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">Disable</button>
+              <button class="px-2 py-1 text-xs text-red-500 hover:text-red-700 ml-1">Delete</button>
+            </td>
+          </tr>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/30 theme-transition">
+            <td class="py-3 px-4 font-mono text-xs">web-search</td>
+            <td class="py-3 px-4 font-medium">Web Search</td>
+            <td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">http</span></td>
+            <td class="py-3 px-4"><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-950 text-green-700 dark:text-green-400"><span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span> Enabled</span></td>
+            <td class="py-3 px-4"><span class="inline-flex items-center gap-1 text-green-600 dark:text-green-400 text-xs"><span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span> Connected</span></td>
+            <td class="py-3 px-4 text-right">
+              <button class="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">Disable</button>
+              <button class="px-2 py-1 text-xs text-red-500 hover:text-red-700 ml-1">Delete</button>
+            </td>
+          </tr>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/30 theme-transition">
+            <td class="py-3 px-4 font-mono text-xs">rag-server</td>
+            <td class="py-3 px-4 font-medium">RAG Knowledge Base</td>
+            <td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">sse</span></td>
+            <td class="py-3 px-4"><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"><span class="w-1.5 h-1.5 bg-gray-400 rounded-full"></span> Disabled</span></td>
+            <td class="py-3 px-4"><span class="inline-flex items-center gap-1 text-gray-400 text-xs"><span class="w-1.5 h-1.5 bg-gray-400 rounded-full"></span> Disconnected</span></td>
+            <td class="py-3 px-4 text-right">
+              <button class="px-2 py-1 text-xs text-brand-500 hover:text-brand-700">Enable</button>
+              <button class="px-2 py-1 text-xs text-red-500 hover:text-red-700 ml-1">Delete</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ====== PAGE: SKILLS (card grid, hidden by default) ====== -->
+  <div id="page-skills" class="p-6 hidden space-y-4">
+    <div class="flex items-center justify-between">
+      <h2 class="text-lg font-semibold">Skills</h2>
+      <button class="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-sm font-medium transition-colors">+ Install Skill</button>
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 theme-transition">
+        <div class="flex items-start justify-between mb-3">
+          <div>
+            <h3 class="font-semibold text-base">code-review</h3>
+            <p class="text-xs text-gray-400 mt-0.5">v2.1.0</p>
+          </div>
+          <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-950 text-green-700 dark:text-green-400">Installed</span>
+        </div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+          <div>Image: <code class="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">skills/code-review:latest</code></div>
+          <div>Domains: github.com, api.github.com</div>
+        </div>
+        <button class="mt-3 text-xs text-red-500 hover:text-red-700 font-medium">Uninstall</button>
+      </div>
+      <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 theme-transition">
+        <div class="flex items-start justify-between mb-3">
+          <div>
+            <h3 class="font-semibold text-base">image-gen</h3>
+            <p class="text-xs text-gray-400 mt-0.5">v1.5.2</p>
+          </div>
+          <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-950 text-green-700 dark:text-green-400">Installed</span>
+        </div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+          <div>Image: <code class="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">skills/stable-diffusion:v1.5</code></div>
+          <div>Domains: —</div>
+        </div>
+        <button class="mt-3 text-xs text-red-500 hover:text-red-700 font-medium">Uninstall</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== PAGE: DEVICES (hidden) ====== -->
+  <div id="page-devices" class="p-6 hidden">
+    <div class="flex items-center justify-between mb-4"><h2 class="text-lg font-semibold">Devices</h2><button class="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-sm font-medium transition-colors">+ Register Device</button></div>
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden theme-transition">
+      <table class="w-full text-sm">
+        <thead><tr class="border-b border-gray-200 dark:border-gray-800"><th class="text-left py-3 px-4 font-medium text-gray-500">ID</th><th class="text-left py-3 px-4 font-medium text-gray-500">Type</th><th class="text-left py-3 px-4 font-medium text-gray-500">Status</th><th class="text-left py-3 px-4 font-medium text-gray-500">Heartbeat</th><th class="text-right py-3 px-4 font-medium text-gray-500">Actions</th></tr></thead>
+        <tbody>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50"><td class="py-3 px-4 font-mono text-xs">dev-macbook</td><td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-400">host</span></td><td class="py-3 px-4"><span class="inline-flex items-center gap-1 text-green-600 text-xs"><span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span> Online</span></td><td class="py-3 px-4 text-xs text-gray-400">3 sec ago</td><td class="py-3 px-4 text-right"><button class="px-2 py-1 text-xs text-red-500 hover:text-red-700">Deregister</button></td></tr>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50"><td class="py-3 px-4 font-mono text-xs">pixel-7</td><td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-400">android</span></td><td class="py-3 px-4"><span class="inline-flex items-center gap-1 text-green-600 text-xs"><span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span> Online</span></td><td class="py-3 px-4 text-xs text-gray-400">12 sec ago</td><td class="py-3 px-4 text-right"><button class="px-2 py-1 text-xs text-red-500 hover:text-red-700">Deregister</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ====== PAGE: HARNESS (hidden) ====== -->
+  <div id="page-harness" class="p-6 hidden space-y-4">
+    <div class="flex items-center justify-between"><h2 class="text-lg font-semibold">Harness Rules</h2><button class="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-sm font-medium transition-colors">Reload Cache</button></div>
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden theme-transition">
+      <table class="w-full text-sm">
+        <thead><tr class="border-b border-gray-200 dark:border-gray-800"><th class="text-left py-3 px-4 font-medium text-gray-500">Priority</th><th class="text-left py-3 px-4 font-medium text-gray-500">Type</th><th class="text-left py-3 px-4 font-medium text-gray-500">Name</th><th class="text-left py-3 px-4 font-medium text-gray-500">Description</th><th class="text-left py-3 px-4 font-medium text-gray-500">Enabled</th><th class="text-right py-3 px-4 font-medium text-gray-500">Actions</th></tr></thead>
+        <tbody>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50"><td class="py-3 px-4"><span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-400">P1</span></td><td class="py-3 px-4 text-xs">blacklist</td><td class="py-3 px-4 font-medium">Block Write /etc</td><td class="py-3 px-4 text-xs text-gray-500 max-w-60 truncate">Prevent file writes to system directories</td><td class="py-3 px-4"><span class="relative inline-block w-9 h-5 rounded-full bg-green-500 cursor-pointer"><span class="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-white shadow"></span></span></td><td class="py-3 px-4 text-right"><button class="px-2 py-1 text-xs text-brand-500 hover:text-brand-700">Edit</button></td></tr>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50"><td class="py-3 px-4"><span class="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 dark:bg-orange-950 text-orange-700 dark:text-orange-400">P2</span></td><td class="py-3 px-4 text-xs">rate_limit</td><td class="py-3 px-4 font-medium">API Rate Limiter</td><td class="py-3 px-4 text-xs text-gray-500 max-w-60 truncate">Max 60 requests/min per user</td><td class="py-3 px-4"><span class="relative inline-block w-9 h-5 rounded-full bg-green-500 cursor-pointer"><span class="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-white shadow"></span></span></td><td class="py-3 px-4 text-right"><button class="px-2 py-1 text-xs text-brand-500 hover:text-brand-700">Edit</button></td></tr>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50"><td class="py-3 px-4"><span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-400">P3</span></td><td class="py-3 px-4 text-xs">cooldown</td><td class="py-3 px-4 font-medium">Execution Cooldown</td><td class="py-3 px-4 text-xs text-gray-500 max-w-60 truncate">5s delay between high-risk operations</td><td class="py-3 px-4"><span class="relative inline-block w-9 h-5 rounded-full bg-gray-300 dark:bg-gray-700 cursor-pointer"><span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow"></span></span></td><td class="py-3 px-4 text-right"><button class="px-2 py-1 text-xs text-brand-500 hover:text-brand-700">Edit</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ====== PAGE: AUDIT (hidden) ====== -->
+  <div id="page-audit" class="p-6 hidden space-y-4">
+    <div class="flex items-center justify-between"><h2 class="text-lg font-semibold">Audit Logs</h2><select class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 theme-transition"><option>All Types</option><option>harness_block</option><option>task_completed</option><option>task_failed</option></select></div>
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden theme-transition">
+      <table class="w-full text-sm"><thead><tr class="border-b border-gray-200 dark:border-gray-800"><th class="text-left py-3 px-4 font-medium text-gray-500">Timestamp</th><th class="text-left py-3 px-4 font-medium text-gray-500">Event Type</th><th class="text-left py-3 px-4 font-medium text-gray-500">Operator</th><th class="text-left py-3 px-4 font-medium text-gray-500"></th></tr></thead>
+        <tbody>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50"><td class="py-3 px-4 text-xs text-gray-400">2026-06-24 14:32:01</td><td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-400">task_completed</span></td><td class="py-3 px-4 text-xs">web:user_abc</td><td class="py-3 px-4 text-right"><button class="text-xs text-brand-500 hover:text-brand-700">Expand</button></td></tr>
+          <tr class="border-b border-gray-100 dark:border-gray-800/50"><td class="py-3 px-4 text-xs text-gray-400">2026-06-24 14:30:15</td><td class="py-3 px-4"><span class="px-2 py-0.5 rounded text-xs bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-400">harness_block</span></td><td class="py-3 px-4 text-xs">system</td><td class="py-3 px-4 text-right"><button class="text-xs text-brand-500 hover:text-brand-700">Expand</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="text-center"><button class="text-sm text-brand-500 hover:text-brand-700 font-medium">Load More</button></div>
+  </div>
+
+  </main>
+</div>
+
+<!-- ====== TOAST CONTAINER ====== -->
+<div id="toast-container" class="fixed top-4 right-4 space-y-2 z-50" style="display:none">
+  <div class="bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 text-green-800 dark:text-green-300 px-4 py-3 rounded-lg text-sm shadow-lg flex items-center gap-2">
+    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+    Operation completed successfully
+  </div>
+</div>
+
+<!-- ====== MODAL OVERLAY (hidden by default) ====== -->
+<div id="modal-overlay" class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center hidden" onclick="closeModal(event)">
+  <div class="bg-white dark:bg-gray-900 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-800 p-6 w-full max-w-md theme-transition" onclick="event.stopPropagation()">
+    <h3 class="text-lg font-semibold mb-4">Confirm Action</h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-6">Are you sure you want to proceed with this operation?</p>
+    <div class="flex justify-end gap-3">
+      <button onclick="closeModal()" class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 theme-transition">Cancel</button>
+      <button onclick="closeModal()" class="px-4 py-2 text-sm font-medium text-white bg-brand-500 hover:bg-brand-600 rounded-lg transition-colors">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ====== PAGE SWITCHING ======
+function switchPage(pageName) {
+  // Hide all pages
+  document.querySelectorAll('[id^="page-"]').forEach(p => p.classList.add('hidden'));
+  // Show target
+  const target = document.getElementById('page-' + pageName);
+  if (target) target.classList.remove('hidden');
+
+  // Update nav active state
+  document.querySelectorAll('nav a').forEach(a => {
+    a.classList.remove('bg-brand-50', 'dark:bg-brand-950', 'text-brand-700', 'dark:text-brand-300');
+    a.classList.add('text-gray-600', 'dark:text-gray-400');
+  });
+  const navLink = document.getElementById('nav-' + pageName);
+  if (navLink) {
+    navLink.classList.add('bg-brand-50', 'dark:bg-brand-950', 'text-brand-700', 'dark:text-brand-300');
+    navLink.classList.remove('text-gray-600', 'dark:text-gray-400');
+  }
+
+  // Update page title
+  const titles = {
+    chat: 'Chat', dashboard: 'Dashboard', mcp: 'MCP Servers',
+    skills: 'Skills', devices: 'Devices', harness: 'Harness Rules', audit: 'Audit Logs'
+  };
+  document.getElementById('page-title').textContent = titles[pageName] || pageName;
+}
+
+// ====== THEME TOGGLE ======
+function toggleTheme() {
+  const html = document.documentElement;
+  const isDark = html.classList.contains('dark');
+  if (isDark) {
+    html.classList.remove('dark');
+    document.getElementById('sun-icon').classList.add('hidden');
+    document.getElementById('moon-icon').classList.remove('hidden');
+    document.getElementById('theme-label').textContent = 'Dark Mode';
+  } else {
+    html.classList.add('dark');
+    document.getElementById('moon-icon').classList.add('hidden');
+    document.getElementById('sun-icon').classList.remove('hidden');
+    document.getElementById('theme-label').textContent = 'Light Mode';
+  }
+}
+
+// ====== MODAL ======
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('modal-overlay')) return;
+  document.getElementById('modal-overlay').classList.add('hidden');
+}
+
+// ====== TOAST DEMO ======
+function showToast() {
+  const container = document.getElementById('toast-container');
+  container.style.display = 'block';
+  setTimeout(() => { container.style.display = 'none'; }, 3000);
+}
+
+// ====== INIT ======
+// Start in dark mode, show sun icon (since we're in dark mode)
+document.getElementById('moon-icon').classList.add('hidden');
+
+// Show toast when clicking delete buttons
+document.querySelectorAll('button').forEach(btn => {
+  if (btn.textContent.trim() === 'Delete' || btn.textContent.trim() === 'Deregister' || btn.textContent.trim() === 'Uninstall') {
+    btn.addEventListener('click', showToast);
+  }
+});
+</script>
+</body>
+</html>

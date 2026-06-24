@@ -1,42 +1,52 @@
-export interface SSECallbacks {
-  onEvent: (eventType: string, data: Record<string, unknown>) => void
-  onError: (error: Error) => void
-  onDone: () => void
+/**
+ * POST-SSE client — streams text/event-stream from a fetch ReadableStream.
+ *
+ * Standard EventSource only supports GET, but Athena's message endpoint
+ * uses POST. This client wraps fetch() + ReadableStream to parse SSE events.
+ */
+
+export type SSEEventCallback = (eventType: string, data: Record<string, unknown>) => void
+export type SSEDoneCallback = () => void
+export type SSEErrorCallback = (error: Error) => void
+
+export interface SSEClientOptions {
+  onEvent: SSEEventCallback
+  onDone?: SSEDoneCallback
+  onError?: SSEErrorCallback
 }
 
-export function createSSEStream(
+export function createSSEClient(
   url: string,
   body: unknown,
-  callbacks: SSECallbacks
-): AbortController {
+  options: SSEClientOptions
+): { abort: () => void } {
   const controller = new AbortController()
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const { onEvent, onDone, onError } = options
 
-  const { onEvent, onError, onDone } = callbacks
+  let aborted = false
 
-  fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal: controller.signal,
-  })
-    .then(async (response) => {
+  const run = async () => {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+
       if (!response.ok) {
-        let errMsg = `HTTP ${response.status}`
-        try {
-          const errBody = await response.json()
-          errMsg = errBody.message || errBody.detail || errMsg
-        } catch {
-          // use default
-        }
-        throw new Error(errMsg)
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(
+          (errBody as { message?: string }).message ||
+            `HTTP ${response.status} ${response.statusText}`
+        )
       }
 
-      const reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('ReadableStream not supported')
+      if (!response.body) {
+        throw new Error('No response body — SSE requires a streaming response')
       }
 
+      const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
 
@@ -46,40 +56,50 @@ export function createSSEStream(
 
         buffer += decoder.decode(value, { stream: true })
 
-        // Parse SSE events from buffer
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || '' // keep incomplete line in buffer
+        // SSE events are separated by double newlines
+        const parts = buffer.split('\n\n')
+        // The last part may be incomplete
+        buffer = parts.pop() || ''
 
-        let currentEvent = ''
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim()
-          } else if (line.startsWith('data: ')) {
-            const rawData = line.slice(6)
+        for (const part of parts) {
+          if (!part.trim()) continue
+          const eventType = extractLine(part, 'event') || 'message'
+          const dataStr = extractLine(part, 'data')
+          if (dataStr) {
             try {
-              const data = JSON.parse(rawData)
-              if (currentEvent) {
-                onEvent(currentEvent, data)
-              }
+              const data = JSON.parse(dataStr)
+              onEvent(eventType, data)
             } catch {
-              // Skip unparseable events
+              onEvent(eventType, { raw: dataStr })
             }
-            currentEvent = ''
           }
-          // Empty lines or comment lines are ignored
         }
       }
-    })
-    .then(() => {
-      onDone()
-    })
-    .catch((err) => {
-      if (err.name === 'AbortError') {
-        onDone()
-        return
-      }
-      onError(err instanceof Error ? err : new Error(String(err)))
-    })
 
-  return controller
+      if (!aborted) {
+        onDone?.()
+      }
+    } catch (err) {
+      if (aborted) return
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      onError?.(err instanceof Error ? err : new Error(String(err)))
+    }
+  }
+
+  run()
+
+  return {
+    abort: () => {
+      aborted = true
+      controller.abort()
+    },
+  }
+}
+
+function extractLine(chunk: string, prefix: string): string | null {
+  const line = chunk
+    .split('\n')
+    .find((l) => l.startsWith(`${prefix}:`))
+  if (!line) return null
+  return line.slice(prefix.length + 1).trim()
 }

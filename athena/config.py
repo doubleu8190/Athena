@@ -133,6 +133,11 @@ class Config:
     prometheus_enabled: bool = field(
         default_factory=lambda: os.environ.get("PROMETHEUS_ENABLED", "true").lower() == "true"
     )
+    cors_origins: list[str] = field(
+        default_factory=lambda: [
+            o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",")
+        ]
+    )
 
     @classmethod
     def load(cls) -> Config:

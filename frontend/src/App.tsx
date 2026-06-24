@@ -7,15 +7,19 @@ import SkillsPage from './pages/SkillsPage'
 import DevicesPage from './pages/DevicesPage'
 import HarnessPage from './pages/HarnessPage'
 import AuditPage from './pages/AuditPage'
-import EmptyState from './components/shared/EmptyState'
 
 function NotFound() {
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <EmptyState
-        title="Page Not Found"
-        description="The page you are looking for doesn't exist or has been moved."
-      />
+    <div className="flex items-center justify-center h-full">
+      <div className="text-center py-16">
+        <div className="text-6xl mb-4">🦉</div>
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">
+          Page Not Found
+        </h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          The page you are looking for doesn&apos;t exist or has been moved.
+        </p>
+      </div>
     </div>
   )
 }

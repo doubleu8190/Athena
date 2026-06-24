@@ -1,22 +1,30 @@
-import { Menu } from 'lucide-react'
+import { useLocation } from 'react-router'
 
-interface HeaderProps {
-  onMenuClick: () => void
+const pageTitles: Record<string, string> = {
+  '/console': 'Chat',
+  '/admin/dashboard': 'Dashboard',
+  '/admin/mcp-servers': 'MCP Servers',
+  '/admin/skills': 'Skills',
+  '/admin/devices': 'Devices',
+  '/admin/harness': 'Harness Rules',
+  '/admin/audit': 'Audit Logs',
 }
 
-export default function Header({ onMenuClick }: HeaderProps) {
+export default function Header() {
+  const location = useLocation()
+
+  // Match the most specific route prefix
+  const title =
+    pageTitles[location.pathname] ||
+    Object.entries(pageTitles).find(([key]) => location.pathname.startsWith(key))?.[1] ||
+    'Athena'
+
   return (
-    <header className="flex items-center gap-3 px-5 py-3 bg-bg-surface shadow-soft lg:px-8 sticky top-0 z-30 transition-shadow duration-200">
-      <button
-        onClick={onMenuClick}
-        className="lg:hidden p-1.5 text-text-secondary hover:text-text-primary hover:bg-bg-elevated rounded-xl transition-all"
-        aria-label="Toggle sidebar"
-      >
-        <Menu size={24} />
-      </button>
-      <span className="text-sm text-text-muted">
-        Athena Console
-      </span>
+    <header className="h-12 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-6 shrink-0">
+      <h1 className="font-semibold text-sm text-gray-900 dark:text-gray-100">{title}</h1>
+      <div className="w-7 h-7 rounded-full bg-orange-100 dark:bg-orange-900 flex items-center justify-center text-orange-600 dark:text-orange-400 text-xs font-semibold">
+        U
+      </div>
     </header>
   )
 }

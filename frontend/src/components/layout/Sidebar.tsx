@@ -1,79 +1,78 @@
 import { NavLink } from 'react-router'
-import { MessageSquare, BarChart3, Server, Wrench, Smartphone, Shield, ClipboardList, X } from 'lucide-react'
+import {
+  MessageCircle,
+  LayoutDashboard,
+  Plug,
+  Puzzle,
+  Smartphone,
+  Shield,
+  FileText,
+  Sun,
+  Moon,
+} from 'lucide-react'
 
-interface SidebarProps {
-  onClose?: () => void
+interface Props {
+  dark: boolean
+  onToggleTheme: () => void
 }
 
 const navItems = [
-  {
-    section: 'Console',
-    items: [
-      { to: '/console', label: 'Chat', icon: MessageSquare },
-    ],
-  },
-  {
-    section: 'Admin',
-    items: [
-      { to: '/admin/dashboard', label: 'Dashboard', icon: BarChart3 },
-      { to: '/admin/mcp-servers', label: 'MCP Servers', icon: Server },
-      { to: '/admin/skills', label: 'Skills', icon: Wrench },
-      { to: '/admin/devices', label: 'Devices', icon: Smartphone },
-      { to: '/admin/harness', label: 'Harness Rules', icon: Shield },
-      { to: '/admin/audit', label: 'Audit Logs', icon: ClipboardList },
-    ],
-  },
+  { to: '/console', icon: MessageCircle, label: 'Chat' },
+  { to: '/admin/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/admin/mcp-servers', icon: Plug, label: 'MCP Servers' },
+  { to: '/admin/skills', icon: Puzzle, label: 'Skills' },
+  { to: '/admin/devices', icon: Smartphone, label: 'Devices' },
+  { to: '/admin/harness', icon: Shield, label: 'Harness' },
+  { to: '/admin/audit', icon: FileText, label: 'Audit Logs' },
 ]
 
-const linkClass = ({ isActive }: { isActive: boolean }) =>
-  `flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm transition-all duration-200 ${
-    isActive
-      ? 'bg-accent/10 text-accent font-medium'
-      : 'text-text-secondary hover:bg-bg-elevated hover:text-text-primary'
-  }`
+const linkBase =
+  'flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors'
 
-export default function Sidebar({ onClose }: SidebarProps) {
+export default function Sidebar({ dark, onToggleTheme }: Props) {
   return (
-    <aside className="flex h-full flex-col bg-bg-surface shadow-soft z-10">
+    <aside className="w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0">
       {/* Logo */}
-      <div className="flex items-center justify-between px-5 py-4 border-b border-border-subtle">
-        <NavLink to="/console" className="flex items-center gap-2.5" onClick={onClose}>
-          <span className="text-2xl">🦉</span>
-          <span className="text-xl font-semibold font-serif text-text-primary tracking-tight">Athena</span>
-        </NavLink>
-        <button
-          onClick={onClose}
-          className="lg:hidden p-1.5 text-text-secondary hover:text-text-primary hover:bg-bg-elevated rounded-xl transition-all"
-          aria-label="Close sidebar"
-        >
-          <X size={20} />
-        </button>
+      <div className="h-12 flex items-center gap-2 px-4 border-b border-gray-200 dark:border-gray-800">
+        <span className="text-xl">🦉</span>
+        <span className="font-semibold text-sm tracking-tight text-gray-900 dark:text-gray-100">
+          Athena
+        </span>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto px-3 py-5 space-y-6">
-        {navItems.map((group) => (
-          <div key={group.section}>
-            <h3 className="px-4 mb-1.5 text-xs font-medium text-text-muted">
-              {group.section}
-            </h3>
-            <ul className="space-y-0.5">
-              {group.items.map((item) => (
-                <li key={item.to}>
-                  <NavLink to={item.to} className={linkClass} onClick={onClose}>
-                    <item.icon size={18} />
-                    {item.label}
-                  </NavLink>
-                </li>
-              ))}
-            </ul>
-          </div>
+      {/* Nav */}
+      <nav className="flex-1 py-2 px-2 space-y-0.5 overflow-y-auto">
+        {navItems.map(({ to, icon: Icon, label }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={to === '/console'}
+            className={({ isActive }) =>
+              `${linkBase} ${
+                isActive
+                  ? 'bg-orange-50 dark:bg-orange-950 text-orange-700 dark:text-orange-300'
+                  : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`
+            }
+          >
+            <Icon size={14} className="shrink-0" />
+            {label}
+          </NavLink>
         ))}
       </nav>
 
-      {/* Footer */}
-      <div className="px-5 py-3 border-t border-border-subtle">
-        <p className="text-xs text-text-muted">Athena v0.1.0</p>
+      {/* Theme toggle + version */}
+      <div className="p-2 border-t border-gray-200 dark:border-gray-800 space-y-1.5">
+        <button
+          onClick={onToggleTheme}
+          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+        >
+          {dark ? <Sun size={14} /> : <Moon size={14} />}
+          <span>{dark ? 'Light Mode' : 'Dark Mode'}</span>
+        </button>
+        <div className="text-[10px] text-gray-400 dark:text-gray-600 text-center">
+          Athena v0.1.0
+        </div>
       </div>
     </aside>
   )

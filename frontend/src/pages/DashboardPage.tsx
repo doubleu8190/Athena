@@ -1,111 +1,96 @@
-import { useEffect, useCallback } from 'react'
-import { useDashboardStore } from '../stores/dashboardStore'
-import { useAuthStore } from '../stores/authStore'
+import { useNavigate } from 'react-router'
+import { CheckCircle, Zap, Clock, XCircle, Shield } from 'lucide-react'
 import MetricCard from '../components/dashboard/MetricCard'
 import SuccessGauge from '../components/dashboard/SuccessGauge'
+import { useDashboardStore } from '../stores/dashboardStore'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
-import { CheckCircle, RefreshCw, Hourglass, XCircle, BarChart3, Shield, Server, Wrench, Smartphone, ClipboardList, MessageSquare } from 'lucide-react'
+
+const quickLinks = [
+  { to: '/admin/mcp-servers', emoji: '🔌', label: 'MCP Servers' },
+  { to: '/admin/skills', emoji: '🧩', label: 'Skills' },
+  { to: '/admin/devices', emoji: '📱', label: 'Devices' },
+  { to: '/admin/harness', emoji: '🛡️', label: 'Harness' },
+  { to: '/admin/audit', emoji: '📋', label: 'Audit Logs' },
+]
 
 export default function DashboardPage() {
-  const { metrics, isLoading, error, fetchMetrics } = useDashboardStore()
-  const { checkAuth } = useAuthStore()
+  const metrics = useDashboardStore((s) => s.metrics)
+  const fetchMetrics = useDashboardStore((s) => s.fetchMetrics)
+  const isLoading = useDashboardStore((s) => s.isLoading)
+  const navigate = useNavigate()
 
-  useEffect(() => { checkAuth() }, [checkAuth])
-
-  const fetch = useCallback(() => { fetchMetrics() }, [fetchMetrics])
-  useAutoRefresh(fetch, 30000)
-
-  const getTaskCount = (status: string) => metrics?.tasks?.[status] ?? 0
+  useAutoRefresh(fetchMetrics, 30_000)
 
   return (
-    <div className="p-8 max-w-6xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-text-primary">Dashboard</h1>
-        <p className="text-sm text-text-secondary mt-1">System overview and real-time metrics</p>
-      </div>
-
-      {error && (
-        <div className="mb-6 px-4 py-3 bg-error/5 border border-error/20 rounded-xl text-sm text-error">
-          Failed to load metrics: {error}
-        </div>
-      )}
-
-      {/* Task metrics */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    <div className="p-6 space-y-6 max-w-6xl mx-auto">
+      {/* Metric Cards */}
+      <div className="grid grid-cols-4 gap-4">
         <MetricCard
-          title="Completed Tasks"
-          value={getTaskCount('completed')}
-          icon={<CheckCircle size={24} />}
-          color="success"
+          label="Completed"
+          value={metrics?.completed ?? '—'}
+          trend={metrics ? '+12% vs last week' : undefined}
+          color="green"
+          icon={<CheckCircle size={18} className="text-green-600 dark:text-green-400" />}
         />
         <MetricCard
-          title="Running Tasks"
-          value={getTaskCount('running')}
-          icon={<RefreshCw size={24} />}
-          color="accent"
+          label="Running"
+          value={metrics?.running ?? '—'}
+          color="blue"
+          icon={<Zap size={18} className="text-blue-600 dark:text-blue-400" />}
         />
         <MetricCard
-          title="Pending Tasks"
-          value={getTaskCount('pending')}
-          icon={<Hourglass size={24} />}
-          color="warning"
+          label="Pending"
+          value={metrics?.pending ?? '—'}
+          color="yellow"
+          icon={<Clock size={18} className="text-amber-600 dark:text-amber-400" />}
         />
         <MetricCard
-          title="Failed Tasks"
-          value={getTaskCount('failed')}
-          icon={<XCircle size={24} />}
-          color="error"
+          label="Failed"
+          value={metrics?.failed ?? '—'}
+          color="red"
+          icon={<XCircle size={18} className="text-red-600 dark:text-red-400" />}
         />
       </div>
 
-      {/* Subtask metrics */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <div className="bg-bg-surface shadow-soft rounded-2xl p-6 flex items-center justify-center">
-          <SuccessGauge percentage={metrics?.subtask_success_rate ?? 0} />
-        </div>
-        <div className="space-y-4">
-          <MetricCard
-            title="Total Subtasks (24h)"
-            value={metrics?.total_subtasks_24h ?? 0}
-            subtitle="Last 24 hours"
-            icon={<BarChart3 size={24} />}
-          />
-          <MetricCard
-            title="Harness Blocks (24h)"
-            value={metrics?.harness_blocks_24h ?? 0}
-            subtitle="Security rule triggers"
-            icon={<Shield size={24} />}
-            color={metrics?.harness_blocks_24h ? 'warning' : 'default'}
-          />
+      {/* Success Gauge + Quick Links */}
+      <div className="grid grid-cols-3 gap-4">
+        <SuccessGauge percentage={metrics?.success_rate_24h ?? 0} />
+        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 col-span-2">
+          <div className="text-[10px] font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+            Quick Access
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            {quickLinks.map((link) => (
+              <button
+                key={link.to}
+                onClick={() => navigate(link.to)}
+                className="p-3 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-center cursor-pointer"
+              >
+                <div className="text-xl mb-1">{link.emoji}</div>
+                <div className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                  {link.label}
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Harness Blocks */}
+          {metrics && (
+            <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-800 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <Shield size={14} className="text-gray-400" />
+              Harness Blocks (24h):{' '}
+              <span className="font-semibold text-gray-900 dark:text-gray-100">
+                {metrics.harness_blocks_24h}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Quick links */}
-      <div className="shadow-soft rounded-2xl bg-bg-surface p-6">
-        <h2 className="text-sm font-semibold text-text-primary mb-4">Quick Actions</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          {[
-            { label: 'MCP Servers', href: '/admin/mcp-servers', icon: Server },
-            { label: 'Skills', href: '/admin/skills', icon: Wrench },
-            { label: 'Devices', href: '/admin/devices', icon: Smartphone },
-            { label: 'Harness Rules', href: '/admin/harness', icon: Shield },
-            { label: 'Audit Logs', href: '/admin/audit', icon: ClipboardList },
-            { label: 'Chat Console', href: '/console', icon: MessageSquare },
-          ].map((link) => (
-            <a
-              key={link.href}
-              href={link.href}
-              className="flex flex-col items-center gap-2 p-4 bg-bg shadow-soft rounded-xl hover:shadow-card-hover hover:-translate-y-0.5 transition-all text-center"
-            >
-              <link.icon size={28} className="text-text-secondary" />
-              <span className="text-xs text-text-secondary">{link.label}</span>
-            </a>
-          ))}
+      {isLoading && (
+        <div className="text-center text-xs text-gray-400 py-4 animate-pulse">
+          Loading metrics...
         </div>
-      </div>
-
-      {isLoading && !metrics && (
-        <div className="text-center text-sm text-text-muted py-8">Loading metrics...</div>
       )}
     </div>
   )

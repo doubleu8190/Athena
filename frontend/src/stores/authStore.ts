@@ -1,15 +1,17 @@
 import { create } from 'zustand'
 
+/**
+ * Placeholder auth store. Currently Athena runs in LAN mode without
+ * real authentication. This store provides the shape for future use.
+ */
 interface AuthState {
-  _hydrated: boolean
-  checkAuth: () => void
+  isAuthenticated: boolean
+  user: { name: string; email: string } | null
+  token: string | null
 }
 
-export const useAuthStore = create<AuthState>((set, get) => ({
-  _hydrated: false,
-
-  checkAuth: () => {
-    if (get()._hydrated) return
-    set({ _hydrated: true })
-  },
+export const useAuthStore = create<AuthState>(() => ({
+  isAuthenticated: true, // LAN mode: always authenticated
+  user: { name: 'User', email: '' },
+  token: null,
 }))

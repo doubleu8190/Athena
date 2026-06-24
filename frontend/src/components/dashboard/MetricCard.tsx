@@ -1,51 +1,40 @@
-import type { ReactNode } from 'react'
-import { TrendingUp, TrendingDown } from 'lucide-react'
-
-interface MetricCardProps {
-  title: string
+interface Props {
+  label: string
   value: number | string
-  subtitle?: string
-  icon?: ReactNode
-  trend?: 'up' | 'down'
-  color?: 'default' | 'success' | 'warning' | 'error' | 'accent'
+  trend?: string
+  color: 'green' | 'blue' | 'yellow' | 'red'
+  icon: React.ReactNode
 }
 
-const topBorderMap = {
-  default: 'border-t-border-subtle',
-  success: 'border-t-success/40',
-  warning: 'border-t-warning/40',
-  error: 'border-t-error/40',
-  accent: 'border-t-accent/40',
+const colorClasses = {
+  green: 'text-green-600 dark:text-green-400',
+  blue: 'text-blue-600 dark:text-blue-400',
+  yellow: 'text-amber-600 dark:text-amber-400',
+  red: 'text-red-600 dark:text-red-400',
 }
 
-const textColorMap = {
-  default: 'text-text-primary',
-  success: 'text-success',
-  warning: 'text-warning',
-  error: 'text-error',
-  accent: 'text-accent',
+const bgClasses = {
+  green: 'bg-green-100 dark:bg-green-950',
+  blue: 'bg-blue-100 dark:bg-blue-950',
+  yellow: 'bg-amber-100 dark:bg-amber-950',
+  red: 'bg-red-100 dark:bg-red-950',
 }
 
-export default function MetricCard({ title, value, subtitle, icon, trend, color = 'default' }: MetricCardProps) {
+export default function MetricCard({ label, value, trend, color, icon }: Props) {
   return (
-    <div className={`bg-bg-surface shadow-soft rounded-2xl p-5 border-t-[3px] ${topBorderMap[color]} hover:shadow-card-hover hover:-translate-y-0.5 transition-all duration-200`}>
-      <div className="flex items-start justify-between mb-3">
-        <span className="text-sm text-text-secondary">{title}</span>
-        {icon && (
-          <span className={`text-xl ${textColorMap[color]}`}>
-            {icon}
-          </span>
-        )}
+    <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-[10px] font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+            {label}
+          </div>
+          <div className={`text-2xl font-bold mt-1 ${colorClasses[color]}`}>{value}</div>
+        </div>
+        <div className={`w-9 h-9 rounded-full ${bgClasses[color]} flex items-center justify-center`}>
+          {icon}
+        </div>
       </div>
-      <div className={`text-3xl font-bold ${textColorMap[color]} mb-1`}>
-        {value}
-        {trend && (
-          <span className={`inline-block ml-2 ${trend === 'up' ? 'text-success' : 'text-error'}`}>
-            {trend === 'up' ? <TrendingUp size={16} className="inline" /> : <TrendingDown size={16} className="inline" />}
-          </span>
-        )}
-      </div>
-      {subtitle && <p className="text-xs text-text-muted">{subtitle}</p>}
+      {trend && <div className="text-[10px] text-gray-400 mt-3">{trend}</div>}
     </div>
   )
 }

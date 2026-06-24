@@ -1,100 +1,51 @@
-import type { TaskProgress, SubtaskProgress } from '../../stores/chatStore'
-import { Circle, Loader2, CheckCircle2, XCircle, Slash, CornerDownRight } from 'lucide-react'
+import type { SubtaskEvent } from '../../stores/chatStore'
+import Badge from '../ui/Badge'
 
-interface SubtaskCardProps {
-  task: TaskProgress
+interface Props {
+  subtask: SubtaskEvent
 }
 
-const statusConfig: Record<SubtaskProgress['status'], { Icon: typeof Circle; color: string; label: string }> = {
-  pending: { Icon: Circle, color: 'text-text-muted', label: 'Pending' },
-  running: { Icon: Loader2, color: 'text-accent', label: 'Running' },
-  completed: { Icon: CheckCircle2, color: 'text-success', label: 'Done' },
-  failed: { Icon: XCircle, color: 'text-error', label: 'Failed' },
-  skipped: { Icon: Slash, color: 'text-warning', label: 'Skipped' },
-  fallback: { Icon: CornerDownRight, color: 'text-warning', label: 'Fallback' },
+const statusConfig: Record<string, { label: string; variant: 'green' | 'red' | 'yellow' | 'blue' | 'gray' | 'orange' }> = {
+  running: { label: 'Running', variant: 'blue' },
+  completed: { label: 'Done', variant: 'green' },
+  failed: { label: 'Failed', variant: 'red' },
+  skipped: { label: 'Skipped', variant: 'yellow' },
+  fallback: { label: 'Fallback', variant: 'orange' },
 }
 
-function SubtaskRow({ subtask }: { subtask: SubtaskProgress }) {
-  const { Icon, color, label } = statusConfig[subtask.status]
+export default function SubtaskCard({ subtask }: Props) {
+  const config = statusConfig[subtask.status || 'running'] || statusConfig.running
 
   return (
-    <div className="flex items-start gap-3 py-2 px-3 rounded-xl hover:bg-bg/50 transition-colors">
-      <span className={`mt-0.5 ${color} ${subtask.status === 'running' ? 'animate-spin' : ''}`}>
-        <Icon size={16} />
-      </span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-medium text-text-primary">{subtask.tool_name}</span>
-          <span className={`text-xs px-1.5 py-0.5 rounded-full ${color} bg-current/10`}>
-            {label}
-          </span>
-        </div>
-        {subtask.intent && (
-          <p className="text-xs text-text-secondary mt-0.5 truncate">{subtask.intent}</p>
+    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 shadow-sm">
+      <div className="flex items-center gap-2">
+        {subtask.status === 'running' && (
+          <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse shrink-0" />
         )}
-        {subtask.output_preview && (
-          <p className="text-xs text-text-muted mt-1 line-clamp-2">{subtask.output_preview}</p>
-        )}
-        {subtask.error && (
-          <p className="text-xs text-error mt-1">{subtask.error}</p>
-        )}
-        {subtask.fallback_from && subtask.fallback_tool && (
-          <p className="text-xs text-warning mt-1">
-            Fallback: {subtask.fallback_from} → {subtask.fallback_tool}
-          </p>
-        )}
-      </div>
-    </div>
-  )
-}
-
-export default function SubtaskCard({ task }: SubtaskCardProps) {
-  const completedCount = task.subtasks.filter((s) => s.status === 'completed').length
-  const statusAccent = task.status === 'completed' ? 'border-t-success/50' : task.status === 'failed' ? 'border-t-error/50' : 'border-t-accent/50'
-
-  return (
-    <div className={`shadow-soft bg-bg-surface rounded-2xl overflow-hidden border-t-[3px] ${statusAccent}`}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border-subtle">
-        <div className="flex items-center gap-2">
-          {task.status === 'executing' && (
-            <span className="w-2 h-2 bg-accent rounded-full animate-pulse" />
-          )}
-          {task.status === 'completed' && (
-            <CheckCircle2 size={16} className="text-success" />
-          )}
-          {task.status === 'failed' && (
-            <XCircle size={16} className="text-error" />
-          )}
-          <span className="text-sm font-medium text-text-primary">
-            Task {task.task_id.slice(0, 8)}
-          </span>
-        </div>
-        <span className="text-xs text-text-muted">
-          {completedCount}/{task.subtasks.length} steps
+        <span className="text-xs font-mono text-gray-400 shrink-0">#{subtask.step}</span>
+        <span className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
+          {subtask.tool_name || subtask.intent || 'Loading...'}
         </span>
+        <Badge variant={config.variant} className="ml-auto shrink-0 text-[10px]">
+          {config.label}
+        </Badge>
       </div>
-
-      {/* Subtask list */}
-      <div className="divide-y divide-border-subtle">
-        {task.subtasks.map((subtask) => (
-          <SubtaskRow key={subtask.step} subtask={subtask} />
-        ))}
-        {task.subtasks.length === 0 && task.status === 'generating' && (
-          <div className="flex items-center gap-2 px-4 py-4 text-sm text-text-muted">
-            <Loader2 size={16} className="animate-spin" />
-            Generating plan...
-          </div>
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="px-4 py-2.5 border-t border-border-subtle bg-bg/30">
-        <p className="text-xs text-text-muted truncate">{task.summary}</p>
-        {task.error && (
-          <p className="text-xs text-error mt-1">{task.error}</p>
-        )}
-      </div>
+      {subtask.intent && (
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">{subtask.intent}</p>
+      )}
+      {subtask.output_preview && (
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6 font-mono truncate">
+          → {subtask.output_preview}
+        </p>
+      )}
+      {subtask.error && (
+        <p className="text-xs text-red-500 mt-1 ml-6 truncate">{subtask.error}</p>
+      )}
+      {subtask.status === 'fallback' && subtask.fallback_tool && (
+        <p className="text-xs text-orange-500 mt-1 ml-6">
+          Fallback: {subtask.original_tool} → {subtask.fallback_tool}
+        </p>
+      )}
     </div>
   )
 }

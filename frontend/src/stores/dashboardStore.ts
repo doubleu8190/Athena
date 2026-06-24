@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { getDashboard, type DashboardMetrics } from '../api/endpoints/admin'
+import { fetchDashboard, type DashboardMetrics } from '../api/endpoints/admin'
 
 interface DashboardState {
   metrics: DashboardMetrics | null
@@ -16,10 +16,13 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   fetchMetrics: async () => {
     set({ isLoading: true, error: null })
     try {
-      const res = await getDashboard()
-      set({ metrics: res.data, isLoading: false })
+      const data = await fetchDashboard()
+      set({ metrics: data, isLoading: false })
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : 'Failed to load metrics', isLoading: false })
+      set({
+        error: err instanceof Error ? err.message : 'Failed to fetch metrics',
+        isLoading: false,
+      })
     }
   },
 }))

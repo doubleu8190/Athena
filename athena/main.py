@@ -109,10 +109,11 @@ def create_app(config: Config | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS — permissive for local/development use
+    # CORS — origins configurable via CORS_ORIGINS env var (default "*")
+    cors_origins = cfg.cors_origins if hasattr(cfg, "cors_origins") else ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -128,13 +129,6 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.include_router(im_router, prefix="/api/v1")
     app.include_router(admin_router, prefix="/api/v1/admin")
     app.include_router(device_router, prefix="/api/v1")
-
-    # Production mode: serve frontend static files (SPA fallback)
-    frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
-    if frontend_dist.exists():
-        from fastapi.staticfiles import StaticFiles
-        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
-        logger.info("frontend_static_mounted", path=str(frontend_dist))
 
     # Prometheus metrics — custom middleware + endpoint (no third-party instrumentator)
     if cfg.prometheus_enabled:

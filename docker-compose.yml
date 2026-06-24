@@ -20,6 +20,7 @@
 #   filebeat        — Docker container log collection
 #   kibana-setup    — One-shot Kibana dashboard import
 
+# docker compose -f 'docker-compose.yml' up -d --build
 services:
   # ── Infrastructure ────────────────────────────────────────────────
   redis:
@@ -58,6 +59,7 @@ services:
       - LLM_CONFIG_PATH=/data/llm.yaml
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - PROMETHEUS_ENABLED=true
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
     secrets:
       - admin_api_key
       - device_psk
@@ -80,6 +82,43 @@ services:
     labels:
       - "app=athena"
       - "component=core"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Athena Frontend ─────────────────────────────────────────────────
+  athena-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - athena-core
+    labels:
+      - "app=athena"
+      - "component=frontend"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Athena Gateway (Nginx) ──────────────────────────────────────────
+  athena-gateway:
+    image: nginx:alpine
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - athena-core
+      - athena-frontend
+    restart: unless-stopped
+    labels:
+      - "app=athena"
+      - "component=gateway"
     logging:
       driver: json-file
       options:

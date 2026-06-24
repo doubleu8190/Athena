@@ -1,77 +1,75 @@
-import { useState, useRef, useCallback, type KeyboardEvent } from 'react'
+import { useState, useRef, useEffect, type KeyboardEvent } from 'react'
 import { Send, Square } from 'lucide-react'
 
-interface ChatInputProps {
+interface Props {
   onSend: (content: string) => void
-  onStop?: () => void
+  onStop: () => void
+  isStreaming: boolean
   disabled?: boolean
-  isStreaming?: boolean
 }
 
-export default function ChatInput({ onSend, onStop, disabled, isStreaming }: ChatInputProps) {
-  const [content, setContent] = useState('')
+export default function ChatInput({ onSend, onStop, isStreaming, disabled }: Props) {
+  const [value, setValue] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const handleSend = useCallback(() => {
-    const trimmed = content.trim()
-    if (!trimmed || disabled) return
+  // Auto-resize textarea
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+  }, [value])
+
+  const handleSend = () => {
+    const trimmed = value.trim()
+    if (!trimmed || isStreaming || disabled) return
     onSend(trimmed)
-    setContent('')
+    setValue('')
+    // Reset textarea height
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [content, disabled, onSend])
+  }
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
     }
   }
 
-  const handleInput = () => {
-    const el = textareaRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-  }
-
   return (
-    <div className="bg-bg-surface shadow-soft px-4 py-3">
+    <div className="p-4 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800">
       <div className="flex items-end gap-3 max-w-4xl mx-auto">
         <textarea
           ref={textareaRef}
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onInput={handleInput}
-          placeholder="Type a message... (Ctrl+Enter to send)"
           rows={1}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
           disabled={disabled}
-          className="flex-1 px-4 py-2.5 bg-bg border border-border rounded-2xl text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all disabled:opacity-50"
+          className="flex-1 resize-none rounded-xl border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent placeholder-gray-400 dark:placeholder-gray-500 text-gray-900 dark:text-gray-100 disabled:opacity-50"
         />
-        {isStreaming && onStop ? (
+        {isStreaming ? (
           <button
             onClick={onStop}
-            className="flex-shrink-0 p-2.5 bg-error text-white rounded-full text-sm font-medium hover:opacity-90 transition-all shadow-soft"
-            aria-label="Stop streaming"
+            className="px-4 py-2.5 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-medium transition-colors flex items-center gap-2 shrink-0"
           >
-            <Square size={16} fill="currentColor" />
+            <Square size={14} fill="currentColor" />
+            Stop
           </button>
         ) : (
           <button
             onClick={handleSend}
-            disabled={disabled || !content.trim()}
-            className="flex-shrink-0 px-5 py-2.5 bg-gradient-to-r from-accent to-accent-hover text-white rounded-full text-sm font-medium hover:opacity-90 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-soft"
-            aria-label="Send message"
+            disabled={!value.trim() || disabled}
+            className="px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 text-white rounded-xl text-sm font-medium transition-colors flex items-center gap-2 shrink-0 disabled:cursor-not-allowed"
           >
-            <Send size={16} />
+            <Send size={14} />
+            Send
           </button>
         )}
       </div>
-      {isStreaming && (
-        <p className="text-center text-xs text-text-muted mt-2 animate-pulse">Streaming response...</p>
-      )}
     </div>
   )
 }

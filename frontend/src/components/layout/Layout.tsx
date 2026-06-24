@@ -1,40 +1,48 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Outlet } from 'react-router'
 import Sidebar from './Sidebar'
 import Header from './Header'
-import Toast from '../shared/Toast'
 
 export default function Layout() {
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [dark, setDark] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('athena-theme')
+      if (stored) return stored === 'dark'
+      return window.matchMedia('(prefers-color-scheme: dark)').matches
+    }
+    return true
+  })
+
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', dark)
+    localStorage.setItem('athena-theme', dark ? 'dark' : 'light')
+  }, [dark])
+
+  // Avoid flash of wrong theme
+  if (!mounted) {
+    return (
+      <div className="flex h-screen bg-gray-50 dark:bg-gray-950">
+        <div className="w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800" />
+        <div className="flex-1" />
+      </div>
+    )
+  }
 
   return (
-    <div className="flex h-full overflow-hidden">
-      {/* Sidebar — hidden on mobile, shown on desktop */}
-      <div
-        className={`fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-200 ease-out lg:relative lg:translate-x-0 ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
-      >
-        <Sidebar onClose={() => setSidebarOpen(false)} />
-      </div>
-
-      {/* Overlay for mobile sidebar */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 z-40 bg-black/20 backdrop-blur-sm lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Main content area */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <Header onMenuClick={() => setSidebarOpen(true)} />
-        <main className="flex-1 overflow-y-auto">
+    <div className="flex h-screen overflow-hidden bg-gray-50 dark:bg-gray-950">
+      <Sidebar dark={dark} onToggleTheme={() => setDark(!dark)} />
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <Header />
+        <main className="flex-1 overflow-auto">
           <Outlet />
         </main>
       </div>
-
-      <Toast />
     </div>
   )
 }

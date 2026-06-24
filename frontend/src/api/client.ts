@@ -7,7 +7,7 @@ interface ApiError {
   data: null
 }
 
-class ApiRequestError extends Error {
+export class ApiRequestError extends Error {
   code: number
   detail?: string
 
@@ -69,5 +69,3 @@ export const api = {
   getRaw: (path: string, body?: unknown) =>
     request<Response>('POST', path, body, { rawResponse: true }),
 }
-
-export { ApiRequestError }

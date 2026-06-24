@@ -1,85 +1,103 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap');
-@import 'highlight.js/styles/github.css';
-@import 'tailwindcss';
+@import "tailwindcss";
 
-@theme {
-  /* Backgrounds — warm cream/beige scale */
-  --color-bg: #fbfaf8;
-  --color-bg-surface: #f7f6f3;
-  --color-bg-elevated: #efeeea;
-
-  /* Borders — subtle warm grays (kept for inputs, table dividers, badges) */
-  --color-border: #e8e7e3;
-  --color-border-subtle: #f0efeb;
-
-  /* Text — warm charcoal scale */
-  --color-text-primary: #1c1c1c;
-  --color-text-secondary: #7d7a73;
-  --color-text-muted: #b0aca3;
-
-  /* Accent — warm amber/orange */
-  --color-accent: #e0703d;
-  --color-accent-hover: #f08a55;
-
-  /* Status — muted, harmonious tones */
-  --color-success: #4a9c5d;
-  --color-error: #d94a4a;
-  --color-warning: #d9a44a;
-
-  /* Fonts */
-  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-  --font-serif: 'Newsreader', 'Georgia', 'Times New Roman', serif;
+/* ── Theme variables ─────────────────────────────────────────────── */
+:root {
+  --color-brand: #f97316;
 }
 
-* {
-  margin: 0;
+/* ── Base styles ─────────────────────────────────────────────────── */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Custom scrollbar ────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #4b5563;
+}
+
+/* ── Stream cursor blink ─────────────────────────────────────────── */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.stream-cursor {
+  animation: blink 1s ease-in-out infinite;
+}
+
+/* ── Live pulse ──────────────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.live-pulse {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* ── Markdown prose ──────────────────────────────────────────────── */
+.prose pre {
+  background: var(--color-gray-50);
+  border: 1px solid var(--color-gray-200);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+}
+.dark .prose pre {
+  background: var(--color-gray-900);
+  border-color: var(--color-gray-700);
+}
+
+.prose code {
+  font-size: 0.8125rem;
+}
+.prose pre code {
+  background: transparent;
   padding: 0;
-  box-sizing: border-box;
 }
 
-html, body, #root {
-  height: 100%;
-  background-color: var(--color-bg);
-  color: var(--color-text-primary);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.prose th,
+.prose td {
+  border: 1px solid var(--color-gray-200);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.dark .prose th,
+.dark .prose td {
+  border-color: var(--color-gray-700);
+}
+.prose th {
+  background: var(--color-gray-50);
+  font-weight: 600;
+}
+.dark .prose th {
+  background: var(--color-gray-800);
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background-color: var(--color-border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background-color: var(--color-text-muted); }
-
-/* Soft shadow utilities — Notion-inspired warm, subtle shadows */
-.shadow-soft {
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
+.prose blockquote {
+  border-left: 3px solid var(--color-brand);
+  padding-left: 1rem;
+  color: var(--color-gray-600);
+  margin: 0.5rem 0;
 }
-.shadow-card {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.04);
-}
-.shadow-card-hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.06);
-}
-
-/* Animations */
-@keyframes spin { to { transform: rotate(360deg); } }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-@keyframes slide-up { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes fade-in-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes scale-in { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
-@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
-
-.animate-spin { animation: spin 1s linear infinite; }
-.animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-.animate-slide-up { animation: slide-up 0.3s ease-out; }
-.animate-fade-in { animation: fade-in 0.2s ease-out; }
-.animate-fade-in-up { animation: fade-in-up 0.3s ease-out; }
-.animate-scale-in { animation: scale-in 0.2s ease-out; }
-.animate-shimmer { background: linear-gradient(90deg, var(--color-bg-elevated) 25%, var(--color-bg-surface) 50%, var(--color-bg-elevated) 75%); background-size: 200% 100%; animation: shimmer 1.5s ease-in-out infinite; }
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-  }
+.dark .prose blockquote {
+  color: var(--color-gray-400);
 }

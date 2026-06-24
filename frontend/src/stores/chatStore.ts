@@ -1,26 +1,32 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
-import { sendMessage, sendConfirm, type MessageRequest } from '../api/endpoints/chat'
-import type { SSECallbacks } from '../api/sse'
 
-export interface SubtaskProgress {
+// ── Types ─────────────────────────────────────────────────────────────
+
+export interface Session {
+  id: string
+  title: string
+  createdAt: number
+}
+
+export interface SubtaskEvent {
   step: number
-  tool_name: string
-  intent: string
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'fallback'
+  tool_name?: string
+  intent?: string
+  status?: string
   output_preview?: string
   error?: string
-  fallback_from?: string
+  reason?: string
+  original_tool?: string
   fallback_tool?: string
 }
 
-export interface TaskProgress {
+export interface ConfirmRequired {
   task_id: string
-  subtask_count: number
-  summary: string
-  subtasks: SubtaskProgress[]
-  status: 'generating' | 'executing' | 'completed' | 'failed'
-  error?: string
+  step: number
+  risk_level: string
+  preview_text: string
+  cooling_off_seconds: number
+  timeout_seconds: number
 }
 
 export interface Message {
@@ -28,329 +34,144 @@ export interface Message {
   role: 'user' | 'assistant'
   content: string
   timestamp: number
-  task?: TaskProgress | null
+  // Task execution events attached to assistant messages
+  plan?: { task_id: string; subtasks: { step: number; tool_name: string; intent: string }[] }
+  subtasks?: SubtaskEvent[]
+  confirmRequired?: ConfirmRequired
+  // SSE streaming state
+  isStreaming?: boolean
+  taskStatus?: 'generating_plan' | 'executing' | 'completed' | 'failed'
 }
 
-export interface Session {
-  id: string
-  title: string
-  lastActive: number
+// ── Helpers ────────────────────────────────────────────────────────────
+
+let counter = 0
+function generateId(): string {
+  counter++
+  return `${Date.now()}-${counter}`
 }
+
+function generateTitle(content: string): string {
+  return content.slice(0, 30).replace(/\n/g, ' ')
+}
+
+// ── Store ──────────────────────────────────────────────────────────────
 
 interface ChatState {
   sessions: Session[]
   activeSessionId: string | null
-  messages: Message[]
-  isStreaming: boolean
-  currentTask: TaskProgress | null
-  abortController: AbortController | null
+  messages: Record<string, Message[]>
 
+  // Session actions
   createSession: () => string
-  selectSession: (id: string) => void
-  sendMessage: (content: string) => Promise<void>
-  confirmAction: (taskId: string, step: number, approved: boolean) => Promise<void>
-  abortStream: () => void
+  deleteSession: (id: string) => void
+  setActiveSession: (id: string) => void
+
+  // Message actions
+  addMessage: (sessionId: string, msg: Message) => void
+  updateMessage: (sessionId: string, msgId: string, patch: Partial<Message>) => void
+
+  // Convenience: add user message + create placeholder assistant message
+  sendUserMessage: (content: string) => { userMsg: Message; assistantMsg: Message; sessionId: string }
 }
 
-let messageCounter = 0
-
 export const useChatStore = create<ChatState>()(
-  persist(
-    (set, get) => ({
-  sessions: [],
-  activeSessionId: null,
-  messages: [],
-  isStreaming: false,
-  currentTask: null,
-  abortController: null,
+  (set, get) => ({
+      sessions: [],
+      activeSessionId: null,
+      messages: {},
 
-  createSession: () => {
-    const id = `session_${Date.now()}`
-    const session: Session = {
-      id,
-      title: 'New Session',
-      lastActive: Date.now(),
-    }
-    set((s) => ({
-      sessions: [session, ...s.sessions],
-      activeSessionId: id,
-      messages: [],
-      currentTask: null,
-    }))
-    return id
-  },
-
-  selectSession: (id: string) => {
-    set({ activeSessionId: id })
-    // In the future, load messages from server
-  },
-
-  sendMessage: async (content: string) => {
-    const state = get()
-    let sessionId = state.activeSessionId
-
-    // Auto-create session if none active
-    if (!sessionId) {
-      sessionId = get().createSession()
-    }
-
-    const userMsg: Message = {
-      id: `msg_${++messageCounter}`,
-      role: 'user',
-      content,
-      timestamp: Date.now(),
-    }
-
-    set((s) => ({
-      messages: [...s.messages, userMsg],
-      isStreaming: true,
-      currentTask: null,
-    }))
-
-    // Update session title based on first message
-    set((s) => ({
-      sessions: s.sessions.map((ses) =>
-        ses.id === sessionId && ses.title === 'New Session'
-          ? { ...ses, title: content.slice(0, 40) + (content.length > 40 ? '...' : ''), lastActive: Date.now() }
-          : ses
-      ),
-    }))
-
-    const reqBody: MessageRequest = {
-      content,
-      session_id: sessionId || undefined,
-    }
-
-    // Build assistant message placeholder
-    const assistantMsgId = `msg_${++messageCounter}`
-    const assistantMsg: Message = {
-      id: assistantMsgId,
-      role: 'assistant',
-      content: '',
-      timestamp: Date.now(),
-    }
-
-    set((s) => ({
-      messages: [...s.messages, assistantMsg],
-    }))
-
-    const callbacks: SSECallbacks = {
-      onEvent: (eventType, data) => {
-        switch (eventType) {
-          case 'plan_generating':
-            set({
-              currentTask: {
-                task_id: (data.task_id as string) || 'pending',
-                subtask_count: 0,
-                summary: 'Generating plan...',
-                subtasks: [],
-                status: 'generating',
-              },
-            })
-            break
-
-          case 'plan_generated': {
-            const count = (data.subtask_count as number) || 0
-            set((s) => ({
-              currentTask: s.currentTask
-                ? {
-                    ...s.currentTask,
-                    task_id: (data.task_id as string) || s.currentTask.task_id,
-                    subtask_count: count,
-                    summary: (data.summary as string) || '',
-                    status: 'executing',
-                  }
-                : {
-                    task_id: (data.task_id as string) || '',
-                    subtask_count: count,
-                    summary: (data.summary as string) || '',
-                    subtasks: [],
-                    status: 'executing',
-                  },
-            }))
-            break
-          }
-
-          case 'subtask_started':
-            set((s) => {
-              if (!s.currentTask) return s
-              const newSubtask: SubtaskProgress = {
-                step: (data.step as number) || 0,
-                tool_name: (data.tool_name as string) || '',
-                intent: (data.intent as string) || '',
-                status: 'running',
-              }
-              return {
-                currentTask: {
-                  ...s.currentTask,
-                  subtasks: [...s.currentTask.subtasks.filter((st) => st.step !== newSubtask.step), newSubtask],
-                },
-              }
-            })
-            break
-
-          case 'subtask_completed':
-            set((s) => {
-              if (!s.currentTask) return s
-              return {
-                currentTask: {
-                  ...s.currentTask,
-                  subtasks: s.currentTask.subtasks.map((st) =>
-                    st.step === (data.step as number)
-                      ? { ...st, status: 'completed' as const, output_preview: data.output_preview as string }
-                      : st
-                  ),
-                },
-              }
-            })
-            break
-
-          case 'subtask_failed':
-            set((s) => {
-              if (!s.currentTask) return s
-              return {
-                currentTask: {
-                  ...s.currentTask,
-                  subtasks: s.currentTask.subtasks.map((st) =>
-                    st.step === (data.step as number)
-                      ? { ...st, status: 'failed' as const, error: data.error as string }
-                      : st
-                  ),
-                },
-              }
-            })
-            break
-
-          case 'subtask_skipped':
-            set((s) => {
-              if (!s.currentTask) return s
-              return {
-                currentTask: {
-                  ...s.currentTask,
-                  subtasks: s.currentTask.subtasks.map((st) =>
-                    st.step === (data.step as number)
-                      ? { ...st, status: 'skipped' as const, error: data.error as string }
-                      : st
-                  ),
-                },
-              }
-            })
-            break
-
-          case 'subtask_fallback':
-            set((s) => {
-              if (!s.currentTask) return s
-              return {
-                currentTask: {
-                  ...s.currentTask,
-                  subtasks: s.currentTask.subtasks.map((st) =>
-                    st.step === (data.step as number)
-                      ? {
-                          ...st,
-                          status: 'fallback' as const,
-                          fallback_from: data.original_tool as string,
-                          fallback_tool: data.fallback_tool as string,
-                        }
-                      : st
-                  ),
-                },
-              }
-            })
-            break
-
-          case 'task_completed':
-            set((s) => ({
-              currentTask: s.currentTask
-                ? { ...s.currentTask, status: 'completed' as const, summary: (data.summary as string) || s.currentTask.summary }
-                : null,
-              isStreaming: false,
-            }))
-            // Update assistant message
-            set((state) => ({
-              messages: state.messages.map((m) =>
-                m.id === assistantMsgId
-                  ? { ...m, content: (data.summary as string) || 'Task completed', task: state.currentTask }
-                  : m
-              ),
-            }))
-            break
-
-          case 'task_failed':
-            set((s) => ({
-              currentTask: s.currentTask
-                ? { ...s.currentTask, status: 'failed' as const, error: (data.error as string) || 'Unknown error' }
-                : null,
-              isStreaming: false,
-            }))
-            set((state) => ({
-              messages: state.messages.map((m) =>
-                m.id === assistantMsgId
-                  ? { ...m, content: `❌ Task failed: ${(data.error as string) || 'Unknown error'}`, task: state.currentTask }
-                  : m
-              ),
-            }))
-            break
-
-          case 'error':
-            set({ isStreaming: false })
-            set((state) => ({
-              messages: state.messages.map((m) =>
-                m.id === assistantMsgId
-                  ? { ...m, content: `❌ Error: ${(data.message as string) || 'Unknown error'}` }
-                  : m
-              ),
-            }))
-            break
+      createSession: () => {
+        const id = generateId()
+        const session: Session = {
+          id,
+          title: 'New Session',
+          createdAt: Date.now(),
         }
-      },
-
-      onError: (error) => {
-        set({ isStreaming: false })
-        set((state) => ({
-          messages: state.messages.map((m) =>
-            m.id === assistantMsgId
-              ? { ...m, content: `❌ Connection error: ${error.message}` }
-              : m
-          ),
+        set((s) => ({
+          sessions: [session, ...s.sessions],
+          activeSessionId: id,
         }))
+        return id
       },
 
-      onDone: () => {
-        set({ isStreaming: false, abortController: null })
-        // Attach current task to the assistant message
-        const finalTask = get().currentTask
-        if (finalTask) {
-          set((state) => ({
-            messages: state.messages.map((m) =>
-              m.id === assistantMsgId ? { ...m, task: finalTask } : m
+      deleteSession: (id) => {
+        set((s) => {
+          const sessions = s.sessions.filter((ses) => ses.id !== id)
+          const { [id]: _, ...messages } = s.messages
+          return {
+            sessions,
+            messages,
+            activeSessionId: s.activeSessionId === id
+              ? (sessions[0]?.id ?? null)
+              : s.activeSessionId,
+          }
+        })
+      },
+
+      setActiveSession: (id) => set({ activeSessionId: id }),
+
+      addMessage: (sessionId, msg) => {
+        set((s) => ({
+          messages: {
+            ...s.messages,
+            [sessionId]: [...(s.messages[sessionId] || []), msg],
+          },
+        }))
+        // Auto-name session on first user message
+        const session = get().sessions.find((ses) => ses.id === sessionId)
+        if (session && session.title === 'New Session' && msg.role === 'user') {
+          set((s) => ({
+            sessions: s.sessions.map((ses) =>
+              ses.id === sessionId ? { ...ses, title: generateTitle(msg.content) } : ses
             ),
           }))
         }
       },
-    }
 
-    const controller = sendMessage(reqBody, callbacks)
-    set({ abortController: controller })
-  },
+      updateMessage: (sessionId, msgId, patch) => {
+        set((s) => ({
+          messages: {
+            ...s.messages,
+            [sessionId]: (s.messages[sessionId] || []).map((m) =>
+              m.id === msgId ? { ...m, ...patch } : m
+            ),
+          },
+        }))
+      },
 
-  confirmAction: async (taskId: string, step: number, approved: boolean) => {
-    await sendConfirm({ task_id: taskId, step, approved })
-  },
+      sendUserMessage: (content) => {
+        const state = get()
+        let sessionId = state.activeSessionId
+        if (!sessionId) {
+          sessionId = state.createSession()
+        }
 
-  abortStream: () => {
-    const { abortController } = get()
-    if (abortController) {
-      abortController.abort()
-      set({ isStreaming: false, abortController: null })
-    }
-  },
-    }),
-    {
-      name: 'athena-chat-store',
-      partialize: (state) => ({
-        sessions: state.sessions,
-        activeSessionId: state.activeSessionId,
-      }),
-    }
+        const userMsg: Message = {
+          id: generateId(),
+          role: 'user',
+          content,
+          timestamp: Date.now(),
+        }
+
+        const assistantMsg: Message = {
+          id: generateId(),
+          role: 'assistant',
+          content: '',
+          timestamp: Date.now(),
+          isStreaming: true,
+          taskStatus: 'generating_plan',
+          subtasks: [],
+        }
+
+        set((s) => ({
+          messages: {
+            ...s.messages,
+            [sessionId!]: [...(s.messages[sessionId!] || []), userMsg, assistantMsg],
+          },
+        }))
+
+        return { userMsg, assistantMsg, sessionId: sessionId! }
+      },
+    })
   )
-)

@@ -5,14 +5,18 @@ Run as: python -m athena.tools.weather_server
 Provides weather query tools for mainland China, Hong Kong, Macau, and Taiwan.
 Uses wttr.in as the free weather data source.
 Uses JSON-RPC over stdin/stdout for communication with the MCP client.
+<<<<<<< HEAD
 
 IMPORTANT: stdout is the JSON-RPC channel — nothing else may write to it.
 All logging is redirected to stderr to avoid corrupting the line protocol.
+=======
+>>>>>>> 6b79d02412b262c340cef98b966f8457e324cd91
 """
 
 from __future__ import annotations
 
 import json
+<<<<<<< HEAD
 import logging
 import sys
 from typing import Any
@@ -41,6 +45,13 @@ structlog.configure(
 
 from athena.tools.weather import query_weather  # noqa: E402
 from athena.logging_config import get_logger  # noqa: E402
+=======
+import sys
+from typing import Any
+
+from athena.tools.weather import query_weather
+from athena.logging_config import get_logger
+>>>>>>> 6b79d02412b262c340cef98b966f8457e324cd91
 
 logger = get_logger(__name__)
 

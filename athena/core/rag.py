@@ -180,3 +180,29 @@ class RAGManager:
 
         self._collection.delete(ids=[vector_id])
         logger.debug("rag_delete_vector", vector_id=vector_id)
+
+
+# ── Singleton ───────────────────────────────────────────────────────────────
+
+_rag_manager: RAGManager | None = None
+
+
+def get_rag_manager() -> RAGManager:
+    """Return the process-wide singleton RAGManager (lazy-init).
+
+    EmbeddingProvider (SentenceTransformer ~80MB) and Chroma client are
+    created once and shared across all callers: ContextManager (memory
+    injection), MCP RAG server (rag_server.py), and Celery tasks
+    (memory_sync.py).
+    """
+    global _rag_manager
+    if _rag_manager is not None:
+        return _rag_manager
+
+    from athena.config import get_config
+
+    config = get_config()
+    embedding = EmbeddingProvider(config)
+    _rag_manager = RAGManager(config, embedding)
+    logger.info("rag_manager_singleton_initialized")
+    return _rag_manager

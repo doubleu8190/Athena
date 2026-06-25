@@ -55,9 +55,13 @@ class ContextManager:
     Context is stored in Redis (hot) with SQLite snapshot (cold backup).
     """
 
-    def __init__(self, config: Config, redis_client):
+    def __init__(self, config: Config, redis_client=None):
         self.config = config
-        self.redis = redis_client
+        if redis_client is not None:
+            self.redis = redis_client
+        else:
+            from athena.models.redis import get_redis_client
+            self.redis = get_redis_client(config.redis_url)
         self._session_idle_timeout = config.system.session_idle_timeout_minutes * 60
         self._session_expire = config.system.session_expire_hours * 3600
 
@@ -246,7 +250,8 @@ class ContextManager:
         """
         try:
             from athena.core.memory import MemoryStore
-            store = MemoryStore(self.config)
+            from athena.core.rag import get_rag_manager
+            store = MemoryStore(self.config, rag_manager=get_rag_manager())
             # Get the last few user messages for context
             recent_user_messages = " ".join(
                 m["content"] for m in ctx.message_history[-3:]
@@ -446,11 +451,9 @@ class ContextManager:
     async def _summarize(self, messages: list[dict[str, Any]]) -> str:
         """Generate a one-sentence summary of a set of messages using LLM."""
         try:
-            from athena.core.llm_provider.manager import LLMProviderManager
-            from athena.config import get_config
+            from athena.core.llm_provider.manager import get_llm_manager
 
-            config = get_config()
-            llm = LLMProviderManager(config)
+            llm = get_llm_manager()
 
             conversation_text = "\n".join(
                 f"{m['role']}: {m.get('content', '')[:200]}" for m in messages
@@ -488,11 +491,9 @@ class ContextManager:
         Falls back to truncation (keep last N chars) if LLM call fails.
         """
         try:
-            from athena.core.llm_provider.manager import LLMProviderManager
-            from athena.config import get_config
+            from athena.core.llm_provider.manager import get_llm_manager
 
-            config = get_config()
-            llm = LLMProviderManager(config)
+            llm = get_llm_manager()
 
             response = await llm.generate(
                 messages=[{

@@ -82,12 +82,7 @@ async def web_message(
 
             # Get or create session
             from athena.core.context import ContextManager
-            redis_client = getattr(app_state, 'redis', None)
-            if redis_client:
-                context_mgr = ContextManager(config, redis_client)
-            else:
-                from athena.models.redis import get_redis_client
-                context_mgr = ContextManager(config, get_redis_client(config.redis_url))
+            context_mgr = ContextManager(config)
 
             # In the web channel, the frontend's session_id serves as the chat_id
             # (there is no separate "chat" concept — each browser session IS a chat)
@@ -101,10 +96,10 @@ async def web_message(
             )
 
             # Call Planner
-            from athena.core.llm_provider.manager import LLMProviderManager
+            from athena.core.llm_provider.manager import get_llm_manager
             from athena.core.planner import Planner
 
-            llm_mgr = LLMProviderManager(config)
+            llm_mgr = get_llm_manager()
             planner = Planner(llm_mgr, tool_registry)
 
             plan = await planner.generate_plan(

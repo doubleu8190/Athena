@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from athena.config import Config
+from athena.core.rag import RAGManager
 from athena.logging_config import get_logger
 from athena.models import get_session_maker
 
@@ -54,7 +55,7 @@ class MemoryStore:
     - delete: mark for deletion + enqueue vector deletion
     """
 
-    def __init__(self, config: Config, rag_manager: Any | None = None):
+    def __init__(self, config: Config, rag_manager: RAGManager | None = None):
         self.config = config
         self._rag_manager = rag_manager
 

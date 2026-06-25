@@ -131,3 +131,26 @@ class LLMProviderManager:
         raise RuntimeError(
             f"All LLM providers failed. Last error: {last_error}"
         )
+
+
+# ── Singleton ───────────────────────────────────────────────────────────────
+
+_llm_manager: LLMProviderManager | None = None
+
+
+def get_llm_manager() -> LLMProviderManager:
+    """Return the process-wide singleton LLMProviderManager (lazy-init).
+
+    Provider instances are lightweight (no network calls in __init__), but
+    a singleton avoids repeated allocation and ensures consistent provider
+    configuration across all call sites (summarization, chat, planning, etc.).
+    """
+    global _llm_manager
+    if _llm_manager is not None:
+        return _llm_manager
+
+    from athena.config import get_config
+
+    _llm_manager = LLMProviderManager(get_config())
+    logger.info("llm_manager_singleton_initialized")
+    return _llm_manager

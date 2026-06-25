@@ -74,22 +74,62 @@ class StdioTransport(MCPTransport):
             self._process = None
 
     async def send_request(self, request: dict) -> dict:
-        """Send a JSON-RPC request over stdin and read response from stdout."""
+        """Send a JSON-RPC request over stdin and read response from stdout.
+
+        Skips non-JSON and non-JSON-RPC lines that may appear on stdout due to
+        library initialization noise (torch, chromadb, sentence-transformers, etc.).
+        Gives up after MAX_SKIP_LINES consecutive unparseable lines.
+        """
         if not self._process or not self._process.stdin or not self._process.stdout:
             raise RuntimeError("StdioTransport not connected")
+
+        MAX_SKIP_LINES = 10
 
         async with self._lock:
             payload = json.dumps(request) + "\n"
             self._process.stdin.write(payload.encode("utf-8"))
             await self._process.stdin.drain()
 
-            # Read response line
-            line = await asyncio.wait_for(
-                self._process.stdout.readline(), timeout=120.0
-            )
-            if not line:
-                raise ConnectionError("StdioTransport: no response from subprocess")
-            return json.loads(line.decode("utf-8"))
+            skipped = 0
+            while True:
+                line = await asyncio.wait_for(
+                    self._process.stdout.readline(), timeout=120.0
+                )
+                if not line:
+                    raise ConnectionError("StdioTransport: no response from subprocess")
+
+                decoded = line.decode("utf-8").strip()
+                if not decoded:
+                    skipped += 1
+                    if skipped > MAX_SKIP_LINES:
+                        raise ConnectionError(
+                            "StdioTransport: too many empty lines from subprocess"
+                        )
+                    continue
+
+                try:
+                    parsed = json.loads(decoded)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    if skipped > MAX_SKIP_LINES:
+                        raise ConnectionError(
+                            f"StdioTransport: too many unparseable lines "
+                            f"(last: {decoded[:200]!r})"
+                        )
+                    continue
+
+                # Accept any JSON-RPC message (response or notification)
+                if isinstance(parsed, dict) and "jsonrpc" in parsed:
+                    return parsed
+
+                # Not a JSON-RPC message — probably library noise on stdout
+                skipped += 1
+                if skipped > MAX_SKIP_LINES:
+                    raise ConnectionError(
+                        f"StdioTransport: too many non-JSON-RPC lines "
+                        f"(last: {decoded[:200]!r})"
+                    )
+                continue
 
     async def send_notification(self, method: str, params: dict) -> None:
         """Send a JSON-RPC notification over stdin."""

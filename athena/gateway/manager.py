@@ -108,10 +108,8 @@ class GatewayManager:
         # The actual Core processing happens here
         # For now, log and acknowledge
         from athena.core.context import ContextManager
-        from athena.models.redis import get_redis_client
 
-        redis_client = get_redis_client(self.config.redis_url)
-        context_mgr = ContextManager(self.config, redis_client)
+        context_mgr = ContextManager(self.config)
 
         # Get or create session
         session_ctx = await context_mgr.get_or_create_session(

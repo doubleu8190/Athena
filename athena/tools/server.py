@@ -4,17 +4,43 @@ Run as: python -m athena.tools.server
 
 Provides Athena's built-in tools (filesystem, web search) as MCP tools.
 Uses JSON-RPC over stdin/stdout for communication with the MCP client.
+
+IMPORTANT: stdout is the JSON-RPC channel — nothing else may write to it.
+All logging is redirected to stderr to avoid corrupting the line protocol.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import Any
 
-from athena.tools.filesystem import file_read, file_write, file_delete
-from athena.tools.web_search import web_search
-from athena.logging_config import get_logger
+# ── CRITICAL: Redirect all logging to stderr BEFORE any other imports ──
+logging.basicConfig(
+    format="%(message)s",
+    stream=sys.stderr,
+    level=logging.INFO,
+)
+
+import structlog  # noqa: E402
+
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.processors.JSONRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)
+
+from athena.tools.filesystem import file_read, file_write, file_delete  # noqa: E402
+from athena.tools.web_search import web_search  # noqa: E402
+from athena.logging_config import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -174,6 +200,10 @@ def handle_notification(notification: dict[str, Any]) -> None:
 async def run_server():
     """Main stdio JSON-RPC loop."""
     import asyncio
+
+    # Flush any import-time garbage that may have landed on stdout
+    sys.stdout.flush()
+
     loop = asyncio.get_event_loop()
 
     # Read from stdin

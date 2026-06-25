@@ -20,14 +20,7 @@ MAX_SYNC_RETRIES = 5
 SYNC_RETRY_BACKOFF = [2, 4, 8, 16, 60]  # Seconds
 
 
-def _get_rag_manager():
-    """Lazy-init RAGManager for use in Celery tasks."""
-    from athena.config import get_config
-    from athena.core.rag import EmbeddingProvider, RAGManager
-
-    config = get_config()
-    embedding = EmbeddingProvider(config)
-    return RAGManager(config, embedding)
+from athena.core.rag import get_rag_manager  # unified process-wide singleton
 
 
 @celery_app.task(bind=True, max_retries=MAX_SYNC_RETRIES, default_retry_delay=2)
@@ -62,7 +55,7 @@ def sync_memory_to_vector_task(self, memory_id: str) -> dict:
 
             try:
                 # Call RAGManager to embed and upsert into Chroma
-                rag = _get_rag_manager()
+                rag = get_rag_manager()
 
                 existing_meta = {}
                 if memory.meta_json:
@@ -132,7 +125,7 @@ def delete_memory_vector_task(self, memory_id: str, vector_id: str) -> dict:
 
         try:
             # Delete from Chroma via RAGManager
-            rag = _get_rag_manager()
+            rag = get_rag_manager()
             rag.delete_vector(vector_id)
 
             # Then physically delete from SQLite

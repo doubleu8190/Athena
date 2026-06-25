@@ -6,15 +6,47 @@ Provides semantic search, vector upsert, and vector delete tools for
 user memory management. Wraps athena.core.rag.RAGManager as MCP tools.
 
 Uses JSON-RPC over stdin/stdout for communication with the MCP client.
+
+IMPORTANT: stdout is the JSON-RPC channel — nothing else may write to it.
+All logging is redirected to stderr to avoid corrupting the line protocol.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import Any
 
-from athena.logging_config import get_logger
+# ── CRITICAL: Redirect all logging to stderr BEFORE any other imports ──
+# The stdio JSON-RPC protocol uses stdout for messages. Any log output on
+# stdout corrupts the line protocol and causes "Extra data" parse errors.
+#
+# Both stdlib logging AND structlog must be pointed at stderr:
+# - stdlib logging: logging.basicConfig(stream=sys.stderr)
+# - structlog: structlog.configure() with a stderr-bound logger factory
+logging.basicConfig(
+    format="%(message)s",
+    stream=sys.stderr,
+    level=logging.INFO,
+)
+
+import structlog  # noqa: E402
+
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.processors.JSONRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)
+
+from athena.logging_config import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -101,14 +133,7 @@ TOOLS = [
 ]
 
 
-def _get_rag_manager():
-    """Lazy-init RAGManager shared across all handlers."""
-    from athena.config import get_config
-    from athena.core.rag import EmbeddingProvider, RAGManager
-
-    config = get_config()
-    embedding = EmbeddingProvider(config)
-    return RAGManager(config, embedding)
+from athena.core.rag import get_rag_manager  # noqa: E402
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────
@@ -119,7 +144,7 @@ async def handle_semantic_search(**kwargs) -> dict:
     query = kwargs["query"]
     top_k = kwargs.get("top_k", 5)
 
-    rag = _get_rag_manager()
+    rag = get_rag_manager()
     results = await rag.semantic_search(user_id=user_id, query=query, top_k=top_k)
     return {"results": results, "count": len(results)}
 
@@ -131,7 +156,7 @@ async def handle_upsert_vector(**kwargs) -> dict:
     text = kwargs["text"]
     metadata = kwargs.get("metadata") or {}
 
-    rag = _get_rag_manager()
+    rag = get_rag_manager()
     vector_id = await rag.upsert_vector(
         memory_id=memory_id,
         user_id=user_id,
@@ -145,7 +170,7 @@ async def handle_delete_vector(**kwargs) -> dict:
     """Handler for delete_vector tool."""
     vector_id = kwargs["vector_id"]
 
-    rag = _get_rag_manager()
+    rag = get_rag_manager()
     rag.delete_vector(vector_id)
     return {"vector_id": vector_id, "status": "deleted"}
 
@@ -243,6 +268,12 @@ def handle_notification(notification: dict[str, Any]) -> None:
 async def run_server():
     """Main stdio JSON-RPC loop."""
     import asyncio
+
+    # Flush any import-time garbage that may have landed on stdout.
+    # Libraries like torch, chromadb, or sentence-transformers can emit
+    # initialization messages / progress bars to stdout on first import.
+    sys.stdout.flush()
+
     loop = asyncio.get_event_loop()
 
     reader = asyncio.StreamReader()

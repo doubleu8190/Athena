@@ -24,20 +24,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Application lifespan: startup and shutdown hooks."""
     # ── Startup ────────────────────────────────────────────────────
     logger.info("athena_starting")
 
-    # Initialize configuration
+    # Initialize configuration (already a singleton via get_config())
     config = get_config()
-    app.state.config = config
 
-    # Initialize database (ensure tables exist via Alembic — migrations
-    # are run at container entrypoint; here we just verify connectivity)
+    # Initialize database (already a singleton via get_engine())
     from athena.models.base import get_engine
     engine = get_engine(config.sqlite_db_path)
-    app.state.db_engine = engine
 
     # Verify DB connectivity
     try:
@@ -48,28 +45,29 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.error("database_connection_failed", path=config.sqlite_db_path)
 
-    # Initialize Redis
+    # Initialize Redis (already a singleton via get_redis_client())
     from athena.models.redis import get_redis_client
-    redis_client = get_redis_client(config.redis_url)
-    app.state.redis = redis_client
+    get_redis_client(config.redis_url)
 
-    # Initialize GatewayManager
-    from athena.gateway.manager import GatewayManager
+    # Initialize GatewayManager (singleton)
+    from athena.gateway.manager import GatewayManager, set_gateway_manager
     gateway_manager = GatewayManager(config)
     await gateway_manager.start()
-    app.state.gateway_manager = gateway_manager
+    set_gateway_manager(gateway_manager)
 
-    # Initialize MCP Client
-    from athena.mcp_client.client import MCPClient
-    from athena.mcp_client.registry import ToolRegistry
+    # Initialize MCP Client (singleton)
+    from athena.mcp_client.client import MCPClient, set_mcp_client
     from athena.mcp_client.seed_loader import seed_mcp_servers
 
-    app.state.tool_registry = ToolRegistry()
+    # Warm ToolRegistry singleton so MCP server seed finds it
+    from athena.mcp_client.registry import get_tool_registry
+    get_tool_registry()
+
     await seed_mcp_servers(config)
 
-    mcp_client = MCPClient(config, app.state.tool_registry)
+    mcp_client = MCPClient(config)
     await mcp_client.start()
-    app.state.mcp_client = mcp_client
+    set_mcp_client(mcp_client)
 
     logger.info("athena_started")
 
@@ -78,10 +76,8 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ───────────────────────────────────────────────────
     logger.info("athena_stopping")
 
-    if hasattr(app.state, "mcp_client"):
-        await app.state.mcp_client.stop()
-    if hasattr(app.state, "gateway_manager"):
-        await app.state.gateway_manager.stop()
+    await mcp_client.stop()
+    await gateway_manager.stop()
 
     await engine.dispose()
     logger.info("athena_stopped")

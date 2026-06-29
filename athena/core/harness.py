@@ -4,7 +4,8 @@ Independent of LLM. Provides synchronous evaluate(action, context) →
 (allow, reason) with rule types:
 
 - blacklist: regex-based command/path deny lists
-- path_boundary: enforce /workspace/ prefix for filesystem operations
+- path_boundary: enforce allowed-prefix rules for filesystem operations
+- path_permission: enforce per-path read/write permissions with glob patterns
 - quota: concurrent task limits, daily operation caps
 - cooling_off: mandatory wait periods before high-risk confirmations
 
@@ -25,6 +26,7 @@ from typing import Any
 from athena.config import Config
 from athena.logging_config import get_logger
 from athena.models import get_session_maker
+from athena.models.harness_rule import RuleType
 
 logger = get_logger(__name__)
 
@@ -77,12 +79,6 @@ class HarnessEngine:
         (r"chmod\s+777", "World-writable permissions"),
         (r"wget\s+.*\|\s*sh", "Pipe to shell from network"),
         (r"curl\s+.*\|\s*sh", "Pipe to shell from network"),
-    ]
-
-    # Sensitive paths outside /workspace
-    SENSITIVE_PATHS: list[str] = [
-        "/etc/", "/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/",
-        "/boot/", "/dev/", "/proc/", "/sys/", "/root/",
     ]
 
     def __init__(self, config: Config):
@@ -158,7 +154,7 @@ class HarnessEngine:
         for r in db_rules:
             rules.append({
                 "rule_id": r.rule_id,
-                "rule_type": r.rule_type,
+                "rule_type": RuleType(r.rule_type),
                 "name": r.name,
                 "config": json.loads(r.config_json),
                 "priority": r.priority,
@@ -186,7 +182,7 @@ class HarnessEngine:
 
         result = HarnessResult()
 
-        # 1. Blacklist check (static + dynamic)
+        # 1. Blacklist check (static)
         result = self._check_blacklist(action, result)
         if not result.allowed:
             return result
@@ -277,34 +273,119 @@ class HarnessEngine:
 
         return result
 
-    def _check_path_boundary(
-        self, action: HarnessAction, result: HarnessResult
-    ) -> HarnessResult:
-        """Enforce /workspace/ prefix for filesystem operations."""
-        if action.tool_name not in ("file_read", "file_write", "file_delete"):
+    def _check_path_boundary(self, action: HarnessAction, result: HarnessResult) -> HarnessResult:
+        """Check path_permission rules for filesystem operations.
+
+        All path access control is now driven by path_permission rules configured
+        from the web UI.  When no rules exist, all paths are unrestricted.
+        """
+        if action.tool_name not in ("file_read", "file_write", "file_delete", "file_search"):
             return result
 
         path = action.arguments.get("path", "")
         if not path:
             return result
 
-        # Normalize and check
+        return self._check_path_permissions(action, result, path)
+
+    @staticmethod
+    def _path_matches_glob(path: str, pattern: str) -> bool:
+        """Check if a normalized path matches a glob pattern.
+
+        Supports ``*`` (single-segment wildcard), ``?``, and ``**``
+        (multi-segment / recursive wildcard).  When *pattern* ends with
+        ``/**`` the base directory itself also matches.
+
+        >>> HarnessEngine._path_matches_glob("/tmp/foo.txt", "/tmp/*.txt")
+        True
+        >>> HarnessEngine._path_matches_glob("/tmp/sub/foo.txt", "/tmp/**")
+        True
+        >>> HarnessEngine._path_matches_glob("/tmp", "/tmp/**")
+        True
+        """
+        # When the pattern ends with /**, the base directory itself matches
+        if pattern.endswith("/**"):
+            base = pattern[:-3]  # strip /**
+            if path == base or path == base + "/":
+                return True
+
+        # Build a regex from the glob pattern
+        regex_parts: list[str] = []
+        i = 0
+        while i < len(pattern):
+            if pattern[i : i + 2] == "**":
+                # ** matches zero or more path segments including /
+                regex_parts.append(".*")
+                i += 2
+            elif pattern[i] == "*":
+                # * matches any chars within a single path segment (no /)
+                regex_parts.append("[^/]*")
+                i += 1
+            elif pattern[i] == "?":
+                # ? matches a single char within a path segment (no /)
+                regex_parts.append("[^/]")
+                i += 1
+            else:
+                c = pattern[i]
+                if c in ".^$+{}[]|\\()":
+                    regex_parts.append("\\" + c)
+                else:
+                    regex_parts.append(c)
+                i += 1
+
+        regex = "^" + "".join(regex_parts) + "$"
+        return bool(re.match(regex, path))
+
+    def _check_path_permissions(
+        self, action: HarnessAction, result: HarnessResult, path: str
+    ) -> HarnessResult:
+        """Enforce path_permission rules against a filesystem action.
+
+        - No rules loaded → allow everything (backward compatible).
+        - First rule whose glob pattern matches the *normalized* path wins.
+        - Unmatched paths are unrestricted.
+        """
         import os
-        normalized = os.path.normpath(path)
 
-        # Must be under /workspace/
-        if not normalized.startswith("/workspace/"):
-            # Check if it resolves outside workspace
-            if ".." in normalized or normalized.startswith("/"):
-                # Check if it's explicitly /workspace itself
-                if normalized != "/workspace":
-                    result.allowed = False
-                    result.reason = (
-                        f"Path '{path}' is outside allowed /workspace/ boundary"
-                    )
-                    result.blocked_by_rule = "path_boundary"
-                    return result
+        # Collect path_permission rules (already sorted by priority desc)
+        perm_rules = [
+            r for r in self._rules
+            if r["rule_type"] == RuleType.PATH_PERMISSION
+        ]
 
+        if not perm_rules:
+            return result  # no rules → all paths unrestricted
+
+        # Normalize: resolve . and .. so patterns match cleanly
+        normalized = os.path.normpath(os.path.abspath(path))
+
+        # Determine required permission
+        if action.tool_name in ("file_read", "file_search"):
+            required_perm = "r"
+        elif action.tool_name in ("file_write", "file_delete"):
+            required_perm = "w"
+        else:
+            return result
+
+        # First match wins
+        for rule in perm_rules:
+            config = rule["config"]
+            pattern = config.get("path", "")
+            perms = config.get("permissions", "rw")
+
+            if self._path_matches_glob(normalized, pattern):
+                if required_perm in perms:
+                    return result  # allowed
+                result.allowed = False
+                result.reason = (
+                    f"Path '{path}' matched rule '{rule['name']}' "
+                    f"but operation requires '{required_perm}', "
+                    f"rule allows '{perms}'"
+                )
+                result.blocked_by_rule = "path_permission"
+                return result
+
+        # No rule matched → unrestricted
         return result
 
     async def _check_quota(
@@ -387,17 +468,20 @@ class HarnessEngine:
         result: HarnessResult,
     ) -> HarnessResult:
         """Apply a single dynamic rule from the database."""
-        rule_type = rule["rule_type"]
+        rule_type = RuleType(rule["rule_type"])
         config = rule["config"]
 
-        if rule_type == "blacklist":
+        if rule_type == RuleType.BLACKLIST:
             return self._apply_blacklist_rule(config, action, result)
-        elif rule_type == "path_boundary":
+        elif rule_type == RuleType.PATH_BOUNDARY:
             return self._apply_path_rule(config, action, result)
-        elif rule_type == "quota":
+        elif rule_type == RuleType.PATH_PERMISSION:
+            # Already enforced in _check_path_boundary (hard gateway)
+            return result
+        elif rule_type == RuleType.QUOTA:
             # DB quota rules augment static checks
             return result
-        elif rule_type == "cooling_off":
+        elif rule_type == RuleType.COOLING_OFF:
             return self._apply_cooling_off_rule(config, action, result)
 
         return result

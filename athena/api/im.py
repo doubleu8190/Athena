@@ -10,7 +10,7 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -38,7 +38,6 @@ class ConfirmRequest(BaseModel):
 @router.post("/im/web/message")
 async def web_message(
     req: MessageRequest,
-    request: Request,
     config: Config = Depends(get_config_dep),
     api_key: str = Depends(verify_api_key),
 ):
@@ -74,10 +73,9 @@ async def web_message(
             # Yield plan_generating
             yield _sse_event("plan_generating", {"task_id": "pending"})
 
-            # Get Core components from app state
-            app_state = request.app.state
-            tool_registry = app_state.tool_registry
-            gateway_manager = app_state.gateway_manager
+            # Get Core components from singletons
+            from athena.gateway.manager import get_gateway_manager
+            gateway_manager = get_gateway_manager()
             web_adapter = gateway_manager.get_adapter("web")
 
             # Get or create session
@@ -100,7 +98,7 @@ async def web_message(
             from athena.core.planner import Planner
 
             llm_mgr = get_llm_manager()
-            planner = Planner(llm_mgr, tool_registry)
+            planner = Planner(llm_mgr)
 
             plan = await planner.generate_plan(
                 unified, session_ctx, context_messages=messages
@@ -119,13 +117,10 @@ async def web_message(
             harness = HarnessEngine(config)
             await harness.start()
 
-            mcp_client = getattr(app_state, 'mcp_client', None)
             executor = Executor(
                 config=config,
                 context_manager=context_mgr,
                 harness_engine=harness,
-                mcp_client=mcp_client,
-                tool_registry=tool_registry,
             )
 
             # Stream subtask execution events
@@ -199,12 +194,12 @@ async def web_message(
 @router.post("/im/web/message/confirm")
 async def web_confirm(
     req: ConfirmRequest,
-    request: Request,
     config: Config = Depends(get_config_dep),
     api_key: str = Depends(verify_api_key),
 ):
     """Submit a confirmation response from the Web console."""
-    gateway_manager = request.app.state.gateway_manager
+    from athena.gateway.manager import get_gateway_manager
+    gateway_manager = get_gateway_manager()
     web_adapter = gateway_manager.get_adapter("web")
 
     if web_adapter:

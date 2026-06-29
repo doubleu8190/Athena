@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import AsyncGenerator
 
-from fastapi import Depends, Request, Security
+from fastapi import Depends, Security
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,6 +59,7 @@ async def verify_api_key(
 
 # ── MCP Client ──────────────────────────────────────────────────────────
 
-async def get_mcp_client(request: Request):
-    """FastAPI dependency: get the MCPClient from app state."""
-    return request.app.state.mcp_client
+def get_mcp_client_dep():
+    """FastAPI dependency: get the singleton MCPClient."""
+    from athena.mcp_client.client import get_mcp_client
+    return get_mcp_client()

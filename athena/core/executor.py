@@ -35,6 +35,7 @@ from athena.core.sandbox import render_args
 from athena.core.task_context import TaskContext
 from athena.logging_config import bind_context, get_logger
 from athena.models import get_session_maker
+from athena.mcp_client.client import MCPClient
 
 logger = get_logger(__name__)
 
@@ -60,14 +61,15 @@ class Executor:
         config: Config,
         context_manager: ContextManager,
         harness_engine: HarnessEngine,
-        mcp_client,
-        tool_registry,
+        mcp_client: MCPClient | None = None,
     ):
         self.config = config
         self.context_manager = context_manager
         self.harness = harness_engine
-        self.mcp_client = mcp_client
-        self.tool_registry = tool_registry
+        from athena.mcp_client.client import get_mcp_client
+        self.mcp_client = get_mcp_client() if mcp_client is None else mcp_client
+        from athena.mcp_client.registry import get_tool_registry
+        self.tool_registry = get_tool_registry()
 
     # ── Main execution ────────────────────────────────────────────────
 

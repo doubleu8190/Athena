@@ -311,3 +311,23 @@ class ToolRegistry:
             }
             for t in tools
         ]
+
+
+# ── Singleton ───────────────────────────────────────────────────────────────
+
+_tool_registry: ToolRegistry | None = None
+
+
+def get_tool_registry() -> ToolRegistry:
+    """Return the process-wide singleton ToolRegistry (lazy-init).
+
+    There is exactly one tool registry per process. It is a pure in-memory
+    data container with no lifecycle methods, making it an ideal singleton.
+    Shared by MCPClient, Planner, Executor, and API handlers.
+    """
+    global _tool_registry
+    if _tool_registry is not None:
+        return _tool_registry
+    _tool_registry = ToolRegistry()
+    logger.info("tool_registry_singleton_initialized")
+    return _tool_registry

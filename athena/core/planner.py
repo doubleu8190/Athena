@@ -20,7 +20,6 @@ from athena.core.llm_provider.manager import LLMProviderManager
 from athena.core.message import UnifiedMessage
 from athena.core.context import SessionContext
 from athena.logging_config import bind_context, get_logger
-from athena.mcp_client.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -50,7 +49,7 @@ PLANNER_SYSTEM_PROMPT = """You are Athena's task planner. Your job is to decompo
 ## Output Format
 Return ONLY a valid JSON object:
 {{
-  "task_id": "uuid",
+  "task_id": "must be uuid, for example: 123e4567-e89b-12d3-a456-426614174000",
   "subtasks": [
     {{
       "step": 1,
@@ -113,9 +112,10 @@ class Planner:
     Returns a structured TaskPlan for the Executor.
     """
 
-    def __init__(self, llm_manager: LLMProviderManager, tool_registry: ToolRegistry):
+    def __init__(self, llm_manager: LLMProviderManager):
         self.llm = llm_manager
-        self.tool_registry = tool_registry
+        from athena.mcp_client.registry import get_tool_registry
+        self.tool_registry = get_tool_registry()
 
     async def generate_plan(
         self,

@@ -38,7 +38,7 @@ structlog.configure(
     cache_logger_on_first_use=True,
 )
 
-from athena.tools.filesystem import file_read, file_write, file_delete  # noqa: E402
+from athena.tools.filesystem import file_read, file_write, file_delete, file_search  # noqa: E402
 from athena.tools.web_search import web_search  # noqa: E402
 from athena.logging_config import get_logger  # noqa: E402
 
@@ -94,6 +94,25 @@ TOOLS = [
         "capability_tags": ["filesystem", "delete"],
     },
     {
+        "name": "file_search",
+        "description": "Search for files within /workspace/ by name pattern or content",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern for name search (e.g. *.py), or search string for content search"},
+                "path": {"type": "string", "default": ".", "description": "Base directory to search from"},
+                "recursive": {"type": "boolean", "default": True, "description": "Search subdirectories recursively"},
+                "match_type": {"type": "string", "enum": ["name", "content"], "default": "name", "description": "Match by filename glob or search inside file contents"},
+                "max_results": {"type": "integer", "default": 50, "maximum": 200, "description": "Maximum number of results"},
+            },
+            "required": ["pattern"],
+        },
+        "supports_preview": True,
+        "idempotent": True,
+        "risk_level": "low",
+        "capability_tags": ["filesystem", "read", "search"],
+    },
+    {
         "name": "web_search",
         "description": "Search the web for information",
         "inputSchema": {
@@ -115,6 +134,7 @@ HANDLERS = {
     "file_read": file_read,
     "file_write": file_write,
     "file_delete": file_delete,
+    "file_search": file_search,
     "web_search": web_search,
 }
 

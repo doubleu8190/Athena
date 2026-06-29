@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, func, and_, tuple_
 
-from athena.api.deps import get_config_dep, get_db, get_mcp_client, verify_api_key
+from athena.api.deps import get_config_dep, get_db, get_mcp_client_dep, verify_api_key
 from athena.config import Config
 from athena.logging_config import get_logger
 
@@ -50,7 +50,7 @@ class MCPServerStatusUpdate(BaseModel):
 async def list_mcp_servers(
     db=Depends(get_db),
     api_key: str = Depends(verify_api_key),
-    mcp_client = Depends(get_mcp_client),
+    mcp_client = Depends(get_mcp_client_dep),
 ):
     """List all registered MCP servers."""
     from athena.models.mcp_server import MCPServer
@@ -79,7 +79,7 @@ async def register_mcp_server(
     body: MCPServerCreate,
     db=Depends(get_db),
     api_key: str = Depends(verify_api_key),
-    mcp_client = Depends(get_mcp_client),
+    mcp_client = Depends(get_mcp_client_dep),
 ):
     """Register a new external MCP server."""
     from athena.models.mcp_server import MCPServer
@@ -115,7 +115,7 @@ async def remove_mcp_server(
     server_id: str,
     db=Depends(get_db),
     api_key: str = Depends(verify_api_key),
-    mcp_client = Depends(get_mcp_client),
+    mcp_client = Depends(get_mcp_client_dep),
 ):
     """Remove a registered MCP server."""
     from athena.models.mcp_server import MCPServer
@@ -140,7 +140,7 @@ async def update_mcp_server_status(
     body: MCPServerStatusUpdate,
     db=Depends(get_db),
     api_key: str = Depends(verify_api_key),
-    mcp_client = Depends(get_mcp_client),
+    mcp_client = Depends(get_mcp_client_dep),
 ):
     """Enable or disable an MCP server.
 
@@ -361,6 +361,60 @@ async def list_harness_rules(
             for r in rules
         ]
     })
+
+
+class HarnessRuleCreate(BaseModel):
+    rule_id: str
+    rule_type: str  # 'blacklist' | 'path_boundary' | 'quota' | 'cooling_off'
+    name: str
+    description: str | None = None
+    config_json: dict[str, Any]
+    priority: int = 0
+    enabled: bool = True
+
+
+@router.post("/harness/rules")
+async def create_harness_rule(
+    body: HarnessRuleCreate,
+    db=Depends(get_db),
+    api_key: str = Depends(verify_api_key),
+):
+    """Create a new harness rule."""
+    from athena.models.harness_rule import HarnessRule
+
+    existing = await db.get(HarnessRule, body.rule_id)
+    if existing:
+        return error(40901, "Rule already exists", f"Rule ID '{body.rule_id}' already exists")
+
+    # Validate config_json for path_permission rules
+    if body.rule_type == "path_permission":
+        if "path" not in body.config_json:
+            return error(400, "Missing 'path' in config_json", "path_permission rules require a 'path' field")
+        perms = body.config_json.get("permissions", "rw")
+        if perms not in ("r", "w", "rw"):
+            return error(400, "Invalid permissions", f"permissions must be 'r', 'w', or 'rw', got '{perms}'")
+
+    rule = HarnessRule(
+        rule_id=body.rule_id,
+        rule_type=body.rule_type,
+        name=body.name,
+        description=body.description,
+        config_json=json.dumps(body.config_json),
+        priority=body.priority,
+        enabled=body.enabled,
+    )
+    db.add(rule)
+    await db.commit()
+
+    logger.info("harness_rule_created", rule_id=body.rule_id, rule_type=body.rule_type)
+    return success({
+        "rule_id": body.rule_id,
+        "rule_type": body.rule_type,
+        "name": body.name,
+        "config": body.config_json,
+        "priority": body.priority,
+        "enabled": body.enabled,
+    }, "Rule created")
 
 
 class HarnessRuleUpdate(BaseModel):

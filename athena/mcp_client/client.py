@@ -16,7 +16,6 @@ from typing import Any
 
 from athena.config import Config
 from athena.logging_config import get_logger
-from athena.mcp_client.registry import ToolRegistry
 from athena.mcp_client.transports import TransportFactory
 from athena.models import get_session, get_session_maker
 
@@ -173,6 +172,33 @@ class ServerConnection:
             raise
 
 
+# ── Singleton ───────────────────────────────────────────────────────────────
+
+_mcp_client: MCPClient | None = None
+
+
+def set_mcp_client(client: MCPClient) -> None:
+    """Set the process-wide singleton MCPClient instance.
+
+    Called once during application startup (lifespan). Must be called
+    before any call to get_mcp_client().
+    """
+    global _mcp_client
+    _mcp_client = client
+    logger.info("mcp_client_singleton_set")
+
+
+def get_mcp_client() -> MCPClient:
+    """Return the process-wide singleton MCPClient instance.
+
+    Raises RuntimeError if not yet initialized. The lifespan must call
+    set_mcp_client() during startup before any route handler accesses this.
+    """
+    if _mcp_client is None:
+        raise RuntimeError("MCPClient not initialized — call set_mcp_client() during lifespan startup")
+    return _mcp_client
+
+
 class MCPClient:
     """Manages MCP server connections and tool operations.
 
@@ -183,9 +209,10 @@ class MCPClient:
     - Stale propagation: immediately marks server tools as stale on disconnect
     """
 
-    def __init__(self, config: Config, registry: ToolRegistry):
+    def __init__(self, config: Config):
         self.config = config
-        self.registry = registry
+        from athena.mcp_client.registry import get_tool_registry
+        self.registry = get_tool_registry()
         self._connections: dict[str, ServerConnection] = {}
         self._connecting: set[str] = set()  # server_ids currently attempting connection
         self._heartbeat_task: asyncio.Task | None = None

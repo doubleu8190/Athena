@@ -69,10 +69,25 @@ export interface HarnessRule {
   config: Record<string, unknown>
 }
 
+export interface HarnessRuleCreate {
+  rule_id: string
+  rule_type: string
+  name: string
+  description?: string
+  config_json: Record<string, unknown>
+  priority?: number
+  enabled?: boolean
+}
+
 export interface HarnessRuleUpdate {
   config_json?: Record<string, unknown>
   priority?: number
   enabled?: boolean
+}
+
+export interface PathPermissionConfig {
+  path: string
+  permissions: "r" | "w" | "rw"
 }
 
 export interface AuditLog {
@@ -186,6 +201,10 @@ export function fetchHarnessRules(): Promise<HarnessRule[]> {
   return api
     .get<BackendResponse<BackendList<HarnessRule>>>('/admin/harness/rules')
     .then((res) => res.data.items ?? [])
+}
+
+export function createHarnessRule(body: HarnessRuleCreate): Promise<void> {
+  return api.post('/admin/harness/rules', body).then(() => undefined)
 }
 
 export function updateHarnessRule(id: string, body: HarnessRuleUpdate): Promise<void> {

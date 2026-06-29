@@ -19,6 +19,35 @@ from athena.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+# ── Singleton ───────────────────────────────────────────────────────────────
+
+_gateway_manager: GatewayManager | None = None
+
+
+def set_gateway_manager(manager: GatewayManager) -> None:
+    """Set the process-wide singleton GatewayManager instance.
+
+    Called once during application startup (lifespan). Must be called
+    before any call to get_gateway_manager().
+    """
+    global _gateway_manager
+    _gateway_manager = manager
+    logger.info("gateway_manager_singleton_set")
+
+
+def get_gateway_manager() -> GatewayManager:
+    """Return the process-wide singleton GatewayManager instance.
+
+    Raises RuntimeError if not yet initialized. The lifespan must call
+    set_gateway_manager() during startup before any route handler accesses this.
+    """
+    if _gateway_manager is None:
+        raise RuntimeError(
+            "GatewayManager not initialized — call set_gateway_manager() during lifespan startup"
+        )
+    return _gateway_manager
+
+
 class GatewayManager:
     """Coordinates all IM channel adapters.
 

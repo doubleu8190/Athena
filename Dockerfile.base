@@ -54,6 +54,8 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV SQLITE_DB_PATH=/data/athena.db
 ENV DATA_DIR=/data
+# HuggingFace cache dir — must be writable; home is /nonexistent for the system user
+ENV HF_HOME=/data/huggingface
 
 # chrome-devtools-mcp: use system Chromium instead of Puppeteer's bundled download
 ENV PUPPETEER_SKIP_DOWNLOAD=true

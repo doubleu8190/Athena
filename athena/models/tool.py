@@ -26,7 +26,6 @@ class Tool(Base):
     risk_level: Mapped[str] = mapped_column(
         String, default="medium"
     )  # 'low', 'medium', 'high', 'critical'
-    supports_preview: Mapped[bool] = mapped_column(Boolean, default=False)
     idempotent: Mapped[bool] = mapped_column(Boolean, default=True)
     capability_tags: Mapped[str | None] = mapped_column(
         Text, nullable=True

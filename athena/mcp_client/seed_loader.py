@@ -1,7 +1,8 @@
-"""MCP Server seed loader.
+"""Built-in MCP server auto-registration.
 
-On first startup (empty database), imports mcp_servers.yaml into the
-mcp_servers table as a one-time initialization seed.
+On every startup, code-defined servers from mcp_servers.yaml are upserted
+into the database.  User-created servers (source != 'builtin') are never
+touched by this process.
 """
 
 from __future__ import annotations
@@ -15,42 +16,70 @@ from athena.models import get_session_maker
 logger = get_logger(__name__)
 
 
-async def seed_mcp_servers(config: Config) -> None:
-    """Import mcp_servers.yaml as seed data if the database is empty.
+async def auto_register_builtin_servers(config: Config) -> None:
+    """Upsert code-defined MCP servers into the database on every startup.
 
-    Only runs when no servers exist in the database. Existing servers
-    are never overwritten.
+    For each server defined in the YAML seed:
+    - server_id not in DB → INSERT with enabled=True
+    - server_id exists and source == 'builtin' → UPDATE name, transport,
+      connection_config (but NOT enabled — respect user's explicit disable)
+    - server_id exists and source != 'builtin' → SKIP (user-created)
     """
     if not config.mcp_servers_seed:
-        logger.info("mcp_seed_empty_skip")
+        logger.info("mcp_auto_register_empty_skip")
         return
 
     db_path = config.sqlite_db_path
     session_maker = get_session_maker(db_path)
 
     async with session_maker() as session:
-        from sqlalchemy import select, func
         from athena.models.mcp_server import MCPServer
 
-        # Check if any servers exist
-        result = await session.execute(select(func.count()).select_from(MCPServer))
-        count = result.scalar_one()
+        inserted = 0
+        updated = 0
+        skipped = 0
 
-        if count > 0:
-            logger.info("mcp_seed_skip_existing", count=count)
-            return
-
-        # Import seed servers
         for entry in config.mcp_servers_seed:
-            server = MCPServer(
-                server_id=entry["server_id"],
-                name=entry["name"],
-                transport=entry["transport"],
-                connection_config=json.dumps(entry.get("connection_config", {})),
-                enabled=True,
-                source=entry.get("source", "external"),
-            )
-            session.add(server)
+            server_id = entry["server_id"]
+            existing = await session.get(MCPServer, server_id)
+
+            if existing is None:
+                # New built-in server — insert
+                server = MCPServer(
+                    server_id=server_id,
+                    name=entry["name"],
+                    transport=entry["transport"],
+                    connection_config=json.dumps(entry.get("connection_config", {})),
+                    enabled=True,
+                    source="builtin",
+                )
+                session.add(server)
+                inserted += 1
+                logger.info("mcp_auto_register_insert", server_id=server_id)
+            elif existing.source == "builtin":
+                # Existing built-in — update config from code (but preserve enabled)
+                existing.name = entry["name"]
+                existing.transport = entry["transport"]
+                existing.connection_config = json.dumps(
+                    entry.get("connection_config", {})
+                )
+                updated += 1
+                logger.info("mcp_auto_register_update", server_id=server_id)
+            else:
+                # User-created server — leave untouched
+                skipped += 1
+                logger.info(
+                    "mcp_auto_register_skip_user",
+                    server_id=server_id,
+                    source=existing.source,
+                )
 
         await session.commit()
-        logger.info("mcp_seed_imported", count=len(config.mcp_servers_seed))
+
+        logger.info(
+            "mcp_auto_register_done",
+            total=len(config.mcp_servers_seed),
+            inserted=inserted,
+            updated=updated,
+            skipped=skipped,
+        )

@@ -13,12 +13,54 @@ import {
   updateMCPServerStatus,
 } from '../api/endpoints/admin'
 
+// ── Claude Desktop config parser ────────────────────────────────────────
+
+interface ParsedClaudeConfig {
+  server_id: string
+  name: string
+  transport: string
+  connection_config: Record<string, unknown>
+}
+
+function parseClaudeConfig(jsonStr: string): ParsedClaudeConfig | null {
+  try {
+    const parsed = JSON.parse(jsonStr)
+    if (!parsed || typeof parsed !== 'object' || !('mcpServers' in parsed)) return null
+
+    const servers = parsed.mcpServers
+    if (typeof servers !== 'object' || servers === null) return null
+
+    const keys = Object.keys(servers)
+    if (keys.length === 0) return null
+
+    const serverKey = keys[0]
+    const config = servers[serverKey]
+    if (typeof config !== 'object' || config === null) return null
+
+    // Infer transport
+    let transport = 'stdio'
+    if (config.url) {
+      transport = String(config.url).includes('sse') ? 'sse' : 'http'
+    }
+
+    return {
+      server_id: serverKey,
+      name: serverKey,
+      transport,
+      connection_config: config as Record<string, unknown>,
+    }
+  } catch {
+    return null
+  }
+}
+
 export default function MCPServersPage() {
   const [servers, setServers] = useState<MCPServer[]>([])
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
   const [deleteId, setDeleteId] = useState<string | null>(null)
-  const [form, setForm] = useState({ server_id: '', name: '', transport: 'stdio', connection_config: '{}', source: 'external' })
+  const [form, setForm] = useState({ server_id: '', name: '', transport: 'stdio', connection_config: '{}', source: 'user' })
+  const [configInput, setConfigInput] = useState('')
   const { toast } = useToast()
 
   const load = async () => {
@@ -35,12 +77,33 @@ export default function MCPServersPage() {
   useEffect(() => { load() }, [])
 
   const handleCreate = async () => {
+    // Validate required fields
+    if (!form.server_id.trim()) {
+      toast('error', 'Server ID is required')
+      return
+    }
+    if (!form.name.trim()) {
+      toast('error', 'Name is required')
+      return
+    }
+    let connectionConfig: Record<string, unknown>
+    try {
+      connectionConfig = JSON.parse(form.connection_config)
+    } catch {
+      toast('error', 'Connection Config is not valid JSON')
+      return
+    }
+    if (!connectionConfig || typeof connectionConfig !== 'object' || Array.isArray(connectionConfig)) {
+      toast('error', 'Connection Config must be a JSON object')
+      return
+    }
+
     try {
       await createMCPServer({
         server_id: form.server_id,
         name: form.name,
         transport: form.transport,
-        connection_config: JSON.parse(form.connection_config),
+        connection_config: connectionConfig,
         source: form.source,
       })
       toast('success', 'Server registered')
@@ -102,7 +165,7 @@ export default function MCPServersPage() {
     <div className="p-6 max-w-6xl mx-auto space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">MCP Servers</h2>
-        <button onClick={() => setShowForm(true)} className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5">
+        <button onClick={() => { setShowForm(true); setConfigInput('') }} className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5">
           <Plus size={14} /> Register Server
         </button>
       </div>
@@ -129,8 +192,34 @@ export default function MCPServersPage() {
             </select>
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Connection Config (JSON)</label>
-            <textarea value={form.connection_config} onChange={(e) => setForm({ ...form, connection_config: e.target.value })} rows={4} className="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm font-mono" />
+            <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Connection Config (paste Claude Desktop config or raw JSON)
+            </label>
+            <textarea
+              value={configInput}
+              onChange={(e) => {
+                const val = e.target.value
+                setConfigInput(val)
+                // Auto-detect Claude Desktop format
+                const parsed = parseClaudeConfig(val)
+                if (parsed) {
+                  setForm({
+                    ...form,
+                    server_id: parsed.server_id,
+                    name: parsed.name,
+                    transport: parsed.transport,
+                    connection_config: JSON.stringify(parsed.connection_config, null, 2),
+                  })
+                  toast('info', 'Claude Desktop config detected — fields auto-filled')
+                } else {
+                  // Raw JSON mode: store as connection_config
+                  setForm({ ...form, connection_config: val })
+                }
+              }}
+              rows={8}
+              placeholder={`{\n  "mcpServers": {\n    "amap-maps": {\n      "command": "npx",\n      "args": ["-y", "@amap/amap-maps-mcp-server"],\n      "env": {\n        "AMAP_MAPS_API_KEY": "api_key"\n      }\n    }\n  }\n}`}
+              className="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm font-mono"
+            />
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <button onClick={() => setShowForm(false)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">Cancel</button>

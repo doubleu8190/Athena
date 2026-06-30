@@ -19,7 +19,6 @@ class RuleType(StrEnum):
     """Valid rule types for the Harness Engine."""
 
     BLACKLIST = "blacklist"
-    PATH_BOUNDARY = "path_boundary"
     PATH_PERMISSION = "path_permission"
     QUOTA = "quota"
     COOLING_OFF = "cooling_off"

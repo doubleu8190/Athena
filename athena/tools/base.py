@@ -14,6 +14,5 @@ class ToolHandler:
     parameters_schema: dict[str, Any]
     handler: Callable[..., Awaitable[Any]]
     risk_level: str = "medium"
-    supports_preview: bool = False
     idempotent: bool = True
     capability_tags: list[str] = field(default_factory=list)

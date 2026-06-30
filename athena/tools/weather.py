@@ -347,7 +347,6 @@ def _extract_day_forecast(day_data: dict[str, Any], day_label: str) -> dict[str,
 async def query_weather(
     city: str,
     date: str | None = None,
-    preview: bool = False,
     **kwargs,
 ) -> dict[str, Any]:
     """Query weather for a city, optionally filtered by date.
@@ -360,20 +359,10 @@ async def query_weather(
         date: Optional date in YYYY-MM-DD format. Defaults to today.
               Supports today and up to 3 days in the future.
               Historical dates are not supported by the free data source.
-        preview: If True, return a preview of the query without fetching.
 
     Returns:
         Dict with weather data or error information.
     """
-    if preview:
-        return {
-            "success": True,
-            "preview": True,
-            "city": city,
-            "date": date or "today",
-            "note": "Will query wttr.in for current weather and forecast",
-        }
-
     # Normalize city name
     normalized_city = _normalize_city(city.strip())
 

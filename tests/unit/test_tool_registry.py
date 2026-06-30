@@ -18,16 +18,16 @@ class TestToolRegistry:
         return [
             ToolDef(name="web_search", description="Search the web",
                     capability_tags=["web_search", "text_retrieval"],
-                    risk_level="low", supports_preview=False),
+                    risk_level="low"),
             ToolDef(name="bing_search", description="Bing search",
                     capability_tags=["web_search"],
-                    risk_level="low", supports_preview=False),
+                    risk_level="low"),
             ToolDef(name="file_read", description="Read a file",
                     capability_tags=["filesystem", "read"],
-                    risk_level="low", supports_preview=False),
+                    risk_level="low"),
             ToolDef(name="file_write", description="Write a file",
                     capability_tags=["filesystem", "write"],
-                    risk_level="medium", supports_preview=True),
+                    risk_level="medium"),
         ]
 
     @pytest.mark.asyncio

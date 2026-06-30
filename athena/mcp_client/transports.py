@@ -14,6 +14,10 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any
 
+from athena.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class MCPTransport(ABC):
     """Abstract transport for MCP JSON-RPC communication."""
@@ -46,14 +50,18 @@ class StdioTransport(MCPTransport):
     skill containers (docker exec / docker attach).
     """
 
-    def __init__(self, command: str | list[str]):
+    def __init__(self, command: str | list[str], env: dict[str, str] | None = None):
         self.command = command if isinstance(command, list) else command.split()
+        self._extra_env = env or {}
         self._process: asyncio.subprocess.Process | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
-        """Start the subprocess."""
+        """Start the subprocess and begin logging its stderr."""
         env = os.environ.copy()
+        if self._extra_env:
+            env.update(self._extra_env)
         self._process = await asyncio.create_subprocess_exec(
             *self.command,
             stdin=asyncio.subprocess.PIPE,
@@ -61,9 +69,41 @@ class StdioTransport(MCPTransport):
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        # Read stderr line-by-line in the background so subprocess errors
+        # (crashes, npx download failures, stack traces) are visible in logs.
+        if self._process.stderr:
+            self._stderr_task = asyncio.create_task(
+                self._log_stderr(self._process.stderr)
+            )
+
+    async def _log_stderr(self, stream: asyncio.StreamReader) -> None:
+        """Read stderr lines and log them at WARNING level."""
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                if decoded:
+                    logger.warning(
+                        "mcp_subprocess_stderr",
+                        command=self.command[0],
+                        stderr_line=decoded,
+                    )
+        except Exception:
+            pass
 
     async def disconnect(self) -> None:
         """Terminate the subprocess."""
+        # Cancel the stderr reader task first
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._stderr_task = None
+
         if self._process:
             self._process.terminate()
             try:
@@ -280,7 +320,19 @@ class TransportFactory:
         """
         if transport_type == "stdio":
             command = connection_config.get("command", "")
-            return StdioTransport(command)
+            args = connection_config.get("args", [])
+            env = connection_config.get("env", None)
+
+            if args:
+                # Claude Desktop format: separate command + args list
+                cmd_list = [command] + args
+            elif isinstance(command, list):
+                cmd_list = command
+            else:
+                # Legacy format: single space-separated command string
+                cmd_list = command.split() if command else []
+
+            return StdioTransport(cmd_list, env)
         elif transport_type == "http":
             url = connection_config.get("url", "")
             auth = {k: v for k, v in connection_config.items() if k != "url"}

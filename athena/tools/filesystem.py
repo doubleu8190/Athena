@@ -3,9 +3,7 @@
 All paths must be absolute.  Path access control is enforced by the Harness
 Engine's path_permission rules (see ``_check_path_boundary``).
 
-Each tool supports:
-- _preview mode: returns expected result without applying changes
-- Idempotency keys for safe retry
+Each tool supports idempotency keys for safe retry.
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ def _safe_path(path: str) -> Path:
     return p.resolve()
 
 
-async def file_read(path: str, preview: bool = False, **kwargs) -> dict[str, Any]:
+async def file_read(path: str, **kwargs) -> dict[str, Any]:
     """Read a file from the workspace.
 
     Risk level: low (read-only).
@@ -58,28 +56,16 @@ async def file_read(path: str, preview: bool = False, **kwargs) -> dict[str, Any
 async def file_write(
     path: str,
     content: str,
-    preview: bool = False,
     idempotency_key: str | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Write content to a file in the workspace.
 
     Risk level: medium.
-    Supports preview mode and idempotency keys.
+    Supports idempotency keys.
     """
     try:
         target = _safe_path(path)
-
-        if preview:
-            return {
-                "success": True,
-                "preview": True,
-                "action": "write",
-                "path": str(target),
-                "content_preview": content[:500],
-                "would_overwrite": target.exists(),
-                "existing_size": target.stat().st_size if target.exists() else 0,
-            }
 
         # Create parent directories if needed
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -102,14 +88,12 @@ async def file_write(
 
 async def file_delete(
     path: str,
-    preview: bool = False,
     idempotency_key: str | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Delete a file from the workspace.
 
     Risk level: high.
-    Supports preview mode.
     """
     try:
         target = _safe_path(path)
@@ -118,16 +102,6 @@ async def file_delete(
             return {"success": False, "error": f"File not found: {path}"}
 
         stat = target.stat()
-
-        if preview:
-            return {
-                "success": True,
-                "preview": True,
-                "action": "delete",
-                "path": str(target),
-                "size_bytes": stat.st_size,
-                "modified_at": stat.st_mtime,
-            }
 
         if target.is_dir():
             shutil.rmtree(target)
@@ -153,7 +127,6 @@ async def file_search(
     recursive: bool = True,
     match_type: str = "name",
     max_results: int = 50,
-    preview: bool = False,
     **kwargs,
 ) -> dict[str, Any]:
     """Search for files under an absolute directory path.
@@ -166,7 +139,6 @@ async def file_search(
         match_type: ``"name"`` for filename glob matching, ``"content"`` for searching
                     inside file contents.
         max_results: Maximum number of results to return.
-        preview: If True, return a preview of what would be searched.
 
     Risk level: low (read-only).
 
@@ -179,17 +151,6 @@ async def file_search(
             return {"success": False, "error": f"Path not found: {path}", "matches": []}
         if not target.is_dir():
             return {"success": False, "error": f"Path is not a directory: {path}", "matches": []}
-
-        if preview:
-            return {
-                "success": True,
-                "preview": True,
-                "action": "search",
-                "pattern": pattern,
-                "search_root": str(target),
-                "recursive": recursive,
-                "match_type": match_type,
-            }
 
         matches: list[str] = []
 

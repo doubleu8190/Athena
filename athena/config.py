@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import yaml
 from dataclasses import dataclass, field
@@ -26,7 +27,7 @@ DEFAULT_LLM_CONFIG_PATH = Path(
     os.environ.get("LLM_CONFIG_PATH", DEFAULT_DATA_DIR / "llm.yaml")
 )
 DEFAULT_MCP_SERVERS_CONFIG = Path(
-    os.environ.get("MCP_SERVERS_CONFIG", DEFAULT_DATA_DIR / "mcp_servers.yaml")
+    os.environ.get("MCP_SERVERS_CONFIG", DEFAULT_DATA_DIR / "mcp_servers.json")
 )
 # ── Configuration dataclasses ──────────────────────────────────────────
 
@@ -237,10 +238,45 @@ class Config:
 
     @classmethod
     def _load_mcp_servers_seed(cls) -> list[dict[str, Any]]:
-        if not DEFAULT_MCP_SERVERS_CONFIG.exists(): 
-            logger.warning(f"Warning: {DEFAULT_MCP_SERVERS_CONFIG} does not exist")  
-        data = cls._load_yaml(DEFAULT_MCP_SERVERS_CONFIG)
-        return data.get("servers", [])
+        """Load built-in MCP server definitions from Claude Desktop format JSON.
+
+        Parses the ``mcpServers`` dict and returns a list of server entries
+        compatible with the internal seed format.  Transport is inferred from
+        the presence of a ``url`` key (sse/http) and defaults to stdio.
+        All servers loaded from this file are marked ``source: builtin``.
+        """
+        if not DEFAULT_MCP_SERVERS_CONFIG.exists():
+            logger.warning(f"Warning: {DEFAULT_MCP_SERVERS_CONFIG} does not exist")
+            return []
+
+        with open(DEFAULT_MCP_SERVERS_CONFIG, "r") as f:
+            data = json.load(f) or {}
+
+        servers = data.get("mcpServers", {})
+        if not isinstance(servers, dict):
+            logger.warning("mcp_servers_config_invalid_format")
+            return []
+
+        result: list[dict[str, Any]] = []
+        for server_id, config in servers.items():
+            if not isinstance(config, dict):
+                continue
+
+            # Infer transport from config shape
+            if "url" in config:
+                transport = "sse" if "sse" in str(config["url"]).lower() else "http"
+            else:
+                transport = "stdio"
+
+            result.append({
+                "server_id": server_id,
+                "name": server_id,
+                "transport": transport,
+                "connection_config": config,
+                "source": "builtin",
+            })
+
+        return result
 
 
 # Module-level singleton (initialized at app startup)

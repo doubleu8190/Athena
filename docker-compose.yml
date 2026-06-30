@@ -57,7 +57,7 @@ services:
       - TELEGRAM_POLL_TIMEOUT=30
       - USER_CONFIG_PATH=/data/user.yaml
       - SYSTEM_CONFIG_PATH=/data/athena.yaml
-      - MCP_SERVERS_CONFIG=/data/mcp_servers.yaml
+      - MCP_SERVERS_CONFIG=/data/mcp_servers.json
       - LLM_CONFIG_PATH=/data/llm.yaml
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - PROMETHEUS_ENABLED=true

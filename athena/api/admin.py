@@ -39,7 +39,7 @@ class MCPServerCreate(BaseModel):
     name: str
     transport: str  # 'stdio', 'http', 'sse'
     connection_config: dict[str, Any]
-    source: str = "external"  # 'builtin', 'skill', 'external'
+    source: str = "user"  # 'builtin' (code-defined), 'user' (web-created)
 
 
 class MCPServerStatusUpdate(BaseModel):

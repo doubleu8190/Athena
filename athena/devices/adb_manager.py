@@ -85,21 +85,12 @@ class ADBManager:
         self,
         serial: str,
         command: str,
-        preview: bool = False,
         **kwargs,
     ) -> dict[str, Any]:
         """Execute a shell command on an Android device.
 
         Risk level: high.
         """
-        if preview:
-            return {
-                "success": True,
-                "preview": True,
-                "serial": serial,
-                "command": command,
-            }
-
         import asyncio
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -124,16 +115,12 @@ class ADBManager:
     async def adb_screenshot(
         self,
         serial: str,
-        preview: bool = False,
         **kwargs,
     ) -> dict[str, Any]:
         """Capture a screenshot from an Android device.
 
         Risk level: low (read-only).
         """
-        if preview:
-            return {"success": True, "preview": True, "serial": serial, "action": "screenshot"}
-
         import asyncio
         import base64
         import tempfile
@@ -164,21 +151,12 @@ class ADBManager:
         self,
         serial: str,
         apk_path: str,
-        preview: bool = False,
         **kwargs,
     ) -> dict[str, Any]:
         """Install an APK on an Android device.
 
         Risk level: critical.
         """
-        if preview:
-            return {
-                "success": True,
-                "preview": True,
-                "serial": serial,
-                "apk_path": apk_path,
-            }
-
         import asyncio
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -203,22 +181,13 @@ class ADBManager:
         serial: str,
         x: int,
         y: int,
-        preview: bool = False,
         **kwargs,
     ) -> dict[str, Any]:
         """Simulate a tap on an Android device screen.
 
         Risk level: high.
         """
-        if preview:
-            return {
-                "success": True,
-                "preview": True,
-                "serial": serial,
-                "coordinates": {"x": x, "y": y},
-            }
         return await self.adb_shell(
             serial,
             f"input tap {x} {y}",
-            preview=False,
         )

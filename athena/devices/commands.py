@@ -15,4 +15,3 @@ class DeviceCommand:
     id: str
     method: str  # 'run_script', 'screenshot', 'simulate_keystroke', etc.
     params: dict[str, Any] = field(default_factory=dict)
-    preview: bool = False

@@ -473,8 +473,6 @@ class HarnessEngine:
 
         if rule_type == RuleType.BLACKLIST:
             return self._apply_blacklist_rule(config, action, result)
-        elif rule_type == RuleType.PATH_BOUNDARY:
-            return self._apply_path_rule(config, action, result)
         elif rule_type == RuleType.PATH_PERMISSION:
             # Already enforced in _check_path_boundary (hard gateway)
             return result

@@ -1,43 +1,41 @@
-# Dockerfile.base — Athena base image with system deps and Python packages
+# Dockerfile.base — Athena base image with language runtimes and Python packages
 #
 # Build:  docker build -f Dockerfile.base -t athena-base:latest .
 # Rebuild only when pyproject.toml or system dependencies change.
+#
+# Runtimes: Python 3.14, JDK 21, Go 1.25, Node.js 26
 
 FROM python:3.14-slim
 
 WORKDIR /app
 
 # ── System dependencies ──────────────────────────────────────────────
-# build-essential: C compiler toolchain for any Python packages that
-# compile from source (rare with wheels, but safe default for slim image).
-# Chromium + shared libs: for Puppeteer (chrome-devtools-mcp).
-# Node.js 22.x: runtime for chrome-devtools-mcp.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
     gnupg \
     tzdata \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends \
-    nodejs \
-    chromium \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libgbm1 \
-    libnss3 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxkbcommon0 \
-    libxrandr2 \
+    openjdk-21-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Node.js 26.x ─────────────────────────────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Go ───────────────────────────────────────────────────────────────
+ARG GO_VERSION=1.25.11
+ARG TARGETARCH=amd64
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" \
+    -o /tmp/go.tar.gz \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
 # ── Python dependencies ──────────────────────────────────────────────
-# Same as the current builder stage — reads pyproject.toml to resolve
-# and install all ~170 dependencies (torch, transformers, chromadb, etc.)
+# Reads pyproject.toml to resolve and install all dependencies
+# (torch, transformers, chromadb, etc.)
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir . && \
@@ -49,18 +47,16 @@ RUN addgroup --system athena && \
     mkdir -p /data /workspace && \
     chown -R athena:athena /data /workspace
 
-# ── Stable environment variables ─────────────────────────────────────
+# ── Environment variables ────────────────────────────────────────────
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV SQLITE_DB_PATH=/data/athena.db
 ENV DATA_DIR=/data
-# HuggingFace cache dir — must be writable; home is /nonexistent for the system user
+# HuggingFace cache — must be writable; home is /nonexistent for the system user
 ENV HF_HOME=/data/huggingface
-
-# chrome-devtools-mcp: use system Chromium instead of Puppeteer's bundled download
-ENV PUPPETEER_SKIP_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-# Opt out of chrome-devtools-mcp telemetry
-ENV CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=true
+# npm/npx needs a writable home; /nonexistent doesn't exist
+ENV HOME=/data
+# Force npm cache to /tmp (tmpfs) — avoids corrupted cache from persisted volume
+ENV npm_config_cache=/tmp/npm-cache
 
 EXPOSE 8000

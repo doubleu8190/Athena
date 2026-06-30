@@ -140,7 +140,7 @@ async def web_message(
                     yield _sse_event("subtask_completed", {
                         "step": r["step"],
                         "status": "success",
-                        "output_preview": str(r.get("output", ""))[:200],
+                        "output_preview": str(r.get("output", "")),
                     })
                 elif r["status"] == "fallback_used":
                     yield _sse_event("subtask_fallback", {

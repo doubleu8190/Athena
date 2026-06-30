@@ -38,7 +38,6 @@ class RegisteredTool:
     handler_info: str
     status: str = "active"          # 'active', 'stale', 'disabled'
     risk_level: str = "medium"
-    supports_preview: bool = False
     idempotent: bool = True
     capability_tags: list[str] = field(default_factory=list)
 
@@ -82,7 +81,6 @@ class ToolRegistry:
                     description=tool.get("description", ""),
                     parameters_schema=tool.get("parameters_schema", tool.get("inputSchema", {})),
                     version=tool.get("version", "1.0.0"),
-                    supports_preview=tool.get("supports_preview", False),
                     idempotent=tool.get("idempotent", True),
                     capability_tags=tool.get("capability_tags", []),
                     risk_level=tool.get("risk_level", "medium"),
@@ -98,7 +96,6 @@ class ToolRegistry:
                 existing.description = td.description
                 existing.parameters_schema = td.parameters_schema
                 existing.version = td.version
-                existing.supports_preview = td.supports_preview
                 existing.idempotent = td.idempotent
                 existing.capability_tags = td.capability_tags
                 existing.risk_level = td.risk_level
@@ -118,7 +115,6 @@ class ToolRegistry:
                     handler_info=td.name,
                     status="active",
                     risk_level=td.risk_level,
-                    supports_preview=td.supports_preview,
                     idempotent=td.idempotent,
                     capability_tags=td.capability_tags,
                 )
@@ -228,15 +224,14 @@ class ToolRegistry:
         failed_tool_name: str,
         capability_tag: str | None = None,
     ) -> RegisteredTool | None:
-        """Deterministic fallback tool selection using a 6-level tiebreaker.
+        """Deterministic fallback tool selection using a 5-level tiebreaker.
 
         Rules:
         1. capability_tag exact match (with the failed tool)
         2. risk_level lowest first
-        3. supports_preview preferred
-        4. Same source_server_id as failed
-        5. Same source type (builtin/skill/external)
-        6. Dictionary order by tool_name (stability guarantee)
+        3. Same source_server_id as failed
+        4. Same source type (builtin/skill/external)
+        5. Dictionary order by tool_name (stability guarantee)
 
         Excludes: the failed tool itself, status != 'active', server not connected.
         """
@@ -270,19 +265,16 @@ class ToolRegistry:
             risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
             risk_score = risk_order.get(tool.risk_level, 1)
 
-            # 3. supports_preview (0 = yes = better, 1 = no)
-            preview_score = 0 if tool.supports_preview else 1
-
-            # 4. Same server (0 = same, 1 = different)
+            # 3. Same server (0 = same, 1 = different)
             server_score = 0 if tool.source_server_id == failed_tool.source_server_id else 1
 
-            # 5. Same source type (0 = same, 1 = different)
+            # 4. Same source type (0 = same, 1 = different)
             source_score = 0 if tool.source == failed_tool.source else 1
 
-            # 6. Dictionary order (stable sort key)
+            # 5. Dictionary order (stable sort key)
             name_key = tool.name
 
-            return (tag_match, risk_score, preview_score, server_score, source_score, name_key)
+            return (tag_match, risk_score, server_score, source_score, name_key)
 
         candidates.sort(key=score)
         return candidates[0]
@@ -306,7 +298,6 @@ class ToolRegistry:
                 "parameters_schema": t.parameters_schema,
                 "source_server_id": t.source_server_id,
                 "risk_level": t.risk_level,
-                "supports_preview": t.supports_preview,
                 "capability_tags": t.capability_tags,
             }
             for t in tools

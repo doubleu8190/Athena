@@ -29,7 +29,6 @@ class ToolDef:
     description: str = ""
     parameters_schema: dict[str, Any] = field(default_factory=dict)
     version: str = "1.0.0"
-    supports_preview: bool = False
     idempotent: bool = True
     capability_tags: list[str] = field(default_factory=list)
     risk_level: str = "medium"
@@ -43,7 +42,6 @@ class ToolResult:
     success: bool
     content: Any = None
     error: str | None = None
-    preview: bool = False
 
 
 class ServerConnection:
@@ -102,29 +100,24 @@ class ServerConnection:
                 description=t.get("description", ""),
                 parameters_schema=schema,
                 version=t.get("version", "1.0.0"),
-                supports_preview=t.get("supports_preview", False),
                 idempotent=t.get("idempotent", True),
                 capability_tags=t.get("capability_tags", []),
                 risk_level=t.get("risk_level", "medium"),
             ))
         return parsed
 
-    async def call_tool(self, tool_name: str, arguments: dict, *, preview: bool = False) -> ToolResult:
+    async def call_tool(self, tool_name: str, arguments: dict) -> ToolResult:
         """Call tools/call and return a standard ToolResult."""
-        call_args = dict(arguments)
-        if preview:
-            call_args["_preview"] = True
         try:
             result = await self._send_request("tools/call", {
                 "name": tool_name,
-                "arguments": call_args,
+                "arguments": dict(arguments),
             })
             return ToolResult(
                 server_id=self.server_id,
                 tool_name=tool_name,
                 success=True,
                 content=result.get("content", result),
-                preview=preview,
             )
         except Exception as e:
             return ToolResult(
@@ -132,7 +125,6 @@ class ServerConnection:
                 tool_name=tool_name,
                 success=False,
                 error=str(e),
-                preview=preview,
             )
 
     async def ping(self) -> bool:
@@ -205,7 +197,7 @@ class MCPClient:
     Responsibilities:
     - Connection lifecycle (connect, disconnect, heartbeat, reconnect)
     - Tool discovery: tools/list on connect, periodic refresh
-    - Tool invocation: tools/call with preview support
+    - Tool invocation: tools/call
     - Stale propagation: immediately marks server tools as stale on disconnect
     """
 
@@ -353,8 +345,6 @@ class MCPClient:
         server_id: str,
         tool_name: str,
         arguments: dict,
-        *,
-        preview: bool = False,
     ) -> ToolResult:
         """Call a tool on a specific server.
 
@@ -362,7 +352,6 @@ class MCPClient:
             server_id: Target MCP server.
             tool_name: Tool to invoke.
             arguments: Tool arguments.
-            preview: If True, pass _preview flag (dry-run, no side effects).
         """
         conn = self._connections.get(server_id)
         if not conn:
@@ -375,10 +364,9 @@ class MCPClient:
                     tool_name=tool_name,
                     success=False,
                     error=f"Server {server_id} not connected",
-                    preview=preview,
                 )
-
-        return await conn.call_tool(tool_name, arguments, preview=preview)
+        logger.info("mcp_call_tool", server_id=server_id, tool_name=tool_name, arguments=arguments)
+        return await conn.call_tool(tool_name, arguments)
 
     async def list_tools(self, server_id: str) -> list[ToolDef]:
         """Get the current tool list from a connected server."""

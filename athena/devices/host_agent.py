@@ -2,7 +2,6 @@
 
 Connects via WSS (secure WebSocket) with PSK authentication.
 Commands: run_script, screenshot, simulate_keystroke.
-All commands support _preview mode.
 """
 
 from __future__ import annotations
@@ -38,22 +37,12 @@ class HostAgent:
         self,
         script: str,
         language: str = "bash",
-        preview: bool = False,
         **kwargs,
     ) -> dict[str, Any]:
         """Execute a script on the host machine.
 
         Risk level: critical.
-        Supports preview mode.
         """
-        if preview:
-            return {
-                "success": True,
-                "preview": True,
-                "script_preview": script[:500],
-                "language": language,
-            }
-
         # Script execution is done through the WebSocket connection
         # to the device agent. This is a server-side placeholder.
         return {
@@ -62,14 +51,11 @@ class HostAgent:
             "device_id": self.device_id,
         }
 
-    async def screenshot(self, preview: bool = False, **kwargs) -> dict[str, Any]:
+    async def screenshot(self, **kwargs) -> dict[str, Any]:
         """Capture a screenshot of the host machine.
 
         Risk level: low (read-only).
         """
-        if preview:
-            return {"success": True, "preview": True, "action": "screenshot"}
-
         return {
             "success": True,
             "action": "screenshot",
@@ -79,20 +65,12 @@ class HostAgent:
     async def simulate_keystroke(
         self,
         keys: str,
-        preview: bool = False,
         **kwargs,
     ) -> dict[str, Any]:
         """Simulate keyboard input on the host machine.
 
         Risk level: critical.
         """
-        if preview:
-            return {
-                "success": True,
-                "preview": True,
-                "keys": keys,
-            }
-
         return {
             "success": True,
             "keys": keys,

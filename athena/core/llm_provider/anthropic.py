@@ -85,11 +85,13 @@ class AnthropicProvider(LLMProvider):
                 # Assistant message with tool calls
                 tool_blocks = []
                 for tc in msg["tool_calls"]:
+                    # Accept both OpenAI nested format and flat format
+                    fn = tc.get("function", tc)
                     tool_blocks.append({
                         "type": "tool_use",
                         "id": tc.get("id", ""),
-                        "name": tc["name"],
-                        "input": tc.get("arguments", {}),
+                        "name": fn["name"],
+                        "input": fn.get("arguments", fn.get("args", {})),
                     })
                 text_blocks = [{"type": "text", "text": content}] if content else []
                 anthropic_messages.append({
@@ -107,10 +109,12 @@ class AnthropicProvider(LLMProvider):
         if tools:
             anthropic_tools = []
             for tool in tools:
+                # Accept both pre-wrapped OpenAI format and flat format
+                fn = tool.get("function", tool)
                 anthropic_tools.append({
-                    "name": tool["name"],
-                    "description": tool.get("description", ""),
-                    "input_schema": tool.get("parameters_schema", {}),
+                    "name": fn["name"],
+                    "description": fn.get("description", ""),
+                    "input_schema": fn.get("parameters", fn.get("parameters_schema", {})),
                 })
 
         kwargs: dict[str, Any] = {

@@ -52,16 +52,12 @@ def build_agent_graph(
         A compiled StateGraph ready for ``astream()`` / ``ainvoke()``.
     """
     # ── Import SummarizationNode lazily (langmem is optional) ─────────
-    try:
-        from langmem.short_term import SummarizationNode as _SummarizationNode
-        _HAS_LANGMEM = True
-    except ImportError:
-        _HAS_LANGMEM = False
+    from langmem.short_term import SummarizationNode as _SummarizationNode
 
     builder = StateGraph(AgentState)
 
     # ── Summarization node (optional, before agent) ────────────────────
-    if _HAS_LANGMEM and summarization_model is not None:
+    if summarization_model is not None:
         summarize_node = _SummarizationNode(
             model=summarization_model,
             max_tokens=4096,

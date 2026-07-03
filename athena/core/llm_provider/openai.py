@@ -70,17 +70,22 @@ class OpenAIProvider(LLMProvider):
         }
 
         if tools:
-            # Convert to OpenAI tool format
+            # Accept both raw (flat) tools and pre-wrapped OpenAI-format tools
             openai_tools = []
             for tool in tools:
-                openai_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool["name"],
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("parameters_schema", {}),
-                    },
-                })
+                if "function" in tool:
+                    # Already wrapped: {"type": "function", "function": {"name": ...}}
+                    openai_tools.append(tool)
+                else:
+                    # Flat format: {"name": ..., "description": ..., "parameters_schema": ...}
+                    openai_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool.get("description", ""),
+                            "parameters": tool.get("parameters_schema", {}),
+                        },
+                    })
             kwargs["tools"] = openai_tools
             kwargs["tool_choice"] = "auto"
 
@@ -138,14 +143,17 @@ class OpenAIProvider(LLMProvider):
         if tools:
             openai_tools = []
             for tool in tools:
-                openai_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool["name"],
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("parameters_schema", {}),
-                    },
-                })
+                if "function" in tool:
+                    openai_tools.append(tool)
+                else:
+                    openai_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool.get("description", ""),
+                            "parameters": tool.get("parameters_schema", {}),
+                        },
+                    })
             kwargs["tools"] = openai_tools
             kwargs["tool_choice"] = "auto"
 

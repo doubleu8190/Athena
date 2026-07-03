@@ -13,14 +13,16 @@ The pipeline for each tool call:
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langgraph.types import RunnableConfig, interrupt
 from langchain_core.messages import ToolMessage
 
 from athena.core.graph.agent_state import AgentState
-from athena.core.harness import HarnessEngine
 from athena.logging_config import bind_context, get_logger
+
+if TYPE_CHECKING:
+    from athena.core.harness import HarnessEngine
 from athena.mcp_client.client import MCPClient
 from athena.mcp_client.registry import ToolRegistry
 

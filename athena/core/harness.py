@@ -20,11 +20,13 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from athena.config import Config
-from athena.core.graph.agent_state import AgentState
 from athena.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from athena.core.graph.agent_state import AgentState
 from athena.models import get_session_maker
 from athena.models.harness_rule import RuleType
 

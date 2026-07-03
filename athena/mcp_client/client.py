@@ -17,7 +17,7 @@ from typing import Any
 from athena.config import Config
 from athena.logging_config import get_logger
 from athena.mcp_client.transports import TransportFactory
-from athena.models import get_session, get_session_maker
+from athena.models import get_session_maker
 
 logger = get_logger(__name__)
 
@@ -47,7 +47,7 @@ class ToolResult:
 class ServerConnection:
     """Represents a live connection to a single MCP server."""
 
-    def __init__(self, server_id: str, transport_type: str, connection_config: dict):
+    def __init__(self, server_id: str, transport_type: str, connection_config: dict) -> None:
         self.server_id = server_id
         self.transport_type = transport_type
         self.connection_config = connection_config
@@ -201,7 +201,7 @@ class MCPClient:
     - Stale propagation: immediately marks server tools as stale on disconnect
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.config = config
         from athena.mcp_client.registry import get_tool_registry
         self.registry = get_tool_registry()

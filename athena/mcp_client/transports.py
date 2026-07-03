@@ -12,7 +12,6 @@ import asyncio
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import Any
 
 from athena.logging_config import get_logger
 
@@ -50,7 +49,7 @@ class StdioTransport(MCPTransport):
     skill containers (docker exec / docker attach).
     """
 
-    def __init__(self, command: str | list[str], env: dict[str, str] | None = None):
+    def __init__(self, command: str | list[str], env: dict[str, str] | None = None) -> None:
         self.command = command if isinstance(command, list) else command.split()
         self._extra_env = env or {}
         self._process: asyncio.subprocess.Process | None = None
@@ -193,7 +192,7 @@ class HttpTransport(MCPTransport):
     Uses httpx for async HTTP calls. Suitable for external MCP servers.
     """
 
-    def __init__(self, url: str, auth_config: dict | None = None):
+    def __init__(self, url: str, auth_config: dict | None = None) -> None:
         self.url = url.rstrip("/")
         self.auth_config = auth_config or {}
         self._client = None
@@ -255,7 +254,7 @@ class SSETransport(MCPTransport):
     Uses httpx-sse or similar for streaming connections.
     """
 
-    def __init__(self, url: str, auth_config: dict | None = None):
+    def __init__(self, url: str, auth_config: dict | None = None) -> None:
         self.url = url.rstrip("/")
         self.auth_config = auth_config or {}
         self._client = None

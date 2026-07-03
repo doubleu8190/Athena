@@ -8,6 +8,7 @@ export interface Session {
   createdAt: number
 }
 
+// ── Deprecated: SubtaskEvent kept for backward compat with old SSE events ──
 export interface SubtaskEvent {
   step: number
   tool_name?: string
@@ -20,11 +21,21 @@ export interface SubtaskEvent {
   fallback_tool?: string
 }
 
+export interface ToolCallEvent {
+  tool_name: string
+  tool_call_id?: string
+  args_preview?: string
+  status: 'running' | 'success' | 'error'
+  output_preview?: string
+}
+
 export interface ConfirmRequired {
   task_id: string
   step: number
+  tool_name: string
   risk_level: string
   preview_text: string
+  reason: string
   cooling_off_seconds: number
   timeout_seconds: number
 }
@@ -34,13 +45,15 @@ export interface Message {
   role: 'user' | 'assistant'
   content: string
   timestamp: number
-  // Task execution events attached to assistant messages
+  // Tool-calling agent events (current)
+  toolCalls?: ToolCallEvent[]
+  // Deprecated: subtask events kept for backward compat
   plan?: { task_id: string; subtasks: { step: number; tool_name: string; intent: string }[] }
   subtasks?: SubtaskEvent[]
   confirmRequired?: ConfirmRequired
   // SSE streaming state
   isStreaming?: boolean
-  taskStatus?: 'generating_plan' | 'executing' | 'completed' | 'failed'
+  taskStatus?: 'thinking' | 'generating_plan' | 'executing' | 'completed' | 'failed'
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -160,8 +173,8 @@ export const useChatStore = create<ChatState>()(
           content: '',
           timestamp: Date.now(),
           isStreaming: true,
-          taskStatus: 'generating_plan',
-          subtasks: [],
+          taskStatus: 'thinking',
+          toolCalls: [],
         }
 
         set((s) => ({

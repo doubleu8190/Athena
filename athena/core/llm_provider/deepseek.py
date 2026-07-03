@@ -24,7 +24,7 @@ class DeepSeekProvider(OpenAIProvider):
         api_key_env: str = "DEEPSEEK_API_KEY",
         model: str = "deepseek-v4-pro",
         base_url: str = "https://api.deepseek.com/v1",
-    ):
+    ) -> None:
         super().__init__(
             api_key_env=api_key_env,
             model=model,

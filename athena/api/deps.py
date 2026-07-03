@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from typing import AsyncGenerator
+from typing import TYPE_CHECKING, AsyncGenerator
 
+import redis.asyncio as aioredis
 from fastapi import Depends, Security
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from athena.mcp_client.client import MCPClient
 
 from athena.config import Config, get_config
 from athena.models import get_session_maker
@@ -37,7 +41,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 # ── Redis ─────────────────────────────────────────────────────────────
 
-def get_redis():
+def get_redis() -> aioredis.Redis:
     """FastAPI dependency: get the Redis client."""
     config = get_config()
     return get_redis_client(config.redis_url)
@@ -59,7 +63,7 @@ async def verify_api_key(
 
 # ── MCP Client ──────────────────────────────────────────────────────────
 
-def get_mcp_client_dep():
+def get_mcp_client_dep() -> "MCPClient":
     """FastAPI dependency: get the singleton MCPClient."""
     from athena.mcp_client.client import get_mcp_client
     return get_mcp_client()

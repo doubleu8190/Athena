@@ -7,7 +7,7 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import event, pool
+from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from athena.models.base import Base
@@ -40,7 +40,7 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def do_run_migrations(connection):
+def do_run_migrations(connection: Any) -> None:  # noqa: ANN401
     """Run migrations with the given connection."""
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():

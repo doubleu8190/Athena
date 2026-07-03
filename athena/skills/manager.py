@@ -41,11 +41,11 @@ class SkillManager:
     Communication happens via docker exec / attach over stdin/stdout.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.config = config
         self._docker_client = None
 
-    def _get_docker(self):
+    def _get_docker(self) -> Any:  # noqa: ANN401
         """Lazy-init the Docker SDK client."""
         if self._docker_client is None:
             import docker
@@ -87,7 +87,7 @@ class SkillManager:
 
             # 1. Pull image
             logger.info("skill_pulling_image", image=image_uri)
-            image = docker.images.pull(image_uri, tag=version)
+            docker.images.pull(image_uri, tag=version)
 
             # 2. Prepare container config
             container_config: dict[str, Any] = {

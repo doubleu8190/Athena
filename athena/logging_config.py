@@ -8,7 +8,6 @@ Token-related logs MUST include token_usage sub-object.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 
 import structlog

@@ -2,7 +2,7 @@
 
 import pytest
 
-from athena.core.harness import HarnessEngine, HarnessAction, HarnessResult, RiskLevel
+from athena.core.harness import HarnessEngine, HarnessAction, HarnessResult
 from athena.models.harness_rule import RuleType
 
 

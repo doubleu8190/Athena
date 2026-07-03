@@ -18,12 +18,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from athena.config import Config
+from athena.core.graph.agent_state import AgentState
 from athena.logging_config import get_logger
 from athena.models import get_session_maker
 from athena.models.harness_rule import RuleType
@@ -81,7 +81,7 @@ class HarnessEngine:
         (r"curl\s+.*\|\s*sh", "Pipe to shell from network"),
     ]
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.config = config
         self._rules: list[dict[str, Any]] = []
         self._last_revision: int = 0
@@ -208,13 +208,14 @@ class HarnessEngine:
 
         return result
 
-    async def pre_check(self, tool_name: str, rendered_args: dict[str, Any]) -> HarnessResult:
+    async def pre_check(self, state: AgentState, tool_name: str, rendered_args: dict[str, Any]) -> HarnessResult:
         """Pre-check: validate rendered (actual runtime) arguments.
 
         Called after template rendering but before tool invocation.
         Checks the actual parameter values, not template variables.
         """
-        action = HarnessAction(tool_name=tool_name, arguments=rendered_args)
+        user_id = state.get("user_id", "unknown")
+        action = HarnessAction(user_id=user_id, tool_name=tool_name, arguments=rendered_args)
         return await self.evaluate(action)
 
     def get_risk_level(
@@ -552,3 +553,40 @@ class HarnessEngine:
         result.timeout_seconds = config.get("timeout_seconds", result.timeout_seconds)
         result.requires_confirmation = True
         return result
+
+
+# ── Process-wide singleton ──────────────────────────────────────────────
+
+_harness: HarnessEngine | None = None
+
+
+async def get_harness() -> HarnessEngine:
+    """Return the process-wide singleton HarnessEngine (lazy-init + auto-start).
+
+    There is exactly one HarnessEngine per process. It holds cached safety
+    rules, a background DB poll loop, and risk-assessment logic — all of
+    which are configuration-derived, not per-request. Sharing a single
+    instance avoids redundant rule reloads, duplicate poll tasks, and
+    repeated start/stop churn across HTTP requests.
+
+    The singleton is created and started on first call. Subsequent calls
+    return the same running instance. Use ``stop_harness()`` during
+    application shutdown to clean up the background poll task.
+    """
+    global _harness
+    if _harness is not None:
+        return _harness
+
+    from athena.config import get_config
+
+    _harness = HarnessEngine(get_config())
+    await _harness.start()
+    return _harness
+
+
+async def stop_harness() -> None:
+    """Stop and tear down the process-wide HarnessEngine singleton."""
+    global _harness
+    if _harness is not None:
+        await _harness.stop()
+        _harness = None

@@ -14,13 +14,10 @@ remain disabled.
 
 from __future__ import annotations
 
-import json
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from athena.logging_config import get_logger
-from athena.models import get_session, get_session_maker
 
 logger = get_logger(__name__)
 
@@ -49,7 +46,7 @@ class ToolRegistry:
     resolution using a 6-level tiebreaker.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._tools: dict[str, RegisteredTool] = {}  # keyed by tool.id
         self._tools_by_name_server: dict[tuple[str, str], str] = {}  # (name, server_id) -> tool.id
 
@@ -69,7 +66,6 @@ class ToolRegistry:
         from athena.mcp_client.client import ToolDef
 
         registered_ids = []
-        db_path = ""  # Will be set from config — here we use direct DB access
         # For now, use in-memory only; DB sync happens via seed loader and reconnects
 
         for tool in tools:
@@ -302,6 +298,40 @@ class ToolRegistry:
             }
             for t in tools
         ]
+
+    def export_for_llm(self) -> list[dict[str, Any]]:
+        """Export active tools in OpenAI function-calling format.
+
+        Each tool is wrapped as ``{"type": "function", "function": {...}}``
+        with ``name``, ``description``, and ``parameters`` (parsed from the
+        stored JSON Schema string).
+
+        Returns:
+            List of tool definitions ready for ``llm.generate(tools=...)``.
+        """
+        import json as _json
+
+        tools = self.get_active_tools()
+        result: list[dict[str, Any]] = []
+        for t in tools:
+            params: dict[str, Any] = {}
+            if t.parameters_schema:
+                try:
+                    params = _json.loads(t.parameters_schema)
+                except (_json.JSONDecodeError, TypeError):
+                    params = {"type": "object", "properties": {}}
+            else:
+                params = {"type": "object", "properties": {}}
+
+            result.append({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description or "",
+                    "parameters": params,
+                },
+            })
+        return result
 
 
 # ── Singleton ───────────────────────────────────────────────────────────────

@@ -29,7 +29,7 @@ class OpenAIProvider(LLMProvider):
         api_key_env: str = "OPENAI_API_KEY",
         model: str = "gpt-4o",
         base_url: str | None = None,
-    ):
+    ) -> None:
         self._api_key_env = api_key_env
         self._model = model
         self._base_url = base_url

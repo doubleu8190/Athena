@@ -6,7 +6,7 @@ avoids "database is locked" errors while WAL enables concurrent reads.
 
 from __future__ import annotations
 
-from sqlalchemy import event, text
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -20,7 +20,7 @@ _engines: dict[str, object] = {}
 _session_makers: dict[str, object] = {}
 
 
-def get_engine(db_path: str):
+def get_engine(db_path: str) -> AsyncEngine:
     """Get or create an async SQLAlchemy engine for the given database path.
 
     Uses StaticPool — one connection per process — which is correct for
@@ -39,7 +39,7 @@ def get_engine(db_path: str):
 
         # Enable WAL mode and foreign keys on every connection
         @event.listens_for(engine.sync_engine, "connect")
-        def set_pragmas(dbapi_connection, connection_record):
+        def set_pragmas(dbapi_connection: Any, connection_record: Any) -> None:  # noqa: ANN401
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL;")
             cursor.execute("PRAGMA foreign_keys=ON;")

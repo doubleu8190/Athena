@@ -16,18 +16,20 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+import redis.asyncio as aioredis
 
 from athena.config import Config
 from athena.logging_config import bind_context, get_logger
 from athena.models import get_session_maker
 
+if TYPE_CHECKING:
+    pass
+
 logger = get_logger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────
-DEFAULT_K_ROUNDS = 10
-TOKEN_WINDOW_THRESHOLD = 0.80  # Compress when > 80% of window
-MAX_SUMMARY_TOKENS = 2000  # Recursively compress summary when it exceeds this
 SESSION_IDLE_TIMEOUT_MINUTES = 30
 SESSION_EXPIRE_HOURS = 24
 
@@ -55,7 +57,7 @@ class ContextManager:
     Context is stored in Redis (hot) with SQLite snapshot (cold backup).
     """
 
-    def __init__(self, config: Config, redis_client=None):
+    def __init__(self, config: Config, redis_client: aioredis.Redis | None = None) -> None:
         self.config = config
         if redis_client is not None:
             self.redis = redis_client
@@ -297,7 +299,7 @@ class ContextManager:
         self,
         ctx: SessionContext,
         step: int,
-        output: Any,
+        output: Any,  # noqa: ANN401
         completed: bool = True,
     ) -> None:
         """Update task context after a subtask execution step.
@@ -365,178 +367,6 @@ class ContextManager:
             "token_count_estimate": ctx.token_count_estimate,
         }
 
-    # ── Token window management ───────────────────────────────────────
-
-    async def compress_if_needed(
-        self,
-        ctx: SessionContext,
-        model_limit: int = 128000,
-    ) -> bool:
-        """Check token usage and compress if over 80% of model limit.
-
-        Two-phase compression:
-        1. Message compression: summarize oldest messages beyond last K
-           rounds, keep recent K rounds intact.
-        2. Summary compression: when the accumulated conversation_summary
-           itself exceeds MAX_SUMMARY_TOKENS, recursively compress it via
-           _summarize_summary() — creating a hierarchical "forgetting
-           curve" where older conversations fade gracefully.
-
-        Returns True if any compression was performed.
-        """
-        threshold = int(model_limit * TOKEN_WINDOW_THRESHOLD)
-        compressed = False
-
-        # Estimate current tokens
-        ctx.token_count_estimate = self._estimate_total_tokens(ctx)
-
-        # ── Phase 1: Message compression ──────────────────────────────
-        if ctx.token_count_estimate >= threshold:
-            k = DEFAULT_K_ROUNDS
-            total_msgs = len(ctx.message_history)
-            if total_msgs > k * 2:  # Enough to compress
-                to_compress = ctx.message_history[: total_msgs - k]
-                to_keep = ctx.message_history[total_msgs - k:]
-
-                summary = await self._summarize(to_compress)
-
-                # Merge with existing summary
-                if ctx.conversation_summary:
-                    ctx.conversation_summary = f"{ctx.conversation_summary}\n{summary}"
-                else:
-                    ctx.conversation_summary = summary
-
-                ctx.message_history = to_keep
-                compressed = True
-
-                logger.info(
-                    "context_compressed_messages",
-                    session_id=ctx.session_id,
-                    removed_messages=len(to_compress),
-                )
-
-        # ── Phase 2: Summary recursive compression ─────────────────────
-        # Guard against summary bloat: when the accumulated summary
-        # exceeds its budget, re-summarize it.  This runs even if
-        # Phase 1 didn't fire — the summary may already be too large
-        # from prior compressions.
-        summary_tokens = len(ctx.conversation_summary) // 4
-        if summary_tokens > MAX_SUMMARY_TOKENS:
-            logger.info(
-                "context_compressing_summary",
-                session_id=ctx.session_id,
-                summary_tokens_before=summary_tokens,
-            )
-            ctx.conversation_summary = await self._summarize_summary(
-                ctx.conversation_summary
-            )
-            compressed = True
-            logger.info(
-                "context_compressed_summary",
-                session_id=ctx.session_id,
-                summary_tokens_after=len(ctx.conversation_summary) // 4,
-            )
-
-        # Re-estimate tokens if we changed anything
-        if compressed:
-            ctx.token_count_estimate = self._estimate_total_tokens(ctx)
-            logger.info(
-                "context_compressed",
-                session_id=ctx.session_id,
-                new_token_estimate=ctx.token_count_estimate,
-            )
-
-        return compressed
-
-    async def _summarize(self, messages: list[dict[str, Any]]) -> str:
-        """Generate a one-sentence summary of a set of messages using LLM."""
-        try:
-            from athena.core.llm_provider.manager import get_llm_manager
-
-            llm = get_llm_manager()
-
-            conversation_text = "\n".join(
-                f"{m['role']}: {m.get('content', '')[:200]}" for m in messages
-            )
-
-            response = await llm.generate(
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "Summarize the following conversation into 1-2 sentences, "
-                        "capturing the key topics and actions:\n\n"
-                        f"{conversation_text}"
-                    ),
-                }],
-                tools=None,
-                max_tokens=200,
-                temperature=0.3,
-            )
-            return response.text.strip()
-        except Exception as e:
-            logger.warning("summarizer_failed", error=str(e))
-            # Fallback: use first and last message
-            first = messages[0].get("content", "")[:100] if messages else ""
-            last = messages[-1].get("content", "")[:100] if messages else ""
-            return f"Conversation about: {first} ... {last}"
-
-    async def _summarize_summary(self, summary_text: str) -> str:
-        """Recursively compress an overgrown conversation_summary.
-
-        Called when the accumulated summary exceeds MAX_SUMMARY_TOKENS.
-        Produces a condensed version that preserves key facts while
-        dropping stale/low-importance details — creating a natural
-        "forgetting curve" where older conversations fade gracefully.
-
-        Falls back to truncation (keep last N chars) if LLM call fails.
-        """
-        try:
-            from athena.core.llm_provider.manager import get_llm_manager
-
-            llm = get_llm_manager()
-
-            response = await llm.generate(
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "The following is a running summary of a long conversation "
-                        "that has grown too large. Compress it into a concise summary "
-                        "(max 500 words) that preserves:\n"
-                        "- Key decisions made and their rationale\n"
-                        "- Important facts and user preferences mentioned\n"
-                        "- Active tasks or ongoing work\n"
-                        "- Critical context needed to continue the conversation\n\n"
-                        "Drop redundant, stale, or low-importance details. "
-                        "Older information can be more aggressively compressed "
-                        "than recent information.\n\n"
-                        f"{summary_text}"
-                    ),
-                }],
-                tools=None,
-                max_tokens=800,
-                temperature=0.3,
-            )
-            return response.text.strip()
-        except Exception as e:
-            logger.warning("summarize_summary_failed", error=str(e))
-            # Fallback: truncate to last ~2000 chars (~500 tokens)
-            max_chars = 2000
-            if len(summary_text) <= max_chars:
-                return summary_text
-            truncated = summary_text[-max_chars:]
-            return f"[Truncated older context]\n{truncated}"
-
-    def _estimate_total_tokens(self, ctx: SessionContext) -> int:
-        """Estimate total token count for the conversation."""
-        total = 0
-        for msg in ctx.message_history:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total += len(content) // 4  # Rough estimate: 4 chars/token
-        if ctx.conversation_summary:
-            total += len(ctx.conversation_summary) // 4
-        return total
-
     # ── Session lifecycle ─────────────────────────────────────────────
 
     async def expire_idle_sessions(self) -> int:
@@ -546,7 +376,6 @@ class ContextManager:
         """
         db_path = self.config.sqlite_db_path
         session_maker = get_session_maker(db_path)
-        expiry_cutoff = datetime.now(timezone.utc)
         # In production this would use a proper timestamp comparison
 
         expired = 0

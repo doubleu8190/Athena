@@ -14,6 +14,8 @@ FastMCP automatically handles:
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastmcp import FastMCP
 
 from athena.tools.weather import query_weather as _query_weather
@@ -31,7 +33,7 @@ mcp = FastMCP("Athena Weather", version="0.1.0")
 async def query_weather(
     city: str,
     date: str | None = None,
-):
+) -> dict[str, Any]:
     """Query weather for a city, optionally filtered by date."""
     return await _query_weather(city=city, date=date)
 

@@ -6,7 +6,6 @@ Each skill gets its own ACL file at /etc/squid/acl/<skill_id>.conf.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from athena.logging_config import get_logger

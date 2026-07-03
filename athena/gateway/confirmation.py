@@ -13,7 +13,6 @@ import asyncio
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Any
 
 from athena.gateway.base import ConfirmationRequest
 from athena.logging_config import get_logger
@@ -42,7 +41,7 @@ class ConfirmationManager:
     - Nonce validation for replay protection
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._confirmations: dict[str, ConfirmationState] = {}
         self._nonces_seen: set[str] = set()
 

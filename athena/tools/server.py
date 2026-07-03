@@ -14,6 +14,8 @@ FastMCP automatically handles:
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastmcp import FastMCP
 
 from athena.tools.filesystem import (
@@ -22,7 +24,6 @@ from athena.tools.filesystem import (
     file_delete as _file_delete,
     file_search as _file_search,
 )
-from athena.tools.web_search import web_search as _web_search
 
 mcp = FastMCP("Athena Built-in Tools", version="0.2.0")
 
@@ -39,7 +40,7 @@ mcp = FastMCP("Athena Built-in Tools", version="0.2.0")
     name="file_read",
     description="Read the contents of a file. Path must be absolute.",
 )
-async def file_read(path: str):
+async def file_read(path: str) -> dict[str, Any]:
     return await _file_read(path=path)
 
 
@@ -52,7 +53,7 @@ async def file_write(
     path: str,
     content: str,
     idempotency_key: str | None = None,
-):
+) -> dict[str, Any]:
     return await _file_write(
         path=path, content=content,
         idempotency_key=idempotency_key,
@@ -67,7 +68,7 @@ async def file_write(
 async def file_delete(
     path: str,
     idempotency_key: str | None = None,
-):
+) -> dict[str, Any]:
     return await _file_delete(
         path=path,
         idempotency_key=idempotency_key,
@@ -84,7 +85,7 @@ async def file_search(
     recursive: bool = True,
     match_type: str = "name",
     max_results: int = 50,
-):
+) -> dict[str, Any]:
     return await _file_search(
         pattern=pattern,
         path=path,

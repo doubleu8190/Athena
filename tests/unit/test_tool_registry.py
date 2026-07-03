@@ -2,7 +2,7 @@
 
 import pytest
 
-from athena.mcp_client.registry import ToolRegistry, RegisteredTool
+from athena.mcp_client.registry import ToolRegistry
 from athena.mcp_client.client import ToolDef
 
 

@@ -10,13 +10,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func, and_, tuple_
+from sqlalchemy import select, func, tuple_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from athena.api.deps import get_config_dep, get_db, get_mcp_client_dep, verify_api_key
-from athena.config import Config
 from athena.logging_config import get_logger
+
+from athena.mcp_client.client import MCPClient
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["admin"])
@@ -24,11 +26,11 @@ router = APIRouter(tags=["admin"])
 
 # ── Response helpers ──────────────────────────────────────────────────
 
-def success(data: Any = None, message: str = "success") -> dict:
+def success(data: Any = None, message: str = "success") -> dict[str, Any]:  # noqa: ANN401
     return {"code": 0, "message": message, "data": data}
 
 
-def error(code: int, message: str, detail: str = "") -> dict:
+def error(code: int, message: str, detail: str = "") -> dict[str, Any]:
     return {"code": code, "message": message, "detail": detail, "data": None}
 
 
@@ -48,10 +50,10 @@ class MCPServerStatusUpdate(BaseModel):
 
 @router.get("/mcp-servers")
 async def list_mcp_servers(
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-    mcp_client = Depends(get_mcp_client_dep),
-):
+    mcp_client: MCPClient = Depends(get_mcp_client_dep),
+) -> dict[str, Any]:
     """List all registered MCP servers."""
     from athena.models.mcp_server import MCPServer
 
@@ -77,10 +79,10 @@ async def list_mcp_servers(
 @router.post("/mcp-servers")
 async def register_mcp_server(
     body: MCPServerCreate,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-    mcp_client = Depends(get_mcp_client_dep),
-):
+    mcp_client: MCPClient = Depends(get_mcp_client_dep),
+) -> dict[str, Any]:
     """Register a new external MCP server."""
     from athena.models.mcp_server import MCPServer
 
@@ -113,10 +115,10 @@ async def register_mcp_server(
 @router.delete("/mcp-servers/{server_id}")
 async def remove_mcp_server(
     server_id: str,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-    mcp_client = Depends(get_mcp_client_dep),
-):
+    mcp_client: MCPClient = Depends(get_mcp_client_dep),
+) -> dict[str, Any]:
     """Remove a registered MCP server."""
     from athena.models.mcp_server import MCPServer
 
@@ -138,10 +140,10 @@ async def remove_mcp_server(
 async def update_mcp_server_status(
     server_id: str,
     body: MCPServerStatusUpdate,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-    mcp_client = Depends(get_mcp_client_dep),
-):
+    mcp_client: MCPClient = Depends(get_mcp_client_dep),
+) -> dict[str, Any]:
     """Enable or disable an MCP server.
 
     Setting enabled=True will actively connect the server.
@@ -182,9 +184,9 @@ class SkillInstallRequest(BaseModel):
 
 @router.get("/skills")
 async def list_skills(
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """List all installed skills."""
     from athena.models.skill import Skill as SkillModel
 
@@ -210,9 +212,9 @@ async def list_skills(
 @router.post("/skills")
 async def install_skill(
     body: SkillInstallRequest,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Install a new Skill (Docker image + MCP container)."""
     skill_id = f"skill_{uuid.uuid4().hex[:12]}"
 
@@ -235,9 +237,9 @@ async def install_skill(
 @router.delete("/skills/{skill_id}")
 async def uninstall_skill(
     skill_id: str,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Uninstall a Skill."""
     from athena.models.skill import Skill as SkillModel
 
@@ -262,9 +264,9 @@ class DeviceRegisterRequest(BaseModel):
 
 @router.get("/devices")
 async def list_devices(
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """List all registered devices."""
     from athena.models.device import Device
 
@@ -288,9 +290,9 @@ async def list_devices(
 @router.post("/devices")
 async def register_device(
     body: DeviceRegisterRequest,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Register a new device."""
     from athena.models.device import Device
 
@@ -314,9 +316,9 @@ async def register_device(
 @router.delete("/devices/{device_id}")
 async def deregister_device(
     device_id: str,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Deregister a device."""
     from athena.models.device import Device
 
@@ -335,9 +337,9 @@ async def deregister_device(
 
 @router.get("/harness/rules")
 async def list_harness_rules(
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """List all harness rules."""
     from athena.models.harness_rule import HarnessRule
 
@@ -376,9 +378,9 @@ class HarnessRuleCreate(BaseModel):
 @router.post("/harness/rules")
 async def create_harness_rule(
     body: HarnessRuleCreate,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Create a new harness rule."""
     from athena.models.harness_rule import HarnessRule
 
@@ -427,9 +429,9 @@ class HarnessRuleUpdate(BaseModel):
 async def update_harness_rule(
     rule_id: str,
     body: HarnessRuleUpdate,
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Update a harness rule."""
     from athena.models.harness_rule import HarnessRule
 
@@ -456,9 +458,9 @@ async def update_harness_rule(
 
 @router.post("/harness/reload")
 async def reload_harness_rules(
-    request: Any = None,
+    request: Any = None,  # noqa: ANN401
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Force immediate reload of harness rules cache."""
     # The actual reload is triggered by the HarnessEngine
     logger.info("harness_reload_requested")
@@ -469,9 +471,9 @@ async def reload_harness_rules(
 
 @router.post("/memories/resync")
 async def resync_memories(
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Trigger full vector re-sync for all memories."""
     from athena.models.user_memory import UserMemory
     from sqlalchemy import update
@@ -515,9 +517,9 @@ async def list_audit_logs(
     event_type: str | None = Query(None),
     cursor: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Search audit logs with cursor-based pagination.
 
     Cursor is a composite of ``{iso_timestamp}__{event_id}`` from the last
@@ -566,9 +568,9 @@ async def list_audit_logs(
 
 @router.get("/dashboard")
 async def get_dashboard(
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Get real-time dashboard metrics summary."""
     from athena.models.task import Task
     from athena.models.subtask_execution import SubtaskExecution
@@ -615,9 +617,9 @@ async def get_dashboard(
 
 @router.get("/im/status")
 async def get_im_status(
-    request: Any = None,
+    request: Any = None,  # noqa: ANN401
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Get status of all IM channel adapters."""
     # Status is provided by the GatewayManager
     return success({
@@ -641,7 +643,7 @@ async def get_im_status(
 @router.get("/im/wechat/qrcode")
 async def get_wechat_qrcode(
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Get WeChat QR code for login (base64-encoded PNG)."""
     return success({"qrcode_base64": "not_implemented"}, "QR code generation not yet available")
 
@@ -649,7 +651,7 @@ async def get_wechat_qrcode(
 @router.get("/im/wechat/status")
 async def get_wechat_status(
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Get WeChat adapter connection status."""
     return success({
         "status": "disconnected",
@@ -661,6 +663,6 @@ async def get_wechat_status(
 @router.post("/im/wechat/reconnect")
 async def reconnect_wechat(
     api_key: str = Depends(verify_api_key),
-):
+) -> dict[str, Any]:
     """Force WeChat re-authentication."""
     return success(None, "Re-authentication trigger sent")

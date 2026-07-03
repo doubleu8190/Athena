@@ -72,6 +72,7 @@ class LLMConfig:
     """LLM configuration from llm.yaml."""
 
     default_provider: str = "openai"
+    default_summarize_provider: str = ""
     fallback_chain: list[str] = field(default_factory=list)
     providers: dict[str, LLMProviderConfig] = field(default_factory=dict)
 
@@ -214,6 +215,7 @@ class Config:
             )
         return LLMConfig(
             default_provider=data.get("default_provider", "openai"),
+            default_summarize_provider=data.get("default_summarize_provider", ""),
             fallback_chain=data.get("fallback_chain", []),
             providers=providers,
         )

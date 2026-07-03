@@ -8,7 +8,7 @@ from __future__ import annotations
 from athena.celery_app import celery_app
 
 
-def main():
+def main() -> None:
     """Entry point for Celery worker."""
     celery_app.start()
 

@@ -20,18 +20,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    before_sleep_log,
-)
 
 from athena.config import Config
 from athena.core.context import ContextManager, SessionContext
-from athena.core.harness import HarnessEngine, HarnessAction, HarnessResult, RiskLevel
+from athena.core.harness import HarnessEngine, HarnessResult, RiskLevel
 from athena.core.planner import TaskPlan, SubtaskDef
-from athena.core.sandbox import render_args
+from athena.core.sandbox import render_args, normalize_output
 from athena.core.task_context import TaskContext
 from athena.logging_config import bind_context, get_logger
 from athena.models import get_session_maker
@@ -62,7 +56,7 @@ class Executor:
         context_manager: ContextManager,
         harness_engine: HarnessEngine,
         mcp_client: MCPClient | None = None,
-    ):
+    ) -> None:
         self.config = config
         self.context_manager = context_manager
         self.harness = harness_engine
@@ -145,10 +139,15 @@ class Executor:
             results.append(result)
 
             if result["status"] == "success":
-                task_ctx.complete_step(subtask.step, result.get("output"))
+                # Normalize raw MCP output: unwrap content blocks, parse JSON
+                # so downstream subtask templates can use precise field
+                # access like {{ step1.output.return[0].location }}
+                raw_output = result.get("output")
+                normalized = normalize_output(raw_output)
+                task_ctx.complete_step(subtask.step, normalized)
                 # Update session snapshot
                 session_ctx.current_task["completed_steps"].append(subtask.step)
-                session_ctx.current_task["step_outputs"][f"step{subtask.step}"] = result.get("output")
+                session_ctx.current_task["step_outputs"][f"step{subtask.step}"] = normalized
 
             elif result["status"] in ("abort", "failed"):
                 abort_count += 1
@@ -164,7 +163,8 @@ class Executor:
                 logger.info("subtask_skipped", step=subtask.step)
 
             elif result["status"] == "fallback_used":
-                task_ctx.complete_step(subtask.step, result.get("output"))
+                normalized = normalize_output(result.get("output"))
+                task_ctx.complete_step(subtask.step, normalized)
                 session_ctx.current_task["completed_steps"].append(subtask.step)
 
             # Write snapshot after each step (atomic with subtask_execution in DB)
@@ -287,8 +287,6 @@ class Executor:
         tool = self.tool_registry.get_tool_by_name(subtask.tool_name)
         server_id = tool.source_server_id if tool else "builtin-core"
 
-        idempotency_key = f"{task_ctx.task_id}:{subtask.step}:0"
-
         last_error = None
         for attempt in range(MAX_RETRIES + 1):  # initial + 5 retries
             try:
@@ -296,7 +294,6 @@ class Executor:
                     server_id=server_id,
                     tool_name=subtask.tool_name,
                     arguments=rendered_args,
-                    preview=False,
                 )
 
                 if result.success:
@@ -390,9 +387,6 @@ class Executor:
             }
 
         elif strategy == "fallback":
-            # Check fallback depth limit
-            fallback_depth = 0
-
             # 1. Try static fallback_tool from plan
             if subtask.fallback_tool:
                 fallback_tool_name = subtask.fallback_tool.get("tool_name")

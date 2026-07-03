@@ -8,14 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
-import os
-from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from athena.api.deps import get_config_dep
-from athena.config import Config
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -26,7 +22,7 @@ router = APIRouter(tags=["device"])
 async def device_websocket(
     websocket: WebSocket,
     device_id: str,
-):
+) -> None:
     """WebSocket endpoint for Device Agent connections.
 
     Authentication: PSK challenge-response on connect.
@@ -79,7 +75,6 @@ async def device_websocket(
             data = await websocket.receive_json()
             msg_id = data.get("id", "")
             method = data.get("method", "")
-            params = data.get("params", {})
 
             logger.debug(
                 "device_command",

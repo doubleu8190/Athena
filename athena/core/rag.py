@@ -32,7 +32,7 @@ class EmbeddingProvider:
     The model is loaded lazily on first use.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self._config = config
         self._local_model = None  # Lazy-loaded
 
@@ -63,13 +63,13 @@ class RAGManager:
     IDs: memory_id (used as Chroma document ID = vector_id)
     """
 
-    def __init__(self, config: Config, embedding_provider: EmbeddingProvider):
+    def __init__(self, config: Config, embedding_provider: EmbeddingProvider) -> None:
         self._config = config
         self._embedding = embedding_provider
         self._client = None
         self._collection = None
 
-    def _ensure_collection(self):
+    def _ensure_collection(self) -> None:
         """Lazy-init Chroma client and collection on first use."""
         if self._collection is not None:
             return

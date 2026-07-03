@@ -6,10 +6,6 @@ Commands: run_script, screenshot, simulate_keystroke.
 
 from __future__ import annotations
 
-import os
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Any
 
 from athena.logging_config import get_logger
@@ -24,7 +20,7 @@ class HostAgent:
     This class provides the command interface for the Athena Core.
     """
 
-    def __init__(self, device_id: str, psk: str):
+    def __init__(self, device_id: str, psk: str) -> None:
         self.device_id = device_id
         self.psk = psk
         self._connected = False
@@ -37,7 +33,7 @@ class HostAgent:
         self,
         script: str,
         language: str = "bash",
-        **kwargs,
+        **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Execute a script on the host machine.
 
@@ -51,7 +47,7 @@ class HostAgent:
             "device_id": self.device_id,
         }
 
-    async def screenshot(self, **kwargs) -> dict[str, Any]:
+    async def screenshot(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         """Capture a screenshot of the host machine.
 
         Risk level: low (read-only).
@@ -65,7 +61,7 @@ class HostAgent:
     async def simulate_keystroke(
         self,
         keys: str,
-        **kwargs,
+        **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Simulate keyboard input on the host machine.
 

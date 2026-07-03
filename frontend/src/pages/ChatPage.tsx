@@ -20,7 +20,7 @@ export default function ChatPage() {
     if (!id) return EMPTY_MESSAGES
     return s.messages[id] ?? EMPTY_MESSAGES
   })
-  const { isStreaming, startStream, stopStream } = useSSE()
+  const { isStreaming, startStream, stopStream, resumeStream } = useSSE()
   const initialized = useRef(false)
 
   // Create initial session if none exists (must be in useEffect, NOT during render)
@@ -46,7 +46,7 @@ export default function ChatPage() {
           </div>
         ) : (
           <>
-            <MessageList messages={messages} sessionId={activeSessionId} />
+            <MessageList messages={messages} sessionId={activeSessionId} onResume={resumeStream} />
             <ChatInput
               onSend={startStream}
               onStop={stopStream}

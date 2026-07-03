@@ -6,7 +6,7 @@ Devices must be on the same LAN and ADB-connectable.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from athena.logging_config import get_logger
@@ -31,7 +31,7 @@ class ADBManager:
     adb_install, adb_tap.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._devices: dict[str, ADBDevice] = {}
 
     # ── Device registry ───────────────────────────────────────────────
@@ -85,7 +85,7 @@ class ADBManager:
         self,
         serial: str,
         command: str,
-        **kwargs,
+        **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Execute a shell command on an Android device.
 
@@ -115,7 +115,7 @@ class ADBManager:
     async def adb_screenshot(
         self,
         serial: str,
-        **kwargs,
+        **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Capture a screenshot from an Android device.
 
@@ -123,13 +123,8 @@ class ADBManager:
         """
         import asyncio
         import base64
-        import tempfile
-        from pathlib import Path
 
         try:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                tmp_path = Path(tmp.name)
-
             proc = await asyncio.create_subprocess_exec(
                 "adb", "-s", serial, "exec-out", "screencap", "-p",
                 stdout=asyncio.subprocess.PIPE,
@@ -151,7 +146,7 @@ class ADBManager:
         self,
         serial: str,
         apk_path: str,
-        **kwargs,
+        **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Install an APK on an Android device.
 
@@ -181,7 +176,7 @@ class ADBManager:
         serial: str,
         x: int,
         y: int,
-        **kwargs,
+        **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Simulate a tap on an Android device screen.
 

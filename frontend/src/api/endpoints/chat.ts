@@ -11,7 +11,6 @@ export interface MessageRequest {
 
 export interface ConfirmRequest {
   task_id: string
-  step: number
   approved: boolean
 }
 
@@ -30,8 +29,23 @@ export function sendMessage(
   })
 }
 
-// ── Confirm subtask ────────────────────────────────────────────────────
+// ── Confirm subtask (JSON, legacy) ──────────────────────────────────────
 
 export function confirmSubtask(body: ConfirmRequest): Promise<{ code: number; message: string }> {
   return api.post('/im/web/message/confirm', body)
+}
+
+// ── Confirm + resume SSE stream ──────────────────────────────────────────
+
+export function confirmAndStream(
+  body: ConfirmRequest,
+  onEvent: SSEEventCallback,
+  onDone?: () => void,
+  onError?: (err: Error) => void
+): { abort: () => void } {
+  return createSSEClient('/api/v1/im/web/message/confirm', body, {
+    onEvent,
+    onDone,
+    onError,
+  })
 }

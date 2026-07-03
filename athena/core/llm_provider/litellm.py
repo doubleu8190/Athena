@@ -6,10 +6,7 @@ Uses the OpenAI-compatible API format.
 
 from __future__ import annotations
 
-import os
-from typing import Any
 
-from athena.core.llm_provider.base import LLMProvider, LLMResponse
 from athena.core.llm_provider.openai import OpenAIProvider
 from athena.logging_config import get_logger
 
@@ -28,7 +25,7 @@ class LiteLLMProvider(OpenAIProvider):
         api_key_env: str = "LITELLM_API_KEY",
         model: str = "gpt-4o",
         base_url: str = "http://litellm:4000",
-    ):
+    ) -> None:
         super().__init__(
             api_key_env=api_key_env,
             model=model,

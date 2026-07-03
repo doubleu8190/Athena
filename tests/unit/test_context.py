@@ -1,6 +1,5 @@
 """Tests for Context Manager — session lifecycle and context building."""
 
-import pytest
 
 from athena.core.context import ContextManager, SessionContext
 
@@ -26,39 +25,6 @@ class TestSessionId:
         id1 = ContextManager.make_session_id("user1", "telegram", "111")
         id2 = ContextManager.make_session_id("user1", "telegram", "222")
         assert id1 != id2
-
-
-class TestTokenEstimation:
-    """Test token counting and compression threshold."""
-
-    def test_empty_context_estimate(self):
-        """Empty context should have near-zero token estimate."""
-        ctx = SessionContext(
-            session_id="test",
-            user_id="user1",
-            channel="web",
-            chat_id="chat1",
-        )
-        from athena.core.context import ContextManager
-        mgr = object.__new__(ContextManager)  # Skip init for unit test
-        estimate = mgr._estimate_total_tokens(ctx)
-        assert estimate == 0
-
-    def test_history_adds_tokens(self):
-        """Adding messages should increase token estimate."""
-        ctx = SessionContext(
-            session_id="test",
-            user_id="user1",
-            channel="web",
-            chat_id="chat1",
-        )
-        ctx.message_history = [
-            {"role": "user", "content": "Hello, this is a test message with some length." * 10},
-        ]
-        from athena.core.context import ContextManager
-        mgr = object.__new__(ContextManager)
-        estimate = mgr._estimate_total_tokens(ctx)
-        assert estimate > 0
 
 
 class TestSnapshot:

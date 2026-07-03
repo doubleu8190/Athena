@@ -13,7 +13,6 @@ import asyncio
 import base64
 import json
 import os
-import secrets
 from datetime import datetime, timezone
 
 from athena.config import Config
@@ -37,7 +36,7 @@ class TelegramAdapter(BaseIMAdapter):
     Messages are pulled from api.telegram.org via HTTPS.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.config = config
         self._token = get_secret("TELEGRAM_BOT_TOKEN", "")
         self._poll_timeout = int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "30"))
@@ -158,7 +157,6 @@ class TelegramAdapter(BaseIMAdapter):
         from_user = message.get("from", {})
         chat = message.get("chat", {})
         user_id = str(from_user.get("id", ""))
-        chat_id = str(chat.get("id", ""))
         content = message.get("text", message.get("caption", ""))
         chat_type = chat.get("type", "private")  # "private" | "group" | "channel"
 
@@ -219,10 +217,6 @@ class TelegramAdapter(BaseIMAdapter):
         try:
             cb_data_b64 = callback_query.get("data", "")
             cb_data = json.loads(base64.b64decode(cb_data_b64).decode())
-
-            # Acknowledge callback
-            from_user = callback_query.get("from", {})
-            user_id = str(from_user.get("id", ""))
 
             if cb_data.get("action") == "confirm_subtask":
                 # Handle confirmation (implementation in confirmation.py)

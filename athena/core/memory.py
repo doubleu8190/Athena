@@ -55,7 +55,7 @@ class MemoryStore:
     - delete: mark for deletion + enqueue vector deletion
     """
 
-    def __init__(self, config: Config, rag_manager: RAGManager | None = None):
+    def __init__(self, config: Config, rag_manager: RAGManager | None = None) -> None:
         self.config = config
         self._rag_manager = rag_manager
 

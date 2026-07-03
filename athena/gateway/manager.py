@@ -58,7 +58,7 @@ class GatewayManager:
     - Status aggregation for admin API
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.config = config
         self._adapters: dict[str, BaseIMAdapter] = {}
         self._pending_confirmations: dict[str, ConfirmationRequest] = {}
@@ -141,7 +141,7 @@ class GatewayManager:
         context_mgr = ContextManager(self.config)
 
         # Get or create session
-        session_ctx = await context_mgr.get_or_create_session(
+        await context_mgr.get_or_create_session(
             unified_msg.user_id,
             unified_msg.channel,
             unified_msg.chat_id or unified_msg.user_id,
@@ -171,7 +171,7 @@ class GatewayManager:
         user_id: str,
         chat_id: str,
         text: str,
-        **kwargs,
+        **kwargs: Any,  # noqa: ANN401
     ) -> str | None:
         """Send a message through a specific channel adapter."""
         adapter = self._adapters.get(channel)

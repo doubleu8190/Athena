@@ -8,12 +8,9 @@ streamed via Server-Sent Events (SSE).
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
-from typing import AsyncGenerator
 
 from athena.config import Config
-from athena.core.message import UnifiedMessage
 from athena.gateway.base import (
     AdapterInfo,
     AdapterState,
@@ -32,7 +29,7 @@ class WebAdapter(BaseIMAdapter):
     SSE is used for streaming execution progress and final replies.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.config = config
         self._state = AdapterState.CONNECTED
         self._last_heartbeat = datetime.now(timezone.utc)

@@ -40,9 +40,17 @@ PLANNER_SYSTEM_PROMPT = """You are Athena's task planner. Your job is to decompo
    - "skip" for non-critical steps that can be safely skipped
    - "fallback" when you specify a fallback_tool
 6. Use `{{stepN.output}}` in arguments to reference previous step outputs.
+   Tool outputs are structured JSON objects (parsed automatically from MCP responses).
+   **CRITICAL — extract exact fields**: Never pass the entire step output as a
+   downstream parameter unless the downstream tool truly expects the full object.
+   Instead, navigate into the output to extract the exact value needed:
+   - `{{step1.output.return[0].location}}` to get a coordinate string
+   - `{{step1.output.summary}}` to get a text field
+   - `{{step1.output.items[0].id}}` for nested array access
+   Using bare `{{stepN.output}}` when the downstream tool expects a simple string
+   (like coordinates or a filename) is the #1 cause of INVALID_PARAMS errors.
 
 ## Safety Boundaries
-- All file operations MUST be confined to /workspace/
 - Do NOT generate commands that modify system files
 - Do NOT generate commands that access sensitive paths (/etc, /proc, /sys)
 
@@ -63,6 +71,19 @@ Return ONLY a valid JSON object:
     }}
   ]
 }}
+
+## Example: Chaining geo → distance
+User asks "distance from A to B". The correct plan extracts specific fields:
+
+Step 1: maps_geo  args: {{"address": "City A"}}
+Step 2: maps_geo  args: {{"address": "City B"}}
+Step 3: maps_distance  args: {{
+  "origins": "{{{{step1.output.return[0].location}}}}",
+  "destination": "{{{{step2.output.return[0].location}}}}"
+}}
+
+DO NOT write `"origins": "{{{{step1.output}}}}"` — that passes the entire
+JSON response object when the tool expects just a coordinate string.
 """
 
 
@@ -112,7 +133,7 @@ class Planner:
     Returns a structured TaskPlan for the Executor.
     """
 
-    def __init__(self, llm_manager: LLMProviderManager):
+    def __init__(self, llm_manager: LLMProviderManager) -> None:
         self.llm = llm_manager
         from athena.mcp_client.registry import get_tool_registry
         self.tool_registry = get_tool_registry()
@@ -207,7 +228,6 @@ class Planner:
 - **Server**: {t.get('source_server_id', 'unknown')}
 - **Description**: {t.get('description', 'No description')}
 - **Risk Level**: {t.get('risk_level', 'medium')}
-- **Supports Preview**: {t.get('supports_preview', False)}
 - **Capability Tags**: {tags or 'none'}
 - **Parameters Schema**:
 ```json

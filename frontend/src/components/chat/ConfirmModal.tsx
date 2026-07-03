@@ -1,4 +1,4 @@
-import { ShieldAlert, Clock } from 'lucide-react'
+import { ShieldAlert, Clock, Wrench } from 'lucide-react'
 import type { ConfirmRequired } from '../../stores/chatStore'
 
 interface Props {
@@ -37,7 +37,25 @@ export default function ConfirmModal({ confirm, onApprove, onDeny }: Props) {
         </span>
       </div>
 
-      <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">{confirm.preview_text}</p>
+      {/* Tool name badge */}
+      {confirm.tool_name && (
+        <div className="flex items-center gap-1.5 mb-2 text-xs font-mono text-gray-700 dark:text-gray-300">
+          <Wrench size={12} />
+          <span>Tool: <strong>{confirm.tool_name}</strong></span>
+        </div>
+      )}
+
+      {/* Reason for confirmation */}
+      {confirm.reason && (
+        <p className="text-xs text-gray-500 dark:text-gray-400 mb-2 italic">
+          {confirm.reason}
+        </p>
+      )}
+
+      {/* Args preview */}
+      {confirm.preview_text && (
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">{confirm.preview_text}</p>
+      )}
 
       {confirm.cooling_off_seconds > 0 && (
         <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-3">

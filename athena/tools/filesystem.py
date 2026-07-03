@@ -29,7 +29,7 @@ def _safe_path(path: str) -> Path:
     return p.resolve()
 
 
-async def file_read(path: str, **kwargs) -> dict[str, Any]:
+async def file_read(path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
     """Read a file from the workspace.
 
     Risk level: low (read-only).
@@ -57,7 +57,7 @@ async def file_write(
     path: str,
     content: str,
     idempotency_key: str | None = None,
-    **kwargs,
+    **kwargs: Any,  # noqa: ANN401
 ) -> dict[str, Any]:
     """Write content to a file in the workspace.
 
@@ -89,7 +89,7 @@ async def file_write(
 async def file_delete(
     path: str,
     idempotency_key: str | None = None,
-    **kwargs,
+    **kwargs: Any,  # noqa: ANN401
 ) -> dict[str, Any]:
     """Delete a file from the workspace.
 
@@ -127,7 +127,7 @@ async def file_search(
     recursive: bool = True,
     match_type: str = "name",
     max_results: int = 50,
-    **kwargs,
+    **kwargs: Any,  # noqa: ANN401
 ) -> dict[str, Any]:
     """Search for files under an absolute directory path.
 

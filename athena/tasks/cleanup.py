@@ -67,7 +67,7 @@ def retry_failed_syncs() -> dict:
         session_maker = get_session_maker(config.sqlite_db_path)
 
         async with session_maker() as session:
-            from sqlalchemy import select, update
+            from sqlalchemy import select
             from athena.models.user_memory import UserMemory
 
             result = await session.execute(

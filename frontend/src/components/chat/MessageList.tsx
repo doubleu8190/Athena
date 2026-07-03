@@ -1,21 +1,21 @@
 import { useEffect, useRef } from 'react'
 import type { Message } from '../../stores/chatStore'
-import { useChatStore } from '../../stores/chatStore'
 import MessageBubble from './MessageBubble'
 import SubtaskCard from './SubtaskCard'
 import MarkdownRenderer from './MarkdownRenderer'
 import ConfirmModal from './ConfirmModal'
-import { confirmSubtask } from '../../api/endpoints/chat'
+import type { ConfirmRequest } from '../../api/endpoints/chat'
 
 interface Props {
   messages: Message[]
   sessionId: string
+  /** Resume a paused graph execution via SSE after user confirm/deny. */
+  onResume: (req: ConfirmRequest, sessionId: string, msgId: string) => void
 }
 
-export default function MessageList({ messages, sessionId }: Props) {
+export default function MessageList({ messages, sessionId, onResume }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const updateMessage = useChatStore((s) => s.updateMessage)
 
   // Auto-scroll to bottom when new messages arrive or streaming
   useEffect(() => {
@@ -31,18 +31,8 @@ export default function MessageList({ messages, sessionId }: Props) {
     }
   }, [messages])
 
-  const handleConfirm = async (
-    taskId: string,
-    step: number,
-    approved: boolean,
-    msgId: string
-  ) => {
-    try {
-      await confirmSubtask({ task_id: taskId, step, approved })
-      updateMessage(sessionId, msgId, { confirmRequired: undefined })
-    } catch {
-      // Keep confirm UI on error — user can retry
-    }
+  const handleConfirm = (taskId: string, approved: boolean, msgId: string) => {
+    onResume({ task_id: taskId, approved }, sessionId, msgId)
   }
 
   return (
@@ -55,15 +45,67 @@ export default function MessageList({ messages, sessionId }: Props) {
             <div className="flex gap-3 max-w-[85%]">
               <span className="text-lg shrink-0 mt-0.5">🦉</span>
               <div className="space-y-3 min-w-0 flex-1">
-                {/* Plan indicator */}
-                {msg.taskStatus === 'generating_plan' && (
+                {/* Thinking / generating plan indicator */}
+                {(msg.taskStatus === 'thinking' ||
+                  msg.taskStatus === 'generating_plan') && (
                   <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
                     <span className="w-1.5 h-1.5 bg-orange-500 rounded-full animate-pulse" />
-                    Generating plan...
+                    {msg.taskStatus === 'generating_plan'
+                      ? 'Generating plan...'
+                      : 'Thinking...'}
                   </div>
                 )}
 
-                {/* Subtask cards */}
+                {/* Tool call cards (new agent flow) */}
+                {msg.toolCalls && msg.toolCalls.length > 0 && (
+                  <div className="space-y-2">
+                    {msg.toolCalls.map((tc, i) => (
+                      <div
+                        key={`${tc.tool_name}-${i}`}
+                        className={`rounded-lg border px-3 py-2 text-sm ${
+                          tc.status === 'running'
+                            ? 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 animate-pulse'
+                            : tc.status === 'success'
+                              ? 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950'
+                              : 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono font-medium">
+                            🔧 {tc.tool_name}
+                          </span>
+                          <span
+                            className={`text-xs ${
+                              tc.status === 'running'
+                                ? 'text-blue-600 dark:text-blue-400'
+                                : tc.status === 'success'
+                                  ? 'text-green-600 dark:text-green-400'
+                                  : 'text-red-600 dark:text-red-400'
+                            }`}
+                          >
+                            {tc.status === 'running'
+                              ? 'running...'
+                              : tc.status === 'success'
+                                ? '✓'
+                                : '✗'}
+                          </span>
+                        </div>
+                        {tc.args_preview && (
+                          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+                            {tc.args_preview}
+                          </div>
+                        )}
+                        {tc.output_preview && tc.status !== 'running' && (
+                          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate font-mono">
+                            {tc.output_preview}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Deprecated: Subtask cards (legacy plan-execute flow) */}
                 {msg.subtasks && msg.subtasks.length > 0 && (
                   <div className="space-y-2">
                     {msg.subtasks.map((st, i) => (
@@ -84,20 +126,31 @@ export default function MessageList({ messages, sessionId }: Props) {
                   <ConfirmModal
                     confirm={msg.confirmRequired}
                     onApprove={() =>
-                      handleConfirm(msg.confirmRequired!.task_id, msg.confirmRequired!.step, true, msg.id)
+                      handleConfirm(
+                        msg.confirmRequired!.task_id,
+                        true,
+                        msg.id
+                      )
                     }
                     onDeny={() =>
-                      handleConfirm(msg.confirmRequired!.task_id, msg.confirmRequired!.step, false, msg.id)
+                      handleConfirm(
+                        msg.confirmRequired!.task_id,
+                        false,
+                        msg.id
+                      )
                     }
                   />
                 )}
 
-                {/* Streaming cursor */}
-                {msg.isStreaming && !msg.subtasks?.length && !msg.content && (
-                  <div className="flex items-center gap-2">
-                    <span className="inline-block w-1.5 h-4 bg-orange-500 rounded-sm animate-pulse" />
-                  </div>
-                )}
+                {/* Streaming cursor — show when waiting for first content */}
+                {msg.isStreaming &&
+                  !msg.toolCalls?.length &&
+                  !msg.subtasks?.length &&
+                  !msg.content && (
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block w-1.5 h-4 bg-orange-500 rounded-sm animate-pulse" />
+                    </div>
+                  )}
 
                 {/* Task status indicator */}
                 {msg.taskStatus && !msg.isStreaming && (

@@ -1,6 +1,5 @@
 """Unit tests for MCP transport layer — StdioTransport and TransportFactory."""
 
-import pytest
 
 from athena.mcp_client.transports import StdioTransport, TransportFactory
 

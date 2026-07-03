@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from starlette.requests import Request
+
 from athena.config import Config, get_config, set_config
 from athena.logging_config import get_logger, setup_logging
 
@@ -24,7 +28,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan: startup and shutdown hooks."""
     # ── Startup ────────────────────────────────────────────────────
     logger.info("athena_starting")
@@ -75,6 +79,10 @@ async def lifespan(_app: FastAPI):
 
     # ── Shutdown ───────────────────────────────────────────────────
     logger.info("athena_stopping")
+
+    # Stop lazy singletons (only if they were created)
+    from athena.core.harness import stop_harness
+    await stop_harness()
 
     await mcp_client.stop()
     await gateway_manager.stop()
@@ -128,20 +136,19 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     # Prometheus metrics — custom middleware + endpoint (no third-party instrumentator)
     if cfg.prometheus_enabled:
-        from starlette.requests import Request
-        from starlette.responses import Response
-        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
         from athena.api.metrics import (
             athena_http_requests_total,
             athena_http_request_duration_seconds,
         )
 
         @app.get("/metrics", include_in_schema=False)
-        async def metrics():
+        async def metrics() -> Response:
             return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
         @app.middleware("http")
-        async def metrics_middleware(request: Request, call_next):
+        async def metrics_middleware(request: Request, call_next: Any) -> Response:  # noqa: ANN401
             if request.url.path == "/metrics":
                 return await call_next(request)
             start = time.monotonic()
@@ -168,7 +175,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 app = create_app()
 
 
-def main():
+def main() -> None:
     """Entry point for uvicorn."""
     import uvicorn
     uvicorn.run("athena.main:app", host="0.0.0.0", port=8000, reload=False)

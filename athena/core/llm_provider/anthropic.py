@@ -5,7 +5,6 @@ Uses Anthropic's Messages API with native tool use support.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -29,7 +28,7 @@ class AnthropicProvider(LLMProvider):
         api_key_env: str = "ANTHROPIC_API_KEY",
         model: str = "claude-sonnet-4-6",
         base_url: str | None = None,
-    ):
+    ) -> None:
         self._api_key_env = api_key_env
         self._model = model
         self._base_url = base_url

@@ -46,7 +46,7 @@ class WeChatAdapter(BaseIMAdapter):
     Long Poll message reception, and text-based confirmations.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.config = config
         self._state = AdapterState.DISCONNECTED
         self._last_heartbeat: datetime | None = None
@@ -122,7 +122,6 @@ class WeChatAdapter(BaseIMAdapter):
 
         try:
             data = json.loads(WECHAT_CREDENTIALS_PATH.read_text())
-            obtained_at = datetime.fromisoformat(data["obtained_at"])
             expires_at = datetime.fromisoformat(data["expires_at"])
 
             if datetime.now(timezone.utc) >= expires_at:
@@ -188,7 +187,6 @@ class WeChatAdapter(BaseIMAdapter):
 
     async def _poll_qr_status(self, client, qrcode_id: str) -> str:
         """Poll QR code scan status. Returns 'wait', 'scaned', 'confirmed', or 'expired'."""
-        import httpx
 
         for _ in range(120):  # Max 2 minutes
             resp = await client.get(

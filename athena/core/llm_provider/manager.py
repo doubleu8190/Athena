@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from athena.config import Config, LLMConfig
+from athena.config import Config
 from athena.core.llm_provider.base import LLMProvider, LLMResponse
 from athena.core.llm_provider.openai import OpenAIProvider
 from athena.core.llm_provider.anthropic import AnthropicProvider
@@ -25,7 +25,7 @@ class LLMProviderManager:
     through fallback_chain in order. If all fail, raises the last error.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self._config = config
         self._providers: dict[str, LLMProvider] = {}
         self._default_provider = config.llm.default_provider

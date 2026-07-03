@@ -6,7 +6,6 @@ import json
 import os
 import tempfile
 
-import pytest
 import pytest_asyncio
 
 from athena.config import Config

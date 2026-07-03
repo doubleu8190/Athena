@@ -130,7 +130,7 @@ def delete_memory_vector_task(self, memory_id: str, vector_id: str) -> dict:
 
             # Then physically delete from SQLite
             async with session_maker() as session:
-                from sqlalchemy import delete, select
+                from sqlalchemy import select
                 from athena.models.user_memory import UserMemory
 
                 result = await session.execute(

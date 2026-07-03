@@ -8,8 +8,10 @@ duration of that request.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from fastapi import Request
+from fastapi.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from athena.logging_config import get_logger
@@ -23,7 +25,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     Adds X-Request-ID header to the response.
     """
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request: Request, call_next: Any) -> Response:  # noqa: ANN401
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
 
         # Bind context for this request

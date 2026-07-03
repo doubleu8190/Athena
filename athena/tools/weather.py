@@ -7,7 +7,7 @@ Supports mainland China, Hong Kong, Macau, and Taiwan cities.
 
 from __future__ import annotations
 
-from datetime import date as _date, datetime, timedelta
+from datetime import date as _date, datetime
 from typing import Any
 
 from athena.logging_config import get_logger
@@ -347,7 +347,7 @@ def _extract_day_forecast(day_data: dict[str, Any], day_label: str) -> dict[str,
 async def query_weather(
     city: str,
     date: str | None = None,
-    **kwargs,
+    **kwargs: Any,  # noqa: ANN401
 ) -> dict[str, Any]:
     """Query weather for a city, optionally filtered by date.
 

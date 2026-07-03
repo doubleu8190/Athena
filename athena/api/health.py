@@ -1,7 +1,11 @@
 """Health check endpoint."""
 
+from typing import Any
+
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from athena.api.deps import get_db, get_redis
 from athena.logging_config import get_logger
@@ -11,7 +15,10 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
-async def health_check(db=Depends(get_db), redis=Depends(get_redis)):
+async def health_check(
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> dict[str, Any]:
     """Health check — verifies SQLite and Redis connectivity."""
     status = {"status": "healthy", "checks": {}}
 

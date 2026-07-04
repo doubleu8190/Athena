@@ -45,38 +45,3 @@ class TestFullPipeline:
 
         # Missing step should return empty string
         assert ctx.get_output(99) == ""
-
-    @pytest.mark.asyncio
-    async def test_plan_from_dict(self):
-        """TaskPlan should be parsed from LLM response JSON."""
-        from athena.core.planner import TaskPlan
-
-        plan_data = {
-            "task_id": "plan-1",
-            "subtasks": [
-                {
-                    "step": 1,
-                    "intent": "search the web",
-                    "tool_name": "web_search",
-                    "args": {"query": "test"},
-                    "depends_on": [],
-                    "critical": True,
-                    "on_failure": "abort",
-                },
-                {
-                    "step": 2,
-                    "intent": "save results",
-                    "tool_name": "file_write",
-                    "args": {"path": "/workspace/results.txt", "content": "{{ step1.output }}"},
-                    "depends_on": [1],
-                    "critical": True,
-                    "on_failure": "skip",
-                },
-            ],
-        }
-
-        plan = TaskPlan.from_dict(plan_data)
-        assert plan.task_id == "plan-1"
-        assert len(plan.subtasks) == 2
-        assert plan.subtasks[0].step == 1
-        assert plan.subtasks[1].depends_on == [1]

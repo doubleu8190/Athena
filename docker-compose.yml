@@ -69,6 +69,7 @@ services:
       - telegram_bot_token
       - wechat_bot_token
       - wechat_ilink_bot_id
+      - mimo_api_key
       - deepseek_api_key
       - openai_api_key
       - anthropic_api_key

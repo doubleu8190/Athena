@@ -100,6 +100,7 @@ class OpenAIProvider(LLMProvider):
                     try:
                         args = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
+                        logger.error("tool_call_arguments_json_decode_error", tool_call_id=tc.id, arguments=tc.function.arguments)
                         args = {}
                     tool_calls.append({
                         "id": tc.id,

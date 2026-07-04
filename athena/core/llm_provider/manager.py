@@ -13,6 +13,7 @@ from athena.core.llm_provider.openai import OpenAIProvider
 from athena.core.llm_provider.anthropic import AnthropicProvider
 from athena.core.llm_provider.deepseek import DeepSeekProvider
 from athena.core.llm_provider.litellm import LiteLLMProvider
+from athena.core.llm_provider.mimo import MimoProvider
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -60,6 +61,12 @@ class LLMProviderManager:
                 api_key_env=pdata.api_key_env,
                 model=pdata.model,
                 base_url=pdata.base_url or "http://litellm:4000",
+            )
+        elif name.lower().startswith("mimo"):
+            return MimoProvider(
+                api_key_env=pdata.api_key_env,
+                model=pdata.model,
+                base_url=pdata.base_url,
             )
         else:
             # Default to OpenAI-compatible (covers OpenAI, vLLM, etc.)

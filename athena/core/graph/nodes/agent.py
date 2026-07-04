@@ -167,6 +167,7 @@ async def agent_node(
 
         # Case 2: LLM wants to call tools
         if response.tool_calls:
+            log.info("agent_tool_calls", iteration=iteration, tool_calls=response.tool_calls)
             tool_names = [tc.get("name", "unknown") for tc in response.tool_calls]
             log.info(
                 "agent_tool_calls",

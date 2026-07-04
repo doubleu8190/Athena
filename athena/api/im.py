@@ -199,6 +199,9 @@ async def web_message(
             }
 
             # ── Stream graph execution ─────────────────────────────────
+            # 使用 stream_mode="updates"
+            # event：仅包含发生变化的节点的更新（即每个节点返回的字典）。
+            # 结构：一个字典，键为节点名称，值为该节点的状态更新。                
             async for event in graph.astream(
                 initial_state,
                 config=graph_config,

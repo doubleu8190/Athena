@@ -65,15 +65,20 @@ class LLMProviderConfig:
     max_tokens: int = 4096
     base_url: str | None = None
     temperature: float = 0.7
+    format: str = "openai"  # "openai" or "anthropic"   
 
 
 @dataclass
 class LLMConfig:
-    """LLM configuration from llm.yaml."""
+    """LLM configuration from llm.yaml.
+
+    Two models only:
+    - ``default_provider``: strong model for main agent tasks
+    - ``default_summarize_provider``: fast/cheap model for summarization
+    """
 
     default_provider: str = "openai"
     default_summarize_provider: str = ""
-    fallback_chain: list[str] = field(default_factory=list)
     providers: dict[str, LLMProviderConfig] = field(default_factory=dict)
 
 
@@ -212,11 +217,11 @@ class Config:
                 max_tokens=pdata.get("max_tokens", 4096),
                 base_url=pdata.get("base_url"),
                 temperature=pdata.get("temperature", 0.7),
+                format=pdata.get("format", "openai"),
             )
         return LLMConfig(
-            default_provider=data.get("default_provider", "openai"),
+            default_provider=data.get("default_provider", ""),
             default_summarize_provider=data.get("default_summarize_provider", ""),
-            fallback_chain=data.get("fallback_chain", []),
             providers=providers,
         )
 

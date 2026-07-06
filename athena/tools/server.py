@@ -31,9 +31,8 @@ mcp = FastMCP("Athena Built-in Tools", version="0.2.0")
 # ── Tool wrappers ────────────────────────────────────────────────────────
 #
 # Thin wrappers around the existing tool functions.
-# ``exclude_args`` hides internal parameters from the public tool schema
-# that the LLM sees.  ``idempotency_key`` is likewise hidden — it is
-# injected by the Executor, never by the LLM.
+# ``idempotency_key`` is an internal parameter injected by the Executor,
+# not by the LLM — so it is not included in the wrapper signatures.
 
 
 @mcp.tool(
@@ -47,32 +46,17 @@ async def file_read(path: str) -> dict[str, Any]:
 @mcp.tool(
     name="file_write",
     description="Write content to a file. Path must be absolute. Creates parent directories as needed.",
-    exclude_args=["idempotency_key"],
 )
-async def file_write(
-    path: str,
-    content: str,
-    idempotency_key: str | None = None,
-) -> dict[str, Any]:
-    return await _file_write(
-        path=path, content=content,
-        idempotency_key=idempotency_key,
-    )
+async def file_write(path: str, content: str) -> dict[str, Any]:
+    return await _file_write(path=path, content=content)
 
 
 @mcp.tool(
     name="file_delete",
     description="Delete a file or directory. Path must be absolute.",
-    exclude_args=["idempotency_key"],
 )
-async def file_delete(
-    path: str,
-    idempotency_key: str | None = None,
-) -> dict[str, Any]:
-    return await _file_delete(
-        path=path,
-        idempotency_key=idempotency_key,
-    )
+async def file_delete(path: str) -> dict[str, Any]:
+    return await _file_delete(path=path)
 
 
 @mcp.tool(

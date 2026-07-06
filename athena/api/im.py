@@ -81,6 +81,7 @@ class MessageRequest(BaseModel):
 class ConfirmRequest(BaseModel):
     task_id: str
     approved: bool
+    session_id: str | None = None  # Frontend's original chat_id (for session reconstruction)
 
 
 @router.post("/im/web/message")
@@ -167,7 +168,7 @@ async def web_message(
 
             # Build summarization model from LLM config (for SummarizationNode).
             # Uses the default provider — typically deepseek (OpenAI-compatible).
-            summarization_model = _build_summarization_model(config)
+            summarization_model = _build_summarization_model()
 
             # Build the agent graph
             graph : StateGraph = build_agent_graph(
@@ -330,6 +331,12 @@ async def web_confirm(
         thread_id = req.task_id
         user_id = config.user.web.user_id
 
+    # Use the frontend's original session_id (chat_id) if provided,
+    # so that get_or_create_session generates the same deterministic hash.
+    # Without this, the hashed task_id would be double-hashed, producing
+    # a completely different SessionContext.
+    chat_id = req.session_id or thread_id
+
     decision = "approved" if req.approved else "rejected"
 
     async def sse_resume_stream() -> AsyncGenerator[str, None]:
@@ -348,7 +355,7 @@ async def web_confirm(
             context_mgr = ContextManager(config)
 
             session_ctx = await context_mgr.get_or_create_session(
-                user_id, "web", thread_id
+                user_id, "web", chat_id
             )
 
             harness = await get_harness()
@@ -390,7 +397,7 @@ async def web_confirm(
                     interrupt_info = event["__interrupt__"]
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
-                            "task_id": thread_id,
+                            "task_id": chat_id,
                             "step": entry.value.get("step", 0),
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
@@ -478,55 +485,18 @@ def _sse_event(event_type: SseEvent, data: dict) -> str:
     return f"event: {event_type.value}\ndata: {payload}\n\n"
 
 
-def _build_summarization_model(config: Config) -> Any | None:  # noqa: ANN401
-    """Build a LangChain chat model for message summarization.
+def _build_summarization_model() -> Any | None:  # noqa: ANN401
+    """Return the fast model for message summarization.
 
-    Prefers ``default_summarize_provider`` from LLM config when set (allows
-    a cheaper/faster model for summarization).  Falls back to
-    ``default_provider`` otherwise.
+    Uses ``LLMProviderManager.fast_model`` — the dedicated fast/cheap model
+    configured as ``default_summarize_provider`` in llm.yaml.
 
-    Most providers (deepseek, openai, litellm) are OpenAI-compatible, so
-    ``ChatOpenAI`` works with their base URLs.
-
-    Returns ``None`` if no suitable provider is configured or the API key
-    is missing — the agent graph will skip summarization in that case.
+    Returns ``None`` if no fast model is configured — the agent graph will
+    skip summarization in that case.
     """
-    import os as _os
-
-    llm_cfg = getattr(config, "llm", None)
-    if llm_cfg is None:
-        return None
-
-    # Prefer a dedicated summarization provider; fall back to the main one
-    summarize_provider = (
-        getattr(llm_cfg, "default_summarize_provider", None)
-        or getattr(llm_cfg, "default_provider", None)
-    )
-    if not summarize_provider:
-        return None
-
-    providers = getattr(llm_cfg, "providers", {}) or {}
-    provider_cfg = providers.get(summarize_provider)
-    if provider_cfg is None:
-        return None
-
-    api_key = _os.environ.get(provider_cfg.api_key_env) if provider_cfg.api_key_env else None
-    if not api_key:
-        return None
+    from athena.core.llm_provider.manager import get_llm_manager
 
     try:
-        from langchain_openai import ChatOpenAI
-
-        kwargs: dict[str, Any] = {
-            "model": provider_cfg.model or summarize_provider,
-            "api_key": api_key,
-            "temperature": 0.3,  # low temp for summarization
-        }
-        if provider_cfg.base_url:
-            kwargs["base_url"] = provider_cfg.base_url
-
-        return ChatOpenAI(**kwargs)
-    except ImportError:
-        return None
+        return get_llm_manager().fast_model
     except Exception:
         return None

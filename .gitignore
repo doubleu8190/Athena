@@ -238,3 +238,6 @@ frontend/dist/
 !/data/*.yaml
 # Keep directory placeholder
 !/data/.gitkeep
+
+# Test artifacts (MagicMock sqlite files from unit tests)
+*MagicMock*

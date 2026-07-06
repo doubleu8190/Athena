@@ -12,6 +12,8 @@ export interface MessageRequest {
 export interface ConfirmRequest {
   task_id: string
   approved: boolean
+  /** Frontend session ID (the original chat_id used when creating the session). */
+  session_id?: string
 }
 
 // ── Send message via SSE ───────────────────────────────────────────────

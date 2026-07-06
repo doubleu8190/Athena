@@ -12,10 +12,13 @@ summarisation::
       ▼
     agent ── (no tool_calls) ──→ END
       │
-      └── (has tool_calls) ──→ tools
-                                  │
-                                  ▼
-                                agent  (loop until answer or max iterations)
+      ├── (has tool_calls) ──→ Send(tools, call_1) ─┐
+      │                          Send(tools, call_2) ─┼→ agent (loop)
+      │                          Send(tools, call_3) ─┘
+
+Each tool call runs as an independent sub-node via ``Send()`` fan-out,
+so ``interrupt()`` (human-in-the-loop confirmation) only pauses the
+current branch — completed branches are never re-executed on resume.
 """
 
 from __future__ import annotations
@@ -33,10 +36,9 @@ from athena.core.graph.nodes.agent import agent_node
 from athena.core.graph.nodes.tools import tools_node
 
 
-
 def build_agent_graph(
     checkpointer: BaseCheckpointSaver | None = None,
-    summarization_model: Any = None  # noqa: ANN401,
+    summarization_model: Any = None,  # noqa: ANN401
 ) -> StateGraph:
     """Build and return the compiled tool-calling agent StateGraph.
 
@@ -78,15 +80,9 @@ def build_agent_graph(
     builder.add_node("tools", tools_node)
 
     # ── Edges ────────────────────────────────────────────────────────────
-    # agent → END or tools
-    builder.add_conditional_edges(
-        "agent",
-        after_agent,
-        {
-            "tools": "tools",
-            "__end__": END,
-        },
-    )
+    # agent → fan-out to tools via Send(), or END (empty list)
+    # after_agent returns Send() objects directly — no mapping dict needed.
+    builder.add_conditional_edges("agent", after_agent)
 
     # tools → agent (loop back for synthesis or additional tool calls)
     builder.add_conditional_edges(

@@ -1,36 +1,23 @@
 # llm.yaml — LLM Provider configuration
-# Only providers with native Function Calling support are compatible.
+#
+# Two models only:
+#   default_provider         — strong model for main agent tasks
+#   default_summarize_provider — fast/cheap model for message summarization
+#
+# The system auto-detects OpenAI vs Anthropic format by provider name prefix.
+# LangChain handles all message format conversion automatically.
 
-default_provider: mimo-v2.5-pro           # 主 LLM：强模型
-default_summarize_provider: deepseek-v4-flash  # 摘要：快模型
-
-# Optional: dedicated provider for message summarization (cheaper/faster).
-# When omitted, ``default_provider`` is used for summarization as well.
-# default_summarize_provider: deepseek-v4-flash
-
-fallback_chain:
-  - mimo-v2.5-pro
-  - deepseek-v4-pro
-  - openai
-  - anthropic
-  - litellm
+default_provider: mimo-v2.5-pro
+default_summarize_provider: deepseek-v4-flash
 
 providers:
   mimo-v2.5-pro:
-    api_key_env: MIMO_API_KEY
+    api_key_env: mimo_api_key
     base_url: https://api.xiaomimimo.com/v1
     model: mimo-v2.5-pro
-    max_tokens: 4096
-    temperature: 0.7
+    format: openai
   deepseek-v4-flash:
-    api_key_env: DEEPSEEK_API_KEY
+    api_key_env: deepseek_api_key
     base_url: https://api.deepseek.com/v1
     model: deepseek-v4-flash
-    max_tokens: 4096
-    temperature: 0.7
-  deepseek-v4-pro:
-    api_key_env: DEEPSEEK_API_KEY
-    base_url: https://api.deepseek.com/v1
-    model: deepseek-v4-pro
-    max_tokens: 4096
-    temperature: 0.7
+    format: openai

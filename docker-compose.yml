@@ -71,8 +71,6 @@ services:
       - wechat_ilink_bot_id
       - mimo_api_key
       - deepseek_api_key
-      - openai_api_key
-      - anthropic_api_key
       - athena_encryption_key
     depends_on:
       redis:
@@ -154,9 +152,8 @@ services:
       - HF_HOME=/data/huggingface
     secrets:
       - admin_api_key
+      - mimo_api_key
       - deepseek_api_key
-      - openai_api_key
-      - anthropic_api_key
       - athena_encryption_key
     labels:
       - "app=athena"
@@ -292,11 +289,9 @@ secrets:
     file: ./secrets/wechat_bot_token
   wechat_ilink_bot_id:
     file: ./secrets/wechat_ilink_bot_id
+  mimo_api_key:
+    file: ./secrets/mimo_api_key
   deepseek_api_key:
     file: ./secrets/deepseek_api_key
-  openai_api_key:
-    file: ./secrets/openai_api_key
-  anthropic_api_key:
-    file: ./secrets/anthropic_api_key
   athena_encryption_key:
     file: ./secrets/athena_encryption_key

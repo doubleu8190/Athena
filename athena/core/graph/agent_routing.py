@@ -1,10 +1,14 @@
 """Routing functions for the tool-calling agent graph.
 
 These conditional-edge callbacks determine which node runs next based on
-the current state.
+the current state.  Uses LangGraph's ``Send()`` to fan out individual
+tool calls so each runs as an independent sub-node (prevents duplicate
+execution when ``interrupt()`` is used for human-in-the-loop confirmation).
 """
 
 from __future__ import annotations
+
+from langgraph.types import Send
 
 from athena.core.graph.agent_state import AgentState
 
@@ -14,27 +18,30 @@ MAX_AGENT_ITERATIONS = 10
 """Hard limit on agent → tools → agent loops to prevent runaway chains."""
 
 
-def after_agent(state: AgentState) -> str:
-    """Decide what happens after the agent node.
+def after_agent(state: AgentState) -> list[Send]:
+    """Route after the agent node.
 
     Returns:
-        * ``"tools"`` — the LLM requested tool calls and we haven't exceeded
-          the iteration limit
-        * ``"__end__"`` — the LLM answered directly or we've hit the limit
+        * ``[Send("tools", ...), ...]`` — fan out tool calls as independent
+          branches (one per tool call)
+        * ``[]`` — empty list signals END to LangGraph
     """
-    if state.get("status") == "completed":
-        return "__end__"
+    if state.get("status") in ("completed", "failed"):
+        return []
 
-    if state.get("status") == "failed":
-        return "__end__"
+    pending = state.get("pending_tool_calls")
+    if not pending:
+        return []
 
-    if state.get("pending_tool_calls"):
-        iteration = state.get("agent_iteration", 0)
-        if iteration >= MAX_AGENT_ITERATIONS:
-            return "__end__"
-        return "tools"
+    iteration = state.get("agent_iteration", 0)
+    if iteration >= MAX_AGENT_ITERATIONS:
+        return []
 
-    return "__end__"
+    # Fan out: each tool call becomes its own tools_node invocation
+    return [
+        Send("tools", {"pending_tool_calls": [tc]})
+        for tc in pending
+    ]
 
 
 def after_tools(state: AgentState) -> str:
@@ -43,7 +50,6 @@ def after_tools(state: AgentState) -> str:
     Tool results always go back to the agent for synthesis — the LLM may
     produce a final answer or request additional tool calls.
     """
-    # If the state is failed, stop
     if state.get("status") == "failed":
         return "__end__"
 

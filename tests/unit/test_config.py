@@ -49,7 +49,7 @@ class TestConfigLoading:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             yaml.dump({
                 "default_provider": "openai",
-                "fallback_chain": ["anthropic"],
+                "default_summarize_provider": "anthropic",
                 "providers": {
                     "openai": {"api_key_env": "OPENAI_KEY", "model": "gpt-4o", "max_tokens": 4096},
                     "anthropic": {"api_key_env": "ANTHROPIC_KEY", "model": "claude-sonnet-4-6"},
@@ -63,7 +63,7 @@ class TestConfigLoading:
             set_config(None)
             config = Config.load()
             assert config.llm.default_provider == "openai"
-            assert "anthropic" in config.llm.fallback_chain
+            assert config.llm.default_summarize_provider == "anthropic"
             assert "openai" in config.llm.providers
         finally:
             cfg_mod.DEFAULT_LLM_CONFIG_PATH = orig_path

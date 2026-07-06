@@ -32,7 +32,7 @@ export default function MessageList({ messages, sessionId, onResume }: Props) {
   }, [messages])
 
   const handleConfirm = (taskId: string, approved: boolean, msgId: string) => {
-    onResume({ task_id: taskId, approved }, sessionId, msgId)
+    onResume({ task_id: taskId, approved, session_id: sessionId }, sessionId, msgId)
   }
 
   return (

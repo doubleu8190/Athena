@@ -1,8 +1,9 @@
 """Agent node — calls the LLM with tools, decides: answer or call tools.
 
-This is the brain of the tool-calling agent.  It replaces the old ``plan_node``
-by letting the LLM *directly* decide whether to answer the user or invoke tools
-(via native function calling), instead of always generating a JSON plan.
+This is the brain of the tool-calling agent.  It uses LangChain's native
+message types (SystemMessage, HumanMessage, AIMessage, ToolMessage) and
+``model.bind_tools()`` for function calling, letting LangChain handle all
+API format conversion automatically.
 
 Two outcomes:
 1. LLM returns text (no tool_calls) → final answer, route to END
@@ -11,16 +12,14 @@ Two outcomes:
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from langgraph.types import RunnableConfig
-from langchain_core.messages import AIMessage
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 
 from athena.core.graph.agent_state import AgentState
-from athena.core.llm_provider.manager import LLMProviderManager
 from athena.logging_config import bind_context, get_logger
-from athena.mcp_client.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -65,101 +64,47 @@ async def agent_node(
 ) -> dict[str, Any]:
     """Call the LLM with tools and determine the next action.
 
-    Reads the full ``messages`` history (restored by checkpointer + new user
-    message), injects the system prompt + system_context, and calls the LLM
-    with native function-calling enabled.
+    Builds a message list using native LangChain message types, loads fresh
+    MCP tools via ``load_mcp_base_tools()`` for hot-plugging, binds them to
+    the model with ``model.bind_tools()``, and invokes the model.
+
+    LangChain handles ALL format conversion (OpenAI ↔ Anthropic) internally.
     """
+    from athena.core.llm_provider.manager import LLMProviderManager
+    from athena.mcp_client.tool_loader import load_mcp_base_tools
+
     llm_manager: LLMProviderManager = config["configurable"]["llm_manager"]
-    tool_registry: ToolRegistry = config["configurable"]["tool_registry"]
+    session_id = config["configurable"]["session_id"]
+    log = bind_context(session_id=session_id)
 
-    log = bind_context(session_id=state.get("session_id", ""))
-
-    # Build tool definitions in OpenAI format (the providers handle conversion)
-    tools: list[dict[str, Any]]  = tool_registry.export_for_llm() if tool_registry else []
-
-    # Build messages: system prompt + system_context + conversation
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": AGENT_SYSTEM_PROMPT}
-    ]
+    # ── Build messages as native LangChain objects ─────────────────────
+    messages: list[BaseMessage] = [SystemMessage(content=AGENT_SYSTEM_PROMPT)]
 
     system_context = state.get("system_context")
     if system_context:
-        messages.append({"role": "system", "content": system_context})
+        messages.append(SystemMessage(content=system_context))
 
-    # Convert LangChain messages to dicts for the LLM
-    for msg in state.get("messages", []):
-        if hasattr(msg, "type") and hasattr(msg, "content"):
-            role = msg.type
-            if role == "human":
-                role = "user"
-            elif role == "ai":
-                role = "assistant"
+    messages.extend(state.get("messages", []))
 
-            entry: dict[str, Any] = {"role": role, "content": msg.content}
+    # ── Load fresh MCP tools (supports hot-plugging) ──────────────────
+    mcp_tools = await load_mcp_base_tools()
 
-            # If the AI message has tool_calls, convert to OpenAI format:
-            #   {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
-            # DeepSeek requires the "type" discriminator on each tool_call entry.
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                entry["tool_calls"] = [
-                    {
-                        "id": tc.get("id", tc.get("tool_call_id", "")),
-                        "type": "function",
-                        "function": {
-                            "name": tc.get("name", tc.get("function", {}).get("name", "")),
-                            "arguments": json.dumps(
-                                tc.get("args", tc.get("arguments", tc.get("function", {}).get("arguments", {}))),
-                                ensure_ascii=False,
-                            ),
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ]
-
-            # Tool messages must carry tool_call_id so the API can
-            # associate the result with the preceding tool call.
-            if role == "tool":
-                entry["tool_call_id"] = getattr(msg, "tool_call_id", "")
-
-            messages.append(entry)
-        elif isinstance(msg, dict):
-            # Dict messages may come from old-style history or
-            # LangGraph checkpointing.  Normalize tool_calls to
-            # OpenAI format when present.
-            if msg.get("tool_calls"):
-                msg = dict(msg)  # shallow copy to avoid mutating state
-                msg["tool_calls"] = [
-                    {
-                        "id": tc.get("id", tc.get("tool_call_id", "")),
-                        "type": "function",
-                        "function": {
-                            "name": tc.get("name", tc.get("function", {}).get("name", "")),
-                            "arguments": json.dumps(
-                                tc.get("args", tc.get("arguments", tc.get("function", {}).get("arguments", {}))),
-                                ensure_ascii=False,
-                            ),
-                        },
-                    }
-                    for tc in msg["tool_calls"]
-                ]
-            messages.append(msg)
+    # ── Bind tools to model ───────────────────────────────────────────
+    model: BaseChatModel = llm_manager.base_model
+    model_with_tools = model.bind_tools(mcp_tools) if mcp_tools else model
 
     # Track iterations
     iteration = state.get("agent_iteration", 0) + 1
 
-    # ── Call LLM with tools ─────────────────────────────────────────────
+    # ── Invoke model ──────────────────────────────────────────────────
     try:
-        response = await llm_manager.generate(
-            messages=messages,
-            tools=tools if tools else None,
-            temperature=0.7,
-        )
+        response: AIMessage = await model_with_tools.ainvoke(messages)
 
         # Case 1: LLM answered directly (no tool calls)
-        if response.text and not response.tool_calls:
+        if response.content and not response.tool_calls:
             log.info("agent_direct_answer", iteration=iteration)
             return {
-                "messages": [AIMessage(content=response.text)],
+                "messages": [response],
                 "status": "completed",
                 "agent_iteration": iteration,
                 "pending_tool_calls": None,
@@ -167,7 +112,6 @@ async def agent_node(
 
         # Case 2: LLM wants to call tools
         if response.tool_calls:
-            log.info("agent_tool_calls", iteration=iteration, tool_calls=response.tool_calls)
             tool_names = [tc.get("name", "unknown") for tc in response.tool_calls]
             log.info(
                 "agent_tool_calls",
@@ -176,19 +120,18 @@ async def agent_node(
                 iteration=iteration,
             )
 
-            ai_msg = AIMessage(content=response.text or "")
-            ai_msg.tool_calls = [
+            pending_tool_calls = [
                 {
                     "id": tc.get("id", f"call_{i}"),
                     "name": tc.get("name", ""),
-                    "args": tc.get("arguments", {}),
+                    "arguments": tc.get("args", {}),
                 }
                 for i, tc in enumerate(response.tool_calls)
             ]
 
             return {
-                "messages": [ai_msg],
-                "pending_tool_calls": response.tool_calls,
+                "messages": [response],
+                "pending_tool_calls": pending_tool_calls,
                 "status": "executing",
                 "agent_iteration": iteration,
             }

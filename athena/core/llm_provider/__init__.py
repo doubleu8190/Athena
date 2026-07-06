@@ -1,23 +1,12 @@
 """LLM Provider abstraction layer.
 
-Only providers with native Function Calling support are accepted.
+Uses LangChain ``BaseChatModel`` instances (ChatOpenAI, ChatAnthropic) for
+automatic message format conversion via ``LLMProviderManager``.
 """
 
-from athena.core.llm_provider.base import LLMProvider, LLMResponse
-from athena.core.llm_provider.manager import LLMProviderManager
-from athena.core.llm_provider.openai import OpenAIProvider
-from athena.core.llm_provider.anthropic import AnthropicProvider
-from athena.core.llm_provider.deepseek import DeepSeekProvider
-from athena.core.llm_provider.litellm import LiteLLMProvider
-from athena.core.llm_provider.mimo import MimoProvider
+from athena.core.llm_provider.manager import LLMProviderManager, get_llm_manager
 
 __all__ = [
-    "LLMProvider",
-    "LLMResponse",
     "LLMProviderManager",
-    "OpenAIProvider",
-    "AnthropicProvider",
-    "DeepSeekProvider",
-    "LiteLLMProvider",
-    "MimoProvider",
+    "get_llm_manager",
 ]

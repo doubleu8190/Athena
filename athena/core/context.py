@@ -6,7 +6,6 @@ Responsibilities:
 - Context injection: conversation history + user memories + environment state
 - Token window control: compress when > 80% of model limit
 - Snapshot persistence: cold backup / recovery point in SQLite
-- Snapshot atomicity: writes with subtask_executions in same transaction
 """
 
 from __future__ import annotations
@@ -324,12 +323,7 @@ class ContextManager:
         await self.write_snapshot(ctx)
 
     async def write_snapshot(self, ctx: SessionContext) -> None:
-        """Write context_snapshot to SQLite.
-
-        IMPORTANT: This MUST be called within the same transaction as
-        subtask_execution writes to ensure atomicity. The caller is
-        responsible for transaction management.
-        """
+        """Write context_snapshot to SQLite."""
         snapshot = self._build_snapshot(ctx)
 
         db_path = self.config.sqlite_db_path

@@ -572,31 +572,11 @@ async def get_dashboard(
     api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get real-time dashboard metrics summary."""
-    from athena.models.task import Task
-    from athena.models.subtask_execution import SubtaskExecution
     from athena.models.audit_log import AuditLog
 
-    # Task counts by status
-    task_result = await db.execute(
-        select(Task.status, func.count()).group_by(Task.status)
-    )
-    task_counts = {row[0]: row[1] for row in task_result.all()}
-
-    # Subtask success rate (last 24h)
+    # Harness blocks (last 24h)
     from datetime import timedelta
     since = datetime.now(timezone.utc) - timedelta(hours=24)
-    subtask_result = await db.execute(
-        select(
-            SubtaskExecution.status,
-            func.count(),
-        ).where(SubtaskExecution.finished_at >= since)
-        .group_by(SubtaskExecution.status)
-    )
-    subtask_counts = {row[0]: row[1] for row in subtask_result.all()}
-    total_subtasks = sum(subtask_counts.values())
-    success_rate = subtask_counts.get("success", 0) / max(total_subtasks, 1)
-
-    # Harness blocks (last 24h)
     block_result = await db.execute(
         select(func.count()).select_from(AuditLog).where(
             AuditLog.event_type == "harness_block",
@@ -606,9 +586,6 @@ async def get_dashboard(
     harness_blocks = block_result.scalar_one()
 
     return success({
-        "tasks": task_counts,
-        "subtask_success_rate": round(success_rate * 100, 1),
-        "total_subtasks_24h": total_subtasks,
         "harness_blocks_24h": harness_blocks,
     })
 

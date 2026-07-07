@@ -79,9 +79,8 @@ class MessageRequest(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
-    task_id: str
+    session_id: str
     approved: bool
-    session_id: str | None = None  # Frontend's original chat_id (for session reconstruction)
 
 
 @router.post("/im/web/message")
@@ -213,7 +212,7 @@ async def web_message(
                     interrupt_info = event["__interrupt__"]
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
-                            "task_id": unified.session_id,
+                            "session_id": unified.session_id,
                             "step": entry.value.get("step", 0),
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
@@ -312,30 +311,10 @@ async def web_confirm(
     from athena.core.graph import build_agent_graph
     from athena.core.graph.agent_graph import create_checkpointer
 
-    # ── Resolve thread_id / user_id (same as before) ────────────────────
-    from athena.models import get_session_maker
-    session_maker = get_session_maker(config.sqlite_db_path)
-
-    async with session_maker() as session:
-        from sqlalchemy import select
-        from athena.models.task import Task
-        result = await session.execute(
-            select(Task).where(Task.task_id == req.task_id)
-        )
-        task = result.scalar_one_or_none()
-
-    if task:
-        thread_id = task.session_id
-        user_id = task.user_id
-    else:
-        thread_id = req.task_id
-        user_id = config.user.web.user_id
-
-    # Use the frontend's original session_id (chat_id) if provided,
-    # so that get_or_create_session generates the same deterministic hash.
-    # Without this, the hashed task_id would be double-hashed, producing
-    # a completely different SessionContext.
-    chat_id = req.session_id or thread_id
+    # ── Resolve thread_id / user_id ────────────────────────────────────
+    thread_id = req.session_id
+    user_id = config.user.web.user_id
+    chat_id = req.session_id
 
     decision = "approved" if req.approved else "rejected"
 
@@ -363,7 +342,14 @@ async def web_confirm(
             tool_registry = get_tool_registry()
 
             checkpointer = await create_checkpointer(config.sqlite_db_path)
-            graph = build_agent_graph(checkpointer=checkpointer)
+
+            # Build graph with same summarization_model as web_message
+            # to ensure consistent topology for interrupt/resume.
+            summarization_model = _build_summarization_model()
+            graph = build_agent_graph(
+                checkpointer=checkpointer,
+                summarization_model=summarization_model,
+            )
 
             graph_config = {
                 "configurable": {
@@ -382,7 +368,7 @@ async def web_confirm(
 
             logger.info(
                 "web_confirm_resuming",
-                task_id=req.task_id,
+                session_id=req.session_id,
                 approved=req.approved,
             )
 
@@ -397,7 +383,7 @@ async def web_confirm(
                     interrupt_info = event["__interrupt__"]
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
-                            "task_id": chat_id,
+                            "session_id": chat_id,
                             "step": entry.value.get("step", 0),
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
@@ -455,7 +441,7 @@ async def web_confirm(
 
             logger.info(
                 "web_confirm_resumed",
-                task_id=req.task_id,
+                session_id=req.session_id,
                 approved=req.approved,
             )
 

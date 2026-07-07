@@ -394,48 +394,12 @@ class HarnessEngine:
     async def _check_quota(
         self, action: HarnessAction, result: HarnessResult
     ) -> HarnessResult:
-        """Check concurrent task and daily operation limits."""
-        # Concurrent tasks check
-        db_path = self.config.sqlite_db_path
-        session_maker = get_session_maker(db_path)
+        """Check concurrent task and daily operation limits.
 
-        async with session_maker() as session:
-            from sqlalchemy import select, func
-            from athena.models.task import Task
-            result_ = await session.execute(
-                select(func.count()).select_from(Task).where(
-                    Task.user_id == action.user_id,
-                    Task.status.in_(["running", "recovering"]),
-                )
-            )
-            concurrent = result_.scalar_one()
-
-        if concurrent >= 2:
-            result.allowed = False
-            result.reason = f"Concurrent task limit reached ({concurrent}/2)"
-            result.blocked_by_rule = "quota"
-            return result
-
-        # Global concurrent check
-        global_max = self.config.system.global_max_concurrent_tasks
-        async with session_maker() as session:
-            from sqlalchemy import select, func
-            from athena.models.task import Task
-            result_ = await session.execute(
-                select(func.count()).select_from(Task).where(
-                    Task.status.in_(["running", "recovering"]),
-                )
-            )
-            global_concurrent = result_.scalar_one()
-
-        if global_concurrent >= global_max:
-            result.allowed = False
-            result.reason = (
-                f"Global concurrent task limit reached ({global_concurrent}/{global_max})"
-            )
-            result.blocked_by_rule = "quota"
-            return result
-
+        NOTE: The previous implementation relied on the Task ORM model for
+        concurrency tracking, which has been removed. Re-implement with a
+        lightweight mechanism if concurrent-task limiting is needed again.
+        """
         return result
 
     def _assess_risk(

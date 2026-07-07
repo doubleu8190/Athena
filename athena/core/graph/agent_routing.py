@@ -33,9 +33,9 @@ def after_agent(state: AgentState) -> list[Send]:
     if not pending:
         return []
 
-    iteration = state.get("agent_iteration", 0)
-    if iteration >= MAX_AGENT_ITERATIONS:
-        return []
+    # NOTE: iteration limit is enforced at the START of agent_node (before the
+    # LLM call), NOT here.  If the agent already produced tool_calls in this
+    # invocation they must be executed — skipping them would silently drop work.
 
     # Fan out: each tool call becomes its own tools_node invocation
     return [

@@ -111,7 +111,6 @@ function createEventHandler(sessionId: string, msgId: string) {
       case 'confirm_required': {
         store.updateMessage(sessionId, msgId, {
           confirmRequired: {
-            task_id: (data.task_id as string) || sessionId,
             step: (data.step as number) || 0,
             tool_name: (data.tool_name as string) || '',
             risk_level: (data.risk_level as string) || 'medium',

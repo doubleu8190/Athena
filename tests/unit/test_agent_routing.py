@@ -50,14 +50,22 @@ class TestAfterAgent:
         assert all(isinstance(s, Send) for s in result)
         assert all(s.node == "tools" for s in result)
 
-    def test_max_iterations_exceeded_ends(self):
-        """Agent should stop when max iterations reached."""
+    def test_max_iterations_still_routes_pending_tools(self):
+        """Even at max iterations, pending tool_calls must be executed.
+
+        The iteration limit is enforced at the START of agent_node (before the
+        LLM call), not in after_agent.  If the agent already produced
+        tool_calls they must be routed to tools — dropping them silently
+        would lose work.
+        """
         state = {
             "status": "executing",
             "pending_tool_calls": [{"id": "call_1", "name": "weather", "arguments": {}}],
             "agent_iteration": MAX_AGENT_ITERATIONS,
         }
-        assert after_agent(state) == []
+        result = after_agent(state)
+        assert len(result) == 1
+        assert isinstance(result[0], Send)
 
     def test_one_below_max_still_routes_to_tools(self):
         """Agent one below max iterations should still route to tools."""

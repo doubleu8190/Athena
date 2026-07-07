@@ -77,6 +77,20 @@ async def agent_node(
     session_id = config["configurable"]["session_id"]
     log = bind_context(session_id=session_id)
 
+    # ── Iteration guard (before LLM call) ─────────────────────────────
+    iteration = state.get("agent_iteration", 0) + 1
+    if iteration > MAX_AGENT_ITERATIONS:
+        log.warning("agent_max_iterations_hit", iteration=iteration)
+        return {
+            "messages": [AIMessage(
+                content="I've reached the maximum number of tool-calling iterations. "
+                        "Please try a simpler request or start a new conversation."
+            )],
+            "status": "completed",
+            "agent_iteration": iteration,
+            "pending_tool_calls": None,
+        }
+
     # ── Build messages as native LangChain objects ─────────────────────
     messages: list[BaseMessage] = [SystemMessage(content=AGENT_SYSTEM_PROMPT)]
 
@@ -92,9 +106,6 @@ async def agent_node(
     # ── Bind tools to model ───────────────────────────────────────────
     model: BaseChatModel = llm_manager.base_model
     model_with_tools = model.bind_tools(mcp_tools) if mcp_tools else model
-
-    # Track iterations
-    iteration = state.get("agent_iteration", 0) + 1
 
     # ── Invoke model ──────────────────────────────────────────────────
     try:

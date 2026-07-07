@@ -30,7 +30,6 @@ export interface ToolCallEvent {
 }
 
 export interface ConfirmRequired {
-  task_id: string
   step: number
   tool_name: string
   risk_level: string

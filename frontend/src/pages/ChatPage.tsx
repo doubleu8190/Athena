@@ -10,8 +10,8 @@ import { useSSE } from '../hooks/useSSE'
 const EMPTY_MESSAGES: Message[] = []
 
 export default function ChatPage() {
-  const sessions = useChatStore((s) => s.sessions)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const historyLoading = useChatStore((s) => s.historyLoading)
 
   // Derive messages entirely from store state; use stable EMPTY_MESSAGES
   // so Object.is(prev, next) stays true when there are no messages.
@@ -23,24 +23,39 @@ export default function ChatPage() {
   const { isStreaming, startStream, stopStream, resumeStream } = useSSE()
   const initialized = useRef(false)
 
-  // Create initial session if none exists (must be in useEffect, NOT during render)
+  // Restore last session from localStorage on first mount
   useEffect(() => {
-    if (!initialized.current && sessions.length === 0 && !activeSessionId) {
+    if (!initialized.current) {
       initialized.current = true
-      useChatStore.getState().createSession()
+      useChatStore.getState().restoreLastSession().then(() => {
+        // If no previous session was restored, create a fresh one
+        const state = useChatStore.getState()
+        if (state.sessions.length === 0 && !state.activeSessionId) {
+          state.createSession()
+        }
+      })
     }
-  }, [sessions.length, activeSessionId])
+  }, [])
 
   return (
     <div className="h-full flex">
       <SessionList />
-      <div className="flex-1 flex flex-col bg-gray-50 dark:bg-gray-950 min-w-0">
+      <div className="flex-1 flex flex-col bg-gray-50 dark:bg-gray-950 min-w-0 min-h-0">
         {!activeSessionId ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <div className="text-5xl mb-3">🦉</div>
               <p className="text-sm text-gray-500 dark:text-gray-400">
                 Select a session or create a new one
+              </p>
+            </div>
+          </div>
+        ) : historyLoading ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-5 h-5 border-2 border-orange-500 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Loading history...
               </p>
             </div>
           </div>

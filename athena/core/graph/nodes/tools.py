@@ -62,7 +62,7 @@ async def tools_node(
     mcp_client: MCPClient = cfg["mcp_client"]
     tool_registry: ToolRegistry = cfg.get("tool_registry")
 
-    log = bind_context(session_id=cfg["session_id"])
+    log = bind_context(session_id=cfg["thread_id"], node="tools_node")
 
     # Ensure arguments is a dict (may come as string from some providers)
     if isinstance(tool_args, str):

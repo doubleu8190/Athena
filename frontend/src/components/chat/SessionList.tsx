@@ -6,7 +6,7 @@ export default function SessionList() {
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const createSession = useChatStore((s) => s.createSession)
   const deleteSession = useChatStore((s) => s.deleteSession)
-  const setActiveSession = useChatStore((s) => s.setActiveSession)
+  const loadHistory = useChatStore((s) => s.loadHistory)
 
   return (
     <div className="w-56 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0">
@@ -25,7 +25,15 @@ export default function SessionList() {
             key={session.id}
             session={session}
             isActive={session.id === activeSessionId}
-            onSelect={() => setActiveSession(session.id)}
+            onSelect={() => {
+              // If messages already loaded, just switch; otherwise fetch from backend
+              const msgs = useChatStore.getState().messages[session.id]
+              if (msgs && msgs.length > 0) {
+                useChatStore.getState().setActiveSession(session.id)
+              } else {
+                loadHistory(session.id)
+              }
+            }}
             onDelete={() => deleteSession(session.id)}
           />
         ))}

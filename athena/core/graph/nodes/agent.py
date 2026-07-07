@@ -74,8 +74,7 @@ async def agent_node(
     from athena.mcp_client.tool_loader import load_mcp_base_tools
 
     llm_manager: LLMProviderManager = config["configurable"]["llm_manager"]
-    session_id = config["configurable"]["session_id"]
-    log = bind_context(session_id=session_id)
+    log = bind_context(session_id=config["configurable"]["thread_id"],node="agent_node")
 
     # ── Iteration guard (before LLM call) ─────────────────────────────
     iteration = state.get("agent_iteration", 0) + 1

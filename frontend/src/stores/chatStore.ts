@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { getHistory, getSessions } from '../api/endpoints/chat'
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -67,12 +68,36 @@ function generateTitle(content: string): string {
   return content.slice(0, 30).replace(/\n/g, ' ')
 }
 
+const ACTIVE_SESSION_KEY = 'athena-active-session-id'
+
+function loadActiveSessionId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_SESSION_KEY)
+  } catch {
+    return null
+  }
+}
+
+function saveActiveSessionId(id: string | null): void {
+  try {
+    if (id) {
+      localStorage.setItem(ACTIVE_SESSION_KEY, id)
+    } else {
+      localStorage.removeItem(ACTIVE_SESSION_KEY)
+    }
+  } catch {
+    // localStorage may be unavailable
+  }
+}
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 interface ChatState {
   sessions: Session[]
   activeSessionId: string | null
   messages: Record<string, Message[]>
+  historyLoading: boolean
+  sessionsLoading: boolean
 
   // Session actions
   createSession: () => string
@@ -83,6 +108,11 @@ interface ChatState {
   addMessage: (sessionId: string, msg: Message) => void
   updateMessage: (sessionId: string, msgId: string, patch: Partial<Message>) => void
 
+  // History
+  loadHistory: (sessionId: string) => Promise<void>
+  loadAllSessions: () => Promise<void>
+  restoreLastSession: () => Promise<void>
+
   // Convenience: add user message + create placeholder assistant message
   sendUserMessage: (content: string) => { userMsg: Message; assistantMsg: Message; sessionId: string }
 }
@@ -92,6 +122,8 @@ export const useChatStore = create<ChatState>()(
       sessions: [],
       activeSessionId: null,
       messages: {},
+      historyLoading: false,
+      sessionsLoading: false,
 
       createSession: () => {
         const id = generateId()
@@ -104,6 +136,7 @@ export const useChatStore = create<ChatState>()(
           sessions: [session, ...s.sessions],
           activeSessionId: id,
         }))
+        saveActiveSessionId(id)
         return id
       },
 
@@ -111,17 +144,22 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           const sessions = s.sessions.filter((ses) => ses.id !== id)
           const { [id]: _, ...messages } = s.messages
+          const nextActive = s.activeSessionId === id
+            ? (sessions[0]?.id ?? null)
+            : s.activeSessionId
+          saveActiveSessionId(nextActive)
           return {
             sessions,
             messages,
-            activeSessionId: s.activeSessionId === id
-              ? (sessions[0]?.id ?? null)
-              : s.activeSessionId,
+            activeSessionId: nextActive,
           }
         })
       },
 
-      setActiveSession: (id) => set({ activeSessionId: id }),
+      setActiveSession: (id) => {
+        set({ activeSessionId: id })
+        saveActiveSessionId(id)
+      },
 
       addMessage: (sessionId, msg) => {
         set((s) => ({
@@ -150,6 +188,91 @@ export const useChatStore = create<ChatState>()(
             ),
           },
         }))
+      },
+
+      /**
+       * Load message history from the backend for a given session.
+       * If the session doesn't exist in the store yet, creates it.
+       */
+      loadHistory: async (sessionId: string) => {
+        set({ historyLoading: true })
+        try {
+          const data = await getHistory(sessionId)
+
+          // Ensure session exists in the store
+          const existingSession = get().sessions.find((s) => s.id === sessionId)
+          if (!existingSession) {
+            // Derive title from first user message
+            const firstUserMsg = data.messages.find((m) => m.role === 'user')
+            const title = firstUserMsg ? generateTitle(firstUserMsg.content) : 'Restored Session'
+            const session: Session = {
+              id: sessionId,
+              title,
+              createdAt: firstUserMsg?.timestamp || Date.now(),
+            }
+            set((s) => ({
+              sessions: [session, ...s.sessions],
+            }))
+          }
+
+          set((s) => ({
+            messages: {
+              ...s.messages,
+              [sessionId]: data.messages,
+            },
+            activeSessionId: sessionId,
+          }))
+          saveActiveSessionId(sessionId)
+        } catch (err) {
+          console.error('Failed to load history:', err)
+        } finally {
+          set({ historyLoading: false })
+        }
+      },
+
+      /**
+       * Load all sessions from the backend (SQLite checkpointer).
+       * Merges with existing local sessions without duplicates.
+       */
+      loadAllSessions: async () => {
+        set({ sessionsLoading: true })
+        try {
+          const data = await getSessions()
+          if (data.sessions.length === 0) return
+
+          const existingIds = new Set(get().sessions.map((s) => s.id))
+          const newSessions = data.sessions
+            .filter((s) => !existingIds.has(s.id))
+            .map((s) => ({
+              id: s.id,
+              title: s.title,
+              createdAt: s.createdAt,
+            }))
+
+          if (newSessions.length > 0) {
+            set((s) => ({
+              sessions: [...s.sessions, ...newSessions].sort(
+                (a, b) => b.createdAt - a.createdAt
+              ),
+            }))
+          }
+        } catch (err) {
+          console.error('Failed to load sessions:', err)
+        } finally {
+          set({ sessionsLoading: false })
+        }
+      },
+
+      /**
+       * Restore the last active session from localStorage on app startup.
+       * First loads all sessions from the backend, then restores the last active one.
+       */
+      restoreLastSession: async () => {
+        await get().loadAllSessions()
+        const lastSessionId = loadActiveSessionId()
+        if (lastSessionId) {
+          await get().loadHistory(lastSessionId)
+        }
       },
 
       sendUserMessage: (content) => {

@@ -33,9 +33,7 @@ def upgrade() -> None:
         sa.Column("user_id", sa.String(), nullable=False),
         sa.Column("channel", sa.String(), nullable=False),
         sa.Column("chat_id", sa.String(), nullable=False),
-        sa.Column("status", sa.String(), server_default="active"),
-        sa.Column("context_snapshot", sa.Text(), nullable=True),
-        sa.Column("last_active_at", sa.DateTime(), server_default=sa.func.now()),
+        sa.Column("modified_at", sa.DateTime(), server_default=sa.func.now()),
         sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("session_id"),
     )

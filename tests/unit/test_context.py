@@ -1,7 +1,7 @@
-"""Tests for Context Manager — session lifecycle and context building."""
+"""Tests for Context Manager — session ID generation."""
 
 
-from athena.core.context import ContextManager, SessionContext
+from athena.core.context import ContextManager
 
 
 class TestSessionId:
@@ -25,51 +25,3 @@ class TestSessionId:
         id1 = ContextManager.make_session_id("user1", "telegram", "111")
         id2 = ContextManager.make_session_id("user1", "telegram", "222")
         assert id1 != id2
-
-
-class TestSnapshot:
-    """Test context snapshot serialization."""
-
-    def test_build_snapshot(self):
-        """Snapshot should contain all required fields."""
-        ctx = SessionContext(
-            session_id="test-sess",
-            user_id="user1",
-            channel="telegram",
-            chat_id="chat1",
-            conversation_summary="Previous discussion about AI",
-            message_history=[{"role": "user", "content": "Hello"}],
-            current_task={"task_id": "task-1", "status": "running", "completed_steps": [1]},
-        )
-        from athena.core.context import ContextManager
-        mgr = object.__new__(ContextManager)
-        snapshot = mgr._build_snapshot(ctx)
-
-        assert snapshot["version"] == 1
-        assert "snapshot_at" in snapshot
-        assert snapshot["conversation_summary"] == "Previous discussion about AI"
-        assert len(snapshot["message_history"]) == 1
-        assert snapshot["current_task"]["task_id"] == "task-1"
-        assert 1 in snapshot["current_task"]["completed_steps"]
-        assert "token_count_estimate" in snapshot
-
-    def test_restore_from_snapshot(self):
-        """Restoring from snapshot should create equivalent context."""
-        snapshot = {
-            "version": 1,
-            "snapshot_at": "2026-06-10T12:00:00Z",
-            "conversation_summary": "Test summary",
-            "message_history": [{"role": "user", "content": "Hi"}],
-            "current_task": {"task_id": "t1", "status": "running", "completed_steps": [1, 2]},
-            "injected_memories": ["mem1"],
-            "token_count_estimate": 500,
-        }
-        from athena.core.context import ContextManager
-        mgr = object.__new__(ContextManager)
-        import asyncio
-        ctx = asyncio.run(mgr.restore_from_snapshot("sess-1", snapshot))
-
-        assert ctx.session_id == "sess-1"
-        assert ctx.conversation_summary == "Test summary"
-        assert len(ctx.message_history) == 1
-        assert ctx.current_task["task_id"] == "t1"

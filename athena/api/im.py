@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from athena.api.deps import get_config_dep, verify_api_key
 from athena.config import Config
-from athena.core.context import SessionContext
+from athena.models.session import Session
 from athena.core.llm_provider.manager import LLMProviderManager
 from athena.core.message import UnifiedMessage
 from athena.logging_config import get_logger
@@ -74,12 +74,12 @@ class SseEvent(StrEnum):
 
 class MessageRequest(BaseModel):
     content: str
-    session_id: str | None = None
+    chat_id: str | None = None
     attachments: list[dict[str, Any]] | None = None
 
 
 class ConfirmRequest(BaseModel):
-    session_id: str
+    chat_id: str
     approved: bool
 
 
@@ -102,15 +102,15 @@ async def web_message(
     user = config.user.web
     if not user.user_id:
         raise HTTPException(status_code=400, detail="Web channel is not configured")
-    if not req.session_id:
-        raise HTTPException(status_code=400, detail="session_id is required for web messages")
+    if not req.chat_id:
+        raise HTTPException(status_code=400, detail="chat_id is required for web messages")
 
     # Build UnifiedMessage
     unified = UnifiedMessage(
         message_id=f"web_{asyncio.get_event_loop().time()}",
         channel="web",
         user_id=user.user_id,
-        session_id=req.session_id,
+        chat_id=req.chat_id,
         content=req.content,
         attachments=req.attachments or [],
         chat_type="private",
@@ -138,22 +138,11 @@ async def web_message(
             context_mgr: ContextManager = ContextManager(config)
 
             # Get or create session
-            session_ctx: SessionContext = await context_mgr.get_or_create_session(
-                unified.user_id, unified.channel, unified.session_id
+            session = await context_mgr.get_or_create_session(
+                unified.user_id, unified.channel, unified.chat_id
             )
 
-            # Build dynamic system context (conversation summary + RAG memories).
-            # Message history is handled by LangGraph checkpointer — we only
-            # need the system-level context from inject_context.
-            # context_messages = await context_mgr.inject_context(
-            #     session_ctx, unified.content, unified.user_id
-            # )
-
             system_context = ""
-            # for msg in context_messages:
-            #     if msg.get("role") == "system":
-            #         system_context = msg.get("content", "")
-            #         break
 
             # Harness engine — process-wide singleton, auto-started on first call
             harness = await get_harness()
@@ -185,12 +174,8 @@ async def web_message(
             # Config with all live objects
             graph_config = {
                 "configurable": {
-                    "thread_id": unified.session_id,
-                    "session_id": unified.session_id,
-                    "user_id": unified.user_id,
-                    "channel": unified.channel,
-                    "session_context": session_ctx,
-                    "context_manager": context_mgr,
+                    "thread_id": session.session_id,
+                    "session_id": session.session_id,
                     "llm_manager": llm_manager,
                     "mcp_client": mcp_client,
                     "harness_engine": harness,
@@ -212,7 +197,7 @@ async def web_message(
                     interrupt_info = event["__interrupt__"]
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
-                            "session_id": unified.session_id,
+                            "session_id": session.session_id,
                             "step": entry.value.get("step", 0),
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
@@ -312,9 +297,8 @@ async def web_confirm(
     from athena.core.graph.agent_graph import create_checkpointer
 
     # ── Resolve thread_id / user_id ────────────────────────────────────
-    thread_id = req.session_id
     user_id = config.user.web.user_id
-    chat_id = req.session_id
+    chat_id = req.chat_id
 
     decision = "approved" if req.approved else "rejected"
 
@@ -333,7 +317,7 @@ async def web_confirm(
             llm_manager = get_llm_manager()
             context_mgr = ContextManager(config)
 
-            session_ctx = await context_mgr.get_or_create_session(
+            session = await context_mgr.get_or_create_session(
                 user_id, "web", chat_id
             )
 
@@ -353,12 +337,8 @@ async def web_confirm(
 
             graph_config = {
                 "configurable": {
-                    "thread_id": thread_id,
-                    "session_id": thread_id,
-                    "user_id": user_id,
-                    "channel": "web",
-                    "session_context": session_ctx,
-                    "context_manager": context_mgr,
+                    "thread_id": session.session_id,
+                    "session_id": session.session_id,
                     "llm_manager": llm_manager,
                     "mcp_client": mcp_client,
                     "harness_engine": harness,
@@ -368,7 +348,7 @@ async def web_confirm(
 
             logger.info(
                 "web_confirm_resuming",
-                session_id=req.session_id,
+                session_id=session.session_id,
                 approved=req.approved,
             )
 
@@ -383,7 +363,7 @@ async def web_confirm(
                     interrupt_info = event["__interrupt__"]
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
-                            "session_id": chat_id,
+                            "session_id": session.session_id,
                             "step": entry.value.get("step", 0),
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
@@ -441,7 +421,7 @@ async def web_confirm(
 
             logger.info(
                 "web_confirm_resumed",
-                session_id=req.session_id,
+                session_id=session.session_id,
                 approved=req.approved,
             )
 
@@ -463,6 +443,154 @@ async def web_confirm(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/im/web/sessions")
+async def web_sessions(
+    config: Config = Depends(get_config_dep),
+) -> dict[str, list[dict[str, Any]]]:
+    """Return all conversation sessions stored in the LangGraph checkpointer.
+
+    Queries the ``checkpoints`` table for distinct ``thread_id`` values,
+    reads the latest checkpoint for each to extract a human-readable title
+    (from the first ``HumanMessage``) and a creation timestamp.
+    """
+    from datetime import datetime
+
+    from langchain_core.messages import HumanMessage
+    from athena.core.graph.agent_graph import create_checkpointer
+
+    checkpointer = None
+    try:
+        checkpointer = await create_checkpointer(config.sqlite_db_path)
+
+        # Only look at the default namespace ("") to avoid duplicates
+        async with checkpointer.conn.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
+        ) as cur:
+            thread_ids = [row[0] for row in await cur.fetchall()]
+
+        sessions: list[dict[str, Any]] = []
+        for tid in thread_ids:
+            try:
+                checkpoint_tuple = await checkpointer.aget_tuple(
+                    {"configurable": {"thread_id": tid}}
+                )
+                if checkpoint_tuple is None:
+                    continue
+
+                msgs = checkpoint_tuple.checkpoint.get("channel_values", {}).get("messages", [])
+                first_user = next(
+                    (m for m in msgs if isinstance(m, HumanMessage)), None
+                )
+                if not first_user:
+                    continue
+
+                content = first_user.content if isinstance(first_user.content, str) else str(first_user.content)
+                title = content[:30].replace("\n", " ").strip() or "Untitled"
+
+                metadata = checkpoint_tuple.metadata or {}
+                ts = metadata.get("ts", "")
+                created_at = 0
+                if ts:
+                    try:
+                        created_at = int(datetime.fromisoformat(ts).timestamp() * 1000)
+                    except (ValueError, TypeError):
+                        pass
+
+                sessions.append({
+                    "id": tid,
+                    "title": title,
+                    "createdAt": created_at,
+                })
+            except Exception:
+                # Skip individual sessions that fail to load
+                continue
+
+        sessions.sort(key=lambda s: s["createdAt"], reverse=True)
+        return {"sessions": sessions}
+
+    except Exception as e:
+        logger.error("web_sessions_error", error=str(e))
+        return {"sessions": []}
+    finally:
+        if checkpointer is not None:
+            await checkpointer.conn.close()
+
+
+@router.get("/im/web/history")
+async def web_history(
+    session_id: str,
+    config: Config = Depends(get_config_dep),
+) -> dict[str, list[dict[str, Any]]]:
+    """Return message history for a web session from the LangGraph checkpointer.
+
+    The checkpointer stores full agent state (including messages) keyed by
+    ``thread_id``.  This endpoint reads the latest checkpoint and extracts
+    the user-visible messages (HumanMessage / AIMessage) in the format
+    expected by the frontend chat store.
+    """
+    import time as _time
+
+    from langchain_core.messages import AIMessage, HumanMessage
+    from athena.core.graph.agent_graph import create_checkpointer
+
+    checkpointer = None
+    try:
+        checkpointer = await create_checkpointer(config.sqlite_db_path)
+        checkpoint_tuple = await checkpointer.aget_tuple(
+            {"configurable": {"thread_id": session_id}}
+        )
+
+        if checkpoint_tuple is None:
+            return {"messages": []}
+
+        # Messages are stored in channel_values by the add_messages reducer
+        channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
+        raw_messages = channel_values.get("messages", [])
+
+        now_ms = int(_time.time() * 1000)
+        result: list[dict[str, Any]] = []
+        for msg in raw_messages:
+            if isinstance(msg, HumanMessage):
+                result.append({
+                    "role": "user",
+                    "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                    "timestamp": now_ms,
+                })
+            elif isinstance(msg, AIMessage):
+                # Skip empty AI messages (tool-calling stubs with no content)
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if not content.strip() and not msg.tool_calls:
+                    continue
+                entry: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": content,
+                    "timestamp": now_ms,
+                }
+                if msg.tool_calls:
+                    entry["toolCalls"] = [
+                        {
+                            "tool_name": tc.get("name", "unknown"),
+                            "args_preview": str(tc.get("args", {}))[:200],
+                            "status": "success",
+                        }
+                        for tc in msg.tool_calls
+                    ]
+                result.append(entry)
+
+        # Assign stable IDs after filtering
+        for idx, item in enumerate(result):
+            item["id"] = f"hist_{session_id}_{idx}"
+
+        return {"messages": result}
+
+    except Exception as e:
+        logger.error("web_history_error", session_id=session_id, error=str(e))
+        return {"messages": []}
+    finally:
+        if checkpointer is not None:
+            await checkpointer.conn.close()
 
 
 def _sse_event(event_type: SseEvent, data: dict) -> str:

@@ -15,7 +15,7 @@ from typing import Any, Literal
 class UnifiedMessage:
     """Normalized message from any IM channel.
 
-    session_id is populated by Context Manager on first message
+    chat_id is populated by Context Manager on first message
     (deterministic hash of user_id + channel + chat_id).
     Gateway layer passes an empty string — Context Manager fills it.
     """
@@ -23,7 +23,7 @@ class UnifiedMessage:
     message_id: str                   # Channel-unique ID for dedup & reply positioning
     channel: Literal["telegram", "web", "wechat"]
     user_id: str
-    session_id: str = ""              # Filled by Context Manager
+    chat_id: str = ""              # Filled by Context Manager
     content: str = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     attachments: list[dict[str, Any]] = field(default_factory=list)

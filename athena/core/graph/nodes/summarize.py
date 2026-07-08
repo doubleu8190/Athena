@@ -155,6 +155,13 @@ async def summarize_node(state: AgentState, config: RunnableConfig) -> dict:
     db_path: str = configurable.get("sqlite_db_path", "")
     llm_manager: LLMProviderManager = configurable.get("llm_manager")
 
+    # ── Task boundary: reset iteration counter ──────────────────────────
+    # When the previous task ended (completed/failed), after_agent routes
+    # to __end__.  The next message starts a fresh task, so reset the
+    # counter so the new task gets its full quota of MAX_AGENT_ITERATIONS.
+    prev_status = state.get("status", "")
+    agent_iteration = 0 if prev_status in ("completed", "failed") else state.get("agent_iteration", 0)
+
     ctx_window = llm_manager.base_model_context_window if llm_manager else 128000
     threshold = int(ctx_window * _SUMMARIZE_THRESHOLD)
 
@@ -208,4 +215,5 @@ async def summarize_node(state: AgentState, config: RunnableConfig) -> dict:
     return {
         "effective_messages": final_messages,
         "summary_offset": summary_offset,
+        "agent_iteration": agent_iteration,
     }

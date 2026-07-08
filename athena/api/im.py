@@ -190,10 +190,9 @@ async def web_message(
                     interrupt_info = event["__interrupt__"]
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
-                            "session_id": session.session_id,
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
-                            "args_preview": str(entry.value.get("args", {}))[:200],
+                            "args_preview": str(entry.value.get("args", {})),
                             "cooling_off_seconds": entry.value.get("cooling_off_seconds", 0),
                             "reason": entry.value.get("reason", ""),
                         })
@@ -367,10 +366,9 @@ async def web_confirm(
                     interrupt_info = event["__interrupt__"]
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
-                            "session_id": session.session_id,
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
-                            "args_preview": str(entry.value.get("args", {}))[:200],
+                            "args_preview": str(entry.value.get("args", {})),
                             "cooling_off_seconds": entry.value.get("cooling_off_seconds", 0),
                             "reason": entry.value.get("reason", ""),
                         })
@@ -481,8 +479,8 @@ async def web_sessions(
 
         sessions = [
             {
-                "id": row.session_id,
-                "title": row.chat_id,
+                "id": row.chat_id,
+                "title": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else row.chat_id,
                 "createdAt": int(row.created_at.timestamp() * 1000) if row.created_at else 0,
             }
             for row in rows
@@ -494,9 +492,9 @@ async def web_sessions(
         return {"sessions": []}
 
 
-@router.delete("/im/web/session/{session_id}")
+@router.delete("/im/web/session/{chat_id}")
 async def delete_web_session(
-    session_id: str,
+    chat_id: str,
     config: Config = Depends(get_config_dep),
 ) -> dict[str, Any]:
     """Soft-delete a web session by setting delete_time.
@@ -517,7 +515,7 @@ async def delete_web_session(
         async with session_maker() as db:
             result = await db.execute(
                 select(SessionModel).where(
-                    SessionModel.session_id == session_id,
+                    SessionModel.chat_id == chat_id,
                     SessionModel.user_id == user_id,
                     SessionModel.channel == "web",
                 )
@@ -530,19 +528,19 @@ async def delete_web_session(
             session.delete_time = datetime.now(timezone.utc)
             await db.commit()
 
-        logger.info("web_session_deleted", session_id=session_id)
+        logger.info("web_session_deleted", chat_id=chat_id)
         return {"success": True}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("delete_web_session_error", session_id=session_id, error=str(e))
+        logger.error("delete_web_session_error", chat_id=chat_id, error=str(e))
         raise HTTPException(status_code=500, detail="Failed to delete session")
 
 
 @router.get("/im/web/history")
 async def web_history(
-    session_id: str,
+    chat_id: str,
     config: Config = Depends(get_config_dep),
 ) -> dict[str, list[dict[str, Any]]]:
     """Return message history for a web session from the LangGraph checkpointer.
@@ -555,7 +553,11 @@ async def web_history(
     import time as _time
 
     from langchain_core.messages import AIMessage, HumanMessage
+    from athena.core.context import ContextManager
     from athena.core.graph.agent_graph import create_checkpointer
+
+    user_id = config.user.web.user_id
+    session_id = ContextManager.make_session_id(user_id, "web", chat_id)
 
     checkpointer = None
     try:
@@ -603,12 +605,12 @@ async def web_history(
 
         # Assign stable IDs after filtering
         for idx, item in enumerate(result):
-            item["id"] = f"hist_{session_id}_{idx}"
+            item["id"] = f"hist_{chat_id}_{idx}"
 
         return {"messages": result}
 
     except Exception as e:
-        logger.error("web_history_error", session_id=session_id, error=str(e))
+        logger.error("web_history_error", chat_id=chat_id, error=str(e))
         return {"messages": []}
     finally:
         if checkpointer is not None:

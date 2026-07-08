@@ -68,7 +68,7 @@ export function confirmAndStream(
 // ── Fetch message history ──────────────────────────────────────────────
 
 export function getHistory(sessionId: string): Promise<HistoryResponse> {
-  return api.get<HistoryResponse>('/im/web/history', { session_id: sessionId })
+  return api.get<HistoryResponse>('/im/web/history', { chat_id: sessionId })
 }
 
 // ── Fetch all sessions ─────────────────────────────────────────────────

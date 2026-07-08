@@ -1,9 +1,20 @@
 """Routing functions for the tool-calling agent graph.
 
 These conditional-edge callbacks determine which node runs next based on
-the current state.  Uses LangGraph's ``Send()`` to fan out individual
-tool calls so each runs as an independent sub-node (prevents duplicate
-execution when ``interrupt()`` is used for human-in-the-loop confirmation).
+the current state.
+
+Graph flow::
+
+    agent ── (no tool_calls) ──→ END
+      │
+      └── (has tool_calls) ──→ confirm ──→ Send(tools, call_1) ─┐
+                                    Send(tools, call_2) ─┼→ agent (loop)
+                                    Send(tools, call_3) ─┘
+
+``interrupt()`` (human-in-the-loop) only happens inside ``confirm_node``
+— never inside ``Send()`` branches — which prevents the duplicate
+confirmation bug caused by LangGraph re-evaluating conditional edges on
+resume.
 """
 
 from __future__ import annotations
@@ -18,29 +29,38 @@ MAX_AGENT_ITERATIONS = 10
 """Hard limit on agent → tools → agent loops to prevent runaway chains."""
 
 
-def after_agent(state: AgentState) -> list[Send]:
+def after_agent(state: AgentState) -> str:
     """Route after the agent node.
 
     Returns:
-        * ``[Send("tools", ...), ...]`` — fan out tool calls as independent
-          branches (one per tool call)
-        * ``[]`` — empty list signals END to LangGraph
+        ``"confirm"`` if there are pending tool calls to process.
+        ``"__end__"`` if the agent produced a final answer or failed.
     """
     if state.get("status") in ("completed", "failed"):
-        return []
+        return "__end__"
 
     pending = state.get("pending_tool_calls")
     if not pending:
+        return "__end__"
+
+    return "confirm"
+
+
+def after_confirm(state: AgentState) -> list[Send]:
+    """Route after the confirm node.
+
+    Returns:
+        ``[Send("tools", ...), ...]`` — fan out confirmed tool calls as
+        independent branches (one per tool call).
+        ``[]`` — empty list signals END (all tools were blocked/rejected).
+    """
+    confirmed = state.get("confirmed_tool_calls")
+    if not confirmed:
         return []
 
-    # NOTE: iteration limit is enforced at the START of agent_node (before the
-    # LLM call), NOT here.  If the agent already produced tool_calls in this
-    # invocation they must be executed — skipping them would silently drop work.
-
-    # Fan out: each tool call becomes its own tools_node invocation
     return [
-        Send("tools", {"pending_tool_calls": [tc]})
-        for tc in pending
+        Send("tools", {"confirmed_tool_calls": [tc]})
+        for tc in confirmed
     ]
 
 

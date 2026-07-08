@@ -91,7 +91,6 @@ class WebAdapter(BaseIMAdapter):
         logger.info(
             "web_confirmation_sent",
             task_id=confirmation.task_id,
-            step=confirmation.step,
         )
         # The SSE event is pushed by the API layer
 

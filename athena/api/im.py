@@ -198,7 +198,6 @@ async def web_message(
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
                             "session_id": session.session_id,
-                            "step": entry.value.get("step", 0),
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
                             "args_preview": str(entry.value.get("args", {}))[:200],
@@ -241,6 +240,20 @@ async def web_message(
                             yield _sse_event(SseEvent.TASK_FAILED, {
                                 "error": "Agent failed to generate a response",
                             })
+
+                    elif node_name == "confirm":
+                        # ── Confirm node output (blocked/rejected tools) ──
+                        c_messages = node_output.get("messages", [])
+                        for msg in c_messages:
+                            if hasattr(msg, "content") and hasattr(msg, "tool_call_id"):
+                                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                                tool_name = getattr(msg, "name", "unknown")
+                                yield _sse_event(SseEvent.TOOL_CALL_RESULT, {
+                                    "tool_name": tool_name,
+                                    "tool_call_id": getattr(msg, "tool_call_id", ""),
+                                    "success": False,
+                                    "output_preview": content[:500],
+                                })
 
                     elif node_name == "tools":
                         # ── Tools node output ──────────────────────────
@@ -364,7 +377,6 @@ async def web_confirm(
                     for entry in interrupt_info:
                         yield _sse_event(SseEvent.CONFIRM_REQUIRED, {
                             "session_id": session.session_id,
-                            "step": entry.value.get("step", 0),
                             "tool_name": entry.value.get("tool_name", ""),
                             "risk_level": entry.value.get("risk_level", "medium"),
                             "args_preview": str(entry.value.get("args", {}))[:200],
@@ -449,73 +461,92 @@ async def web_confirm(
 async def web_sessions(
     config: Config = Depends(get_config_dep),
 ) -> dict[str, list[dict[str, Any]]]:
-    """Return all conversation sessions stored in the LangGraph checkpointer.
+    """Return all non-deleted web sessions for the current user.
 
-    Queries the ``checkpoints`` table for distinct ``thread_id`` values,
-    reads the latest checkpoint for each to extract a human-readable title
-    (from the first ``HumanMessage``) and a creation timestamp.
+    Queries the ``sessions`` table filtered by channel=web,
+    user_id from config, and delete_time IS NULL.
+    Results are ordered by created_at DESC.
     """
-    from datetime import datetime
+    from sqlalchemy import select
 
-    from langchain_core.messages import HumanMessage
-    from athena.core.graph.agent_graph import create_checkpointer
+    from athena.models import get_session_maker
+    from athena.models.session import Session as SessionModel
 
-    checkpointer = None
+    user_id = config.user.web.user_id
+    session_maker = get_session_maker(config.sqlite_db_path)
+
     try:
-        checkpointer = await create_checkpointer(config.sqlite_db_path)
-
-        # Only look at the default namespace ("") to avoid duplicates
-        async with checkpointer.conn.execute(
-            "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
-        ) as cur:
-            thread_ids = [row[0] for row in await cur.fetchall()]
-
-        sessions: list[dict[str, Any]] = []
-        for tid in thread_ids:
-            try:
-                checkpoint_tuple = await checkpointer.aget_tuple(
-                    {"configurable": {"thread_id": tid}}
+        async with session_maker() as db:
+            result = await db.execute(
+                select(SessionModel)
+                .where(
+                    SessionModel.channel == "web",
+                    SessionModel.user_id == user_id,
+                    SessionModel.delete_time.is_(None),
                 )
-                if checkpoint_tuple is None:
-                    continue
+                .order_by(SessionModel.created_at.desc())
+            )
+            rows = result.scalars().all()
 
-                msgs = checkpoint_tuple.checkpoint.get("channel_values", {}).get("messages", [])
-                first_user = next(
-                    (m for m in msgs if isinstance(m, HumanMessage)), None
-                )
-                if not first_user:
-                    continue
-
-                content = first_user.content if isinstance(first_user.content, str) else str(first_user.content)
-                title = content[:30].replace("\n", " ").strip() or "Untitled"
-
-                metadata = checkpoint_tuple.metadata or {}
-                ts = metadata.get("ts", "")
-                created_at = 0
-                if ts:
-                    try:
-                        created_at = int(datetime.fromisoformat(ts).timestamp() * 1000)
-                    except (ValueError, TypeError):
-                        pass
-
-                sessions.append({
-                    "id": tid,
-                    "title": title,
-                    "createdAt": created_at,
-                })
-            except Exception:
-                # Skip individual sessions that fail to load
-                continue
-
-        sessions.sort(key=lambda s: s["createdAt"], reverse=True)
+        sessions = [
+            {
+                "id": row.session_id,
+                "title": row.chat_id,
+                "createdAt": int(row.created_at.timestamp() * 1000) if row.created_at else 0,
+            }
+            for row in rows
+        ]
         return {"sessions": sessions}
 
     except Exception as e:
         logger.error("web_sessions_error", error=str(e))
         return {"sessions": []}
-    finally:
-        if checkpointer is not None:
-            await checkpointer.conn.close()
+
+
+@router.delete("/im/web/session/{session_id}")
+async def delete_web_session(
+    session_id: str,
+    config: Config = Depends(get_config_dep),
+) -> dict[str, Any]:
+    """Soft-delete a web session by setting delete_time.
+
+    Only the session owner (matched by user_id) can delete it.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from athena.models import get_session_maker
+    from athena.models.session import Session as SessionModel
+
+    user_id = config.user.web.user_id
+    session_maker = get_session_maker(config.sqlite_db_path)
+
+    try:
+        async with session_maker() as db:
+            result = await db.execute(
+                select(SessionModel).where(
+                    SessionModel.session_id == session_id,
+                    SessionModel.user_id == user_id,
+                    SessionModel.channel == "web",
+                )
+            )
+            session = result.scalar_one_or_none()
+
+            if session is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+
+            session.delete_time = datetime.now(timezone.utc)
+            await db.commit()
+
+        logger.info("web_session_deleted", session_id=session_id)
+        return {"success": True}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("delete_web_session_error", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to delete session")
 
 
 @router.get("/im/web/history")

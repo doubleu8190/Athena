@@ -43,6 +43,10 @@ class AgentState(TypedDict):
     """Tool calls returned by the LLM that need to be executed.
     Format: ``[{"id": "...", "name": "...", "arguments": {...}}, ...]``."""
 
+    confirmed_tool_calls: list[dict[str, Any]] | None
+    """Tool calls that passed confirmation and are ready to execute.
+    Set by the confirm node; consumed by tools node via Send() fan-out."""
+
     agent_iteration: int
     """How many times the agent node has been invoked in the current loop.
     Guards against infinite tool-calling loops."""

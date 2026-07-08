@@ -64,7 +64,7 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
 def bind_context(**kwargs: object) -> structlog.stdlib.BoundLogger:
     """Bind context variables to the current logger.
 
-    Common keys: session_id, task_id, step, tool_name, mcp_server_id.
+    Common keys: session_id, task_id, tool_name, mcp_server_id.
 
     Usage:
         logger = bind_context(session_id="sess_123", task_id="task_456")

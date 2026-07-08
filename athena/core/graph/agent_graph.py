@@ -12,13 +12,14 @@ summarisation::
       ▼
     agent ── (no tool_calls) ──→ END
       │
-      ├── (has tool_calls) ──→ Send(tools, call_1) ─┐
-      │                          Send(tools, call_2) ─┼→ agent (loop)
-      │                          Send(tools, call_3) ─┘
+      └── (has tool_calls) ──→ confirm ──→ Send(tools, call_1) ─┐
+                                    Send(tools, call_2) ─┼→ agent (loop)
+                                    Send(tools, call_3) ─┘
 
-Each tool call runs as an independent sub-node via ``Send()`` fan-out,
-so ``interrupt()`` (human-in-the-loop confirmation) only pauses the
-current branch — completed branches are never re-executed on resume.
+``interrupt()`` (human-in-the-loop) only happens inside ``confirm_node``
+— never inside ``Send()`` branches — which prevents the duplicate
+confirmation bug caused by LangGraph re-evaluating conditional edges on
+resume.
 """
 
 from __future__ import annotations
@@ -31,8 +32,9 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from athena.core.graph.agent_state import AgentState
-from athena.core.graph.agent_routing import after_agent, after_tools
+from athena.core.graph.agent_routing import after_agent, after_confirm, after_tools
 from athena.core.graph.nodes.agent import agent_node
+from athena.core.graph.nodes.confirm import confirm_node
 from athena.core.graph.nodes.tools import tools_node
 
 
@@ -77,12 +79,22 @@ def build_agent_graph(
 
     # ── Nodes ───────────────────────────────────────────────────────────
     builder.add_node("agent", agent_node)
+    builder.add_node("confirm", confirm_node)
     builder.add_node("tools", tools_node)
 
     # ── Edges ────────────────────────────────────────────────────────────
-    # agent → fan-out to tools via Send(), or END (empty list)
-    # after_agent returns Send() objects directly — no mapping dict needed.
-    builder.add_conditional_edges("agent", after_agent)
+    # agent → confirm (when tool_calls exist) or END
+    builder.add_conditional_edges(
+        "agent",
+        after_agent,
+        {
+            "confirm": "confirm",
+            "__end__": END,
+        },
+    )
+
+    # confirm → fan-out to tools via Send(), or END (all blocked/rejected)
+    builder.add_conditional_edges("confirm", after_confirm)
 
     # tools → agent (loop back for synthesis or additional tool calls)
     builder.add_conditional_edges(

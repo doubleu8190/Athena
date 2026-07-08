@@ -15,10 +15,10 @@ class TestAgentGraphConstruction:
         assert graph is not None
 
     def test_nodes_present(self):
-        """Agent and tools nodes must be registered."""
+        """Agent, confirm, and tools nodes must be registered."""
         graph = build_agent_graph()
         nodes = list(graph.get_graph().nodes.keys())
-        expected = {"__start__", "agent", "tools", "__end__"}
+        expected = {"__start__", "agent", "confirm", "tools", "__end__"}
         assert set(nodes) == expected
 
     def test_start_to_agent(self):

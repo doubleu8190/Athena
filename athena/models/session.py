@@ -20,6 +20,7 @@ class Session(Base):
     user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     channel: Mapped[str] = mapped_column(String, nullable=False)
     chat_id: Mapped[str] = mapped_column(String, nullable=False)
+    delete_time: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
     modified_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()
     )

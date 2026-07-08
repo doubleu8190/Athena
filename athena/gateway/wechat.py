@@ -424,13 +424,11 @@ class WeChatAdapter(BaseIMAdapter):
             logger.info(
                 "wechat_confirmation_approved",
                 task_id=confirmation.task_id,
-                step=confirmation.step,
             )
         else:
             logger.info(
                 "wechat_confirmation_rejected",
                 task_id=confirmation.task_id,
-                step=confirmation.step,
             )
 
     async def _confirmation_timeout(self, confirmation: ConfirmationRequest) -> None:

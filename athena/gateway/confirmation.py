@@ -50,7 +50,6 @@ class ConfirmationManager:
     async def create_confirmation(
         self,
         task_id: str,
-        step: int,
         risk_level: str,
         preview_text: str,
         cooling_off_seconds: int,
@@ -63,7 +62,6 @@ class ConfirmationManager:
 
         Args:
             task_id: Parent task ID.
-            step: Subtask step number.
             risk_level: 'low', 'medium', 'high', or 'critical'.
             preview_text: Human-readable operation summary.
             cooling_off_seconds: Mandatory wait before confirmation.
@@ -79,7 +77,6 @@ class ConfirmationManager:
 
         confirmation = ConfirmationRequest(
             task_id=task_id,
-            step=step,
             risk_level=risk_level,
             preview_text=preview_text,
             cooling_off_seconds=cooling_off_seconds,
@@ -104,7 +101,6 @@ class ConfirmationManager:
         logger.info(
             "confirmation_created",
             task_id=task_id,
-            step=step,
             risk_level=risk_level,
             cooling_off=cooling_off_seconds,
             timeout=timeout_seconds,

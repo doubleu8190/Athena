@@ -174,21 +174,21 @@ export function useSSE() {
   const startStream = useCallback(
     (content: string) => {
       // Prepare messages in store
-      const { assistantMsg, sessionId } =
+      const { assistantMsg, sessionId: chatId } =
         useChatStore.getState().sendUserMessage(content)
 
       setIsStreaming(true)
 
-      const handleEvent = createEventHandler(sessionId, assistantMsg.id)
+      const handleEvent = createEventHandler(chatId, assistantMsg.id)
 
       const { abort } = sendMessage(
-        { content, session_id: sessionId },
+        { content, chat_id: chatId },
         handleEvent,
         () => {
           setIsStreaming(false)
         },
         (err) => {
-          useChatStore.getState().updateMessage(sessionId, assistantMsg.id, {
+          useChatStore.getState().updateMessage(chatId, assistantMsg.id, {
             isStreaming: false,
             taskStatus: 'failed',
             content: `Error: ${err.message}`,

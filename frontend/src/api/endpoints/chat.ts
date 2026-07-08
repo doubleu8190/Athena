@@ -6,12 +6,12 @@ import type { Message } from '../../stores/chatStore'
 
 export interface MessageRequest {
   content: string
-  session_id: string
+  chat_id: string
   attachments?: Record<string, unknown>[]
 }
 
 export interface ConfirmRequest {
-  session_id: string
+  chat_id: string
   approved: boolean
 }
 
@@ -75,4 +75,10 @@ export function getHistory(sessionId: string): Promise<HistoryResponse> {
 
 export function getSessions(): Promise<SessionsResponse> {
   return api.get<SessionsResponse>('/im/web/sessions')
+}
+
+// ── Delete a session ─────────────────────────────────────────────────
+
+export function deleteSession(sessionId: string): Promise<{ success: boolean }> {
+  return api.delete<{ success: boolean }>(`/im/web/session/${sessionId}`)
 }

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { getHistory, getSessions } from '../api/endpoints/chat'
+import { deleteSession as deleteSessionApi, getHistory, getSessions } from '../api/endpoints/chat'
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -141,6 +141,7 @@ export const useChatStore = create<ChatState>()(
       },
 
       deleteSession: (id) => {
+        deleteSessionApi(id).catch(() => {})
         set((s) => {
           const sessions = s.sessions.filter((ses) => ses.id !== id)
           const { [id]: _, ...messages } = s.messages
@@ -238,24 +239,20 @@ export const useChatStore = create<ChatState>()(
         set({ sessionsLoading: true })
         try {
           const data = await getSessions()
-          if (data.sessions.length === 0) return
+          const remoteSessions = data.sessions.map((s) => ({
+            id: s.id,
+            title: s.title,
+            createdAt: s.createdAt,
+          }))
 
-          const existingIds = new Set(get().sessions.map((s) => s.id))
-          const newSessions = data.sessions
-            .filter((s) => !existingIds.has(s.id))
-            .map((s) => ({
-              id: s.id,
-              title: s.title,
-              createdAt: s.createdAt,
-            }))
-
-          if (newSessions.length > 0) {
-            set((s) => ({
-              sessions: [...s.sessions, ...newSessions].sort(
-                (a, b) => b.createdAt - a.createdAt
-              ),
-            }))
-          }
+          set((s) => {
+            const existingIds = new Set(remoteSessions.map((r) => r.id))
+            const merged = [
+              ...remoteSessions,
+              ...s.sessions.filter((e) => !existingIds.has(e.id)),
+            ].sort((a, b) => b.createdAt - a.createdAt)
+            return { sessions: merged }
+          })
         } catch (err) {
           console.error('Failed to load sessions:', err)
         } finally {
@@ -270,8 +267,11 @@ export const useChatStore = create<ChatState>()(
       restoreLastSession: async () => {
         await get().loadAllSessions()
         const lastSessionId = loadActiveSessionId()
-        if (lastSessionId) {
+        const sessions = get().sessions
+        if (lastSessionId && sessions.some((s) => s.id === lastSessionId)) {
           await get().loadHistory(lastSessionId)
+        } else if (sessions.length > 0) {
+          await get().loadHistory(sessions[0].id)
         }
       },
 

@@ -4,15 +4,15 @@ Loads MCP tools as LangChain ``BaseTool`` objects using
 ``MultiServerMCPClient`` from ``langchain-mcp-adapters``. These tools can be
 used directly with ``model.bind_tools()`` for native function calling.
 
-Each call to ``load_mcp_base_tools()`` creates a fresh ``MultiServerMCPClient``
-and fetches the latest tool list, supporting hot-plugging of MCP servers.
-The ``BaseTool.ainvoke()`` on returned tools creates a new session per call,
-so no long-lived client context is needed.
+Caching: ``load_mcp_base_tools()`` caches the result in-process with a TTL.
+Cache is invalidated automatically on expiry and manually via
+``invalidate_tool_cache()`` (called by admin API on server add/remove/update).
 """
 
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from langchain_core.tools import BaseTool
@@ -21,16 +21,32 @@ from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# ── Module-level cache ───────────────────────────────────────────────
+_cached_tools: list[BaseTool] | None = None
+_cached_configs: dict[str, dict[str, Any]] | None = None
+_cache_time: float = 0.0
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
+def invalidate_tool_cache() -> None:
+    """Invalidate the cached tools list.
+
+    Called by admin API endpoints when MCP servers are
+    registered, removed, or their status changes.
+    """
+    global _cached_tools, _cached_configs, _cache_time
+    _cached_tools = None
+    _cached_configs = None
+    _cache_time = 0.0
+    logger.info("mcp_tool_cache_invalidated")
+
 
 async def load_mcp_base_tools() -> list[BaseTool]:
     """Load all enabled MCP tools as LangChain ``BaseTool`` objects.
 
-    Uses ``MultiServerMCPClient`` to connect to all enabled MCP servers
-    and convert their tools to LangChain's ``BaseTool`` format, suitable
-    for ``model.bind_tools()``.
-
-    Each call creates a fresh client and fetches the latest tool list,
-    so newly added/removed MCP servers are picked up automatically.
+    Uses an in-process cache with a 5-minute TTL. Each cache miss
+    creates a fresh ``MultiServerMCPClient`` and fetches the latest
+    tool list.
 
     The returned ``BaseTool`` objects create a new MCP session per
     ``ainvoke()`` call, so no long-lived context manager is needed.
@@ -39,6 +55,13 @@ async def load_mcp_base_tools() -> list[BaseTool]:
         List of LangChain ``BaseTool`` objects. Empty list if no servers
         are configured or loading fails.
     """
+    global _cached_tools, _cached_configs, _cache_time
+
+    now = time.monotonic()
+    if _cached_tools is not None and (now - _cache_time) < CACHE_TTL_SECONDS:
+        logger.debug("mcp_tools_cache_hit", count=len(_cached_tools))
+        return _cached_tools
+
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
     except ImportError:
@@ -55,6 +78,11 @@ async def load_mcp_base_tools() -> list[BaseTool]:
         client = MultiServerMCPClient(server_configs)
         tools = await client.get_tools()
         logger.info("mcp_base_tools_loaded", count=len(tools))
+
+        _cached_tools = tools
+        _cached_configs = server_configs
+        _cache_time = now
+
         return tools
     except Exception as e:
         logger.error("mcp_base_tools_load_failed", error=str(e))
@@ -77,9 +105,15 @@ async def _build_server_configs() -> dict[str, dict[str, Any]]:
             }
         }
 
-    Returns:
-        Dict mapping server_id to connection config.
+    Results are cached per-process with a 5-minute TTL.
     """
+    global _cached_configs, _cache_time
+
+    now = time.monotonic()
+    if _cached_configs is not None and (now - _cache_time) < CACHE_TTL_SECONDS:
+        logger.debug("mcp_server_configs_cache_hit")
+        return _cached_configs
+
     from athena.config import get_config
     from athena.models import get_session_maker
     from athena.models.mcp_server import MCPServer
@@ -128,4 +162,6 @@ async def _build_server_configs() -> dict[str, dict[str, Any]]:
 
         configs[server.server_id] = entry
 
+    _cached_configs = configs
+    _cache_time = now
     return configs

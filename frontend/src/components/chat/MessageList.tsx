@@ -13,7 +13,7 @@ interface Props {
   onResume: (req: ConfirmRequest, sessionId: string, msgId: string) => void
 }
 
-export default function MessageList({ messages, sessionId, onResume }: Props) {
+export default function MessageList({ messages, sessionId: chatId, onResume }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -32,7 +32,7 @@ export default function MessageList({ messages, sessionId, onResume }: Props) {
   }, [messages])
 
   const handleConfirm = (approved: boolean, msgId: string) => {
-    onResume({ session_id: sessionId, approved }, sessionId, msgId)
+    onResume({ chat_id: chatId, approved }, chatId, msgId)
   }
 
   return (

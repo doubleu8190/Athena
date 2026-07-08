@@ -104,6 +104,9 @@ async def register_mcp_server(
     # Connect the newly registered server
     await mcp_client.connect_server(body.server_id)
 
+    from athena.mcp_client.tool_loader import invalidate_tool_cache
+    invalidate_tool_cache()
+
     logger.info("mcp_server_registered", server_id=body.server_id, transport=body.transport)
     return success({
         "server_id": body.server_id,
@@ -132,6 +135,9 @@ async def remove_mcp_server(
     await db.delete(server)
     await db.commit()
 
+    from athena.mcp_client.tool_loader import invalidate_tool_cache
+    invalidate_tool_cache()
+
     logger.info("mcp_server_removed", server_id=server_id)
     return success(None, "Server removed")
 
@@ -157,6 +163,9 @@ async def update_mcp_server_status(
 
     server.enabled = body.enabled
     await db.commit()
+
+    from athena.mcp_client.tool_loader import invalidate_tool_cache
+    invalidate_tool_cache()
 
     if body.enabled:
         # Actively connect the server

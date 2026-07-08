@@ -12,7 +12,6 @@ from typing import Annotated, Any, TypedDict
 
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
-from langmem.short_term import RunningSummary
 
 
 class AgentState(TypedDict):
@@ -24,19 +23,14 @@ class AgentState(TypedDict):
 
     # ── Conversation ──
     messages: Annotated[list[BaseMessage], add_messages]
-    """Full message history managed by LangGraph's add_messages reducer
-    and automatically summarised by the ``SummarizationNode``."""
-
-    context: RunningSummary | None
-    """Running summary state maintained by ``SummarizationNode``.
-    Tracks which messages have been summarised so the node only
-    processes new messages on each invocation.  Set to ``None`` on
-    first run; the summarization node populates it."""
+    """Full message history managed by LangGraph's add_messages reducer.
+    Context-aware summarization (in agent_node) reads from the session
+    table, not from graph state."""
 
     system_context: str | None
     """Dynamic system context rebuilt each invocation (RAG-injected memories
-    and other ephemeral metadata).  *Not* used for conversation summary
-    (that is handled by ``context`` + ``SummarizationNode``)."""
+    and other ephemeral metadata).  Injected into the agent's system prompt
+    by ``summarize_node`` alongside the conversation summary."""
 
     # ── Tool execution ──
     pending_tool_calls: list[dict[str, Any]] | None
@@ -50,6 +44,22 @@ class AgentState(TypedDict):
     agent_iteration: int
     """How many times the agent node has been invoked in the current loop.
     Guards against infinite tool-calling loops."""
+
+    # ── Summarisation ──
+    effective_messages: list | None
+    """Compressed message list populated by ``summarize_node``.
+    Contains ``[system_prompt, summary, messages[offset:]]`` when a
+    summary exists, otherwise ``None`` (agent falls back to raw messages)."""
+
+    summary_offset: int
+    """Index into ``messages`` up to which summarisation has been applied.
+    Managed by ``summarize_node`` and persisted atomically with the
+    LangGraph checkpoint — no separate DB transaction required."""
+
+    # ── Tool availability ──
+    tools_available: bool
+    """Whether MCP tools were loaded successfully.  Set by ``agent_node``;
+    when ``False``, the agent warns the user that tools are unavailable."""
 
     # ── Control ──
     status: str

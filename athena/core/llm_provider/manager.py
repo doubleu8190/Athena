@@ -81,6 +81,19 @@ class LLMProviderManager:
         return m
 
     @property
+    def base_model_context_window(self) -> int:
+        """The context window size (in tokens) of the primary model."""
+        pdata = self._config.llm.providers.get(self._default_provider)
+        if pdata is None:
+            logger.warning(
+                "context_window_provider_not_found",
+                provider=self._default_provider,
+                fallback=128000,
+            )
+            return 128000
+        return pdata.context_window
+
+    @property
     def fast_model(self) -> BaseChatModel | None:
         """The fast/cheap model for summarization. None if not configured."""
         if not self._fast_provider:

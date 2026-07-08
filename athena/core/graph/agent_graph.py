@@ -1,31 +1,30 @@
 """Agent graph builder — constructs the tool-calling agent StateGraph.
 
-This is the simplified replacement for the old plan→execute→collect→finalize
-graph.  It implements a standard LLM agent loop with optional message
-summarisation::
+Standard LLM agent loop::
 
     START
       │
       ▼
-    summarize  (SummarizationNode — trims long history, optional)
-      │
-      ▼
-    agent ── (no tool_calls) ──→ END
-      │
-      └── (has tool_calls) ──→ confirm ──→ Send(tools, call_1) ─┐
-                                    Send(tools, call_2) ─┼→ agent (loop)
-                                    Send(tools, call_3) ─┘
+    summarize ──→ agent ── (no tool_calls) ──→ END
+                     │
+                     └── (has tool_calls) ──→ confirm ──→ Send(tools, call_1) ─┐
+                                                   Send(tools, call_2) ─┼→ summarize (loop)
+                                                   Send(tools, call_3) ─┘
 
 ``interrupt()`` (human-in-the-loop) only happens inside ``confirm_node``
 — never inside ``Send()`` branches — which prevents the duplicate
 confirmation bug caused by LangGraph re-evaluating conditional edges on
 resume.
+
+Context-aware summarisation is handled by ``summarize_node`` which runs
+**before** every ``agent_node`` call.  It estimates token usage and, if
+needed, summarises older messages via the fast model and persists the
+summary in the session table.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -35,54 +34,34 @@ from athena.core.graph.agent_state import AgentState
 from athena.core.graph.agent_routing import after_agent, after_confirm, after_tools
 from athena.core.graph.nodes.agent import agent_node
 from athena.core.graph.nodes.confirm import confirm_node
+from athena.core.graph.nodes.summarize import summarize_node
 from athena.core.graph.nodes.tools import tools_node
 
 
 def build_agent_graph(
     checkpointer: BaseCheckpointSaver | None = None,
-    summarization_model: Any = None,  # noqa: ANN401
 ) -> StateGraph:
     """Build and return the compiled tool-calling agent StateGraph.
 
     Args:
         checkpointer: Optional ``SqliteSaver`` for checkpointing.  Required
             for ``interrupt()`` / resume (human-in-the-loop confirmation).
-        summarization_model: Optional LangChain chat model (e.g.
-            ``ChatOpenAI``) used by ``SummarizationNode`` to compress long
-            message histories.  If ``None``, messages grow unbounded — only
-            suitable for short-lived sessions.
 
     Returns:
         A compiled StateGraph ready for ``astream()`` / ``ainvoke()``.
     """
-    # ── Import SummarizationNode lazily (langmem is optional) ─────────
-    from langmem.short_term import SummarizationNode as _SummarizationNode
-
     builder = StateGraph(AgentState)
 
-    # ── Summarization node (optional, before agent) ────────────────────
-    if summarization_model is not None:
-        summarize_node = _SummarizationNode(
-            model=summarization_model,
-            max_tokens=4096,
-            max_tokens_before_summary=8192,
-            max_summary_tokens=512,
-            input_messages_key="messages",
-            output_messages_key="messages",  # in-place: auto RemoveMessage
-            name="summarize",
-        )
-        builder.add_node("summarize", summarize_node)
-        builder.add_edge(START, "summarize")
-        builder.add_edge("summarize", "agent")
-    else:
-        builder.add_edge(START, "agent")
-
     # ── Nodes ───────────────────────────────────────────────────────────
+    builder.add_node("summarize", summarize_node)
     builder.add_node("agent", agent_node)
     builder.add_node("confirm", confirm_node)
     builder.add_node("tools", tools_node)
 
     # ── Edges ────────────────────────────────────────────────────────────
+    builder.add_edge(START, "summarize")
+    builder.add_edge("summarize", "agent")
+
     # agent → confirm (when tool_calls exist) or END
     builder.add_conditional_edges(
         "agent",
@@ -96,12 +75,12 @@ def build_agent_graph(
     # confirm → fan-out to tools via Send(), or END (all blocked/rejected)
     builder.add_conditional_edges("confirm", after_confirm)
 
-    # tools → agent (loop back for synthesis or additional tool calls)
+    # tools → summarize → agent (loop back for synthesis or additional tool calls)
     builder.add_conditional_edges(
         "tools",
         after_tools,
         {
-            "agent": "agent",
+            "summarize": "summarize",
             "__end__": END,
         },
     )

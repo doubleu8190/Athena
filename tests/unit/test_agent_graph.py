@@ -1,7 +1,7 @@
 """Tests for agent graph construction and end-to-end execution."""
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 from athena.core.graph import build_agent_graph
 
@@ -18,36 +18,23 @@ class TestAgentGraphConstruction:
         """Agent, confirm, and tools nodes must be registered."""
         graph = build_agent_graph()
         nodes = list(graph.get_graph().nodes.keys())
-        expected = {"__start__", "agent", "confirm", "tools", "__end__"}
+        expected = {"__start__", "summarize", "agent", "confirm", "tools", "__end__"}
         assert set(nodes) == expected
 
-    def test_start_to_agent(self):
-        """START → agent edge must exist (without summarization model)."""
+    def test_start_to_summarize(self):
+        """START → summarize edge must exist."""
         graph = build_agent_graph()
         edges = graph.get_graph().edges
         start_edges = [e for e in edges if e.source == "__start__"]
         assert len(start_edges) == 1
-        assert start_edges[0].target == "agent"
+        assert start_edges[0].target == "summarize"
 
-    def test_summarize_node_absent_without_model(self):
-        """Without summarization_model, no summarize node should be present."""
+    def test_summarize_node_present(self):
+        """Graph should contain a summarize node that runs before agent."""
         graph = build_agent_graph()
         nodes = list(graph.get_graph().nodes.keys())
-        assert "summarize" not in nodes
-
-    def test_summarize_node_present_with_model(self):
-        """With summarization_model, summarize node should appear."""
-        from langchain_openai import ChatOpenAI
-
-        model = ChatOpenAI(model="deepseek-v4-flash", base_url="https://api.deepseek.com/v1", api_key="test")
-        graph = build_agent_graph(summarization_model=model)
-        nodes = list(graph.get_graph().nodes.keys())
         assert "summarize" in nodes
-
-        # START → summarize → agent
-        edges = graph.get_graph().edges
-        start_edges = [e for e in edges if e.source == "__start__"]
-        assert start_edges[0].target == "summarize"
+        assert "agent" in nodes
 
 
 class TestAgentGraphEndToEnd:
@@ -59,14 +46,19 @@ class TestAgentGraphEndToEnd:
         from langchain_core.messages import HumanMessage
 
         # Mock LLM manager — direct answer by default
+        from langchain_core.messages import AIMessage
         llm_mgr = MagicMock()
-        llm_response = MagicMock()
-        llm_response.text = "Hello! I'm Athena. How can I help you?"
-        llm_response.tool_calls = []
+        llm_response = AIMessage(content="Hello! I'm Athena. How can I help you?")
 
-        async def _mock_generate(*args, **kwargs):
+        mock_llm = MagicMock()
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+
+        async def _mock_ainvoke(*args, **kwargs):
             return llm_response
-        llm_mgr.generate = _mock_generate
+        mock_llm.ainvoke = _mock_ainvoke
+        type(llm_mgr).base_model = PropertyMock(return_value=mock_llm)
+        llm_mgr.base_model_context_window = 128000
+        llm_mgr.default_summarize_provider = None
 
         # Mock harness engine
         harness = MagicMock()
@@ -145,30 +137,29 @@ class TestAgentGraphEndToEnd:
     @pytest.mark.asyncio
     async def test_tool_calling_flow(self, mock_deps):
         """LLM requests tool → tools execute → agent synthesizes."""
-        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import AIMessage, HumanMessage
 
         # Override LLM: first call returns tool_calls, second call returns answer
         call_count = [0]
 
-        tool_response = MagicMock()
-        tool_response.text = "Let me check the weather."
+        tool_response = AIMessage(content="Let me check the weather.")
         tool_response.tool_calls = [
-            {"id": "call_1", "name": "weather", "arguments": {"city": "Tokyo"}}
+            {"id": "call_1", "name": "weather", "args": {"city": "Tokyo"}}
         ]
 
-        final_response = MagicMock()
-        final_response.text = "The weather in Tokyo is 22°C, sunny."
-        final_response.tool_calls = []
+        final_response = AIMessage(content="The weather in Tokyo is 22°C, sunny.")
 
-        async def _mock_generate(*args, **kwargs):
+        async def _mock_ainvoke(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                # Check that tools were passed
                 return tool_response
             else:
                 return final_response
 
-        mock_deps["llm_manager"].generate = _mock_generate
+        mock_llm = MagicMock()
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_llm.ainvoke = _mock_ainvoke
+        type(mock_deps["llm_manager"]).base_model = PropertyMock(return_value=mock_llm)
 
         # Add tool to registry
         mock_tool = MagicMock()
@@ -234,7 +225,11 @@ class TestAgentGraphEndToEnd:
         # Make LLM fail
         async def _mock_fail(*args, **kwargs):
             raise RuntimeError("LLM unavailable")
-        mock_deps["llm_manager"].generate = _mock_fail
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_llm.ainvoke = _mock_fail
+        type(mock_deps["llm_manager"]).base_model = PropertyMock(return_value=mock_llm)
 
         graph = build_agent_graph()
 
@@ -273,19 +268,22 @@ class TestAgentGraphEndToEnd:
     @pytest.mark.asyncio
     async def test_max_iterations_guard(self, mock_deps):
         """Graph should stop after MAX_AGENT_ITERATIONS tool-call loops."""
-        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import AIMessage, HumanMessage
         from athena.core.graph.agent_routing import MAX_AGENT_ITERATIONS
 
         # LLM always returns tool_calls (simulate infinite loop scenario)
-        tool_response = MagicMock()
-        tool_response.text = ""
-        tool_response.tool_calls = [
-            {"id": "call_1", "name": "weather", "arguments": {"city": "Tokyo"}}
+        always_tool_response = AIMessage(content="Let me check.")
+        always_tool_response.tool_calls = [
+            {"id": "call_1", "name": "weather", "args": {"city": "Tokyo"}}
         ]
 
         async def _always_tools(*args, **kwargs):
-            return tool_response
-        mock_deps["llm_manager"].generate = _always_tools
+            return always_tool_response
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_llm.ainvoke = _always_tools
+        type(mock_deps["llm_manager"]).base_model = PropertyMock(return_value=mock_llm)
 
         mock_tool = MagicMock()
         mock_tool.source_server_id = "builtin-core"
@@ -337,3 +335,8 @@ class TestAgentGraphEndToEnd:
         # Should have at most MAX_AGENT_ITERATIONS agent invocations
         agent_events = [e for e in events if "agent" in e]
         assert len(agent_events) <= MAX_AGENT_ITERATIONS + 1
+
+        # Last agent event should be the max-iterations fallback
+        last_agent = agent_events[-1]["agent"]
+        assert last_agent["status"] == "completed"
+        assert "maximum number of iterations" in last_agent["messages"][0].content

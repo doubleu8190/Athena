@@ -65,7 +65,8 @@ class LLMProviderConfig:
     max_tokens: int = 4096
     base_url: str | None = None
     temperature: float = 0.7
-    format: str = "openai"  # "openai" or "anthropic"   
+    context_window: int = 128000
+    format: str = "openai"  # "openai" or "anthropic"
 
 
 @dataclass
@@ -217,6 +218,7 @@ class Config:
                 max_tokens=pdata.get("max_tokens", 4096),
                 base_url=pdata.get("base_url"),
                 temperature=pdata.get("temperature", 0.7),
+                context_window=pdata.get("context_window", 128000),
                 format=pdata.get("format", "openai"),
             )
         return LLMConfig(

@@ -126,4 +126,6 @@ class ContextManager:
             "user_id": session.user_id,
             "channel": session.channel,
             "chat_id": session.chat_id,
+            "summary": session.summary,
+            "summary_offset": session.summary_offset,
         }

@@ -1,12 +1,12 @@
-"""Tests for agent_node, confirm_node, and tools_node with mocked dependencies."""
+"""Tests for agent_node, confirm_node, tools_node, and summarize_node."""
 
-import json
 import pytest
 from unittest.mock import MagicMock, PropertyMock, patch, AsyncMock
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 
 # ── agent_node tests ────────────────────────────────────────────────────────
+
 
 class TestAgentNode:
     """Tests for agent_node — LLM call with tools."""
@@ -15,174 +15,158 @@ class TestAgentNode:
     def mock_config(self):
         """Build a minimal configurable with mocked LLM + tool registry."""
         llm_mgr = MagicMock()
-        mock_model = MagicMock()
-        mock_model.ainvoke = AsyncMock()
-        type(llm_mgr).base_model = PropertyMock(return_value=mock_model)
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        type(llm_mgr).base_model = PropertyMock(return_value=mock_llm)
 
-        return {
+        mcp_client = MagicMock()
+
+        config = {
             "configurable": {
                 "llm_manager": llm_mgr,
-                "mock_model": mock_model,  # expose for easy assertion
+                "mcp_client": mcp_client,
+                "tool_registry": None,
                 "session_id": "test-session",
             }
         }
+        return config, mock_llm
 
     @pytest.mark.asyncio
-    @patch("athena.mcp_client.tool_loader.load_mcp_base_tools", new_callable=AsyncMock)
-    async def test_direct_answer_no_tools(self, mock_load_tools, mock_config):
-        """LLM returns text without tool_calls → completed status."""
+    @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[MagicMock()])
+    async def test_direct_answer_no_tools(self, _mock_tools, mock_config):
+        """LLM returns text without tool_calls."""
         from athena.core.graph.nodes.agent import agent_node
 
-        mock_load_tools.return_value = []
-
-        # Mock LLM response: direct answer
-        response = AIMessage(content="Hello! How can I help you today?")
+        config, mock_llm = mock_config
+        response = AIMessage(content="Hello!")
         response.tool_calls = []
-        mock_config["configurable"]["mock_model"].ainvoke.return_value = response
+        mock_llm.ainvoke.return_value = response
 
         state = {
             "messages": [HumanMessage(content="hello")],
-            "context": None,
-            "system_context": None,
-            "pending_tool_calls": None,
-            "agent_iteration": 0,
-            "status": "thinking",
             "session_id": "test",
             "user_id": "user1",
             "channel": "web",
         }
 
-        result = await agent_node(state, mock_config)
+        result = await agent_node(state, config)
 
-        assert result["status"] == "completed"
-        assert result["pending_tool_calls"] is None
-        assert result["agent_iteration"] == 1
         assert len(result["messages"]) == 1
-        assert result["messages"][0].content == "Hello! How can I help you today?"
+        assert result["messages"][0].content == "Hello!"
+        mock_llm.ainvoke.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @patch("athena.mcp_client.tool_loader.load_mcp_base_tools", new_callable=AsyncMock)
-    async def test_tool_calls_requested(self, mock_load_tools, mock_config):
-        """LLM returns tool_calls → executing status with pending calls."""
+    @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[MagicMock()])
+    async def test_uses_effective_messages_when_present(self, _mock_tools, mock_config):
+        """When effective_messages is in state, agent uses it directly."""
         from athena.core.graph.nodes.agent import agent_node
 
-        mock_load_tools.return_value = []
+        config, mock_llm = mock_config
+        response = AIMessage(content="Done")
+        response.tool_calls = []
+        mock_llm.ainvoke.return_value = response
 
+        effective = [
+            SystemMessage(content="You are Athena."),
+            SystemMessage(content="Summary: user asked about weather"),
+            HumanMessage(content="What about tomorrow?"),
+        ]
+        state = {
+            "messages": [HumanMessage(content="hello"), HumanMessage(content="What about tomorrow?")],
+            "effective_messages": effective,
+            "session_id": "test",
+            "user_id": "user1",
+            "channel": "web",
+        }
+
+        result = await agent_node(state, config)
+
+        assert result["messages"][0].content == "Done"
+        # Verify the LLM was called with effective_messages, not raw messages
+        call_args = mock_llm.ainvoke.call_args[0][0]
+        assert call_args is effective
+
+    @pytest.mark.asyncio
+    @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[])
+    async def test_falls_back_without_effective_messages(self, _mock_tools, mock_config):
+        """Without effective_messages, agent builds its own message list."""
+        from athena.core.graph.nodes.agent import agent_node
+
+        config, mock_llm = mock_config
+        response = AIMessage(content="OK")
+        response.tool_calls = []
+        mock_llm.ainvoke.return_value = response
+
+        state = {
+            "messages": [HumanMessage(content="hi")],
+            "session_id": "test",
+            "user_id": "user1",
+            "channel": "web",
+        }
+
+        result = await agent_node(state, config)
+
+        call_args = mock_llm.ainvoke.call_args[0][0]
+        # First message should be the system prompt
+        assert isinstance(call_args[0], SystemMessage)
+        assert "Athena" in call_args[0].content
+
+    @pytest.mark.asyncio
+    @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[MagicMock()])
+    async def test_tool_calls_passed_through(self, _mock_tools, mock_config):
+        """LLM returns tool_calls — they appear in the response message."""
+        from athena.core.graph.nodes.agent import agent_node
+
+        config, mock_llm = mock_config
         response = AIMessage(content="")
         response.tool_calls = [
             {"id": "call_1", "name": "weather", "args": {"city": "Tokyo"}}
         ]
-        mock_config["configurable"]["mock_model"].ainvoke.return_value = response
+        mock_llm.ainvoke.return_value = response
 
         state = {
-            "messages": [HumanMessage(content="What's the weather in Tokyo?")],
-            "context": None,
-            "system_context": None,
-            "pending_tool_calls": None,
-            "agent_iteration": 0,
-            "status": "thinking",
+            "messages": [HumanMessage(content="weather?")],
             "session_id": "test",
             "user_id": "user1",
             "channel": "web",
         }
 
-        result = await agent_node(state, mock_config)
+        result = await agent_node(state, config)
 
-        assert result["status"] == "executing"
-        assert result["pending_tool_calls"] is not None
-        assert len(result["pending_tool_calls"]) == 1
-        assert result["pending_tool_calls"][0]["name"] == "weather"
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].tool_calls[0]["name"] == "weather"
 
     @pytest.mark.asyncio
-    @patch("athena.mcp_client.tool_loader.load_mcp_base_tools", new_callable=AsyncMock)
-    async def test_text_with_tool_calls(self, mock_load_tools, mock_config):
-        """LLM returns both text and tool_calls (e.g., "Let me check...")."""
+    @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[])
+    async def test_includes_system_context(self, _mock_tools, mock_config):
+        """system_context from config is included as a system message."""
         from athena.core.graph.nodes.agent import agent_node
 
-        mock_load_tools.return_value = []
+        config, mock_llm = mock_config
+        config["configurable"]["system_context"] = "User prefers concise answers."
 
-        response = AIMessage(content="Let me look up the weather for you.")
-        response.tool_calls = [
-            {"id": "call_1", "name": "weather", "args": {"city": "Tokyo"}}
-        ]
-        mock_config["configurable"]["mock_model"].ainvoke.return_value = response
-
-        state = {
-            "messages": [HumanMessage(content="weather in Tokyo?")],
-            "system_context": None,
-            "pending_tool_calls": None,
-            "agent_iteration": 0,
-            "status": "thinking",
-            "session_id": "test",
-            "user_id": "user1",
-            "channel": "web",
-        }
-
-        result = await agent_node(state, mock_config)
-
-        assert result["status"] == "executing"
-        assert result["pending_tool_calls"] is not None
-        # Should have text content AND tool_calls on the message
-        assert result["messages"][0].content == "Let me look up the weather for you."
-
-    @pytest.mark.asyncio
-    @patch("athena.mcp_client.tool_loader.load_mcp_base_tools", new_callable=AsyncMock)
-    async def test_llm_error_returns_failed(self, mock_load_tools, mock_config):
-        """LLM call fails → failed status with error message."""
-        from athena.core.graph.nodes.agent import agent_node
-
-        mock_load_tools.return_value = []
-
-        async def _fail(*args, **kwargs):
-            raise RuntimeError("LLM API down")
-        mock_config["configurable"]["mock_model"].ainvoke = _fail
-
-        state = {
-            "messages": [HumanMessage(content="hello")],
-            "context": None,
-            "system_context": None,
-            "pending_tool_calls": None,
-            "agent_iteration": 0,
-            "status": "thinking",
-            "session_id": "test",
-            "user_id": "user1",
-            "channel": "web",
-        }
-
-        result = await agent_node(state, mock_config)
-
-        assert result["status"] == "failed"
-        assert result["pending_tool_calls"] is None
-        assert "error" in result["messages"][0].content.lower()
-
-    @pytest.mark.asyncio
-    @patch("athena.mcp_client.tool_loader.load_mcp_base_tools", new_callable=AsyncMock)
-    async def test_includes_system_context(self, mock_load_tools, mock_config):
-        """System context should be included as a second system message."""
-        from athena.core.graph.nodes.agent import agent_node
-
-        mock_load_tools.return_value = []
-
-        response = AIMessage(content="I see. Let me help with that.")
+        response = AIMessage(content="Sure.")
         response.tool_calls = []
-        mock_config["configurable"]["mock_model"].ainvoke.return_value = response
+        mock_llm.ainvoke.return_value = response
 
         state = {
-            "messages": [HumanMessage(content="help")],
-            "system_context": "Previous: user asked about weather.",
-            "pending_tool_calls": None,
-            "agent_iteration": 0,
-            "status": "thinking",
+            "messages": [HumanMessage(content="hi")],
             "session_id": "test",
             "user_id": "user1",
             "channel": "web",
         }
 
-        result = await agent_node(state, mock_config)
-        assert result["status"] == "completed"
+        await agent_node(state, config)
+
+        call_args = mock_llm.ainvoke.call_args[0][0]
+        system_msgs = [m for m in call_args if isinstance(m, SystemMessage)]
+        contexts = [m.content for m in system_msgs]
+        assert any("concise" in c for c in contexts)
 
 
 # ── confirm_node tests ──────────────────────────────────────────────────────
+
 
 class TestConfirmNode:
     """Tests for confirm_node — harness check + sequential interrupt."""
@@ -345,6 +329,7 @@ class TestConfirmNode:
 
 # ── tools_node tests ────────────────────────────────────────────────────────
 
+
 class TestToolsNode:
     """Tests for tools_node — MCP tool execution (no harness/interrupt)."""
 
@@ -376,7 +361,7 @@ class TestToolsNode:
         """Execute a single confirmed tool call successfully."""
         from athena.core.graph.nodes.tools import tools_node
 
-        mock_load_tools.return_value = {}  # No MCP tools, use fallback
+        mock_load_tools.return_value = {}
 
         state = {
             "messages": [],
@@ -479,7 +464,124 @@ class TestToolsNode:
         assert "error" in result["messages"][0].content.lower()
 
 
+# ── summarize_node tests ────────────────────────────────────────────────────
+
+
+class TestSummarizeNode:
+    """Tests for summarize_node — context-aware summarisation."""
+
+    @pytest.fixture
+    def mock_config(self):
+        llm_mgr = MagicMock()
+        llm_mgr.base_model_context_window = 1000
+        llm_mgr.default_summarize_provider = "test-fast"
+
+        return {
+            "configurable": {
+                "llm_manager": llm_mgr,
+                "session_id": "test-session",
+                "sqlite_db_path": "",
+            }
+        }
+
+    @pytest.mark.asyncio
+    @patch("athena.core.graph.nodes.summarize._load_session_summary", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.summarize.count_tokens_approximately", return_value=100)
+    async def test_below_threshold_passthrough(self, _mock_count, mock_load, mock_config):
+        """Token count below threshold → effective_messages built without summarisation."""
+        from athena.core.graph.nodes.summarize import summarize_node
+
+        mock_load.return_value = (None, 0)
+
+        messages = [HumanMessage(content="hello")]
+        state = {
+            "messages": messages,
+            "session_id": "test",
+            "user_id": "user1",
+            "channel": "web",
+        }
+
+        result = await summarize_node(state, mock_config)
+
+        assert "effective_messages" in result
+        eff = result["effective_messages"]
+        # First message should be system prompt
+        assert isinstance(eff[0], SystemMessage)
+        # Last should be the human message
+        assert isinstance(eff[-1], HumanMessage)
+        assert eff[-1].content == "hello"
+
+    @pytest.mark.asyncio
+    @patch("athena.core.graph.nodes.summarize._save_session_summary", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.summarize._summarize_messages", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.summarize._load_session_summary", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.summarize.count_tokens_approximately")
+    async def test_above_threshold_triggers_summarise(
+        self, mock_count, mock_load, mock_summarise, mock_save, mock_config
+    ):
+        """Token count above threshold → summarise called, summary persisted."""
+        from athena.core.graph.nodes.summarize import summarize_node
+
+        mock_load.return_value = (None, 0)
+        # Threshold is 1000 * 0.8 = 800.  Return 900 to trigger.
+        mock_count.return_value = 900
+        mock_summarise.return_value = "User said hello."
+
+        messages = [
+            HumanMessage(content="msg1"),
+            HumanMessage(content="msg2"),
+            HumanMessage(content="msg3"),
+        ]
+        state = {
+            "messages": messages,
+            "session_id": "test",
+            "user_id": "user1",
+            "channel": "web",
+        }
+
+        result = await summarize_node(state, mock_config)
+
+        mock_summarise.assert_awaited_once()
+        mock_save.assert_awaited_once()
+        eff = result["effective_messages"]
+        # Should have system prompt + summary + last 2 messages
+        summary_msgs = [m for m in eff if isinstance(m, SystemMessage) and "summary" in m.content.lower()]
+        assert len(summary_msgs) >= 1
+
+    @pytest.mark.asyncio
+    @patch("athena.core.graph.nodes.summarize._load_session_summary", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.summarize.count_tokens_approximately", return_value=100)
+    async def test_existing_summary_included(self, _mock_count, mock_load, mock_config):
+        """When session has a summary, it's included as a system message."""
+        from athena.core.graph.nodes.summarize import summarize_node
+
+        mock_load.return_value = ("Previous conversation about weather.", 2)
+
+        messages = [
+            HumanMessage(content="old1"),
+            HumanMessage(content="old2"),
+            HumanMessage(content="new msg"),
+        ]
+        state = {
+            "messages": messages,
+            "session_id": "test",
+            "user_id": "user1",
+            "channel": "web",
+        }
+
+        result = await summarize_node(state, mock_config)
+
+        eff = result["effective_messages"]
+        summary_msgs = [m for m in eff if isinstance(m, SystemMessage) and "weather" in m.content]
+        assert len(summary_msgs) == 1
+        # Only messages after offset (2) should be included
+        human_msgs = [m for m in eff if isinstance(m, HumanMessage)]
+        assert len(human_msgs) == 1
+        assert human_msgs[0].content == "new msg"
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _async_return(value):
     """Create an async function that returns a fixed value."""

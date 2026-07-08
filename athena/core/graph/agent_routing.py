@@ -5,11 +5,11 @@ the current state.
 
 Graph flow::
 
-    agent ── (no tool_calls) ──→ END
-      │
-      └── (has tool_calls) ──→ confirm ──→ Send(tools, call_1) ─┐
-                                    Send(tools, call_2) ─┼→ agent (loop)
-                                    Send(tools, call_3) ─┘
+    summarize ──→ agent ── (no tool_calls) ──→ END
+                     │
+                     └── (has tool_calls) ──→ confirm ──→ Send(tools, call_1) ─┐
+                                                   Send(tools, call_2) ─┼→ summarize (loop)
+                                                   Send(tools, call_3) ─┘
 
 ``interrupt()`` (human-in-the-loop) only happens inside ``confirm_node``
 — never inside ``Send()`` branches — which prevents the duplicate
@@ -73,4 +73,4 @@ def after_tools(state: AgentState) -> str:
     if state.get("status") == "failed":
         return "__end__"
 
-    return "agent"
+    return "summarize"

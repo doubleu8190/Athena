@@ -117,14 +117,14 @@ class TestAfterConfirm:
 class TestAfterTools:
     """Tests for the after_tools conditional edge function."""
 
-    def test_tools_routes_back_to_agent(self):
-        """After tools complete, always route back to agent for synthesis."""
+    def test_tools_routes_back_to_summarize(self):
+        """After tools complete, route back to summarize (then agent)."""
         state = {
             "status": "executing",
             "pending_tool_calls": None,
             "agent_iteration": 1,
         }
-        assert after_tools(state) == "agent"
+        assert after_tools(state) == "summarize"
 
     def test_failed_status_ends(self):
         """Tools with failed status should stop."""

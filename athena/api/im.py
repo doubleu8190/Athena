@@ -142,8 +142,6 @@ async def web_message(
                 unified.user_id, unified.channel, unified.chat_id
             )
 
-            system_context = ""
-
             # Harness engine — process-wide singleton, auto-started on first call
             harness = await get_harness()
 
@@ -154,21 +152,15 @@ async def web_message(
             
             checkpointer: AsyncSqliteSaver = await create_checkpointer(config.sqlite_db_path)
 
-            # Build summarization model from LLM config (for SummarizationNode).
-            # Uses the default provider — typically deepseek (OpenAI-compatible).
-            summarization_model = _build_summarization_model()
-
             # Build the agent graph
-            graph : StateGraph = build_agent_graph(
+            graph: StateGraph = build_agent_graph(
                 checkpointer=checkpointer,
-                summarization_model=summarization_model,
             )
             
             # Initial state — checkpointer restores prior messages(/history);
             # we only seed the dynamic system context + the new user message.
             initial_state = {
                 "messages": [HumanMessage(content=unified.content)],
-                "system_context": system_context,
             }
 
             # Config with all live objects
@@ -180,6 +172,7 @@ async def web_message(
                     "mcp_client": mcp_client,
                     "harness_engine": harness,
                     "tool_registry": tool_registry,
+                    "sqlite_db_path": config.sqlite_db_path,
                 }
             }
 
@@ -340,12 +333,9 @@ async def web_confirm(
 
             checkpointer = await create_checkpointer(config.sqlite_db_path)
 
-            # Build graph with same summarization_model as web_message
-            # to ensure consistent topology for interrupt/resume.
-            summarization_model = _build_summarization_model()
+            # Build graph — topology must match web_message for interrupt/resume.
             graph = build_agent_graph(
                 checkpointer=checkpointer,
-                summarization_model=summarization_model,
             )
 
             graph_config = {
@@ -356,6 +346,7 @@ async def web_confirm(
                     "mcp_client": mcp_client,
                     "harness_engine": harness,
                     "tool_registry": tool_registry,
+                    "sqlite_db_path": config.sqlite_db_path,
                 }
             }
 
@@ -630,18 +621,3 @@ def _sse_event(event_type: SseEvent, data: dict) -> str:
     return f"event: {event_type.value}\ndata: {payload}\n\n"
 
 
-def _build_summarization_model() -> Any | None:  # noqa: ANN401
-    """Return the fast model for message summarization.
-
-    Uses ``LLMProviderManager.fast_model`` — the dedicated fast/cheap model
-    configured as ``default_summarize_provider`` in llm.yaml.
-
-    Returns ``None`` if no fast model is configured — the agent graph will
-    skip summarization in that case.
-    """
-    from athena.core.llm_provider.manager import get_llm_manager
-
-    try:
-        return get_llm_manager().fast_model
-    except Exception:
-        return None

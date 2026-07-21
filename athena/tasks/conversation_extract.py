@@ -2,7 +2,7 @@
 
 Reads the latest conversation from the LangGraph checkpointer, uses the
 fast LLM to extract valuable information (atomic facts + paragraph
-summaries), and stores them via MemoryStore (SQLite + Chroma sync).
+summaries), and stores them directly to SQLite + ChromaDB.
 
 Triggered after each complete SSE stream in api/im.py.
 """
@@ -147,7 +147,7 @@ def _format_existing_memories(memories: list) -> str:
 
     parts: list[str] = []
     for m in memories:
-        parts.append(f"- {m.key}: {m.value}")
+        parts.append(f"- {m['key']}: {m['value']}")
     return "\n".join(parts)
 
 
@@ -224,13 +224,16 @@ async def _dedup_and_write(
     facts: list[dict],
     summaries: list[dict],
     session_id: str,
-    memory_store,
+    rag_manager,
+    session_maker,
 ) -> int:
-    """Write extracted insights to memory store with deduplication.
+    """Write extracted insights directly to SQLite + ChromaDB with deduplication.
 
     For each item, performs a semantic search first:
     - If similarity > threshold → update existing memory (same key)
     - Otherwise → create new memory
+
+    Writes to both SQLite and ChromaDB directly (no Celery roundtrip).
 
     Returns the number of memories created or updated.
     """
@@ -248,26 +251,21 @@ async def _dedup_and_write(
         # Deterministic key for atomic facts
         memory_key = f"auto_{category}_{_short_hash(key + value)}"
 
-        # Dedup via semantic search
-        similar = await memory_store.semantic_search(user_id, value, top_k=1)
-        if similar and similar[0].meta_json.get("score", 0) >= _DEDUP_SIMILARITY_THRESHOLD:
-            existing = similar[0]
-            memory_key = existing.key
-            logger.info("extraction_dedup_update", key=memory_key, score=similar[0].meta_json.get("score"))
+        # Dedup via semantic search (direct ChromaDB query)
+        similar = await rag_manager.semantic_search(user_id, value, top_k=1)
+        if similar and similar[0].get("score", 0) >= _DEDUP_SIMILARITY_THRESHOLD:
+            memory_key = similar[0].get("metadata", {}).get("key", memory_key)
+            logger.info("extraction_dedup_update", key=memory_key, score=similar[0].get("score"))
 
-        await memory_store.upsert(
-            user_id=user_id,
-            key=memory_key,
-            value=value,
-            meta={
-                "type": "atomic_fact",
-                "category": category,
-                "source": "conversation_extract",
-                "session_id": session_id,
-                "extracted_at": now,
-                "confidence": fact.get("confidence", 0),
-            },
-        )
+        meta = {
+            "type": "atomic_fact",
+            "category": category,
+            "source": "conversation_extract",
+            "session_id": session_id,
+            "extracted_at": now,
+            "confidence": fact.get("confidence", 0),
+        }
+        await _write_memory(user_id, memory_key, value, meta, rag_manager, session_maker)
         written += 1
 
     for summary in summaries:
@@ -280,30 +278,91 @@ async def _dedup_and_write(
 
         memory_key = f"summary_{category}_{_short_hash(topic)}"
 
-        # Dedup via semantic search
-        similar = await memory_store.semantic_search(user_id, content, top_k=1)
-        if similar and similar[0].meta_json.get("score", 0) >= _DEDUP_SIMILARITY_THRESHOLD:
-            existing = similar[0]
-            memory_key = existing.key
-            logger.info("extraction_dedup_update_summary", key=memory_key)
+        # Dedup via semantic search (direct ChromaDB query)
+        similar = await rag_manager.semantic_search(user_id, content, top_k=1)
+        if similar and similar[0].get("score", 0) >= _DEDUP_SIMILARITY_THRESHOLD:
+            memory_key = similar[0].get("metadata", {}).get("key", memory_key)
+            logger.info("extraction_dedup_update_summary", key=memory_key, score=similar[0].get("score"))
 
-        await memory_store.upsert(
-            user_id=user_id,
-            key=memory_key,
-            value=content,
-            meta={
-                "type": "paragraph_summary",
-                "category": category,
-                "source": "conversation_extract",
-                "session_id": session_id,
-                "extracted_at": now,
-                "confidence": summary.get("confidence", 0),
-                "topic": topic,
-            },
-        )
+        meta = {
+            "type": "paragraph_summary",
+            "category": category,
+            "source": "conversation_extract",
+            "session_id": session_id,
+            "extracted_at": now,
+        }
+        await _write_memory(user_id, memory_key, content, meta, rag_manager, session_maker)
         written += 1
 
     return written
+
+
+async def _write_memory(
+    user_id: str,
+    key: str,
+    value: str,
+    meta: dict,
+    rag_manager,
+    session_maker,
+) -> None:
+    """Write a single memory to both SQLite and ChromaDB directly."""
+    import uuid as _uuid
+    from athena.models.user_memory import UserMemory
+    from sqlalchemy import select, update
+
+    meta_json = json.dumps(meta, ensure_ascii=False)
+
+    # 1. Write to SQLite (upsert by user_id + key)
+    async with session_maker() as session:
+        result = await session.execute(
+            select(UserMemory).where(
+                UserMemory.user_id == user_id,
+                UserMemory.key == key,
+            )
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            await session.execute(
+                update(UserMemory)
+                .where(UserMemory.memory_id == existing.memory_id)
+                .values(
+                    value=value,
+                    sync_status="synced",
+                    meta_json=meta_json,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            memory_id = existing.memory_id
+        else:
+            memory_id = f"mem_{_uuid.uuid4().hex[:16]}"
+            session.add(UserMemory(
+                memory_id=memory_id,
+                user_id=user_id,
+                key=key,
+                value=value,
+                sync_status="synced",
+                meta_json=meta_json,
+            ))
+
+        await session.commit()
+
+    # 2. Write to ChromaDB directly
+    await rag_manager.upsert_vector(
+        memory_id=memory_id,
+        text=value,
+        user_id=user_id,
+        metadata={"key": key, **meta},
+    )
+
+    # 3. Write back vector_id to SQLite
+    async with session_maker() as session:
+        await session.execute(
+            update(UserMemory)
+            .where(UserMemory.memory_id == memory_id)
+            .values(vector_id=memory_id)
+        )
+        await session.commit()
 
 
 # ── Celery task ─────────────────────────────────────────────────────────────
@@ -323,7 +382,7 @@ def extract_conversation_insights_task(
     3. Check if enough new messages since last extraction
     4. Read existing memories for dedup context
     5. Call fast LLM for extraction
-    6. Deduplicate and write to MemoryStore (SQLite + Chroma)
+    6. Deduplicate and write to SQLite + ChromaDB directly
     7. Update session's last_extracted_message_count
     """
     logger.info("conversation_extract_started", session_id=session_id, user_id=user_id)
@@ -332,7 +391,6 @@ def extract_conversation_insights_task(
         from athena.config import get_config
         from athena.core.graph.agent_graph import create_checkpointer
         from athena.core.llm_provider.manager import get_llm_manager
-        from athena.core.memory import MemoryStore
         from athena.core.rag import get_rag_manager
         from athena.models import get_session_maker
         from athena.models.session import Session
@@ -400,8 +458,22 @@ def extract_conversation_insights_task(
 
         # ── 4. Read existing memories for dedup context ────────────────
         rag_manager = get_rag_manager()
-        memory_store = MemoryStore(config, rag_manager)
-        existing_memories = await memory_store.simple_query(user_id, limit=50)
+
+        # Direct SQLite query instead of MemoryStore
+        from athena.models.user_memory import UserMemory
+        from sqlalchemy import select as sa_select
+        async with session_maker() as db:
+            result = await db.execute(
+                sa_select(UserMemory)
+                .where(UserMemory.user_id == user_id, UserMemory.sync_status != "deleted")
+                .order_by(UserMemory.updated_at.desc())
+                .limit(50)
+            )
+            existing_rows = result.scalars().all()
+        existing_memories = [
+            {"key": r.key, "value": r.value}
+            for r in existing_rows
+        ]
         existing_memories_text = _format_existing_memories(existing_memories)
 
         # ── 5. LLM extraction ─────────────────────────────────────────
@@ -451,7 +523,8 @@ def extract_conversation_insights_task(
             facts=facts,
             summaries=summaries,
             session_id=session_id,
-            memory_store=memory_store,
+            rag_manager=rag_manager,
+            session_maker=session_maker,
         )
 
         # ── 7. Update session ─────────────────────────────────────────

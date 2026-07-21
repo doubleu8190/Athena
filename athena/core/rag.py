@@ -205,8 +205,8 @@ def get_rag_manager() -> RAGManager:
 
     EmbeddingProvider (SentenceTransformer ~80MB) and Chroma client are
     created once and shared across all callers: ContextManager (memory
-    injection), MCP RAG server (rag_server.py), and Celery tasks
-    (memory_sync.py).
+    injection), MCP RAG server (rag_server.py), MemoryStore, and Celery
+    tasks (conversation_extract.py).
     """
     global _rag_manager
     if _rag_manager is not None:

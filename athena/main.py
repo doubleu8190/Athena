@@ -128,11 +128,13 @@ def create_app(config: Config | None = None) -> FastAPI:
     from athena.api.im import router as im_router
     from athena.api.admin import router as admin_router
     from athena.api.device import router as device_router
+    from athena.api.memory import router as memory_router
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(im_router, prefix="/api/v1")
     app.include_router(admin_router, prefix="/api/v1/admin")
     app.include_router(device_router, prefix="/api/v1")
+    app.include_router(memory_router, prefix="/api/v1/memory")
 
     # Prometheus metrics — custom middleware + endpoint (no third-party instrumentator)
     if cfg.prometheus_enabled:

@@ -55,6 +55,12 @@ class SystemConfig:
     mcp_reconnect_backoff_max_seconds: int = 60
     mcp_tools_list_refresh_on_reconnect: bool = True
 
+    # Conversation extraction
+    extraction_min_messages: int = 6
+    """Minimum new messages since last extraction to trigger a new run."""
+    extraction_max_messages: int = 100
+    """Maximum messages to read from checkpointer for a single extraction."""
+
 
 @dataclass
 class LLMProviderConfig:
@@ -187,6 +193,7 @@ class Config:
         system_data = data.get("system", {})
         harness_data = data.get("harness", {})
         mcp_data = data.get("mcp", {})
+        extraction_data = data.get("extraction", {})
 
         return SystemConfig(
             max_fallback_depth=system_data.get("max_fallback_depth", 1),
@@ -202,6 +209,8 @@ class Config:
             mcp_tools_list_refresh_on_reconnect=mcp_data.get(
                 "tools_list_refresh_on_reconnect", True
             ),
+            extraction_min_messages=extraction_data.get("min_messages_since_last", 6),
+            extraction_max_messages=extraction_data.get("max_messages_for_extraction", 100),
         )
 
     @classmethod

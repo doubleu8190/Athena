@@ -19,3 +19,7 @@ mcp:
   heartbeat_interval_seconds: 30
   reconnect_backoff_max_seconds: 60
   tools_list_refresh_on_reconnect: true
+
+extraction:
+  min_messages_since_last: 6    # 距上次提取至少新增多少条消息才触发
+  max_messages_for_extraction: 100  # 单次提取最多读取多少条消息

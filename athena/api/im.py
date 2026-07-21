@@ -179,7 +179,8 @@ async def web_message(
             # ── Stream graph execution ─────────────────────────────────
             # 使用 stream_mode="updates"
             # event：仅包含发生变化的节点的更新（即每个节点返回的字典）。
-            # 结构：一个字典，键为节点名称，值为该节点的状态更新。                
+            # 结构：一个字典，键为节点名称，值为该节点的状态更新。
+            task_completed = False
             async for event in graph.astream(
                 initial_state,
                 config=graph_config,
@@ -225,6 +226,7 @@ async def web_message(
                                     })
 
                         if status == "completed":
+                            task_completed = True
                             yield _sse_event(SseEvent.TASK_COMPLETED, {
                                 "summary": "Response complete",
                             })
@@ -262,6 +264,14 @@ async def web_message(
                                     "success": not is_error,
                                     "output_preview": content[:500],
                                 })
+
+            # Fire-and-forget: extract conversation insights after normal completion
+            if task_completed:
+                try:
+                    from athena.tasks.conversation_extract import extract_conversation_insights_task
+                    extract_conversation_insights_task.delay(session.session_id, unified.user_id)
+                except Exception as extract_err:
+                    logger.warning("extraction_trigger_failed", error=str(extract_err))
 
         except Exception as e:
             logger.error("web_sse_error", error=str(e))

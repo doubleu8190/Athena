@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import String, Text, func
+from sqlalchemy import Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from athena.models.base import Base
@@ -27,6 +27,10 @@ class Session(Base):
     summary_offset: Mapped[int] = mapped_column(default=0)
     """Number of messages already included in the summary.
     Messages[:summary_offset] are summarized; Messages[summary_offset:] are raw."""
+
+    last_extracted_message_count: Mapped[int] = mapped_column(Integer, default=0)
+    """Message count at the last conversation extraction.
+    Used to determine if enough new messages exist to warrant re-extraction."""
 
     modified_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()

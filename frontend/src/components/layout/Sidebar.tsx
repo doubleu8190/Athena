@@ -7,6 +7,7 @@ import {
   Smartphone,
   Shield,
   FileText,
+  Brain,
   Sun,
   Moon,
 } from 'lucide-react'
@@ -24,6 +25,7 @@ const navItems = [
   { to: '/admin/devices', icon: Smartphone, label: 'Devices' },
   { to: '/admin/harness', icon: Shield, label: 'Harness' },
   { to: '/admin/audit', icon: FileText, label: 'Audit Logs' },
+  { to: '/admin/memory', icon: Brain, label: 'Memory' },
 ]
 
 const linkBase =

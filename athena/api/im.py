@@ -22,7 +22,6 @@ from pydantic import BaseModel
 
 from athena.api.deps import get_config_dep, verify_api_key
 from athena.config import Config
-from athena.models.session import Session
 from athena.core.llm_provider.manager import LLMProviderManager
 from athena.core.message import UnifiedMessage
 from athena.logging_config import get_logger
@@ -149,14 +148,14 @@ async def web_message(
             tool_registry: ToolRegistry = get_tool_registry()
 
             # Set up checkpointer for persistence (required for interrupt/resume)
-            
+
             checkpointer: AsyncSqliteSaver = await create_checkpointer(config.sqlite_db_path)
 
             # Build the agent graph
             graph: StateGraph = build_agent_graph(
                 checkpointer=checkpointer,
             )
-            
+
             # Initial state — checkpointer restores prior messages(/history);
             # we only seed the dynamic system context + the new user message.
             initial_state = {

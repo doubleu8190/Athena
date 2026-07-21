@@ -239,3 +239,65 @@ export function fetchAuditLogs(params?: {
 export function fetchIMStatus(): Promise<{ data: Record<string, unknown> }> {
   return api.get('/admin/im/status')
 }
+
+// ── Memory ─────────────────────────────────────────────────────────────
+
+export interface Memory {
+  memory_id: string
+  key: string
+  value: string
+  meta: Record<string, unknown>
+  updated_at: string
+}
+
+export interface MemorySearchResult extends Memory {
+  score: number
+}
+
+export function fetchMemories(params?: {
+  key_prefix?: string
+  limit?: number
+}): Promise<Memory[]> {
+  const query: Record<string, string> = {}
+  if (params?.key_prefix) query.key_prefix = params.key_prefix
+  if (params?.limit) query.limit = String(params.limit)
+  return api
+    .get<BackendResponse<{ memories: Memory[]; count: number }>>('/memory/list', query)
+    .then((res) => res.data.memories ?? [])
+}
+
+export function createMemory(body: {
+  key: string
+  value: string
+  meta?: Record<string, unknown>
+}): Promise<Memory> {
+  return api
+    .post<BackendResponse<Memory>>('/memory', body)
+    .then((res) => res.data)
+}
+
+export function updateMemory(
+  memoryId: string,
+  body: { value: string; meta?: Record<string, unknown> },
+): Promise<Memory> {
+  return api
+    .put<BackendResponse<Memory>>(`/memory/${memoryId}`, body)
+    .then((res) => res.data)
+}
+
+export function deleteMemory(memoryId: string): Promise<void> {
+  return api.delete(`/memory/${memoryId}`).then(() => undefined)
+}
+
+export function searchMemories(body: {
+  query: string
+  top_k?: number
+  type?: string
+}): Promise<MemorySearchResult[]> {
+  return api
+    .post<BackendResponse<{ memories: MemorySearchResult[]; count: number }>>(
+      '/memory/search',
+      body,
+    )
+    .then((res) => res.data.memories ?? [])
+}

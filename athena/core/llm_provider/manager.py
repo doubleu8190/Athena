@@ -62,7 +62,7 @@ class LLMProviderManager:
                 "api_key": api_key,
                 "base_url": pdata.base_url,
             }
-     
+
         if pdata.format == "anthropic":
             from langchain_anthropic import ChatAnthropic
             return ChatAnthropic(**kwargs)

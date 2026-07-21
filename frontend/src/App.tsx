@@ -7,6 +7,7 @@ import SkillsPage from './pages/SkillsPage'
 import DevicesPage from './pages/DevicesPage'
 import HarnessPage from './pages/HarnessPage'
 import AuditPage from './pages/AuditPage'
+import MemoriesPage from './pages/MemoriesPage'
 
 function NotFound() {
   return (
@@ -36,6 +37,7 @@ export default function App() {
         <Route path="/admin/devices" element={<DevicesPage />} />
         <Route path="/admin/harness" element={<HarnessPage />} />
         <Route path="/admin/audit" element={<AuditPage />} />
+        <Route path="/admin/memory" element={<MemoriesPage />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

@@ -171,7 +171,7 @@ async def _extract_with_llm(
     Returns a dict with ``atomic_facts`` and ``summaries`` lists.
     Returns empty lists on parse failure.
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_core.messages import HumanMessage
 
     notice = _INCOMPLETE_NOTICE if is_incomplete else ""
     prompt_text = _EXTRACTION_PROMPT.format(

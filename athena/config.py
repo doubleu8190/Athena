@@ -188,7 +188,7 @@ class Config:
     def _load_system_config(cls) -> SystemConfig:
         if not DEFAULT_SYSTEM_CONFIG_PATH.exists():
             logger.warning(f"Warning: {DEFAULT_SYSTEM_CONFIG_PATH} does not exist")
-            
+
         data = cls._load_yaml(DEFAULT_SYSTEM_CONFIG_PATH)
         system_data = data.get("system", {})
         harness_data = data.get("harness", {})

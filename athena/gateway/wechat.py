@@ -36,7 +36,6 @@ logger = get_logger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────
 WECHAT_CREDENTIALS_PATH = Path("/data/wechat_credentials.json")
 ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
-TOKEN_VALIDITY_HOURS = 24
 
 
 class WeChatAdapter(BaseIMAdapter):

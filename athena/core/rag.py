@@ -100,21 +100,34 @@ class RAGManager:
         user_id: str,
         query: str,
         top_k: int = 5,
+        where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Search memories by semantic similarity for a given user.
 
-        Returns list of dicts: {memory_id, score, metadata}
+        Args:
+            user_id: Filter results to this user.
+            query: Natural language query to embed and search.
+            top_k: Maximum number of results to return.
+            where: Additional ChromaDB metadata filter (merged with user_id).
+                   Example: {"type": "atomic_fact"} to search only facts.
+
+        Returns list of dicts: {memory_id, score, metadata, text}
         """
         self._ensure_collection()
 
         # Embed the query
         [query_embedding] = await self._embedding.embed([query])
 
-        # Search Chroma, filtered by user_id
+        # Build where clause — always filter by user_id, merge extra conditions
+        where_clause: dict[str, Any] = {"user_id": user_id}
+        if where:
+            where_clause = {"$and": [where_clause, where]}
+
+        # Search Chroma
         results = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
-            where={"user_id": user_id},
+            where=where_clause,
             include=["metadatas", "distances", "documents"],
         )
 

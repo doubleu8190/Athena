@@ -53,15 +53,31 @@ mcp = FastMCP("Athena RAG", version="0.1.0")
 
 @mcp.tool(
     name="semantic_search",
-    description="Search user memories by semantic similarity using vector embeddings",
+    description="Search user memories by semantic similarity using vector embeddings. "
+    "Use the 'type' filter to search specific memory types: "
+    "'atomic_fact' for granular facts, 'paragraph_summary' for discussion summaries. "
+    "Omit 'type' to search all memories.",
 )
 async def semantic_search(
     user_id: str,
     query: str,
     top_k: int = 5,
+    type: str | None = None,
 ) -> dict[str, Any]:
+    """Search user memories with optional type filtering.
+
+    Args:
+        user_id: User to search memories for.
+        query: Natural language search query.
+        top_k: Max results to return (default 5).
+        type: Filter by memory type — "atomic_fact" or "paragraph_summary".
+              Omit to search all types.
+    """
     rag = get_rag_manager()
-    results = await rag.semantic_search(user_id=user_id, query=query, top_k=top_k)
+    where = {"type": type} if type else None
+    results = await rag.semantic_search(
+        user_id=user_id, query=query, top_k=top_k, where=where,
+    )
     return {"results": results, "count": len(results)}
 
 

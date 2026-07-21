@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from athena.celery_app import celery_app
+from athena.core.rag import RAGManager
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -251,8 +252,10 @@ async def _dedup_and_write(
         # Deterministic key for atomic facts
         memory_key = f"auto_{category}_{_short_hash(key + value)}"
 
-        # Dedup via semantic search (direct ChromaDB query)
-        similar = await rag_manager.semantic_search(user_id, value, top_k=1)
+        # Dedup via semantic search (only against other atomic_facts)
+        similar = await rag_manager.semantic_search(
+            user_id, value, top_k=1, where={"type": "atomic_fact"},
+        )
         if similar and similar[0].get("score", 0) >= _DEDUP_SIMILARITY_THRESHOLD:
             memory_key = similar[0].get("metadata", {}).get("key", memory_key)
             logger.info("extraction_dedup_update", key=memory_key, score=similar[0].get("score"))
@@ -278,8 +281,10 @@ async def _dedup_and_write(
 
         memory_key = f"summary_{category}_{_short_hash(topic)}"
 
-        # Dedup via semantic search (direct ChromaDB query)
-        similar = await rag_manager.semantic_search(user_id, content, top_k=1)
+        # Dedup via semantic search (only against other paragraph_summaries)
+        similar = await rag_manager.semantic_search(
+            user_id, content, top_k=1, where={"type": "paragraph_summary"},
+        )
         if similar and similar[0].get("score", 0) >= _DEDUP_SIMILARITY_THRESHOLD:
             memory_key = similar[0].get("metadata", {}).get("key", memory_key)
             logger.info("extraction_dedup_update_summary", key=memory_key, score=similar[0].get("score"))
@@ -302,7 +307,7 @@ async def _write_memory(
     key: str,
     value: str,
     meta: dict,
-    rag_manager,
+    rag_manager: RAGManager,
     session_maker,
 ) -> None:
     """Write a single memory to both SQLite and ChromaDB directly."""

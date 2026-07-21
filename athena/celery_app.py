@@ -35,6 +35,5 @@ celery_app.conf.update(
 # Auto-discover tasks
 celery_app.autodiscover_tasks([
     "athena.tasks.memory_sync",
-    "athena.tasks.cleanup",
     "athena.tasks.conversation_extract",
 ])

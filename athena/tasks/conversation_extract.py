@@ -388,9 +388,10 @@ def extract_conversation_insights_task(
 
         # ── 3. Trim to complete turns ──────────────────────────────────
         recent_messages = all_messages[last_extracted:]
-        # Cap at max_messages
+        # Cap at max_messages — process oldest unextracted messages first,
+        # remaining messages will be picked up in the next extraction run
         if len(recent_messages) > config.system.extraction_max_messages:
-            recent_messages = recent_messages[-config.system.extraction_max_messages:]
+            recent_messages = recent_messages[:config.system.extraction_max_messages]
 
         trimmed, is_incomplete = _trim_to_complete_turns(recent_messages)
 
@@ -439,7 +440,7 @@ def extract_conversation_insights_task(
                 await db.execute(
                     update(Session)
                     .where(Session.session_id == session_id)
-                    .values(last_extracted_message_count=len(all_messages))
+                    .values(last_extracted_message_count=last_extracted + len(trimmed))
                 )
                 await db.commit()
             return {"status": "completed", "facts": 0, "summaries": 0}
@@ -454,12 +455,14 @@ def extract_conversation_insights_task(
         )
 
         # ── 7. Update session ─────────────────────────────────────────
+        # Advance pointer past dropped + trimmed messages (not necessarily len(all_messages),
+        # since _trim_to_complete_turns may drop an incomplete tail)
         async with session_maker() as db:
             from sqlalchemy import update
             await db.execute(
                 update(Session)
                 .where(Session.session_id == session_id)
-                .values(last_extracted_message_count=len(all_messages))
+                .values(last_extracted_message_count=last_extracted + len(trimmed))
             )
             await db.commit()
 

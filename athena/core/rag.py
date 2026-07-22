@@ -6,7 +6,7 @@ Layer 1 of the RAG architecture. Provides:
 
 All embedding computation runs locally — no user data is sent to external APIs.
 
-Used directly by MemoryStore and Celery tasks (Layer 2), and wrapped by
+Used directly by the API layer and Celery tasks, and wrapped by
 the MCP stdio server (Layer 3).
 """
 
@@ -167,9 +167,12 @@ class RAGManager:
         [embedding] = await self._embedding.embed([text])
 
         # Build metadata
+        from datetime import datetime, timezone
+
         meta = {"user_id": user_id, "memory_id": memory_id}
         if metadata:
             meta.update(metadata)
+        meta["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         # Upsert into Chroma
         self._collection.upsert(
@@ -186,6 +189,63 @@ class RAGManager:
             text_preview=text[:80],
         )
         return memory_id
+
+    async def get_vector(self, memory_id: str) -> dict[str, Any] | None:
+        """Fetch a single vector by memory_id.
+
+        Returns {memory_id, text, metadata} or None if not found.
+        """
+        self._ensure_collection()
+
+        result = self._collection.get(
+            ids=[memory_id],
+            include=["documents", "metadatas"],
+        )
+
+        if not result["ids"]:
+            return None
+
+        return {
+            "memory_id": result["ids"][0],
+            "text": result["documents"][0] if result["documents"] else "",
+            "metadata": result["metadatas"][0] if result["metadatas"] else {},
+        }
+
+    async def list_vectors(
+        self,
+        user_id: str,
+        key_prefix: str = "",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List vectors for a user, optionally filtered by key prefix.
+
+        Returns list of {memory_id, text, metadata}.
+        """
+        self._ensure_collection()
+
+        result = self._collection.get(
+            where={"user_id": user_id},
+            include=["documents", "metadatas"],
+        )
+
+        items: list[dict[str, Any]] = []
+        for i, mem_id in enumerate(result["ids"]):
+            meta = result["metadatas"][i] if result["metadatas"] else {}
+            key = meta.get("key", "")
+
+            if key_prefix and not key.startswith(key_prefix):
+                continue
+
+            items.append({
+                "memory_id": mem_id,
+                "text": result["documents"][i] if result["documents"] else "",
+                "metadata": meta,
+            })
+
+        # Sort by updated_at descending (newest first), fall back to insertion order
+        items.sort(key=lambda x: x["metadata"].get("updated_at", ""), reverse=True)
+
+        return items[:limit]
 
     def delete_vector(self, vector_id: str) -> None:
         """Remove a vector from the Chroma collection."""
@@ -205,7 +265,7 @@ def get_rag_manager() -> RAGManager:
 
     EmbeddingProvider (SentenceTransformer ~80MB) and Chroma client are
     created once and shared across all callers: ContextManager (memory
-    injection), MCP RAG server (rag_server.py), MemoryStore, and Celery
+    injection), MCP RAG server (rag_server.py), Memory API, and Celery
     tasks (conversation_extract.py).
     """
     global _rag_manager

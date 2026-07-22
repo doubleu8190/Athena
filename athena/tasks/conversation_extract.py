@@ -2,8 +2,7 @@
 
 Reads the latest conversation from the LangGraph checkpointer, uses the
 fast LLM to extract valuable information (atomic facts + paragraph
-summaries), and stores them via MemoryStore (synchronous dual-write to
-SQLite + ChromaDB).
+summaries), and stores them directly in ChromaDB via RAGManager.
 
 Triggered after each complete SSE stream in api/im.py.
 """
@@ -18,6 +17,7 @@ from datetime import datetime, timezone
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from athena.celery_app import celery_app
+from athena.core.rag import RAGManager
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -142,13 +142,18 @@ def _format_messages_for_llm(messages: list) -> str:
 
 
 def _format_existing_memories(memories: list) -> str:
-    """Format existing memories for the prompt context."""
+    """Format existing memories for the prompt context.
+
+    Each memory is a dict with 'text' and 'metadata' keys (from RAGManager).
+    """
     if not memories:
         return "(none)"
 
     parts: list[str] = []
     for m in memories:
-        parts.append(f"- {m['key']}: {m['value']}")
+        key = m.get("metadata", {}).get("key", "")
+        value = m.get("text", "")
+        parts.append(f"- {key}: {value}")
     return "\n".join(parts)
 
 
@@ -225,10 +230,9 @@ async def _dedup_and_write(
     facts: list[dict],
     summaries: list[dict],
     session_id: str,
-    rag_manager,
-    memory_store,
+    rag_manager : RAGManager,
 ) -> int:
-    """Write extracted insights to MemoryStore with deduplication.
+    """Write extracted insights to ChromaDB with deduplication.
 
     For each item, performs a semantic search first:
     - If similarity > threshold → update existing memory (same key)
@@ -259,6 +263,7 @@ async def _dedup_and_write(
             logger.info("extraction_dedup_update", key=memory_key, score=similar[0].get("score"))
 
         meta = {
+            "key": memory_key,
             "type": "atomic_fact",
             "category": category,
             "source": "conversation_extract",
@@ -266,7 +271,9 @@ async def _dedup_and_write(
             "extracted_at": now,
             "confidence": fact.get("confidence", 0),
         }
-        await memory_store.upsert(user_id=user_id, key=memory_key, value=value, meta=meta)
+        await rag_manager.upsert_vector(
+            memory_id=memory_key, user_id=user_id, text=value, metadata=meta,
+        )
         written += 1
 
     for summary in summaries:
@@ -288,13 +295,16 @@ async def _dedup_and_write(
             logger.info("extraction_dedup_update_summary", key=memory_key, score=similar[0].get("score"))
 
         meta = {
+            "key": memory_key,
             "type": "paragraph_summary",
             "category": category,
             "source": "conversation_extract",
             "session_id": session_id,
             "extracted_at": now,
         }
-        await memory_store.upsert(user_id=user_id, key=memory_key, value=content, meta=meta)
+        await rag_manager.upsert_vector(
+            memory_id=memory_key, user_id=user_id, text=content, metadata=meta,
+        )
         written += 1
 
     return written
@@ -392,11 +402,8 @@ def extract_conversation_insights_task(
             return {"status": "skipped", "reason": "no_messages_after_trim"}
 
         # ── 4. Read existing memories for dedup context ────────────────
-        from athena.core.memory import MemoryStore
-
         rag_manager = get_rag_manager()
-        memory_store = MemoryStore(config, rag_manager)
-        existing_memories = await memory_store.simple_query(user_id, limit=50)
+        existing_memories = await rag_manager.list_vectors(user_id, limit=50)
         existing_memories_text = _format_existing_memories(existing_memories)
 
         # ── 5. LLM extraction ─────────────────────────────────────────
@@ -447,7 +454,6 @@ def extract_conversation_insights_task(
             summaries=summaries,
             session_id=session_id,
             rag_manager=rag_manager,
-            memory_store=memory_store,
         )
 
         # ── 7. Update session ─────────────────────────────────────────

@@ -478,27 +478,6 @@ async def reload_harness_rules(
 
 # ── Memory management ─────────────────────────────────────────────────
 
-@router.post("/memories/resync")
-async def resync_memories(
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-) -> dict[str, Any]:
-    """Trigger full vector re-sync for all memories."""
-    from athena.models.user_memory import UserMemory
-    from sqlalchemy import update
-
-    # Mark all synced memories as pending for re-sync
-    result = await db.execute(
-        update(UserMemory)
-        .where(UserMemory.sync_status == "synced")
-        .values(sync_status="pending")
-    )
-    await db.commit()
-
-    count = result.rowcount
-    logger.info("memory_resync_triggered", count=count)
-    return success({"memories_to_resync": count}, f"Resync triggered for {count} memories")
-
 
 # ── Audit logs ────────────────────────────────────────────────────────
 

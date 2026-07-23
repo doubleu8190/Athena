@@ -356,12 +356,9 @@ class TestToolsNode:
         }
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.tools._load_mcp_tools_map", new_callable=AsyncMock)
-    async def test_executes_single_tool(self, mock_load_tools, mock_config):
+    async def test_executes_single_tool(self, mock_config):
         """Execute a single confirmed tool call successfully."""
         from athena.core.graph.nodes.tools import tools_node
-
-        mock_load_tools.return_value = {}
 
         state = {
             "messages": [],
@@ -384,12 +381,9 @@ class TestToolsNode:
         assert "temperature" in msg.content
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.tools._load_mcp_tools_map", new_callable=AsyncMock)
-    async def test_mcp_call_fails(self, mock_load_tools, mock_config):
+    async def test_mcp_call_fails(self, mock_config):
         """MCP call returns failure → error ToolMessage."""
         from athena.core.graph.nodes.tools import tools_node
-
-        mock_load_tools.return_value = {}
 
         failed_result = MagicMock()
         failed_result.success = False
@@ -414,12 +408,9 @@ class TestToolsNode:
         assert "error" in result["messages"][0].content.lower()
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.tools._load_mcp_tools_map", new_callable=AsyncMock)
-    async def test_no_confirmed_calls(self, mock_load_tools, mock_config):
+    async def test_no_confirmed_calls(self, mock_config):
         """Called with no confirmed calls → return empty dict."""
         from athena.core.graph.nodes.tools import tools_node
-
-        mock_load_tools.return_value = {}
 
         state = {
             "messages": [],
@@ -435,12 +426,9 @@ class TestToolsNode:
         assert result == {}
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.tools._load_mcp_tools_map", new_callable=AsyncMock)
-    async def test_mcp_call_exception(self, mock_load_tools, mock_config):
+    async def test_mcp_call_exception(self, mock_config):
         """MCP call raises exception → error ToolMessage."""
         from athena.core.graph.nodes.tools import tools_node
-
-        mock_load_tools.return_value = {}
 
         async def _raise(*args, **kwargs):
             raise RuntimeError("Connection timeout")

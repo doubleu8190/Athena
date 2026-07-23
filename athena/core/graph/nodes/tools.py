@@ -5,9 +5,10 @@ Each invocation handles **one** tool call.  The agent graph uses
 Confirmation is handled **before** this node by ``confirm_node``,
 so this node only executes already-confirmed tools.
 
-Pipeline for each tool call:
-1. Tool execution via ``BaseTool.ainvoke()`` or ``MCPClient.call_tool()``
-2. Return ``ToolMessage`` result back to the agent
+All tool calls flow through ``MCPClient.call_tool()`` — the single
+connection pool with heartbeat, reconnect, and state management.
+LLM tool-binding (``model.bind_tools()``) uses the same path via
+``_MCPClientToolAdapter`` in ``tool_loader.py``.
 """
 
 from __future__ import annotations
@@ -15,11 +16,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langgraph.types import RunnableConfig
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import BaseTool
+from langgraph.types import RunnableConfig
 
 from athena.core.graph.agent_state import AgentState
+from athena.core.resilience.llm_decision import LLMDecision
+from athena.core.resilience.manager import ResilienceManager
 from athena.logging_config import bind_context, get_logger
 from athena.mcp_client.client import MCPClient
 from athena.mcp_client.registry import ToolRegistry
@@ -42,7 +44,6 @@ async def tools_node(
         logger.warning("tools_node_called_without_confirmed_calls")
         return {}
 
-    # Process the first (and only) tool call in this branch
     tc = confirmed[0]
     tool_name = tc.get("name", "")
     tool_args = tc.get("arguments", {})
@@ -54,7 +55,6 @@ async def tools_node(
 
     log = bind_context(session_id=cfg["session_id"], node="tools_node")
 
-    # Ensure arguments is a dict (may come as string from some providers)
     if isinstance(tool_args, str):
         try:
             tool_args = json.loads(tool_args)
@@ -64,79 +64,250 @@ async def tools_node(
 
     log.info("executing_tool", tool=tool_name, args=tool_args, tool_call_id=tool_call_id)
 
-    # ── Execute tool ──────────────────────────────────────────────────
-    # Try BaseTool.ainvoke() first (from MultiServerMCPClient),
-    # fall back to MCPClient.call_tool() for backward compatibility.
-    mcp_tools = await _load_mcp_tools_map()
-
-    if tool_name in mcp_tools:
-        try:
-            result_content = await mcp_tools[tool_name].ainvoke(tool_args)
-            content_str = _serialize_result(result_content)
-            log.info("tool_success", tool=tool_name, via="base_tool")
-            return {"messages": [ToolMessage(
-                content=content_str,
-                tool_call_id=tool_call_id,
-                name=tool_name,
-            )]}
-        except Exception as e:
-            log.error("tool_exception", tool=tool_name, error=str(e))
-            return {"messages": [ToolMessage(
-                content=json.dumps({"error": str(e)}),
-                tool_call_id=tool_call_id,
-                name=tool_name,
-            )]}
-
-    # Fallback: use MCPClient directly
+    # Resolve server_id from registry
     tool = tool_registry.get_tool_by_name(tool_name) if tool_registry else None
     server_id = tool.source_server_id if tool else "builtin-core"
 
-    try:
+    # ── Single execution path via MCPClient ────────────────────────
+    async def tool_func(args: dict) -> Any:
+        """Execute tool via MCPClient — the only path."""
         result = await mcp_client.call_tool(
             server_id=server_id,
             tool_name=tool_name,
-            arguments=tool_args,
+            arguments=args,
+        )
+        if result.success:
+            return result.content
+        raise ToolExecutionError(result.error or "Tool returned failure")
+
+    # ── Resilience-aware path ──────────────────────────────────────
+    resilience_manager: ResilienceManager | None = cfg.get("resilience_manager")
+
+    if resilience_manager is not None:
+        return await _execute_with_resilience(
+            resilience_manager=resilience_manager,
+            mcp_client=mcp_client,
+            tool_registry=tool_registry,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_call_id=tool_call_id,
+            server_id=server_id,
+            tool_func=tool_func,
+            log=log,
         )
 
-        if result.success:
-            content_str = _serialize_result(result.content)
-            log.info("tool_success", tool=tool_name, via="mcp_client")
-            return {"messages": [ToolMessage(
-                content=content_str,
-                tool_call_id=tool_call_id,
-                name=tool_name,
-            )]}
-        else:
-            error_msg = result.error or "Tool returned failure"
-            log.warning("tool_failed", tool=tool_name, error=error_msg)
-            return {"messages": [ToolMessage(
-                content=json.dumps({"error": error_msg}),
-                tool_call_id=tool_call_id,
-                name=tool_name,
-            )]}
+    # ── Simple path (no resilience manager) ────────────────────────
+    return await _execute_simple(
+        tool_name=tool_name,
+        tool_args=tool_args,
+        tool_call_id=tool_call_id,
+        tool_func=tool_func,
+        log=log,
+    )
 
+
+# ── Resilience-aware execution ─────────────────────────────────────
+
+
+async def _execute_with_resilience(
+    resilience_manager: ResilienceManager,
+    mcp_client: MCPClient,
+    tool_registry: ToolRegistry | None,
+    tool_name: str,
+    tool_args: dict,
+    tool_call_id: str,
+    server_id: str,
+    tool_func,
+    log,
+) -> dict[str, Any]:
+    """Execute tool using ResilienceManager (retry + circuit breaker + LLM decision)."""
+
+    exec_result = await resilience_manager.execute_tool(
+        tool_name=tool_name,
+        tool_args=tool_args,
+        tool_call_id=tool_call_id,
+        tool_func=tool_func,
+        server_id=server_id,
+    )
+
+    # ── Handle LLM fallback decision ──────────────────────────────
+    if not exec_result.success and exec_result.fallback_tool_name and exec_result.decision_used:
+        return await _execute_fallback(
+            resilience_manager=resilience_manager,
+            mcp_client=mcp_client,
+            tool_registry=tool_registry,
+            fallback_name=exec_result.fallback_tool_name,
+            fallback_decision=exec_result.decision_used,
+            original_args=tool_args,
+            original_call_id=tool_call_id,
+            depth=0,
+            log=log,
+        )
+
+    if exec_result.success:
+        log.info("tool_success", tool=tool_name, via="resilience_manager")
+    else:
+        log.warning(
+            "tool_failed_after_resilience",
+            tool=tool_name,
+            error=exec_result.error_message,
+        )
+
+    return {
+        "messages": [
+            ToolMessage(
+                content=exec_result.to_message_content(),
+                tool_call_id=tool_call_id,
+                name=tool_name,
+            )
+        ]
+    }
+
+
+MAX_FALLBACK_DEPTH = 3
+
+
+async def _execute_fallback(
+    resilience_manager: ResilienceManager,
+    mcp_client: MCPClient,
+    tool_registry: ToolRegistry | None,
+    fallback_name: str,
+    fallback_decision: LLMDecision,
+    original_args: dict,
+    original_call_id: str,
+    depth: int,
+    log,
+) -> dict[str, Any]:
+    """Execute a fallback tool identified by the LLM decision.
+
+    Supports nested fallbacks up to MAX_FALLBACK_DEPTH. Uses the
+    injected tool_registry (not the process-wide singleton) for
+    server_id resolution. Prefers decision.adjusted_args when present,
+    falls back to original_args when the decision has no adjusted_args.
+    """
+    if depth >= MAX_FALLBACK_DEPTH:
+        log.warning("max_fallback_depth_reached", depth=depth, tool=fallback_name)
+        return {
+            "messages": [
+                ToolMessage(
+                    content=json.dumps(
+                        {"error": f"Fallback depth limit reached ({MAX_FALLBACK_DEPTH})."}
+                    ),
+                    tool_call_id=original_call_id,
+                    name=fallback_name,
+                )
+            ]
+        }
+
+    log.info("executing_fallback_tool", to_tool=fallback_name, depth=depth)
+
+    # Resolve fallback tool's server_id via injected registry
+    fb_tool = tool_registry.get_tool_by_name(fallback_name) if tool_registry else None
+    fb_server_id = fb_tool.source_server_id if fb_tool else "builtin-core"
+
+    # Prefer adjusted_args from the decision; fall back to original_args
+    fallback_args = fallback_decision.adjusted_args or original_args
+
+    async def fallback_func(args: dict) -> Any:
+        result = await mcp_client.call_tool(
+            server_id=fb_server_id,
+            tool_name=fallback_name,
+            arguments=args,
+        )
+        if result.success:
+            return result.content
+        raise ToolExecutionError(result.error or "Fallback tool returned failure")
+
+    fb_result = await resilience_manager.execute_tool(
+        tool_name=fallback_name,
+        tool_args=fallback_args,
+        tool_call_id=original_call_id,
+        tool_func=fallback_func,
+        server_id=fb_server_id,
+    )
+
+    # ── Handle nested fallback (Fix #4) ──────────────────────────
+    if not fb_result.success and fb_result.fallback_tool_name and fb_result.decision_used:
+        log.info(
+            "nested_fallback",
+            from_tool=fallback_name,
+            to_tool=fb_result.fallback_tool_name,
+            depth=depth,
+        )
+        return await _execute_fallback(
+            resilience_manager=resilience_manager,
+            mcp_client=mcp_client,
+            tool_registry=tool_registry,
+            fallback_name=fb_result.fallback_tool_name,
+            fallback_decision=fb_result.decision_used,
+            original_args=original_args,
+            original_call_id=original_call_id,
+            depth=depth + 1,
+            log=log,
+        )
+
+    if fb_result.success:
+        log.info("fallback_tool_success", tool=fallback_name, depth=depth)
+    else:
+        log.warning(
+            "fallback_tool_failed", tool=fallback_name, error=fb_result.error_message, depth=depth
+        )
+
+    return {
+        "messages": [
+            ToolMessage(
+                content=fb_result.to_message_content(),
+                tool_call_id=original_call_id,
+                name=fallback_name,
+            )
+        ]
+    }
+
+
+# ── Simple execution (no resilience) ───────────────────────────────
+
+
+async def _execute_simple(
+    tool_name: str,
+    tool_args: dict,
+    tool_call_id: str,
+    tool_func,
+    log,
+) -> dict[str, Any]:
+    """Simple tool execution without retry/circuit breaker."""
+    try:
+        result_content = await tool_func(tool_args)
+        content_str = _serialize_result(result_content)
+        log.info("tool_success", tool=tool_name, via="mcp_client")
+        return {
+            "messages": [
+                ToolMessage(
+                    content=content_str,
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                )
+            ]
+        }
     except Exception as e:
         log.error("tool_exception", tool=tool_name, error=str(e))
-        return {"messages": [ToolMessage(
-            content=json.dumps({"error": str(e)}),
-            tool_call_id=tool_call_id,
-            name=tool_name,
-        )]}
+        return {
+            "messages": [
+                ToolMessage(
+                    content=json.dumps({"error": str(e)}),
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                )
+            ]
+        }
 
 
-async def _load_mcp_tools_map() -> dict[str, BaseTool]:
-    """Load MCP tools and return as a name-keyed dict.
+# ── Helpers ────────────────────────────────────────────────────────
 
-    Uses ``load_mcp_base_tools()`` from the tool loader bridge.
-    Returns empty dict on failure (tools_node will fall back to MCPClient).
-    """
-    try:
-        from athena.mcp_client.tool_loader import load_mcp_base_tools
-        tools = await load_mcp_base_tools()
-        return {t.name: t for t in tools}
-    except Exception as e:
-        logger.warning("mcp_tools_load_failed_for_execution", error=str(e))
-        return {}
+
+class ToolExecutionError(Exception):
+    """Raised when a tool returns a non-success result."""
+
+    pass
 
 
 def _serialize_result(content: Any) -> str:

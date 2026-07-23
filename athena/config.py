@@ -55,6 +55,9 @@ class SystemConfig:
     mcp_reconnect_backoff_max_seconds: int = 60
     mcp_tools_list_refresh_on_reconnect: bool = True
 
+    # Tool resilience (retry + circuit breaker + LLM decision)
+    tool_resilience: dict[str, Any] = field(default_factory=dict)
+
     # Conversation extraction
     extraction_min_messages: int = 6
     """Minimum new messages since last extraction to trigger a new run."""
@@ -176,6 +179,59 @@ class Config:
 
         return config
 
+    def build_resilience_config(self):
+        """Build a ResilienceConfig from the raw ``tool_resilience`` dict.
+
+        Returns a ``ResilienceConfig`` instance with all sub-configs populated
+        from the YAML configuration, falling back to sensible defaults.
+        """
+        from athena.core.resilience.retry import RetryConfig
+        from athena.core.resilience.circuit_breaker import CircuitBreakerConfig
+        from athena.core.resilience.llm_decision import LLMDecisionConfig
+        from athena.core.resilience.manager import ResilienceConfig
+
+        raw = self.system.tool_resilience
+
+        retry_raw = raw.get("retry", {})
+        retry_cfg = RetryConfig(
+            max_retries=retry_raw.get("max_retries", 5),
+            initial_interval_ms=retry_raw.get("initial_interval_ms", 200),
+            max_interval_ms=retry_raw.get("max_interval_ms", 30000),
+            backoff_multiplier=retry_raw.get("backoff_multiplier", 2.0),
+            jitter=retry_raw.get("jitter", True),
+            retryable_errors=retry_raw.get("retryable_errors", [
+                "TimeoutError", "ConnectionError", "ServiceUnavailable",
+                "RateLimitExceeded", "InternalServerError",
+            ]),
+            non_retryable_errors=retry_raw.get("non_retryable_errors", [
+                "AuthenticationError", "InvalidParameters", "ToolNotFound",
+            ]),
+        )
+
+        cb_raw = raw.get("circuit_breaker", {})
+        cb_cfg = CircuitBreakerConfig(
+            failure_rate_threshold=cb_raw.get("failure_rate_threshold", 0.5),
+            min_requests=cb_raw.get("min_requests", 20),
+            open_duration_seconds=cb_raw.get("open_duration_seconds", 30),
+            half_open_max_calls=cb_raw.get("half_open_max_calls", 3),
+            half_open_success_threshold=cb_raw.get("half_open_success_threshold", 2),
+            sliding_window_size=cb_raw.get("sliding_window_size", 100),
+        )
+
+        llm_raw = raw.get("llm_decision", {})
+        llm_cfg = LLMDecisionConfig(
+            enabled=llm_raw.get("enabled", True),
+            max_decisions=llm_raw.get("max_decisions", 3),
+            decision_timeout_seconds=llm_raw.get("decision_timeout_seconds", 30),
+            allowed_decisions=llm_raw.get("allowed_decisions", LLMDecisionConfig().allowed_decisions),
+        )
+
+        return ResilienceConfig(
+            retry=retry_cfg,
+            circuit_breaker=cb_cfg,
+            llm_decision=llm_cfg,
+        )
+
     @classmethod
     def _load_yaml(cls, path: Path) -> dict[str, Any]:
         """Load a YAML file, returning empty dict if not found."""
@@ -194,6 +250,7 @@ class Config:
         harness_data = data.get("harness", {})
         mcp_data = data.get("mcp", {})
         extraction_data = data.get("extraction", {})
+        resilience_data = data.get("tool_resilience", {})
 
         return SystemConfig(
             max_fallback_depth=system_data.get("max_fallback_depth", 1),
@@ -211,6 +268,7 @@ class Config:
             ),
             extraction_min_messages=extraction_data.get("min_messages_since_last", 6),
             extraction_max_messages=extraction_data.get("max_messages_for_extraction", 100),
+            tool_resilience=resilience_data,
         )
 
     @classmethod

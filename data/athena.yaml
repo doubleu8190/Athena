@@ -21,5 +21,42 @@ mcp:
   tools_list_refresh_on_reconnect: true
 
 extraction:
-  min_messages_since_last: 6    # 距上次提取至少新增多少条消息才触发
-  max_messages_for_extraction: 100  # 单次提取最多读取多少条消息
+  min_messages_since_last: 6 # 距上次提取至少新增多少条消息才触发
+  max_messages_for_extraction: 100 # 单次提取最多读取多少条消息
+
+# ── 工具调用健壮性 (重试 + 熔断 + 大模型决策) ──
+tool_resilience:
+  retry:
+    max_retries: 5 # 最大重试次数 (1-10)
+    initial_interval_ms: 200 # 初始重试间隔 (ms)
+    max_interval_ms: 30000 # 最大重试间隔 (ms), 指数退避上限
+    backoff_multiplier: 2.0 # 退避倍数
+    jitter: true # 是否添加随机抖动 (±25%)
+    retryable_errors: # 可重试的错误类型白名单
+      - TimeoutError
+      - ConnectionError
+      - ServiceUnavailable
+      - RateLimitExceeded
+      - InternalServerError
+    non_retryable_errors: # 不可重试的错误类型 (优先级高于白名单)
+      - AuthenticationError
+      - InvalidParameters
+      - ToolNotFound
+
+  circuit_breaker:
+    failure_rate_threshold: 0.5 # 失败率阈值 (0.0-1.0)
+    min_requests: 20 # 最少请求数 (低于此数不触发熔断)
+    open_duration_seconds: 30 # 熔断持续时间 (秒)
+    half_open_max_calls: 3 # 半开状态探测请求数
+    half_open_success_threshold: 2 # 半开状态成功阈值 (达到则恢复)
+    sliding_window_size: 100 # 滑动窗口大小 (请求数)
+
+  llm_decision:
+    enabled: true # 是否启用大模型决策
+    max_decisions: 3 # 单次工具调用最大决策次数 (防无限循环)
+    decision_timeout_seconds: 30 # 大模型决策超时
+    allowed_decisions: # 允许的决策类型
+      - retry_with_adjustment
+      - fallback_tool
+      - user_intervention
+      - abort

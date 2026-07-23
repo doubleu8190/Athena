@@ -9,23 +9,13 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from athena.api.deps import get_config_dep
+from athena.api.response import error, success
 from athena.config import Config
 from athena.core.rag import RAGManager, get_rag_manager
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["memory"])
-
-
-# ── Response helpers ──────────────────────────────────────────────────
-
-
-def success(data: Any = None, message: str = "success") -> dict[str, Any]:  # noqa: ANN401
-    return {"code": 0, "message": message, "data": data}
-
-
-def error(code: int, message: str, detail: str = "") -> dict[str, Any]:
-    return {"code": code, "message": message, "detail": detail, "data": None}
 
 
 # ── Request models ────────────────────────────────────────────────────
@@ -70,11 +60,11 @@ async def list_memories(
     vectors = await rag.list_vectors(user_id, key_prefix=key_prefix, limit=limit)
     items = [
         {
-            "memory_id": v["memory_id"],
-            "key": v["metadata"].get("key", ""),
-            "value": v["text"],
-            "meta": v["metadata"],
-            "updated_at": v["metadata"].get("updated_at", ""),
+            "memory_id": v.memory_id,
+            "key": v.metadata.get("key", ""),
+            "value": v.text,
+            "meta": v.metadata,
+            "updated_at": v.metadata.get("updated_at", ""),
         }
         for v in vectors
     ]
@@ -116,8 +106,8 @@ async def update_memory(
     if not existing:
         return error(404, "memory_not_found", f"Memory {memory_id} not found")
 
-    key = existing["metadata"].get("key", "")
-    meta = {k: v for k, v in existing["metadata"].items()
+    key = existing.metadata.get("key", "")
+    meta = {k: v for k, v in existing.metadata.items()
             if k not in ("user_id", "memory_id", "key", "updated_at")}
     if body.meta:
         meta.update(body.meta)
@@ -170,11 +160,11 @@ async def search_memories(
     )
     items = [
         {
-            "memory_id": r["memory_id"],
-            "key": r["metadata"].get("key", ""),
-            "value": r["text"],
-            "score": r.get("score", 0.0),
-            "meta": r["metadata"],
+            "memory_id": r.memory_id,
+            "key": r.metadata.get("key", ""),
+            "value": r.text,
+            "score": r.score,
+            "meta": r.metadata,
         }
         for r in results
     ]

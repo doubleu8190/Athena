@@ -16,7 +16,7 @@ from typing import Any
 
 from athena.config import Config
 from athena.logging_config import get_logger
-from athena.mcp_client.transports import TransportFactory
+from athena.mcp_client.transports import ConnectionConfig, TransportFactory
 from athena.models import get_session_maker
 
 logger = get_logger(__name__)
@@ -47,7 +47,7 @@ class ToolResult:
 class ServerConnection:
     """Represents a live connection to a single MCP server."""
 
-    def __init__(self, server_id: str, transport_type: str, connection_config: dict) -> None:
+    def __init__(self, server_id: str, transport_type: str, connection_config: ConnectionConfig) -> None:
         self.server_id = server_id
         self.transport_type = transport_type
         self.connection_config = connection_config
@@ -218,9 +218,10 @@ class MCPClient:
 
         async with session_maker() as session:
             from sqlalchemy import select
+
             from athena.models.mcp_server import MCPServer
             result = await session.execute(
-                select(MCPServer).where(MCPServer.enabled == True)
+                select(MCPServer).where(MCPServer.enabled.is_(True))
             )
             servers = result.scalars().all()
         logger.info("mcp_client_starting", found_servers=servers)
@@ -256,6 +257,7 @@ class MCPClient:
 
         async with session_maker() as session:
             from sqlalchemy import select
+
             from athena.models.mcp_server import MCPServer
             result = await session.execute(
                 select(MCPServer).where(MCPServer.server_id == server_id)
@@ -266,12 +268,12 @@ class MCPClient:
             logger.error("mcp_server_not_found", server_id=server_id)
             return False
 
-        config_json = json.loads(server_record.connection_config)
+        config = ConnectionConfig.from_dict(json.loads(server_record.connection_config))
 
         conn = ServerConnection(
             server_id=server_id,
             transport_type=server_record.transport,
-            connection_config=config_json,
+            connection_config=config,
         )
 
         self._connecting.add(server_id)
@@ -281,7 +283,7 @@ class MCPClient:
                 self._connecting.discard(server_id)
 
                 # Discover and register tools
-                tools = await conn.list_tools()
+                tools: list[ToolDef] = await conn.list_tools()
                 source = server_record.source
                 await self.registry.register(server_id, tools, source)
 
@@ -393,5 +395,5 @@ class MCPClient:
                         if await self.connect_server(server_id):
                             # Refresh tools on reconnect
                             if self.config.system.mcp_tools_list_refresh_on_reconnect:
-                                fresh_tools = await self.list_tools(server_id)
+                                fresh_tools: list[ToolDef] = await self.list_tools(server_id)
                                 await self.registry.refresh(server_id, fresh_tools)

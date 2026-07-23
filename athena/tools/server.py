@@ -40,7 +40,7 @@ mcp = FastMCP("Athena Built-in Tools", version="0.2.0")
     description="Read the contents of a file. Path must be absolute.",
 )
 async def file_read(path: str) -> dict[str, Any]:
-    return await _file_read(path=path)
+    return (await _file_read(path=path)).to_dict()
 
 
 @mcp.tool(
@@ -48,7 +48,7 @@ async def file_read(path: str) -> dict[str, Any]:
     description="Write content to a file. Path must be absolute. Creates parent directories as needed.",
 )
 async def file_write(path: str, content: str) -> dict[str, Any]:
-    return await _file_write(path=path, content=content)
+    return (await _file_write(path=path, content=content)).to_dict()
 
 
 @mcp.tool(
@@ -56,7 +56,7 @@ async def file_write(path: str, content: str) -> dict[str, Any]:
     description="Delete a file or directory. Path must be absolute.",
 )
 async def file_delete(path: str) -> dict[str, Any]:
-    return await _file_delete(path=path)
+    return (await _file_delete(path=path)).to_dict()
 
 
 @mcp.tool(
@@ -70,13 +70,13 @@ async def file_search(
     match_type: str = "name",
     max_results: int = 50,
 ) -> dict[str, Any]:
-    return await _file_search(
+    return (await _file_search(
         pattern=pattern,
         path=path,
         recursive=recursive,
         match_type=match_type,
         max_results=max_results,
-    )
+    )).to_dict()
 
 # ── Entry point ──────────────────────────────────────────────────────────
 

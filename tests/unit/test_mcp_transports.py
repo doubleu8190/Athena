@@ -1,7 +1,7 @@
 """Unit tests for MCP transport layer — StdioTransport and TransportFactory."""
 
 
-from athena.mcp_client.transports import StdioTransport, TransportFactory
+from athena.mcp_client.transports import ConnectionConfig, StdioTransport, TransportFactory
 
 
 class TestStdioTransport:
@@ -44,56 +44,56 @@ class TestTransportFactory:
 
     def test_legacy_command_string(self):
         """Legacy: command as space-separated string."""
-        t = TransportFactory.create("stdio", {"command": "python -m foo"})
+        t = TransportFactory.create("stdio", ConnectionConfig(command="python -m foo"))
         assert isinstance(t, StdioTransport)
         assert t.command == ["python", "-m", "foo"]
         assert t._extra_env == {}
 
     def test_claude_desktop_command_with_args(self):
         """Claude Desktop format: separate command + args list."""
-        t = TransportFactory.create("stdio", {
-            "command": "npx",
-            "args": ["-y", "@amap/amap-maps-mcp-server"],
-        })
+        t = TransportFactory.create("stdio", ConnectionConfig(
+            command="npx",
+            args=["-y", "@amap/amap-maps-mcp-server"],
+        ))
         assert isinstance(t, StdioTransport)
         assert t.command == ["npx", "-y", "@amap/amap-maps-mcp-server"]
 
     def test_command_with_args_and_env(self):
         """Claude Desktop format: command + args + env."""
-        t = TransportFactory.create("stdio", {
-            "command": "npx",
-            "args": ["-y", "@scope/pkg"],
-            "env": {"API_KEY": "secret", "DEBUG": "1"},
-        })
+        t = TransportFactory.create("stdio", ConnectionConfig(
+            command="npx",
+            args=["-y", "@scope/pkg"],
+            env={"API_KEY": "secret", "DEBUG": "1"},
+        ))
         assert isinstance(t, StdioTransport)
         assert t.command == ["npx", "-y", "@scope/pkg"]
         assert t._extra_env == {"API_KEY": "secret", "DEBUG": "1"}
 
     def test_command_as_list_no_args(self):
         """command already a list, no args key."""
-        t = TransportFactory.create("stdio", {
-            "command": ["python", "-m", "foo"],
-        })
+        t = TransportFactory.create("stdio", ConnectionConfig(
+            command=["python", "-m", "foo"],
+        ))
         assert isinstance(t, StdioTransport)
         assert t.command == ["python", "-m", "foo"]
 
     def test_empty_connection_config(self):
         """Edge case: no command at all."""
-        t = TransportFactory.create("stdio", {})
+        t = TransportFactory.create("stdio", ConnectionConfig())
         assert isinstance(t, StdioTransport)
         assert t.command == []
 
     def test_env_only_no_command(self):
         """env without command — command list is empty."""
-        t = TransportFactory.create("stdio", {"env": {"KEY": "val"}})
+        t = TransportFactory.create("stdio", ConnectionConfig(env={"KEY": "val"}))
         assert isinstance(t, StdioTransport)
         assert t.command == []
         assert t._extra_env == {"KEY": "val"}
 
     def test_command_with_single_arg(self):
         """Single arg in args list."""
-        t = TransportFactory.create("stdio", {
-            "command": "uvx",
-            "args": ["mcp-server-git"],
-        })
+        t = TransportFactory.create("stdio", ConnectionConfig(
+            command="uvx",
+            args=["mcp-server-git"],
+        ))
         assert t.command == ["uvx", "mcp-server-git"]

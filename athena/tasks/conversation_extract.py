@@ -12,7 +12,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -21,6 +22,78 @@ from athena.core.rag import RAGManager
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Data classes ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class AtomicFact:
+    """An atomic fact extracted from conversation."""
+
+    key: str = ""
+    value: str = ""
+    category: str = "other"
+    confidence: float = 0.0
+
+    @classmethod
+    def from_dict(cls, data: dict) -> AtomicFact:
+        return cls(
+            key=data.get("key", ""),
+            value=data.get("value", ""),
+            category=data.get("category", "other"),
+            confidence=data.get("confidence", 0),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "key": self.key,
+            "value": self.value,
+            "category": self.category,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
+class SummaryItem:
+    """A summary extracted from conversation."""
+
+    topic: str = ""
+    content: str = ""
+    category: str = "other"
+    confidence: float = 0.0
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SummaryItem:
+        return cls(
+            topic=data.get("topic", ""),
+            content=data.get("content", ""),
+            category=data.get("category", "other"),
+            confidence=data.get("confidence", 0),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "topic": self.topic,
+            "content": self.content,
+            "category": self.category,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
+class ExtractionResult:
+    """Result of LLM-based conversation extraction."""
+
+    atomic_facts: list[AtomicFact] = field(default_factory=list)
+    summaries: list[SummaryItem] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "atomic_facts": [f.to_dict() for f in self.atomic_facts],
+            "summaries": [s.to_dict() for s in self.summaries],
+        }
+
 
 # ── Prompt ──────────────────────────────────────────────────────────────────
 
@@ -144,15 +217,15 @@ def _format_messages_for_llm(messages: list) -> str:
 def _format_existing_memories(memories: list) -> str:
     """Format existing memories for the prompt context.
 
-    Each memory is a dict with 'text' and 'metadata' keys (from RAGManager).
+    Each memory is a MemoryVector with 'text' and 'metadata' attributes.
     """
     if not memories:
         return "(none)"
 
     parts: list[str] = []
     for m in memories:
-        key = m.get("metadata", {}).get("key", "")
-        value = m.get("text", "")
+        key = m.metadata.get("key", "")
+        value = m.text
         parts.append(f"- {key}: {value}")
     return "\n".join(parts)
 
@@ -170,11 +243,11 @@ async def _extract_with_llm(
     existing_memories_text: str,
     is_incomplete: bool,
     fast_model,
-) -> dict:
+) -> ExtractionResult:
     """Call the fast LLM to extract insights from conversation text.
 
-    Returns a dict with ``atomic_facts`` and ``summaries`` lists.
-    Returns empty lists on parse failure.
+    Returns an ``ExtractionResult`` with typed ``atomic_facts`` and
+    ``summaries`` lists.  Returns an empty result on parse failure.
     """
     from langchain_core.messages import HumanMessage
 
@@ -205,18 +278,26 @@ async def _extract_with_llm(
         parsed = json.loads(raw)
 
         # Validate structure
-        facts = parsed.get("atomic_facts", [])
-        summaries = parsed.get("summaries", [])
+        raw_facts = parsed.get("atomic_facts", [])
+        raw_summaries = parsed.get("summaries", [])
 
-        # Filter by confidence
-        facts = [f for f in facts if f.get("confidence", 0) >= _MIN_CONFIDENCE]
-        summaries = [s for s in summaries if s.get("confidence", 0) >= _MIN_CONFIDENCE]
+        # Filter by confidence and convert to typed dataclasses
+        facts = [
+            AtomicFact.from_dict(f)
+            for f in raw_facts
+            if f.get("confidence", 0) >= _MIN_CONFIDENCE
+        ]
+        summaries = [
+            SummaryItem.from_dict(s)
+            for s in raw_summaries
+            if s.get("confidence", 0) >= _MIN_CONFIDENCE
+        ]
 
-        return {"atomic_facts": facts, "summaries": summaries}
+        return ExtractionResult(atomic_facts=facts, summaries=summaries)
 
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.warning("extraction_parse_failed", error=str(e))
-        return {"atomic_facts": [], "summaries": []}
+        return ExtractionResult()
     except Exception as e:
         logger.error("extraction_llm_error", error=str(e))
         raise
@@ -227,8 +308,8 @@ async def _extract_with_llm(
 
 async def _dedup_and_write(
     user_id: str,
-    facts: list[dict],
-    summaries: list[dict],
+    facts: list[AtomicFact],
+    summaries: list[SummaryItem],
     session_id: str,
     rag_manager : RAGManager,
 ) -> int:
@@ -241,69 +322,61 @@ async def _dedup_and_write(
     Returns the number of memories created or updated.
     """
     written = 0
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     for fact in facts:
-        key = fact.get("key", "")
-        value = fact.get("value", "")
-        category = fact.get("category", "other")
-
-        if not key or not value:
+        if not fact.key or not fact.value:
             continue
 
         # Deterministic key for atomic facts
-        memory_key = f"auto_{category}_{_short_hash(key + value)}"
+        memory_key = f"auto_{fact.category}_{_short_hash(fact.key + fact.value)}"
 
         # Dedup via semantic search (only against other atomic_facts)
         similar = await rag_manager.semantic_search(
-            user_id, value, top_k=1, where={"type": "atomic_fact"},
+            user_id, fact.value, top_k=1, where={"type": "atomic_fact"},
         )
-        if similar and similar[0].get("score", 0) >= _DEDUP_SIMILARITY_THRESHOLD:
-            memory_key = similar[0].get("metadata", {}).get("key", memory_key)
-            logger.info("extraction_dedup_update", key=memory_key, score=similar[0].get("score"))
+        if similar and similar[0].score >= _DEDUP_SIMILARITY_THRESHOLD:
+            memory_key = similar[0].metadata.get("key", memory_key)
+            logger.info("extraction_dedup_update", key=memory_key, score=similar[0].score)
 
         meta = {
             "key": memory_key,
             "type": "atomic_fact",
-            "category": category,
+            "category": fact.category,
             "source": "conversation_extract",
             "session_id": session_id,
             "extracted_at": now,
-            "confidence": fact.get("confidence", 0),
+            "confidence": fact.confidence,
         }
         await rag_manager.upsert_vector(
-            memory_id=memory_key, user_id=user_id, text=value, metadata=meta,
+            memory_id=memory_key, user_id=user_id, text=fact.value, metadata=meta,
         )
         written += 1
 
     for summary in summaries:
-        topic = summary.get("topic", "")
-        content = summary.get("content", "")
-        category = summary.get("category", "other")
-
-        if not topic or not content:
+        if not summary.topic or not summary.content:
             continue
 
-        memory_key = f"summary_{category}_{_short_hash(topic)}"
+        memory_key = f"summary_{summary.category}_{_short_hash(summary.topic)}"
 
         # Dedup via semantic search (only against other paragraph_summaries)
         similar = await rag_manager.semantic_search(
-            user_id, content, top_k=1, where={"type": "paragraph_summary"},
+            user_id, summary.content, top_k=1, where={"type": "paragraph_summary"},
         )
-        if similar and similar[0].get("score", 0) >= _DEDUP_SIMILARITY_THRESHOLD:
-            memory_key = similar[0].get("metadata", {}).get("key", memory_key)
-            logger.info("extraction_dedup_update_summary", key=memory_key, score=similar[0].get("score"))
+        if similar and similar[0].score >= _DEDUP_SIMILARITY_THRESHOLD:
+            memory_key = similar[0].metadata.get("key", memory_key)
+            logger.info("extraction_dedup_update_summary", key=memory_key, score=similar[0].score)
 
         meta = {
             "key": memory_key,
             "type": "paragraph_summary",
-            "category": category,
+            "category": summary.category,
             "source": "conversation_extract",
             "session_id": session_id,
             "extracted_at": now,
         }
         await rag_manager.upsert_vector(
-            memory_id=memory_key, user_id=user_id, text=content, metadata=meta,
+            memory_id=memory_key, user_id=user_id, text=summary.content, metadata=meta,
         )
         written += 1
 
@@ -431,8 +504,8 @@ def extract_conversation_insights_task(
             fast_model,
         )
 
-        facts = extracted.get("atomic_facts", [])
-        summaries = extracted.get("summaries", [])
+        facts = extracted.atomic_facts
+        summaries = extracted.summaries
 
         if not facts and not summaries:
             logger.info("extraction_nothing_extracted", session_id=session_id)
@@ -489,5 +562,5 @@ def extract_conversation_insights_task(
     except Exception as e:
         logger.error("extraction_task_failed", session_id=session_id, error=str(e))
         if self.request.retries < self.max_retries:
-            raise self.retry(exc=e)
+            raise self.retry(exc=e) from e
         return {"status": "failed", "error": str(e)}

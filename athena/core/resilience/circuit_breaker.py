@@ -14,8 +14,8 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
-from athena.logging_config import get_logger
 from athena.api.metrics import athena_tool_circuit_state, athena_tool_circuit_trip_total
+from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
 

@@ -12,10 +12,61 @@ import asyncio
 import json
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
 
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class ConnectionConfig:
+    """MCP server connection configuration.
+
+    Fields vary by transport type:
+    - stdio: command, args, env
+    - http/sse: url, auth_type, auth_token_env, encrypted_token
+    """
+    command: str | list[str] = ""
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] | None = None
+    url: str = ""
+    auth_type: str = "none"
+    auth_token_env: str = ""
+    encrypted_token: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ConnectionConfig:
+        """Create from a parsed JSON dictionary."""
+        return cls(
+            command=data.get("command", ""),
+            args=data.get("args", []),
+            env=data.get("env"),
+            url=data.get("url", ""),
+            auth_type=data.get("auth_type", "none"),
+            auth_token_env=data.get("auth_token_env", ""),
+            encrypted_token=data.get("encrypted_token", ""),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for JSON storage."""
+        result: dict[str, Any] = {}
+        if self.command:
+            result["command"] = self.command
+        if self.args:
+            result["args"] = self.args
+        if self.env:
+            result["env"] = self.env
+        if self.url:
+            result["url"] = self.url
+        if self.auth_type != "none":
+            result["auth_type"] = self.auth_type
+        if self.auth_token_env:
+            result["auth_token_env"] = self.auth_token_env
+        if self.encrypted_token:
+            result["encrypted_token"] = self.encrypted_token
+        return result
 
 
 class MCPTransport(ABC):
@@ -107,7 +158,7 @@ class StdioTransport(MCPTransport):
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
                 await self._process.wait()
             self._process = None
@@ -122,7 +173,7 @@ class StdioTransport(MCPTransport):
         if not self._process or not self._process.stdin or not self._process.stdout:
             raise RuntimeError("StdioTransport not connected")
 
-        MAX_SKIP_LINES = 10
+        max_skip_lines = 10
 
         async with self._lock:
             payload = json.dumps(request) + "\n"
@@ -140,7 +191,7 @@ class StdioTransport(MCPTransport):
                 decoded = line.decode("utf-8").strip()
                 if not decoded:
                     skipped += 1
-                    if skipped > MAX_SKIP_LINES:
+                    if skipped > max_skip_lines:
                         raise ConnectionError(
                             "StdioTransport: too many empty lines from subprocess"
                         )
@@ -148,13 +199,12 @@ class StdioTransport(MCPTransport):
 
                 try:
                     parsed = json.loads(decoded)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
                     skipped += 1
-                    if skipped > MAX_SKIP_LINES:
+                    if skipped > max_skip_lines:
                         raise ConnectionError(
-                            f"StdioTransport: too many unparseable lines "
-                            f"(last: {decoded[:200]!r})"
-                        )
+                            f"StdioTransport: too many unparseable lines (last: {decoded[:200]!r})"
+                        ) from e
                     continue
 
                 # Accept any JSON-RPC message (response or notification)
@@ -163,7 +213,7 @@ class StdioTransport(MCPTransport):
 
                 # Not a JSON-RPC message — probably library noise on stdout
                 skipped += 1
-                if skipped > MAX_SKIP_LINES:
+                if skipped > max_skip_lines:
                     raise ConnectionError(
                         f"StdioTransport: too many non-JSON-RPC lines "
                         f"(last: {decoded[:200]!r})"
@@ -307,24 +357,24 @@ class TransportFactory:
     """Factory for creating transport instances based on type."""
 
     @staticmethod
-    def create(transport_type: str, connection_config: dict) -> MCPTransport:
+    def create(transport_type: str, config: ConnectionConfig) -> MCPTransport:
         """Create a transport instance.
 
         Args:
             transport_type: 'stdio', 'http', or 'sse'.
-            connection_config: Transport-specific configuration.
+            config: Connection configuration.
 
         Returns:
             An MCPTransport instance.
         """
         if transport_type == "stdio":
-            command = connection_config.get("command", "")
-            args = connection_config.get("args", [])
-            env = connection_config.get("env", None)
+            command = config.command
+            args = config.args
+            env = config.env
 
             if args:
                 # Claude Desktop format: separate command + args list
-                cmd_list = [command] + args
+                cmd_list = [command] + args if isinstance(command, str) else list(command) + args
             elif isinstance(command, list):
                 cmd_list = command
             else:
@@ -333,12 +383,18 @@ class TransportFactory:
 
             return StdioTransport(cmd_list, env)
         elif transport_type == "http":
-            url = connection_config.get("url", "")
-            auth = {k: v for k, v in connection_config.items() if k != "url"}
-            return HttpTransport(url, auth)
+            auth = {
+                "auth_type": config.auth_type,
+                "auth_token_env": config.auth_token_env,
+                "encrypted_token": config.encrypted_token,
+            }
+            return HttpTransport(config.url, auth)
         elif transport_type == "sse":
-            url = connection_config.get("url", "")
-            auth = {k: v for k, v in connection_config.items() if k != "url"}
-            return SSETransport(url, auth)
+            auth = {
+                "auth_type": config.auth_type,
+                "auth_token_env": config.auth_token_env,
+                "encrypted_token": config.encrypted_token,
+            }
+            return SSETransport(config.url, auth)
         else:
             raise ValueError(f"Unknown transport type: {transport_type}")

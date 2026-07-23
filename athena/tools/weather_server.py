@@ -35,7 +35,8 @@ async def query_weather(
     date: str | None = None,
 ) -> dict[str, Any]:
     """Query weather for a city, optionally filtered by date."""
-    return await _query_weather(city=city, date=date)
+    result = await _query_weather(city=city, date=date)
+    return result.to_dict()
 
 
 # ── Entry point ──────────────────────────────────────────────────────────

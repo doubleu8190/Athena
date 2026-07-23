@@ -8,10 +8,45 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from athena.core.resilience.retry import AttemptRecord, RetryResult
+from athena.core.resilience.retry import RetryResult
+
+
+@dataclass
+class AttemptInfo:
+    """Structured information about a single retry attempt."""
+
+    attempt: int
+    timestamp: float
+    success: bool
+    duration_ms: float
+    error_type: str | None = None
+    error_message: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AttemptInfo:
+        """Create an AttemptInfo from a dictionary."""
+        return cls(
+            attempt=data["attempt"],
+            timestamp=data["timestamp"],
+            success=data["success"],
+            duration_ms=data["duration_ms"],
+            error_type=data.get("error_type"),
+            error_message=data.get("error_message"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
+        return {
+            "attempt": self.attempt,
+            "timestamp": self.timestamp,
+            "success": self.success,
+            "duration_ms": self.duration_ms,
+            "error_type": self.error_type,
+            "error_message": self.error_message,
+        }
 
 
 @dataclass
@@ -23,22 +58,41 @@ class StructuredError:
     tool_name: str
     tool_args: dict[str, Any]
     total_attempts: int
-    retry_history: list[dict[str, Any]]
+    retry_history: list[AttemptInfo]
     circuit_state: str
     circuit_failure_rate: float
     timestamp: float
     server_id: str
     duration_total_ms: float
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> StructuredError:
+        """Create a StructuredError from a dictionary."""
+        return cls(
+            error_type=data["error_type"],
+            error_message=data["error_message"],
+            tool_name=data["tool_name"],
+            tool_args=data["tool_args"],
+            total_attempts=data["total_attempts"],
+            retry_history=[
+                AttemptInfo.from_dict(a) for a in data.get("retry_history", [])
+            ],
+            circuit_state=data["circuit_state"],
+            circuit_failure_rate=data["circuit_failure_rate"],
+            timestamp=data["timestamp"],
+            server_id=data["server_id"],
+            duration_total_ms=data["duration_total_ms"],
+        )
+
     def to_llm_prompt(self) -> str:
         """Render into a human/LLM-readable text block."""
         retry_lines: list[str] = []
         for a in self.retry_history:
-            status = "OK" if a["success"] else "FAIL"
-            err = a.get("error_type", "N/A") if not a["success"] else "success"
-            msg = (a.get("error_message") or "")[:100]
+            status = "OK" if a.success else "FAIL"
+            err = a.error_type or "N/A" if not a.success else "success"
+            msg = (a.error_message or "")[:100]
             retry_lines.append(
-                f"  Attempt {a['attempt'] + 1} [{status}] {err}: {msg}"
+                f"  Attempt {a.attempt + 1} [{status}] {err}: {msg}"
             )
 
         args_str = json.dumps(self.tool_args, ensure_ascii=False)
@@ -72,7 +126,7 @@ class StructuredError:
             "tool_name": self.tool_name,
             "tool_args": self.tool_args,
             "total_attempts": self.total_attempts,
-            "retry_history": self.retry_history,
+            "retry_history": [a.to_dict() for a in self.retry_history],
             "circuit_state": self.circuit_state,
             "circuit_failure_rate": self.circuit_failure_rate,
             "timestamp": self.timestamp,
@@ -112,7 +166,15 @@ class ErrorCollector:
             tool_args=tool_args,
             total_attempts=retry_result.total_attempts,
             retry_history=[
-                _attempt_to_dict(a) for a in retry_result.attempts
+                AttemptInfo(
+                    attempt=a.attempt,
+                    timestamp=a.timestamp,
+                    success=a.success,
+                    duration_ms=a.duration_ms,
+                    error_type=a.error_type,
+                    error_message=a.error_message,
+                )
+                for a in retry_result.attempts
             ],
             circuit_state=circuit_state,
             circuit_failure_rate=circuit_failure_rate,
@@ -120,14 +182,3 @@ class ErrorCollector:
             server_id=server_id,
             duration_total_ms=total_duration,
         )
-
-
-def _attempt_to_dict(record: AttemptRecord) -> dict[str, Any]:
-    return {
-        "attempt": record.attempt,
-        "timestamp": record.timestamp,
-        "success": record.success,
-        "duration_ms": record.duration_ms,
-        "error_type": record.error_type,
-        "error_message": record.error_message,
-    }

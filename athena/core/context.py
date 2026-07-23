@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import redis.asyncio as aioredis
@@ -21,6 +22,50 @@ if TYPE_CHECKING:
     from athena.models.session import Session
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class SessionData:
+    """Serializable session data for Redis caching."""
+    session_id: str = ""
+    user_id: str = ""
+    channel: str = ""
+    chat_id: str = ""
+    summary: str | None = None
+    summary_offset: int | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SessionData:
+        return cls(
+            session_id=data.get("session_id", ""),
+            user_id=data.get("user_id", ""),
+            channel=data.get("channel", ""),
+            chat_id=data.get("chat_id", ""),
+            summary=data.get("summary"),
+            summary_offset=data.get("summary_offset"),
+        )
+
+    @classmethod
+    def from_session(cls, session: Session) -> SessionData:
+        """Create from a Session ORM model."""
+        return cls(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            channel=session.channel,
+            chat_id=session.chat_id,
+            summary=session.summary,
+            summary_offset=session.summary_offset,
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "channel": self.channel,
+            "chat_id": self.chat_id,
+            "summary": self.summary,
+            "summary_offset": self.summary_offset,
+        }
 
 
 class ContextManager:
@@ -84,7 +129,7 @@ class ContextManager:
 
         if db_row is not None:
             # Cache in Redis
-            session_data = self._session_to_dict(db_row)
+            session_data = SessionData.from_session(db_row).to_dict()
             await self.redis.set(
                 key,
                 json.dumps(session_data, ensure_ascii=False, default=str),
@@ -106,7 +151,7 @@ class ContextManager:
             await db_session.commit()
 
         # Cache in Redis
-        session_data = self._session_to_dict(new_session)
+        session_data = SessionData.from_session(new_session).to_dict()
         await self.redis.set(
             key,
             json.dumps(session_data, ensure_ascii=False, default=str),
@@ -117,15 +162,3 @@ class ContextManager:
         return new_session
 
     # ── Helpers ───────────────────────────────────────────────────────
-
-    @staticmethod
-    def _session_to_dict(session: Session) -> dict:
-        """Convert a Session model to a JSON-serializable dict."""
-        return {
-            "session_id": session.session_id,
-            "user_id": session.user_id,
-            "channel": session.channel,
-            "chat_id": session.chat_id,
-            "summary": session.summary,
-            "summary_offset": session.summary_offset,
-        }

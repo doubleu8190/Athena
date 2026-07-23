@@ -61,10 +61,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize MCP Client (singleton)
     from athena.mcp_client.client import MCPClient, set_mcp_client
-    from athena.mcp_client.seed_loader import auto_register_builtin_servers
 
     # Warm ToolRegistry singleton so MCP server auto-registration finds it
     from athena.mcp_client.registry import get_tool_registry
+    from athena.mcp_client.seed_loader import auto_register_builtin_servers
     get_tool_registry()
 
     await auto_register_builtin_servers(config)
@@ -124,10 +124,10 @@ def create_app(config: Config | None = None) -> FastAPI:
     )
 
     # Register routes
-    from athena.api.health import router as health_router
-    from athena.api.im import router as im_router
     from athena.api.admin import router as admin_router
     from athena.api.device import router as device_router
+    from athena.api.health import router as health_router
+    from athena.api.im import router as im_router
     from athena.api.memory import router as memory_router
 
     app.include_router(health_router, prefix="/api/v1")
@@ -141,8 +141,8 @@ def create_app(config: Config | None = None) -> FastAPI:
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
         from athena.api.metrics import (
-            athena_http_requests_total,
             athena_http_request_duration_seconds,
+            athena_http_requests_total,
         )
 
         @app.get("/metrics", include_in_schema=False)

@@ -12,12 +12,41 @@ the MCP stdio server (Layer 3).
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from athena.config import Config
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class MemoryVector:
+    """A memory vector from ChromaDB."""
+    memory_id: str = ""
+    text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    score: float = 0.0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MemoryVector:
+        return cls(
+            memory_id=data.get("memory_id", ""),
+            text=data.get("text", ""),
+            metadata=data.get("metadata", {}),
+            score=data.get("score", 0.0),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "memory_id": self.memory_id,
+            "text": self.text,
+            "metadata": self.metadata,
+        }
+        if self.score:
+            result["score"] = self.score
+        return result
 
 # ── Constants ─────────────────────────────────────────────────────────────
 
@@ -101,7 +130,7 @@ class RAGManager:
         query: str,
         top_k: int = 5,
         where: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[MemoryVector]:
         """Search memories by semantic similarity for a given user.
 
         Args:
@@ -111,7 +140,7 @@ class RAGManager:
             where: Additional ChromaDB metadata filter (merged with user_id).
                    Example: {"type": "atomic_fact"} to search only facts.
 
-        Returns list of dicts: {memory_id, score, metadata, text}
+        Returns list of MemoryVector instances.
         """
         self._ensure_collection()
 
@@ -132,15 +161,15 @@ class RAGManager:
         )
 
         # Normalize Chroma response format
-        items: list[dict[str, Any]] = []
+        items: list[MemoryVector] = []
         if results["ids"] and results["ids"][0]:
             for i, mem_id in enumerate(results["ids"][0]):
-                items.append({
-                    "memory_id": mem_id,
-                    "score": 1.0 - results["distances"][0][i],  # cosine distance → similarity
-                    "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-                    "text": results["documents"][0][i] if results["documents"] else "",
-                })
+                items.append(MemoryVector(
+                    memory_id=mem_id,
+                    score=1.0 - results["distances"][0][i],  # cosine distance → similarity
+                    metadata=results["metadatas"][0][i] if results["metadatas"] else {},
+                    text=results["documents"][0][i] if results["documents"] else "",
+                ))
 
         logger.debug(
             "rag_semantic_search",
@@ -190,10 +219,10 @@ class RAGManager:
         )
         return memory_id
 
-    async def get_vector(self, memory_id: str) -> dict[str, Any] | None:
+    async def get_vector(self, memory_id: str) -> MemoryVector | None:
         """Fetch a single vector by memory_id.
 
-        Returns {memory_id, text, metadata} or None if not found.
+        Returns a MemoryVector or None if not found.
         """
         self._ensure_collection()
 
@@ -205,21 +234,21 @@ class RAGManager:
         if not result["ids"]:
             return None
 
-        return {
-            "memory_id": result["ids"][0],
-            "text": result["documents"][0] if result["documents"] else "",
-            "metadata": result["metadatas"][0] if result["metadatas"] else {},
-        }
+        return MemoryVector(
+            memory_id=result["ids"][0],
+            text=result["documents"][0] if result["documents"] else "",
+            metadata=result["metadatas"][0] if result["metadatas"] else {},
+        )
 
     async def list_vectors(
         self,
         user_id: str,
         key_prefix: str = "",
         limit: int = 50,
-    ) -> list[dict[str, Any]]:
+    ) -> list[MemoryVector]:
         """List vectors for a user, optionally filtered by key prefix.
 
-        Returns list of {memory_id, text, metadata}.
+        Returns list of MemoryVector instances.
         """
         self._ensure_collection()
 
@@ -228,7 +257,7 @@ class RAGManager:
             include=["documents", "metadatas"],
         )
 
-        items: list[dict[str, Any]] = []
+        items: list[MemoryVector] = []
         for i, mem_id in enumerate(result["ids"]):
             meta = result["metadatas"][i] if result["metadatas"] else {}
             key = meta.get("key", "")
@@ -236,14 +265,14 @@ class RAGManager:
             if key_prefix and not key.startswith(key_prefix):
                 continue
 
-            items.append({
-                "memory_id": mem_id,
-                "text": result["documents"][i] if result["documents"] else "",
-                "metadata": meta,
-            })
+            items.append(MemoryVector(
+                memory_id=mem_id,
+                text=result["documents"][i] if result["documents"] else "",
+                metadata=meta,
+            ))
 
         # Sort by updated_at descending (newest first), fall back to insertion order
-        items.sort(key=lambda x: x["metadata"].get("updated_at", ""), reverse=True)
+        items.sort(key=lambda x: x.metadata.get("updated_at", ""), reverse=True)
 
         return items[:limit]
 

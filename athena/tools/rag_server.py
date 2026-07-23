@@ -78,7 +78,7 @@ async def semantic_search(
     results = await rag.semantic_search(
         user_id=user_id, query=query, top_k=top_k, where=where,
     )
-    return {"results": results, "count": len(results)}
+    return {"results": [r.to_dict() for r in results], "count": len(results)}
 
 
 @mcp.tool(

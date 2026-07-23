@@ -9,12 +9,12 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from athena.api.metrics import athena_tool_retry_success_total, athena_tool_retry_total
 from athena.logging_config import get_logger
-from athena.api.metrics import athena_tool_retry_total, athena_tool_retry_success_total
 
 logger = get_logger(__name__)
 

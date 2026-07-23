@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from athena.core.secrets import get_secret
 from athena.logging_config import get_logger
@@ -185,10 +186,10 @@ class Config:
         Returns a ``ResilienceConfig`` instance with all sub-configs populated
         from the YAML configuration, falling back to sensible defaults.
         """
-        from athena.core.resilience.retry import RetryConfig
         from athena.core.resilience.circuit_breaker import CircuitBreakerConfig
         from athena.core.resilience.llm_decision import LLMDecisionConfig
         from athena.core.resilience.manager import ResilienceConfig
+        from athena.core.resilience.retry import RetryConfig
 
         raw = self.system.tool_resilience
 
@@ -219,12 +220,7 @@ class Config:
         )
 
         llm_raw = raw.get("llm_decision", {})
-        llm_cfg = LLMDecisionConfig(
-            enabled=llm_raw.get("enabled", True),
-            max_decisions=llm_raw.get("max_decisions", 3),
-            decision_timeout_seconds=llm_raw.get("decision_timeout_seconds", 30),
-            allowed_decisions=llm_raw.get("allowed_decisions", LLMDecisionConfig().allowed_decisions),
-        )
+        llm_cfg = LLMDecisionConfig.from_dict(llm_raw)
 
         return ResilienceConfig(
             retry=retry_cfg,
@@ -237,7 +233,7 @@ class Config:
         """Load a YAML file, returning empty dict if not found."""
         if not path.exists():
             return {}
-        with open(path, "r") as f:
+        with open(path) as f:
             return yaml.safe_load(f) or {}
 
     @classmethod
@@ -325,7 +321,7 @@ class Config:
             logger.warning(f"Warning: {DEFAULT_MCP_SERVERS_CONFIG} does not exist")
             return []
 
-        with open(DEFAULT_MCP_SERVERS_CONFIG, "r") as f:
+        with open(DEFAULT_MCP_SERVERS_CONFIG) as f:
             data = json.load(f) or {}
 
         servers = data.get("mcpServers", {})

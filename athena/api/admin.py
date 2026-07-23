@@ -12,26 +12,16 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func, tuple_
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from athena.api.deps import get_config_dep, get_db, get_mcp_client_dep, verify_api_key
+from athena.api.response import error, success
 from athena.logging_config import get_logger
-
 from athena.mcp_client.client import MCPClient
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["admin"])
-
-
-# ── Response helpers ──────────────────────────────────────────────────
-
-def success(data: Any = None, message: str = "success") -> dict[str, Any]:  # noqa: ANN401
-    return {"code": 0, "message": message, "data": data}
-
-
-def error(code: int, message: str, detail: str = "") -> dict[str, Any]:
-    return {"code": code, "message": message, "detail": detail, "data": None}
 
 
 # ── MCP Server management ─────────────────────────────────────────────

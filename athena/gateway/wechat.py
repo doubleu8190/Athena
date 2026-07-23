@@ -17,6 +17,7 @@ import base64
 import json
 import secrets
 import struct
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,6 +33,33 @@ from athena.gateway.base import (
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class WeChatCredentials:
+    """Persisted WeChat iLink bot credentials."""
+    bot_token: str = ""
+    ilink_bot_id: str = ""
+    obtained_at: str = ""
+    expires_at: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict) -> WeChatCredentials:
+        return cls(
+            bot_token=data.get("bot_token", ""),
+            ilink_bot_id=data.get("ilink_bot_id", ""),
+            obtained_at=data.get("obtained_at", ""),
+            expires_at=data.get("expires_at", ""),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "bot_token": self.bot_token,
+            "ilink_bot_id": self.ilink_bot_id,
+            "obtained_at": self.obtained_at,
+            "expires_at": self.expires_at,
+        }
+
 
 # ── Constants ─────────────────────────────────────────────────────────
 WECHAT_CREDENTIALS_PATH = Path("/data/wechat_credentials.json")
@@ -121,14 +149,15 @@ class WeChatAdapter(BaseIMAdapter):
 
         try:
             data = json.loads(WECHAT_CREDENTIALS_PATH.read_text())
-            expires_at = datetime.fromisoformat(data["expires_at"])
+            creds = WeChatCredentials.from_dict(data)
+            expires_at = datetime.fromisoformat(creds.expires_at)
 
             if datetime.now(timezone.utc) >= expires_at:
                 logger.info("wechat_credentials_expired")
                 return False
 
-            self._bot_token = data["bot_token"]
-            self._ilink_bot_id = data.get("ilink_bot_id", "")
+            self._bot_token = creds.bot_token
+            self._ilink_bot_id = creds.ilink_bot_id
             return True
         except Exception as e:
             logger.warning("wechat_credentials_load_failed", error=str(e))
@@ -137,13 +166,13 @@ class WeChatAdapter(BaseIMAdapter):
     async def _save_credentials(self) -> None:
         """Persist credentials to /data/wechat_credentials.json (0600)."""
         WECHAT_CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "bot_token": self._bot_token,
-            "ilink_bot_id": self._ilink_bot_id,
-            "obtained_at": datetime.now(timezone.utc).isoformat(),
-            "expires_at": datetime.now(timezone.utc).isoformat(),
-        }
-        WECHAT_CREDENTIALS_PATH.write_text(json.dumps(data, indent=2))
+        creds = WeChatCredentials(
+            bot_token=self._bot_token,
+            ilink_bot_id=self._ilink_bot_id,
+            obtained_at=datetime.now(timezone.utc).isoformat(),
+            expires_at=datetime.now(timezone.utc).isoformat(),
+        )
+        WECHAT_CREDENTIALS_PATH.write_text(json.dumps(creds.to_dict(), indent=2))
         WECHAT_CREDENTIALS_PATH.chmod(0o600)
         logger.info("wechat_credentials_saved")
 

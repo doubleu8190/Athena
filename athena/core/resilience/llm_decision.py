@@ -70,6 +70,26 @@ class LLMDecisionConfig:
         "abort",
     ])
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LLMDecisionConfig:
+        """Create an LLMDecisionConfig from a dictionary."""
+        default_allowed = cls().allowed_decisions
+        return cls(
+            enabled=data.get("enabled", True),
+            max_decisions=data.get("max_decisions", 3),
+            decision_timeout_seconds=data.get("decision_timeout_seconds", 30),
+            allowed_decisions=data.get("allowed_decisions", default_allowed),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
+        return {
+            "enabled": self.enabled,
+            "max_decisions": self.max_decisions,
+            "decision_timeout_seconds": self.decision_timeout_seconds,
+            "allowed_decisions": self.allowed_decisions,
+        }
+
 
 @dataclass
 class LLMDecision:
@@ -82,6 +102,36 @@ class LLMDecision:
     fallback_tool_name: str | None = None
     user_message: str | None = None
     reason: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LLMDecision:
+        """Create an LLMDecision from a dictionary (e.g., parsed JSON)."""
+        return cls(
+            decision=data.get("decision", "abort"),
+            confidence=float(data.get("confidence", 0.5)),
+            reasoning=data.get("reasoning") or "",
+            adjusted_args=data.get("adjusted_args"),
+            fallback_tool_name=data.get("fallback_tool_name"),
+            user_message=data.get("user_message"),
+            reason=data.get("reason"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
+        result: dict[str, Any] = {
+            "decision": self.decision,
+            "confidence": self.confidence,
+            "reasoning": self.reasoning,
+        }
+        if self.adjusted_args is not None:
+            result["adjusted_args"] = self.adjusted_args
+        if self.fallback_tool_name is not None:
+            result["fallback_tool_name"] = self.fallback_tool_name
+        if self.user_message is not None:
+            result["user_message"] = self.user_message
+        if self.reason is not None:
+            result["reason"] = self.reason
+        return result
 
 
 class LLMProvider(Protocol):
@@ -165,23 +215,15 @@ class LLMDecisionEngine:
                 raise ValueError("No JSON found in LLM response")
 
             data = json.loads(json_str)
-            decision = data.get("decision", "abort")
+            decision_obj = LLMDecision.from_dict(data)
 
-            if decision not in self.config.allowed_decisions:
+            if decision_obj.decision not in self.config.allowed_decisions:
                 logger.warning(
-                    "llm_invalid_decision_type", decision=decision
+                    "llm_invalid_decision_type", decision=decision_obj.decision
                 )
-                decision = "abort"
+                decision_obj.decision = "abort"
 
-            return LLMDecision(
-                decision=decision,
-                confidence=float(data.get("confidence", 0.5)),
-                reasoning=data.get("reasoning") or "",
-                adjusted_args=data.get("adjusted_args"),
-                fallback_tool_name=data.get("fallback_tool_name"),
-                user_message=data.get("user_message"),
-                reason=data.get("reason"),
-            )
+            return decision_obj
 
         except (json.JSONDecodeError, ValueError) as exc:
             logger.error("llm_decision_parse_failed", error=str(exc))

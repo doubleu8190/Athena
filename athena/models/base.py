@@ -6,6 +6,8 @@ avoids "database is locked" errors while WAL enables concurrent reads.
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -20,7 +22,7 @@ _engines: dict[str, object] = {}
 _session_makers: dict[str, object] = {}
 
 
-def get_engine(db_path: str) -> AsyncEngine:
+def get_engine(db_path: str) -> Any:
     """Get or create an async SQLAlchemy engine for the given database path.
 
     Uses StaticPool — one connection per process — which is correct for

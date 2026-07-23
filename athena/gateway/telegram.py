@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from athena.config import Config
@@ -27,6 +28,35 @@ from athena.gateway.base import (
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class TelegramCallbackData:
+    """Parsed Telegram inline keyboard callback data."""
+    action: str = ""
+    task_id: str = ""
+    step: int = 0
+    approved: bool = False
+    nonce: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TelegramCallbackData:
+        return cls(
+            action=data.get("action", ""),
+            task_id=data.get("task_id", ""),
+            step=data.get("step", 0),
+            approved=data.get("approved", False),
+            nonce=data.get("nonce", ""),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action,
+            "task_id": self.task_id,
+            "step": self.step,
+            "approved": self.approved,
+            "nonce": self.nonce,
+        }
 
 
 class TelegramAdapter(BaseIMAdapter):
@@ -216,14 +246,16 @@ class TelegramAdapter(BaseIMAdapter):
         """Process an Inline Keyboard button click (confirmation callback)."""
         try:
             cb_data_b64 = callback_query.get("data", "")
-            cb_data = json.loads(base64.b64decode(cb_data_b64).decode())
+            callback = TelegramCallbackData.from_dict(
+                json.loads(base64.b64decode(cb_data_b64).decode())
+            )
 
-            if cb_data.get("action") == "confirm_subtask":
+            if callback.action == "confirm_subtask":
                 # Handle confirmation (implementation in confirmation.py)
                 logger.info(
                     "telegram_confirmation_callback",
-                    task_id=cb_data.get("task_id"),
-                    approved=cb_data.get("approved"),
+                    task_id=callback.task_id,
+                    approved=callback.approved,
                 )
 
         except Exception as e:
@@ -283,32 +315,35 @@ class TelegramAdapter(BaseIMAdapter):
         Uses Telegram's editMessageText for countdown updates (throttled).
         """
         # Build callback data
-        cb_data = base64.b64encode(json.dumps({
-            "action": "confirm_subtask",
-            "task_id": confirmation.task_id,
-            "step": confirmation.step,
-            "approved": True,
-            "nonce": confirmation.nonce,
-        }).encode()).decode()
+        cb_approve = TelegramCallbackData(
+            action="confirm_subtask",
+            task_id=confirmation.task_id,
+            step=confirmation.step,
+            approved=True,
+            nonce=confirmation.nonce,
+        )
+        cb_reject = TelegramCallbackData(
+            action="confirm_subtask",
+            task_id=confirmation.task_id,
+            step=confirmation.step,
+            approved=False,
+            nonce=confirmation.nonce,
+        )
+        cb_approve_b64 = base64.b64encode(json.dumps(cb_approve.to_dict()).encode()).decode()
+        cb_reject_b64 = base64.b64encode(json.dumps(cb_reject.to_dict()).encode()).decode()
 
         keyboard = {
             "inline_keyboard": [
                 [
                     {
                         "text": f"⏳ 请等待 {confirmation.cooling_off_seconds} 秒..." if confirmation.cooling_off_seconds > 0 else "✅ 确认执行",
-                        "callback_data": cb_data,
+                        "callback_data": cb_approve_b64,
                     }
                 ],
                 [
                     {
                         "text": "✕ 拒绝",
-                        "callback_data": base64.b64encode(json.dumps({
-                            "action": "confirm_subtask",
-                            "task_id": confirmation.task_id,
-                            "step": confirmation.step,
-                            "approved": False,
-                            "nonce": confirmation.nonce,
-                        }).encode()).decode(),
+                        "callback_data": cb_reject_b64,
                     }
                 ],
             ]

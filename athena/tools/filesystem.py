@@ -10,12 +10,99 @@ from __future__ import annotations
 
 import os
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from athena.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class FileReadResult:
+    """Result of a file read operation."""
+    success: bool
+    content: str | None = None
+    size_bytes: int = 0
+    path: str = ""
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        if not self.success:
+            return {"success": False, "error": self.error, "content": None}
+        return {
+            "success": True,
+            "content": self.content,
+            "size_bytes": self.size_bytes,
+            "path": self.path,
+        }
+
+
+@dataclass
+class FileWriteResult:
+    """Result of a file write operation."""
+    success: bool
+    path: str = ""
+    size_bytes: int = 0
+    overwrote: bool = False
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        if not self.success:
+            return {"success": False, "error": self.error}
+        return {
+            "success": True,
+            "path": self.path,
+            "size_bytes": self.size_bytes,
+            "overwrote": self.overwrote,
+        }
+
+
+@dataclass
+class FileDeleteResult:
+    """Result of a file delete operation."""
+    success: bool
+    path: str = ""
+    was_directory: bool = False
+    size_bytes: int = 0
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        if not self.success:
+            return {"success": False, "error": self.error}
+        return {
+            "success": True,
+            "path": self.path,
+            "was_directory": self.was_directory,
+            "size_bytes": self.size_bytes,
+        }
+
+
+@dataclass
+class FileSearchResult:
+    """Result of a file search operation."""
+    success: bool
+    matches: list[str] = field(default_factory=list)
+    count: int = 0
+    search_root: str = ""
+    pattern: str = ""
+    match_type: str = ""
+    truncated: bool = False
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        if not self.success:
+            return {"success": False, "error": self.error, "matches": []}
+        return {
+            "success": True,
+            "matches": self.matches,
+            "count": self.count,
+            "search_root": self.search_root,
+            "pattern": self.pattern,
+            "match_type": self.match_type,
+            "truncated": self.truncated,
+        }
 
 def _safe_path(path: str) -> Path:
     """Resolve a path and verify it's absolute.
@@ -29,7 +116,7 @@ def _safe_path(path: str) -> Path:
     return p.resolve()
 
 
-async def file_read(path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+async def file_read(path: str, **kwargs: Any) -> FileReadResult:
     """Read a file from the workspace.
 
     Risk level: low (read-only).
@@ -37,20 +124,20 @@ async def file_read(path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
     try:
         target = _safe_path(path)
         if not target.exists():
-            return {"success": False, "error": f"File not found: {path}", "content": None}
+            return FileReadResult(success=False, error=f"File not found: {path}")
 
         content = target.read_text(encoding="utf-8")
-        return {
-            "success": True,
-            "content": content,
-            "size_bytes": len(content),
-            "path": str(target),
-        }
+        return FileReadResult(
+            success=True,
+            content=content,
+            size_bytes=len(content),
+            path=str(target),
+        )
     except ValueError as e:
-        return {"success": False, "error": str(e), "content": None}
+        return FileReadResult(success=False, error=str(e))
     except Exception as e:
         logger.error("file_read_error", path=path, error=str(e))
-        return {"success": False, "error": str(e), "content": None}
+        return FileReadResult(success=False, error=str(e))
 
 
 async def file_write(
@@ -58,7 +145,7 @@ async def file_write(
     content: str,
     idempotency_key: str | None = None,
     **kwargs: Any,  # noqa: ANN401
-) -> dict[str, Any]:
+) -> FileWriteResult:
     """Write content to a file in the workspace.
 
     Risk level: medium.
@@ -73,24 +160,24 @@ async def file_write(
         # Write content
         target.write_text(content, encoding="utf-8")
 
-        return {
-            "success": True,
-            "path": str(target),
-            "size_bytes": len(content),
-            "overwrote": target.exists(),
-        }
+        return FileWriteResult(
+            success=True,
+            path=str(target),
+            size_bytes=len(content),
+            overwrote=target.exists(),
+        )
     except ValueError as e:
-        return {"success": False, "error": str(e)}
+        return FileWriteResult(success=False, error=str(e))
     except Exception as e:
         logger.error("file_write_error", path=path, error=str(e))
-        return {"success": False, "error": str(e)}
+        return FileWriteResult(success=False, error=str(e))
 
 
 async def file_delete(
     path: str,
     idempotency_key: str | None = None,
     **kwargs: Any,  # noqa: ANN401
-) -> dict[str, Any]:
+) -> FileDeleteResult:
     """Delete a file from the workspace.
 
     Risk level: high.
@@ -99,7 +186,7 @@ async def file_delete(
         target = _safe_path(path)
 
         if not target.exists():
-            return {"success": False, "error": f"File not found: {path}"}
+            return FileDeleteResult(success=False, error=f"File not found: {path}")
 
         stat = target.stat()
 
@@ -108,17 +195,17 @@ async def file_delete(
         else:
             target.unlink()
 
-        return {
-            "success": True,
-            "path": str(target),
-            "was_directory": target.is_dir() if target.exists() else False,
-            "size_bytes": stat.st_size,
-        }
+        return FileDeleteResult(
+            success=True,
+            path=str(target),
+            was_directory=target.is_dir() if target.exists() else False,
+            size_bytes=stat.st_size,
+        )
     except ValueError as e:
-        return {"success": False, "error": str(e)}
+        return FileDeleteResult(success=False, error=str(e))
     except Exception as e:
         logger.error("file_delete_error", path=path, error=str(e))
-        return {"success": False, "error": str(e)}
+        return FileDeleteResult(success=False, error=str(e))
 
 
 async def file_search(
@@ -128,7 +215,7 @@ async def file_search(
     match_type: str = "name",
     max_results: int = 50,
     **kwargs: Any,  # noqa: ANN401
-) -> dict[str, Any]:
+) -> FileSearchResult:
     """Search for files under an absolute directory path.
 
     Args:
@@ -148,9 +235,9 @@ async def file_search(
     try:
         target = _safe_path(path)
         if not target.exists():
-            return {"success": False, "error": f"Path not found: {path}", "matches": []}
+            return FileSearchResult(success=False, error=f"Path not found: {path}")
         if not target.is_dir():
-            return {"success": False, "error": f"Path is not a directory: {path}", "matches": []}
+            return FileSearchResult(success=False, error=f"Path is not a directory: {path}")
 
         matches: list[str] = []
 
@@ -173,7 +260,7 @@ async def file_search(
                 try:
                     compiled = re.compile(regex_str, flags)
                 except re.error as e:
-                    return {"success": False, "error": f"Invalid regex: {e}", "matches": []}
+                    return FileSearchResult(success=False, error=f"Invalid regex: {e}")
 
                 def content_match(file_path: Path) -> bool:
                     try:
@@ -196,20 +283,20 @@ async def file_search(
                         break
 
         else:
-            return {"success": False, "error": f"Unknown match_type: {match_type}", "matches": []}
+            return FileSearchResult(success=False, error=f"Unknown match_type: {match_type}")
 
-        return {
-            "success": True,
-            "matches": matches,
-            "count": len(matches),
-            "search_root": str(target),
-            "pattern": pattern,
-            "match_type": match_type,
-            "truncated": len(matches) >= max_results,
-        }
+        return FileSearchResult(
+            success=True,
+            matches=matches,
+            count=len(matches),
+            search_root=str(target),
+            pattern=pattern,
+            match_type=match_type,
+            truncated=len(matches) >= max_results,
+        )
 
     except ValueError as e:
-        return {"success": False, "error": str(e), "matches": []}
+        return FileSearchResult(success=False, error=str(e))
     except Exception as e:
         logger.error("file_search_error", pattern=pattern, path=path, error=str(e))
-        return {"success": False, "error": str(e), "matches": []}
+        return FileSearchResult(success=False, error=str(e))

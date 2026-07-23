@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from athena.logging_config import get_logger
+from athena.mcp_client.client import ToolDef
 
 logger = get_logger(__name__)
 
@@ -55,7 +56,7 @@ class ToolRegistry:
     async def register(
         self,
         server_id: str,
-        tools: list[Any],
+        tools: list[ToolDef],
         source: str,
     ) -> list[str]:
         """Register tools from a server. Returns list of tool IDs.
@@ -63,38 +64,24 @@ class ToolRegistry:
         Uses DB as the source of truth — inserts or updates tool records,
         then syncs to in-memory cache.
         """
-        from athena.mcp_client.client import ToolDef
-
         registered_ids = []
         # For now, use in-memory only; DB sync happens via seed loader and reconnects
 
         for tool in tools:
-            if isinstance(tool, ToolDef):
-                td = tool
-            else:
-                td = ToolDef(
-                    name=tool.get("name", ""),
-                    description=tool.get("description", ""),
-                    parameters_schema=tool.get("parameters_schema", tool.get("inputSchema", {})),
-                    version=tool.get("version", "1.0.0"),
-                    idempotent=tool.get("idempotent", True),
-                    capability_tags=tool.get("capability_tags", []),
-                    risk_level=tool.get("risk_level", "medium"),
-                )
 
-            tool_id = f"{server_id}::{td.name}"
-            key = (td.name, server_id)
+            tool_id = f"{server_id}::{tool.name}"
+            key = (tool.name, server_id)
 
             if key in self._tools_by_name_server:
                 # Update existing
                 existing_id = self._tools_by_name_server[key]
                 existing = self._tools[existing_id]
-                existing.description = td.description
-                existing.parameters_schema = td.parameters_schema
-                existing.version = td.version
-                existing.idempotent = td.idempotent
-                existing.capability_tags = td.capability_tags
-                existing.risk_level = td.risk_level
+                existing.description = tool.description
+                existing.parameters_schema = tool.parameters_schema
+                existing.version = tool.version
+                existing.idempotent = tool.idempotent
+                existing.capability_tags = tool.capability_tags
+                existing.risk_level = tool.risk_level
                 # Keep disabled status if admin-set
                 if existing.status != "disabled":
                     existing.status = "active"
@@ -102,17 +89,17 @@ class ToolRegistry:
             else:
                 rt = RegisteredTool(
                     id=tool_id,
-                    name=td.name,
-                    version=td.version,
-                    description=td.description,
-                    parameters_schema=td.parameters_schema,
+                    name=tool.name,
+                    version=tool.version,
+                    description=tool.description,
+                    parameters_schema=tool.parameters_schema,
                     source=source,
                     source_server_id=server_id,
-                    handler_info=td.name,
+                    handler_info=tool.name,
                     status="active",
-                    risk_level=td.risk_level,
-                    idempotent=td.idempotent,
-                    capability_tags=td.capability_tags,
+                    risk_level=tool.risk_level,
+                    idempotent=tool.idempotent,
+                    capability_tags=tool.capability_tags,
                 )
                 self._tools[tool_id] = rt
                 self._tools_by_name_server[key] = tool_id
@@ -145,11 +132,9 @@ class ToolRegistry:
         - Deleted tools (not in fresh list) → mark disabled
         - Existing tools → stale→active (unless admin-disabled)
         """
-        from athena.mcp_client.client import ToolDef
-
         fresh_names = set()
         for tool in fresh_tools:
-            name = tool.name if isinstance(tool, ToolDef) else tool.get("name", "")
+            name = tool.name
             fresh_names.add(name)
 
         # Mark deleted tools as disabled

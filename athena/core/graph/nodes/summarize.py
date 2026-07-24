@@ -10,6 +10,7 @@ so they survive graph restarts and checkpoint boundaries.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -124,6 +125,8 @@ async def _summarize_messages(
     )
     content = result.content
     if isinstance(content, list):
+        if any(isinstance(item, dict) for item in content):
+            return json.dumps(content, ensure_ascii=False)
         return "\n".join(str(item) for item in content)
     return content
 

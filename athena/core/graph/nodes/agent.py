@@ -6,6 +6,7 @@ which manages ``summary_offset`` before this node runs.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langchain_core.messages import AIMessage, SystemMessage
@@ -105,7 +106,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
         summary = await _load_session_summary(session_id)
         messages = _build_messages(effective, summary)
 
-        response: AIMessage = await llm.ainvoke(messages)
+        response: AIMessage = await llm.ainvoke(input=messages)
     except Exception as e:
         log.error("agent_node_error", error=str(e))
         error_msg = AIMessage(content=f"Error: {e}")
@@ -153,7 +154,10 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
             log.info("answer_without_tools")
             content = ""
             if isinstance(response.content, list):
-                content = "\n".join(str(item) for item in response.content)
+                if any(isinstance(item, dict) for item in response.content):
+                    content = json.dumps(response.content, ensure_ascii=False)
+                else:
+                    content = "\n".join(str(item) for item in response.content)
             else:
                 content = response.content
             response = AIMessage(

@@ -30,7 +30,7 @@ from athena.core.graph.nodes.agent import AGENT_SYSTEM_PROMPT
 from athena.core.llm_provider.manager import LLMProviderManager
 from athena.core.prompt_loader import load_prompt
 from athena.logging_config import get_logger
-from athena.models.base import get_session
+from athena.models.base import get_session_maker
 from athena.models.session import Session
 
 logger = get_logger(__name__)
@@ -51,8 +51,7 @@ _SUMMARIZE_PROMPT = load_prompt("summarize.md")
 
 async def _load_session_summary(session_id: str) -> tuple[str | None, int]:
     """Return ``(summary, summary_offset)`` from the session row."""
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         row = (
             await db.execute(
                 select(Session.summary, Session.summary_offset).where(
@@ -61,24 +60,19 @@ async def _load_session_summary(session_id: str) -> tuple[str | None, int]:
             )
         ).first()
         return (row[0], row[1]) if row else (None, 0)
-    finally:
-        await db.close()
 
 
 async def _save_session_summary(
     session_id: str, summary: str, summary_offset: int
 ) -> None:
     """Persist updated summary and offset."""
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         await db.execute(
             update(Session)
             .where(Session.session_id == session_id)
             .values(summary=summary, summary_offset=summary_offset)
         )
         await db.commit()
-    finally:
-        await db.close()
 
 
 def _determine_recent_keep(messages: list, min_keep: int = 2) -> list:

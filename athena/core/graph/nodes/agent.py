@@ -40,19 +40,16 @@ async def _load_session_summary(session_id: str) -> str | None:
     """
     from sqlalchemy import select
 
-    from athena.models.base import get_session
+    from athena.models.base import get_session_maker
     from athena.models.session import Session
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         row = (
             await db.execute(
                 select(Session.summary).where(Session.session_id == session_id)
             )
         ).first()
         return row[0] if row and row[0] else None
-    finally:
-        await db.close()
 
 
 async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -85,7 +82,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
         )
         return {
             "messages": [fallback],
-            "status": "completed",
+            "status": "failed",
             "pending_tool_calls": None,
             "agent_iteration": iteration,
         }

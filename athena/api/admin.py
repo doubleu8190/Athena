@@ -18,7 +18,7 @@ from athena.api.response import error, success
 from athena.config import get_config
 from athena.logging_config import get_logger
 from athena.mcp_client.client import get_mcp_client
-from athena.models.base import get_session
+from athena.models.base import get_session_maker
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["admin"])
@@ -44,12 +44,9 @@ async def list_mcp_servers() -> dict[str, Any]:
     """List all registered MCP servers."""
     from athena.models.mcp_server import MCPServer
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         result = await db.execute(select(MCPServer).order_by(MCPServer.registered_at.desc()))
         servers = result.scalars().all()
-    finally:
-        await db.close()
     mcp_client = get_mcp_client()
     return success(
         {
@@ -77,8 +74,7 @@ async def register_mcp_server(
     from athena.models.mcp_server import MCPServer
 
     # Check for duplicate
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         existing = await db.get(MCPServer, body.server_id)
         if existing:
             return error(
@@ -93,8 +89,6 @@ async def register_mcp_server(
         )
         db.add(server)
         await db.commit()
-    finally:
-        await db.close()
 
     # Connect the newly registered server
     mcp_client = get_mcp_client()
@@ -122,8 +116,7 @@ async def remove_mcp_server(
     """Remove a registered MCP server."""
     from athena.models.mcp_server import MCPServer
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         server = await db.get(MCPServer, server_id)
         if not server:
             return error(40401, "Server not found", f"Server '{server_id}' not found")
@@ -132,8 +125,6 @@ async def remove_mcp_server(
         await mcp_client.disconnect_server(server_id)
         await db.delete(server)
         await db.commit()
-    finally:
-        await db.close()
 
     from athena.mcp_client.tool_loader import invalidate_tool_cache
 
@@ -155,15 +146,12 @@ async def update_mcp_server_status(
     """
     from athena.models.mcp_server import MCPServer
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         server = await db.get(MCPServer, server_id)
         if not server:
             return error(40401, "Server not found", f"Server '{server_id}' not found")
         server.enabled = body.enabled
         await db.commit()
-    finally:
-        await db.close()
 
     from athena.mcp_client.tool_loader import invalidate_tool_cache
 
@@ -202,12 +190,9 @@ async def list_skills() -> dict[str, Any]:
     """List all installed skills."""
     from athena.models.skill import Skill as SkillModel
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         result = await db.execute(select(SkillModel).order_by(SkillModel.installed_at.desc()))
         skills = result.scalars().all()
-    finally:
-        await db.close()
 
     return success(
         {
@@ -244,12 +229,9 @@ async def install_skill(
         allowed_domains=body.allowed_domains,
         status="installing",
     )
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         db.add(skill)
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("skill_install_requested", skill_id=skill_id, name=body.name)
     return success({"skill_id": skill_id}, "Skill installation initiated")
@@ -262,15 +244,12 @@ async def uninstall_skill(
     """Uninstall a Skill."""
     from athena.models.skill import Skill as SkillModel
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         skill = await db.get(SkillModel, skill_id)
         if not skill:
             return error(40401, "Skill not found", f"Skill '{skill_id}' not found")
         skill.status = "uninstalling"
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("skill_uninstall_requested", skill_id=skill_id)
     return success(None, "Skill uninstallation initiated")
@@ -290,14 +269,11 @@ async def list_devices() -> dict[str, Any]:
     """List all registered devices."""
     from athena.models.device import Device
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         result = await db.execute(
             select(Device).order_by(Device.last_heartbeat.desc().nulls_last())
         )
         devices = result.scalars().all()
-    finally:
-        await db.close()
 
     return success(
         {
@@ -322,8 +298,7 @@ async def register_device(
     """Register a new device."""
     from athena.models.device import Device
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         existing = await db.get(Device, body.device_id)
         if existing:
             return error(
@@ -338,8 +313,6 @@ async def register_device(
         )
         db.add(device)
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("device_registered", device_id=body.device_id, type=body.type)
     return success({"device_id": body.device_id}, "Device registered")
@@ -352,15 +325,12 @@ async def deregister_device(
     """Deregister a device."""
     from athena.models.device import Device
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         device = await db.get(Device, device_id)
         if not device:
             return error(40401, "Device not found", f"Device '{device_id}' not found")
         await db.delete(device)
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("device_deregistered", device_id=device_id)
     return success(None, "Device deregistered")
@@ -374,12 +344,9 @@ async def list_harness_rules() -> dict[str, Any]:
     """List all harness rules."""
     from athena.models.harness_rule import HarnessRule
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         result = await db.execute(select(HarnessRule).order_by(HarnessRule.priority.desc()))
         rules = result.scalars().all()
-    finally:
-        await db.close()
 
     return success(
         {
@@ -417,8 +384,7 @@ async def create_harness_rule(
     """Create a new harness rule."""
     from athena.models.harness_rule import HarnessRule
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         existing = await db.get(HarnessRule, body.rule_id)
         if existing:
             return error(40901, "Rule already exists", f"Rule ID '{body.rule_id}' already exists")
@@ -450,8 +416,6 @@ async def create_harness_rule(
         )
         db.add(rule)
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("harness_rule_created", rule_id=body.rule_id, rule_type=body.rule_type)
     return success(
@@ -481,8 +445,7 @@ async def update_harness_rule(
     """Update a harness rule."""
     from athena.models.harness_rule import HarnessRule
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         rule = await db.get(HarnessRule, rule_id)
         if not rule:
             return error(40401, "Rule not found", f"Rule '{rule_id}' not found")
@@ -499,8 +462,6 @@ async def update_harness_rule(
         rule.updated_at = datetime.now(UTC)
 
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("harness_rule_updated", rule_id=rule_id, revision=rule.revision)
     return success({"rule_id": rule_id, "revision": rule.revision})
@@ -567,12 +528,9 @@ async def list_audit_logs(
     stmt = stmt.order_by(AuditLog.timestamp.desc(), AuditLog.event_id.desc())
     stmt = stmt.limit(limit + 1)
 
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         result = await db.execute(stmt)
         rows = result.scalars().all()
-    finally:
-        await db.close()
 
     has_more = len(rows) > limit
     items = rows[:limit]
@@ -608,8 +566,7 @@ async def get_dashboard() -> dict[str, Any]:
     from athena.models.audit_log import AuditLog
 
     since = datetime.now(UTC) - timedelta(hours=24)
-    db = await get_session()
-    try:
+    async with get_session_maker()() as db:
         block_result = await db.execute(
             select(func.count())
             .select_from(AuditLog)
@@ -619,8 +576,6 @@ async def get_dashboard() -> dict[str, Any]:
             )
         )
         harness_blocks = block_result.scalar_one()
-    finally:
-        await db.close()
 
     return success(
         {

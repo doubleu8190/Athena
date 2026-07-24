@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from athena.logging_config import get_logger
-from athena.models.base import get_redis, get_session
+from athena.models.base import get_redis, get_session_maker
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["health"])
@@ -17,9 +17,9 @@ async def health_check() -> JSONResponse:
     status = {"status": "healthy", "checks": {}}
 
     # Check SQLite
-    db = await get_session()
     try:
-        await db.execute(text("SELECT 1"))
+        async with get_session_maker()() as db:
+            await db.execute(text("SELECT 1"))
         status["checks"]["database"] = "ok"
     except Exception as e:
         status["checks"]["database"] = f"error: {e}"

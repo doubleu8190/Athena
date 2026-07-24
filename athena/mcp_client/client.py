@@ -233,8 +233,7 @@ class MCPClient:
     async def start(self) -> None:
         """Start the MCP client: connect all registered servers, begin heartbeat."""
         self._running = True
-        db_path = self.config.sqlite_db_path
-        session_maker = get_session_maker(db_path)
+        session_maker = get_session_maker()
 
         async with session_maker() as session:
             from sqlalchemy import select

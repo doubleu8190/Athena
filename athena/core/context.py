@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from athena.config import get_config
 from athena.logging_config import bind_context, get_logger
-from athena.models.base import get_redis, get_session
+from athena.models.base import get_redis, get_session_maker
 
 if TYPE_CHECKING:
     from athena.models.session import Session
@@ -110,9 +110,7 @@ class ContextManager:
             return SessionModel(**d)
 
         # 2. Check SQLite
-        db_session = await get_session()
-
-        try:
+        async with get_session_maker()() as db_session:
             from sqlalchemy import select
             result = await db_session.execute(
                 select(SessionModel).where(SessionModel.session_id == session_id)
@@ -150,5 +148,3 @@ class ContextManager:
 
             log.info("session_created")
             return new_session
-        finally:
-            await db_session.close()

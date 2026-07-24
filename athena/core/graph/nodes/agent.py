@@ -82,7 +82,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
         )
         return {
             "messages": [fallback],
-            "status": "failed",
+            "status": "completed",
             "pending_tool_calls": None,
             "agent_iteration": iteration,
         }

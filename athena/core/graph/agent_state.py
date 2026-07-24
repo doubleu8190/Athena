@@ -36,6 +36,17 @@ class AgentState(TypedDict):
     """Tool calls that passed confirmation and are ready to execute.
     Set by the confirm node; consumed by tools node via Send() fan-out."""
 
+    allowed_tool_calls: list[dict[str, Any]] | None
+    """Tool calls that passed pre-check without needing confirmation.
+    Set by ``precheck_node``; merged into Send() fan-out by ``after_confirm``."""
+
+    blocked_tool_calls: list[dict[str, Any]] | None
+    """Tool calls blocked by harness pre-check.  Set by ``precheck_node``."""
+
+    needs_confirmation_tool_calls: list[dict[str, Any]] | None
+    """Tool calls requiring user confirmation.  Set by ``precheck_node``;
+    consumed sequentially by ``confirm_node`` via ``interrupt()``."""
+
     agent_iteration: int
     """How many times the agent node has been invoked in the current loop.
     Guards against infinite tool-calling loops."""

@@ -23,18 +23,18 @@ class TestAfterAgent:
         state = {"status": "executing", "pending_tool_calls": None, "agent_iteration": 1}
         assert after_agent(state) == "__end__"
 
-    def test_has_tool_calls_routes_to_confirm(self):
-        """Agent with pending tool calls should route to confirm node."""
+    def test_has_tool_calls_routes_to_precheck(self):
+        """Agent with pending tool calls should route to precheck node."""
         state = {
             "status": "executing",
             "pending_tool_calls": [{"id": "call_1", "name": "weather", "arguments": {}}],
             "agent_iteration": 1,
         }
         result = after_agent(state)
-        assert result == "confirm"
+        assert result == "precheck"
 
-    def test_multiple_tool_calls_routes_to_confirm(self):
-        """Agent with multiple tool calls should route to confirm node."""
+    def test_multiple_tool_calls_routes_to_precheck(self):
+        """Agent with multiple tool calls should route to precheck node."""
         state = {
             "status": "executing",
             "pending_tool_calls": [
@@ -44,27 +44,27 @@ class TestAfterAgent:
             "agent_iteration": 1,
         }
         result = after_agent(state)
-        assert result == "confirm"
+        assert result == "precheck"
 
     def test_max_iterations_still_routes_pending_tools(self):
-        """Even at max iterations, pending tool_calls must be routed to confirm."""
+        """Even at max iterations, pending tool_calls must be routed to precheck."""
         state = {
             "status": "executing",
             "pending_tool_calls": [{"id": "call_1", "name": "weather", "arguments": {}}],
             "agent_iteration": MAX_AGENT_ITERATIONS,
         }
         result = after_agent(state)
-        assert result == "confirm"
+        assert result == "precheck"
 
-    def test_one_below_max_still_routes_to_confirm(self):
-        """Agent one below max iterations should still route to confirm."""
+    def test_one_below_max_still_routes_to_precheck(self):
+        """Agent one below max iterations should still route to precheck."""
         state = {
             "status": "executing",
             "pending_tool_calls": [{"id": "call_1", "name": "weather", "arguments": {}}],
             "agent_iteration": MAX_AGENT_ITERATIONS - 1,
         }
         result = after_agent(state)
-        assert result == "confirm"
+        assert result == "precheck"
 
 
 class TestAfterConfirm:
@@ -74,6 +74,7 @@ class TestAfterConfirm:
         """Confirmed tool calls should return Send() objects to tools node."""
         state = {
             "confirmed_tool_calls": [{"id": "call_1", "name": "weather", "arguments": {}}],
+            "allowed_tool_calls": None,
             "pending_tool_calls": None,
         }
         result = after_confirm(state)
@@ -88,6 +89,7 @@ class TestAfterConfirm:
                 {"id": "call_1", "name": "weather", "arguments": {}},
                 {"id": "call_2", "name": "search", "arguments": {}},
             ],
+            "allowed_tool_calls": None,
             "pending_tool_calls": None,
         }
         result = after_confirm(state)
@@ -95,23 +97,51 @@ class TestAfterConfirm:
         assert all(isinstance(s, Send) for s in result)
         assert all(s.node == "tools" for s in result)
 
-    def test_no_confirmed_calls_ends(self):
-        """No confirmed calls should return empty list (END)."""
+    def test_allowed_calls_return_sends(self):
+        """Allowed tool calls (no confirmation needed) should return Send() objects."""
         state = {
             "confirmed_tool_calls": None,
+            "allowed_tool_calls": [{"id": "call_1", "name": "weather", "arguments": {}}],
             "pending_tool_calls": None,
         }
         result = after_confirm(state)
-        assert result == []
+        assert len(result) == 1
+        assert isinstance(result[0], Send)
+        assert result[0].node == "tools"
 
-    def test_empty_confirmed_list_ends(self):
-        """Empty confirmed list should return empty list (END)."""
+    def test_merges_allowed_and_confirmed(self):
+        """Allowed + confirmed calls should be merged into a single fan-out."""
+        state = {
+            "confirmed_tool_calls": [{"id": "call_2", "name": "file_write", "arguments": {}}],
+            "allowed_tool_calls": [{"id": "call_1", "name": "weather", "arguments": {}}],
+            "pending_tool_calls": None,
+        }
+        result = after_confirm(state)
+        assert len(result) == 2
+        assert all(isinstance(s, Send) for s in result)
+        # Allowed comes first, then confirmed
+        assert result[0].node == "tools"
+        assert result[1].node == "tools"
+
+    def test_no_calls_returns_summarize(self):
+        """No confirmed or allowed calls should return summarize (agent processes rejections)."""
+        state = {
+            "confirmed_tool_calls": None,
+            "allowed_tool_calls": None,
+            "pending_tool_calls": None,
+        }
+        result = after_confirm(state)
+        assert result == "summarize"
+
+    def test_empty_lists_returns_summarize(self):
+        """Empty confirmed and allowed lists should return summarize (agent processes rejections)."""
         state = {
             "confirmed_tool_calls": [],
+            "allowed_tool_calls": [],
             "pending_tool_calls": None,
         }
         result = after_confirm(state)
-        assert result == []
+        assert result == "summarize"
 
 
 class TestAfterTools:

@@ -7,14 +7,15 @@ Standard LLM agent loop::
       ▼
     summarize ──→ agent ── (no tool_calls) ──→ END
                      │
-                     └── (has tool_calls) ──→ confirm ──→ Send(tools, call_1) ─┐
-                                                   Send(tools, call_2) ─┼→ summarize (loop)
-                                                   Send(tools, call_3) ─┘
+                     └── (has tool_calls) ──→ precheck ──→ confirm ──→ Send(tools, call_1) ─┐
+                                                        Send(tools, call_2) ─┼→ summarize
+                                                        Send(tools, call_3) ─┘
 
-``interrupt()`` (human-in-the-loop) only happens inside ``confirm_node``
-— never inside ``Send()`` branches — which prevents the duplicate
-confirmation bug caused by LangGraph re-evaluating conditional edges on
-resume.
+``harness.pre_check`` runs inside ``precheck_node`` (no interrupt),
+so it executes exactly once per tool call.  ``interrupt()``
+(human-in-the-loop) only happens inside ``confirm_node`` — never inside
+``Send()`` branches — which prevents the duplicate confirmation bug caused
+by LangGraph re-evaluating conditional edges on resume.
 
 Context-aware summarisation is handled by ``summarize_node`` which runs
 **before** every ``agent_node`` call.  It estimates token usage and, if
@@ -35,6 +36,7 @@ from athena.core.graph.agent_routing import after_agent, after_confirm, after_to
 from athena.core.graph.agent_state import AgentState
 from athena.core.graph.nodes.agent import agent_node
 from athena.core.graph.nodes.confirm import confirm_node
+from athena.core.graph.nodes.precheck import precheck_node
 from athena.core.graph.nodes.summarize import summarize_node
 from athena.core.graph.nodes.tools import tools_node
 
@@ -56,6 +58,7 @@ def build_agent_graph(
     # ── Nodes ───────────────────────────────────────────────────────────
     builder.add_node("summarize", summarize_node)
     builder.add_node("agent", agent_node)
+    builder.add_node("precheck", precheck_node)
     builder.add_node("confirm", confirm_node)
     builder.add_node("tools", tools_node)
 
@@ -63,15 +66,18 @@ def build_agent_graph(
     builder.add_edge(START, "summarize")
     builder.add_edge("summarize", "agent")
 
-    # agent → confirm (when tool_calls exist) or END
+    # agent → precheck (when tool_calls exist) or END
     builder.add_conditional_edges(
         "agent",
         after_agent,
         {
-            "confirm": "confirm",
+            "precheck": "precheck",
             "__end__": END,
         },
     )
+
+    # precheck → confirm (always — confirm handles the empty case quickly)
+    builder.add_edge("precheck", "confirm")
 
     # confirm → fan-out to tools via Send(), or END (all blocked/rejected)
     builder.add_conditional_edges("confirm", after_confirm)

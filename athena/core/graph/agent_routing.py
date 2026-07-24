@@ -7,9 +7,11 @@ Graph flow::
 
     summarize ──→ agent ── (no tool_calls) ──→ END
                      │
-                     └── (has tool_calls) ──→ confirm ──→ Send(tools, call_1) ─┐
-                                                   Send(tools, call_2) ─┼→ summarize (loop)
-                                                   Send(tools, call_3) ─┘
+                     └── (has tool_calls) ──→ precheck ──→ confirm ──(needs more)──→ confirm
+                                                                 │
+                                                                 └──(all done)──→ Send(tools, call_1) ─┐
+                                                                                 Send(tools, call_2) ─┼→ summarize
+                                                                                 Send(tools, call_3) ─┘
 
 ``interrupt()`` (human-in-the-loop) only happens inside ``confirm_node``
 — never inside ``Send()`` branches — which prevents the duplicate
@@ -33,7 +35,7 @@ def after_agent(state: AgentState) -> str:
     """Route after the agent node.
 
     Returns:
-        ``"confirm"`` if there are pending tool calls to process.
+        ``"precheck"`` if there are pending tool calls to process.
         ``"__end__"`` if the agent produced a final answer or failed.
     """
     if state.get("status") in ("completed", "failed"):
@@ -43,24 +45,41 @@ def after_agent(state: AgentState) -> str:
     if not pending:
         return "__end__"
 
-    return "confirm"
+    return "precheck"
 
 
-def after_confirm(state: AgentState) -> list[Send]:
+def after_confirm(state: AgentState) -> str | list[Send]:
     """Route after the confirm node.
 
+    Merges ``allowed_tool_calls`` (from ``precheck_node``) with
+    ``confirmed_tool_calls`` (user-approved via ``confirm_node``) and
+    fans them out to the tools node.
+
+    If there are remaining tools that need confirmation, loops back to
+    the confirm node for another interrupt cycle.
+
     Returns:
-        ``[Send("tools", ...), ...]`` — fan out confirmed tool calls as
+        ``"confirm"`` — loop back to confirm_node for remaining tools.
+        ``[Send("tools", ...), ...]`` — fan out all ready tool calls as
         independent branches (one per tool call).
         ``[]`` — empty list signals END (all tools were blocked/rejected).
     """
-    confirmed = state.get("confirmed_tool_calls")
-    if not confirmed:
-        return []
+    needs_confirmation = state.get("needs_confirmation_tool_calls") or []
+    if needs_confirmation:
+        return "confirm"
+
+    # Merge allowed and confirmed tool calls
+    allowed = state.get("allowed_tool_calls") or []
+    confirmed = state.get("confirmed_tool_calls") or []
+    all_calls = allowed + confirmed
+    if not all_calls:
+        # No tools to execute — route back to agent so it can process
+        # rejection messages and provide a response to the user
+        return "summarize"
 
     return [
         Send("tools", {"confirmed_tool_calls": [tc]})
-        for tc in confirmed
+        for tc in all_calls
     ]
 
 

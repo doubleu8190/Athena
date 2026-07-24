@@ -1,14 +1,18 @@
 """Confirm node — sequential human-in-the-loop confirmation for tool calls.
 
-Sits between ``agent`` and ``tools`` in the graph.  Processes each pending
-tool call that requires confirmation via ``interrupt()`` **sequentially**,
-so each tool is confirmed exactly once.
+Sits between ``precheck`` and ``tools`` in the graph.  Processes tool calls
+that **require confirmation** (as classified by ``precheck_node``) via
+``interrupt()`` **sequentially**, so each tool is confirmed exactly once.
+
+On each invocation, processes exactly one tool call and returns remaining
+tools to the graph state. The ``after_confirm`` router loops back to this
+node until all tools are processed.
 
 Graph flow::
 
-    agent → confirm → Send(tools, confirmed_1) ─┐
-                        Send(tools, confirmed_2) ─┼→ agent (loop)
-                        Send(tools, confirmed_3) ─┘
+    precheck → confirm ──(needs more)──→ confirm ──(all done)──→ Send(tools, confirmed_1) ─┐
+                                                      Send(tools, confirmed_2) ─┼→ summarize
+                                                      Send(tools, confirmed_3) ─┘
 
 ``interrupt()`` is only called inside this node — never inside ``Send()``
 branches — which prevents the duplicate-confirmation bug caused by
@@ -27,11 +31,6 @@ from langgraph.types import interrupt
 from athena.core.graph.agent_state import AgentState
 from athena.logging_config import bind_context, get_logger
 
-if __name__ != "__main__":
-    from typing import TYPE_CHECKING
-    if TYPE_CHECKING:
-        from athena.core.harness import HarnessEngine
-
 logger = get_logger(__name__)
 
 
@@ -39,109 +38,88 @@ async def confirm_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Check each pending tool call and interrupt for confirmation if needed.
+    """Confirm tool calls that require user approval.
 
-    For each tool call in ``pending_tool_calls``:
-    - Runs the harness pre-check.
-    - If blocked → emits an error ToolMessage.
-    - If requires_confirmation → calls ``interrupt()`` and waits for user.
-    - If allowed → passes through to confirmed list.
+    Reads ``needs_confirmation_tool_calls`` (set by ``precheck_node``) and
+    processes tools sequentially via ``interrupt()``.
+
+    On each invocation, processes the first tool in the list:
+    - Calls ``interrupt()`` and waits for user decision.
+    - If approved → appends to ``confirmed_tool_calls``.
+    - If rejected → emits an error ToolMessage.
+    - Returns remaining tools in ``needs_confirmation_tool_calls`` for
+      the next cycle.
 
     Returns a dict with:
-    - ``messages``: error/rejection ToolMessages for blocked/rejected calls.
+    - ``messages``: rejection ToolMessages for rejected calls.
     - ``confirmed_tool_calls``: list of tool calls that passed confirmation.
-    - ``pending_tool_calls``: cleared (all processed).
+    - ``needs_confirmation_tool_calls``: remaining tools needing confirmation.
     """
-    pending = state.get("pending_tool_calls")
-    if not pending:
+    needs_confirmation = state.get("needs_confirmation_tool_calls")
+    if not needs_confirmation:
         return {
+            "needs_confirmation_tool_calls": None,
             "confirmed_tool_calls": None,
-            "pending_tool_calls": None,
         }
-
     cfg = config.get("configurable", {})
-    harness: HarnessEngine | None = cfg.get("harness_engine")
-    if harness is None:
-        # Fallback to singleton for production; tests should inject via config
-        from athena.core.harness import get_harness
-        harness = await get_harness()
-    session_id = cfg.get("session_id", "")
-
+    session_id = cfg.get("thread_id", state.get("session_id", ""))
     log = bind_context(session_id=session_id, node="confirm_node")
 
     messages: list[ToolMessage] = []
-    confirmed: list[dict[str, Any]] = []
+    # Carry forward any previously confirmed calls (from earlier interrupt cycles)
+    confirmed: list[dict[str, Any]] = list(state.get("confirmed_tool_calls") or [])
 
-    for tc in pending:
-        tool_name = tc.get("name", "")
-        tool_args = tc.get("arguments", {})
-        tool_call_id = tc.get("id", "")
+    remaining_needs_confirmation = needs_confirmation[1:]
+    tc = needs_confirmation[0]
+    tool_name = tc.get("name", "")
+    tool_args = tc.get("arguments", {})
+    tool_call_id = tc.get("id", "")
 
-        # Ensure args is a dict
-        if isinstance(tool_args, str):
-            try:
-                tool_args = json.loads(tool_args)
-            except json.JSONDecodeError:
-                tool_args = {}
-
-        # ── Harness pre-check ─────────────────────────────────────────
+    # Ensure args is a dict
+    if isinstance(tool_args, str):
         try:
-            harness_result = await harness.pre_check(state, tool_name, tool_args)
-        except Exception as e:
-            log.warning("harness_check_exception", tool=tool_name, error=str(e))
-            messages.append(ToolMessage(
-                content=json.dumps({"error": f"Security check failed: {e}"}),
-                tool_call_id=tool_call_id,
-                name=tool_name,
-            ))
-            continue
+            tool_args = json.loads(tool_args)
+        except json.JSONDecodeError:
+            tool_args = {}
 
-        if not harness_result.allowed:
-            log.warning("harness_blocked", tool=tool_name, reason=harness_result.reason)
-            messages.append(ToolMessage(
-                content=json.dumps({"error": f"Operation blocked: {harness_result.reason}"}),
-                tool_call_id=tool_call_id,
-                name=tool_name,
-            ))
-            continue
+    # ── Confirmation (sequential interrupt) ───────────────────────
+    # Metadata was attached by precheck_node
+    risk_level = tc.get("_harness_risk_level", "medium")
+    cooling_off = tc.get("_harness_cooling_off", 0)
+    reason = tc.get("_harness_reason", "")
 
-        # ── Confirmation (sequential interrupt) ───────────────────────
-        if harness_result.requires_confirmation:
-            log.info("confirm_required", tool=tool_name, risk=harness_result.risk_level.value)
+    log.info("confirm_required", tool=tool_name, risk=risk_level)
 
-            decision = interrupt({
-                "type": "confirmation_required",
-                "tool_call_id": tool_call_id,
-                "tool_name": tool_name,
-                "args": tool_args,
-                "risk_level": harness_result.risk_level.value,
-                "cooling_off_seconds": harness_result.cooling_off_seconds,
-                "reason": getattr(harness_result, "reason", ""),
-            })
+    decision = interrupt({
+        "type": "confirmation_required",
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "args": tool_args,
+        "risk_level": risk_level,
+        "cooling_off_seconds": cooling_off,
+        "reason": reason,
+    })
 
-            if decision != "approved":
-                log.info("user_rejected", tool=tool_name)
-                messages.append(ToolMessage(
-                    content=json.dumps({"error": "User rejected the operation"}),
-                    tool_call_id=tool_call_id,
-                    name=tool_name,
-                ))
-                continue
-
-            log.info("user_approved", tool=tool_name)
-
-        # ── Tool passed confirmation ──────────────────────────────────
+    if decision != "approved":
+        log.info("user_rejected", tool=tool_name)
+        messages.append(ToolMessage(
+            content=json.dumps({"error": "User rejected the operation"}),
+            tool_call_id=tool_call_id,
+            name=tool_name,
+        ))
+    else:
+        log.info("user_approved", tool=tool_name)
         confirmed.append(tc)
 
     log.info(
         "confirm_done",
-        total=len(pending),
-        confirmed=len(confirmed),
-        blocked=len(messages),
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        result=decision,
     )
 
     return {
-        "messages": messages,
-        "confirmed_tool_calls": confirmed if confirmed else None,
-        "pending_tool_calls": None,
+        "messages": messages or None,
+        "confirmed_tool_calls": confirmed or None,
+        "needs_confirmation_tool_calls": remaining_needs_confirmation or None,
     }

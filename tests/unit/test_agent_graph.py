@@ -1,7 +1,7 @@
 """Tests for agent graph construction and end-to-end execution."""
 
 import pytest
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch, AsyncMock
 
 from athena.core.graph import build_agent_graph
 
@@ -15,10 +15,10 @@ class TestAgentGraphConstruction:
         assert graph is not None
 
     def test_nodes_present(self):
-        """Agent, confirm, and tools nodes must be registered."""
+        """Agent, precheck, confirm, and tools nodes must be registered."""
         graph = build_agent_graph()
         nodes = list(graph.get_graph().nodes.keys())
-        expected = {"__start__", "summarize", "agent", "confirm", "tools", "__end__"}
+        expected = {"__start__", "summarize", "agent", "precheck", "confirm", "tools", "__end__"}
         assert set(nodes) == expected
 
     def test_start_to_summarize(self):
@@ -92,7 +92,10 @@ class TestAgentGraphEndToEnd:
         }
 
     @pytest.mark.asyncio
-    async def test_direct_answer_flow(self, mock_deps):
+    @patch("athena.core.graph.nodes.summarize._load_session_summary", new_callable=AsyncMock, return_value=(None, 0))
+    @patch("athena.core.graph.nodes.summarize._save_session_summary", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.agent._load_session_summary", new_callable=AsyncMock, return_value=None)
+    async def test_direct_answer_flow(self, _mock_agent_summary, _mock_save_summary, _mock_load_summary, mock_deps):
         """Simple "hello" → LLM answers directly, no tool calls."""
 
         graph = build_agent_graph()
@@ -128,7 +131,10 @@ class TestAgentGraphEndToEnd:
         assert agent_events[0]["agent"]["status"] == "completed"
 
     @pytest.mark.asyncio
-    async def test_tool_calling_flow(self, mock_deps):
+    @patch("athena.core.graph.nodes.summarize._load_session_summary", new_callable=AsyncMock, return_value=(None, 0))
+    @patch("athena.core.graph.nodes.summarize._save_session_summary", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.agent._load_session_summary", new_callable=AsyncMock, return_value=None)
+    async def test_tool_calling_flow(self, _mock_agent_summary, _mock_save_summary, _mock_load_summary, mock_deps):
         """LLM requests tool → tools execute → agent synthesizes."""
         from langchain_core.messages import AIMessage, HumanMessage
 
@@ -208,7 +214,10 @@ class TestAgentGraphEndToEnd:
         assert agent_events[-1]["status"] == "completed"
 
     @pytest.mark.asyncio
-    async def test_agent_error_handling(self, mock_deps):
+    @patch("athena.core.graph.nodes.summarize._load_session_summary", new_callable=AsyncMock, return_value=(None, 0))
+    @patch("athena.core.graph.nodes.summarize._save_session_summary", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.agent._load_session_summary", new_callable=AsyncMock, return_value=None)
+    async def test_agent_error_handling(self, _mock_agent_summary, _mock_save_summary, _mock_load_summary, mock_deps):
         """Graph handles LLM errors gracefully."""
         from langchain_core.messages import HumanMessage
 
@@ -253,7 +262,10 @@ class TestAgentGraphEndToEnd:
         assert agent_events[0]["agent"]["status"] == "failed"
 
     @pytest.mark.asyncio
-    async def test_max_iterations_guard(self, mock_deps):
+    @patch("athena.core.graph.nodes.summarize._load_session_summary", new_callable=AsyncMock, return_value=(None, 0))
+    @patch("athena.core.graph.nodes.summarize._save_session_summary", new_callable=AsyncMock)
+    @patch("athena.core.graph.nodes.agent._load_session_summary", new_callable=AsyncMock, return_value=None)
+    async def test_max_iterations_guard(self, _mock_agent_summary, _mock_save_summary, _mock_load_summary, mock_deps):
         """Graph should stop after MAX_AGENT_ITERATIONS tool-call loops."""
         from langchain_core.messages import AIMessage, HumanMessage
         from athena.core.graph.agent_routing import MAX_AGENT_ITERATIONS
@@ -313,7 +325,7 @@ class TestAgentGraphEndToEnd:
             stream_mode="updates",
         ):
             events.append(event)
-            if len(events) > 50:  # Safety timeout
+            if len(events) > 100:  # Safety timeout (more than enough for 10 iterations)
                 break
 
         # Should have at most MAX_AGENT_ITERATIONS agent invocations

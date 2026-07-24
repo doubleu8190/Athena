@@ -27,6 +27,7 @@ from sqlalchemy import select, update
 from athena.core.graph.agent_state import AgentState
 from athena.core.graph.nodes.agent import AGENT_SYSTEM_PROMPT
 from athena.core.llm_provider.manager import LLMProviderManager
+from athena.core.prompt_loader import load_prompt
 from athena.logging_config import get_logger
 from athena.models.base import get_session
 from athena.models.session import Session
@@ -40,24 +41,16 @@ logger = get_logger(__name__)
 _SUMMARIZE_THRESHOLD = 0.8
 """Proportion of context window that triggers summarisation."""
 
-_SUMMARIZE_PROMPT = (
-    "You are a concise summarisation engine.  Produce a single cumulative "
-    "summary that covers BOTH the previous summary (if any) and the new "
-    "messages below.  Preserve all factual claims, decisions, user "
-    "preferences, tool outputs, and unresolved questions.  Write in prose, "
-    "not bullet points.  Aim for roughly 300-500 words."
-)
+_SUMMARIZE_PROMPT = load_prompt("summarize.md")
 
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
 
 
-async def _load_session_summary(session_id: str, db_path: str) -> tuple[str | None, int]:
+async def _load_session_summary(session_id: str) -> tuple[str | None, int]:
     """Return ``(summary, summary_offset)`` from the session row."""
-    if not db_path:
-        return None, 0
-    db = await get_session(db_path)
+    db = await get_session()
     try:
         row = (
             await db.execute(
@@ -72,12 +65,10 @@ async def _load_session_summary(session_id: str, db_path: str) -> tuple[str | No
 
 
 async def _save_session_summary(
-    session_id: str, db_path: str, summary: str, summary_offset: int
+    session_id: str, summary: str, summary_offset: int
 ) -> None:
     """Persist updated summary and offset."""
-    if not db_path:
-        return
-    db = await get_session(db_path)
+    db = await get_session()
     try:
         await db.execute(
             update(Session)
@@ -131,7 +122,10 @@ async def _summarize_messages(
     result = await fast_model.ainvoke(
         [SystemMessage(content=_SUMMARIZE_PROMPT), HumanMessage(content="\n".join(parts))]
     )
-    return result.content
+    content = result.content
+    if isinstance(content, list):
+        return "\n".join(str(item) for item in content)
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -152,14 +146,17 @@ async def summarize_node(state: AgentState, config: RunnableConfig) -> dict:
     recovery.
 
     Returns a dict that LangGraph merges into ``AgentState``:
-    ``effective_messages`` — the compressed message list the agent should
-    send to the LLM.
+    ``summary_offset`` — index into ``messages`` used by ``agent_node``
+    to build the compressed message list for the LLM.
     """
     configurable: dict[str, Any] = config.get("configurable", {})
 
-    session_id: str = configurable.get("session_id", state.get("session_id", ""))
-    db_path: str = configurable.get("sqlite_db_path", "")
-    llm_manager: LLMProviderManager = configurable.get("llm_manager")
+    session_id: str = configurable.get("thread_id", state.get("session_id", ""))
+    llm_manager: LLMProviderManager | None = configurable.get("llm_manager")
+    if llm_manager is None:
+        # Fallback to singleton for production; tests should inject via config
+        from athena.core.llm_provider.manager import get_llm_manager
+        llm_manager = get_llm_manager()
 
     # ── Task boundary: reset iteration counter ──────────────────────────
     # When the previous task ended (completed/failed), after_agent routes
@@ -174,7 +171,7 @@ async def summarize_node(state: AgentState, config: RunnableConfig) -> dict:
     # summary_offset lives in checkpoint state; fall back to DB on first run
     # (e.g. after a fresh deployment where state has no offset yet).
     summary_offset = state.get("summary_offset", 0)
-    session_summary, db_offset = await _load_session_summary(session_id, db_path)
+    session_summary, db_offset = await _load_session_summary(session_id)
     if summary_offset == 0 and db_offset > 0:
         summary_offset = db_offset
 
@@ -199,7 +196,7 @@ async def summarize_node(state: AgentState, config: RunnableConfig) -> dict:
         recent_keep = _determine_recent_keep(effective_messages)
         to_summarize = effective_messages[: len(effective_messages) - len(recent_keep)]
 
-        fast_model = llm_manager.fast_model
+        fast_model = llm_manager.fast_model if llm_manager else None
         new_summary = None
         if fast_model:
             new_summary = await _summarize_messages(to_summarize, session_summary, fast_model)
@@ -209,17 +206,9 @@ async def summarize_node(state: AgentState, config: RunnableConfig) -> dict:
             summary_offset = len(all_messages) - len(recent_keep)
             # Persist summary text to DB for cross-session recovery;
             # summary_offset is committed with the checkpoint below.
-            await _save_session_summary(session_id, db_path, session_summary, summary_offset)
-            effective_messages = recent_keep
-
-    # Build the final message list the agent will send to the LLM
-    final_messages: list = [SystemMessage(content=AGENT_SYSTEM_PROMPT)]
-    if session_summary:
-        final_messages.append(SystemMessage(content=f"Conversation summary:\n{session_summary}"))
-    final_messages.extend(effective_messages)
+            await _save_session_summary(session_id, session_summary, summary_offset)
 
     return {
-        "effective_messages": final_messages,
         "summary_offset": summary_offset,
         "agent_iteration": agent_iteration,
     }

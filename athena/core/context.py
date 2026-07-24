@@ -12,11 +12,9 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import redis.asyncio as aioredis
-
-from athena.config import Config
+from athena.config import get_config
 from athena.logging_config import bind_context, get_logger
-from athena.models import get_session_maker
+from athena.models.base import get_redis, get_session
 
 if TYPE_CHECKING:
     from athena.models.session import Session
@@ -75,13 +73,8 @@ class ContextManager:
     Session records are cached in Redis (hot) with SQLite as cold storage.
     """
 
-    def __init__(self, config: Config, redis_client: aioredis.Redis | None = None) -> None:
-        self.config = config
-        if redis_client is not None:
-            self.redis = redis_client
-        else:
-            from athena.models.redis import get_redis_client
-            self.redis = get_redis_client(config.redis_url)
+    def __init__(self) -> None:
+        config = get_config()
         self._session_idle_timeout = config.system.session_idle_timeout_minutes * 60
 
     # ── Session management ────────────────────────────────────────────
@@ -109,56 +102,53 @@ class ContextManager:
         log = bind_context(session_id=session_id)
 
         # 1. Check Redis
+        redis = await get_redis()
         key = f"session:{session_id}"
-        data = await self.redis.get(key)
+        data = await redis.get(key)
         if data:
             d = json.loads(data)
-            log.info("session_reused_from_redis")
             return SessionModel(**d)
 
         # 2. Check SQLite
-        db_path = self.config.sqlite_db_path
-        session_maker = get_session_maker(db_path)
+        db_session = await get_session()
 
-        async with session_maker() as db_session:
+        try:
             from sqlalchemy import select
             result = await db_session.execute(
                 select(SessionModel).where(SessionModel.session_id == session_id)
             )
             db_row = result.scalar_one_or_none()
+            if db_row is not None:
+                # Cache in Redis
+                session_data = SessionData.from_session(db_row).to_dict()
+                await redis.set(
+                    key,
+                    json.dumps(session_data, ensure_ascii=False, default=str),
+                    ex=self._session_idle_timeout,
+                )
+                log.info("session_loaded_from_sqlite")
+                return db_row
 
-        if db_row is not None:
+            # 3. Create new
+            new_session = SessionModel(
+                session_id=session_id,
+                user_id=user_id,
+                channel=channel,
+                chat_id=chat_id,
+            )
+
+            db_session.add(new_session)
+            await db_session.commit()
+
             # Cache in Redis
-            session_data = SessionData.from_session(db_row).to_dict()
-            await self.redis.set(
+            session_data = SessionData.from_session(new_session).to_dict()
+            await redis.set(
                 key,
                 json.dumps(session_data, ensure_ascii=False, default=str),
                 ex=self._session_idle_timeout,
             )
-            log.info("session_loaded_from_sqlite")
-            return db_row
 
-        # 3. Create new
-        new_session = SessionModel(
-            session_id=session_id,
-            user_id=user_id,
-            channel=channel,
-            chat_id=chat_id,
-        )
-
-        async with session_maker() as db_session:
-            db_session.add(new_session)
-            await db_session.commit()
-
-        # Cache in Redis
-        session_data = SessionData.from_session(new_session).to_dict()
-        await self.redis.set(
-            key,
-            json.dumps(session_data, ensure_ascii=False, default=str),
-            ex=self._session_idle_timeout,
-        )
-
-        log.info("session_created")
-        return new_session
-
-    # ── Helpers ───────────────────────────────────────────────────────
+            log.info("session_created")
+            return new_session
+        finally:
+            await db_session.close()

@@ -29,6 +29,7 @@ from pathlib import Path
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from athena.core.graph.agent_routing import after_agent, after_confirm, after_tools
 from athena.core.graph.agent_state import AgentState
@@ -40,7 +41,7 @@ from athena.core.graph.nodes.tools import tools_node
 
 def build_agent_graph(
     checkpointer: BaseCheckpointSaver | None = None,
-) -> StateGraph:
+) -> CompiledStateGraph:
     """Build and return the compiled tool-calling agent StateGraph.
 
     Args:

@@ -27,11 +27,6 @@ class AgentState(TypedDict):
     Context-aware summarization (in agent_node) reads from the session
     table, not from graph state."""
 
-    system_context: str | None
-    """Dynamic system context rebuilt each invocation (RAG-injected memories
-    and other ephemeral metadata).  Injected into the agent's system prompt
-    by ``summarize_node`` alongside the conversation summary."""
-
     # ── Tool execution ──
     pending_tool_calls: list[dict[str, Any]] | None
     """Tool calls returned by the LLM that need to be executed.
@@ -46,11 +41,6 @@ class AgentState(TypedDict):
     Guards against infinite tool-calling loops."""
 
     # ── Summarisation ──
-    effective_messages: list | None
-    """Compressed message list populated by ``summarize_node``.
-    Contains ``[system_prompt, summary, messages[offset:]]`` when a
-    summary exists, otherwise ``None`` (agent falls back to raw messages)."""
-
     summary_offset: int
     """Index into ``messages`` up to which summarisation has been applied.
     Managed by ``summarize_node`` and persisted atomically with the

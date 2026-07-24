@@ -5,12 +5,11 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel
 
-from athena.api.deps import get_config_dep
 from athena.api.response import error, success
-from athena.config import Config
+from athena.config import get_config
 from athena.core.rag import RAGManager, get_rag_manager
 from athena.logging_config import get_logger
 
@@ -52,10 +51,10 @@ def _get_rag_manager() -> RAGManager:
 async def list_memories(
     key_prefix: str = "",
     limit: int = 50,
-    config: Config = Depends(get_config_dep),
-    rag: RAGManager = Depends(_get_rag_manager),
 ):
     """List user memories from ChromaDB, ordered by most recent."""
+    rag = get_rag_manager()
+    config = get_config()
     user_id = config.user.web.user_id
     vectors = await rag.list_vectors(user_id, key_prefix=key_prefix, limit=limit)
     items = [
@@ -74,10 +73,10 @@ async def list_memories(
 @router.post("")
 async def create_memory(
     body: MemoryCreate,
-    config: Config = Depends(get_config_dep),
-    rag: RAGManager = Depends(_get_rag_manager),
 ):
     """Create a memory (write to ChromaDB)."""
+    rag = get_rag_manager()
+    config = get_config()
     user_id = config.user.web.user_id
     memory_id = f"mem_{uuid.uuid4().hex[:16]}"
 
@@ -98,10 +97,10 @@ async def create_memory(
 async def update_memory(
     memory_id: str,
     body: MemoryUpdate,
-    config: Config = Depends(get_config_dep),
-    rag: RAGManager = Depends(_get_rag_manager),
 ):
     """Update an existing memory by memory_id."""
+    rag = get_rag_manager()
+    config = get_config()
     existing = await rag.get_vector(memory_id)
     if not existing:
         return error(404, "memory_not_found", f"Memory {memory_id} not found")
@@ -128,9 +127,9 @@ async def update_memory(
 @router.delete("/{memory_id}")
 async def delete_memory(
     memory_id: str,
-    rag: RAGManager = Depends(_get_rag_manager),
 ):
     """Delete a memory from ChromaDB."""
+    rag = get_rag_manager()
     existing = await rag.get_vector(memory_id)
     if not existing:
         return error(404, "memory_not_found", f"Memory {memory_id} not found")
@@ -142,14 +141,14 @@ async def delete_memory(
 @router.post("/search")
 async def search_memories(
     body: MemorySearch,
-    config: Config = Depends(get_config_dep),
-    rag: RAGManager = Depends(_get_rag_manager),
 ):
     """Semantic search across user memories via ChromaDB vector query.
 
     Use 'type' to filter: "atomic_fact" for granular facts,
     "paragraph_summary" for discussion summaries. Omit to search all.
     """
+    rag = get_rag_manager()
+    config = get_config()
     user_id = config.user.web.user_id
     where = {"type": body.type} if body.type else None
     results = await rag.semantic_search(

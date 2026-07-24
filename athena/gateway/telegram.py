@@ -14,7 +14,7 @@ import base64
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from athena.config import Config
 from athena.core.message import UnifiedMessage
@@ -151,7 +151,7 @@ class TelegramAdapter(BaseIMAdapter):
                                 self._last_update_id, update["update_id"]
                             )
 
-                    self._last_heartbeat = datetime.now(timezone.utc)
+                    self._last_heartbeat = datetime.now(UTC)
                     self._state = AdapterState.CONNECTED
                     self._error = None
 
@@ -197,7 +197,7 @@ class TelegramAdapter(BaseIMAdapter):
             user_id=user_id,
             content=content,
             timestamp=datetime.fromtimestamp(
-                message.get("date", 0), tz=timezone.utc
+                message.get("date", 0), tz=UTC
             ),
             attachments=self._extract_attachments(message),
             raw_metadata={"raw": message},

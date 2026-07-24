@@ -8,7 +8,7 @@ streamed via Server-Sent Events (SSE).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from athena.config import Config
 from athena.gateway.base import (
@@ -32,7 +32,7 @@ class WebAdapter(BaseIMAdapter):
     def __init__(self, config: Config) -> None:
         self.config = config
         self._state = AdapterState.CONNECTED
-        self._last_heartbeat = datetime.now(timezone.utc)
+        self._last_heartbeat = datetime.now(UTC)
         self._error: str | None = None
         # SSE queues: task_id → asyncio.Queue for streaming events
         self._sse_queues: dict[str, asyncio.Queue] = {}
@@ -71,7 +71,7 @@ class WebAdapter(BaseIMAdapter):
         attachments: list[dict] | None = None,
     ) -> str:
         """Send a message via SSE event stream."""
-        msg_id = f"web_{datetime.now(timezone.utc).timestamp()}"
+        msg_id = f"web_{datetime.now(UTC).timestamp()}"
         # Messages are delivered via SSE, not a direct return
         logger.info("web_message_queued", text_preview=text[:100])
         return msg_id

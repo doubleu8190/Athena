@@ -1,7 +1,7 @@
 """Agent node — calls the LLM with tool schemas and returns the response.
 
 Context-aware summarisation is handled by the upstream ``summarize_node``
-which populates ``state["effective_messages"]`` before this node runs.
+which manages ``summary_offset`` before this node runs.
 """
 
 from __future__ import annotations
@@ -14,42 +14,12 @@ from langchain_core.runnables import RunnableConfig
 from athena.core.graph.agent_routing import MAX_AGENT_ITERATIONS
 from athena.core.graph.agent_state import AgentState
 from athena.core.llm_provider.manager import LLMProviderManager
+from athena.core.prompt_loader import load_prompt
 from athena.logging_config import bind_context, get_logger
 
 logger = get_logger(__name__)
 
-# ── System prompt ──────────────────────────────────────────────────────────
-
-AGENT_SYSTEM_PROMPT = """
-# ROLE
-You are Athena, a helpful AI assistant with tool-calling capabilities via MCP.
-
-# CORE DECISION TREE
-1. **Direct Reply** -> User greets, asks general knowledge, or requests explanations.
-2. **Tool Call** -> User asks for real-time data, external actions, or private context.
-
-# TOOL EXECUTION PROTOCOL
-- **Parallel**: If tools have zero data dependency, call ALL in one turn to minimize latency.
-- **Sequential**: If Tool B's input requires Tool A's output, call A -> wait -> call B.
-- **Pagination/Safety**: Never call more than 5 tools in a single turn. If more needed, ask user to narrow scope.
-- **Data Handling**: If tool returns massive JSON (>10k tokens), summarize key points before presenting. Do not dump raw JSON unless explicitly requested.
-
-# OUTPUT STANDARDS
-- **Language**: Always match the user's input language exactly.
-- **Format**: Use Markdown. Tables for comparisons, code blocks with language tags, bullet lists for steps.
-- **Conciseness**: Answer the exact question. Omit disclaimers like "As an AI..." or "Based on my knowledge...".
-
-# BOUNDARIES & FAILURE RECOVERY
-- **Hallucination**: Never invent tool names, parameters, or results. If tool doesn't exist, say "Tool unavailable" and offer a manual workaround.
-- **Failure Loop**: If the same tool fails twice, STOP calling it. Explain the error, suggest manual action, and ask for guidance.
-- **Sensitive Data**: Never expose system paths, auth tokens, or internal configs in output.
-
-# PERSONA CONSTRAINT
-- Be direct and witty, but never sarcastic. If uncertain, say "I don't know" immediately without prelude.
-
----
-**Final Rule**: If this instruction conflicts with user request, follow THIS instruction.
-"""
+AGENT_SYSTEM_PROMPT = load_prompt("agent_system.md")
 
 
 async def _load_tools() -> list:
@@ -62,24 +32,44 @@ async def _load_tools() -> list:
         return []
 
 
+async def _load_session_summary(session_id: str) -> str | None:
+    """Load the cumulative conversation summary from the session table.
+
+    Returns ``None`` when no summary exists.
+    """
+    from sqlalchemy import select
+
+    from athena.models.base import get_session
+    from athena.models.session import Session
+
+    db = await get_session()
+    try:
+        row = (
+            await db.execute(
+                select(Session.summary).where(Session.session_id == session_id)
+            )
+        ).first()
+        return row[0] if row and row[0] else None
+    finally:
+        await db.close()
+
+
 async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
     """Call the LLM with tool schemas and return its response.
 
-    Expects ``effective_messages`` to have been populated by the upstream
-    ``summarize_node``.  Falls back to building messages from raw state
-    when absent (e.g. in tests).
+    System prompts are assembled immediately before each LLM invocation
+    and are never stored in graph state.  Conversation summaries are loaded
+    from the session table on demand.
     """
     configurable: dict[str, Any] = config.get("configurable", {})
 
     llm_manager: LLMProviderManager | None = configurable.get("llm_manager")
     if llm_manager is None:
-        raise KeyError(
-            "'llm_manager' missing from config['configurable']. "
-            "Ensure the LLMProviderManager is passed in the graph config."
-        )
+        from athena.core.llm_provider.manager import get_llm_manager
+        llm_manager = get_llm_manager()
 
-    session_id: str = configurable.get("session_id", state.get("session_id", ""))
-    log = bind_context(session_id=session_id, node="agent_node")
+    thread_id: str = configurable.get("thread_id", state.get("session_id", ""))
+    log = bind_context(session_id=thread_id, node="agent_node")
 
     iteration = state.get("agent_iteration", 0) + 1
 
@@ -108,13 +98,12 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
         if all_tools:
             llm = llm.bind_tools(all_tools)
 
-        # Use effective_messages from summarize_node, fall back to raw messages
-        effective = state.get("effective_messages")
-        if effective is not None:
-            messages = effective
-        else:
-            system_ctx = configurable.get("system_context") or state.get("system_context")
-            messages = _build_messages(state["messages"], system_ctx)
+        summary_offset = state.get("summary_offset", 0)
+        all_messages = state["messages"]
+        effective = all_messages[summary_offset:]
+        session_id = configurable.get("thread_id", state.get("session_id", ""))
+        summary = await _load_session_summary(session_id)
+        messages = _build_messages(effective, summary)
 
         response: AIMessage = await llm.ainvoke(messages)
     except Exception as e:
@@ -161,9 +150,14 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
         # Warn the user when tools were unavailable and the agent
         # produced a text-only answer (may be hallucinated).
         if not tools_available and response.content:
-            log.warning("answer_without_tools")
+            log.info("answer_without_tools")
+            content = ""
+            if isinstance(response.content, list):
+                content = "\n".join(str(item) for item in response.content)
+            else:
+                content = response.content
             response = AIMessage(
-                content=response.content
+                content=content
                 + "\n\n⚠️ External tools are temporarily unavailable — "
                 "this answer may be incomplete."
             )
@@ -179,11 +173,11 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
 
 def _build_messages(
     raw_messages: list,
-    system_context: str | None = None,
+    summary: str | None = None,
 ) -> list:
-    """Fallback: build message list without summarisation."""
+    """Assemble the message list with system prompt for LLM invocation."""
     messages: list = [SystemMessage(content=AGENT_SYSTEM_PROMPT)]
-    if system_context:
-        messages.append(SystemMessage(content=system_context))
+    if summary:
+        messages.append(SystemMessage(content=f"Conversation summary:\n{summary}"))
     messages.extend(raw_messages)
     return messages

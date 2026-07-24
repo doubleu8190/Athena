@@ -18,7 +18,7 @@ import json
 import secrets
 import struct
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from athena.config import Config
@@ -152,7 +152,7 @@ class WeChatAdapter(BaseIMAdapter):
             creds = WeChatCredentials.from_dict(data)
             expires_at = datetime.fromisoformat(creds.expires_at)
 
-            if datetime.now(timezone.utc) >= expires_at:
+            if datetime.now(UTC) >= expires_at:
                 logger.info("wechat_credentials_expired")
                 return False
 
@@ -169,8 +169,8 @@ class WeChatAdapter(BaseIMAdapter):
         creds = WeChatCredentials(
             bot_token=self._bot_token,
             ilink_bot_id=self._ilink_bot_id,
-            obtained_at=datetime.now(timezone.utc).isoformat(),
-            expires_at=datetime.now(timezone.utc).isoformat(),
+            obtained_at=datetime.now(UTC).isoformat(),
+            expires_at=datetime.now(UTC).isoformat(),
         )
         WECHAT_CREDENTIALS_PATH.write_text(json.dumps(creds.to_dict(), indent=2))
         WECHAT_CREDENTIALS_PATH.chmod(0o600)
@@ -284,7 +284,7 @@ class WeChatAdapter(BaseIMAdapter):
 
                     # Update cursor
                     self._get_updates_buf = data.get("get_updates_buf", self._get_updates_buf)
-                    self._last_heartbeat = datetime.now(timezone.utc)
+                    self._last_heartbeat = datetime.now(UTC)
                     self._state = AdapterState.CONNECTED
                     self._error = None
                     backoff = 5
@@ -325,7 +325,7 @@ class WeChatAdapter(BaseIMAdapter):
             channel="wechat",
             user_id=from_user_id,
             content=content,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             attachments=attachments,
             raw_metadata={
                 "context_token": context_token,

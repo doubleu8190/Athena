@@ -13,6 +13,7 @@ the MCP stdio server (Layer 3).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any
 
 from athena.config import Config
@@ -103,8 +104,9 @@ class RAGManager:
         if self._collection is not None:
             return
 
-        import chromadb
         import os
+
+        import chromadb
 
 
         persist_dir = os.path.join(
@@ -196,12 +198,12 @@ class RAGManager:
         [embedding] = await self._embedding.embed([text])
 
         # Build metadata
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         meta = {"user_id": user_id, "memory_id": memory_id}
         if metadata:
             meta.update(metadata)
-        meta["updated_at"] = datetime.now(timezone.utc).isoformat()
+        meta["updated_at"] = datetime.now(UTC).isoformat()
 
         # Upsert into Chroma
         self._collection.upsert(

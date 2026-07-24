@@ -12,8 +12,6 @@ class TestAgentState:
         """A minimal state dict should have all required fields resolvable."""
         state: AgentState = {
             "messages": [HumanMessage(content="hello")],
-            "context": None,
-            "system_context": None,
             "pending_tool_calls": None,
             "agent_iteration": 0,
             "status": "thinking",
@@ -24,15 +22,11 @@ class TestAgentState:
         assert state["status"] == "thinking"
         assert state["agent_iteration"] == 0
         assert state["pending_tool_calls"] is None
-        assert state["system_context"] is None
-        assert state["context"] is None
 
     def test_with_tool_calls(self):
         """State with pending tool calls."""
         state: AgentState = {
             "messages": [HumanMessage(content="weather in Tokyo")],
-            "context": None,
-            "system_context": "Previous conversation summary...",
             "pending_tool_calls": [
                 {"id": "call_1", "name": "weather", "arguments": {"city": "Tokyo"}}
             ],
@@ -52,8 +46,6 @@ class TestAgentState:
                 HumanMessage(content="hello"),
                 HumanMessage(content="Hi! How can I help?"),  # AI response
             ],
-            "context": None,
-            "system_context": None,
             "pending_tool_calls": None,
             "agent_iteration": 1,
             "status": "completed",

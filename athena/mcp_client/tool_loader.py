@@ -64,15 +64,13 @@ async def load_mcp_base_tools() -> list[BaseTool]:
 
     try:
         from athena.mcp_client.client import get_mcp_client
-        from athena.mcp_client.registry import get_tool_registry
 
         mcp_client = get_mcp_client()
-        registry = get_tool_registry()
     except Exception as e:
         logger.warning("mcp_tools_load_dependency_failed", error=str(e))
         return []
 
-    active_tools = registry.get_active_tools()
+    active_tools = mcp_client.get_active_tools()
     if not active_tools:
         logger.info("no_active_mcp_tools")
         return []
@@ -80,7 +78,7 @@ async def load_mcp_base_tools() -> list[BaseTool]:
     tools: list[BaseTool] = []
     for tool in active_tools:
         adapter = _MCPClientToolAdapter(
-            name=tool.name,
+            tool_name=tool.name,
             description=tool.description,
             parameters_schema=tool.parameters_schema,
             mcp_client=mcp_client,
@@ -105,7 +103,7 @@ class _MCPClientToolAdapter(BaseTool):
 
     mcp_client: Any  # MCPClient — avoid import cycle at class level
     server_id: str
-    name: str
+    tool_name: str
     description: str
     parameters_schema: dict[str, Any]
 
@@ -115,7 +113,7 @@ class _MCPClientToolAdapter(BaseTool):
     async def _arun(self, **kwargs: Any) -> Any:
         result = await self.mcp_client.call_tool(
             server_id=self.server_id,
-            tool_name=self.name,
+            tool_name=self.tool_name,
             arguments=kwargs,
         )
         if result.success:
@@ -125,4 +123,5 @@ class _MCPClientToolAdapter(BaseTool):
 
 class ToolCallError(Exception):
     """Raised when a MCP tool call returns a non-success result."""
+
     pass

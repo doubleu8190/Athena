@@ -7,7 +7,7 @@ representation before dispatching to Core.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 
@@ -25,7 +25,7 @@ class UnifiedMessage:
     user_id: str
     chat_id: str = ""              # Filled by Context Manager
     content: str = ""
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     attachments: list[dict[str, Any]] = field(default_factory=list)
     raw_metadata: dict[str, Any] = field(default_factory=dict)
     chat_type: str | None = None      # "private" | "group" | "channel"

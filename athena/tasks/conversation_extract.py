@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from athena.celery_app import celery_app
+from athena.core.prompt_loader import load_prompt
 from athena.core.rag import RAGManager
 from athena.logging_config import get_logger
 
@@ -97,32 +98,7 @@ class ExtractionResult:
 
 # ── Prompt ──────────────────────────────────────────────────────────────────
 
-_EXTRACTION_PROMPT = """You are an information extraction engine. Analyze the following conversation and extract valuable information.
-
-{incomplete_notice}
-Existing memories (avoid duplicates):
-{existing_memories}
-
-Conversation:
-{conversation_text}
-
-Extraction rules:
-1. Only extract information with long-term value; ignore one-off Q&A and small talk.
-2. Atomic facts: user preferences, habits, personal information, technical choices, etc. (each should be standalone and concise).
-3. Paragraph summaries: important discussions, technical decisions, problem solutions (retain key context).
-4. Do NOT extract information already present in "Existing memories".
-5. Attach a confidence score (0-1) to each item; discard anything below 0.6.
-6. If the conversation may be unfinished, only extract confirmed information and skip incomplete discussions.
-
-Output JSON (do NOT wrap in markdown code fences):
-{{
-  "atomic_facts": [
-    {{"key": "short identifier", "value": "fact content", "category": "preference|profile|project|technical_decision|fact|other", "confidence": 0.9}}
-  ],
-  "summaries": [
-    {{"topic": "discussion topic", "content": "summary content", "category": "technical_discussion|problem_solving|planning|other", "confidence": 0.85}}
-  ]
-}}"""
+_EXTRACTION_PROMPT = load_prompt("extraction.md")
 
 _INCOMPLETE_NOTICE = (
     "\nNote: The conversation may be unfinished — the last message is an AI reply/question "

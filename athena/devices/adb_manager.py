@@ -107,7 +107,7 @@ class ADBManager:
                 "error": stderr.decode(errors="replace") if stderr else None,
                 "exit_code": proc.returncode,
             }
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"success": False, "error": "Command timed out (30s)"}
         except Exception as e:
             return {"success": False, "error": str(e)}

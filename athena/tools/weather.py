@@ -424,8 +424,8 @@ def _resolve_date(target_date: str | None) -> tuple[str, int]:
 
     try:
         parsed = datetime.strptime(target_date, "%Y-%m-%d").date()
-    except ValueError:
-        raise ValueError(f"日期格式无效: {target_date}，请使用 YYYY-MM-DD 格式")
+    except ValueError as e:
+        raise ValueError(f"日期格式无效: {target_date}，请使用 YYYY-MM-DD 格式") from e
 
     delta = (parsed - today).days
 

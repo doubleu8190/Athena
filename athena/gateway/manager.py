@@ -138,7 +138,7 @@ class GatewayManager:
         # For now, log and acknowledge
         from athena.core.context import ContextManager
 
-        context_mgr = ContextManager(self.config)
+        context_mgr = ContextManager()
 
         # Get or create session
         await context_mgr.get_or_create_session(

@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from athena.core.prompt_loader import load_prompt
 from athena.core.resilience.error_collector import StructuredError
 from athena.logging_config import get_logger
 
@@ -20,40 +21,7 @@ logger = get_logger(__name__)
 
 # ── Prompt template ─────────────────────────────────────────────────
 
-DECISION_PROMPT_TEMPLATE = """\
-You are a system operations assistant. A tool call has failed after \
-multiple retries. Analyze the failure and recommend the next action.
-
-{error_report}
-
-## Available Decision Types
-
-1. **retry_with_adjustment** — Retry with modified arguments.
-   - Use when: arguments may be incorrect or a temporary tweak could help.
-   - MUST include `adjusted_args` field.
-
-2. **fallback_tool** — Switch to an alternative tool.
-   - Use when: the current tool is persistently unavailable.
-   - MUST include `fallback_tool_name` field.
-
-3. **user_intervention** — Ask the user for help.
-   - Use when: permission is missing, configuration is wrong, \
-or human confirmation is needed.
-   - MUST include `user_message` field (clear, non-technical).
-
-4. **abort** — Give up.
-   - Use when: the error is unrecoverable or risk is too high.
-   - MUST include `reason` field.
-
-Respond with a single JSON object:
-```json
-{{
-  "decision": "<one of the four types above>",
-  "confidence": 0.0,
-  "reasoning": "your analysis",
-  ... additional fields per decision type
-}}
-```"""
+DECISION_PROMPT_TEMPLATE = load_prompt("decision.md")
 
 
 @dataclass

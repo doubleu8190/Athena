@@ -6,11 +6,16 @@ avoids "database is locked" errors while WAL enables concurrent reads.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
+import redis.asyncio as aioredis
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+
+from athena.config import get_config
+from athena.models.redis import get_redis_client
 
 
 class Base(DeclarativeBase):
@@ -19,7 +24,7 @@ class Base(DeclarativeBase):
 
 
 _engines: dict[str, object] = {}
-_session_makers: dict[str, object] = {}
+_session_makers: dict[str, async_sessionmaker[AsyncSession]] = {}
 
 
 def get_engine(db_path: str) -> Any:
@@ -52,8 +57,13 @@ def get_engine(db_path: str) -> Any:
     return _engines[db_path]
 
 
-def get_session_maker(db_path: str) -> async_sessionmaker[AsyncSession]:
+# ── Database ──────────────────────────────────────────────────────────
+
+def get_session_maker(db_path: str|None = None) -> async_sessionmaker[AsyncSession]:
     """Get or create an async session maker for the given database path."""
+    if not db_path:
+        config = get_config()
+        db_path = config.sqlite_db_path
     if db_path not in _session_makers:
         engine = get_engine(db_path)
         _session_makers[db_path] = async_sessionmaker(
@@ -63,8 +73,19 @@ def get_session_maker(db_path: str) -> async_sessionmaker[AsyncSession]:
         )
     return _session_makers[db_path]
 
-
-async def get_session(db_path: str) -> AsyncSession:
+async def get_session(db_path: str|None = None) -> AsyncSession:
     """Create a new async session (caller must close/rollback)."""
+    if not db_path:
+        config = get_config()
+        db_path = config.sqlite_db_path
     maker = get_session_maker(db_path)
     return maker()
+
+# ── Redis ─────────────────────────────────────────────────────────────
+
+def get_redis() -> aioredis.Redis:
+    """FastAPI dependency: get the Redis client."""
+    config = get_config()
+    return get_redis_client(config.redis_url)
+
+

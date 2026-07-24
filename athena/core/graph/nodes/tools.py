@@ -17,14 +17,13 @@ import json
 from typing import Any
 
 from langchain_core.messages import ToolMessage
-from langgraph.types import RunnableConfig
+from langchain_core.runnables import RunnableConfig
 
 from athena.core.graph.agent_state import AgentState
 from athena.core.resilience.llm_decision import LLMDecision
 from athena.core.resilience.manager import ResilienceManager
 from athena.logging_config import bind_context, get_logger
 from athena.mcp_client.client import MCPClient
-from athena.mcp_client.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -49,9 +48,12 @@ async def tools_node(
     tool_args = tc.get("arguments", {})
     tool_call_id = tc.get("id", "")
 
-    cfg = config["configurable"]
-    mcp_client: MCPClient = cfg["mcp_client"]
-    tool_registry: ToolRegistry = cfg.get("tool_registry")
+    cfg = config.get("configurable", {})
+    mcp_client: MCPClient | None = cfg.get("mcp_client")
+    if mcp_client is None:
+        # Fallback to singleton for production; tests should inject via config
+        from athena.mcp_client.client import get_mcp_client
+        mcp_client = get_mcp_client()
 
     log = bind_context(session_id=cfg["session_id"], node="tools_node")
 
@@ -64,8 +66,8 @@ async def tools_node(
 
     log.info("executing_tool", tool=tool_name, args=tool_args, tool_call_id=tool_call_id)
 
-    # Resolve server_id from registry
-    tool = tool_registry.get_tool_by_name(tool_name) if tool_registry else None
+    # Resolve server_id from MCPClient registry
+    tool = mcp_client.get_tool_by_name(tool_name)
     server_id = tool.source_server_id if tool else "builtin-core"
 
     # ── Single execution path via MCPClient ────────────────────────
@@ -87,7 +89,6 @@ async def tools_node(
         return await _execute_with_resilience(
             resilience_manager=resilience_manager,
             mcp_client=mcp_client,
-            tool_registry=tool_registry,
             tool_name=tool_name,
             tool_args=tool_args,
             tool_call_id=tool_call_id,
@@ -112,7 +113,6 @@ async def tools_node(
 async def _execute_with_resilience(
     resilience_manager: ResilienceManager,
     mcp_client: MCPClient,
-    tool_registry: ToolRegistry | None,
     tool_name: str,
     tool_args: dict,
     tool_call_id: str,
@@ -135,7 +135,6 @@ async def _execute_with_resilience(
         return await _execute_fallback(
             resilience_manager=resilience_manager,
             mcp_client=mcp_client,
-            tool_registry=tool_registry,
             fallback_name=exec_result.fallback_tool_name,
             fallback_decision=exec_result.decision_used,
             original_args=tool_args,
@@ -170,7 +169,6 @@ MAX_FALLBACK_DEPTH = 3
 async def _execute_fallback(
     resilience_manager: ResilienceManager,
     mcp_client: MCPClient,
-    tool_registry: ToolRegistry | None,
     fallback_name: str,
     fallback_decision: LLMDecision,
     original_args: dict,
@@ -201,8 +199,7 @@ async def _execute_fallback(
 
     log.info("executing_fallback_tool", to_tool=fallback_name, depth=depth)
 
-    # Resolve fallback tool's server_id via injected registry
-    fb_tool = tool_registry.get_tool_by_name(fallback_name) if tool_registry else None
+    fb_tool = mcp_client.get_tool_by_name(fallback_name)
     fb_server_id = fb_tool.source_server_id if fb_tool else "builtin-core"
 
     # Prefer adjusted_args from the decision; fall back to original_args
@@ -237,7 +234,6 @@ async def _execute_fallback(
         return await _execute_fallback(
             resilience_manager=resilience_manager,
             mcp_client=mcp_client,
-            tool_registry=tool_registry,
             fallback_name=fb_result.fallback_tool_name,
             fallback_decision=fb_result.decision_used,
             original_args=original_args,

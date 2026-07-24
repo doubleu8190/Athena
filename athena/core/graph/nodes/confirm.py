@@ -21,7 +21,8 @@ import json
 from typing import Any
 
 from langchain_core.messages import ToolMessage
-from langgraph.types import RunnableConfig, interrupt
+from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
 
 from athena.core.graph.agent_state import AgentState
 from athena.logging_config import bind_context, get_logger
@@ -58,9 +59,13 @@ async def confirm_node(
             "pending_tool_calls": None,
         }
 
-    cfg = config["configurable"]
-    harness: HarnessEngine = cfg["harness_engine"]
-    session_id = cfg["session_id"]
+    cfg = config.get("configurable", {})
+    harness: HarnessEngine | None = cfg.get("harness_engine")
+    if harness is None:
+        # Fallback to singleton for production; tests should inject via config
+        from athena.core.harness import get_harness
+        harness = await get_harness()
+    session_id = cfg.get("session_id", "")
 
     log = bind_context(session_id=session_id, node="confirm_node")
 

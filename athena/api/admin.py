@@ -7,24 +7,25 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from athena.api.deps import get_config_dep, get_db, get_mcp_client_dep, verify_api_key
 from athena.api.response import error, success
+from athena.config import get_config
 from athena.logging_config import get_logger
-from athena.mcp_client.client import MCPClient
+from athena.mcp_client.client import get_mcp_client
+from athena.models.base import get_session
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["admin"])
 
 
 # ── MCP Server management ─────────────────────────────────────────────
+
 
 class MCPServerCreate(BaseModel):
     server_id: str
@@ -39,93 +40,103 @@ class MCPServerStatusUpdate(BaseModel):
 
 
 @router.get("/mcp-servers")
-async def list_mcp_servers(
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-    mcp_client: MCPClient = Depends(get_mcp_client_dep),
-) -> dict[str, Any]:
+async def list_mcp_servers() -> dict[str, Any]:
     """List all registered MCP servers."""
     from athena.models.mcp_server import MCPServer
 
-    result = await db.execute(select(MCPServer).order_by(MCPServer.registered_at.desc()))
-    servers = result.scalars().all()
-
-    return success({
-        "items": [
-            {
-                "server_id": s.server_id,
-                "name": s.name,
-                "transport": s.transport,
-                "connection_config": json.loads(s.connection_config),
-                "source": s.source,
-                "enabled": s.enabled,
-                "connection_status": mcp_client.get_connection_status(s.server_id),
-            }
-            for s in servers
-        ]
-    })
+    db = await get_session()
+    try:
+        result = await db.execute(select(MCPServer).order_by(MCPServer.registered_at.desc()))
+        servers = result.scalars().all()
+    finally:
+        await db.close()
+    mcp_client = get_mcp_client()
+    return success(
+        {
+            "items": [
+                {
+                    "server_id": s.server_id,
+                    "name": s.name,
+                    "transport": s.transport,
+                    "connection_config": json.loads(s.connection_config),
+                    "source": s.source,
+                    "enabled": s.enabled,
+                    "connection_status": mcp_client.get_connection_status(s.server_id),
+                }
+                for s in servers
+            ]
+        }
+    )
 
 
 @router.post("/mcp-servers")
 async def register_mcp_server(
     body: MCPServerCreate,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-    mcp_client: MCPClient = Depends(get_mcp_client_dep),
 ) -> dict[str, Any]:
     """Register a new external MCP server."""
     from athena.models.mcp_server import MCPServer
 
     # Check for duplicate
-    existing = await db.get(MCPServer, body.server_id)
-    if existing:
-        return error(40901, "Server already exists", f"Server ID '{body.server_id}' already registered")
-
-    server = MCPServer(
-        server_id=body.server_id,
-        name=body.name,
-        transport=body.transport,
-        connection_config=json.dumps(body.connection_config),
-        source=body.source,
-    )
-    db.add(server)
-    await db.commit()
+    db = await get_session()
+    try:
+        existing = await db.get(MCPServer, body.server_id)
+        if existing:
+            return error(
+                40901, "Server already exists", f"Server ID '{body.server_id}' already registered"
+            )
+        server = MCPServer(
+            server_id=body.server_id,
+            name=body.name,
+            transport=body.transport,
+            connection_config=json.dumps(body.connection_config),
+            source=body.source,
+        )
+        db.add(server)
+        await db.commit()
+    finally:
+        await db.close()
 
     # Connect the newly registered server
+    mcp_client = get_mcp_client()
     await mcp_client.connect_server(body.server_id)
 
     from athena.mcp_client.tool_loader import invalidate_tool_cache
+
     invalidate_tool_cache()
 
     logger.info("mcp_server_registered", server_id=body.server_id, transport=body.transport)
-    return success({
-        "server_id": body.server_id,
-        "enabled": server.enabled,
-        "connection_status": mcp_client.get_connection_status(body.server_id),
-    }, "Server registered")
+    return success(
+        {
+            "server_id": body.server_id,
+            "enabled": server.enabled,
+            "connection_status": mcp_client.get_connection_status(body.server_id),
+        },
+        "Server registered",
+    )
 
 
 @router.delete("/mcp-servers/{server_id}")
 async def remove_mcp_server(
     server_id: str,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-    mcp_client: MCPClient = Depends(get_mcp_client_dep),
 ) -> dict[str, Any]:
     """Remove a registered MCP server."""
     from athena.models.mcp_server import MCPServer
 
-    server = await db.get(MCPServer, server_id)
-    if not server:
-        return error(40401, "Server not found", f"Server '{server_id}' not found")
-
-    # Disconnect before removing
-    await mcp_client.disconnect_server(server_id)
-
-    await db.delete(server)
-    await db.commit()
+    db = await get_session()
+    try:
+        server = await db.get(MCPServer, server_id)
+        if not server:
+            return error(40401, "Server not found", f"Server '{server_id}' not found")
+        # Disconnect before removing
+        mcp_client = get_mcp_client()
+        await mcp_client.disconnect_server(server_id)
+        await db.delete(server)
+        await db.commit()
+    finally:
+        await db.close()
 
     from athena.mcp_client.tool_loader import invalidate_tool_cache
+
     invalidate_tool_cache()
 
     logger.info("mcp_server_removed", server_id=server_id)
@@ -136,9 +147,6 @@ async def remove_mcp_server(
 async def update_mcp_server_status(
     server_id: str,
     body: MCPServerStatusUpdate,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-    mcp_client: MCPClient = Depends(get_mcp_client_dep),
 ) -> dict[str, Any]:
     """Enable or disable an MCP server.
 
@@ -147,16 +155,21 @@ async def update_mcp_server_status(
     """
     from athena.models.mcp_server import MCPServer
 
-    server = await db.get(MCPServer, server_id)
-    if not server:
-        return error(40401, "Server not found", f"Server '{server_id}' not found")
-
-    server.enabled = body.enabled
-    await db.commit()
+    db = await get_session()
+    try:
+        server = await db.get(MCPServer, server_id)
+        if not server:
+            return error(40401, "Server not found", f"Server '{server_id}' not found")
+        server.enabled = body.enabled
+        await db.commit()
+    finally:
+        await db.close()
 
     from athena.mcp_client.tool_loader import invalidate_tool_cache
+
     invalidate_tool_cache()
 
+    mcp_client = get_mcp_client()
     if body.enabled:
         # Actively connect the server
         await mcp_client.connect_server(server_id)
@@ -165,14 +178,17 @@ async def update_mcp_server_status(
         await mcp_client.disconnect_server(server_id)
 
     logger.info("mcp_server_enabled_updated", server_id=server_id, enabled=body.enabled)
-    return success({
-        "server_id": server_id,
-        "enabled": body.enabled,
-        "connection_status": mcp_client.get_connection_status(server_id),
-    })
+    return success(
+        {
+            "server_id": server_id,
+            "enabled": body.enabled,
+            "connection_status": mcp_client.get_connection_status(server_id),
+        }
+    )
 
 
 # ── Skill management ──────────────────────────────────────────────────
+
 
 class SkillInstallRequest(BaseModel):
     name: str
@@ -182,42 +198,44 @@ class SkillInstallRequest(BaseModel):
 
 
 @router.get("/skills")
-async def list_skills(
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-) -> dict[str, Any]:
+async def list_skills() -> dict[str, Any]:
     """List all installed skills."""
     from athena.models.skill import Skill as SkillModel
 
-    result = await db.execute(select(SkillModel).order_by(SkillModel.installed_at.desc()))
-    skills = result.scalars().all()
+    db = await get_session()
+    try:
+        result = await db.execute(select(SkillModel).order_by(SkillModel.installed_at.desc()))
+        skills = result.scalars().all()
+    finally:
+        await db.close()
 
-    return success({
-        "items": [
-            {
-                "skill_id": s.skill_id,
-                "name": s.name,
-                "version": s.version,
-                "image_uri": s.image_uri,
-                "status": s.status,
-                "allowed_domains": s.allowed_domains,
-                "container_id": s.container_id,
-            }
-            for s in skills
-        ]
-    })
+    return success(
+        {
+            "items": [
+                {
+                    "skill_id": s.skill_id,
+                    "name": s.name,
+                    "version": s.version,
+                    "image_uri": s.image_uri,
+                    "status": s.status,
+                    "allowed_domains": s.allowed_domains,
+                    "container_id": s.container_id,
+                }
+                for s in skills
+            ]
+        }
+    )
 
 
 @router.post("/skills")
 async def install_skill(
     body: SkillInstallRequest,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Install a new Skill (Docker image + MCP container)."""
     skill_id = f"skill_{uuid.uuid4().hex[:12]}"
 
     from athena.models.skill import Skill as SkillModel
+
     skill = SkillModel(
         skill_id=skill_id,
         name=body.name,
@@ -226,8 +244,12 @@ async def install_skill(
         allowed_domains=body.allowed_domains,
         status="installing",
     )
-    db.add(skill)
-    await db.commit()
+    db = await get_session()
+    try:
+        db.add(skill)
+        await db.commit()
+    finally:
+        await db.close()
 
     logger.info("skill_install_requested", skill_id=skill_id, name=body.name)
     return success({"skill_id": skill_id}, "Skill installation initiated")
@@ -236,24 +258,26 @@ async def install_skill(
 @router.delete("/skills/{skill_id}")
 async def uninstall_skill(
     skill_id: str,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Uninstall a Skill."""
     from athena.models.skill import Skill as SkillModel
 
-    skill = await db.get(SkillModel, skill_id)
-    if not skill:
-        return error(40401, "Skill not found", f"Skill '{skill_id}' not found")
-
-    skill.status = "uninstalling"
-    await db.commit()
+    db = await get_session()
+    try:
+        skill = await db.get(SkillModel, skill_id)
+        if not skill:
+            return error(40401, "Skill not found", f"Skill '{skill_id}' not found")
+        skill.status = "uninstalling"
+        await db.commit()
+    finally:
+        await db.close()
 
     logger.info("skill_uninstall_requested", skill_id=skill_id)
     return success(None, "Skill uninstallation initiated")
 
 
 # ── Device management ─────────────────────────────────────────────────
+
 
 class DeviceRegisterRequest(BaseModel):
     device_id: str
@@ -262,51 +286,60 @@ class DeviceRegisterRequest(BaseModel):
 
 
 @router.get("/devices")
-async def list_devices(
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-) -> dict[str, Any]:
+async def list_devices() -> dict[str, Any]:
     """List all registered devices."""
     from athena.models.device import Device
 
-    result = await db.execute(select(Device).order_by(Device.last_heartbeat.desc().nulls_last()))
-    devices = result.scalars().all()
+    db = await get_session()
+    try:
+        result = await db.execute(
+            select(Device).order_by(Device.last_heartbeat.desc().nulls_last())
+        )
+        devices = result.scalars().all()
+    finally:
+        await db.close()
 
-    return success({
-        "items": [
-            {
-                "device_id": d.device_id,
-                "type": d.type,
-                "connection_info": json.loads(d.connection_info) if d.connection_info else None,
-                "status": d.status,
-                "last_heartbeat": d.last_heartbeat.isoformat() if d.last_heartbeat else None,
-            }
-            for d in devices
-        ]
-    })
+    return success(
+        {
+            "items": [
+                {
+                    "device_id": d.device_id,
+                    "type": d.type,
+                    "connection_info": json.loads(d.connection_info) if d.connection_info else None,
+                    "status": d.status,
+                    "last_heartbeat": d.last_heartbeat.isoformat() if d.last_heartbeat else None,
+                }
+                for d in devices
+            ]
+        }
+    )
 
 
 @router.post("/devices")
 async def register_device(
     body: DeviceRegisterRequest,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Register a new device."""
     from athena.models.device import Device
 
-    existing = await db.get(Device, body.device_id)
-    if existing:
-        return error(40901, "Device already exists", f"Device '{body.device_id}' already registered")
+    db = await get_session()
+    try:
+        existing = await db.get(Device, body.device_id)
+        if existing:
+            return error(
+                40901, "Device already exists", f"Device '{body.device_id}' already registered"
+            )
 
-    device = Device(
-        device_id=body.device_id,
-        type=body.type,
-        connection_info=json.dumps(body.connection_info) if body.connection_info else None,
-        status="offline",
-    )
-    db.add(device)
-    await db.commit()
+        device = Device(
+            device_id=body.device_id,
+            type=body.type,
+            connection_info=json.dumps(body.connection_info) if body.connection_info else None,
+            status="offline",
+        )
+        db.add(device)
+        await db.commit()
+    finally:
+        await db.close()
 
     logger.info("device_registered", device_id=body.device_id, type=body.type)
     return success({"device_id": body.device_id}, "Device registered")
@@ -315,18 +348,19 @@ async def register_device(
 @router.delete("/devices/{device_id}")
 async def deregister_device(
     device_id: str,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Deregister a device."""
     from athena.models.device import Device
 
-    device = await db.get(Device, device_id)
-    if not device:
-        return error(40401, "Device not found", f"Device '{device_id}' not found")
-
-    await db.delete(device)
-    await db.commit()
+    db = await get_session()
+    try:
+        device = await db.get(Device, device_id)
+        if not device:
+            return error(40401, "Device not found", f"Device '{device_id}' not found")
+        await db.delete(device)
+        await db.commit()
+    finally:
+        await db.close()
 
     logger.info("device_deregistered", device_id=device_id)
     return success(None, "Device deregistered")
@@ -334,34 +368,36 @@ async def deregister_device(
 
 # ── Harness rule management ───────────────────────────────────────────
 
+
 @router.get("/harness/rules")
-async def list_harness_rules(
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-) -> dict[str, Any]:
+async def list_harness_rules() -> dict[str, Any]:
     """List all harness rules."""
     from athena.models.harness_rule import HarnessRule
 
-    result = await db.execute(
-        select(HarnessRule).order_by(HarnessRule.priority.desc())
-    )
-    rules = result.scalars().all()
+    db = await get_session()
+    try:
+        result = await db.execute(select(HarnessRule).order_by(HarnessRule.priority.desc()))
+        rules = result.scalars().all()
+    finally:
+        await db.close()
 
-    return success({
-        "items": [
-            {
-                "rule_id": r.rule_id,
-                "rule_type": r.rule_type,
-                "name": r.name,
-                "description": r.description,
-                "config": json.loads(r.config_json),
-                "priority": r.priority,
-                "enabled": r.enabled,
-                "revision": r.revision,
-            }
-            for r in rules
-        ]
-    })
+    return success(
+        {
+            "items": [
+                {
+                    "rule_id": r.rule_id,
+                    "rule_type": r.rule_type,
+                    "name": r.name,
+                    "description": r.description,
+                    "config": json.loads(r.config_json),
+                    "priority": r.priority,
+                    "enabled": r.enabled,
+                    "revision": r.revision,
+                }
+                for r in rules
+            ]
+        }
+    )
 
 
 class HarnessRuleCreate(BaseModel):
@@ -377,45 +413,58 @@ class HarnessRuleCreate(BaseModel):
 @router.post("/harness/rules")
 async def create_harness_rule(
     body: HarnessRuleCreate,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Create a new harness rule."""
     from athena.models.harness_rule import HarnessRule
 
-    existing = await db.get(HarnessRule, body.rule_id)
-    if existing:
-        return error(40901, "Rule already exists", f"Rule ID '{body.rule_id}' already exists")
+    db = await get_session()
+    try:
+        existing = await db.get(HarnessRule, body.rule_id)
+        if existing:
+            return error(40901, "Rule already exists", f"Rule ID '{body.rule_id}' already exists")
 
-    # Validate config_json for path_permission rules
-    if body.rule_type == "path_permission":
-        if "path" not in body.config_json:
-            return error(400, "Missing 'path' in config_json", "path_permission rules require a 'path' field")
-        perms = body.config_json.get("permissions", "rw")
-        if perms not in ("r", "w", "rw"):
-            return error(400, "Invalid permissions", f"permissions must be 'r', 'w', or 'rw', got '{perms}'")
+        # Validate config_json for path_permission rules
+        if body.rule_type == "path_permission":
+            if "path" not in body.config_json:
+                return error(
+                    400,
+                    "Missing 'path' in config_json",
+                    "path_permission rules require a 'path' field",
+                )
+            perms = body.config_json.get("permissions", "rw")
+            if perms not in ("r", "w", "rw"):
+                return error(
+                    400,
+                    "Invalid permissions",
+                    f"permissions must be 'r', 'w', or 'rw', got '{perms}'",
+                )
 
-    rule = HarnessRule(
-        rule_id=body.rule_id,
-        rule_type=body.rule_type,
-        name=body.name,
-        description=body.description,
-        config_json=json.dumps(body.config_json),
-        priority=body.priority,
-        enabled=body.enabled,
-    )
-    db.add(rule)
-    await db.commit()
+        rule = HarnessRule(
+            rule_id=body.rule_id,
+            rule_type=body.rule_type,
+            name=body.name,
+            description=body.description,
+            config_json=json.dumps(body.config_json),
+            priority=body.priority,
+            enabled=body.enabled,
+        )
+        db.add(rule)
+        await db.commit()
+    finally:
+        await db.close()
 
     logger.info("harness_rule_created", rule_id=body.rule_id, rule_type=body.rule_type)
-    return success({
-        "rule_id": body.rule_id,
-        "rule_type": body.rule_type,
-        "name": body.name,
-        "config": body.config_json,
-        "priority": body.priority,
-        "enabled": body.enabled,
-    }, "Rule created")
+    return success(
+        {
+            "rule_id": body.rule_id,
+            "rule_type": body.rule_type,
+            "name": body.name,
+            "config": body.config_json,
+            "priority": body.priority,
+            "enabled": body.enabled,
+        },
+        "Rule created",
+    )
 
 
 class HarnessRuleUpdate(BaseModel):
@@ -428,28 +477,30 @@ class HarnessRuleUpdate(BaseModel):
 async def update_harness_rule(
     rule_id: str,
     body: HarnessRuleUpdate,
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Update a harness rule."""
     from athena.models.harness_rule import HarnessRule
 
-    rule = await db.get(HarnessRule, rule_id)
-    if not rule:
-        return error(40401, "Rule not found", f"Rule '{rule_id}' not found")
+    db = await get_session()
+    try:
+        rule = await db.get(HarnessRule, rule_id)
+        if not rule:
+            return error(40401, "Rule not found", f"Rule '{rule_id}' not found")
 
-    if body.config_json is not None:
-        rule.config_json = json.dumps(body.config_json)
-    if body.priority is not None:
-        rule.priority = body.priority
-    if body.enabled is not None:
-        rule.enabled = body.enabled
+        if body.config_json is not None:
+            rule.config_json = json.dumps(body.config_json)
+        if body.priority is not None:
+            rule.priority = body.priority
+        if body.enabled is not None:
+            rule.enabled = body.enabled
 
-    # Increment revision to trigger hot-reload detection
-    rule.revision = (rule.revision or 0) + 1
-    rule.updated_at = datetime.now(timezone.utc)
+        # Increment revision to trigger hot-reload detection
+        rule.revision = (rule.revision or 0) + 1
+        rule.updated_at = datetime.now(UTC)
 
-    await db.commit()
+        await db.commit()
+    finally:
+        await db.close()
 
     logger.info("harness_rule_updated", rule_id=rule_id, revision=rule.revision)
     return success({"rule_id": rule_id, "revision": rule.revision})
@@ -458,7 +509,6 @@ async def update_harness_rule(
 @router.post("/harness/reload")
 async def reload_harness_rules(
     request: Any = None,  # noqa: ANN401
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Force immediate reload of harness rules cache."""
     # The actual reload is triggered by the HarnessEngine
@@ -470,6 +520,7 @@ async def reload_harness_rules(
 
 
 # ── Audit logs ────────────────────────────────────────────────────────
+
 
 def _parse_audit_cursor(cursor: str | None) -> tuple[datetime, str] | None:
     """Parse a composite cursor string of form ``{iso_timestamp}__{event_id}``."""
@@ -495,8 +546,6 @@ async def list_audit_logs(
     event_type: str | None = Query(None),
     cursor: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Search audit logs with cursor-based pagination.
 
@@ -513,111 +562,127 @@ async def list_audit_logs(
     parsed_cursor = _parse_audit_cursor(cursor)
     if parsed_cursor:
         cursor_ts, cursor_id = parsed_cursor
-        stmt = stmt.where(
-            tuple_(AuditLog.timestamp, AuditLog.event_id) < (cursor_ts, cursor_id)
-        )
+        stmt = stmt.where(tuple_(AuditLog.timestamp, AuditLog.event_id) < (cursor_ts, cursor_id))
 
     stmt = stmt.order_by(AuditLog.timestamp.desc(), AuditLog.event_id.desc())
     stmt = stmt.limit(limit + 1)
-    result = await db.execute(stmt)
-    rows = result.scalars().all()
+
+    db = await get_session()
+    try:
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
+    finally:
+        await db.close()
 
     has_more = len(rows) > limit
     items = rows[:limit]
 
     next_cursor = _make_audit_cursor(items[-1].timestamp, items[-1].event_id) if has_more else None
 
-    return success({
-        "items": [
-            {
-                "event_id": r.event_id,
-                "event_type": r.event_type,
-                "actor_user_id": r.actor_user_id,
-                "details": json.loads(r.details_json) if r.details_json else None,
-                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-            }
-            for r in items
-        ],
-        "next_cursor": next_cursor,
-    })
+    return success(
+        {
+            "items": [
+                {
+                    "event_id": r.event_id,
+                    "event_type": r.event_type,
+                    "actor_user_id": r.actor_user_id,
+                    "details": json.loads(r.details_json) if r.details_json else None,
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                }
+                for r in items
+            ],
+            "next_cursor": next_cursor,
+        }
+    )
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────
 
-@router.get("/dashboard")
-async def get_dashboard(
-    db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-) -> dict[str, Any]:
-    """Get real-time dashboard metrics summary."""
-    from athena.models.audit_log import AuditLog
 
+@router.get("/dashboard")
+async def get_dashboard() -> dict[str, Any]:
+    """Get real-time dashboard metrics summary."""
     # Harness blocks (last 24h)
     from datetime import timedelta
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
-    block_result = await db.execute(
-        select(func.count()).select_from(AuditLog).where(
-            AuditLog.event_type == "harness_block",
-            AuditLog.timestamp >= since,
-        )
-    )
-    harness_blocks = block_result.scalar_one()
 
-    return success({
-        "harness_blocks_24h": harness_blocks,
-    })
+    from athena.models.audit_log import AuditLog
+
+    since = datetime.now(UTC) - timedelta(hours=24)
+    db = await get_session()
+    try:
+        block_result = await db.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(
+                AuditLog.event_type == "harness_block",
+                AuditLog.timestamp >= since,
+            )
+        )
+        harness_blocks = block_result.scalar_one()
+    finally:
+        await db.close()
+
+    return success(
+        {
+            "harness_blocks_24h": harness_blocks,
+        }
+    )
 
 
 # ── IM Status ─────────────────────────────────────────────────────────
 
+
 @router.get("/im/status")
 async def get_im_status(
     request: Any = None,  # noqa: ANN401
-    api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get status of all IM channel adapters."""
     # Status is provided by the GatewayManager
-    return success({
-        "channels": [
-            {
-                "channel": "telegram",
-                "status": "configured" if (get_config_dep().user.is_channel_enabled("telegram")) else "disabled",
-            },
-            {
-                "channel": "wechat",
-                "status": "configured" if (get_config_dep().user.is_channel_enabled("wechat")) else "disabled",
-            },
-            {
-                "channel": "web",
-                "status": "configured" if (get_config_dep().user.is_channel_enabled("web")) else "disabled",
-            },
-        ]
-    })
+    return success(
+        {
+            "channels": [
+                {
+                    "channel": "telegram",
+                    "status": "configured"
+                    if (get_config().user.is_channel_enabled("telegram"))
+                    else "disabled",
+                },
+                {
+                    "channel": "wechat",
+                    "status": "configured"
+                    if (get_config().user.is_channel_enabled("wechat"))
+                    else "disabled",
+                },
+                {
+                    "channel": "web",
+                    "status": "configured"
+                    if (get_config().user.is_channel_enabled("web"))
+                    else "disabled",
+                },
+            ]
+        }
+    )
 
 
 @router.get("/im/wechat/qrcode")
-async def get_wechat_qrcode(
-    api_key: str = Depends(verify_api_key),
-) -> dict[str, Any]:
+async def get_wechat_qrcode() -> dict[str, Any]:
     """Get WeChat QR code for login (base64-encoded PNG)."""
     return success({"qrcode_base64": "not_implemented"}, "QR code generation not yet available")
 
 
 @router.get("/im/wechat/status")
-async def get_wechat_status(
-    api_key: str = Depends(verify_api_key),
-) -> dict[str, Any]:
+async def get_wechat_status() -> dict[str, Any]:
     """Get WeChat adapter connection status."""
-    return success({
-        "status": "disconnected",
-        "token_valid": False,
-        "token_expires_at": None,
-    })
+    return success(
+        {
+            "status": "disconnected",
+            "token_valid": False,
+            "token_expires_at": None,
+        }
+    )
 
 
 @router.post("/im/wechat/reconnect")
-async def reconnect_wechat(
-    api_key: str = Depends(verify_api_key),
-) -> dict[str, Any]:
+async def reconnect_wechat() -> dict[str, Any]:
     """Force WeChat re-authentication."""
     return success(None, "Re-authentication trigger sent")

@@ -1,28 +1,23 @@
 """Health check endpoint."""
 
-from typing import Any
-
-import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from athena.api.deps import get_db, get_redis
 from athena.logging_config import get_logger
+from athena.models.base import get_redis, get_session
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
-async def health_check(
-    db: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis),
-) -> dict[str, Any]:
+async def health_check() -> JSONResponse:
     """Health check — verifies SQLite and Redis connectivity."""
     status = {"status": "healthy", "checks": {}}
 
     # Check SQLite
+    db = await get_session()
     try:
         await db.execute(text("SELECT 1"))
         status["checks"]["database"] = "ok"
@@ -32,6 +27,7 @@ async def health_check(
 
     # Check Redis
     try:
+        redis = get_redis()
         await redis.ping()
         status["checks"]["redis"] = "ok"
     except Exception as e:
@@ -39,7 +35,6 @@ async def health_check(
         status["status"] = "degraded"
 
     if status["status"] == "healthy":
-        return status
+        return JSONResponse(status_code=200, content=status)
     else:
-        from fastapi.responses import JSONResponse
         return JSONResponse(status_code=503, content=status)

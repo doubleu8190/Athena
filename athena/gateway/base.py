@@ -114,3 +114,4 @@ class BaseIMAdapter(ABC):
 
     # Injected by GatewayManager
     _core_dispatch: Any = None
+

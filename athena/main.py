@@ -61,11 +61,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize MCP Client (singleton)
     from athena.mcp_client.client import MCPClient, set_mcp_client
-
-    # Warm ToolRegistry singleton so MCP server auto-registration finds it
-    from athena.mcp_client.registry import get_tool_registry
     from athena.mcp_client.seed_loader import auto_register_builtin_servers
-    get_tool_registry()
 
     await auto_register_builtin_servers(config)
 

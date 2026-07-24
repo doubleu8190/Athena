@@ -82,16 +82,12 @@ class TestAgentGraphEndToEnd:
         async def _mock_call_tool(*args, **kwargs):
             return tool_result
         mcp_client.call_tool = _mock_call_tool
-
-        # Mock tool registry
-        tool_registry = MagicMock()
-        tool_registry.export_for_llm.return_value = []
+        mcp_client.export_for_llm = MagicMock(return_value=[])
 
         return {
             "llm_manager": llm_mgr,
             "harness_engine": harness,
             "mcp_client": mcp_client,
-            "tool_registry": tool_registry,
             "messages": [HumanMessage(content="hello")],
         }
 
@@ -103,8 +99,6 @@ class TestAgentGraphEndToEnd:
 
         initial_state = {
             "messages": mock_deps["messages"],
-            "system_context": None,
-            "context": None,
         }
 
         config = {
@@ -116,7 +110,6 @@ class TestAgentGraphEndToEnd:
                 "llm_manager": mock_deps["llm_manager"],
                 "mcp_client": mock_deps["mcp_client"],
                 "harness_engine": mock_deps["harness_engine"],
-                "tool_registry": mock_deps["tool_registry"],
             }
         }
 
@@ -165,8 +158,8 @@ class TestAgentGraphEndToEnd:
         mock_tool = MagicMock()
         mock_tool.source_server_id = "builtin-core"
         mock_tool.name = "weather"
-        mock_deps["tool_registry"].get_tool_by_name.return_value = mock_tool
-        mock_deps["tool_registry"].export_for_llm.return_value = [
+        mock_deps["mcp_client"].get_tool_by_name = MagicMock(return_value=mock_tool)
+        mock_deps["mcp_client"].export_for_llm.return_value = [
             {
                 "type": "function",
                 "function": {
@@ -181,8 +174,6 @@ class TestAgentGraphEndToEnd:
 
         initial_state = {
             "messages": [HumanMessage(content="What's the weather in Tokyo?")],
-            "system_context": None,
-            "context": None,
         }
 
         config = {
@@ -194,7 +185,6 @@ class TestAgentGraphEndToEnd:
                 "llm_manager": mock_deps["llm_manager"],
                 "mcp_client": mock_deps["mcp_client"],
                 "harness_engine": mock_deps["harness_engine"],
-                "tool_registry": mock_deps["tool_registry"],
             }
         }
 
@@ -235,8 +225,6 @@ class TestAgentGraphEndToEnd:
 
         initial_state = {
             "messages": [HumanMessage(content="hello")],
-            "system_context": None,
-            "context": None,
         }
 
         config = {
@@ -248,7 +236,6 @@ class TestAgentGraphEndToEnd:
                 "llm_manager": mock_deps["llm_manager"],
                 "mcp_client": mock_deps["mcp_client"],
                 "harness_engine": mock_deps["harness_engine"],
-                "tool_registry": mock_deps["tool_registry"],
             }
         }
 
@@ -288,8 +275,8 @@ class TestAgentGraphEndToEnd:
         mock_tool = MagicMock()
         mock_tool.source_server_id = "builtin-core"
         mock_tool.name = "weather"
-        mock_deps["tool_registry"].get_tool_by_name.return_value = mock_tool
-        mock_deps["tool_registry"].export_for_llm.return_value = [
+        mock_deps["mcp_client"].get_tool_by_name = MagicMock(return_value=mock_tool)
+        mock_deps["mcp_client"].export_for_llm.return_value = [
             {
                 "type": "function",
                 "function": {
@@ -304,8 +291,6 @@ class TestAgentGraphEndToEnd:
 
         initial_state = {
             "messages": [HumanMessage(content="weather please")],
-            "system_context": None,
-            "context": None,
         }
 
         config = {
@@ -317,7 +302,6 @@ class TestAgentGraphEndToEnd:
                 "llm_manager": mock_deps["llm_manager"],
                 "mcp_client": mock_deps["mcp_client"],
                 "harness_engine": mock_deps["harness_engine"],
-                "tool_registry": mock_deps["tool_registry"],
             }
         }
 

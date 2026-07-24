@@ -19,7 +19,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from athena.config import Config
@@ -33,7 +33,7 @@ from athena.models.harness_rule import RuleType
 logger = get_logger(__name__)
 
 
-class RiskLevel(str, Enum):
+class RiskLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -126,7 +126,8 @@ class HarnessEngine:
         session_maker = get_session_maker(db_path)
 
         async with session_maker() as session:
-            from sqlalchemy import select, func
+            from sqlalchemy import func, select
+
             from athena.models.harness_rule import HarnessRule
             result = await session.execute(
                 select(func.max(HarnessRule.revision))
@@ -145,6 +146,7 @@ class HarnessEngine:
 
         async with session_maker() as session:
             from sqlalchemy import select
+
             from athena.models.harness_rule import HarnessRule
             result = await session.execute(
                 select(HarnessRule).where(HarnessRule.enabled == True)  # noqa: E712

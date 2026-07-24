@@ -1,9 +1,11 @@
 """Tests for agent_node, precheck_node, confirm_node, tools_node, and summarize_node."""
 
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
 import pytest
-from unittest.mock import MagicMock, PropertyMock, patch, AsyncMock
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from athena.core.graph.nodes.precheck import AgentState
 
 # ── agent_node tests ────────────────────────────────────────────────────────
 
@@ -32,8 +34,16 @@ class TestAgentNode:
         return config, mock_llm
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.agent._load_session_summary", new_callable=AsyncMock, return_value=None)
-    @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[MagicMock()])
+    @patch(
+        "athena.core.graph.nodes.agent._load_session_summary",
+        new_callable=AsyncMock,
+        return_value=None,
+    )
+    @patch(
+        "athena.core.graph.nodes.agent._load_tools",
+        new_callable=AsyncMock,
+        return_value=[MagicMock()],
+    )
     async def test_direct_answer_no_tools(self, _mock_tools, _mock_summary, mock_config):
         """LLM returns text without tool_calls."""
         from athena.core.graph.nodes.agent import agent_node
@@ -50,15 +60,23 @@ class TestAgentNode:
             "channel": "web",
         }
 
-        result = await agent_node(state, config)
+        result = await agent_node(AgentState(**state), config)
 
         assert len(result["messages"]) == 1
         assert result["messages"][0].content == "Hello!"
         mock_llm.ainvoke.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.agent._load_session_summary", new_callable=AsyncMock, return_value=None)
-    @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[MagicMock()])
+    @patch(
+        "athena.core.graph.nodes.agent._load_session_summary",
+        new_callable=AsyncMock,
+        return_value=None,
+    )
+    @patch(
+        "athena.core.graph.nodes.agent._load_tools",
+        new_callable=AsyncMock,
+        return_value=[MagicMock()],
+    )
     async def test_uses_summary_offset(self, _mock_tools, _mock_summary, mock_config):
         """When summary_offset is set, agent slices messages from that offset."""
         from athena.core.graph.nodes.agent import agent_node
@@ -76,7 +94,7 @@ class TestAgentNode:
             "channel": "web",
         }
 
-        result = await agent_node(state, config)
+        result = await agent_node(AgentState(**state), config)
 
         assert result["messages"][0].content == "Done"
         call_kwargs = mock_llm.ainvoke.call_args.kwargs
@@ -88,9 +106,15 @@ class TestAgentNode:
         assert human_msgs[0].content == "What about tomorrow?"
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.agent._load_session_summary", new_callable=AsyncMock, return_value=None)
+    @patch(
+        "athena.core.graph.nodes.agent._load_session_summary",
+        new_callable=AsyncMock,
+        return_value=None,
+    )
     @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[])
-    @patch("athena.core.graph.nodes.agent.AGENT_SYSTEM_PROMPT", "Athena is your name. You are helpful.")
+    @patch(
+        "athena.core.graph.nodes.agent.AGENT_SYSTEM_PROMPT", "Athena is your name. You are helpful."
+    )
     async def test_builds_message_list(self, _mock_tools, _mock_summary, mock_config):
         """Agent always builds message list with system prompt from raw messages."""
         from athena.core.graph.nodes.agent import agent_node, _build_messages
@@ -107,7 +131,7 @@ class TestAgentNode:
             "channel": "web",
         }
 
-        result = await agent_node(state, config)
+        result = await agent_node(AgentState(**state), config)
 
         call_kwargs = mock_llm.ainvoke.call_args.kwargs
         assert "input" in call_kwargs
@@ -116,17 +140,23 @@ class TestAgentNode:
         assert "Athena" in call_args[0].content
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.agent._load_session_summary", new_callable=AsyncMock, return_value=None)
-    @patch("athena.core.graph.nodes.agent._load_tools", new_callable=AsyncMock, return_value=[MagicMock()])
+    @patch(
+        "athena.core.graph.nodes.agent._load_session_summary",
+        new_callable=AsyncMock,
+        return_value=None,
+    )
+    @patch(
+        "athena.core.graph.nodes.agent._load_tools",
+        new_callable=AsyncMock,
+        return_value=[MagicMock()],
+    )
     async def test_tool_calls_passed_through(self, _mock_tools, _mock_summary, mock_config):
         """LLM returns tool_calls — they appear in the response message."""
         from athena.core.graph.nodes.agent import agent_node
 
         config, mock_llm = mock_config
         response = AIMessage(content="")
-        response.tool_calls = [
-            {"id": "call_1", "name": "weather", "args": {"city": "Tokyo"}}
-        ]
+        response.tool_calls = [{"id": "call_1", "name": "weather", "args": {"city": "Tokyo"}}]
         mock_llm.ainvoke.return_value = response
 
         state = {
@@ -136,11 +166,10 @@ class TestAgentNode:
             "channel": "web",
         }
 
-        result = await agent_node(state, config)
+        result = await agent_node(AgentState(**state), config)
 
         assert len(result["messages"]) == 1
         assert result["messages"][0].tool_calls[0]["name"] == "weather"
-
 
 
 # ── precheck_node tests ─────────────────────────────────────────────────────
@@ -183,7 +212,7 @@ class TestPrecheckNode:
             "channel": "web",
         }
 
-        result = await precheck_node(state, mock_config)
+        result = await precheck_node(AgentState(**state), mock_config)
         assert result["allowed_tool_calls"] is None
         assert result["blocked_tool_calls"] is None
         assert result["needs_confirmation_tool_calls"] is None
@@ -206,7 +235,7 @@ class TestPrecheckNode:
             "channel": "web",
         }
 
-        result = await precheck_node(state, mock_config)
+        result = await precheck_node(AgentState(**state), mock_config)
         assert len(result["allowed_tool_calls"]) == 1
         assert result["allowed_tool_calls"][0]["name"] == "weather"
         assert result["blocked_tool_calls"] is None
@@ -236,7 +265,7 @@ class TestPrecheckNode:
             "channel": "web",
         }
 
-        result = await precheck_node(state, mock_config)
+        result = await precheck_node(AgentState(**state), mock_config)
         assert result["allowed_tool_calls"] is None
         assert len(result["blocked_tool_calls"]) == 1
         assert result["needs_confirmation_tool_calls"] is None
@@ -269,7 +298,7 @@ class TestPrecheckNode:
             "channel": "web",
         }
 
-        result = await precheck_node(state, mock_config)
+        result = await precheck_node(AgentState(**state), mock_config)
         assert result["allowed_tool_calls"] is None
         assert result["blocked_tool_calls"] is None
         assert len(result["needs_confirmation_tool_calls"]) == 1
@@ -284,8 +313,13 @@ class TestPrecheckNode:
         results_by_call = [
             MagicMock(allowed=True, requires_confirmation=False),
             MagicMock(allowed=False, requires_confirmation=False, reason="Blocked"),
-            MagicMock(allowed=True, requires_confirmation=True,
-                      risk_level=MagicMock(value="high"), cooling_off_seconds=0, reason=""),
+            MagicMock(
+                allowed=True,
+                requires_confirmation=True,
+                risk_level=MagicMock(value="high"),
+                cooling_off_seconds=0,
+                reason="",
+            ),
         ]
 
         async def _mock_pre_check(*args, **kwargs):
@@ -309,7 +343,7 @@ class TestPrecheckNode:
             "channel": "web",
         }
 
-        result = await precheck_node(state, mock_config)
+        result = await precheck_node(AgentState(**state), mock_config)
         assert len(result["allowed_tool_calls"]) == 1
         assert result["allowed_tool_calls"][0]["name"] == "weather"
         assert len(result["blocked_tool_calls"]) == 1
@@ -349,7 +383,7 @@ class TestConfirmNode:
             "channel": "web",
         }
 
-        result = await confirm_node(state, mock_config)
+        result = await confirm_node(AgentState(**state), mock_config)
         assert result["confirmed_tool_calls"] is None
         assert result["needs_confirmation_tool_calls"] is None
 
@@ -365,7 +399,8 @@ class TestConfirmNode:
             "messages": [],
             "needs_confirmation_tool_calls": [
                 {
-                    "id": "call_1", "name": "file_delete",
+                    "id": "call_1",
+                    "name": "file_delete",
                     "arguments": {"path": "/tmp"},
                     "_harness_risk_level": "high",
                     "_harness_cooling_off": 0,
@@ -379,7 +414,7 @@ class TestConfirmNode:
             "channel": "web",
         }
 
-        result = await confirm_node(state, mock_config)
+        result = await confirm_node(AgentState(**state), mock_config)
         assert len(result["confirmed_tool_calls"]) == 1
         assert result["confirmed_tool_calls"][0]["name"] == "file_delete"
         assert result["needs_confirmation_tool_calls"] is None
@@ -396,7 +431,8 @@ class TestConfirmNode:
             "messages": [],
             "needs_confirmation_tool_calls": [
                 {
-                    "id": "call_1", "name": "file_delete",
+                    "id": "call_1",
+                    "name": "file_delete",
                     "arguments": {"path": "/tmp"},
                     "_harness_risk_level": "high",
                     "_harness_cooling_off": 0,
@@ -410,7 +446,7 @@ class TestConfirmNode:
             "channel": "web",
         }
 
-        result = await confirm_node(state, mock_config)
+        result = await confirm_node(AgentState(**state), mock_config)
         assert result["confirmed_tool_calls"] is None
         assert len(result["messages"]) == 1
         assert "rejected" in result["messages"][0].content.lower()
@@ -428,14 +464,16 @@ class TestConfirmNode:
             "messages": [],
             "needs_confirmation_tool_calls": [
                 {
-                    "id": "call_1", "name": "file_delete",
+                    "id": "call_1",
+                    "name": "file_delete",
                     "arguments": {"path": "/tmp"},
                     "_harness_risk_level": "high",
                     "_harness_cooling_off": 0,
                     "_harness_reason": "",
                 },
                 {
-                    "id": "call_2", "name": "file_write",
+                    "id": "call_2",
+                    "name": "file_write",
                     "arguments": {"path": "/tmp/out"},
                     "_harness_risk_level": "medium",
                     "_harness_cooling_off": 0,
@@ -449,7 +487,7 @@ class TestConfirmNode:
             "channel": "web",
         }
 
-        result = await confirm_node(state, mock_config)
+        result = await confirm_node(AgentState(**state), mock_config)
         # First call processes only the first tool
         assert len(result["confirmed_tool_calls"]) == 1
         assert result["confirmed_tool_calls"][0]["name"] == "file_delete"
@@ -474,7 +512,8 @@ class TestConfirmNode:
             ],
             "needs_confirmation_tool_calls": [
                 {
-                    "id": "call_2", "name": "file_write",
+                    "id": "call_2",
+                    "name": "file_write",
                     "arguments": {"path": "/tmp/out"},
                     "_harness_risk_level": "medium",
                     "_harness_cooling_off": 0,
@@ -488,7 +527,7 @@ class TestConfirmNode:
             "channel": "web",
         }
 
-        result = await confirm_node(state, mock_config)
+        result = await confirm_node(AgentState(**state), mock_config)
         # Only the second tool should be interrupted
         assert mock_interrupt.call_count == 1
         # Both tools should be in confirmed list (carried forward + new)
@@ -542,7 +581,7 @@ class TestToolsNode:
             "channel": "web",
         }
 
-        result = await tools_node(state, mock_config)
+        result = await tools_node(AgentState(**state), mock_config)
 
         assert len(result["messages"]) == 1
         msg = result["messages"][0]
@@ -572,7 +611,7 @@ class TestToolsNode:
             "channel": "web",
         }
 
-        result = await tools_node(state, mock_config)
+        result = await tools_node(AgentState(**state), mock_config)
 
         assert len(result["messages"]) == 1
         assert "error" in result["messages"][0].content.lower()
@@ -592,7 +631,7 @@ class TestToolsNode:
             "channel": "web",
         }
 
-        result = await tools_node(state, mock_config)
+        result = await tools_node(AgentState(**state), mock_config)
         assert result == {}
 
     @pytest.mark.asyncio
@@ -602,6 +641,7 @@ class TestToolsNode:
 
         async def _raise(*args, **kwargs):
             raise RuntimeError("Connection timeout")
+
         mock_config["configurable"]["mcp_client"].call_tool = _raise
 
         state = {
@@ -616,7 +656,7 @@ class TestToolsNode:
             "channel": "web",
         }
 
-        result = await tools_node(state, mock_config)
+        result = await tools_node(AgentState(**state), mock_config)
 
         assert len(result["messages"]) == 1
         assert "error" in result["messages"][0].content.lower()
@@ -659,7 +699,7 @@ class TestSummarizeNode:
             "channel": "web",
         }
 
-        result = await summarize_node(state, mock_config)
+        result = await summarize_node(AgentState(**state), mock_config)
 
         assert "summary_offset" in result
         assert "effective_messages" not in result
@@ -693,7 +733,7 @@ class TestSummarizeNode:
             "channel": "web",
         }
 
-        result = await summarize_node(state, mock_config)
+        result = await summarize_node(AgentState(**state), mock_config)
 
         mock_summarise.assert_awaited_once()
         mock_save.assert_awaited_once()
@@ -721,7 +761,7 @@ class TestSummarizeNode:
             "channel": "web",
         }
 
-        result = await summarize_node(state, mock_config)
+        result = await summarize_node(AgentState(**state), mock_config)
 
         assert "effective_messages" not in result
         assert result["summary_offset"] == 2
@@ -732,6 +772,8 @@ class TestSummarizeNode:
 
 def _async_return(value):
     """Create an async function that returns a fixed value."""
+
     async def _inner(*args, **kwargs):
         return value
+
     return _inner

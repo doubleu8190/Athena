@@ -1,5 +1,6 @@
 """Tests for agent graph construction and end-to-end execution."""
 
+from langchain_core.runnables import RunnableConfig
 import pytest
 from unittest.mock import MagicMock, PropertyMock, patch, AsyncMock
 
@@ -104,7 +105,7 @@ class TestAgentGraphEndToEnd:
             "messages": mock_deps["messages"],
         }
 
-        config = {
+        config: RunnableConfig = {
             "configurable": {
                 "thread_id": "test-thread-1",
                 "session_id": "test-session",
@@ -182,7 +183,7 @@ class TestAgentGraphEndToEnd:
             "messages": [HumanMessage(content="What's the weather in Tokyo?")],
         }
 
-        config = {
+        config: RunnableConfig = {
             "configurable": {
                 "thread_id": "test-thread-2",
                 "session_id": "test-session",
@@ -236,7 +237,7 @@ class TestAgentGraphEndToEnd:
             "messages": [HumanMessage(content="hello")],
         }
 
-        config = {
+        config: RunnableConfig = {
             "configurable": {
                 "thread_id": "test-thread-3",
                 "session_id": "test-session",
@@ -305,7 +306,7 @@ class TestAgentGraphEndToEnd:
             "messages": [HumanMessage(content="weather please")],
         }
 
-        config = {
+        config: RunnableConfig = {
             "configurable": {
                 "thread_id": "test-thread-4",
                 "session_id": "test-session",

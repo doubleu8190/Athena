@@ -314,9 +314,10 @@ class WeChatAdapter(BaseIMAdapter):
                 attachments.append(item)
 
         # Check if this is a confirmation reply
-        if context_token in self._pending_confirmations:
+        # Use user_id to match pending confirmations
+        if from_user_id in self._pending_confirmations:
             await self._handle_confirmation_reply(
-                context_token, content, from_user_id
+                from_user_id, content
             )
             return
 
@@ -340,7 +341,8 @@ class WeChatAdapter(BaseIMAdapter):
             logger.warning("wechat_unauthorized_user", user_id=from_user_id)
             return
 
-        await self._dispatch_to_core(unified)
+        # Fire-and-forget: dispatch to core without blocking the poll loop
+        asyncio.create_task(self._dispatch_to_core(unified))
 
     def _validate_user(self, user_id: str) -> bool:
         """Check if the user matches the configured WeChat user_id."""
@@ -423,11 +425,12 @@ class WeChatAdapter(BaseIMAdapter):
             f"⌛ 超时: {confirmation.timeout_seconds} 秒\n\n"
             f"回复 **确认** 执行此操作\n"
             f"回复 **取消** 放弃此操作\n\n"
-            f"[操作编号: #task-{confirmation.task_id}-step{confirmation.step}]"
+            f"[操作编号: #task-{confirmation.task_id}]"
         )
 
         # Track for confirmation reply handling
-        self._pending_confirmations[confirmation.nonce] = confirmation
+        # Use user_id as key since WeChat users can only have one pending confirmation at a time
+        self._pending_confirmations[user_id] = confirmation
 
         # Set timeout
         asyncio.create_task(self._confirmation_timeout(confirmation))
@@ -436,12 +439,11 @@ class WeChatAdapter(BaseIMAdapter):
 
     async def _handle_confirmation_reply(
         self,
-        context_token: str,
-        content: str,
         user_id: str,
+        content: str,
     ) -> None:
         """Handle a text reply to a confirmation request."""
-        confirmation = self._pending_confirmations.pop(context_token, None)
+        confirmation = self._pending_confirmations.pop(user_id, None)
         if not confirmation:
             return
 
@@ -459,10 +461,29 @@ class WeChatAdapter(BaseIMAdapter):
                 task_id=confirmation.task_id,
             )
 
+        # Call GatewayManager to resume graph execution
+        try:
+            from athena.gateway.manager import get_gateway_manager
+            gateway_manager = get_gateway_manager()
+            await gateway_manager.handle_confirmation_response(
+                channel="wechat",
+                user_id=user_id,
+                chat_id=confirmation.chat_id,
+                session_id=confirmation.task_id,
+                approved=approved,
+            )
+        except Exception as e:
+            logger.error(
+                "wechat_confirmation_resume_error",
+                task_id=confirmation.task_id,
+                error=str(e),
+            )
+
     async def _confirmation_timeout(self, confirmation: ConfirmationRequest) -> None:
         """Handle confirmation timeout."""
         await asyncio.sleep(confirmation.timeout_seconds)
-        self._pending_confirmations.pop(confirmation.nonce, None)
+        # Use user_id to remove timed-out confirmation
+        self._pending_confirmations.pop(confirmation.user_id, None)
 
     # ── Status ────────────────────────────────────────────────────────
 

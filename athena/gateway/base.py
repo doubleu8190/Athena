@@ -38,7 +38,6 @@ class ConfirmationRequest:
     Gateway adapters translate this into channel-specific UI.
     """
     task_id: str
-    step: int
     risk_level: str          # "low" | "medium" | "high" | "critical"
     preview_text: str        # Human-readable summary of the operation
     cooling_off_seconds: int

@@ -35,7 +35,6 @@ class TelegramCallbackData:
     """Parsed Telegram inline keyboard callback data."""
     action: str = ""
     task_id: str = ""
-    step: int = 0
     approved: bool = False
     nonce: str = ""
 
@@ -44,7 +43,6 @@ class TelegramCallbackData:
         return cls(
             action=data.get("action", ""),
             task_id=data.get("task_id", ""),
-            step=data.get("step", 0),
             approved=data.get("approved", False),
             nonce=data.get("nonce", ""),
         )
@@ -53,7 +51,6 @@ class TelegramCallbackData:
         return {
             "action": self.action,
             "task_id": self.task_id,
-            "step": self.step,
             "approved": self.approved,
             "nonce": self.nonce,
         }
@@ -210,7 +207,8 @@ class TelegramAdapter(BaseIMAdapter):
             logger.warning("telegram_unauthorized_user", user_id=user_id)
             return
 
-        await self._dispatch_to_core(unified)
+        # Fire-and-forget: dispatch to core without blocking the poll loop
+        asyncio.create_task(self._dispatch_to_core(unified))
 
     def _extract_attachments(self, message: dict) -> list[dict]:
         """Extract photo, document, voice, etc. from a Telegram message."""
@@ -251,10 +249,28 @@ class TelegramAdapter(BaseIMAdapter):
             )
 
             if callback.action == "confirm_subtask":
-                # Handle confirmation (implementation in confirmation.py)
+                # Handle confirmation via GatewayManager
                 logger.info(
                     "telegram_confirmation_callback",
                     task_id=callback.task_id,
+                    approved=callback.approved,
+                )
+
+                # Get chat info from callback_query
+                from_user = callback_query.get("from", {})
+                message = callback_query.get("message", {})
+                chat = message.get("chat", {})
+                user_id = str(from_user.get("id", ""))
+                chat_id = str(chat.get("id", ""))
+
+                # Call GatewayManager to resume graph execution
+                from athena.gateway.manager import get_gateway_manager
+                gateway_manager = get_gateway_manager()
+                await gateway_manager.handle_confirmation_response(
+                    channel="telegram",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    session_id=callback.task_id,
                     approved=callback.approved,
                 )
 
@@ -318,14 +334,12 @@ class TelegramAdapter(BaseIMAdapter):
         cb_approve = TelegramCallbackData(
             action="confirm_subtask",
             task_id=confirmation.task_id,
-            step=confirmation.step,
             approved=True,
             nonce=confirmation.nonce,
         )
         cb_reject = TelegramCallbackData(
             action="confirm_subtask",
             task_id=confirmation.task_id,
-            step=confirmation.step,
             approved=False,
             nonce=confirmation.nonce,
         )

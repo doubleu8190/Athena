@@ -24,7 +24,7 @@ export interface SubtaskEvent {
 
 export interface ToolCallEvent {
   tool_name: string
-  tool_call_id?: string
+  tool_call_id: string  // 改为必填字段，用于唯一标识工具调用
   args_preview?: string
   status: 'running' | 'success' | 'error'
   output_preview?: string

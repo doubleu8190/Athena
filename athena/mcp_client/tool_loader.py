@@ -43,6 +43,49 @@ def invalidate_tool_cache() -> None:
     logger.info("mcp_tool_cache_invalidated")
 
 
+def _build_args_schema(parameters_schema: dict) -> Any:
+    """Build a Pydantic BaseModel from parameters_schema for LangChain tool binding."""
+    if not parameters_schema:
+        return None
+
+    from pydantic import Field, create_model
+
+    properties = parameters_schema.get("properties", {})
+    required = parameters_schema.get("required", [])
+
+    # Build field definitions for create_model
+    # Format: field_name = (type, FieldInfo)
+    field_defs = {}
+    for name, prop in properties.items():
+        field_type = prop.get("type", "string")
+        description = prop.get("description", "")
+
+        # Map JSON schema types to Python types
+        py_type = str
+        if field_type == "integer":
+            py_type = int
+        elif field_type == "number":
+            py_type = float
+        elif field_type == "boolean":
+            py_type = bool
+        elif field_type == "array":
+            py_type = list
+        elif field_type == "object":
+            py_type = dict
+
+        # For Pydantic v2, use create_model with (type, Field(...)) tuples
+        if name in required:
+            field_defs[name] = (py_type, Field(description=description))
+        else:
+            field_defs[name] = (py_type | None, Field(default=None, description=description))
+
+    # Create dynamic Pydantic model
+    if not field_defs:
+        return None
+
+    return create_model("ToolArgs", **field_defs)
+
+
 async def load_mcp_base_tools() -> list[BaseTool]:
     """Load all active MCP tools as LangChain ``BaseTool`` objects.
 
@@ -77,10 +120,13 @@ async def load_mcp_base_tools() -> list[BaseTool]:
 
     tools: list[BaseTool] = []
     for tool in active_tools:
+        # Build args_schema from parameters_schema
+        args_schema = _build_args_schema(tool.parameters_schema)
+
         adapter = _MCPClientToolAdapter(
-            tool_name=tool.name,
+            name=tool.name,
             description=tool.description,
-            parameters_schema=tool.parameters_schema,
+            args_schema=args_schema,
             mcp_client=mcp_client,
             server_id=tool.source_server_id,
         )
@@ -103,9 +149,6 @@ class _MCPClientToolAdapter(BaseTool):
 
     mcp_client: Any  # MCPClient — avoid import cycle at class level
     server_id: str
-    tool_name: str
-    description: str
-    parameters_schema: dict[str, Any]
 
     def _run(self, **kwargs: Any) -> str:
         raise NotImplementedError("Use async ainvoke() instead")
@@ -113,7 +156,7 @@ class _MCPClientToolAdapter(BaseTool):
     async def _arun(self, **kwargs: Any) -> Any:
         result = await self.mcp_client.call_tool(
             server_id=self.server_id,
-            tool_name=self.tool_name,
+            tool_name=self.name,
             arguments=kwargs,
         )
         if result.success:

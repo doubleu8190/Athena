@@ -34,6 +34,7 @@ function createEventHandler(sessionId: string, msgId: string) {
       case 'tool_call_start': {
         const tc: ToolCallEvent = {
           tool_name: (data.tool_name as string) || 'unknown',
+          tool_call_id: (data.tool_call_id as string) || '',  // 保存 tool_call_id
           args_preview: (data.args_preview as string) || '',
           status: 'running',
         }
@@ -47,10 +48,10 @@ function createEventHandler(sessionId: string, msgId: string) {
       }
 
       case 'tool_call_result': {
-        const toolName = (data.tool_name as string) || 'unknown'
+        const toolCallId = (data.tool_call_id as string) || ''
         const msg = store.messages[sessionId]?.find((m) => m.id === msgId)
         const toolCalls = (msg?.toolCalls || []).map((tc) =>
-          tc.tool_name === toolName
+          tc.tool_call_id === toolCallId  // 使用 tool_call_id 匹配，而不是 tool_name
             ? {
                 ...tc,
                 status: data.success ? 'success' : 'error',

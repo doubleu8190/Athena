@@ -130,6 +130,14 @@ class ServerConnection:
                 "name": tool_name,
                 "arguments": dict(arguments),
             })
+            logger.info("_send_request", server_id=self.server_id, tool_name=tool_name, arguments=arguments, result=result)
+            if result is None:
+                return ToolResult(
+                    server_id=self.server_id,
+                    tool_name=tool_name,
+                    success=False,
+                    error="Tool call returned no result",
+                )
             return ToolResult(
                 server_id=self.server_id,
                 tool_name=tool_name,
@@ -386,8 +394,9 @@ class MCPClient:
                     success=False,
                     error=f"Server {server_id} not connected",
                 )
-        logger.info("mcp_call_tool", server_id=server_id, tool_name=tool_name, arguments=arguments)
-        return await conn.call_tool(tool_name, arguments)
+        result =  await conn.call_tool(tool_name, arguments)
+        logger.info("mcp_call_tool", server_id=server_id, tool_name=tool_name, arguments=arguments, result=result)
+        return result
 
     async def list_tools(self, server_id: str) -> list[ToolDef]:
         """Get the current tool list from a connected server."""
@@ -567,49 +576,6 @@ class MCPClient:
 
         candidates.sort(key=score)
         return candidates[0]
-
-    # ── Export ─────────────────────────────────────────────────────
-
-    def export_for_planner(self) -> list[dict[str, Any]]:
-        """Export active tools in a format suitable for LLM system prompts."""
-        tools = self.get_active_tools()
-        return [
-            {
-                "name": t.name,
-                "description": t.description,
-                "parameters_schema": t.parameters_schema,
-                "source_server_id": t.source_server_id,
-                "risk_level": t.risk_level,
-                "capability_tags": t.capability_tags,
-            }
-            for t in tools
-        ]
-
-    def export_for_llm(self) -> list[dict[str, Any]]:
-        """Export active tools in OpenAI function-calling format."""
-        import json as _json
-
-        tools = self.get_active_tools()
-        result: list[dict[str, Any]] = []
-        for t in tools:
-            params: dict[str, Any] = {}
-            if t.parameters_schema:
-                try:
-                    params = _json.loads(t.parameters_schema)
-                except (_json.JSONDecodeError, TypeError):
-                    params = {"type": "object", "properties": {}}
-            else:
-                params = {"type": "object", "properties": {}}
-
-            result.append({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description or "",
-                    "parameters": params,
-                },
-            })
-        return result
 
     # ── Helpers ────────────────────────────────────────────────────
 

@@ -212,10 +212,12 @@ async def web_message(
                                 for tc in msg.tool_calls:
                                     tc_name = tc.get("name", "unknown")
                                     tc_args = tc.get("args", tc.get("arguments", {}))
+                                    tc_id = tc.get("id", "")  # 获取 tool_call_id
                                     yield _sse_event(
                                         SseEvent.TOOL_CALL_START,
                                         {
                                             "tool_name": tc_name,
+                                            "tool_call_id": tc_id,  # 发送 tool_call_id
                                             "args_preview": str(tc_args)[:200],
                                         },
                                     )
@@ -410,10 +412,12 @@ async def web_confirm(
                                 for tc in msg.tool_calls:
                                     tc_name = tc.get("name", "unknown")
                                     tc_args = tc.get("args", tc.get("arguments", {}))
+                                    tc_id = tc.get("id", "")  # 获取 tool_call_id
                                     yield _sse_event(
                                         SseEvent.TOOL_CALL_START,
                                         {
                                             "tool_name": tc_name,
+                                            "tool_call_id": tc_id,  # 发送 tool_call_id
                                             "args_preview": str(tc_args)[:200],
                                         },
                                     )
@@ -595,7 +599,7 @@ async def web_history(
     config = get_config()
     user_id = config.user.web.user_id
     session_id = ContextManager.make_session_id(user_id, "web", chat_id)
-
+    logger.info("web_history", session_id=session_id)
     checkpointer = None
     try:
         checkpointer = await create_checkpointer(config.sqlite_db_path)

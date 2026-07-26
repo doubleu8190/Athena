@@ -36,8 +36,8 @@ def setup_logging(log_level: str = "INFO") -> None:
             structlog.stdlib.add_logger_name,
             # Add timestamp in ISO 8601 UTC
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            # Format as JSON
-            structlog.processors.JSONRenderer(),
+            # Format as JSON, preserve Unicode characters (Chinese, emojis, etc.)
+            structlog.processors.JSONRenderer(ensure_ascii=False),
         ],
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),

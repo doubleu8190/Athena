@@ -55,7 +55,7 @@ async def tools_node(
         from athena.mcp_client.client import get_mcp_client
         mcp_client = get_mcp_client()
 
-    log = bind_context(session_id=cfg["session_id"], node="tools_node")
+    log = bind_context(session_id=cfg.get("thread_id", state.get("session_id", "")), node="tools_node")
 
     if isinstance(tool_args, str):
         try:

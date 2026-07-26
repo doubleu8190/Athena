@@ -106,15 +106,3 @@ class TestToolRegistry:
         await registry.register_tools("srv1", tools, "external")
         fallback = registry.resolve_fallback("tool_a")
         assert fallback.name == "tool_b"  # Lower risk preferred
-
-    def test_export_for_planner(self, registry, sample_tools):
-        """Export should return only active tools in LLM-friendly format."""
-        import asyncio
-        asyncio.run(registry.register_tools("builtin-core", sample_tools, "builtin"))
-        exported = registry.export_for_planner()
-        assert len(exported) == 4
-        for t in exported:
-            assert "name" in t
-            assert "description" in t
-            assert "parameters_schema" in t
-            assert "capability_tags" in t

@@ -91,7 +91,9 @@ structlog.configure(
         structlog.processors.TimeStamper(        # 3. 添加 ISO 8601 UTC 时间戳
             fmt="iso", utc=True
         ),
-        structlog.processors.JSONRenderer(),     # 4. 渲染为 JSON
+        structlog.processors.JSONRenderer(       # 4. 渲染为 JSON，保留 Unicode 字符
+            ensure_ascii=False
+        ),
     ],
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),

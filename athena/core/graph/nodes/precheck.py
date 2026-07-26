@@ -69,7 +69,7 @@ async def precheck_node(
     if harness is None:
         from athena.core.harness import get_harness
         harness = await get_harness()
-    session_id = cfg.get("session_id", "")
+    session_id = cfg.get("thread_id", state.get("session_id", ""))
 
     log = bind_context(session_id=session_id, node="precheck_node")
 

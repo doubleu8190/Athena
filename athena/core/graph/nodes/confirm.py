@@ -119,7 +119,7 @@ async def confirm_node(
     )
 
     return {
-        "messages": messages or None,
+        "messages": messages or [],
         "confirmed_tool_calls": confirmed or None,
         "needs_confirmation_tool_calls": remaining_needs_confirmation or None,
     }

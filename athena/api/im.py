@@ -285,8 +285,10 @@ async def web_message(
             # Fire-and-forget: extract conversation insights after normal completion
             if task_completed:
                 try:
-                    from athena.tasks.conversation_extract import extract_conversation_insights_task
-                    extract_conversation_insights_task.delay(session.session_id, unified.user_id)
+                    from athena.tasks.dispatcher import dispatch_extract_conversation
+                    await dispatch_extract_conversation(
+                        session.session_id, unified.user_id
+                    )
                 except Exception as extract_err:
                     logger.warning("extraction_trigger_failed", error=str(extract_err))
 

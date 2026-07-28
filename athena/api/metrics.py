@@ -100,7 +100,7 @@ athena_mcp_server_status = Gauge(
     ["server_id"],
 )
 
-athena_celery_queue_depth = Gauge(
-    "athena_celery_queue_depth",
-    "Celery task queue depth",
+athena_arq_queue_depth = Gauge(
+    "athena_arq_queue_depth",
+    "ARQ task queue depth",
 )

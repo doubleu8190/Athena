@@ -30,6 +30,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan: startup and shutdown hooks."""
+    import asyncio
+
     # ── Startup ────────────────────────────────────────────────────
     logger.info("athena_starting")
 
@@ -69,12 +71,39 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await mcp_client.start()
     set_mcp_client(mcp_client)
 
+    # ── Start embedded ARQ worker ──────────────────────────────────
+    arq_task: asyncio.Task[None] | None = None
+    if config.arq_embedded:
+        from arq import run_worker
+
+        from athena.arq_worker import WorkerSettings
+
+        async def _run_arq_worker() -> None:
+            logger.info("arq_worker_embedded_starting")
+            try:
+                await run_worker(WorkerSettings)
+            except asyncio.CancelledError:
+                logger.info("arq_worker_embedded_cancelled")
+            except Exception:
+                logger.exception("arq_worker_embedded_failed")
+
+        arq_task = asyncio.create_task(_run_arq_worker())
+        logger.info("arq_worker_embedded_started")
+
     logger.info("athena_started")
 
     yield
 
     # ── Shutdown ───────────────────────────────────────────────────
     logger.info("athena_stopping")
+
+    # Stop embedded ARQ worker
+    if arq_task is not None and not arq_task.done():
+        arq_task.cancel()
+        try:
+            await arq_task
+        except asyncio.CancelledError:
+            pass
 
     # Stop lazy singletons (only if they were created)
     from athena.core.harness import stop_harness

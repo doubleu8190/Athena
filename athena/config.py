@@ -133,11 +133,14 @@ class Config:
     redis_url: str = field(
         default_factory=lambda: os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     )
-    celery_broker_url: str = field(
-        default_factory=lambda: os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/1")
+    arq_broker_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "ARQ_BROKER_URL",
+            os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/1"),
+        )
     )
-    celery_result_backend: str = field(
-        default_factory=lambda: os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
+    arq_embedded: bool = field(
+        default_factory=lambda: os.environ.get("ARQ_EMBEDDED", "true").lower() == "true"
     )
     admin_api_key: str = field(
         default_factory=lambda: get_secret("ADMIN_API_KEY", "")

@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+/* ── Theme variables ─────────────────────────────────────────────── */
+:root {
+  --color-brand: #f97316;
+}
+
+/* ── Base styles ─────────────────────────────────────────────────── */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Custom scrollbar ────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #4b5563;
+}
+
+/* ── Stream cursor blink ─────────────────────────────────────────── */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.stream-cursor {
+  animation: blink 1s ease-in-out infinite;
+}
+
+/* ── Live pulse ──────────────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.live-pulse {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* ── Markdown prose ──────────────────────────────────────────────── */
+.prose {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.prose pre {
+  background: var(--color-gray-50);
+  border: 1px solid var(--color-gray-200);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.dark .prose pre {
+  background: var(--color-gray-900);
+  border-color: var(--color-gray-700);
+}
+
+.prose code {
+  font-size: 0.8125rem;
+}
+.prose pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.prose th,
+.prose td {
+  border: 1px solid var(--color-gray-200);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.dark .prose th,
+.dark .prose td {
+  border-color: var(--color-gray-700);
+}
+.prose th {
+  background: var(--color-gray-50);
+  font-weight: 600;
+}
+.dark .prose th {
+  background: var(--color-gray-800);
+}
+
+.prose blockquote {
+  border-left: 3px solid var(--color-brand);
+  padding-left: 1rem;
+  color: var(--color-gray-600);
+  margin: 0.5rem 0;
+}
+.dark .prose blockquote {
+  color: var(--color-gray-400);
+}

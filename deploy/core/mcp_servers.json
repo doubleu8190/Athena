@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "builtin-core": {
+      "command": "python",
+      "args": [
+        "-m",
+        "athena.tools.server"
+      ],
+      "env": {}
+    },
+    "weather": {
+      "command": "python",
+      "args": [
+        "-m",
+        "athena.tools.weather_server"
+      ],
+      "env": {}
+    },
+    "rag": {
+      "command": "python",
+      "args": [
+        "-m",
+        "athena.tools.rag_server"
+      ],
+      "env": {}
+    }
+  }
+}

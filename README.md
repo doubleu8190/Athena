@@ -49,7 +49,7 @@ Athena is a personal AI assistant powered by large language models, built on Lan
 │   ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐    │
 │   │    SQLite    │  │    Redis     │  │     ChromaDB         │    │
 │   │ (sessions,   │  │  (cache,     │  │  (vector memory,     │    │
-│   │  rules, MCP) │  │   Celery)    │  │   embeddings)        │    │
+│   │  rules, MCP) │  │   ARQ)      │  │   embeddings)        │    │
 │   └──────────────┘  └──────────────┘  └──────────────────────┘    │
 └───────────────────────────────────────────────────────────────────┘
                          │
@@ -96,7 +96,7 @@ Athena is a personal AI assistant powered by large language models, built on Lan
 ### Memory & RAG
 - **Local Embeddings**: `all-MiniLM-L6-v2` via sentence-transformers (no data leaves the machine)
 - **ChromaDB Vector Store**: Persistent, cosine-similarity search
-- **Automatic Extraction**: Celery task extracts atomic facts and paragraph summaries from conversations
+- **Automatic Extraction**: ARQ task extracts atomic facts and paragraph summaries from conversations
 - **Semantic Deduplication**: New memories compared against existing ones before write
 
 ### Multi-Channel IM
@@ -126,7 +126,7 @@ Athena is a personal AI assistant powered by large language models, built on Lan
 | **Cache / Broker** | Redis 7+ |
 | **Vector Store** | ChromaDB 1.5+ |
 | **Embeddings** | sentence-transformers (all-MiniLM-L6-v2, local) |
-| **Task Queue** | Celery 5.6+ |
+| **Task Queue** | ARQ 0.26+ |
 | **MCP** | fastmcp 3.4+, custom MCP client |
 | **Containerization** | Docker, Docker Compose |
 | **Frontend** | React 18, TypeScript 5.6, Vite 6, Tailwind CSS 4, Zustand 5 |
@@ -179,7 +179,7 @@ The frontend runs on `http://localhost:5173` by default.
 # Start API server
 athena-core
 
-# Start Celery worker
+# Start ARQ worker (background tasks)
 athena-worker
 ```
 
@@ -306,8 +306,7 @@ tool_resilience:
 | `SQLITE_DB_PATH` | `/data/athena.db` | SQLite database path |
 | `CHROMA_PERSIST_DIR` | `/data/chroma` | ChromaDB persistence directory |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
-| `CELERY_BROKER_URL` | `redis://localhost:6379/1` | Celery broker URL |
-| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/2` | Celery result backend |
+| `ARQ_BROKER_URL` | `redis://localhost:6379/1` | ARQ broker URL |
 | `ADMIN_API_KEY` | *(empty)* | Admin API key (X-API-Key header) |
 | `DEVICE_PSK` | *(empty)* | Device WebSocket pre-shared key |
 | `LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR) |
@@ -352,7 +351,7 @@ echo "your-deepseek-key" > secrets/deepseek_api_key
 echo "your-mimo-key" > secrets/mimo_api_key
 chmod 600 secrets/*
 
-# Build base image (required for athena-core and celery-worker)
+# Build base image (required for athena-core and arq-worker)
 sh scripts/build-base.sh
 
 # Start all services
@@ -366,14 +365,9 @@ docker compose up -d --build
 | `athena-gateway` (Nginx) | 80 | Reverse proxy for frontend + API |
 | `athena-core` | 8000 | FastAPI + LangGraph agent engine |
 | `athena-frontend` | — | React + Vite SPA |
-| `celery-worker` | — | Background tasks (conversation extraction) |
-| `redis` | — | Session cache + Celery broker |
+| `arq-worker` | — | Background tasks (conversation extraction) |
+| `redis` | — | Session cache + ARQ broker |
 | `skill-proxy` (Squid) | 3128 | Skill network egress proxy |
-| `elasticsearch` | 9200 | Log indexing and search |
-| `logstash` | 5044 | Log aggregation and parsing |
-| `kibana` | 5601 | Log visualization and dashboards |
-| `filebeat` | — | Docker container log collection |
-| `kibana-setup` | — | One-shot dashboard import |
 
 ### Scripts
 
@@ -494,8 +488,8 @@ athena/                          # Backend Python package
 ├── main.py                      # FastAPI app factory + entry point
 ├── config.py                    # YAML + env config loading
 ├── logging_config.py            # structlog setup
-├── celery_app.py                # Celery app instance
-├── worker.py                    # Celery worker entry point
+├── arq_worker.py                # ARQ worker configuration
+├── worker.py                    # ARQ worker entry point
 ├── middleware.py                # FastAPI middleware
 │
 ├── core/                        # Core engine
@@ -575,7 +569,7 @@ athena/                          # Backend Python package
 │   ├── deps.py                  # Dependency injection helpers
 │   └── response.py              # Standard response format
 │
-├── tasks/                       # Celery tasks
+├── tasks/                       # ARQ tasks
 │   └── conversation_extract.py  # Auto-extract insights from conversations
 │
 └── migrations/                  # Alembic migrations
@@ -753,7 +747,7 @@ agent ────── LLM decides: respond directly or call tools
 - Check `docker logs athena-skill-<id>` for container errors
 
 **Conversation extraction not working**
-- Verify Celery worker is running: `celery -A athena.worker status`
+- Verify ARQ worker is running: `arq athena.arq_worker.WorkerSettings`
 - Check `default_summarize_provider` is configured in `llm.yaml`
 - Ensure at least `min_messages_since_last` new messages exist
 - Check worker logs for extraction errors

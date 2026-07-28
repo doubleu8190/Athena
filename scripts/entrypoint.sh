@@ -5,7 +5,7 @@ set -e
 echo "Running Alembic migrations..."
 alembic upgrade head
 
-# If command arguments are provided, execute them (e.g., celery worker)
+# If command arguments are provided, execute them (e.g., arq worker)
 if [ $# -gt 0 ]; then
     echo "Starting with command: $*"
     exec "$@"

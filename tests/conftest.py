@@ -1,4 +1,4 @@
-"""Shared test fixtures — in-memory SQLite, mock Redis, test Config."""
+"""Shared test fixtures — in-memory SQLite, test Config."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def clean_config_singleton():
     """Reset the config singleton between tests."""
     from athena.config import set_config
     yield
-    set_config(None)
+    set_config(None)  # type: ignore[arg-type]
 
 
 @pytest.fixture

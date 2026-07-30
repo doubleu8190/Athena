@@ -1,10 +1,10 @@
-"""Conversation insight extraction — helper functions for ARQ background tasks.
+"""Conversation insight extraction — helper functions for background tasks.
 
 Reads the latest conversation from the LangGraph checkpointer, uses the
 fast LLM to extract valuable information (atomic facts + paragraph
 summaries), and stores them directly in ChromaDB via RAGManager.
 
-Triggered after each complete SSE stream in api/im.py via ARQ.
+Triggered after each complete stream in api/im.py via TaskScheduler.
 """
 
 from __future__ import annotations

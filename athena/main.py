@@ -51,9 +51,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.error("database_connection_failed", path=config.sqlite_db_path)
 
-    # Initialize Redis (already a singleton via get_redis_client())
-    from athena.models.redis import get_redis_client
-    get_redis_client(config.redis_url)
+    # Initialize in-memory cache
+    from athena.cache.memory_cache import get_cache
+    get_cache()
+    logger.info("cache_initialized")
+
+    # Initialize TaskScheduler (replaces ARQ/Redis)
+    from athena.tasks.scheduler import get_scheduler
+    scheduler = get_scheduler()
+    logger.info("scheduler_initialized")
 
     # Initialize GatewayManager (singleton)
     from athena.gateway.manager import GatewayManager, set_gateway_manager
@@ -71,24 +77,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await mcp_client.start()
     set_mcp_client(mcp_client)
 
-    # ── Start embedded ARQ worker ──────────────────────────────────
-    arq_task: asyncio.Task[None] | None = None
+    # Start embedded scheduler if enabled
+    scheduler_task: asyncio.Task[None] | None = None
     if config.arq_embedded:
-        from arq import run_worker
+        # Verify scheduler is working by scheduling a heartbeat task
+        async def _scheduler_heartbeat() -> None:
+            logger.info("scheduler_heartbeat")
 
-        from athena.arq_worker import WorkerSettings
-
-        async def _run_arq_worker() -> None:
-            logger.info("arq_worker_embedded_starting")
-            try:
-                await run_worker(WorkerSettings)
-            except asyncio.CancelledError:
-                logger.info("arq_worker_embedded_cancelled")
-            except Exception:
-                logger.exception("arq_worker_embedded_failed")
-
-        arq_task = asyncio.create_task(_run_arq_worker())
-        logger.info("arq_worker_embedded_started")
+        job_id = await scheduler.enqueue(_scheduler_heartbeat)
+        logger.info("scheduler_started", heartbeat_job_id=job_id)
 
     logger.info("athena_started")
 
@@ -97,13 +94,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # ── Shutdown ───────────────────────────────────────────────────
     logger.info("athena_stopping")
 
-    # Stop embedded ARQ worker
-    if arq_task is not None and not arq_task.done():
-        arq_task.cancel()
-        try:
-            await arq_task
-        except asyncio.CancelledError:
-            pass
+    # Shutdown task scheduler (cancel pending tasks)
+    from athena.tasks.scheduler import close_scheduler
+    await close_scheduler()
 
     # Stop lazy singletons (only if they were created)
     from athena.core.harness import stop_harness

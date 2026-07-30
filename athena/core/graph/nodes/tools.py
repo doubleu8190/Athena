@@ -5,10 +5,14 @@ Each invocation handles **one** tool call.  The agent graph uses
 Confirmation is handled **before** this node by ``confirm_node``,
 so this node only executes already-confirmed tools.
 
-All tool calls flow through ``MCPClient.call_tool()`` — the single
-connection pool with heartbeat, reconnect, and state management.
-LLM tool-binding (``model.bind_tools()``) uses the same path via
-``_MCPClientToolAdapter`` in ``tool_loader.py``.
+Dual Runtime Strategy:
+- Native tools (high-frequency, lightweight): ``file_read``, ``file_write``,
+  ``file_search``, ``file_delete``, ``query_weather`` — execute directly
+  via Python function call, bypassing MCP transport for minimal latency.
+- MCP tools (external services, heavy computation): go through the full
+  MCP protocol stack (JSON-RPC → transport → server).
+
+Routing is determined by ``tool.execution_mode`` field.
 """
 
 from __future__ import annotations
@@ -66,21 +70,37 @@ async def tools_node(
 
     log.info("executing_tool", tool=tool_name, args=tool_args, tool_call_id=tool_call_id)
 
-    # Resolve server_id from MCPClient registry
+    # Resolve tool info from registry (determines execution mode)
     tool = mcp_client.get_tool_by_name(tool_name)
-    server_id = tool.source_server_id if tool else "builtin-core"
+    is_native = tool is not None and tool.execution_mode == "native"
 
-    # ── Single execution path via MCPClient ────────────────────────
-    async def tool_func(args: dict) -> Any:
-        """Execute tool via MCPClient — the only path."""
-        result = await mcp_client.call_tool(
-            server_id=server_id,
-            tool_name=tool_name,
-            arguments=args,
-        )
-        if result.success:
-            return result.content
-        raise ToolExecutionError(result.error or "Tool returned failure")
+    # ── Dual runtime: choose execution path ────────────────────────
+    if is_native:
+        log.info("native_tool_path", tool=tool_name)
+
+        async def tool_func(args: dict) -> Any:
+            """Execute native tool directly via Python handler."""
+            result = await mcp_client.call_native_tool(
+                tool_name=tool_name,
+                arguments=args,
+            )
+            if result.success:
+                return result.content
+            raise ToolExecutionError(result.error or "Native tool returned failure")
+    else:
+        log.info("mcp_tool_path", tool=tool_name)
+        server_id = tool.source_server_id if tool else "builtin-core"
+
+        async def tool_func(args: dict) -> Any:
+            """Execute tool via MCP protocol stack."""
+            result = await mcp_client.call_tool(
+                server_id=server_id,
+                tool_name=tool_name,
+                arguments=args,
+            )
+            if result.success:
+                return result.content
+            raise ToolExecutionError(result.error or "Tool returned failure")
 
     # ── Resilience-aware path ──────────────────────────────────────
     resilience_manager: ResilienceManager | None = cfg.get("resilience_manager")
@@ -92,7 +112,7 @@ async def tools_node(
             tool_name=tool_name,
             tool_args=tool_args,
             tool_call_id=tool_call_id,
-            server_id=server_id,
+            server_id=tool.source_server_id if tool else "builtin-core",
             tool_func=tool_func,
             log=log,
         )

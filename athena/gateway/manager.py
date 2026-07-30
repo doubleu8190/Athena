@@ -189,62 +189,80 @@ class GatewayManager:
             # ── Stream Graph Execution ────────────────────────────────
             # Use stream_mode="updates" to get per-node updates
             collected_response = []
-            async for event in graph.astream(
-                initial_state,
-                config=graph_config,
-                stream_mode="updates",
-            ):
-                # Handle interrupt (confirmation required)
-                if "__interrupt__" in event:
-                    await self._handle_interrupt(
-                        unified_msg.channel,
-                        unified_msg.user_id,
-                        unified_msg.chat_id or unified_msg.user_id,
-                        event["__interrupt__"],
-                        session.session_id,
-                    )
-                    break
+            gateway_decisions: dict[str, str] = {}
 
-                # Convert LangGraph events to adapter messages
-                for node_name, node_output in event.items():
-                    if node_name == "agent":
-                        # ── Agent node output ────────────────────────
-                        messages = node_output.get("messages", [])
-                        status = node_output.get("status", "")
+            while True:
+                input_state: Any = initial_state
+                if gateway_decisions:
+                    input_state = {**initial_state, "_confirmation_results": gateway_decisions}
 
-                        for msg in messages:
-                            if hasattr(msg, "content") and msg.content:
-                                content = (
-                                    msg.content
-                                    if isinstance(msg.content, str)
-                                    else str(msg.content)
-                                )
-                                if content.strip():
-                                    collected_response.append(content)
-
-                        if status == "completed":
-                            # Send the final response
-                            if collected_response:
-                                await self.send_message(
-                                    channel=unified_msg.channel,
-                                    user_id=unified_msg.user_id,
-                                    chat_id=unified_msg.chat_id or unified_msg.user_id,
-                                    text="\n".join(collected_response),
-                                    reply_token=unified_msg.reply_token,
-                                )
+                loop_done = False
+                async for event in graph.astream(
+                    input_state,
+                    config=graph_config,
+                    stream_mode="updates",
+                ):
+                    # Handle awaiting confirmation (state-based flow)
+                    for node_name, node_output in event.items():
+                        if node_name == "confirm" and node_output.get("_awaiting_confirmation"):
+                            pending_tools = node_output["_awaiting_confirmation"]
+                            await self._handle_confirmation_request(
+                                unified_msg.channel,
+                                unified_msg.user_id,
+                                unified_msg.chat_id or unified_msg.user_id,
+                                pending_tools,
+                                session.session_id,
+                            )
+                            loop_done = True
                             break
 
-                    elif node_name == "tools":
-                        # ── Tools node output ────────────────────────
-                        # Tool results are processed internally by the graph
-                        # but we can log them for debugging
-                        t_messages = node_output.get("messages", [])
-                        for msg in t_messages:
-                            if hasattr(msg, "content"):
-                                logger.info(
-                                    "tool_execution_result",
-                                    content=str(msg.content)[:200],
-                                )
+                    if loop_done:
+                        break
+
+                    # Convert LangGraph events to adapter messages
+                    for node_name, node_output in event.items():
+                        if node_name == "agent":
+                            # ── Agent node output ────────────────────────
+                            messages = node_output.get("messages", [])
+                            status = node_output.get("status", "")
+
+                            for msg in messages:
+                                if hasattr(msg, "content") and msg.content:
+                                    content = (
+                                        msg.content
+                                        if isinstance(msg.content, str)
+                                        else str(msg.content)
+                                    )
+                                    if content.strip():
+                                        collected_response.append(content)
+
+                            if status == "completed":
+                                # Send the final response
+                                if collected_response:
+                                    await self.send_message(
+                                        channel=unified_msg.channel,
+                                        user_id=unified_msg.user_id,
+                                        chat_id=unified_msg.chat_id or unified_msg.user_id,
+                                        text="\n".join(collected_response),
+                                        reply_token=unified_msg.reply_token,
+                                    )
+                                loop_done = True
+                                break
+
+                        elif node_name == "tools":
+                            # ── Tools node output ────────────────────────
+                            # Tool results are processed internally by the graph
+                            # but we can log them for debugging
+                            t_messages = node_output.get("messages", [])
+                            for msg in t_messages:
+                                if hasattr(msg, "content"):
+                                    logger.info(
+                                        "tool_execution_result",
+                                        content=str(msg.content)[:200],
+                                    )
+
+                if not loop_done:
+                    break
 
         except Exception as e:
             logger.error(
@@ -277,43 +295,45 @@ class GatewayManager:
                         error=str(close_err),
                     )
 
-    async def _handle_interrupt(
+    async def _handle_confirmation_request(
         self,
         channel: str,
         user_id: str,
         chat_id: str,
-        interrupt_info: list,
+        pending_tools: list[dict[str, Any]],
         session_id: str,
     ) -> None:
-        """Handle a LangGraph interrupt requiring user confirmation.
+        """Handle confirmation requests using state-based flow.
+
+        Sends confirmation requests via the adapter and stores pending
+        approvals.  The graph execution loop will be resumed externally
+        via ``handle_confirmation_response`` when the user responds.
 
         Args:
             channel: The IM channel (telegram, wechat, etc.)
             user_id: The user ID
             chat_id: The chat ID
-            interrupt_info: List of interrupt entries from LangGraph
+            pending_tools: List of tool dicts needing user approval
             session_id: The session ID for resuming
         """
         from athena.gateway.confirmation import ConfirmationManager
 
         confirm_mgr = ConfirmationManager()
 
-        for entry in interrupt_info:
-            interrupt_data = entry.value
-            risk_level = interrupt_data.get("risk_level", "medium")
-            preview_text = interrupt_data.get("reason", "")
-            cooling_off_seconds = interrupt_data.get("cooling_off_seconds", 0)
-            timeout_seconds = interrupt_data.get("timeout_seconds", 300)
-            tool_name = interrupt_data.get("tool_name", "")
-            tool_call_id = interrupt_data.get("tool_call_id", "")
+        for tc in pending_tools:
+            tool_call_id = tc.get("id", "")
+            tool_name = tc.get("name", "")
+            risk_level = tc.get("_harness_risk_level", "medium")
+            cooling_off = tc.get("_harness_cooling_off", 0)
+            reason = tc.get("_harness_reason", "")
 
             # Create confirmation request
             confirmation = await confirm_mgr.create_confirmation(
                 task_id=tool_call_id,
                 risk_level=risk_level,
-                preview_text=preview_text,
-                cooling_off_seconds=cooling_off_seconds,
-                timeout_seconds=timeout_seconds,
+                preview_text=reason or f"Operation requires confirmation: {tool_name}",
+                cooling_off_seconds=cooling_off,
+                timeout_seconds=300,
                 channel=channel,
                 user_id=user_id,
                 chat_id=chat_id,
@@ -328,10 +348,11 @@ class GatewayManager:
             )
 
             logger.info(
-                "confirmation_sent_for_interrupt",
+                "confirmation_sent",
                 channel=channel,
                 session_id=session_id,
                 tool_name=tool_name,
+                tool_call_id=tool_call_id,
                 risk_level=risk_level,
             )
 
@@ -346,7 +367,8 @@ class GatewayManager:
         """Handle user's confirmation response and resume graph execution.
 
         Called by adapters when a user responds to a confirmation request.
-        Resumes the LangGraph execution with the user's decision.
+        Resumes the LangGraph execution by injecting the decision via state
+        (``_confirmation_results``) — no ``Command(resume)`` is used.
 
         Args:
             channel: The IM channel (telegram, wechat, etc.)
@@ -356,7 +378,6 @@ class GatewayManager:
             approved: Whether the user approved the operation
         """
         from langchain_core.runnables import RunnableConfig
-        from langgraph.types import Command
 
         from athena.core.graph import build_agent_graph
         from athena.core.graph.agent_graph import create_checkpointer
@@ -384,25 +405,30 @@ class GatewayManager:
                 }
             }
 
-            # ── Resume Execution ────────────────────────────────────────
+            # ── Resume Execution via state injection ────────────────────
             decision = "approved" if approved else "rejected"
             collected_response = []
+            resume_state: dict[str, Any] = {
+                "_confirmation_results": {"_pending": decision},
+            }
 
             async for event in graph.astream(
-                Command(resume=decision),
+                resume_state,
                 config=graph_config,
                 stream_mode="updates",
             ):
-                # Handle nested interrupt (agent may call another tool)
-                if "__interrupt__" in event:
-                    await self._handle_interrupt(
-                        channel,
-                        user_id,
-                        chat_id,
-                        event["__interrupt__"],
-                        session_id,
-                    )
-                    break
+                # Handle nested confirmation (state-based)
+                for node_name, node_output in event.items():
+                    if node_name == "confirm" and node_output.get("_awaiting_confirmation"):
+                        pending_tools = node_output["_awaiting_confirmation"]
+                        await self._handle_confirmation_request(
+                            channel,
+                            user_id,
+                            chat_id,
+                            pending_tools,
+                            session_id,
+                        )
+                        return  # End here; user must confirm via another response
 
                 # Convert LangGraph events to adapter messages
                 for node_name, node_output in event.items():
@@ -429,7 +455,7 @@ class GatewayManager:
                                     chat_id=chat_id,
                                     text="\n".join(collected_response),
                                 )
-                            break
+                            return
 
                     elif node_name == "tools":
                         # Log tool execution results for debugging

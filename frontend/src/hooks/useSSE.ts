@@ -1,7 +1,9 @@
 import { useState, useRef, useCallback } from 'react'
-import { sendMessage, confirmAndStream } from '../api/endpoints/chat'
+import { sendMessage, confirmAndStream, sendMessageWS, confirmAndStreamWS } from '../api/endpoints/chat'
 import type { ConfirmRequest } from '../api/endpoints/chat'
 import { useChatStore, type ToolCallEvent } from '../stores/chatStore'
+
+const USE_WS = true
 
 /**
  * Shared SSE event handler — updates the specified assistant message in the
@@ -182,7 +184,8 @@ export function useSSE() {
 
       const handleEvent = createEventHandler(chatId, assistantMsg.id)
 
-      const { abort } = sendMessage(
+      const sender = USE_WS ? sendMessageWS : sendMessage
+      const { abort } = sender(
         { content, chat_id: chatId },
         handleEvent,
         () => {
@@ -228,7 +231,8 @@ export function useSSE() {
 
       const handleEvent = createEventHandler(sessionId, msgId)
 
-      const { abort } = confirmAndStream(
+      const streamer = USE_WS ? confirmAndStreamWS : confirmAndStream
+      const { abort } = streamer(
         req,
         handleEvent,
         () => {

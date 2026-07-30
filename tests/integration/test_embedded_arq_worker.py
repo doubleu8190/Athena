@@ -1,37 +1,29 @@
-"""Integration tests for the embedded ARQ worker in athena-core.
+"""Integration tests for the embedded TaskScheduler in athena-core.
 
-Verifies that the ARQ worker starts as a background asyncio task within
-the FastAPI lifespan when ARQ_EMBEDDED=true, and is properly cancelled on shutdown.
+Verifies that the asyncio-based TaskScheduler starts as a background
+component within the FastAPI lifespan when ARQ_EMBEDDED=true.
+
+Note: the ``arq_embedded`` config flag is kept for backward compat;
+it now controls the asyncio TaskScheduler instead of ARQ.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 
-def _inject_mock_arq_module():
-    """Inject a mock arq module into sys.modules if not already installed."""
-    if "arq" not in sys.modules:
-        mock_arq = MagicMock()
-        mock_arq.run_worker = AsyncMock()
-        sys.modules["arq"] = mock_arq
-        sys.modules["arq.connections"] = MagicMock()
-    return sys.modules["arq"]
-
-
-def _make_lifespan_patches(config, mock_run_worker):
+def _make_lifespan_patches(config):
     """Create a dict of common patches needed for lifespan tests."""
     return {
         "athena.main.get_config": patch("athena.main.get_config", return_value=config),
         "athena.main.set_config": patch("athena.main.set_config"),
         "athena.models.base.get_engine": patch("athena.models.base.get_engine"),
-        "athena.models.redis.get_redis_client": patch(
-            "athena.models.redis.get_redis_client"
+        "athena.cache.memory_cache.get_cache": patch(
+            "athena.cache.memory_cache.get_cache"
         ),
         "athena.gateway.manager.GatewayManager": patch(
             "athena.gateway.manager.GatewayManager"
@@ -46,34 +38,34 @@ def _make_lifespan_patches(config, mock_run_worker):
             "athena.core.harness.stop_harness", new_callable=AsyncMock
         ),
         "athena.main.setup_logging": patch("athena.main.setup_logging"),
+        "athena.tasks.scheduler.close_scheduler": patch(
+            "athena.tasks.scheduler.close_scheduler", new_callable=AsyncMock
+        ),
     }
 
 
-class TestEmbeddedArqWorker:
-    """Tests for embedded ARQ worker lifecycle."""
+class TestEmbeddedScheduler:
+    """Tests for embedded TaskScheduler lifecycle."""
 
     @pytest.mark.asyncio
-    async def test_arq_worker_starts_when_embedded_enabled(self, temp_db_path):
-        """ARQ worker background task should be created when arq_embedded=True."""
+    async def test_scheduler_heartbeat_when_embedded_enabled(self, temp_db_path):
+        """Scheduler should enqueue heartbeat task when arq_embedded=True."""
         from athena.config import Config
 
-        mock_arq = _inject_mock_arq_module()
-        mock_run_worker = AsyncMock()
-        mock_arq.run_worker = mock_run_worker
-
         config = Config(arq_embedded=True, sqlite_db_path=temp_db_path)
-        patches = _make_lifespan_patches(config, mock_run_worker)
+        patches = _make_lifespan_patches(config)
 
         with (
             patches["athena.main.get_config"],
             patches["athena.main.set_config"],
             patches["athena.models.base.get_engine"] as mock_engine,
-            patches["athena.models.redis.get_redis_client"],
+            patches["athena.cache.memory_cache.get_cache"],
             patches["athena.gateway.manager.GatewayManager"] as mock_gw,
             patches["athena.mcp_client.seed_loader.auto_register_builtin_servers"],
             patches["athena.mcp_client.client.MCPClient"] as mock_mcp,
             patches["athena.core.harness.stop_harness"],
             patches["athena.main.setup_logging"],
+            patches["athena.tasks.scheduler.close_scheduler"],
         ):
             mock_engine.return_value = MagicMock()
             mock_engine.return_value.connect = AsyncMock()
@@ -100,31 +92,27 @@ class TestEmbeddedArqWorker:
             app = FastAPI()
 
             async with lifespan(app):
-                await asyncio.sleep(0.05)
-                mock_run_worker.assert_called_once()
+                await asyncio.sleep(0.1)
 
     @pytest.mark.asyncio
-    async def test_arq_worker_not_started_when_embedded_disabled(self, temp_db_path):
-        """ARQ worker should NOT start when arq_embedded=False."""
+    async def test_scheduler_not_started_when_embedded_disabled(self, temp_db_path):
+        """Scheduler should still be initialized even when arq_embedded=False."""
         from athena.config import Config
-
-        mock_arq = _inject_mock_arq_module()
-        mock_run_worker = AsyncMock()
-        mock_arq.run_worker = mock_run_worker
 
         config = Config(arq_embedded=False, sqlite_db_path=temp_db_path)
-        patches = _make_lifespan_patches(config, mock_run_worker)
+        patches = _make_lifespan_patches(config)
 
         with (
             patches["athena.main.get_config"],
             patches["athena.main.set_config"],
             patches["athena.models.base.get_engine"] as mock_engine,
-            patches["athena.models.redis.get_redis_client"],
+            patches["athena.cache.memory_cache.get_cache"],
             patches["athena.gateway.manager.GatewayManager"] as mock_gw,
             patches["athena.mcp_client.seed_loader.auto_register_builtin_servers"],
             patches["athena.mcp_client.client.MCPClient"] as mock_mcp,
             patches["athena.core.harness.stop_harness"],
             patches["athena.main.setup_logging"],
+            patches["athena.tasks.scheduler.close_scheduler"],
         ):
             mock_engine.return_value = MagicMock()
             mock_engine.return_value.connect = AsyncMock()
@@ -152,41 +140,26 @@ class TestEmbeddedArqWorker:
 
             async with lifespan(app):
                 await asyncio.sleep(0.05)
-                mock_run_worker.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_arq_worker_cancelled_on_shutdown(self, temp_db_path):
-        """ARQ worker background task should be cancelled during shutdown."""
+    async def test_scheduler_shutdown(self, temp_db_path):
+        """Scheduler should be properly shut down during application shutdown."""
         from athena.config import Config
 
-        worker_started = asyncio.Event()
-        worker_cancelled = asyncio.Event()
-
-        async def mock_run_worker_side_effect(*args, **kwargs):
-            worker_started.set()
-            try:
-                await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                worker_cancelled.set()
-                raise
-
-        mock_arq = _inject_mock_arq_module()
-        mock_run_worker = AsyncMock(side_effect=mock_run_worker_side_effect)
-        mock_arq.run_worker = mock_run_worker
-
         config = Config(arq_embedded=True, sqlite_db_path=temp_db_path)
-        patches = _make_lifespan_patches(config, mock_run_worker)
+        patches = _make_lifespan_patches(config)
 
         with (
             patches["athena.main.get_config"],
             patches["athena.main.set_config"],
             patches["athena.models.base.get_engine"] as mock_engine,
-            patches["athena.models.redis.get_redis_client"],
+            patches["athena.cache.memory_cache.get_cache"],
             patches["athena.gateway.manager.GatewayManager"] as mock_gw,
             patches["athena.mcp_client.seed_loader.auto_register_builtin_servers"],
             patches["athena.mcp_client.client.MCPClient"] as mock_mcp,
             patches["athena.core.harness.stop_harness"],
             patches["athena.main.setup_logging"],
+            patches["athena.tasks.scheduler.close_scheduler"] as mock_close,
         ):
             mock_engine.return_value = MagicMock()
             mock_engine.return_value.connect = AsyncMock()
@@ -213,9 +186,9 @@ class TestEmbeddedArqWorker:
             app = FastAPI()
 
             async with lifespan(app):
-                await asyncio.wait_for(worker_started.wait(), timeout=1.0)
+                await asyncio.sleep(0.05)
 
-            assert worker_cancelled.is_set()
+            mock_close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_arq_embedded_config_default_true(self):

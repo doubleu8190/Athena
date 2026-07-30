@@ -1,5 +1,6 @@
 import { api } from '../client'
 import { createSSEClient, type SSEEventCallback } from '../sse'
+import { AthenaWSClient, createWSClient } from '../ws'
 import type { Message } from '../../stores/chatStore'
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -81,4 +82,84 @@ export function getSessions(): Promise<SessionsResponse> {
 
 export function deleteSession(sessionId: string): Promise<{ success: boolean }> {
   return api.delete<{ success: boolean }>(`/im/web/session/${sessionId}`)
+}
+
+// ── WebSocket-based messaging ────────────────────────────────────────
+
+let wsClient: AthenaWSClient | null = null
+let wsEventHandlers = new Map<string, SSEEventCallback>()
+let wsDoneHandlers = new Map<string, () => void>()
+let wsErrorHandlers = new Map<string, (err: Error) => void>()
+
+function getWSClient(): AthenaWSClient {
+  if (!wsClient) {
+    wsClient = createWSClient('/api/v1/ws/im/web', {
+      onEvent: (eventType, data) => {
+        wsEventHandlers.forEach((handler) => handler(eventType, data))
+      },
+      onDone: () => {
+        wsDoneHandlers.forEach((handler) => handler())
+      },
+      onError: (err) => {
+        wsErrorHandlers.forEach((handler) => handler(err))
+      },
+      autoReconnect: true,
+    })
+    wsClient.connect()
+  }
+  return wsClient
+}
+
+export function sendMessageWS(
+  body: MessageRequest,
+  onEvent: SSEEventCallback,
+  onDone?: () => void,
+  onError?: (err: Error) => void
+): { abort: () => void } {
+  const key = `msg_${Date.now()}`
+  wsEventHandlers.set(key, onEvent)
+  if (onDone) wsDoneHandlers.set(key, onDone)
+  if (onError) wsErrorHandlers.set(key, onError)
+
+  const client = getWSClient()
+  client.sendMessage(body.content, body.chat_id, body.attachments)
+
+  return {
+    abort: () => {
+      wsEventHandlers.delete(key)
+      wsDoneHandlers.delete(key)
+      wsErrorHandlers.delete(key)
+    },
+  }
+}
+
+export function confirmAndStreamWS(
+  body: ConfirmRequest,
+  onEvent: SSEEventCallback,
+  onDone?: () => void,
+  onError?: (err: Error) => void
+): { abort: () => void } {
+  const key = `confirm_${Date.now()}`
+  wsEventHandlers.set(key, onEvent)
+  if (onDone) wsDoneHandlers.set(key, onDone)
+  if (onError) wsErrorHandlers.set(key, onError)
+
+  const client = getWSClient()
+  client.sendConfirm(body.chat_id, body.approved)
+
+  return {
+    abort: () => {
+      wsEventHandlers.delete(key)
+      wsDoneHandlers.delete(key)
+      wsErrorHandlers.delete(key)
+    },
+  }
+}
+
+export function disconnectWS(): void {
+  wsClient?.disconnect()
+  wsClient = null
+  wsEventHandlers.clear()
+  wsDoneHandlers.clear()
+  wsErrorHandlers.clear()
 }

@@ -45,7 +45,18 @@ class AgentState(TypedDict):
 
     needs_confirmation_tool_calls: list[dict[str, Any]] | None
     """Tool calls requiring user confirmation.  Set by ``precheck_node``;
-    consumed sequentially by ``confirm_node`` via ``interrupt()``."""
+    consumed sequentially by ``confirm_node`` via state-based flow."""
+
+    _awaiting_confirmation: list[dict[str, Any]] | None
+    """Set by ``confirm_node`` when a tool lacks a confirmation decision.
+    The ``after_confirm`` router sees this and routes to END so the
+    external handler can request user input.  After the decision is
+    provided, the graph is re-invoked targeting ``confirm``."""
+
+    _confirmation_results: dict[str, str] | None
+    """Mapping of tool_call_id → "approved"|"rejected".  Populated by the
+    external handler after receiving user confirmation.  The ``confirm_node``
+    reads this to process pending tools."""
 
     agent_iteration: int
     """How many times the agent node has been invoked in the current loop.

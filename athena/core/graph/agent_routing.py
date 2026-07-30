@@ -55,15 +55,25 @@ def after_confirm(state: AgentState) -> str | list[Send]:
     ``confirmed_tool_calls`` (user-approved via ``confirm_node``) and
     fans them out to the tools node.
 
-    If there are remaining tools that need confirmation, loops back to
-    the confirm node for another interrupt cycle.
+    If ``_awaiting_confirmation`` is set, signals that user input is
+    needed and routes to ``END`` so the external handler can process it.
+    After the handler provides a decision, the graph is re-invoked
+    targeting the ``confirm`` node.
+
+    If there are remaining tools that need confirmation (decision provided),
+    loops back to the confirm node for the next tool.
 
     Returns:
         ``"confirm"`` — loop back to confirm_node for remaining tools.
+        ``"__end__"`` — awaiting external confirmation (graph pauses).
         ``[Send("tools", ...), ...]`` — fan out all ready tool calls as
         independent branches (one per tool call).
-        ``[]`` — empty list signals END (all tools were blocked/rejected).
+        ``"summarize"`` — no tools to execute; loop back to agent.
     """
+    awaiting = state.get("_awaiting_confirmation")
+    if awaiting:
+        return "__end__"
+
     needs_confirmation = state.get("needs_confirmation_tool_calls") or []
     if needs_confirmation:
         return "confirm"

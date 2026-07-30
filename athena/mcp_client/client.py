@@ -37,6 +37,8 @@ class RegisteredTool:
     risk_level: str = "medium"
     idempotent: bool = True
     capability_tags: list[str] = field(default_factory=list)
+    execution_mode: str = "mcp"     # 'native' | 'mcp'
+    native_handler: Any = None      # Direct async callable for native tools
 
 
 @dataclass
@@ -49,6 +51,8 @@ class ToolDef:
     idempotent: bool = True
     capability_tags: list[str] = field(default_factory=list)
     risk_level: str = "medium"
+    execution_mode: str = "mcp"     # 'native' | 'mcp'
+    native_handler: Any = None      # Direct async callable for native tools
 
 
 @dataclass
@@ -255,6 +259,10 @@ class MCPClient:
         for server in servers:
             await self.connect_server(server.server_id)
 
+        # Register native tools (file I/O, weather) for low-latency execution
+        from athena.mcp_client.seed_loader import register_native_tools
+        await register_native_tools(self)
+
         # Start heartbeat loop
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         logger.info("mcp_client_started", server_count=len(self._connections))
@@ -398,6 +406,136 @@ class MCPClient:
         logger.info("mcp_call_tool", server_id=server_id, tool_name=tool_name, arguments=arguments, result=result)
         return result
 
+    # ── Native Tool Execution ─────────────────────────────────────
+
+    def register_native_tool(
+        self,
+        name: str,
+        handler: Any,
+        *,
+        description: str = "",
+        parameters_schema: dict[str, Any] | None = None,
+        risk_level: str = "low",
+        capability_tags: list[str] | None = None,
+    ) -> str:
+        """Register a native tool with a direct Python function handler.
+
+        Native tools bypass the MCP transport layer entirely — they are
+        called as direct async function invocations, reducing latency
+        for high-frequency lightweight operations (file_read, file_write, etc.).
+
+        Args:
+            name: Unique tool name (e.g., 'file_read').
+            handler: Async callable implementing the tool.
+            description: Human-readable description.
+            parameters_schema: JSON Schema for tool parameters.
+            risk_level: Risk level for precheck (low/medium/high/critical).
+            capability_tags: Capability tags for fallback resolution.
+
+        Returns:
+            The registered tool ID.
+        """
+        tool_id = f"native::{name}"
+        schema = parameters_schema or self._infer_schema_from_handler(handler, name, description)
+
+        rt = RegisteredTool(
+            id=tool_id,
+            name=name,
+            version="1.0.0",
+            description=description,
+            parameters_schema=schema,
+            source="builtin",
+            source_server_id="native",
+            handler_info="native_direct_call",
+            status="active",
+            risk_level=risk_level,
+            idempotent=True,
+            capability_tags=capability_tags or [],
+            execution_mode="native",
+            native_handler=handler,
+        )
+        self._tools[tool_id] = rt
+        self._tools_by_name_server[(name, "native")] = tool_id
+        logger.info("native_tool_registered", tool_id=tool_id, name=name)
+        return tool_id
+
+    async def call_native_tool(
+        self,
+        tool_name: str,
+        arguments: dict,
+    ) -> ToolResult:
+        """Execute a native tool directly via its Python handler.
+
+        Args:
+            tool_name: Name of the native tool to execute.
+            arguments: Tool arguments (passed as keyword args).
+        """
+        tool = self.get_tool_by_name(tool_name)
+        if not tool or tool.execution_mode != "native" or tool.native_handler is None:
+            return ToolResult(
+                server_id="native",
+                tool_name=tool_name,
+                success=False,
+                error=f"Native tool '{tool_name}' not found or has no handler",
+            )
+        try:
+            result = await tool.native_handler(**arguments)
+            return ToolResult(
+                server_id="native",
+                tool_name=tool_name,
+                success=True,
+                content=result,
+            )
+        except Exception as e:
+            logger.error("native_tool_error", tool_name=tool_name, error=str(e))
+            return ToolResult(
+                server_id="native",
+                tool_name=tool_name,
+                success=False,
+                error=str(e),
+            )
+
+    def _infer_schema_from_handler(
+        self, handler: Any, name: str, description: str
+    ) -> dict[str, Any]:
+        """Build a minimal JSON Schema from a handler's type annotations."""
+        import inspect
+
+        sig = inspect.signature(handler)
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+
+        for param_name, param in sig.parameters.items():
+            if param_name in ("self", "cls"):
+                continue
+            annotation = param.annotation
+            if annotation is inspect.Parameter.empty:
+                param_type = "string"
+            elif annotation is str:
+                param_type = "string"
+            elif annotation is int:
+                param_type = "integer"
+            elif annotation is float:
+                param_type = "number"
+            elif annotation is bool:
+                param_type = "boolean"
+            elif annotation is dict:
+                param_type = "object"
+            elif annotation is list:
+                param_type = "array"
+            else:
+                param_type = "string"
+
+            properties[param_name] = {"type": param_type}
+            if param.default is inspect.Parameter.empty:
+                required.append(param_name)
+
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }
+
     async def list_tools(self, server_id: str) -> list[ToolDef]:
         """Get the current tool list from a connected server."""
         conn = self._connections.get(server_id)
@@ -433,6 +571,8 @@ class MCPClient:
                 existing.idempotent = tool.idempotent
                 existing.capability_tags = tool.capability_tags
                 existing.risk_level = tool.risk_level
+                existing.execution_mode = tool.execution_mode
+                existing.native_handler = tool.native_handler
                 if existing.status != "disabled":
                     existing.status = "active"
                 registered_ids.append(existing_id)
@@ -450,6 +590,8 @@ class MCPClient:
                     risk_level=tool.risk_level,
                     idempotent=tool.idempotent,
                     capability_tags=tool.capability_tags,
+                    execution_mode=tool.execution_mode,
+                    native_handler=tool.native_handler,
                 )
                 self._tools[tool_id] = rt
                 self._tools_by_name_server[key] = tool_id

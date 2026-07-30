@@ -2,7 +2,7 @@
 
 Responsibilities:
 - Deterministic session_id: hash(user_id + channel + chat_id)
-- Session lookup: Redis (hot) → SQLite (cold) → create new
+- Session lookup: Memory cache (hot) → SQLite (cold) → create new
 """
 
 from __future__ import annotations
@@ -12,9 +12,10 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from athena.cache.memory_cache import get_cache
 from athena.config import get_config
 from athena.logging_config import bind_context, get_logger
-from athena.models.base import get_redis, get_session_maker
+from athena.models.base import get_session_maker
 
 if TYPE_CHECKING:
     from athena.models.session import Session
@@ -24,7 +25,7 @@ logger = get_logger(__name__)
 
 @dataclass
 class SessionData:
-    """Serializable session data for Redis caching."""
+    """Serializable session data for cache storage."""
     session_id: str = ""
     user_id: str = ""
     channel: str = ""
@@ -70,7 +71,7 @@ class ContextManager:
     """Manages conversation sessions for the Athena Core.
 
     Session IDs are deterministic: hash(user_id + channel + chat_id).
-    Session records are cached in Redis (hot) with SQLite as cold storage.
+    Session records are cached in memory (hot) with SQLite as cold storage.
     """
 
     def __init__(self) -> None:
@@ -93,7 +94,7 @@ class ContextManager:
     ) -> Session:
         """Find or create a session for the given identity.
 
-        Lookup order: Redis → SQLite → create new.
+        Lookup order: Memory cache → SQLite → create new.
         Returns a ``Session`` model instance (detached from SQLAlchemy session).
         """
         from athena.models.session import Session as SessionModel
@@ -101,10 +102,11 @@ class ContextManager:
         session_id = self.make_session_id(user_id, channel, chat_id)
         log = bind_context(session_id=session_id)
 
-        # 1. Check Redis
-        redis = await get_redis()
+        cache = get_cache()
         key = f"session:{session_id}"
-        data = await redis.get(key)
+
+        # 1. Check memory cache
+        data = await cache.get(key)
         if data:
             d = json.loads(data)
             return SessionModel(**d)
@@ -117,9 +119,8 @@ class ContextManager:
             )
             db_row = result.scalar_one_or_none()
             if db_row is not None:
-                # Cache in Redis
                 session_data = SessionData.from_session(db_row).to_dict()
-                await redis.set(
+                await cache.set(
                     key,
                     json.dumps(session_data, ensure_ascii=False, default=str),
                     ex=self._session_idle_timeout,
@@ -138,9 +139,8 @@ class ContextManager:
             db_session.add(new_session)
             await db_session.commit()
 
-            # Cache in Redis
             session_data = SessionData.from_session(new_session).to_dict()
-            await redis.set(
+            await cache.set(
                 key,
                 json.dumps(session_data, ensure_ascii=False, default=str),
                 ex=self._session_idle_timeout,

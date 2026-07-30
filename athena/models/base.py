@@ -9,13 +9,11 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import redis.asyncio as aioredis
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from athena.config import get_config
-from athena.models.redis import get_redis_client
 
 
 class Base(DeclarativeBase):
@@ -46,7 +44,7 @@ def get_engine(db_path: str) -> Any:
 
         # Enable WAL mode and foreign keys on every connection
         @event.listens_for(engine.sync_engine, "connect")
-        def set_pragmas(dbapi_connection: Any, connection_record: Any) -> None:  # noqa: ANN401
+        def set_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL;")
             cursor.execute("PRAGMA foreign_keys=ON;")
@@ -80,12 +78,5 @@ async def get_session(db_path: str|None = None) -> AsyncSession:
         db_path = config.sqlite_db_path
     maker = get_session_maker(db_path)
     return maker()
-
-# ── Redis ─────────────────────────────────────────────────────────────
-
-def get_redis() -> aioredis.Redis:
-    """FastAPI dependency: get the Redis client."""
-    config = get_config()
-    return get_redis_client(config.redis_url)
 
 

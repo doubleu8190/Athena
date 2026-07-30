@@ -1,16 +1,14 @@
-"""FastAPI dependencies — DB session, config, Redis, API key auth."""
+"""FastAPI dependencies — DB session, config, API key auth."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
-import redis.asyncio as aioredis
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from athena.config import Config, get_config
 from athena.models import get_session_maker
-from athena.models.redis import get_redis_client
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 

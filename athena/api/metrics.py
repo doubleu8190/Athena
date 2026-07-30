@@ -100,7 +100,7 @@ athena_mcp_server_status = Gauge(
     ["server_id"],
 )
 
-athena_arq_queue_depth = Gauge(
-    "athena_arq_queue_depth",
-    "ARQ task queue depth",
+athena_scheduler_pending_tasks = Gauge(
+    "athena_scheduler_pending_tasks",
+    "Number of pending/running tasks in the asyncio TaskScheduler",
 )

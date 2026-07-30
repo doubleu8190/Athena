@@ -130,6 +130,7 @@ class Config:
     chroma_persist_dir: str = field(
         default_factory=lambda: os.environ.get("CHROMA_PERSIST_DIR", "/data/chroma")
     )
+    # redis_url and arq_broker_url kept for backward compat but no longer required
     redis_url: str = field(
         default_factory=lambda: os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     )
@@ -139,6 +140,7 @@ class Config:
             os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/1"),
         )
     )
+    # arq_embedded now controls whether asyncio TaskScheduler starts on startup
     arq_embedded: bool = field(
         default_factory=lambda: os.environ.get("ARQ_EMBEDDED", "true").lower() == "true"
     )

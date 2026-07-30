@@ -388,12 +388,9 @@ class TestConfirmNode:
         assert result["needs_confirmation_tool_calls"] is None
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.confirm.interrupt")
-    async def test_confirmation_tool_approved(self, mock_interrupt, mock_config):
-        """Tool requiring confirmation → interrupt called, user approves."""
+    async def test_confirmation_tool_approved(self, mock_config):
+        """Tool requiring confirmation → decision passed via state, user approves."""
         from athena.core.graph.nodes.confirm import confirm_node
-
-        mock_interrupt.return_value = "approved"
 
         state = {
             "messages": [],
@@ -407,6 +404,7 @@ class TestConfirmNode:
                     "_harness_reason": "",
                 }
             ],
+            "_confirmation_results": {"call_1": "approved"},
             "agent_iteration": 1,
             "status": "executing",
             "session_id": "test",
@@ -420,12 +418,9 @@ class TestConfirmNode:
         assert result["needs_confirmation_tool_calls"] is None
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.confirm.interrupt")
-    async def test_confirmation_tool_rejected(self, mock_interrupt, mock_config):
-        """Tool requiring confirmation → interrupt called, user rejects."""
+    async def test_confirmation_tool_rejected(self, mock_config):
+        """Tool requiring confirmation → decision passed via state, user rejects."""
         from athena.core.graph.nodes.confirm import confirm_node
-
-        mock_interrupt.return_value = "rejected"
 
         state = {
             "messages": [],
@@ -439,6 +434,7 @@ class TestConfirmNode:
                     "_harness_reason": "",
                 }
             ],
+            "_confirmation_results": {"call_1": "rejected"},
             "agent_iteration": 1,
             "status": "executing",
             "session_id": "test",
@@ -453,12 +449,39 @@ class TestConfirmNode:
         assert result["needs_confirmation_tool_calls"] is None
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.confirm.interrupt")
-    async def test_multiple_tools_first_call(self, mock_interrupt, mock_config):
-        """Multiple tools requiring confirmation → first call processes only first tool."""
+    async def test_confirmation_awaits_when_no_decision(self, mock_config):
+        """Tool requiring confirmation with no decision → returns awaiting flag."""
         from athena.core.graph.nodes.confirm import confirm_node
 
-        mock_interrupt.return_value = "approved"
+        state = {
+            "messages": [],
+            "needs_confirmation_tool_calls": [
+                {
+                    "id": "call_1",
+                    "name": "file_delete",
+                    "arguments": {"path": "/tmp"},
+                    "_harness_risk_level": "high",
+                    "_harness_cooling_off": 0,
+                    "_harness_reason": "",
+                }
+            ],
+            "_confirmation_results": {},
+            "agent_iteration": 1,
+            "status": "executing",
+            "session_id": "test",
+            "user_id": "user1",
+            "channel": "web",
+        }
+
+        result = await confirm_node(AgentState(**state), mock_config)
+        assert "_awaiting_confirmation" in result
+        assert len(result["_awaiting_confirmation"]) == 1
+        assert result["_awaiting_confirmation"][0]["id"] == "call_1"
+
+    @pytest.mark.asyncio
+    async def test_multiple_tools_first_call(self, mock_config):
+        """Multiple tools requiring confirmation → first call processes only first tool."""
+        from athena.core.graph.nodes.confirm import confirm_node
 
         state = {
             "messages": [],
@@ -480,6 +503,7 @@ class TestConfirmNode:
                     "_harness_reason": "",
                 },
             ],
+            "_confirmation_results": {"call_1": "approved"},
             "agent_iteration": 1,
             "status": "executing",
             "session_id": "test",
@@ -491,18 +515,14 @@ class TestConfirmNode:
         # First call processes only the first tool
         assert len(result["confirmed_tool_calls"]) == 1
         assert result["confirmed_tool_calls"][0]["name"] == "file_delete"
-        assert mock_interrupt.call_count == 1
         # Second tool remains in needs_confirmation for next cycle
         assert len(result["needs_confirmation_tool_calls"]) == 1
         assert result["needs_confirmation_tool_calls"][0]["name"] == "file_write"
 
     @pytest.mark.asyncio
-    @patch("athena.core.graph.nodes.confirm.interrupt")
-    async def test_carries_forward_confirmed_tools(self, mock_interrupt, mock_config):
+    async def test_carries_forward_confirmed_tools(self, mock_config):
         """Confirmed tools from previous cycles are carried forward correctly."""
         from athena.core.graph.nodes.confirm import confirm_node
-
-        mock_interrupt.return_value = "approved"
 
         # Simulate second cycle: first tool already confirmed, second tool needs confirmation
         state = {
@@ -520,6 +540,7 @@ class TestConfirmNode:
                     "_harness_reason": "",
                 },
             ],
+            "_confirmation_results": {"call_2": "approved"},
             "agent_iteration": 1,
             "status": "executing",
             "session_id": "test",
@@ -528,8 +549,6 @@ class TestConfirmNode:
         }
 
         result = await confirm_node(AgentState(**state), mock_config)
-        # Only the second tool should be interrupted
-        assert mock_interrupt.call_count == 1
         # Both tools should be in confirmed list (carried forward + new)
         assert len(result["confirmed_tool_calls"]) == 2
         assert result["confirmed_tool_calls"][0]["name"] == "file_delete"

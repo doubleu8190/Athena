@@ -1,32 +1,17 @@
-"""ARQ Worker configuration for Athena background tasks.
+"""Background task definitions — conversation extraction.
 
-Replaces Celery with ARQ (async-redis-queue) for Windows compatibility.
-ARQ is a lightweight async task queue built on Redis and asyncio.
+Formerly ARQ worker tasks; now run via asyncio TaskScheduler.
+The ``extract_conversation_insights`` function signature is preserved
+for compatibility (ctx dict as first parameter).
 
-Usage:
-    arq athena.arq_worker.WorkerSettings
-
-To dispatch a task from your FastAPI code:
-    from arq import create_pool
-    from arq.connections import RedisSettings
-
-    redis = await create_pool(RedisSettings())
-    job = await redis.enqueue_job(
-        'extract_conversation_insights',
-        session_id, user_id,
-        _job_timeout=300,
-        _max_tries=2,
-    )
+Note: the file is named ``arq_worker.py`` for backward compatibility
+with existing imports.  It no longer depends on ARQ.
 """
 
 from __future__ import annotations
 
-import asyncio
-import os
+import time
 from typing import Any
-
-from arq import cron
-from arq.connections import RedisSettings
 
 from athena.config import get_config
 from athena.logging_config import get_logger
@@ -41,8 +26,6 @@ async def extract_conversation_insights(
 ) -> dict[str, Any]:
     """Extract valuable information from a conversation and store as memories.
 
-    This is the ARQ-compatible async version of the former Celery task.
-
     Steps:
     1. Read messages from LangGraph checkpointer
     2. Trim to complete turns
@@ -52,8 +35,6 @@ async def extract_conversation_insights(
     6. Deduplicate and write to SQLite + ChromaDB directly
     7. Update session's last_extracted_message_count
     """
-    import time
-
     from athena.tasks.conversation_extract import (
         _dedup_and_write,
         _extract_with_llm,
@@ -67,7 +48,6 @@ async def extract_conversation_insights(
         "conversation_extract_started",
         session_id=session_id,
         user_id=user_id,
-        job_try=ctx.get("job_try", 1),
     )
 
     try:
@@ -239,75 +219,3 @@ async def extract_conversation_insights(
             elapsed_s=elapsed,
         )
         raise
-
-
-async def startup(ctx: dict[str, Any]) -> None:
-    """Initialize resources when the ARQ worker starts up."""
-    cfg = get_config()
-    # Ensure config is loaded
-    logger.info(
-        "arq_worker_started",
-        redis_url=cfg.redis_url,
-    )
-
-
-async def shutdown(ctx: dict[str, Any]) -> None:
-    """Cleanup resources when the ARQ worker shuts down."""
-    logger.info("arq_worker_shutdown")
-
-
-def _get_redis_settings() -> RedisSettings:
-    """Build RedisSettings from environment/config.
-
-    Uses the CELERY_BROKER_URL environment variable for backward
-    compatibility, falling back to REDIS_URL database 1.
-    """
-    config = get_config()
-    broker_url = config.arq_broker_url
-
-    # Parse redis://host:port/dbnum
-    # Default: redis://localhost:6379/1
-    url = os.environ.get("ARQ_BROKER_URL") or broker_url
-
-    # Parse the URL
-    if url.startswith("redis://"):
-        parts = url[len("redis://"):].split("/")
-        host_port = parts[0].split(":")
-        host = host_port[0] or "localhost"
-        port = int(host_port[1]) if len(host_port) > 1 else 6379
-        database = int(parts[1]) if len(parts) > 1 else 1
-    else:
-        host, port, database = "localhost", 6379, 1
-
-    return RedisSettings(
-        host=host,
-        port=port,
-        database=database,
-    )
-
-
-class WorkerSettings:
-    """ARQ Worker configuration for Athena.
-
-    This class is the entry point for the ARQ worker.
-
-    Run with:
-        arq athena.arq_worker.WorkerSettings
-
-    Or programmatically:
-        from arq import run_worker
-        run_worker(WorkerSettings)
-    """
-
-    functions = [extract_conversation_insights]
-
-    on_startup = startup
-    on_shutdown = shutdown
-
-    redis_settings = _get_redis_settings()
-
-    # Job execution timeout in seconds
-    job_timeout = 600  # 10 minutes
-
-    # Maximum number of concurrent jobs
-    max_tries = 2

@@ -4,8 +4,9 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from athena.cache.memory_cache import get_cache
 from athena.logging_config import get_logger
-from athena.models.base import get_redis, get_session_maker
+from athena.models.base import get_session_maker
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["health"])
@@ -13,7 +14,7 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health")
 async def health_check() -> JSONResponse:
-    """Health check — verifies SQLite and Redis connectivity."""
+    """Health check — verifies SQLite and cache connectivity."""
     status = {"status": "healthy", "checks": {}}
 
     # Check SQLite
@@ -25,13 +26,13 @@ async def health_check() -> JSONResponse:
         status["checks"]["database"] = f"error: {e}"
         status["status"] = "degraded"
 
-    # Check Redis
+    # Check in-memory cache
     try:
-        redis = get_redis()
-        await redis.ping()
-        status["checks"]["redis"] = "ok"
+        cache = get_cache()
+        await cache.ping()
+        status["checks"]["cache"] = "ok"
     except Exception as e:
-        status["checks"]["redis"] = f"error: {e}"
+        status["checks"]["cache"] = f"error: {e}"
         status["status"] = "degraded"
 
     if status["status"] == "healthy":

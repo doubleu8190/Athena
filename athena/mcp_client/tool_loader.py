@@ -123,12 +123,15 @@ async def load_mcp_base_tools() -> list[BaseTool]:
         # Build args_schema from parameters_schema
         args_schema = _build_args_schema(tool.parameters_schema)
 
+        is_native = tool.execution_mode == "native"
+
         adapter = _MCPClientToolAdapter(
             name=tool.name,
             description=tool.description,
             args_schema=args_schema,
             mcp_client=mcp_client,
             server_id=tool.source_server_id,
+            is_native=is_native,
         )
         tools.append(adapter)
 
@@ -145,20 +148,30 @@ class _MCPClientToolAdapter(BaseTool):
     (``model.bind_tools()``) and tool execution (``ainvoke()``) use
     the same ``MCPClient`` connection pool, eliminating the previous
     dual-path via ``MultiServerMCPClient``.
+
+    When ``is_native`` is True, routes calls directly to
+    ``MCPClient.call_native_tool()`` bypassing the MCP transport layer.
     """
 
     mcp_client: Any  # MCPClient — avoid import cycle at class level
     server_id: str
+    is_native: bool = False
 
     def _run(self, **kwargs: Any) -> str:
         raise NotImplementedError("Use async ainvoke() instead")
 
     async def _arun(self, **kwargs: Any) -> Any:
-        result = await self.mcp_client.call_tool(
-            server_id=self.server_id,
-            tool_name=self.name,
-            arguments=kwargs,
-        )
+        if self.is_native:
+            result = await self.mcp_client.call_native_tool(
+                tool_name=self.name,
+                arguments=kwargs,
+            )
+        else:
+            result = await self.mcp_client.call_tool(
+                server_id=self.server_id,
+                tool_name=self.name,
+                arguments=kwargs,
+            )
         if result.success:
             return result.content
         raise ToolCallError(result.error or "Tool returned failure")

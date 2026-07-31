@@ -1,38 +1,40 @@
-"""Session model — sessions table.
-
-Tracks conversation sessions per (user_id, channel, chat_id).
-"""
+"""会话模型."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
+from typing import Any
 
-from sqlalchemy import Integer, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column
-
-from athena.models.base import Base
+from pydantic import BaseModel, Field
 
 
-class Session(Base):
-    __tablename__ = "sessions"
+class SessionStatus(StrEnum):
+    """会话状态.
 
-    session_id: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    channel: Mapped[str] = mapped_column(String, nullable=False)
-    chat_id: Mapped[str] = mapped_column(String, nullable=False)
-    delete_time: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
-    summary: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    """Cumulative summary of older messages, produced by the summarization model."""
+    状态流转：idle → running → idle (正常完成)
+                    │
+                    ▼
+              interrupted → recovering → idle (恢复成功)
+                                    │
+                                    ▼
+                                  failed (恢复失败)
+    """
 
-    summary_offset: Mapped[int] = mapped_column(default=0)
-    """Number of messages already included in the summary.
-    Messages[:summary_offset] are summarized; Messages[summary_offset:] are raw."""
+    IDLE = "idle"
+    RUNNING = "running"
+    INTERRUPTED = "interrupted"
+    RECOVERING = "recovering"
+    FAILED = "failed"
 
-    last_extracted_message_count: Mapped[int] = mapped_column(Integer, default=0)
-    """Message count at the last conversation extraction.
-    Used to determine if enough new messages exist to warrant re-extraction."""
 
-    modified_at: Mapped[datetime] = mapped_column(
-        server_default=func.now(), onupdate=func.now()
-    )
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+class Session(BaseModel):
+    """会话记录."""
+
+    id: str
+    title: str = "New Session"
+    status: SessionStatus = SessionStatus.IDLE
+    run_id: str | None = None  # 当前运行 ID，关联 steps 表
+    created_at: datetime
+    updated_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)

@@ -1,205 +1,298 @@
-"""FastAPI application factory and entry point for Athena Core."""
+"""Athena 应用入口 — FastAPI 应用、WebSocket 端点、启动恢复.
+
+启动流程：
+1. 配置 structlog 日志
+2. 初始化 SQLite 数据库（建表）
+3. 初始化 LLM Provider / 工具管理器 / 审批管理器 / 记忆系统 / 上下文压缩
+4. 构建 AgentWorkflow 并注入路由运行时
+5. 注册 REST API 路由与 WebSocket 端点
+6. 启动时执行被动会话恢复（检测 interrupted 会话并通知用户）
+"""
 
 from __future__ import annotations
 
-import sys
-import time
-from collections.abc import AsyncIterator
+import asyncio
+import json
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
-from starlette.requests import Request
 
-from athena.config import Config, get_config, set_config
-from athena.logging_config import get_logger, setup_logging
+from athena.config.settings import Settings, get_settings
+from athena.db.database import close_database, get_database
+from athena.gateway.approval import ApprovalManager, get_approval_manager, set_approval_manager
+from athena.gateway.routes import api_router
+from athena.gateway.routes._runtime import set_workflow
+from athena.gateway.ws.manager import WebSocketManager, get_websocket_manager, set_websocket_manager
+from athena.schemas.events import ClientEventType, EventType, build_event
+from athena.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
 
 
-# ── Add project root for MCP server subprocess ────────────────────────
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-
-
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan: startup and shutdown hooks."""
-    import asyncio
+async def lifespan(app: FastAPI):
+    """应用生命周期管理 - 启动初始化与关闭清理."""
+    settings = get_settings()
+    configure_logging(debug=settings.debug)
+    logger.info("athena_starting", host=settings.host, port=settings.port)
 
-    # ── Startup ────────────────────────────────────────────────────
-    logger.info("athena_starting")
+    # 1. 数据库
+    db = await get_database(settings.sqlite_db_path)
 
-    # Initialize configuration (already a singleton via get_config())
-    config = get_config()
+    # 2. WebSocket 管理器
+    ws_manager = get_websocket_manager()
+    set_websocket_manager(ws_manager)
 
-    # Initialize database (already a singleton via get_engine())
-    from athena.models.base import get_engine
-    engine = get_engine(config.sqlite_db_path)
+    # 3. 审批管理器（绑定 ws + db）
+    approval_manager = get_approval_manager(
+        approval_timeout=settings.approval_timeout,
+        websocket_manager=ws_manager,
+        db=db,
+    )
+    approval_manager.set_websocket_manager(ws_manager)
+    approval_manager.set_db(db)
+    set_approval_manager(approval_manager)
 
-    # Verify DB connectivity
+    # 4. 工具管理器（注册内置工具）
+    from athena.core.tools.manager import UnifiedToolManager, set_tool_manager
+    from athena.core.tools.builtin.registry import register_builtin_tools
+    tool_manager = UnifiedToolManager(approval_manager=approval_manager)
+    register_builtin_tools(tool_manager)
+    set_tool_manager(tool_manager)
+
+    # 5. LLM / 记忆 / 压缩
+    from athena.core.llm.provider import get_llm_provider
+    llm = get_llm_provider(settings)
+
+    from athena.core.memory.memory import MemoryManager
+    from athena.core.memory.retrieval import HybridRetrievalManager, MemoryRetrievalService
+    from athena.core.memory.summarizer import ConversationSummarizer
+    memory_manager = MemoryManager(settings=settings)
     try:
-        import sqlalchemy as sa
-        async with engine.connect() as conn:
-            await conn.execute(sa.text("SELECT 1"))
-        logger.info("database_connected", path=config.sqlite_db_path)
-    except Exception:
-        logger.error("database_connection_failed", path=config.sqlite_db_path)
+        await memory_manager.initialize()
+    except Exception as e:
+        logger.warning("memory_init_skipped", error=str(e))
+        memory_manager = None  # type: ignore
 
-    # Initialize in-memory cache
-    from athena.cache.memory_cache import get_cache
-    get_cache()
-    logger.info("cache_initialized")
+    retrieval_manager = (
+        HybridRetrievalManager(llm, memory_manager, settings=settings)
+        if memory_manager is not None
+        else None
+    )
+    memory_retrieval = (
+        MemoryRetrievalService(retrieval_manager) if retrieval_manager is not None else None
+    )
+    conversation_summarizer = (
+        ConversationSummarizer(llm, memory_manager, settings=settings)
+        if memory_manager is not None
+        else None
+    )
 
-    # Initialize TaskScheduler (replaces ARQ/Redis)
-    from athena.tasks.scheduler import get_scheduler
-    scheduler = get_scheduler()
-    logger.info("scheduler_initialized")
+    from athena.core.compression.compressor import ContextCompressor
+    compressor = ContextCompressor(llm=llm, settings=settings)
 
-    # Initialize GatewayManager (singleton)
-    from athena.gateway.manager import GatewayManager, set_gateway_manager
-    gateway_manager = GatewayManager(config)
-    await gateway_manager.start()
-    set_gateway_manager(gateway_manager)
+    # 6. AgentWorkflow
+    from athena.core.agent.workflow import AgentWorkflow
+    workflow = AgentWorkflow(
+        llm=llm,
+        tool_manager=tool_manager,
+        db=db,
+        ws_manager=ws_manager,
+        compressor=compressor,
+        memory_retrieval=memory_retrieval,
+        conversation_summarizer=conversation_summarizer,
+        settings=settings,
+    )
+    set_workflow(workflow)
 
-    # Initialize MCP Client (singleton)
-    from athena.mcp_client.client import MCPClient, set_mcp_client
-    from athena.mcp_client.seed_loader import auto_register_builtin_servers
-
-    await auto_register_builtin_servers(config)
-
-    mcp_client = MCPClient(config)
-    await mcp_client.start()
-    set_mcp_client(mcp_client)
-
-    # Start embedded scheduler if enabled
-    scheduler_task: asyncio.Task[None] | None = None
-    if config.arq_embedded:
-        # Verify scheduler is working by scheduling a heartbeat task
-        async def _scheduler_heartbeat() -> None:
-            logger.info("scheduler_heartbeat")
-
-        job_id = await scheduler.enqueue(_scheduler_heartbeat)
-        logger.info("scheduler_started", heartbeat_job_id=job_id)
+    # 7. 被动会话恢复（project_memory 约束：通知用户 → 等待确认 → 执行恢复）
+    await _recover_interrupted_sessions(db, ws_manager)
 
     logger.info("athena_started")
-
     yield
 
-    # ── Shutdown ───────────────────────────────────────────────────
-    logger.info("athena_stopping")
-
-    # Shutdown task scheduler (cancel pending tasks)
-    from athena.tasks.scheduler import close_scheduler
-    await close_scheduler()
-
-    # Stop lazy singletons (only if they were created)
-    from athena.core.harness import stop_harness
-    await stop_harness()
-
-    await mcp_client.stop()
-    await gateway_manager.stop()
-
-    await engine.dispose()
+    # 关闭清理
+    logger.info("athena_shutting_down")
+    try:
+        await approval_manager.cancel_all_pending("")
+    except Exception:
+        pass
+    await close_database()
     logger.info("athena_stopped")
 
 
-def create_app(config: Config | None = None) -> FastAPI:
-    """Create and configure the FastAPI application.
+async def _recover_interrupted_sessions(db: Any, ws_manager: WebSocketManager) -> None:
+    """被动会话恢复：检测 interrupted 会话并标记为 idle 等待用户确认.
 
-    Args:
-        config: Optional Config instance (uses singleton if not provided).
-
-    Returns:
-        Configured FastAPI application.
+    project_memory 约束：恢复采用被动模式，仅通知用户不主动执行，
+    避免产生意外副作用。
     """
-    if config is not None:
-        set_config(config)
-    cfg = config or get_config()
+    try:
+        interrupted = await db.query_sessions(status=["interrupted", "running"])
+        for session in interrupted:
+            await db.update_session(session["id"], status="idle")
+            logger.info(
+                "session_recovered_passive",
+                session_id=session["id"],
+                previous_status=session.get("status"),
+            )
+    except Exception as e:
+        logger.warning("recovery_check_failed", error=str(e))
 
-    setup_logging(cfg.log_level)
 
-    app = FastAPI(
-        title="Athena",
-        description="Personal AI Assistant",
-        version="0.1.0",
-        lifespan=lifespan,
+# ---------------------------------------------------------------------------
+# FastAPI 应用
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="Athena",
+    description="自主 AI Agent 桌面应用",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(api_router)
+
+
+@app.websocket("/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
+    """WebSocket 端点 - 双向事件流.
+
+    客户端可发送：USER_COMMAND / APPROVAL_RESPONSE / APPROVAL_CANCEL /
+                  SESSION_STOP / SESSION_RESUME / MEMORY_SAVE / PING
+    """
+    ws_manager = get_websocket_manager()
+    await ws_manager.connect(session_id, websocket)
+
+    # 推送会话开始事件
+    await ws_manager.send_to_session(
+        session_id,
+        build_event(EventType.SESSION_START, {"session_id": session_id}, session_id=session_id),
     )
 
-    # CORS — origins configurable via CORS_ORIGINS env var (default "*")
-    cors_origins = cfg.cors_origins if hasattr(cfg, "cors_origins") else ["*"]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await ws_manager.send_to_session(
+                    session_id,
+                    build_event(EventType.ERROR, {"error": "invalid json"}, session_id=session_id),
+                )
+                continue
+
+            msg_type = msg.get("type", "")
+            data = msg.get("data", {})
+
+            if msg_type == ClientEventType.PING:
+                await ws_manager.send_to_session(
+                    session_id,
+                    build_event(EventType.PONG, {"echo": data}, session_id=session_id),
+                )
+            elif msg_type == ClientEventType.APPROVAL_RESPONSE:
+                await _handle_approval_response(session_id, data)
+            elif msg_type == ClientEventType.APPROVAL_CANCEL:
+                await _handle_approval_cancel(session_id, data)
+            elif msg_type == ClientEventType.SESSION_STOP:
+                from athena.gateway.routes._runtime import get_session_stop_event
+                get_session_stop_event(session_id).set()
+            elif msg_type == ClientEventType.USER_COMMAND:
+                await _handle_user_command(session_id, data)
+            elif msg_type == ClientEventType.MEMORY_SAVE:
+                await _handle_memory_save(session_id, data)
+            else:
+                logger.warning("unknown_ws_message", msg_type=msg_type)
+    except WebSocketDisconnect:
+        logger.info("ws_client_disconnected", session_id=session_id)
+    except Exception as e:
+        logger.exception("ws_endpoint_error", session_id=session_id)
+    finally:
+        await ws_manager.disconnect(session_id, websocket)
+
+
+async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
+    """处理用户命令（异步执行，避免阻塞 WebSocket 接收）."""
+    from athena.gateway.routes._runtime import get_workflow, reset_session_stop_event
+    workflow = get_workflow()
+    if workflow is None:
+        return
+    message = data.get("message", "")
+    system_prompt = data.get("system_prompt", "")
+    reset_session_stop_event(session_id)
+    # 异步执行不等待，避免阻塞 ws 接收循环
+    asyncio.create_task(
+        workflow.process_message(
+            session_id=session_id,
+            user_message=message,
+            system_prompt=system_prompt,
+        )
     )
 
-    # Register routes
-    from athena.api.admin import router as admin_router
-    from athena.api.device import router as device_router
-    from athena.api.health import router as health_router
-    from athena.api.im import router as im_router
-    from athena.api.memory import router as memory_router
 
-    app.include_router(health_router, prefix="/api/v1")
-    app.include_router(im_router, prefix="/api/v1")
-    app.include_router(admin_router, prefix="/api/v1/admin")
-    app.include_router(device_router, prefix="/api/v1")
-    app.include_router(memory_router, prefix="/api/v1/memory")
+async def _handle_approval_response(session_id: str, data: dict[str, Any]) -> None:
+    """处理审批响应."""
+    approval_id = data.get("approval_id", "")
+    action = data.get("action", "")
+    if not approval_id or action not in ("allow", "deny"):
+        return
+    manager = get_approval_manager()
+    await manager.respond_approval(approval_id, action)
 
-    # Prometheus metrics — custom middleware + endpoint (no third-party instrumentator)
-    if cfg.prometheus_enabled:
-        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-        from athena.api.metrics import (
-            athena_http_request_duration_seconds,
-            athena_http_requests_total,
+async def _handle_approval_cancel(session_id: str, data: dict[str, Any]) -> None:
+    """处理审批取消."""
+    approval_id = data.get("approval_id", "")
+    if not approval_id:
+        return
+    manager = get_approval_manager()
+    await manager.cancel_approval(approval_id)
+
+
+async def _handle_memory_save(session_id: str, data: dict[str, Any]) -> None:
+    """处理主动记忆保存."""
+    from athena.gateway.routes._runtime import get_workflow
+    workflow = get_workflow()
+    if workflow is None:
+        return
+    memory_retrieval = getattr(workflow, "_memory_retrieval", None)
+    if memory_retrieval is None:
+        return
+    memory_manager = getattr(memory_retrieval, "_memory", None)
+    if memory_manager is None:
+        return
+    content = data.get("content", "")
+    metadata = data.get("metadata", {})
+    if content:
+        await memory_manager.add_memory(
+            content=content,
+            session_id=session_id,
+            metadata=metadata,
         )
 
-        @app.get("/metrics", include_in_schema=False)
-        async def metrics() -> Response:
-            return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-        @app.middleware("http")
-        async def metrics_middleware(request: Request, call_next: Any) -> Response:  # noqa: ANN401
-            if request.url.path == "/metrics":
-                return await call_next(request)
-            start = time.monotonic()
-            response = await call_next(request)
-            duration = time.monotonic() - start
-            endpoint = request.url.path
-            athena_http_requests_total.labels(
-                method=request.method,
-                endpoint=endpoint,
-                status_code=str(response.status_code),
-            ).inc()
-            athena_http_request_duration_seconds.labels(
-                method=request.method,
-                endpoint=endpoint,
-            ).observe(duration)
-            return response
-
-        logger.info("prometheus_enabled")
-
-    return app
-
-
-# Module-level app instance (used by uvicorn)
-app = create_app()
-
-
-def main() -> None:
-    """Entry point for uvicorn."""
+def run() -> None:
+    """启动 uvicorn 服务器（命令行入口）."""
     import uvicorn
-    uvicorn.run("athena.main:app", host="0.0.0.0", port=8000, reload=False)
+    settings = get_settings()
+    uvicorn.run(
+        "athena.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug,
+        log_level="debug" if settings.debug else "info",
+    )
 
 
 if __name__ == "__main__":
-    main()
+    run()

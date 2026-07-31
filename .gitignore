@@ -12,6 +12,7 @@ eggs/
 .venv/
 venv/
 .env
+.run/
 
 # Data
 data/

@@ -456,8 +456,10 @@ start_frontend() {
     echo $! > "${PID_FRONTEND}"
   )
 
-  # 给前端最多 15 秒启动窗口：检查 Vite 端口是否打开
-  local timeout=15
+  # 给前端最多 30 秒启动窗口：检查 Vite 端口是否打开
+  # 注意：electron-vite dev 需要依次构建 main/preload + 启动 Vite + 拉起 Electron，
+  # 首次冷启动可能较慢，因此超时设为 30s。
+  local timeout=30
   log_info "等待前端就绪（最多 ${timeout}s）..."
   if wait_for "${timeout}" "lsof -iTCP:${FRONTEND_PORT} -sTCP:LISTEN -t >/dev/null 2>&1"; then
     log_success "前端已就绪 (PID=$(cat "${PID_FRONTEND}"))"

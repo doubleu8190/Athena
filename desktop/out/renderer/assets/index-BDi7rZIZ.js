@@ -17770,35 +17770,62 @@ function Chat({ sendEvent }) {
     agentStatus,
     pendingApprovals,
     thinking,
+    error,
     addMessage,
     setMessages,
     clearMessages,
     clearToolCalls,
-    clearApprovals
+    clearApprovals,
+    setAgentStatus,
+    clearThinking,
+    setError,
+    clearError
   } = useChatStore();
   const [input, setInput] = reactExports.useState("");
   const [isSending, setIsSending] = reactExports.useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = reactExports.useState(false);
   const messagesEndRef = reactExports.useRef(null);
   const textareaRef = reactExports.useRef(null);
+  const loadingSessionIdRef = reactExports.useRef(null);
   reactExports.useEffect(() => {
     if (activeSessionId) {
+      clearMessages();
+      clearToolCalls();
+      clearApprovals();
+      clearThinking();
+      setAgentStatus("idle");
+      clearError();
+      loadingSessionIdRef.current = activeSessionId;
+      setIsLoadingHistory(true);
       loadHistory(activeSessionId);
     } else {
       clearMessages();
       clearToolCalls();
       clearApprovals();
+      clearThinking();
+      setAgentStatus("idle");
+      clearError();
     }
   }, [activeSessionId]);
   const loadHistory = async (sessionId) => {
     try {
       const history = await apiClient.getMessages(sessionId);
-      if (history.length > 0) {
-        setMessages(history);
-      } else {
-        clearMessages();
+      if (loadingSessionIdRef.current === sessionId) {
+        if (history.length > 0) {
+          setMessages(history);
+        } else {
+          clearMessages();
+        }
       }
     } catch {
-      clearMessages();
+      if (loadingSessionIdRef.current === sessionId) {
+        clearMessages();
+        setError("Failed to load session history. Please try again.");
+      }
+    } finally {
+      if (loadingSessionIdRef.current === sessionId) {
+        setIsLoadingHistory(false);
+      }
     }
   };
   reactExports.useEffect(() => {
@@ -17851,13 +17878,21 @@ function Chat({ sendEvent }) {
   const isAgentActive = agentStatus === "thinking" || agentStatus === "running" || agentStatus === "waiting_approval";
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex-1 flex flex-col h-full min-w-0", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex-1 overflow-y-auto", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "max-w-3xl mx-auto px-4 py-6 space-y-4", children: [
-      messages.length === 0 && !thinking && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-center py-16 text-athena-muted", children: [
+      isLoadingHistory && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-center py-16 text-athena-muted", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(LoaderCircle, { className: "w-8 h-8 mx-auto mb-4 text-athena-accent animate-spin" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm", children: "Loading conversation history…" })
+      ] }),
+      !isLoadingHistory && messages.length === 0 && !thinking && !isAgentActive && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-center py-16 text-athena-muted", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(Sparkles, { className: "w-12 h-12 mx-auto mb-4 text-athena-accent" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-lg font-medium mb-2", children: "How can Athena help you?" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm", children: "Start a new conversation to begin interacting with your AI agent." })
       ] }),
+      !isLoadingHistory && messages.length === 0 && error && !thinking && !isAgentActive && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-center py-16", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm text-athena-danger mb-2", children: error }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-athena-muted", children: "Try selecting the session again, or create a new one." })
+      ] }),
       messages.map((message) => /* @__PURE__ */ jsxRuntimeExports.jsx(MessageBubble, { message }, message.id)),
-      thinking?.active && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-3", children: [
+      !isLoadingHistory && thinking?.active && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-3", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-full flex items-center justify-center bg-athena-surface border border-athena-border", children: /* @__PURE__ */ jsxRuntimeExports.jsx(LoaderCircle, { className: "w-4 h-4 text-athena-accent animate-spin" }) }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "card px-4 py-3 max-w-[85%]", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "thinking-indicator", children: [
@@ -17869,7 +17904,7 @@ function Chat({ sendEvent }) {
           thinking.content && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mt-2 text-sm text-athena-text/80 font-mono whitespace-pre-wrap max-h-48 overflow-hidden", children: thinking.content })
         ] })
       ] }),
-      isAgentActive && !thinking && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-3", children: [
+      !isLoadingHistory && isAgentActive && !thinking && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-3", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-full flex items-center justify-center bg-athena-surface border border-athena-border", children: /* @__PURE__ */ jsxRuntimeExports.jsx(LoaderCircle, { className: "w-4 h-4 text-athena-accent animate-spin" }) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "card px-4 py-3", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "thinking-indicator", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", {}),
@@ -18109,6 +18144,9 @@ function useWebSocket(options) {
     }
   }, []);
   reactExports.useEffect(() => {
+    buildingMessageId.current = null;
+    setAgentStatus("idle");
+    clearThinking();
     if (sessionId) {
       connect(sessionId);
     } else {
@@ -18118,7 +18156,7 @@ function useWebSocket(options) {
     return () => {
       disconnect();
     };
-  }, [sessionId, connect, disconnect, setConnectionStatus]);
+  }, [sessionId, connect, disconnect, setConnectionStatus, setAgentStatus, clearThinking]);
   reactExports.useEffect(() => {
     const interval = setInterval(() => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -18139,6 +18177,9 @@ function useWebSocket(options) {
   );
   const handleEvent = reactExports.useCallback(
     (event) => {
+      if (event.session_id && sessionId && event.session_id !== sessionId) {
+        return;
+      }
       const { type, data } = event;
       switch (type) {
         case EventType.SESSION_START:

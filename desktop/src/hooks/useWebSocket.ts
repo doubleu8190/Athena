@@ -112,6 +112,11 @@ export function useWebSocket(options: UseWebSocketOptions) {
 
   // 监听 sessionId 变化
   useEffect(() => {
+    // 切换 session 时重置所有会话相关状态
+    buildingMessageId.current = null
+    setAgentStatus("idle")
+    clearThinking()
+
     if (sessionId) {
       connect(sessionId)
     } else {
@@ -121,7 +126,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
     return () => {
       disconnect()
     }
-  }, [sessionId, connect, disconnect, setConnectionStatus])
+  }, [sessionId, connect, disconnect, setConnectionStatus, setAgentStatus, clearThinking])
 
   // 心跳
   useEffect(() => {
@@ -146,6 +151,11 @@ export function useWebSocket(options: UseWebSocketOptions) {
 
   const handleEvent = useCallback(
     (event: WebSocketEvent) => {
+      // 过滤不属于当前 session 的事件（防止切换 session 时旧事件残留）
+      if (event.session_id && sessionId && event.session_id !== sessionId) {
+        return
+      }
+
       const { type, data } = event
 
       switch (type) {

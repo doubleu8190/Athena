@@ -18,26 +18,46 @@ function Chat({ sendEvent }: ChatProps) {
     agentStatus,
     pendingApprovals,
     thinking,
+    error,
     addMessage,
     setMessages,
     clearMessages,
     clearToolCalls,
     clearApprovals,
+    setAgentStatus,
+    clearThinking,
+    setError,
+    clearError,
   } = useChatStore()
 
   const [input, setInput] = useState("")
   const [isSending, setIsSending] = useState(false)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const loadingSessionIdRef = useRef<string | null>(null)
 
-  // 加载会话历史消息
+  // 加载会话历史消息 — 切换 session 时完全重置状态
   useEffect(() => {
     if (activeSessionId) {
+      // 先完全清除上一个 session 的所有残留状态
+      clearMessages()
+      clearToolCalls()
+      clearApprovals()
+      clearThinking()
+      setAgentStatus("idle")
+      clearError()
+      // 再加载新 session 的历史
+      loadingSessionIdRef.current = activeSessionId
+      setIsLoadingHistory(true)
       loadHistory(activeSessionId)
     } else {
       clearMessages()
       clearToolCalls()
       clearApprovals()
+      clearThinking()
+      setAgentStatus("idle")
+      clearError()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId])
@@ -45,13 +65,23 @@ function Chat({ sendEvent }: ChatProps) {
   const loadHistory = async (sessionId: string) => {
     try {
       const history = await apiClient.getMessages(sessionId)
-      if (history.length > 0) {
-        setMessages(history)
-      } else {
-        clearMessages()
+      // 防止快速切换 session 导致的竞态：只在当前 session 仍匹配时应用结果
+      if (loadingSessionIdRef.current === sessionId) {
+        if (history.length > 0) {
+          setMessages(history)
+        } else {
+          clearMessages()
+        }
       }
     } catch {
-      clearMessages()
+      if (loadingSessionIdRef.current === sessionId) {
+        clearMessages()
+        setError("Failed to load session history. Please try again.")
+      }
+    } finally {
+      if (loadingSessionIdRef.current === sessionId) {
+        setIsLoadingHistory(false)
+      }
     }
   }
 
@@ -126,7 +156,16 @@ function Chat({ sendEvent }: ChatProps) {
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
-          {messages.length === 0 && !thinking && (
+          {/* Loading History Indicator */}
+          {isLoadingHistory && (
+            <div className="text-center py-16 text-athena-muted">
+              <Loader2 className="w-8 h-8 mx-auto mb-4 text-athena-accent animate-spin" />
+              <p className="text-sm">Loading conversation history…</p>
+            </div>
+          )}
+
+          {/* Empty State */}
+          {!isLoadingHistory && messages.length === 0 && !thinking && !isAgentActive && (
             <div className="text-center py-16 text-athena-muted">
               <Sparkles className="w-12 h-12 mx-auto mb-4 text-athena-accent" />
               <p className="text-lg font-medium mb-2">How can Athena help you?</p>
@@ -136,12 +175,22 @@ function Chat({ sendEvent }: ChatProps) {
             </div>
           )}
 
+          {/* Error State */}
+          {!isLoadingHistory && messages.length === 0 && error && !thinking && !isAgentActive && (
+            <div className="text-center py-16">
+              <p className="text-sm text-athena-danger mb-2">{error}</p>
+              <p className="text-xs text-athena-muted">
+                Try selecting the session again, or create a new one.
+              </p>
+            </div>
+          )}
+
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} />
           ))}
 
           {/* Thinking Indicator */}
-          {thinking?.active && (
+          {!isLoadingHistory && thinking?.active && (
             <div className="flex gap-3">
               <div className="w-8 h-8 rounded-full flex items-center justify-center bg-athena-surface border border-athena-border">
                 <Loader2 className="w-4 h-4 text-athena-accent animate-spin" />
@@ -162,7 +211,7 @@ function Chat({ sendEvent }: ChatProps) {
             </div>
           )}
 
-          {isAgentActive && !thinking && (
+          {!isLoadingHistory && isAgentActive && !thinking && (
             <div className="flex gap-3">
               <div className="w-8 h-8 rounded-full flex items-center justify-center bg-athena-surface border border-athena-border">
                 <Loader2 className="w-4 h-4 text-athena-accent animate-spin" />

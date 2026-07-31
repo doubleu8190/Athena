@@ -1,5 +1,28 @@
 import type { EventType } from "./events"
 
+// ─── 执行步骤相关 ───────────────────────────────────────────────
+
+export type StepType = "llm_call" | "tool_execution"
+
+export type StepStatus = "pending" | "running" | "completed" | "failed"
+
+export interface Step {
+  id: string
+  session_id: string
+  run_id: string
+  step_number: number
+  step_type: StepType
+  parent_step_id?: string | null
+  status: StepStatus
+  started_at: string
+  completed_at?: string | null
+  duration_ms: number
+  llm_input_tokens: number
+  llm_output_tokens: number
+  error_message?: string | null
+  metadata?: Record<string, unknown>
+}
+
 // ─── 消息相关 ───────────────────────────────────────────────────
 
 export type MessageRole = "user" | "assistant" | "system" | "tool"

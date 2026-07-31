@@ -5,6 +5,7 @@ import type {
   CreateSessionResponse,
   Session,
   Message,
+  Step,
   ApprovalRequest,
 } from "../types"
 
@@ -73,8 +74,8 @@ class ApiClient {
     return this.request<Message[]>(`/api/sessions/${sessionId}/messages${params}`)
   }
 
-  async getSteps(sessionId: string): Promise<unknown[]> {
-    return this.request<unknown[]>(`/api/sessions/${sessionId}/steps`)
+  async getSteps(sessionId: string): Promise<Step[]> {
+    return this.request<Step[]>(`/api/sessions/${sessionId}/steps`)
   }
 
   async getToolCalls(sessionId: string, status?: string): Promise<unknown[]> {

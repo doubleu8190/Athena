@@ -1,4 +1,4 @@
-import { Bot, User, Wrench } from "lucide-react"
+import { Bot, User, Wrench, Clock } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import type { Message } from "../types"
 import { ToolCard } from "./ToolCard"
@@ -90,7 +90,7 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             <ToolMessageContent content={message.content} toolName={message.tool_name} />
           ) : (
             <div
-              className={`prose prose-invert max-w-none text-sm ${
+              className={`prose-custom max-w-none text-sm ${
                 isStreaming ? "typing-cursor" : ""
               }`}
             >
@@ -101,10 +101,11 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
         {/* Timestamp */}
         <div
-          className={`text-xs text-athena-muted ${
-            isUser ? "text-right" : "text-left"
+          className={`text-xs text-athena-muted flex items-center gap-1 ${
+            isUser ? "text-right justify-end" : "text-left"
           }`}
         >
+          <Clock className="w-3 h-3" />
           {formatTime(message.timestamp)}
         </div>
       </div>

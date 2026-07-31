@@ -114,7 +114,7 @@ function AppContent() {
       />
       <main className="flex-1 flex flex-col min-w-0">
         <StatusIndicator />
-        <Chat key={activeSessionId ?? "new"} sendEvent={sendEvent} />
+        <Chat sendEvent={sendEvent} />
       </main>
     </div>
   )

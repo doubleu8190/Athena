@@ -2,6 +2,7 @@ import { create } from "zustand"
 import type {
   Session,
   Message,
+  Step,
   ToolCall,
   ApprovalRequest,
   ConnectionStatus,
@@ -34,6 +35,13 @@ interface ChatStore {
   updateMessage: (messageId: string, updates: Partial<Message>) => void
   clearMessages: () => void
   setMessages: (messages: Message[]) => void
+
+  // 执行步骤
+  steps: Step[]
+  addStep: (step: Step) => void
+  updateStep: (stepId: string, updates: Partial<Step>) => void
+  clearSteps: () => void
+  setSteps: (steps: Step[]) => void
 
   // 工具调用
   toolCalls: ToolCall[]
@@ -101,6 +109,19 @@ export const useChatStore = create<ChatStore>((set) => ({
     })),
   clearMessages: () => set({ messages: [] }),
   setMessages: (messages) => set({ messages }),
+
+  // 执行步骤
+  steps: [],
+  addStep: (step) =>
+    set((state) => ({ steps: [...state.steps, step] })),
+  updateStep: (stepId, updates) =>
+    set((state) => ({
+      steps: state.steps.map((s) =>
+        s.id === stepId ? { ...s, ...updates } : s,
+      ),
+    })),
+  clearSteps: () => set({ steps: [] }),
+  setSteps: (steps) => set({ steps }),
 
   // 工具调用
   toolCalls: [],

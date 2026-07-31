@@ -7121,7 +7121,54 @@ const Bot = createLucideIcon("Bot", [
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
+const Brain = createLucideIcon("Brain", [
+  [
+    "path",
+    {
+      d: "M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z",
+      key: "l5xja"
+    }
+  ],
+  [
+    "path",
+    {
+      d: "M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z",
+      key: "ep3f8r"
+    }
+  ],
+  ["path", { d: "M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4", key: "1p4c4q" }],
+  ["path", { d: "M17.599 6.5a3 3 0 0 0 .399-1.375", key: "tmeiqw" }],
+  ["path", { d: "M6.003 5.125A3 3 0 0 0 6.401 6.5", key: "105sqy" }],
+  ["path", { d: "M3.477 10.896a4 4 0 0 1 .585-.396", key: "ql3yin" }],
+  ["path", { d: "M19.938 10.5a4 4 0 0 1 .585.396", key: "1qfode" }],
+  ["path", { d: "M6 18a4 4 0 0 1-1.967-.516", key: "2e4loj" }],
+  ["path", { d: "M19.967 17.484A4 4 0 0 1 18 18", key: "159ez6" }]
+]);
+/**
+ * @license lucide-react v0.441.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
 const Check = createLucideIcon("Check", [["path", { d: "M20 6 9 17l-5-5", key: "1gmf2c" }]]);
+/**
+ * @license lucide-react v0.441.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const ChevronDown = createLucideIcon("ChevronDown", [
+  ["path", { d: "m6 9 6 6 6-6", key: "qrunsl" }]
+]);
+/**
+ * @license lucide-react v0.441.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const ChevronRight = createLucideIcon("ChevronRight", [
+  ["path", { d: "m9 18 6-6-6-6", key: "mthhwq" }]
+]);
 /**
  * @license lucide-react v0.441.0 - ISC
  *
@@ -7181,6 +7228,19 @@ const Cpu = createLucideIcon("Cpu", [
   ["path", { d: "M20 9h2", key: "19tzq7" }],
   ["path", { d: "M9 2v2", key: "165o2o" }],
   ["path", { d: "M9 20v2", key: "i2bqo8" }]
+]);
+/**
+ * @license lucide-react v0.441.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const ListChecks = createLucideIcon("ListChecks", [
+  ["path", { d: "m3 17 2 2 4-4", key: "1jhpwq" }],
+  ["path", { d: "m3 7 2 2 4-4", key: "1obspn" }],
+  ["path", { d: "M13 6h8", key: "15sg57" }],
+  ["path", { d: "M13 12h8", key: "h98zly" }],
+  ["path", { d: "M13 18h8", key: "oe0vm4" }]
 ]);
 /**
  * @license lucide-react v0.441.0 - ISC
@@ -17423,6 +17483,16 @@ const useChatStore = create((set) => ({
   })),
   clearMessages: () => set({ messages: [] }),
   setMessages: (messages) => set({ messages }),
+  // 执行步骤
+  steps: [],
+  addStep: (step) => set((state) => ({ steps: [...state.steps, step] })),
+  updateStep: (stepId, updates) => set((state) => ({
+    steps: state.steps.map(
+      (s) => s.id === stepId ? { ...s, ...updates } : s
+    )
+  })),
+  clearSteps: () => set({ steps: [] }),
+  setSteps: (steps) => set({ steps }),
   // 工具调用
   toolCalls: [],
   addToolCall: (toolCall) => set((state) => ({ toolCalls: [...state.toolCalls, toolCall] })),
@@ -17501,7 +17571,7 @@ function MessageBubble({ message, isStreaming }) {
                 "div",
                 {
                   className: `text-xs text-athena-muted ${isUser ? "text-right" : "text-left"}`,
-                  children: formatTime(message.timestamp)
+                  children: formatTime$1(message.timestamp)
                 }
               )
             ]
@@ -17528,12 +17598,133 @@ function ToolMessageContent({
     parsedContent !== null ? /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: "text-xs bg-athena-bg/50 rounded p-2 overflow-x-auto text-athena-text/80", children: JSON.stringify(parsedContent, null, 2) }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-athena-text/80", children: content2 })
   ] });
 }
-function formatTime(isoString) {
+function formatTime$1(isoString) {
   try {
     const date = new Date(isoString);
     return date.toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit"
+    });
+  } catch {
+    return "";
+  }
+}
+function StepCard({ step, compact = false }) {
+  const {
+    step_type,
+    status,
+    step_number,
+    duration_ms,
+    llm_input_tokens,
+    llm_output_tokens,
+    error_message,
+    started_at,
+    completed_at
+  } = step;
+  const isLlmCall = step_type === "llm_call";
+  const statusIcon = () => {
+    switch (status) {
+      case "completed":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheckBig, { className: "w-4 h-4 text-athena-success" });
+      case "failed":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(CircleX, { className: "w-4 h-4 text-athena-danger" });
+      case "running":
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(LoaderCircle, { className: "w-4 h-4 text-athena-accent animate-spin" });
+      default:
+        return /* @__PURE__ */ jsxRuntimeExports.jsx(Clock, { className: "w-4 h-4 text-athena-muted" });
+    }
+  };
+  const statusLabel = () => {
+    switch (status) {
+      case "completed":
+        return "Completed";
+      case "failed":
+        return "Failed";
+      case "running":
+        return "Running";
+      default:
+        return "Pending";
+    }
+  };
+  const stepTypeIcon = () => {
+    if (isLlmCall) {
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(Brain, { className: "w-3.5 h-3.5 text-purple-400" });
+    }
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(Wrench, { className: "w-3.5 h-3.5 text-yellow-400" });
+  };
+  const stepTypeLabel = () => {
+    if (isLlmCall) return "LLM Call";
+    return "Tool Execution";
+  };
+  const formatDuration = (ms) => {
+    if (ms < 1e3) return `${ms}ms`;
+    return `${(ms / 1e3).toFixed(1)}s`;
+  };
+  const formatTokens = (tokens) => {
+    if (tokens < 1e3) return tokens.toString();
+    return `${(tokens / 1e3).toFixed(1)}k`;
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      className: `card overflow-hidden transition-all ${status === "running" ? "border-athena-accent/50" : ""} ${isLlmCall ? "border-l-2 border-l-purple-500/30" : "border-l-2 border-l-yellow-500/30"}`,
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 px-3 py-2 bg-athena-bg/50 border-b border-athena-border", children: [
+          statusIcon(),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-1.5", children: [
+            stepTypeIcon(),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "font-mono text-sm font-medium", children: [
+              "Step ",
+              step_number
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-xs text-athena-muted", children: [
+              "(",
+              stepTypeLabel(),
+              ")"
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "ml-auto text-xs text-athena-muted flex items-center gap-1", children: [
+            statusLabel(),
+            duration_ms > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-0.5", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Clock, { className: "w-3 h-3" }),
+              formatDuration(duration_ms)
+            ] })
+          ] })
+        ] }),
+        !compact && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "px-3 py-2 space-y-2", children: [
+          isLlmCall && (llm_input_tokens > 0 || llm_output_tokens > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3 text-xs text-athena-muted", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-1", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-athena-text/60", children: "Input:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-mono", children: formatTokens(llm_input_tokens) })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-1", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-athena-text/60", children: "Output:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-mono", children: formatTokens(llm_output_tokens) })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3 text-xs text-athena-muted", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-1", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-athena-text/60", children: "Started:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-mono", children: formatTime(started_at) })
+            ] }),
+            completed_at && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-1", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-athena-text/60", children: "Completed:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-mono", children: formatTime(completed_at) })
+            ] })
+          ] }),
+          error_message && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-xs text-athena-danger bg-red-500/10 rounded p-2", children: error_message })
+        ] })
+      ]
+    }
+  );
+}
+function formatTime(isoString) {
+  try {
+    const date = new Date(isoString);
+    return date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
     });
   } catch {
     return "";
@@ -17766,6 +17957,7 @@ const ClientEventType = {
 function Chat({ sendEvent }) {
   const {
     messages,
+    steps,
     activeSessionId,
     agentStatus,
     pendingApprovals,
@@ -17773,7 +17965,9 @@ function Chat({ sendEvent }) {
     error,
     addMessage,
     setMessages,
+    setSteps,
     clearMessages,
+    clearSteps,
     clearToolCalls,
     clearApprovals,
     setAgentStatus,
@@ -17784,12 +17978,14 @@ function Chat({ sendEvent }) {
   const [input, setInput] = reactExports.useState("");
   const [isSending, setIsSending] = reactExports.useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = reactExports.useState(false);
+  const [showSteps, setShowSteps] = reactExports.useState(false);
   const messagesEndRef = reactExports.useRef(null);
   const textareaRef = reactExports.useRef(null);
   const loadingSessionIdRef = reactExports.useRef(null);
   reactExports.useEffect(() => {
     if (activeSessionId) {
       clearMessages();
+      clearSteps();
       clearToolCalls();
       clearApprovals();
       clearThinking();
@@ -17800,6 +17996,7 @@ function Chat({ sendEvent }) {
       loadHistory(activeSessionId);
     } else {
       clearMessages();
+      clearSteps();
       clearToolCalls();
       clearApprovals();
       clearThinking();
@@ -17809,17 +18006,26 @@ function Chat({ sendEvent }) {
   }, [activeSessionId]);
   const loadHistory = async (sessionId) => {
     try {
-      const history = await apiClient.getMessages(sessionId);
+      const [history, sessionSteps] = await Promise.all([
+        apiClient.getMessages(sessionId),
+        apiClient.getSteps(sessionId)
+      ]);
       if (loadingSessionIdRef.current === sessionId) {
         if (history.length > 0) {
           setMessages(history);
         } else {
           clearMessages();
         }
+        if (sessionSteps.length > 0) {
+          setSteps(sessionSteps);
+        } else {
+          clearSteps();
+        }
       }
     } catch {
       if (loadingSessionIdRef.current === sessionId) {
         clearMessages();
+        clearSteps();
         setError("Failed to load session history. Please try again.");
       }
     } finally {
@@ -17890,6 +18096,26 @@ function Chat({ sendEvent }) {
       !isLoadingHistory && messages.length === 0 && error && !thinking && !isAgentActive && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-center py-16", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm text-athena-danger mb-2", children: error }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-athena-muted", children: "Try selecting the session again, or create a new one." })
+      ] }),
+      !isLoadingHistory && steps.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mb-4", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            onClick: () => setShowSteps(!showSteps),
+            className: "flex items-center gap-2 w-full px-3 py-2 rounded-lg bg-athena-surface border border-athena-border hover:bg-athena-bg transition-colors text-sm",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(ListChecks, { className: "w-4 h-4 text-athena-accent" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-medium text-athena-text", children: "Execution Steps" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-xs text-athena-muted ml-1", children: [
+                "(",
+                steps.length,
+                ")"
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ml-auto", children: showSteps ? /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronDown, { className: "w-4 h-4 text-athena-muted" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronRight, { className: "w-4 h-4 text-athena-muted" }) })
+            ]
+          }
+        ),
+        showSteps && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mt-2 space-y-2 pl-2 border-l-2 border-athena-border/30", children: steps.map((step) => /* @__PURE__ */ jsxRuntimeExports.jsx(StepCard, { step, compact: true }, step.id)) })
       ] }),
       messages.map((message) => /* @__PURE__ */ jsxRuntimeExports.jsx(MessageBubble, { message }, message.id)),
       !isLoadingHistory && thinking?.active && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-3", children: [

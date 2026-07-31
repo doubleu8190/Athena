@@ -1,25 +1,31 @@
-"""记忆存储管理器 — 基于 ChromaDB 的长期记忆.
+"""记忆存储管理器 — 基于 ChromaDB + SQLite FTS5 的双写长期记忆.
 
 支持语义检索、自动摘要与生命周期管理。
 - add_memory: 写入记忆（同时双写 ChromaDB + SQLite FTS5）
-- search: 向量检索
-- delete/pin: 生命周期管理
+- search: 向量检索（ChromaDB）
+- keyword_search: 关键词检索（SQLite FTS5）
+- delete/pin: 生命周期管理（双写同步）
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import insert, text, update
+
 from athena.config.settings import Settings, get_settings
+from athena.db.engine import get_session
+from athena.db.models import MemoryModel
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
 class MemoryManager:
-    """ChromaDB 长期记忆管理器."""
+    """ChromaDB + SQLite FTS5 双写长期记忆管理器."""
 
     def __init__(
         self,
@@ -57,6 +63,10 @@ class MemoryManager:
             raise RuntimeError("MemoryManager not initialized. Call initialize() first.")
         return self._collection
 
+    # ------------------------------------------------------------------
+    # 写入：双写 ChromaDB + SQLite (memories 表 + memory_fts 虚拟表)
+    # ------------------------------------------------------------------
+
     async def add_memory(
         self,
         content: str,
@@ -64,7 +74,7 @@ class MemoryManager:
         metadata: dict[str, Any] | None = None,
         pinned: bool = False,
     ) -> str:
-        """写入记忆条目.
+        """写入记忆条目（双写 ChromaDB + SQLite FTS5）.
 
         Args:
             content: 记忆文本内容
@@ -91,17 +101,51 @@ class MemoryManager:
             **(metadata or {}),
         }
 
+        # 1. 写入 ChromaDB（向量检索）
         try:
             self.collection.add(
                 ids=[memory_id],
                 documents=[content],
                 metadatas=[meta],
             )
-            logger.info("memory_added", memory_id=memory_id, session_id=session_id)
         except Exception as e:
-            logger.error("memory_add_failed", error=str(e))
+            logger.error("memory_add_chromadb_failed", error=str(e))
             raise
+
+        # 2. 写入 SQLite memories 表 + FTS5 虚拟表（关键词检索）
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        insert(MemoryModel).values(
+                            id=memory_id,
+                            session_id=session_id,
+                            content=content,
+                            metadata_json=json.dumps(meta, ensure_ascii=False, default=str),
+                            pinned=1 if pinned else 0,
+                            expires_at=expires_at,
+                            created_at=now,
+                            last_accessed=now,
+                            access_count=0,
+                        )
+                    )
+                    # 写入 FTS5 索引
+                    await session.execute(
+                        text(
+                            "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :memory_id)"
+                        ),
+                        {"content": content, "memory_id": memory_id},
+                    )
+        except Exception as e:
+            logger.error("memory_add_sqlite_failed", error=str(e))
+            # SQLite 写入失败不影响 ChromaDB 已有数据，但记录错误
+
+        logger.info("memory_added", memory_id=memory_id, session_id=session_id)
         return memory_id
+
+    # ------------------------------------------------------------------
+    # 向量检索（ChromaDB）
+    # ------------------------------------------------------------------
 
     async def search(
         self,
@@ -110,7 +154,7 @@ class MemoryManager:
         n_results: int = 5,
         where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """向量检索记忆."""
+        """向量检索记忆（ChromaDB）."""
         await self.initialize()
         query_filter: dict[str, Any] = {}
         if session_id:
@@ -151,6 +195,89 @@ class MemoryManager:
             })
         return out
 
+    # ------------------------------------------------------------------
+    # 关键词检索（SQLite FTS5）
+    # ------------------------------------------------------------------
+
+    async def keyword_search(
+        self,
+        query: str,
+        session_id: str | None = None,
+        n_results: int = 10,
+    ) -> list[dict[str, Any]]:
+        """关键词检索记忆（SQLite FTS5 MATCH）.
+
+        使用 FTS5 的 MATCH 操作符进行全文检索，
+        tokenize='unicode61' 支持中文分词。
+        """
+        # 构建 FTS5 MATCH 查询：对查询中的每个词用 OR 连接
+        # FTS5 语法：双引号包裹避免特殊字符干扰
+        import re
+        tokens = re.findall(r"[\w\u4e00-\u9fa5]+", query)
+        if not tokens:
+            return []
+
+        # 转义双引号并构建 MATCH 表达式
+        match_terms = " OR ".join(f'"{t}"' for t in tokens if len(t) > 0)
+        if not match_terms:
+            return []
+
+        try:
+            async with get_session() as session:
+                # FTS5 MATCH 查询 + 关联 memories 表获取完整数据
+                sql = text("""
+                    SELECT m.id, m.content, m.metadata_json, m.session_id,
+                           m.created_at, m.pinned, m.expires_at,
+                           bm25(memory_fts) AS rank
+                    FROM memory_fts
+                    JOIN memories m ON memory_fts.memory_id = m.id
+                    WHERE memory_fts MATCH :match_expr
+                      AND m.deleted_time IS NULL
+                """)
+                params: dict[str, Any] = {"match_expr": match_terms}
+                if session_id:
+                    sql = text("""
+                        SELECT m.id, m.content, m.metadata_json, m.session_id,
+                               m.created_at, m.pinned, m.expires_at,
+                               bm25(memory_fts) AS rank
+                        FROM memory_fts
+                        JOIN memories m ON memory_fts.memory_id = m.id
+                        WHERE memory_fts MATCH :match_expr
+                          AND m.deleted_time IS NULL
+                          AND m.session_id = :session_id
+                    """)
+                    params["session_id"] = session_id
+
+                sql = text(str(sql.text) + f" LIMIT {n_results}")
+                result = await session.execute(sql, params)
+                rows = result.fetchall()
+        except Exception as e:
+            logger.error("memory_keyword_search_failed", error=str(e))
+            return []
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            meta = {}
+            try:
+                meta = json.loads(row.metadata_json) if row.metadata_json else {}
+            except (json.JSONDecodeError, TypeError):
+                pass
+            # bm25 返回负值，越小越相关，转换为 0-1 的分数
+            raw_rank = row.rank if row.rank is not None else 0.0
+            score = max(0.0, min(1.0, 1.0 / (1.0 + abs(raw_rank))))
+            out.append({
+                "id": row.id,
+                "content": row.content,
+                "metadata": meta,
+                "score": score,
+                "source": "keyword",
+            })
+        return out
+
+    # ------------------------------------------------------------------
+    # 单条获取
+    # ------------------------------------------------------------------
+
     async def get(self, memory_id: str) -> dict[str, Any] | None:
         """根据 ID 获取记忆."""
         await self.initialize()
@@ -167,25 +294,72 @@ class MemoryManager:
             logger.error("memory_get_failed", memory_id=memory_id, error=str(e))
             return None
 
+    # ------------------------------------------------------------------
+    # 删除：双删 ChromaDB + SQLite
+    # ------------------------------------------------------------------
+
     async def delete(self, memory_id: str) -> None:
-        """删除记忆条目."""
+        """删除记忆条目（双删 ChromaDB + SQLite 软删除 + FTS5 删除）."""
         await self.initialize()
+        # 1. 删除 ChromaDB
         try:
             self.collection.delete(ids=[memory_id])
-            logger.info("memory_deleted", memory_id=memory_id)
         except Exception as e:
-            logger.error("memory_delete_failed", memory_id=memory_id, error=str(e))
+            logger.error("memory_delete_chromadb_failed", memory_id=memory_id, error=str(e))
+
+        # 2. SQLite 软删除 + FTS5 索引删除
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    now = datetime.now().isoformat()
+                    # 软删除 memories 记录
+                    await session.execute(
+                        update(MemoryModel)
+                        .where(MemoryModel.id == memory_id)
+                        .values(deleted_time=now)
+                    )
+                    # 删除 FTS5 索引条目
+                    await session.execute(
+                        text("DELETE FROM memory_fts WHERE memory_id = :memory_id"),
+                        {"memory_id": memory_id},
+                    )
+        except Exception as e:
+            logger.error("memory_delete_sqlite_failed", memory_id=memory_id, error=str(e))
+
+        logger.info("memory_deleted", memory_id=memory_id)
+
+    # ------------------------------------------------------------------
+    # 固定/取消固定（双写同步）
+    # ------------------------------------------------------------------
 
     async def pin(self, memory_id: str, pinned: bool = True) -> None:
         """固定/取消固定记忆（避免 TTL 清理）."""
         await self.initialize()
+        # 1. 更新 ChromaDB
         try:
             self.collection.update(
                 ids=[memory_id],
                 metadatas=[{"pinned": pinned, "expires_at": "" if pinned else datetime.now().isoformat()}],
             )
         except Exception as e:
-            logger.error("memory_pin_failed", memory_id=memory_id, error=str(e))
+            logger.error("memory_pin_chromadb_failed", memory_id=memory_id, error=str(e))
+
+        # 2. 更新 SQLite
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    expires_at = None if pinned else datetime.now().isoformat()
+                    await session.execute(
+                        update(MemoryModel)
+                        .where(MemoryModel.id == memory_id)
+                        .values(pinned=1 if pinned else 0, expires_at=expires_at)
+                    )
+        except Exception as e:
+            logger.error("memory_pin_sqlite_failed", memory_id=memory_id, error=str(e))
+
+    # ------------------------------------------------------------------
+    # 清理过期记忆（双写同步）
+    # ------------------------------------------------------------------
 
     async def cleanup_expired(self) -> int:
         """清理过期且未固定的记忆."""
@@ -212,7 +386,21 @@ class MemoryManager:
                 except (ValueError, TypeError):
                     continue
             if expired_ids:
+                # 双删
                 self.collection.delete(ids=expired_ids)
+                async with get_session() as session:
+                    async with session.begin():
+                        now_iso = now.isoformat()
+                        for mid in expired_ids:
+                            await session.execute(
+                                update(MemoryModel)
+                                .where(MemoryModel.id == mid)
+                                .values(deleted_time=now_iso)
+                            )
+                            await session.execute(
+                                text("DELETE FROM memory_fts WHERE memory_id = :mid"),
+                                {"mid": mid},
+                            )
                 logger.info("memory_cleanup", count=len(expired_ids))
             return len(expired_ids)
         except Exception as e:

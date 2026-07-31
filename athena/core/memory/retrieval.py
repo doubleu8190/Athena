@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -29,18 +28,6 @@ class SearchResult:
     source: str  # "vector" / "keyword" / "fused"
     metadata: dict[str, Any]
     chunk_id: str
-
-
-# 中英文停用词
-_STOP_WORDS = {
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "can", "shall", "of", "in", "on", "at",
-    "to", "for", "with", "by", "and", "or", "not", "no",
-    "的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都",
-    "这", "一个", "也", "很", "到", "说", "要", "去", "你", "会", "着",
-    "没有", "看", "好", "自己", "这",
-}
 
 
 class HybridRetrievalManager:
@@ -145,57 +132,31 @@ class HybridRetrievalManager:
         session_id: str,
         filter_params: dict[str, Any] | None,
     ) -> list[SearchResult]:
-        """关键词检索（基于 ChromaDB 元数据中的所有文档进行精确匹配）."""
-        keywords = self._extract_keywords(query)
-        if not keywords:
-            return []
+        """关键词检索（SQLite FTS5 MATCH 全文检索）.
 
+        通过 MemoryManager.keyword_search() 走 FTS5 虚拟表的 MATCH 操作符，
+        tokenize='unicode61' 支持中文分词，bm25 算法排序。
+        """
         try:
-            all_data = await self._memory.search(
+            results = await self._memory.keyword_search(
                 query=query,
                 session_id=session_id,
-                n_results=50,  # 拉取较多候选用于关键词匹配
-                where=filter_params,
+                n_results=self._top_k * 2,
             )
         except Exception as e:
             logger.warning("keyword_search_failed", error=str(e))
             return []
 
-        results: list[SearchResult] = []
-        for i, r in enumerate(all_data, 1):
-            score = self._calculate_keyword_score(r["content"], keywords)
-            if score > 0:
-                results.append(SearchResult(
-                    content=r["content"],
-                    score=score * self._keyword_weight,
-                    source="keyword",
-                    metadata=r.get("metadata", {}),
-                    chunk_id=r.get("id", str(i)),
-                ))
-        results.sort(key=lambda x: x.score, reverse=True)
-        return results[: self._top_k]
-
-    def _extract_keywords(self, query: str) -> list[str]:
-        """从查询中提取关键词（中英文）。"""
-        # 英文/数字 token
-        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]+", query.lower())
-        # 中文 token（按字符切分简单处理，后续可换 jieba）
-        cn_chars = re.findall(r"[\u4e00-\u9fa5]+", query)
-        tokens.extend(cn_chars)
-        return [t for t in tokens if t not in _STOP_WORDS and len(t) > 1]
-
-    def _calculate_keyword_score(self, document: str, keywords: list[str]) -> float:
-        """计算关键词匹配分数."""
-        doc_lower = document.lower()
-        score = 0.0
-        for kw in keywords:
-            if kw in doc_lower:
-                score += 0.5
-                if re.search(r"\b" + re.escape(kw) + r"\b", doc_lower):
-                    score += 0.3
-                freq = doc_lower.count(kw)
-                score += min(freq * 0.1, 0.2)
-        return min(score, 1.0)
+        out: list[SearchResult] = []
+        for i, r in enumerate(results, 1):
+            out.append(SearchResult(
+                content=r["content"],
+                score=r["score"] * self._keyword_weight,
+                source="keyword",
+                metadata=r.get("metadata", {}),
+                chunk_id=r.get("id", str(i)),
+            ))
+        return out
 
     def _reciprocal_rank_fusion(
         self,

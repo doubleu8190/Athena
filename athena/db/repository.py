@@ -181,6 +181,27 @@ class SessionRepository:
                     .where(SessionModel.id == session_id, SessionModel.deleted_time.is_(None))
                     .values(deleted_time=now)
                 )
+                # 级联软删除关联数据
+                await session.execute(
+                    update(MessageModel)
+                    .where(MessageModel.session_id == session_id, MessageModel.deleted_time.is_(None))
+                    .values(deleted_time=now)
+                )
+                await session.execute(
+                    update(StepModel)
+                    .where(StepModel.session_id == session_id, StepModel.deleted_time.is_(None))
+                    .values(deleted_time=now)
+                )
+                await session.execute(
+                    update(ToolCallModel)
+                    .where(ToolCallModel.session_id == session_id, ToolCallModel.deleted_time.is_(None))
+                    .values(deleted_time=now)
+                )
+                await session.execute(
+                    update(ApprovalLogModel)
+                    .where(ApprovalLogModel.session_id == session_id, ApprovalLogModel.deleted_time.is_(None))
+                    .values(deleted_time=now)
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -284,9 +305,12 @@ class StepRepository:
         for key, value in updates.items():
             if key not in allowed:
                 continue
+            # ORM 列名为 metadata_json，外部 API 使用 "metadata"
             if key == "metadata":
                 value = _json_dumps(value)
-            values[key] = value
+                values["metadata_json"] = value
+            else:
+                values[key] = value
         if not values:
             return
 

@@ -121,3 +121,38 @@ class ApprovalLogModel(Base):
     decision_time_ms: Mapped[float] = mapped_column(Float, default=0)
     timestamp: Mapped[str] = mapped_column(String)
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class MemoryModel(Base):
+    """记忆表模型 — 与 ChromaDB 双写的 SQLite 侧.
+
+    用于 FTS5 全文检索（关键词检索），ChromaDB 负责向量检索。
+    content 字段通过 FTS5 虚拟表 memory_fts 建立全文索引。
+    """
+
+    __tablename__ = "memories"
+    __table_args__ = (
+        Index("idx_memories_session", "session_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(Text)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    pinned: Mapped[int] = mapped_column(Integer, default=0)  # 0=未固定, 1=固定
+    expires_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+    last_accessed: Mapped[str | None] = mapped_column(String, nullable=True)
+    access_count: Mapped[int] = mapped_column(Integer, default=0)
+    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+# FTS5 虚拟表 DDL（SQLAlchemy ORM 不支持 FTS5，需通过原生 SQL 创建）
+# tokenize='unicode61' 支持中文分词
+MEMORY_FTS_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    content,
+    memory_id UNINDEXED,
+    tokenize='unicode61'
+)
+"""

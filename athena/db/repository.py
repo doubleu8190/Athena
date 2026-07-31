@@ -175,30 +175,6 @@ class SessionRepository:
         now = _now_iso()
         async with get_session() as session:
             async with session.begin():
-                # 软删除关联的 messages
-                await session.execute(
-                    update(MessageModel)
-                    .where(MessageModel.session_id == session_id, MessageModel.deleted_time.is_(None))
-                    .values(deleted_time=now)
-                )
-                # 软删除关联的 tool_call
-                await session.execute(
-                    update(ToolCallModel)
-                    .where(ToolCallModel.session_id == session_id, ToolCallModel.deleted_time.is_(None))
-                    .values(deleted_time=now)
-                )
-                # 软删除关联的 steps
-                await session.execute(
-                    update(StepModel)
-                    .where(StepModel.session_id == session_id, StepModel.deleted_time.is_(None))
-                    .values(deleted_time=now)
-                )
-                # 软删除关联的 approval_logs
-                await session.execute(
-                    update(ApprovalLogModel)
-                    .where(ApprovalLogModel.session_id == session_id, ApprovalLogModel.deleted_time.is_(None))
-                    .values(deleted_time=now)
-                )
                 # 软删除 session 本身
                 await session.execute(
                     update(SessionModel)

@@ -6,13 +6,13 @@ run_id: 日期格式字符串（YYYYMMDD），子 Agent 在主 run_id 基础上�
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 
 
 def generate_session_id() -> str:
     """生成 session_id（UUID v4）."""
-    return str(uuid.uuid4())
+    now = datetime.now()
+    return f"{now.strftime('%Y_%m_%d_%H_%M_%S')}_{now.microsecond // 1000:03d}"
 
 
 class RunIdGenerator:

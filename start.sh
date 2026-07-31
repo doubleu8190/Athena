@@ -95,6 +95,16 @@ fatal() { log_error "$*"; exit 1; }
 # shellcheck disable=SC1090
 [[ -f "${ENV_FILE}" ]] && set -a && source "${ENV_FILE}" && set +a || true
 
+# --- Python 解释器选择（优先使用 .venv，否则系统 python3）---
+PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python3"
+if [[ -x "${PYTHON_BIN}" ]]; then
+  log_info "检测到虚拟环境 .venv，使用 ${PYTHON_BIN}"
+else
+  PYTHON_BIN="$(command -v python3 || echo python3)"
+  log_warn "未检测到 .venv，使用系统 ${PYTHON_BIN}（若依赖缺失请先 ./start.sh install）"
+fi
+export PYTHON_BIN
+
 # --- 默认值（在未设置时生效）---
 export HOST="${HOST:-127.0.0.1}"
 export PORT="${PORT:-8000}"
@@ -138,10 +148,13 @@ wait_for() {
   return 0
 }
 
-# 3.3 后端健康检查：通过 HTTP /health 接口
+# 3.3 后端健康检查：通过 HTTP /api/health 接口
+# 注意：后端 health 路由注册在 api_router 下（prefix=/api），
+# 因此完整路径为 /api/health，而非 /health。
+BACKEND_HEALTH_PATH="${BACKEND_HEALTH_PATH:-/api/health}"
 backend_healthy() {
   command -v curl >/dev/null 2>&1 || return 1
-  curl -fsS "http://${HOST}:${PORT}/health" >/dev/null 2>&1
+  curl -fsS "http://${HOST}:${PORT}${BACKEND_HEALTH_PATH}" >/dev/null 2>&1
 }
 
 # 3.4 进程存活（PID 文件）：PID 存在且在运行
@@ -199,7 +212,7 @@ check_dependencies_core() {
 # 后端 Python 依赖是否就绪（通过 import athena.main 判断是否有缺包）
 check_dependencies_backend() {
   log_step "后端 Python 依赖检查"
-  if ! PYTHONPATH="${PROJECT_ROOT}" python3 -c "import athena.main, fastapi, uvicorn, pydantic_settings, structlog, langchain" >/dev/null 2>&1; then
+  if ! PYTHONPATH="${PROJECT_ROOT}" "${PYTHON_BIN}" -c "import athena.main, fastapi, uvicorn, pydantic_settings, structlog, langchain" >/dev/null 2>&1; then
     log_warn "后端依赖缺失，建议先执行：${C_BOLD}./start.sh install${C_RESET}"
     return 1
   fi
@@ -264,7 +277,7 @@ cmd_status() {
   echo -e "    地址:       http://${HOST}:${PORT}"
   echo -e "    健康检查:   " | tr -d '\n'
   if backend_healthy; then
-    echo -e "${C_GREEN}/health OK${C_RESET}"
+    echo -e "${C_GREEN}${BACKEND_HEALTH_PATH} OK${C_RESET}"
   else
     echo -e "${C_YELLOW}未响应${C_RESET}"
   fi
@@ -337,7 +350,7 @@ cmd_test() {
   check_dependencies_backend || true
   (
     cd "${BACKEND_DIR}"
-    PYTHONPATH="${BACKEND_DIR}" python3 -m pytest tests/ -v --tb=short \
+    PYTHONPATH="${BACKEND_DIR}" "${PYTHON_BIN}" -m pytest tests/ -v --tb=short \
       || fatal "测试失败，请查看上方输出。"
   )
   log_success "后端测试全部通过"
@@ -394,7 +407,7 @@ start_backend() {
       LLM_PROVIDER="${LLM_PROVIDER}" LLM_MODEL="${LLM_MODEL}" \
       LLM_API_KEY="${LLM_API_KEY}" LLM_BASE_URL="${LLM_BASE_URL}" \
       SQLITE_DB_PATH="${SQLITE_DB_PATH}" CHROMADB_PATH="${CHROMADB_PATH}" \
-      python3 -u athena/main.py \
+      "${PYTHON_BIN}" -u athena/main.py \
       >> "${LOG_BACKEND}" 2>&1 &
     echo $! > "${PID_BACKEND}"
   )
@@ -404,7 +417,7 @@ start_backend() {
   log_info "等待后端就绪（最多 ${timeout}s）..."
   if wait_for "${timeout}" backend_healthy; then
     log_success "后端已就绪 -> http://${HOST}:${PORT}  (PID=$(cat "${PID_BACKEND}"))"
-    log_info "    健康检查: http://${HOST}:${PORT}/health"
+    log_info "    健康检查: http://${HOST}:${PORT}${BACKEND_HEALTH_PATH}"
     log_info "    API 文档: http://${HOST}:${PORT}/docs"
     log_info "    实时日志: ${C_BOLD}./start.sh logs backend${C_RESET}"
   else

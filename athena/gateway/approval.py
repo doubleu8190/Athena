@@ -279,7 +279,7 @@ class ApprovalManager:
                 "timeout": ApprovalDecision.TIMEOUT,
                 "cancelled": ApprovalDecision.DENIED,
             }
-            from athena.db.database import _now_iso
+            from datetime import datetime
 
             await self._db.save_approval_log({
                 "id": str(uuid.uuid4()),
@@ -290,7 +290,7 @@ class ApprovalManager:
                 "risk_level": request.risk_level,
                 "decision": str(decision_map.get(request.resolution, ApprovalDecision.DENIED)),
                 "decision_time_ms": decision_time_ms,
-                "timestamp": _now_iso(),
+                "timestamp": datetime.now().isoformat(),
             })
         except Exception as e:
             logger.error("approval_log_failed", approval_id=request.id, error=str(e))

@@ -1,4 +1,4 @@
-"""Athena 应用入口 — FastAPI 应用、WebSocket 端点、启动恢复.
+"""Athena 应用入口 — FastAPI 应用创建、依赖注入、路由注册.
 
 启动流程：
 1. 配置 structlog 日志
@@ -7,25 +7,27 @@
 4. 构建 AgentWorkflow 并注入路由运行时
 5. 注册 REST API 路由与 WebSocket 端点
 6. 启动时执行被动会话恢复（检测 interrupted 会话并通知用户）
+
+业务逻辑已剥离至：
+- gateway/ws/handler.py — WebSocket 端点与消息处理
+- services/recovery.py — 会话恢复
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 from contextlib import asynccontextmanager
-from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from athena.config.settings import Settings, get_settings
+from athena.config.settings import get_settings
 from athena.db.database import close_database, get_database
-from athena.gateway.approval import ApprovalManager, get_approval_manager, set_approval_manager
+from athena.gateway.approval import get_approval_manager, set_approval_manager
 from athena.gateway.routes import api_router
 from athena.gateway.routes._runtime import set_workflow
-from athena.gateway.ws.manager import WebSocketManager, get_websocket_manager, set_websocket_manager
-from athena.schemas.events import ClientEventType, EventType, build_event
+from athena.gateway.ws.handler import websocket_endpoint
+from athena.gateway.ws.manager import get_websocket_manager, set_websocket_manager
+from athena.gateway.recovery import recover_interrupted_sessions
 from athena.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -108,7 +110,7 @@ async def lifespan(app: FastAPI):
     set_workflow(workflow)
 
     # 7. 被动会话恢复（project_memory 约束：通知用户 → 等待确认 → 执行恢复）
-    await _recover_interrupted_sessions(db, ws_manager)
+    await recover_interrupted_sessions(db)
 
     logger.info("athena_started")
     yield
@@ -123,27 +125,8 @@ async def lifespan(app: FastAPI):
     logger.info("athena_stopped")
 
 
-async def _recover_interrupted_sessions(db: Any, ws_manager: WebSocketManager) -> None:
-    """被动会话恢复：检测 interrupted 会话并标记为 idle 等待用户确认.
-
-    project_memory 约束：恢复采用被动模式，仅通知用户不主动执行，
-    避免产生意外副作用。
-    """
-    try:
-        interrupted = await db.query_sessions(status=["interrupted", "running"])
-        for session in interrupted:
-            await db.update_session(session["id"], status="idle")
-            logger.info(
-                "session_recovered_passive",
-                session_id=session["id"],
-                previous_status=session.get("status"),
-            )
-    except Exception as e:
-        logger.warning("recovery_check_failed", error=str(e))
-
-
 # ---------------------------------------------------------------------------
-# FastAPI 应用
+# FastAPI 应用（仅创建、中间件、路由注册）
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
@@ -162,130 +145,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
-
-
-@app.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
-    """WebSocket 端点 - 双向事件流.
-
-    客户端可发送：USER_COMMAND / APPROVAL_RESPONSE / APPROVAL_CANCEL /
-                  SESSION_STOP / SESSION_RESUME / MEMORY_SAVE / PING
-    """
-    ws_manager = get_websocket_manager()
-    await ws_manager.connect(session_id, websocket)
-
-    # 推送会话开始事件
-    await ws_manager.send_to_session(
-        session_id,
-        build_event(EventType.SESSION_START, {"session_id": session_id}, session_id=session_id),
-    )
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-                logger.info("ws_received_received", msg=msg)
-            except json.JSONDecodeError:
-                await ws_manager.send_to_session(
-                    session_id,
-                    build_event(EventType.ERROR, {"error": "invalid json"}, session_id=session_id),
-                )
-                continue
-
-            msg_type = msg.get("type", "")
-            data = msg.get("data", {})
-
-            if msg_type == ClientEventType.PING:
-                await ws_manager.send_to_session(
-                    session_id,
-                    build_event(EventType.PONG, {"echo": data}, session_id=session_id),
-                )
-            elif msg_type == ClientEventType.APPROVAL_RESPONSE:
-                await _handle_approval_response(session_id, data)
-            elif msg_type == ClientEventType.APPROVAL_CANCEL:
-                await _handle_approval_cancel(session_id, data)
-            elif msg_type == ClientEventType.SESSION_STOP:
-                from athena.gateway.routes._runtime import get_session_stop_event
-                get_session_stop_event(session_id).set()
-            elif msg_type == ClientEventType.USER_COMMAND:
-                await _handle_user_command(session_id, data)
-            elif msg_type == ClientEventType.MEMORY_SAVE:
-                await _handle_memory_save(session_id, data)
-            else:
-                logger.warning("unknown_ws_message", msg_type=msg_type)
-    except WebSocketDisconnect:
-        logger.info("ws_client_disconnected", session_id=session_id)
-    except Exception as e:
-        logger.exception("ws_endpoint_error", session_id=session_id)
-    finally:
-        await ws_manager.disconnect(session_id, websocket)
-
-
-async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
-    """处理用户命令（异步执行，避免阻塞 WebSocket 接收）."""
-    from athena.gateway.routes._runtime import get_workflow, reset_session_stop_event
-    workflow = get_workflow()
-    if workflow is None:
-        return
-    message = data.get("message", "")
-    system_prompt = data.get("system_prompt", "")
-    logger.info(
-        "user_command_received",
-        session_id=session_id,
-        message_length=len(message),
-        has_custom_prompt=bool(system_prompt.strip()),
-    )
-    reset_session_stop_event(session_id)
-    # 异步执行不等待，避免阻塞 ws 接收循环
-    asyncio.create_task(
-        workflow.process_message(
-            session_id=session_id,
-            user_message=message,
-            system_prompt=system_prompt,
-        )
-    )
-
-
-async def _handle_approval_response(session_id: str, data: dict[str, Any]) -> None:
-    """处理审批响应."""
-    approval_id = data.get("approval_id", "")
-    action = data.get("action", "")
-    if not approval_id or action not in ("allow", "deny"):
-        return
-    manager = get_approval_manager()
-    await manager.respond_approval(approval_id, action)
-
-
-async def _handle_approval_cancel(session_id: str, data: dict[str, Any]) -> None:
-    """处理审批取消."""
-    approval_id = data.get("approval_id", "")
-    if not approval_id:
-        return
-    manager = get_approval_manager()
-    await manager.cancel_approval(approval_id)
-
-
-async def _handle_memory_save(session_id: str, data: dict[str, Any]) -> None:
-    """处理主动记忆保存."""
-    from athena.gateway.routes._runtime import get_workflow
-    workflow = get_workflow()
-    if workflow is None:
-        return
-    memory_retrieval = getattr(workflow, "_memory_retrieval", None)
-    if memory_retrieval is None:
-        return
-    memory_manager = getattr(memory_retrieval, "_memory", None)
-    if memory_manager is None:
-        return
-    content = data.get("content", "")
-    metadata = data.get("metadata", {})
-    if content:
-        await memory_manager.add_memory(
-            content=content,
-            session_id=session_id,
-            metadata=metadata,
-        )
+app.websocket("/ws/{session_id}")(websocket_endpoint)
 
 
 def run() -> None:

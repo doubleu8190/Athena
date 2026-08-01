@@ -185,6 +185,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
             raw = await websocket.receive_text()
             try:
                 msg = json.loads(raw)
+                logger.info("ws_received_received", msg=msg)
             except json.JSONDecodeError:
                 await ws_manager.send_to_session(
                     session_id,
@@ -229,6 +230,12 @@ async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
         return
     message = data.get("message", "")
     system_prompt = data.get("system_prompt", "")
+    logger.info(
+        "user_command_received",
+        session_id=session_id,
+        message_length=len(message),
+        has_custom_prompt=bool(system_prompt.strip()),
+    )
     reset_session_stop_event(session_id)
     # 异步执行不等待，避免阻塞 ws 接收循环
     asyncio.create_task(

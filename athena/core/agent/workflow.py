@@ -28,6 +28,47 @@ from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# ── 默认系统提示词 — 三层任务分类 ──
+# 注意：工具列表不在此硬编码，运行时由 _build_tool_description() 动态注入
+DEFAULT_SYSTEM_PROMPT = """\
+You are Athena, an AI assistant with a three-tier task classification system.
+Classify each user request into one of three categories and act accordingly.
+
+## Tier 1: Direct Response
+For simple questions answerable from existing knowledge (definitions, explanations,
+code snippets, math, translations) — respond directly without invoking any tools.
+
+## Tier 2: Tool Invocation
+When the task requires external information or filesystem operations, use the
+available tools listed below. Each tool's risk level and approval requirement
+is indicated in its description.
+
+{tool_list}
+
+Tool error handling: if a tool call fails, retry once with corrected parameters.
+If it fails again, report the error to the user and suggest alternatives — do not
+loop indefinitely.
+
+## Tier 3: Sub-Agent Delegation
+For complex tasks that benefit from decomposition or parallel execution (multi-step
+research, multi-file refactoring, tasks with independent subtasks), use the
+spawn_sub_agent tool to create specialized sub-agents. Each sub-agent runs
+independently with its own tool access and returns a result you can aggregate.
+
+Guidelines for sub-agent usage:
+- Decompose the task into independent, well-scoped subtasks
+- Spawn one sub-agent per subtask (they run in parallel)
+- Aggregate results and synthesize a coherent final response
+- If a sub-agent fails, retry it once or report the partial result
+
+## Decision Boundaries
+- Default to Tier 1. Only escalate to Tier 2/3 when the task genuinely requires it.
+- A single tool call = Tier 2. Multiple independent tool calls that could run in
+  parallel = consider Tier 3.
+- Never use Tier 3 for tasks that need sequential reasoning or tight coupling
+  between steps — use Tier 2 with multiple turns instead.
+"""
+
 
 class SubAgentResult(BaseModel):
     """子 Agent 执行结果."""
@@ -200,6 +241,35 @@ class AgentWorkflow:
         self._settings = settings or get_settings()
         self._turn_counts: dict[str, int] = {}
 
+        # 注册 spawn_sub_agent 工具，使 LLM 可通过 tool call 创建子 Agent
+        if "spawn_sub_agent" not in self._tool_manager._tools:
+            self._tool_manager.register_native(
+                name="spawn_sub_agent",
+                description=(
+                    "Create a sub-agent to handle an independent subtask. "
+                    "Use this for complex tasks that can be decomposed into "
+                    "parallel or independent subtasks. The sub-agent runs with "
+                    "its own tool access and returns a result."
+                ),
+                handler=self._spawn_sub_agent_handler,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "The independent subtask to delegate to the sub-agent.",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "The current session ID.",
+                        },
+                    },
+                    "required": ["task", "session_id"],
+                },
+                risk_level="medium",
+                require_approval=False,
+            )
+
     async def process_message(
         self,
         session_id: str,
@@ -216,6 +286,20 @@ class AgentWorkflow:
         5. 触发阈值摘要（若启用）
         6. 返回结果
         """
+        # 应用默认系统提示词（当客户端未提供时），并动态注入当前可用工具列表
+        if system_prompt.strip():
+            effective_prompt = system_prompt
+        else:
+            effective_prompt = DEFAULT_SYSTEM_PROMPT.format(
+                tool_list=self._build_tool_description()
+            )
+        logger.info(
+            "task_classification_start",
+            session_id=session_id,
+            using_custom_prompt=bool(system_prompt.strip()),
+            available_tools=self._tool_manager.list_names(),
+        )
+
         # 1. 持久化用户消息
         if self._db is not None:
             await self._db.save_message(session_id, {
@@ -246,7 +330,7 @@ class AgentWorkflow:
                 history = history[:-1]
 
         # 4. 构建系统提示（含记忆上下文）
-        full_system_prompt = system_prompt
+        full_system_prompt = effective_prompt
         if memory_context:
             full_system_prompt = (full_system_prompt + "\n\n" + memory_context).strip()
 
@@ -265,6 +349,16 @@ class AgentWorkflow:
             messages=messages_for_harness,
             session_id=session_id,
             system_prompt=full_system_prompt,
+        )
+
+        # 日志：记录任务分类决策结果（工具使用情况反映分类）
+        logger.info(
+            "task_classification_result",
+            session_id=session_id,
+            turn_count=result.turn_count,
+            tool_count=len(result.tool_results),
+            had_error=bool(result.error),
+            interrupted=result.interrupted,
         )
 
         # 6. 异步提取事实（不阻塞主流程）
@@ -302,6 +396,54 @@ class AgentWorkflow:
                 await self._fact_extractor.extract(message, session_id, self._memory_manager)
         except Exception as e:
             logger.warning("fact_extraction_failed", error=str(e))
+
+    def _build_tool_description(self) -> str:
+        """从 UnifiedToolManager 动态生成工具列表描述.
+
+        遍历当前注册的所有工具，生成包含名称、描述、风险等级和审批要求的
+        格式化列表，用于注入系统提示词。工具集变化时无需修改代码。
+        """
+        lines: list[str] = []
+        for tool in self._tool_manager.list_tools():
+            schema = tool.schema
+            flags = []
+            if schema.require_approval:
+                flags.append("requires approval")
+            flags.append(f"risk: {schema.risk_level.value if hasattr(schema.risk_level, 'value') else schema.risk_level}")
+            flag_str = f" ({', '.join(flags)})" if flags else ""
+            lines.append(f"- {schema.name}: {schema.description}{flag_str}")
+        return "\n".join(lines) if lines else "(no tools available)"
+
+    async def _spawn_sub_agent_handler(self, task: str, session_id: str) -> str:
+        """spawn_sub_agent 工具的执行处理器.
+
+        创建子 Agent 执行独立子任务，返回子 Agent 的输出结果。
+        失败时返回错误信息而非抛出异常，使 LLM 可以处理失败情况。
+        """
+        logger.info(
+            "sub_agent_tool_invoked",
+            session_id=session_id,
+            task=task[:200],
+        )
+        try:
+            manager = self.get_sub_agent_manager()
+            result = await manager.spawn(task=task, session_id=session_id)
+            if result.error:
+                logger.warning(
+                    "sub_agent_tool_error",
+                    session_id=session_id,
+                    error=result.error,
+                )
+                return f"[SUB-AGENT ERROR] {result.error}"
+            logger.info(
+                "sub_agent_tool_success",
+                session_id=session_id,
+                turn_count=result.turn_count,
+            )
+            return result.content or "[SUB-AGENT] Completed with no output."
+        except Exception as e:
+            logger.exception("sub_agent_tool_exception", session_id=session_id)
+            return f"[SUB-AGENT ERROR] {e}"
 
     def get_sub_agent_manager(self, main_run_id: str | None = None) -> SubAgentManager:
         """获取子 Agent 管理器实例（共享父级依赖）."""

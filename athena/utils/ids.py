@@ -2,11 +2,28 @@
 
 session_id: UUID v4，会话级别全局唯一。
 run_id: 日期格式字符串（YYYYMMDD），子 Agent 在主 run_id 基础上添加下划线+序号。
+message_id: 毫秒级 Unix 时间戳 + 随机后缀，保证时序可排序且并发安全。
 """
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
+
+
+def generate_message_id() -> str:
+    """生成消息 ID（毫秒级时间戳 + 随机后缀）.
+
+    格式: msg_{unix_ms}_{random_hex}
+    - unix_ms: 毫秒级 Unix 时间戳，保证 ID 按时间可排序
+    - random_hex: 4 字节随机十六进制，防止同毫秒并发场景下的 ID 冲突
+
+    Returns:
+        形如 "msg_1722425678123_a3f2b1c9" 的字符串
+    """
+    unix_ms = int(datetime.now().timestamp() * 1000)
+    random_hex = os.urandom(4).hex()
+    return f"msg_{unix_ms}_{random_hex}"
 
 
 def generate_session_id() -> str:

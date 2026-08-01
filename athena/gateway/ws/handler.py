@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from athena.core.agent.workflow import AgentWorkflow
 from athena.gateway.approval import get_approval_manager
 from athena.gateway.ws.manager import get_websocket_manager
 from athena.schemas.events import ClientEventType, EventType, build_event
@@ -84,16 +85,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
 async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
     """处理用户命令（异步执行，避免阻塞 WebSocket 接收）."""
     from athena.gateway.routes._runtime import get_workflow, reset_session_stop_event
-    workflow = get_workflow()
+    workflow: AgentWorkflow | None = get_workflow()
     if workflow is None:
         return
     message = data.get("message", "")
-    system_prompt = data.get("system_prompt", "")
     logger.info(
         "user_command_received",
         session_id=session_id,
         message_length=len(message),
-        has_custom_prompt=bool(system_prompt.strip()),
     )
     reset_session_stop_event(session_id)
     # 异步执行不等待，避免阻塞 ws 接收循环
@@ -101,7 +100,6 @@ async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
         workflow.process_message(
             session_id=session_id,
             user_message=message,
-            system_prompt=system_prompt,
         )
     )
 

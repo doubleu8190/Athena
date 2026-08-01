@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from athena.core.agent.workflow import AgentWorkflow
+
 # 全局 AgentWorkflow 实例（main.py 启动时注入）
 _workflow: Any | None = None
 
@@ -12,12 +14,12 @@ _workflow: Any | None = None
 _stop_events: dict[str, asyncio.Event] = {}
 
 
-def set_workflow(workflow: Any) -> None:
+def set_workflow(workflow: AgentWorkflow) -> None:
     global _workflow
     _workflow = workflow
 
 
-def get_workflow() -> Any | None:
+def get_workflow() -> AgentWorkflow | None:
     return _workflow
 
 

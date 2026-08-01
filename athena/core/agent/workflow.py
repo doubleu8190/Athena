@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from datetime import datetime
 from typing import Any
 
@@ -23,7 +22,7 @@ from athena.core.tools.manager import UnifiedToolManager
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.schemas.events import EventType, build_event
-from athena.utils.ids import RunIdGenerator
+from athena.utils.ids import RunIdGenerator, generate_message_id
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -274,7 +273,6 @@ class AgentWorkflow:
         self,
         session_id: str,
         user_message: str,
-        system_prompt: str = "",
     ) -> dict[str, Any]:
         """处理用户消息的编排入口.
 
@@ -286,24 +284,19 @@ class AgentWorkflow:
         5. 触发阈值摘要（若启用）
         6. 返回结果
         """
-        # 应用默认系统提示词（当客户端未提供时），并动态注入当前可用工具列表
-        if system_prompt.strip():
-            effective_prompt = system_prompt
-        else:
-            effective_prompt = DEFAULT_SYSTEM_PROMPT.format(
-                tool_list=self._build_tool_description()
-            )
+        effective_prompt = DEFAULT_SYSTEM_PROMPT.format(
+            tool_list=self._build_tool_description()
+        )
         logger.info(
             "task_classification_start",
             session_id=session_id,
-            using_custom_prompt=bool(system_prompt.strip()),
             available_tools=self._tool_manager.list_names(),
         )
 
         # 1. 持久化用户消息
         if self._db is not None:
             await self._db.save_message(session_id, {
-                "id": str(uuid.uuid4()),
+                "id": generate_message_id(),  # 毫秒级时间戳 + 随机后缀，时序可排序且并发安全
                 "role": "user",
                 "content": user_message,
                 "metadata": {},

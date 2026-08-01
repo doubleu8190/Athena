@@ -18,6 +18,18 @@ from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# 受保护的系统目录（统一定义，避免多处重复）
+_PROTECTED_SYSTEM_DIRS = [
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/boot",
+    "/dev",
+    "/proc",
+    "/sys",
+]
+
 # 危险路径模式
 _DANGEROUS_PATTERNS = [
     r"\.\./",  # 路径遍历
@@ -135,21 +147,10 @@ class PathSecurityFilter:
         """
         resolved = self.validate(path)
 
-        # 写入保护检查
-        protected_patterns = [
-            r"/etc/",
-            r"/usr/",
-            r"/bin/",
-            r"/sbin/",
-            r"/boot/",
-            r"/dev/",
-            r"/proc/",
-            r"/sys/",
-        ]
-        path_str = str(resolved)
-        for pattern in protected_patterns:
-            if path_str.startswith(pattern.rstrip("/")):
-                raise PathSecurityError(path, f"Cannot write to protected directory: {pattern}")
+        # 写入保护检查：使用统一常量，避免与 _DANGEROUS_PATTERNS / blocked_dirs 重复定义
+        for protected_dir in _PROTECTED_SYSTEM_DIRS:
+            if str(resolved).startswith(str(protected_dir)):
+                raise PathSecurityError(path, f"Cannot write to protected directory: {protected_dir}")
 
         return resolved
 
@@ -177,7 +178,7 @@ def get_path_security_filter() -> PathSecurityFilter:
         cwd = os.getcwd()
         _default_filter = PathSecurityFilter(
             allowed_dirs=[cwd],
-            blocked_dirs=["/etc", "/usr", "/bin", "/sbin", "/boot", "/dev", "/proc", "/sys"],
+            blocked_dirs=_PROTECTED_SYSTEM_DIRS,
             strict_mode=False,
         )
     return _default_filter

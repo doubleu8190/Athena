@@ -293,17 +293,7 @@ class AgentWorkflow:
             available_tools=self._tool_manager.list_names(),
         )
 
-        # 1. 持久化用户消息
-        if self._db is not None:
-            await self._db.save_message(session_id, {
-                "id": generate_message_id(),  # 毫秒级时间戳 + 随机后缀，时序可排序且并发安全
-                "role": "user",
-                "content": user_message,
-                "metadata": {},
-                "timestamp": datetime.now().isoformat(),
-            })
-
-        # 2. 注入相关记忆
+        # 1. 注入相关记忆
         memory_context = ""
         if self._memory_retrieval is not None:
             try:
@@ -314,20 +304,17 @@ class AgentWorkflow:
             except Exception as e:
                 logger.warning("memory_injection_failed", error=str(e))
 
-        # 3. 加载历史消息
+        # 2. 加载历史消息
         history: list[dict[str, Any]] = []
         if self._db is not None:
             history = await self._db.get_messages(session_id)
-            # 移除刚保存的用户消息（避免重复），由 Harness 拼接
-            if history and history[-1].get("role") == "user" and history[-1].get("content") == user_message:
-                history = history[:-1]
 
-        # 4. 构建系统提示（含记忆上下文）
+        # 3. 构建系统提示（含记忆上下文）
         full_system_prompt = effective_prompt
         if memory_context:
             full_system_prompt = (full_system_prompt + "\n\n" + memory_context).strip()
 
-        # 5. 调用 Harness
+        # 4. 调用 Harness
         harness = Harness(
             llm=self._llm,
             tool_manager=self._tool_manager,
@@ -336,14 +323,22 @@ class AgentWorkflow:
             ws_manager=self._ws,
             compressor=self._compressor,
         )
-
         messages_for_harness = history + [{"role": "user", "content": user_message}]
         result = await harness.run(
             messages=messages_for_harness,
             session_id=session_id,
             system_prompt=full_system_prompt,
         )
-
+        
+        # 5. 持久化用户消息
+        if self._db is not None:
+            await self._db.save_message(session_id, {
+                "id": generate_message_id(),  # 毫秒级时间戳 + 随机后缀，时序可排序且并发安全
+                "role": "user",
+                "content": user_message,
+                "metadata": {},
+                "timestamp": datetime.now().isoformat(),
+            })
         # 日志：记录任务分类决策结果（工具使用情况反映分类）
         logger.info(
             "task_classification_result",

@@ -21,6 +21,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectAttempts = useRef(0)
   const buildingMessageId = useRef<string | null>(null)
+  const hasUserCommandRef = useRef(false)
   const {
     setConnectionStatus,
     setAgentStatus,
@@ -114,6 +115,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
   useEffect(() => {
     // 切换 session 时重置所有会话相关状态
     buildingMessageId.current = null
+    hasUserCommandRef.current = false
     setAgentStatus("idle")
     clearThinking()
 
@@ -143,6 +145,10 @@ export function useWebSocket(options: UseWebSocketOptions) {
   const sendEvent = useCallback(
     (type: string, data: Record<string, unknown> = {}) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
+        // 标记用户已发送命令，允许 agent 状态转为 running
+        if (type === ClientEventType.USER_COMMAND) {
+          hasUserCommandRef.current = true
+        }
         wsRef.current.send(JSON.stringify({ type, data }))
       }
     },
@@ -161,7 +167,11 @@ export function useWebSocket(options: UseWebSocketOptions) {
       switch (type) {
         case EventType.SESSION_START:
         case EventType.STREAM_START:
-          setAgentStatus("running")
+          // 仅在用户已发送过命令后才将状态设为 running，
+          // 防止仅因 WebSocket 连接建立就错误显示"运行中"
+          if (hasUserCommandRef.current) {
+            setAgentStatus("running")
+          }
           clearError()
           break
 
@@ -210,7 +220,9 @@ export function useWebSocket(options: UseWebSocketOptions) {
         }
 
         case EventType.LLM_CALL_END:
-          setAgentStatus("running")
+          if (hasUserCommandRef.current) {
+            setAgentStatus("running")
+          }
           buildingMessageId.current = null
           clearThinking()
           break

@@ -1,7 +1,8 @@
 """增量摘要生成器 — 维护持续更新的摘要缓冲区.
 
 每次压缩时只处理新增内容，与已有摘要合并，避免重复处理。
-_summary_buffer 需持久化到记忆系统（session_id 绑定）并在启动时恢复。
+_summary_buffer 按 session_id 隔离，避免跨会话数据污染。
+缓冲区持久化到记忆系统（session_id 绑定）并可在启动时恢复。
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from athena.core.memory.memory import MemoryManager
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,57 +33,75 @@ SUMMARY_PROMPT = """你需要将以下对话历史压缩为简洁的摘要。
 
 
 class IncrementalSummarizer:
-    """增量摘要生成器."""
+    """增量摘要生成器 — 按 session_id 隔离摘要缓冲区."""
 
     BUFFER_METADATA_KEY = "compression_summary_buffer"
 
-    def __init__(self, llm: Any, max_summary_tokens: int = 2000) -> None:
+    def __init__(self, llm: Any, memory_manager: MemoryManager, max_summary_tokens: int = 2000) -> None:
         self._llm = llm
         self._max_summary_tokens = max_summary_tokens
-        self._summary_buffer: str = ""
-        self._summarized_turns: int = 0
+        self._memory_manager = memory_manager
+        # 按 session_id 隔离，避免跨会话数据污染
+        self._buffers: dict[str, str] = {}
+        self._summarized_turns: dict[str, int] = {}
 
-    @property
-    def summary_buffer(self) -> str:
-        return self._summary_buffer
+    def _get_buffer(self, session_id: str) -> str:
+        """获取指定会话的摘要缓冲区."""
+        return self._buffers.get(session_id, "")
 
-    @property
-    def summarized_turns(self) -> int:
-        return self._summarized_turns
+    def _get_turns(self, session_id: str) -> int:
+        """获取指定会话的已摘要轮次数."""
+        return self._summarized_turns.get(session_id, 0)
 
-    def set_buffer(self, buffer: str, summarized_turns: int = 0) -> None:
+    def get_summary(self, session_id: str) -> str:
+        """获取指定会话的当前摘要."""
+        return self._get_buffer(session_id)
+
+    def get_summarized_turns(self, session_id: str) -> int:
+        """获取指定会话的已摘要轮次数."""
+        return self._get_turns(session_id)
+
+    def set_buffer(self, session_id: str, buffer: str, summarized_turns: int = 0) -> None:
         """恢复持久化的摘要缓冲区（启动时调用）."""
-        self._summary_buffer = buffer
-        self._summarized_turns = summarized_turns
+        self._buffers[session_id] = buffer
+        self._summarized_turns[session_id] = summarized_turns
         logger.info(
             "summary_buffer_restored",
+            session_id=session_id,
             buffer_tokens=len(buffer) // 4,
             summarized_turns=summarized_turns,
         )
+
+    def reset(self, session_id: str) -> None:
+        """重置指定会话的摘要（新会话或会话结束时调用）."""
+        self._buffers.pop(session_id, None)
+        self._summarized_turns.pop(session_id, None)
 
     async def update_summary(
         self,
         old_turns: list[list[dict[str, Any]]],
         session_id: str | None = None,
-        memory_manager: Any | None = None,
     ) -> str:
         """增量更新摘要.
 
         Args:
             old_turns: 需摘要的旧轮次
-            session_id: 会话 ID（用于持久化到记忆系统）
+            session_id: 会话 ID（用于隔离缓冲区和持久化到记忆系统）
             memory_manager: 记忆管理器（可选，用于持久化摘要缓冲区）
 
         Returns:
             更新后的完整摘要文本
         """
         if not old_turns:
-            return self._summary_buffer
+            return "" if session_id is None else self._get_buffer(session_id)
+
+        sid = session_id or "_default"
+        current_buffer = self._get_buffer(sid)
 
         new_content = self._format_turns_for_summary(old_turns)
         existing_section = ""
-        if self._summary_buffer:
-            existing_section = f"历史摘要：\n{self._summary_buffer}\n\n"
+        if current_buffer:
+            existing_section = f"历史摘要：\n{current_buffer}\n\n"
 
         prompt = SUMMARY_PROMPT.format(
             existing_summary_section=existing_section,
@@ -93,35 +113,35 @@ class IncrementalSummarizer:
             content = getattr(response, "content", str(response))
             if isinstance(content, list):
                 content = "\n".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
-            self._summary_buffer = content.strip()
+            self._buffers[sid] = content.strip()
         except Exception as e:
-            logger.error("incremental_summary_failed", error=str(e))
+            logger.error("incremental_summary_failed", error=str(e), session_id=sid)
             # 失败时保留旧摘要，不更新
-            return self._summary_buffer
+            return current_buffer
 
-        self._summarized_turns += len(old_turns)
+        self._summarized_turns[sid] = self._get_turns(sid) + len(old_turns)
 
         # 持久化到记忆系统（project_memory 约束：session_id 绑定）
-        if memory_manager is not None and session_id:
-            await self._persist_buffer(session_id, memory_manager)
+        if session_id:
+            await self._persist_buffer(session_id)
 
-        return self._summary_buffer
+        return self._buffers[sid]
 
-    async def _persist_buffer(self, session_id: str, memory_manager: Any) -> None:
+    async def _persist_buffer(self, session_id: str) -> None:
         """持久化摘要缓冲区到记忆系统."""
         try:
-            await memory_manager.add_memory(
-                content=self._summary_buffer,
+            await self._memory_manager.add_memory(
+                content=self._get_buffer(session_id),
                 session_id=session_id,
                 metadata={
                     "type": self.BUFFER_METADATA_KEY,
-                    "summarized_turns": self._summarized_turns,
+                    "summarized_turns": self._get_turns(session_id),
                     "source": "compression",
                 },
                 pinned=True,
             )
         except Exception as e:
-            logger.warning("summary_buffer_persist_failed", error=str(e))
+            logger.warning("summary_buffer_persist_failed", error=str(e), session_id=session_id)
 
     def _format_turns_for_summary(self, turns: list[list[dict[str, Any]]]) -> str:
         """将轮次格式化为摘要输入."""
@@ -148,11 +168,3 @@ class IncrementalSummarizer:
                     turn_content.append(f"工具结果 [{tc_id}]: {content[:200]}")
             formatted.append(f"--- 轮次 {i} ---\n" + "\n".join(turn_content))
         return "\n\n".join(formatted)
-
-    def get_summary(self) -> str:
-        return self._summary_buffer
-
-    def reset(self) -> None:
-        """重置摘要（新会话开始时调用）."""
-        self._summary_buffer = ""
-        self._summarized_turns = 0

@@ -76,8 +76,8 @@ async def lifespan(app: FastAPI):
         await memory_manager.initialize()
     except Exception as e:
         logger.warning("memory_init_skipped", error=str(e))
-        memory_manager = None  # type: ignore
-
+        raise e
+    
     retrieval_manager = (
         HybridRetrievalManager(llm, memory_manager, settings=settings)
         if memory_manager is not None
@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
     )
 
     from athena.core.compression.compressor import ContextCompressor
-    compressor = ContextCompressor(llm=llm, settings=settings)
+    compressor = ContextCompressor(llm=llm, memory_manager=memory_manager, settings=settings)
 
     # 6. AgentWorkflow
     from athena.core.agent.workflow import AgentWorkflow

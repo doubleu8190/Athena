@@ -161,7 +161,8 @@ class Harness:
                 if self._compressor is not None:
                     dict_messages = [self._message_to_dict(m) for m in lc_messages]
                     compressed = await self._compressor.compress(
-                        dict_messages, session_id=session_id
+                        dict_messages,
+                        session_id=session_id,
                     )
                     if len(compressed) < len(dict_messages):
                         lc_messages = [self._dict_to_message(m) for m in compressed]
@@ -632,7 +633,7 @@ class Harness:
                 build_event(event_type, data, session_id=session_id, run_id=run_id),
             )
         except Exception as e:
-            logger.warning("emit_event_failed", event=str(event_type), error=str(e))
+            logger.warning("emit_event_failed", event_type=str(event_type), error=str(e))
 
     def _dict_to_message(self, m: dict[str, Any]) -> BaseMessage:
         """字典 → LangChain Message."""

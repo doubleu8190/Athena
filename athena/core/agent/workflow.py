@@ -94,6 +94,7 @@ class SubAgentManager:
         db: Database | None = None,
         ws_manager: WebSocketManager | None = None,
         compressor: ContextCompressor | None = None,
+        memory_manager: Any | None = None,
         settings: Settings | None = None,
         main_run_id: str | None = None,
     ) -> None:
@@ -102,6 +103,7 @@ class SubAgentManager:
         self._db = db
         self._ws = ws_manager
         self._compressor = compressor
+        self._memory_manager = memory_manager
         self._settings = settings or get_settings()
         self._main_run_id = main_run_id
         self._sub_counter = 0
@@ -441,6 +443,7 @@ class AgentWorkflow:
             db=self._db,
             ws_manager=self._ws,
             compressor=self._compressor,
+            memory_manager=self._memory_manager,
             settings=self._settings,
             main_run_id=main_run_id,
         )

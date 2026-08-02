@@ -15,6 +15,7 @@ from typing import Any
 from athena.config.settings import Settings, get_settings
 from athena.core.compression.pairer import MessagePairer
 from athena.core.compression.summarizer import IncrementalSummarizer
+from athena.core.memory.memory import MemoryManager
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -55,6 +56,7 @@ class ContextCompressor:
     def __init__(
         self,
         llm: Any,
+        memory_manager: MemoryManager,
         settings: Settings | None = None,
     ) -> None:
         self._llm = llm
@@ -66,6 +68,7 @@ class ContextCompressor:
         self._pairer = MessagePairer()
         self._summarizer = IncrementalSummarizer(
             llm=llm,
+            memory_manager=memory_manager,
             max_summary_tokens=self._settings.max_summary_tokens,
         )
         self._keep_recent_turns = self._settings.keep_recent_turns
@@ -74,15 +77,10 @@ class ContextCompressor:
     def summarizer(self) -> IncrementalSummarizer:
         return self._summarizer
 
-    @property
-    def pairer(self) -> MessagePairer:
-        return self._pairer
-
     async def compress(
         self,
         messages: list[dict[str, Any]],
         session_id: str | None = None,
-        memory_manager: Any | None = None,
     ) -> list[dict[str, Any]]:
         """压缩消息列表.
 
@@ -110,11 +108,11 @@ class ContextCompressor:
             return messages
 
         # 4. 增量更新摘要
-        original_buffer = self._summarizer.summary_buffer
+        sid = session_id or "_default"
+        original_buffer = self._summarizer.get_summary(sid)
         updated_summary = await self._summarizer.update_summary(
             old_turns,
             session_id=session_id,
-            memory_manager=memory_manager,
         )
 
         # 摘要更新失败时降级为简单截断（保留更多消息）
@@ -125,7 +123,7 @@ class ContextCompressor:
         # 5. 重建压缩后的消息列表
         compressed = self._rebuild_messages(updated_summary, recent_turns)
 
-        await self._emit_compression_event(messages, compressed)
+        await self._emit_compression_event(messages, compressed, sid)
         return compressed
 
     def _rebuild_messages(
@@ -151,6 +149,7 @@ class ContextCompressor:
         self,
         original: list[dict[str, Any]],
         compressed: list[dict[str, Any]],
+        session_id: str,
     ) -> None:
         """发送压缩统计事件（供调用方推送）."""
         original_tokens = self._size_checker.estimate_total(original)
@@ -165,95 +164,5 @@ class ContextCompressor:
             original_tokens=original_tokens,
             compressed_tokens=compressed_tokens,
             saved_percent=round(saved_percent, 1),
-            summarized_turns=self._summarizer.summarized_turns,
+            summarized_turns=self._summarizer.get_summarized_turns(session_id),
         )
-
-
-class IntegratedCompressionManager:
-    """集成压缩管理器 — 压缩上下文 + 双写记忆系统.
-
-    职责：
-    1. 调用 ContextCompressor 执行增量压缩
-    2. 将压缩摘要写入 MemoryManager（双重保障）
-    3. 返回压缩后的消息列表供 Harness 使用
-
-    双写策略确保摘要不会丢失：
-    - 摘要缓冲区持久化到 SQLite（通过 IncrementalSummarizer）
-    - 摘要内容同时写入 ChromaDB（通过 MemoryManager.add_memory）
-    """
-
-    def __init__(
-        self,
-        compressor: ContextCompressor,
-        memory_manager: Any,
-    ) -> None:
-        self._compressor = compressor
-        self._memory = memory_manager
-
-    async def compress_and_persist(
-        self,
-        messages: list[dict[str, Any]],
-        session_id: str,
-    ) -> list[dict[str, Any]]:
-        """压缩上下文并持久化摘要到记忆系统.
-
-        Args:
-            messages: 原始消息列表
-            session_id: 会话 ID
-
-        Returns:
-            压缩后的消息列表（若未触发压缩则原样返回）
-        """
-        if self._memory is None:
-            return await self._compressor.compress(messages, session_id)
-
-        original_count = len(messages)
-        compressed = await self._compressor.compress(
-            messages, session_id, memory_manager=self._memory,
-        )
-
-        # 若发生压缩，将摘要写入记忆系统
-        if len(compressed) < original_count:
-            summary_msg = compressed[0] if compressed else None
-            if (
-                summary_msg
-                and summary_msg.get("role") == "system"
-                and "[对话历史摘要]" in summary_msg.get("content", "")
-            ):
-                try:
-                    summary_content = summary_msg["content"].replace(
-                        "[对话历史摘要]\n", ""
-                    )
-                    await self._memory.add_memory(
-                        content=summary_content,
-                        session_id=session_id,
-                        metadata={
-                            "type": "compression_summary",
-                            "source": "integrated_compression",
-                            "original_messages": original_count,
-                            "compressed_messages": len(compressed),
-                        },
-                        pinned=False,
-                    )
-                    logger.info(
-                        "compression_summary_persisted",
-                        session_id=session_id,
-                        original_count=original_count,
-                        compressed_count=len(compressed),
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "compression_persist_failed",
-                        session_id=session_id,
-                        error=str(e),
-                    )
-
-        return compressed
-
-    @property
-    def compressor(self) -> ContextCompressor:
-        return self._compressor
-
-    @property
-    def memory(self) -> Any:
-        return self._memory

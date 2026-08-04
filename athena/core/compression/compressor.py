@@ -10,12 +10,12 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from athena.config.settings import Settings, get_settings
 from athena.core.compression.pairer import MessagePairer
 from athena.core.compression.summarizer import IncrementalSummarizer
+from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
+from athena.types import JSONValue
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -28,7 +28,7 @@ class ContextSizeChecker:
         self._max_tokens = max_context_tokens
         self._threshold = threshold
 
-    async def should_compress(self, messages: list[dict[str, Any]]) -> bool:
+    async def should_compress(self, messages: list[dict[str, JSONValue]]) -> bool:
         """检查是否需要压缩（超过阈值时触发）."""
         total = sum(self._estimate_tokens(m.get("content", "")) for m in messages)
         # 也计入 tool_calls 的 token
@@ -38,7 +38,7 @@ class ContextSizeChecker:
                 total += self._estimate_tokens(str(tc.get("args", {})))
         return total > self._max_tokens * self._threshold
 
-    def estimate_total(self, messages: list[dict[str, Any]]) -> int:
+    def estimate_total(self, messages: list[dict[str, JSONValue]]) -> int:
         return sum(self._estimate_tokens(m.get("content", "")) for m in messages)
 
     def _estimate_tokens(self, text: str) -> int:
@@ -55,7 +55,7 @@ class ContextCompressor:
 
     def __init__(
         self,
-        llm: Any,
+        llm: LLMProvider,
         memory_manager: MemoryManager,
         settings: Settings | None = None,
     ) -> None:
@@ -79,9 +79,9 @@ class ContextCompressor:
 
     async def compress(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, JSONValue]],
         session_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, JSONValue]]:
         """压缩消息列表.
 
         Args:
@@ -129,8 +129,8 @@ class ContextCompressor:
     def _rebuild_messages(
         self,
         summary: str,
-        recent_turns: list[list[dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
+        recent_turns: list[list[dict[str, JSONValue]]],
+    ) -> list[dict[str, JSONValue]]:
         """重建压缩后的消息列表."""
         summary_msg = {
             "role": "system",
@@ -140,15 +140,15 @@ class ContextCompressor:
                 "is_incremental": True,
             },
         }
-        recent_messages: list[dict[str, Any]] = []
+        recent_messages: list[dict[str, JSONValue]] = []
         for turn in recent_turns:
             recent_messages.extend(turn)
         return [summary_msg] + recent_messages
 
     async def _emit_compression_event(
         self,
-        original: list[dict[str, Any]],
-        compressed: list[dict[str, Any]],
+        original: list[dict[str, JSONValue]],
+        compressed: list[dict[str, JSONValue]],
         session_id: str,
     ) -> None:
         """发送压缩统计事件（供调用方推送）."""

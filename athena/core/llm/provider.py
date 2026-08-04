@@ -12,9 +12,16 @@ from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
+from langchain_core.runnables import Runnable
+from langchain_core.tools import BaseTool, StructuredTool
 
 from athena.config.settings import Settings, get_settings
-from athena.core.llm.retry import ErrorCategory, LLMRetryManager, RetryConfig, RetryResult
+from athena.core.llm.retry import (
+    ErrorCategory,
+    LLMRetryManager,
+    RetryConfig,
+    RetryResult,
+)
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -27,13 +34,17 @@ class LLMProviderProtocol(Protocol):
     @property
     def model(self) -> BaseChatModel: ...
 
-    async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> Any: ...
+    async def ainvoke(
+        self, messages: list[BaseMessage], **kwargs: Any
+    ) -> BaseMessage: ...
 
-    def astream(self, messages: list[BaseMessage], **kwargs: Any) -> AsyncIterator[Any]: ...
+    def astream(
+        self, messages: list[BaseMessage], **kwargs: Any
+    ) -> AsyncIterator[BaseMessage]: ...
 
-    def bind_tools(self, tools: list[Any]) -> "LLMProviderProtocol": ...
+    def bind_tools(self, tools: list[BaseTool]) -> "LLMProviderProtocol": ...
 
-    def with_structured_output(self, schema: type) -> Any: ...
+    def with_structured_output(self, schema: type) -> Runnable: ...
 
 
 class LLMProvider:
@@ -45,14 +56,14 @@ class LLMProvider:
 
     def __init__(
         self,
-        model: Any,
+        model: BaseChatModel,
         retry_manager: LLMRetryManager | None = None,
     ) -> None:
         self._model = model
         self._retry_manager = retry_manager
 
     @property
-    def model(self) -> Any:
+    def model(self) -> BaseChatModel:
         """获取底层 LangChain 模型实例."""
         return self._model
 
@@ -60,13 +71,15 @@ class LLMProvider:
         """注入重试管理器."""
         self._retry_manager = retry_manager
 
-    async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> Any:
+    async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> BaseMessage:
         """异步调用模型，失败时使用指数退避重试."""
         if self._retry_manager is None:
             return await self._model.ainvoke(messages, **kwargs)
 
         result = await self._retry_manager.execute_with_retry(
-            self._model.ainvoke, messages, **kwargs,
+            self._model.ainvoke,
+            messages,
+            **kwargs,
         )
         if not result.success:
             error = result.error or RuntimeError("Unknown LLM error")
@@ -79,15 +92,19 @@ class LLMProvider:
             raise RuntimeError(
                 f"LLM 调用失败 ({result.attempts} 次尝试): {error}"
             ) from error
+        if result.result is None:
+            raise RuntimeError("LLM returned None result despite success")
         return result.result
 
-    def astream(self, messages: list[BaseMessage], **kwargs: Any) -> AsyncIterator[Any]:
+    def astream(
+        self, messages: list[BaseMessage], **kwargs: Any
+    ) -> AsyncIterator[BaseMessage]:
         """流式调用模型，返回带重试能力的 async generator."""
         return self._retry_astream(messages, **kwargs)
 
     async def _retry_astream(
         self, messages: list[BaseMessage], **kwargs: Any
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncIterator[BaseMessage]:
         """带重试的流式输出.
 
         当 astream 创建 generator 失败时进行重试；
@@ -113,10 +130,14 @@ class LLMProvider:
                 last_error = e
                 category = ErrorCategory.TRANSIENT
                 from athena.core.llm.retry import categorize_error
+
                 category = categorize_error(e)
 
-                if attempt < config.max_attempts - 1 and category != ErrorCategory.PERMANENT:
-                    delay_ms = config.min_delay_ms * (2 ** attempt)
+                if (
+                    attempt < config.max_attempts - 1
+                    and category != ErrorCategory.PERMANENT
+                ):
+                    delay_ms = config.min_delay_ms * (2**attempt)
                     delay_s = min(delay_ms, config.max_delay_ms) / 1000
                     logger.warning(
                         "llm_astream_retry",
@@ -131,12 +152,12 @@ class LLMProvider:
         if last_error:
             raise last_error
 
-    def bind_tools(self, tools: list[Any]) -> "LLMProvider":
+    def bind_tools(self, tools: list[StructuredTool]) -> LLMProvider:
         """绑定工具到模型，返回新的 provider 实例."""
-        bound = self._model.bind_tools(tools)
-        return LLMProvider(bound, retry_manager=self._retry_manager)
+        self._model.bind_tools(tools)
+        return LLMProvider(self._model, retry_manager=self._retry_manager)
 
-    def with_structured_output(self, schema: type) -> Any:
+    def with_structured_output(self, schema: type) -> Runnable:
         """绑定结构化输出 schema，返回可调用的 runnable."""
         return self._model.with_structured_output(schema)
 

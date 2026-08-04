@@ -16,8 +16,9 @@ from athena.config.settings import Settings, get_settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessSettings
 from athena.core.llm.provider import LLMProvider
+from athena.core.memory.memory import MemoryManager
 from athena.core.memory.retrieval import MemoryRetrievalService
-from athena.core.memory.summarizer import ConversationSummarizer
+from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
 from athena.core.tools.manager import UnifiedToolManager
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
@@ -91,12 +92,12 @@ class SubAgentManager:
         self,
         llm: LLMProvider,
         tool_manager: UnifiedToolManager,
-        db: Database | None = None,
-        ws_manager: WebSocketManager | None = None,
-        compressor: ContextCompressor | None = None,
-        memory_manager: Any | None = None,
-        settings: Settings | None = None,
-        main_run_id: str | None = None,
+        db: Database,
+        ws_manager: WebSocketManager,
+        compressor: ContextCompressor,
+        memory_manager: MemoryManager,
+        settings: Settings,
+        main_run_id: str,
     ) -> None:
         self._llm = llm
         self._tool_manager = tool_manager
@@ -127,16 +128,15 @@ class SubAgentManager:
         )
 
         # 推送子 Agent 启动事件
-        if self._ws is not None:
-            await self._ws.send_to_session(
-                session_id,
-                build_event(
-                    EventType.SUB_AGENT_SPAWNED,
-                    {"task": task, "sub_run_id": sub_run_id, "max_turns": max_turns},
-                    session_id=session_id,
-                    run_id=sub_run_id,
-                ),
-            )
+        await self._ws.send_to_session(
+            session_id,
+            build_event(
+                EventType.SUB_AGENT_SPAWNED,
+                {"task": task, "sub_run_id": sub_run_id, "max_turns": max_turns},
+                session_id=session_id,
+                run_id=sub_run_id,
+            ),
+        )
 
         # 子 Agent 使用过滤后的工具集（共享同一 manager，但通过 langchain_tools 名单过滤）
         sub_harness = Harness(
@@ -167,29 +167,31 @@ class SubAgentManager:
                 error=result.error,
                 run_id=sub_run_id,
             )
-            if self._ws is not None:
-                await self._ws.send_to_session(
-                    session_id,
-                    build_event(
-                        EventType.SUB_AGENT_COMPLETE,
-                        {"task": task, "sub_run_id": sub_run_id, "turn_count": result.turn_count},
-                        session_id=session_id,
-                        run_id=sub_run_id,
-                    ),
-                )
+            await self._ws.send_to_session(
+                session_id,
+                build_event(
+                    EventType.SUB_AGENT_COMPLETE,
+                    {
+                        "task": task,
+                        "sub_run_id": sub_run_id,
+                        "turn_count": result.turn_count,
+                    },
+                    session_id=session_id,
+                    run_id=sub_run_id,
+                ),
+            )
             return sub_result
         except Exception as e:
             logger.exception("sub_agent_failed", sub_run_id=sub_run_id)
-            if self._ws is not None:
-                await self._ws.send_to_session(
-                    session_id,
-                    build_event(
-                        EventType.SUB_AGENT_FAILED,
-                        {"task": task, "sub_run_id": sub_run_id, "error": str(e)},
-                        session_id=session_id,
-                        run_id=sub_run_id,
-                    ),
-                )
+            await self._ws.send_to_session(
+                session_id,
+                build_event(
+                    EventType.SUB_AGENT_FAILED,
+                    {"task": task, "sub_run_id": sub_run_id, "error": str(e)},
+                    session_id=session_id,
+                    run_id=sub_run_id,
+                ),
+            )
             return SubAgentResult(
                 task=task, content="", error=str(e), run_id=sub_run_id
             )
@@ -221,14 +223,14 @@ class AgentWorkflow:
         self,
         llm: LLMProvider,
         tool_manager: UnifiedToolManager,
-        db: Database | None = None,
-        ws_manager: WebSocketManager | None = None,
-        compressor: ContextCompressor | None = None,
-        memory_retrieval: MemoryRetrievalService | None = None,
-        conversation_summarizer: ConversationSummarizer | None = None,
-        fact_extractor: Any | None = None,
-        memory_manager: Any | None = None,
-        settings: Settings | None = None,
+        db: Database,
+        ws_manager: WebSocketManager,
+        compressor: ContextCompressor,
+        memory_retrieval: MemoryRetrievalService,
+        conversation_summarizer: ConversationSummarizer,
+        fact_extractor: FactExtractor,
+        memory_manager: MemoryManager,
+        settings: Settings,
     ) -> None:
         self._llm = llm
         self._tool_manager = tool_manager
@@ -275,6 +277,7 @@ class AgentWorkflow:
         self,
         session_id: str,
         user_message: str,
+        system_prompt: str | None = None,
     ) -> dict[str, Any]:
         """处理用户消息的编排入口.
 
@@ -312,7 +315,7 @@ class AgentWorkflow:
             history = await self._db.get_messages(session_id)
 
         # 3. 构建系统提示（含记忆上下文）
-        full_system_prompt = effective_prompt
+        full_system_prompt = system_prompt or effective_prompt
         if memory_context:
             full_system_prompt = (full_system_prompt + "\n\n" + memory_context).strip()
 
@@ -331,16 +334,18 @@ class AgentWorkflow:
             session_id=session_id,
             system_prompt=full_system_prompt,
         )
-        
+
         # 5. 持久化用户消息
-        if self._db is not None:
-            await self._db.save_message(session_id, {
+        await self._db.save_message(
+            session_id,
+            {
                 "id": generate_message_id(),  # 毫秒级时间戳 + 随机后缀，时序可排序且并发安全
                 "role": "user",
                 "content": user_message,
                 "metadata": {},
                 "timestamp": datetime.now().isoformat(),
-            })
+            },
+        )
         # 日志：记录任务分类决策结果（工具使用情况反映分类）
         logger.info(
             "task_classification_result",
@@ -352,23 +357,23 @@ class AgentWorkflow:
         )
 
         # 6. 异步提取事实（不阻塞主流程）
-        if self._fact_extractor is not None and self._memory_manager is not None:
-            asyncio.create_task(
-                self._extract_facts_async(user_message, session_id)
-            )
+        asyncio.create_task(self._extract_facts_async(user_message, session_id))
 
         # 7. 触发阈值摘要
-        if self._conversation_summarizer is not None:
-            self._turn_counts[session_id] = self._turn_counts.get(session_id, 0) + result.turn_count
-            try:
-                recent_messages = history[-self._settings.summary_threshold * 2 :] if history else []
-                await self._conversation_summarizer.summarize_if_needed(
-                    session_id=session_id,
-                    turn_count=self._turn_counts[session_id],
-                    messages=recent_messages,
-                )
-            except Exception as e:
-                logger.warning("summary_trigger_failed", error=str(e))
+        self._turn_counts[session_id] = (
+            self._turn_counts.get(session_id, 0) + result.turn_count
+        )
+        try:
+            recent_messages = (
+                history[-self._settings.summary_threshold * 2 :] if history else []
+            )
+            await self._conversation_summarizer.summarize_if_needed(
+                session_id=session_id,
+                turn_count=self._turn_counts[session_id],
+                messages=recent_messages,
+            )
+        except Exception as e:
+            logger.warning("summary_trigger_failed", error=str(e))
 
         return {
             "content": result.content,
@@ -382,8 +387,9 @@ class AgentWorkflow:
     async def _extract_facts_async(self, message: str, session_id: str) -> None:
         """异步提取事实（不阻塞主流程）."""
         try:
-            if self._fact_extractor is not None and self._memory_manager is not None:
-                await self._fact_extractor.extract(message, session_id, self._memory_manager)
+            await self._fact_extractor.extract(
+                message, session_id, self._memory_manager
+            )
         except Exception as e:
             logger.warning("fact_extraction_failed", error=str(e))
 
@@ -399,7 +405,9 @@ class AgentWorkflow:
             flags = []
             if schema.require_approval:
                 flags.append("requires approval")
-            flags.append(f"risk: {schema.risk_level.value if hasattr(schema.risk_level, 'value') else schema.risk_level}")
+            flags.append(
+                f"risk: {schema.risk_level.value if hasattr(schema.risk_level, 'value') else schema.risk_level}"
+            )
             flag_str = f" ({', '.join(flags)})" if flags else ""
             lines.append(f"- {schema.name}: {schema.description}{flag_str}")
         return "\n".join(lines) if lines else "(no tools available)"

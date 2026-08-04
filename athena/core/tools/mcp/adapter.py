@@ -2,82 +2,22 @@
 
 职责：
 - MCP 工具 Schema 转换为 ToolSchema
-- MCP 工具远程代理执行
-- 错误处理与超时控制
+- 工具名称前缀化，避免多 Server 之间冲突
+- 批量注册到 UnifiedToolManager
 """
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from athena.core.tools.base import BaseTool
 from athena.core.tools.mcp.client import MCPClient
-from athena.models.tool import ToolCallStatus, ToolResult, ToolSchema
+from athena.models.tool import RiskLevel
 from athena.utils.logging import get_logger
 
+if TYPE_CHECKING:
+    from athena.core.tools.manager import UnifiedToolManager
+
 logger = get_logger(__name__)
-
-
-class MCPTool(BaseTool):
-    """MCP 工具代理 — 通过 MCP 协议远程调用工具."""
-
-    def __init__(
-        self,
-        schema: ToolSchema,
-        mcp_client: MCPClient,
-        timeout: float = 30.0,
-    ) -> None:
-        super().__init__(schema)
-        self._client = mcp_client
-        self._timeout = timeout
-
-    async def execute(self, **kwargs: Any) -> ToolResult:
-        """通过 MCP 协议远程执行工具."""
-        try:
-            result = await asyncio.wait_for(
-                self._client.call_tool(self.name, kwargs),
-                timeout=self._timeout,
-            )
-
-            # 解析 MCP 返回结果
-            if isinstance(result, dict):
-                content = result.get("content", [])
-                if isinstance(content, list):
-                    # MCP 标准格式：[{type: "text", text: "..."}]
-                    text_parts = [
-                        item.get("text", str(item))
-                        for item in content
-                        if isinstance(item, dict)
-                    ]
-                    output = "\n".join(text_parts) if text_parts else str(result)
-                else:
-                    output = str(content)
-            else:
-                output = str(result)
-
-            return ToolResult(
-                tool_call_id="",
-                name=self.name,
-                status=ToolCallStatus.SUCCESS,
-                output=output,
-            )
-
-        except asyncio.TimeoutError:
-            return ToolResult(
-                tool_call_id="",
-                name=self.name,
-                status=ToolCallStatus.TIMEOUT,
-                error=f"工具 {self.name} 执行超时 ({self._timeout}s)",
-            )
-        except Exception as e:
-            logger.error("mcp_tool_execute_failed", tool=self.name, error=str(e))
-            return ToolResult(
-                tool_call_id="",
-                name=self.name,
-                status=ToolCallStatus.FAILED,
-                error=str(e),
-            )
 
 
 class MCPToolAdapter:
@@ -91,7 +31,7 @@ class MCPToolAdapter:
         )
     """
 
-    def __init__(self, tool_manager: Any) -> None:
+    def __init__(self, tool_manager: UnifiedToolManager) -> None:
         self._tool_manager = tool_manager
         self._clients: dict[str, MCPClient] = {}
 
@@ -131,8 +71,9 @@ class MCPToolAdapter:
 
         self._clients[server_name] = client
 
-        # 获取工具列表并注册
+        # 获取工具列表并构建注册信息
         tools = await client.list_tools()
+        tool_defs: list[dict[str, Any]] = []
         registered_names: list[str] = []
 
         for tool_def in tools:
@@ -140,31 +81,25 @@ class MCPToolAdapter:
             if not tool_name:
                 continue
 
-            # 添加服务器名称前缀避免冲突
+            # 添加服务器名称前缀避免冲突，同时保留原始工具名供远程调用
             full_name = f"mcp_{server_name}_{tool_name}"
 
-            schema = ToolSchema(
-                name=full_name,
-                description=tool_def.get("description", ""),
-                parameters=tool_def.get("inputSchema", {}),
-                require_approval=True,  # MCP 工具默认需要审批
-                risk_level="medium",
+            tool_defs.append(
+                {
+                    "name": full_name,
+                    "description": tool_def.get("description", ""),
+                    "parameters": tool_def.get("inputSchema", {}),
+                    "remote_name": tool_name,
+                    "risk_level": RiskLevel.MEDIUM,
+                    "require_approval": True,  # MCP 工具默认需要审批
+                }
             )
-
-            mcp_tool = MCPTool(
-                schema=schema,
-                mcp_client=client,
-                timeout=timeout,
-            )
-
-            self._tool_manager.register_tool(mcp_tool)
             registered_names.append(full_name)
 
-            logger.info(
-                "mcp_tool_registered",
-                server=server_name,
-                tool=full_name,
-            )
+            logger.info("mcp_tool_registered", server=server_name, tool=full_name)
+
+        # 批量注册到工具管理器
+        self._tool_manager.register_mcp_tools(server_name, tool_defs, client)
 
         return registered_names
 

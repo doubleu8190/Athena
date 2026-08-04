@@ -14,11 +14,15 @@ import asyncio
 import uuid
 from collections import deque
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from athena.models.approval import ApprovalDecision, ApprovalRequest
 from athena.schemas.events import EventType, build_event
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from athena.db.database import Database
+    from athena.gateway.ws.manager import WebSocketManager
 
 logger = get_logger(__name__)
 
@@ -29,8 +33,8 @@ class ApprovalManager:
     def __init__(
         self,
         approval_timeout: int = 120,
-        websocket_manager: Any | None = None,
-        db: Any | None = None,
+        websocket_manager: WebSocketManager | None = None,
+        db: Database | None = None,
     ) -> None:
         self._queue: deque[ApprovalRequest] = deque()
         self._pending: dict[str, ApprovalRequest] = {}  # approval_id → request
@@ -41,10 +45,10 @@ class ApprovalManager:
         self._db = db
         self._lock = asyncio.Lock()
 
-    def set_websocket_manager(self, ws_manager: Any) -> None:
+    def set_websocket_manager(self, ws_manager: WebSocketManager) -> None:
         self._websocket_manager = ws_manager
 
-    def set_db(self, db: Any) -> None:
+    def set_db(self, db: Database) -> None:
         self._db = db
 
     @property
@@ -357,8 +361,8 @@ _approval_manager: ApprovalManager | None = None
 
 def get_approval_manager(
     approval_timeout: int = 120,
-    websocket_manager: Any | None = None,
-    db: Any | None = None,
+    websocket_manager: WebSocketManager | None = None,
+    db: Database | None = None,
 ) -> ApprovalManager:
     """获取审批管理器单例."""
     global _approval_manager

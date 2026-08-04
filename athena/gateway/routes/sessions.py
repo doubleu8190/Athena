@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from athena.core.agent.workflow import AgentWorkflow
 from athena.db.database import Database, get_database
 from athena.utils.ids import generate_session_id
 from athena.utils.logging import get_logger
@@ -31,7 +32,7 @@ async def _get_db() -> Database:
     return await get_database(get_settings().sqlite_db_path)
 
 
-async def _get_workflow() -> Any:
+async def _get_workflow() -> AgentWorkflow | None:
     """获取全局 AgentWorkflow 实例（由 main.py 注入）."""
     from athena.gateway.routes._runtime import get_workflow
     return get_workflow()
@@ -95,7 +96,6 @@ async def send_message(session_id: str, req: SendMessageRequest) -> dict[str, An
         result = await workflow.process_message(
             session_id=session_id,
             user_message=req.message,
-            system_prompt=req.system_prompt,
         )
         return result
     except Exception as e:

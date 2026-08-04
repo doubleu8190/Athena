@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from athena.core.memory.memory import MemoryManager
 
 logger = get_logger(__name__)
 
@@ -27,7 +30,7 @@ class SearchMemoryRequest(BaseModel):
     n_results: int = 5
 
 
-async def _get_memory_manager() -> Any:
+async def _get_memory_manager() -> MemoryManager | None:
     from athena.gateway.routes._runtime import get_workflow
     workflow = get_workflow()
     if workflow is None:

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from athena.gateway.approval import ApprovalManager
 
 logger = get_logger(__name__)
 
@@ -18,7 +21,7 @@ class ApprovalResponseRequest(BaseModel):
     action: str  # allow / deny
 
 
-async def _get_approval_manager() -> Any:
+async def _get_approval_manager() -> ApprovalManager | None:
     from athena.gateway.routes._runtime import get_workflow
     workflow = get_workflow()
     if workflow is None:

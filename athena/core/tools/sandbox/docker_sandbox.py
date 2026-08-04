@@ -19,10 +19,13 @@ import asyncio
 import io
 import tarfile
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from athena.config.settings import Settings, get_settings
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    import docker
 
 logger = get_logger(__name__)
 
@@ -71,7 +74,7 @@ class DockerSandboxManager:
         cpu_limit: float = 0.5,
         workspace_path: str = "/workspace",
         allowed_paths: list[str] | None = None,
-        docker_client: Any | None = None,
+        docker_client: docker.DockerClient | None = None,
     ) -> None:
         self._client = docker_client
         self._image = image
@@ -99,7 +102,7 @@ class DockerSandboxManager:
     def configure_allowed_paths(self, paths: list[str]) -> None:
         self._path_filter.configure(paths)
 
-    def _get_client(self) -> Any:
+    def _get_client(self) -> docker.DockerClient:
         if self._client is None:
             import docker
             self._client = docker.from_env()
@@ -123,7 +126,7 @@ class DockerSandboxManager:
         session_id: str,
         run_id: str | None = None,
         bind_mounts: dict[str, str] | None = None,
-    ) -> Any:
+    ) -> docker.models.containers.Container:
         """确保指定作用域的容器存在且运行."""
         scope_key = self._get_scope_key(scope, session_id, run_id)
         client = self._get_client()

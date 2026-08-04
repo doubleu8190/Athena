@@ -12,15 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.schemas.events import EventType, build_event
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from athena.core.agent.workflow import AgentWorkflow
 
 logger = get_logger(__name__)
 
@@ -51,7 +53,7 @@ class SessionRecovery:
         self,
         db: Database,
         ws_manager: WebSocketManager | None = None,
-        agent_workflow: Any = None,
+        agent_workflow: AgentWorkflow | None = None,
     ) -> None:
         self._db = db
         self._ws = ws_manager
@@ -70,7 +72,9 @@ class SessionRecovery:
             try:
                 await self._recover_session(session_id)
             except Exception as e:
-                logger.error("session_recovery_failed", session_id=session_id, error=str(e))
+                logger.error(
+                    "session_recovery_failed", session_id=session_id, error=str(e)
+                )
                 await self._db.update_session(session_id, status="idle")
 
     async def _recover_session(self, session_id: str) -> None:
@@ -110,7 +114,11 @@ class SessionRecovery:
                     system_prompt="[系统] 正在恢复中断的会话，请从现有对话历史继续。",
                 )
                 await self._db.update_session(session_id, status="idle")
-                logger.info("session_recovery_success", session_id=session_id, attempt=attempt + 1)
+                logger.info(
+                    "session_recovery_success",
+                    session_id=session_id,
+                    attempt=attempt + 1,
+                )
                 return
             except Exception as e:
                 logger.warning(
@@ -120,7 +128,7 @@ class SessionRecovery:
                     error=str(e),
                 )
                 if attempt < self.MAX_RECOVERY_RETRIES - 1:
-                    await asyncio.sleep(2 ** attempt)  # 指数退避
+                    await asyncio.sleep(2**attempt)  # 指数退避
 
         # 恢复失败
         await self._db.update_session(session_id, status="failed")
@@ -160,16 +168,21 @@ class SessionRecovery:
 
     async def _check_pending_approvals(self, session_id: str) -> None:
         """检查中断时的待审批请求并通知用户."""
-        running_tools = await self._db.query_tool_calls(session_id=session_id, status="running")
+        running_tools = await self._db.query_tool_calls(
+            session_id=session_id, status="running"
+        )
 
         for tc in running_tools:
             approval = await self._db.query_approval(tool_call_id=tc["id"])
             if not approval:
                 # 审批中断，更新状态并通知用户
-                await self._db.update_tool_call(tc["id"], {
-                    "status": "interrupted",
-                    "error_message": "进程中断，审批未完成",
-                })
+                await self._db.update_tool_call(
+                    tc["id"],
+                    {
+                        "status": "interrupted",
+                        "error_message": "进程中断，审批未完成",
+                    },
+                )
 
                 if self._ws is not None:
                     await self._ws.send_to_session(
@@ -194,28 +207,39 @@ class SessionRecovery:
 
     async def _handle_interrupted_tools(self, session_id: str) -> None:
         """处理中断的工具调用."""
-        running_tools = await self._db.query_tool_calls(session_id=session_id, status="running")
+        running_tools = await self._db.query_tool_calls(
+            session_id=session_id, status="running"
+        )
 
         for tc in running_tools:
             strategy = self._get_interrupted_tool_strategy(tc)
 
             if strategy == InterruptedToolStrategy.RETRY:
                 # 标记为待重试
-                await self._db.update_tool_call(tc["id"], {
-                    "status": "pending_retry",
-                    "error_message": "进程中断，待重试",
-                })
+                await self._db.update_tool_call(
+                    tc["id"],
+                    {
+                        "status": "pending_retry",
+                        "error_message": "进程中断，待重试",
+                    },
+                )
             elif strategy == InterruptedToolStrategy.SKIP:
                 # 标记为已完成
-                await self._db.update_tool_call(tc["id"], {
-                    "status": "completed",
-                    "error_message": "进程中断，但操作可能已完成",
-                })
+                await self._db.update_tool_call(
+                    tc["id"],
+                    {
+                        "status": "completed",
+                        "error_message": "进程中断，但操作可能已完成",
+                    },
+                )
             else:  # NOTIFY_USER
-                await self._db.update_tool_call(tc["id"], {
-                    "status": "interrupted",
-                    "error_message": "进程中断，状态未知",
-                })
+                await self._db.update_tool_call(
+                    tc["id"],
+                    {
+                        "status": "interrupted",
+                        "error_message": "进程中断，状态未知",
+                    },
+                )
 
                 if self._ws is not None:
                     await self._ws.send_to_session(
@@ -231,7 +255,9 @@ class SessionRecovery:
                         ),
                     )
 
-    def _get_interrupted_tool_strategy(self, tool_call: dict[str, Any]) -> InterruptedToolStrategy:
+    def _get_interrupted_tool_strategy(
+        self, tool_call: dict[str, Any]
+    ) -> InterruptedToolStrategy:
         """根据工具类型确定中断后的处理策略."""
         tool_name = tool_call.get("tool_name", "")
 

@@ -6,14 +6,14 @@ project_memory 约束：恢复采用被动模式，仅通知用户不主动执�
 
 from __future__ import annotations
 
-from typing import Any
+from athena.db.database import Database
 
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-async def recover_interrupted_sessions(db: Any) -> None:
+async def recover_interrupted_sessions(db: Database) -> None:
     """被动会话恢复：检测 interrupted 会话并标记为 idle 等待用户确认.
 
     Args:

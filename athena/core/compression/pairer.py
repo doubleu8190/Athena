@@ -8,20 +8,20 @@
 
 from __future__ import annotations
 
-from athena.types import JSONValue
+from typing import Any
 
 
 class MessagePairer:
     """将扁平消息列表分割为完整对话轮次."""
 
-    def identify_turns(self, messages: list[dict[str, JSONValue]]) -> list[list[dict[str, JSONValue]]]:
+    def identify_turns(self, messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         """将消息列表分割为完整的对话轮次.
 
         Returns:
             轮次列表，每个轮次是一个消息列表
         """
-        turns: list[list[dict[str, JSONValue]]] = []
-        current_turn: list[dict[str, JSONValue]] = []
+        turns: list[list[dict[str, Any]]] = []
+        current_turn: list[dict[str, Any]] = []
 
         for msg in messages:
             role = msg.get("role", "")
@@ -47,7 +47,7 @@ class MessagePairer:
 
         return turns
 
-    def _is_turn_complete(self, turn: list[dict[str, JSONValue]]) -> bool:
+    def _is_turn_complete(self, turn: list[dict[str, Any]]) -> bool:
         """判断当前轮次是否完整."""
         if len(turn) < 2:
             return False
@@ -67,7 +67,7 @@ class MessagePairer:
         # tool 消息本身不直接结束轮次，需要等待 assistant 后续总结消息
         return False
 
-    def _has_pending_tool_calls(self, turn: list[dict[str, JSONValue]]) -> bool:
+    def _has_pending_tool_calls(self, turn: list[dict[str, Any]]) -> bool:
         """检查当前轮次是否存在未处理完成的 tool_calls."""
         tool_call_ids: set[str] = set()
         tool_result_ids: set[str] = set()
@@ -88,9 +88,9 @@ class MessagePairer:
 
     def get_recent_turns(
         self,
-        turns: list[list[dict[str, JSONValue]]],
+        turns: list[list[dict[str, Any]]],
         keep_count: int,
-    ) -> tuple[list[list[dict[str, JSONValue]]], list[list[dict[str, JSONValue]]]]:
+    ) -> tuple[list[list[dict[str, Any]]], list[list[dict[str, Any]]]]:
         """分离旧轮次与最近轮次.
 
         Returns:

@@ -8,11 +8,12 @@ _summary_buffer 按 session_id 隔离，避免跨会话数据污染。
 from __future__ import annotations
 
 import json
+from typing import Any
+
 from langchain_core.messages import HumanMessage
 
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
-from athena.types import JSONValue
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -79,7 +80,7 @@ class IncrementalSummarizer:
 
     async def update_summary(
         self,
-        old_turns: list[list[dict[str, JSONValue]]],
+        old_turns: list[list[dict[str, Any]]],
         session_id: str | None = None,
     ) -> str:
         """增量更新摘要.
@@ -143,7 +144,7 @@ class IncrementalSummarizer:
         except Exception as e:
             logger.warning("summary_buffer_persist_failed", error=str(e), session_id=session_id)
 
-    def _format_turns_for_summary(self, turns: list[list[dict[str, JSONValue]]]) -> str:
+    def _format_turns_for_summary(self, turns: list[list[dict[str, Any]]]) -> str:
         """将轮次格式化为摘要输入."""
         formatted: list[str] = []
         for i, turn in enumerate(turns, 1):

@@ -20,6 +20,8 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
+
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from athena.config.settings import Settings, get_settings
@@ -33,7 +35,6 @@ from athena.gateway.ws.manager import WebSocketManager
 from athena.models.step import StepStatus, StepType
 from athena.models.tool import ToolCallStatus
 from athena.schemas.events import EventType, build_event
-from athena.types import JSONValue
 from athena.utils.ids import RunIdGenerator
 from athena.utils.logging import get_logger
 
@@ -56,7 +57,7 @@ class HarnessRunResult:
     content: str
     run_id: str
     turn_count: int
-    tool_results: list[dict[str, JSONValue]] = field(default_factory=list)
+    tool_results: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     interrupted: bool = False
 
@@ -111,7 +112,7 @@ class Harness:
 
     async def run(
         self,
-        messages: list[dict[str, JSONValue]],
+        messages: list[dict[str, Any]],
         session_id: str,
         system_prompt: str = "",
         run_id: str | None = None,
@@ -149,7 +150,7 @@ class Harness:
         bound_llm = self._llm.bind_tools(lc_tools) if lc_tools else self._llm
 
         step_counter = 0
-        tool_results_all: list[dict[str, JSONValue]] = []
+        tool_results_all: list[dict[str, Any]] = []
         last_content = ""
         error_msg: str | None = None
         interrupted = False
@@ -190,7 +191,7 @@ class Harness:
 
                 start_time = time.time()
                 full_content = ""
-                tool_calls_raw: list[dict[str, JSONValue]] = []
+                tool_calls_raw: list[dict[str, Any]] = []
                 try:
                     async for chunk in bound_llm.astream(lc_messages):
                         if self._stop_event.is_set():
@@ -282,7 +283,7 @@ class Harness:
 
                 # Step: 工具执行（并行）
                 # 预分配 step_number（project_memory 约束：避免并行 race condition）
-                tool_step_starts: list[tuple[int, str, dict[str, JSONValue]]] = []
+                tool_step_starts: list[tuple[int, str, dict[str, Any]]] = []
                 for tc in final_tc:
                     step_counter += 1
                     tool_step_id = str(uuid.uuid4())
@@ -352,17 +353,17 @@ class Harness:
 
     async def _execute_tool_calls(
         self,
-        final_tc: list[dict[str, JSONValue]],
-        tool_step_starts: list[tuple[int, str, dict[str, JSONValue]]],
+        final_tc: list[dict[str, Any]],
+        tool_step_starts: list[tuple[int, str, dict[str, Any]]],
         parent_step_id: str,
         session_id: str,
         run_id: str,
-        tool_results_all: list[dict[str, JSONValue]],
+        tool_results_all: list[dict[str, Any]],
     ) -> list[ToolMessage]:
         """并行执行所有工具调用，同时记录日志与推送事件."""
 
         async def _execute_one(
-            step_number: int, step_id: str, tc: dict[str, JSONValue]
+            step_number: int, step_id: str, tc: dict[str, Any]
         ) -> ToolMessage:
             tool_name = tc.get("name", "")
             args = tc.get("args", {}) or tc.get("arguments", {}) or {}
@@ -492,7 +493,7 @@ class Harness:
     async def _execute_single_tool(
         self,
         tool_name: str,
-        args: dict[str, JSONValue],
+        args: dict[str, Any],
         session_id: str,
         run_id: str,
         tool_call_id: str,
@@ -573,7 +574,7 @@ class Harness:
 
     def _extract_tool_calls(
         self, bound_llm: LLMProvider, messages: list[BaseMessage]
-    ) -> list[dict[str, JSONValue]]:
+    ) -> list[dict[str, Any]]:
         """从最后一次 LLM 调用提取完整 tool_calls.
 
         简化实现：流式 chunk 中累积的 tool_call_chunks 在最后一条 AIMessage 中提取。
@@ -601,7 +602,7 @@ class Harness:
         """请求停止当前运行（优雅退出）."""
         self._stop_event.set()
 
-    async def _save_step(self, step: dict[str, JSONValue]) -> None:
+    async def _save_step(self, step: dict[str, Any]) -> None:
         if self._db is None:
             return
         try:
@@ -609,7 +610,7 @@ class Harness:
         except Exception as e:
             logger.error("save_step_failed", error=str(e))
 
-    async def _update_step(self, step_id: str, updates: dict[str, JSONValue]) -> None:
+    async def _update_step(self, step_id: str, updates: dict[str, Any]) -> None:
         if self._db is None:
             return
         try:
@@ -620,7 +621,7 @@ class Harness:
     async def _emit(
         self,
         event_type: EventType,
-        data: dict[str, JSONValue],
+        data: dict[str, Any],
         session_id: str,
         run_id: str,
     ) -> None:
@@ -634,7 +635,7 @@ class Harness:
         except Exception as e:
             logger.warning("emit_event_failed", event_type=str(event_type), error=str(e))
 
-    def _dict_to_message(self, m: dict[str, JSONValue]) -> BaseMessage:
+    def _dict_to_message(self, m: dict[str, Any]) -> BaseMessage:
         """字典 → LangChain Message."""
         role = m.get("role", "user")
         content = m.get("content", "")
@@ -661,7 +662,7 @@ class Harness:
             return ToolMessage(content=content, tool_call_id=tool_call_id or "")
         return HumanMessage(content=content)
 
-    def _message_to_dict(self, m: BaseMessage) -> dict[str, JSONValue]:
+    def _message_to_dict(self, m: BaseMessage) -> dict[str, Any]:
         """LangChain Message → 字典."""
         role_map = {
             HumanMessage: "user",
@@ -674,7 +675,7 @@ class Harness:
             if isinstance(m, cls):
                 role = r
                 break
-        d: dict[str, JSONValue] = {"role": role, "content": getattr(m, "content", "")}
+        d: dict[str, Any] = {"role": role, "content": getattr(m, "content", "")}
         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
             d["tool_calls"] = [
                 {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}

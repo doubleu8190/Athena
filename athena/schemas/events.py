@@ -33,6 +33,7 @@ class EventType(StrEnum):
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_END = "tool_call_end"
     TOOL_CALL_SKIPPED = "tool_call_skipped"
+    TOOL_INTERRUPTED = "tool_interrupted"
 
     # 审批生命周期
     APPROVAL_QUEUE_STATUS = "approval_queue_status"
@@ -40,6 +41,7 @@ class EventType(StrEnum):
     APPROVAL_PROCESSING = "approval_processing"
     APPROVAL_RESULT = "approval_result"
     APPROVAL_TIMEOUT = "approval_timeout"
+    APPROVAL_INTERRUPTED = "approval_interrupted"
 
     # 子 Agent 生命周期
     SUB_AGENT_SPAWNED = "sub_agent_spawned"

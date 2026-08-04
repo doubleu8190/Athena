@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Any
 
 from athena.core.security.path_filter import PathSecurityError, get_path_security_filter
 from athena.utils.logging import get_logger

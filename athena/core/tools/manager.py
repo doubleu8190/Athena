@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from langchain_core.tools import StructuredTool
 from pydantic import create_model
@@ -23,13 +23,17 @@ from athena.core.tools.base import (
 from athena.models.tool import RiskLevel, ToolResult
 from athena.utils.logging import get_logger
 
+if TYPE_CHECKING:
+    from athena.core.tools.mcp.client import MCPClient
+    from athena.gateway.approval import ApprovalManager
+
 logger = get_logger(__name__)
 
 
 class UnifiedToolManager:
     """统一工具管理器."""
 
-    def __init__(self, approval_manager: Any | None = None) -> None:
+    def __init__(self, approval_manager: ApprovalManager | None = None) -> None:
         self._tools: dict[str, ToolProtocol] = {}
         self._approval_manager = approval_manager
 
@@ -63,23 +67,29 @@ class UnifiedToolManager:
         self,
         server_name: str,
         tool_defs: list[dict[str, Any]],
-        mcp_client: Any,
+        mcp_client: MCPClient,
     ) -> None:
         """注册 MCP 服务器的工具集.
 
         Args:
             server_name: MCP 服务器名称
-            tool_defs: 工具定义列表，每项含 name/description/parameters/risk_level/require_approval
+            tool_defs: 工具定义列表，每项含
+                name/description/parameters/remote_name/risk_level/require_approval
             mcp_client: MCP 客户端实例，需提供 async call_tool(name, params) 方法
         """
         for tool_def in tool_defs:
             name = tool_def["name"]
+            if name in self._tools:
+                logger.warning("tool_already_registered", tool=name, action="overwrite")
             self._tools[name] = MCPTool(
                 name=name,
                 description=tool_def.get("description", ""),
-                parameters=tool_def.get("parameters", {"type": "object", "properties": {}}),
+                parameters=tool_def.get(
+                    "parameters", {"type": "object", "properties": {}}
+                ),
                 mcp_client=mcp_client,
                 server_name=server_name,
+                remote_name=tool_def.get("remote_name"),
                 risk_level=tool_def.get("risk_level", RiskLevel.MEDIUM),
                 require_approval=tool_def.get("require_approval", True),
             )
@@ -162,7 +172,9 @@ class UnifiedToolManager:
     # LangChain 集成
     # ------------------------------------------------------------------
 
-    def get_langchain_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
+    def get_langchain_tools(
+        self, names: list[str] | None = None
+    ) -> list[StructuredTool]:
         """转换为 LangChain StructuredTool 列表，用于 bind_tools.
 
         遵循 project_memory：使用 Pydantic v2 create_model() 动态构建参数模型，
@@ -228,7 +240,9 @@ class UnifiedToolManager:
 _tool_manager: UnifiedToolManager | None = None
 
 
-def get_tool_manager(approval_manager: Any | None = None) -> UnifiedToolManager:
+def get_tool_manager(
+    approval_manager: ApprovalManager | None = None,
+) -> UnifiedToolManager:
     """获取工具管理器单例."""
     global _tool_manager
     if _tool_manager is None:

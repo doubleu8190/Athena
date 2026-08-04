@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import Any, TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkable
 
 from athena.models.tool import RiskLevel, ToolExecutionMode, ToolResult, ToolSchema
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from athena.core.tools.mcp.client import MCPClient
 
 logger = get_logger(__name__)
 
@@ -114,8 +117,9 @@ class MCPTool:
         name: str,
         description: str,
         parameters: dict[str, Any],
-        mcp_client: Any,
+        mcp_client: MCPClient,
         server_name: str,
+        remote_name: str | None = None,
         risk_level: RiskLevel | str = RiskLevel.MEDIUM,
         require_approval: bool = True,
     ) -> None:
@@ -129,6 +133,8 @@ class MCPTool:
         )
         self._mcp_client = mcp_client
         self._server_name = server_name
+        # 本地注册名（可能带前缀）与远端 MCP 工具名分离，避免前缀污染远程调用
+        self._remote_name = remote_name or name
 
     async def execute(self, **params: Any) -> ToolResult:
         """通过 MCP 协议调用远程工具.
@@ -136,7 +142,7 @@ class MCPTool:
         遵循 project_memory 约束：必须检查 result.get("isError") 判断成功状态。
         """
         try:
-            result = await self._mcp_client.call_tool(self.schema.name, params)
+            result = await self._mcp_client.call_tool(self._remote_name, params)
 
             # MCP 响应可能为 dict 或带 content 的对象
             if isinstance(result, dict):

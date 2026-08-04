@@ -24,9 +24,14 @@ import random
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, TYPE_CHECKING, Awaitable, Callable
 
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
+
+    from athena.core.llm.provider import LLMProvider
 
 logger = get_logger(__name__)
 
@@ -122,7 +127,7 @@ class RetryResult:
     """重试结果."""
 
     success: bool
-    result: Any = None
+    result: BaseMessage | None = None
     error: Exception | None = None
     attempts: int = 0
     total_duration_ms: float = 0
@@ -134,7 +139,7 @@ async def retry_with_backoff(
     *args,
     retry_config: RetryConfig | None = None,
     error_category: ErrorCategory | None = None,
-    on_retry: Any = None,
+    on_retry: Callable[..., Awaitable[None]] | None = None,
     **kwargs,
 ) -> RetryResult:
     """执行函数，失败时使用指数退避重试.
@@ -234,9 +239,9 @@ class LLMRetryManager:
 
     def __init__(self, retry_config: RetryConfig | None = None) -> None:
         self._config = retry_config or RetryConfig()
-        self._fallback_providers: list[Any] = []
+        self._fallback_providers: list[LLMProvider] = []
 
-    def add_fallback_provider(self, provider: Any) -> None:
+    def add_fallback_provider(self, provider: LLMProvider) -> None:
         """添加备用 LLM Provider（故障转移用）."""
         self._fallback_providers.append(provider)
 
@@ -244,7 +249,7 @@ class LLMRetryManager:
         self,
         func,
         *args,
-        on_retry: Any = None,
+        on_retry: Callable[..., Awaitable[None]] | None = None,
         **kwargs,
     ) -> RetryResult:
         """执行 LLM 调用，失败时重试.

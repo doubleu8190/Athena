@@ -60,43 +60,49 @@ async def lifespan(app: FastAPI):
     # 4. 工具管理器（注册内置工具）
     from athena.core.tools.manager import UnifiedToolManager, set_tool_manager
     from athena.core.tools.builtin.registry import register_builtin_tools
+
     tool_manager = UnifiedToolManager(approval_manager=approval_manager)
     register_builtin_tools(tool_manager)
     set_tool_manager(tool_manager)
 
     # 5. LLM / 记忆 / 压缩
     from athena.core.llm.provider import get_llm_provider
+
     llm = get_llm_provider(settings)
 
     from athena.core.memory.memory import MemoryManager
-    from athena.core.memory.retrieval import HybridRetrievalManager, MemoryRetrievalService
-    from athena.core.memory.summarizer import ConversationSummarizer
+    
     memory_manager = MemoryManager(settings=settings)
     try:
         await memory_manager.initialize()
     except Exception as e:
         logger.warning("memory_init_skipped", error=str(e))
         raise e
-    
-    retrieval_manager = (
-        HybridRetrievalManager(llm, memory_manager, settings=settings)
-        if memory_manager is not None
-        else None
-    )
-    memory_retrieval = (
-        MemoryRetrievalService(retrieval_manager) if retrieval_manager is not None else None
-    )
-    conversation_summarizer = (
-        ConversationSummarizer(llm, memory_manager, settings=settings)
-        if memory_manager is not None
-        else None
+
+    from athena.core.memory.retrieval import (
+            HybridRetrievalManager,
+            MemoryRetrievalService,
+        )
+    retrieval_manager = HybridRetrievalManager(llm, memory_manager, settings=settings)
+
+    memory_retrieval = MemoryRetrievalService(retrieval_manager)
+
+    from athena.core.memory.summarizer import ConversationSummarizer
+    conversation_summarizer = ConversationSummarizer(
+        llm, memory_manager, settings=settings
     )
 
+    from athena.core.memory.summarizer import FactExtractor
+    fact_extractor = FactExtractor(llm)
+
     from athena.core.compression.compressor import ContextCompressor
-    compressor = ContextCompressor(llm=llm, memory_manager=memory_manager, settings=settings)
+    compressor = ContextCompressor(
+        llm=llm, memory_manager=memory_manager, settings=settings
+    )
 
     # 6. AgentWorkflow
     from athena.core.agent.workflow import AgentWorkflow
+
     workflow = AgentWorkflow(
         llm=llm,
         tool_manager=tool_manager,
@@ -105,6 +111,8 @@ async def lifespan(app: FastAPI):
         compressor=compressor,
         memory_retrieval=memory_retrieval,
         conversation_summarizer=conversation_summarizer,
+        fact_extractor=fact_extractor,
+        memory_manager=memory_manager,
         settings=settings,
     )
     set_workflow(workflow)
@@ -151,6 +159,7 @@ app.websocket("/ws/{session_id}")(websocket_endpoint)
 def run() -> None:
     """启动 uvicorn 服务器（命令行入口）."""
     import uvicorn
+
     settings = get_settings()
     uvicorn.run(
         "athena.main:app",

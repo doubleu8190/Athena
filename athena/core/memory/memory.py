@@ -12,14 +12,19 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
+from chromadb import Collection
+from chromadb.api import ClientAPI
 from sqlalchemy import insert, text, update
 
 from athena.config.settings import Settings, get_settings
 from athena.db.engine import get_session
 from athena.db.models import MemoryModel
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    import chromadb
 
 logger = get_logger(__name__)
 
@@ -29,13 +34,13 @@ class MemoryManager:
 
     def __init__(
         self,
-        chroma_client: Any | None = None,
+        chroma_client: ClientAPI | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._client = chroma_client
         self._collection_name = "athena_memory"
-        self._collection: Any | None = None
+        self._collection: Collection | None = None
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -45,7 +50,10 @@ class MemoryManager:
         if self._client is None:
             try:
                 import chromadb
-                self._client = chromadb.PersistentClient(path=str(self._settings.chroma_path))
+
+                self._client = chromadb.PersistentClient(
+                    path=str(self._settings.chroma_path)
+                )
             except Exception as e:
                 logger.error("chromadb_init_failed", error=str(e))
                 raise
@@ -57,10 +65,12 @@ class MemoryManager:
         logger.info("memory_manager_initialized", path=str(self._settings.chroma_path))
 
     @property
-    def collection(self) -> Any:
+    def collection(self) -> Collection:
         """获取已初始化的 ChromaDB collection（调用前需先 initialize）."""
         if self._collection is None:
-            raise RuntimeError("MemoryManager not initialized. Call initialize() first.")
+            raise RuntimeError(
+                "MemoryManager not initialized. Call initialize() first."
+            )
         return self._collection
 
     # ------------------------------------------------------------------
@@ -89,7 +99,11 @@ class MemoryManager:
         memory_id = str(uuid.uuid4())
         now = datetime.now().isoformat()
         ttl_days = self._settings.memory_ttl_days
-        expires_at = (datetime.now() + timedelta(days=ttl_days)).isoformat() if not pinned else None
+        expires_at = (
+            (datetime.now() + timedelta(days=ttl_days)).isoformat()
+            if not pinned
+            else None
+        )
 
         meta = {
             "session_id": session_id,
@@ -121,7 +135,9 @@ class MemoryManager:
                             id=memory_id,
                             session_id=session_id,
                             content=content,
-                            metadata_json=json.dumps(meta, ensure_ascii=False, default=str),
+                            metadata_json=json.dumps(
+                                meta, ensure_ascii=False, default=str
+                            ),
                             pinned=1 if pinned else 0,
                             expires_at=expires_at,
                             created_at=now,
@@ -175,24 +191,29 @@ class MemoryManager:
             logger.error("memory_search_failed", error=str(e))
             return []
 
-        if not results or not results.get("ids") or not results["ids"][0]:
+        ids = results.get("ids") or []
+        if not ids or not ids[0]:
             return []
 
+        # ChromaDB 单查询返回单行结果，逐字段取首行并做防御性兜底
+        row_ids = ids[0]
+        documents = (results.get("documents") or [[]])[0]
+        metadatas = (results.get("metadatas") or [[]])[0]
+        distances = (results.get("distances") or [[]])[0]
+
         out: list[dict[str, Any]] = []
-        for doc_id, doc, meta, dist in zip(
-            results["ids"][0],
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
-        ):
-            score = max(0.0, 1.0 - (dist / 2.0))
-            out.append({
-                "id": doc_id,
-                "content": doc,
-                "metadata": meta or {},
-                "score": score,
-                "source": "vector",
-            })
+        for doc_id, doc, meta, dist in zip(row_ids, documents, metadatas, distances):
+            # cosine 距离 ∈ [0,2]，线性归一化为 0-1 相似度
+            score = max(0.0, 1.0 - (float(dist) / 2.0))
+            out.append(
+                {
+                    "id": doc_id,
+                    "content": doc,
+                    "metadata": meta or {},
+                    "score": score,
+                    "source": "vector",
+                }
+            )
         return out
 
     # ------------------------------------------------------------------
@@ -213,6 +234,7 @@ class MemoryManager:
         # 构建 FTS5 MATCH 查询：对查询中的每个词用 OR 连接
         # FTS5 语法：双引号包裹避免特殊字符干扰
         import re
+
         tokens = re.findall(r"[\w\u4e00-\u9fa5]+", query)
         if not tokens:
             return []
@@ -265,13 +287,15 @@ class MemoryManager:
             # bm25 返回负值，越小越相关，转换为 0-1 的分数
             raw_rank = row.rank if row.rank is not None else 0.0
             score = max(0.0, min(1.0, 1.0 / (1.0 + abs(raw_rank))))
-            out.append({
-                "id": row.id,
-                "content": row.content,
-                "metadata": meta,
-                "score": score,
-                "source": "keyword",
-            })
+            out.append(
+                {
+                    "id": row.id,
+                    "content": row.content,
+                    "metadata": meta,
+                    "score": score,
+                    "source": "keyword",
+                }
+            )
         return out
 
     # ------------------------------------------------------------------
@@ -305,7 +329,9 @@ class MemoryManager:
         try:
             self.collection.delete(ids=[memory_id])
         except Exception as e:
-            logger.error("memory_delete_chromadb_failed", memory_id=memory_id, error=str(e))
+            logger.error(
+                "memory_delete_chromadb_failed", memory_id=memory_id, error=str(e)
+            )
 
         # 2. SQLite 软删除 + FTS5 索引删除
         try:
@@ -324,7 +350,9 @@ class MemoryManager:
                         {"memory_id": memory_id},
                     )
         except Exception as e:
-            logger.error("memory_delete_sqlite_failed", memory_id=memory_id, error=str(e))
+            logger.error(
+                "memory_delete_sqlite_failed", memory_id=memory_id, error=str(e)
+            )
 
         logger.info("memory_deleted", memory_id=memory_id)
 
@@ -339,10 +367,17 @@ class MemoryManager:
         try:
             self.collection.update(
                 ids=[memory_id],
-                metadatas=[{"pinned": pinned, "expires_at": "" if pinned else datetime.now().isoformat()}],
+                metadatas=[
+                    {
+                        "pinned": pinned,
+                        "expires_at": "" if pinned else datetime.now().isoformat(),
+                    }
+                ],
             )
         except Exception as e:
-            logger.error("memory_pin_chromadb_failed", memory_id=memory_id, error=str(e))
+            logger.error(
+                "memory_pin_chromadb_failed", memory_id=memory_id, error=str(e)
+            )
 
         # 2. 更新 SQLite
         try:
@@ -368,16 +403,19 @@ class MemoryManager:
             all_data = self.collection.get(
                 include=["metadatas"],
             )
-            if not all_data or not all_data.get("ids"):
+            ids = all_data.get("ids") if all_data else []
+            if not ids:
                 return 0
             now = datetime.now()
             expired_ids: list[str] = []
-            for mid, meta in zip(all_data["ids"], all_data.get("metadatas", [])):
+            # 注意：metadatas 声明为 list[Metadata] | None，必须用 or [] 消除 None，
+            # 不能依赖 .get(key, []) 的默认值（pyright 仍视为可能为 None）
+            for mid, meta in zip(ids, all_data.get("metadatas") or []):
                 meta = meta or {}
                 if meta.get("pinned"):
                     continue
                 expires_at = meta.get("expires_at", "")
-                if not expires_at:
+                if not expires_at or not isinstance(expires_at, str):
                     continue
                 try:
                     exp_time = datetime.fromisoformat(expires_at)
@@ -413,7 +451,7 @@ _memory_manager: MemoryManager | None = None
 
 
 def get_memory_manager(
-    chroma_client: Any | None = None,
+    chroma_client: ClientAPI | None = None,
     settings: Settings | None = None,
 ) -> MemoryManager:
     """获取记忆管理器单例."""

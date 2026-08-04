@@ -11,9 +11,8 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from enum import StrEnum
-from typing import Callable
+from typing import Any, Callable
 
-from athena.types import JSONValue
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -119,7 +118,7 @@ class FallbackRoute:
         on_errors: list[str],
         action: str,  # retry / alternate / escalate / passthrough
         max_retries: int = 1,
-        param_transform: dict[str, Callable[[JSONValue], JSONValue]] | None = None,
+        param_transform: dict[str, Callable[[Any], Any]] | None = None,
         alternate_tool: str | None = None,
     ) -> None:
         self.tool_name = tool_name
@@ -147,7 +146,7 @@ class ToolErrorHandler:
         on_errors: list[str],
         action: str,
         max_retries: int = 1,
-        param_transform: dict[str, Callable[[JSONValue], JSONValue]] | None = None,
+        param_transform: dict[str, Callable[[Any], Any]] | None = None,
         alternate_tool: str | None = None,
     ) -> None:
         """注册 Fallback 路由."""
@@ -185,8 +184,8 @@ class ToolErrorHandler:
         self._circuit.record_result(tool_name, success)
 
     def apply_param_transform(
-        self, params: dict[str, JSONValue], route: FallbackRoute
-    ) -> dict[str, JSONValue]:
+        self, params: dict[str, Any], route: FallbackRoute
+    ) -> dict[str, Any]:
         """应用参数变换."""
         new_params = dict(params)
         for key, transform in route.param_transform.items():

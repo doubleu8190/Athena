@@ -141,6 +141,5 @@ async def _handle_memory_save(session_id: str, data: dict[str, Any]) -> None:
     if content:
         await memory_manager.add_memory(
             content=content,
-            session_id=session_id,
-            metadata=metadata,
+            metadata={"session_id": session_id, **metadata},
         )

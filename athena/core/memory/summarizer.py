@@ -167,8 +167,8 @@ conversation_text:
             try:
                 await memory_manager.add_memory(
                     content=content,
-                    session_id=session_id,
                     metadata={
+                        "session_id": session_id,
                         "type": "fact",
                         "category": fact.category,
                         "confidence": fact.confidence,
@@ -350,8 +350,8 @@ class ConversationSummarizer:
             try:
                 await self._memory.add_memory(
                     content=content,
-                    session_id=session_id,
                     metadata={
+                        "session_id": session_id,
                         "type": "summary",
                         "category": s.category,
                         "confidence": s.confidence,

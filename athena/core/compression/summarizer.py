@@ -132,8 +132,8 @@ class IncrementalSummarizer:
         try:
             await self._memory_manager.add_memory(
                 content=self._get_buffer(session_id),
-                session_id=session_id,
                 metadata={
+                    "session_id": session_id,
                     "type": self.BUFFER_METADATA_KEY,
                     "summarized_turns": self._get_turns(session_id),
                     "source": "compression",

@@ -49,10 +49,10 @@ async def save_memory(req: SaveMemoryRequest) -> dict[str, Any]:
     if manager is None:
         raise HTTPException(status_code=503, detail="Memory manager not initialized")
     try:
+        meta = {"session_id": req.session_id, **(req.metadata or {})}
         memory_id = await manager.add_memory(
             content=req.content,
-            session_id=req.session_id,
-            metadata=req.metadata,
+            metadata=meta,
             pinned=req.pinned,
         )
         return {"status": "saved", "memory_id": memory_id}

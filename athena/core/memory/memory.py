@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, TYPE_CHECKING
 
-from chromadb import Collection
+from chromadb import Collection, QueryResult
 from chromadb.api import ClientAPI
 from sqlalchemy import insert, text, update
 
@@ -74,27 +74,33 @@ class MemoryManager:
         return self._collection
 
     # ------------------------------------------------------------------
-    # 写入：双写 ChromaDB + SQLite (memories 表 + memory_fts 虚拟表)
+    # 写入：双写 SQLite + ChromaDB (memories 表 + memory_fts 虚拟表)
     # ------------------------------------------------------------------
 
     async def add_memory(
         self,
         content: str,
-        session_id: str,
         metadata: dict[str, Any] | None = None,
         pinned: bool = False,
     ) -> str:
-        """写入记忆条目（双写 ChromaDB + SQLite FTS5）.
+        """写入记忆条目（双写 SQLite FTS5 + ChromaDB）.
+
+        写入顺序：SQLite → ChromaDB。ChromaDB 写入失败时回滚 SQLite，
+        保证两边数据一致。
 
         Args:
             content: 记忆文本内容
-            session_id: 所属会话 ID
-            metadata: 附加元数据（category/confidence/type 等）
+            metadata: 附加元数据（须包含 session_id，以及 category/confidence/type 等）
             pinned: 是否固定（不被 TTL 清理）
 
         Returns:
             记忆 ID
         """
+        metadata = metadata or {}
+        session_id = metadata.get("session_id", "")
+        if not session_id:
+            logger.warning("add_memory_missing_session_id")
+
         await self.initialize()
         memory_id = generate_time_id()
         now = datetime.now().isoformat()
@@ -106,27 +112,15 @@ class MemoryManager:
         )
 
         meta = {
-            "session_id": session_id,
             "created_at": now,
             "last_accessed": now,
             "access_count": 0,
             "pinned": pinned,
             "expires_at": expires_at or "",
-            **(metadata or {}),
+            **metadata,
         }
 
-        # 1. 写入 ChromaDB（向量检索）
-        try:
-            self.collection.add(
-                ids=[memory_id],
-                documents=[content],
-                metadatas=[meta],
-            )
-        except Exception as e:
-            logger.error("memory_add_chromadb_failed", error=str(e))
-            raise
-
-        # 2. 写入 SQLite memories 表 + FTS5 虚拟表（关键词检索）
+        # 1. 先写 SQLite（可事务回滚）
         try:
             async with get_session() as session:
                 async with session.begin():
@@ -145,7 +139,6 @@ class MemoryManager:
                             access_count=0,
                         )
                     )
-                    # 写入 FTS5 索引
                     await session.execute(
                         text(
                             "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :memory_id)"
@@ -154,7 +147,19 @@ class MemoryManager:
                     )
         except Exception as e:
             logger.error("memory_add_sqlite_failed", error=str(e))
-            # SQLite 写入失败不影响 ChromaDB 已有数据，但记录错误
+            raise
+
+        # 2. 再写 ChromaDB；失败则回滚 SQLite 保证一致
+        try:
+            self.collection.add(
+                ids=[memory_id],
+                documents=[content],
+                metadatas=[meta],
+            )
+        except Exception as e:
+            logger.error("memory_add_chromadb_failed", error=str(e))
+            await self._rollback_add(memory_id)
+            raise
 
         logger.info("memory_added", memory_id=memory_id, session_id=session_id)
         return memory_id
@@ -186,7 +191,7 @@ class MemoryManager:
             }
             if where:
                 kwargs["where"] = where
-            results = self.collection.query(**kwargs)
+            results: QueryResult = self.collection.query(**kwargs)
         except Exception as e:
             logger.error("memory_search_failed", error=str(e))
             return []
@@ -320,32 +325,26 @@ class MemoryManager:
             return None
 
     # ------------------------------------------------------------------
-    # 删除：双删 ChromaDB + SQLite
+    # 删除：双删 SQLite + ChromaDB
     # ------------------------------------------------------------------
 
     async def delete(self, memory_id: str) -> None:
-        """删除记忆条目（双删 ChromaDB + SQLite 软删除 + FTS5 删除）."""
-        await self.initialize()
-        # 1. 删除 ChromaDB
-        try:
-            self.collection.delete(ids=[memory_id])
-        except Exception as e:
-            logger.error(
-                "memory_delete_chromadb_failed", memory_id=memory_id, error=str(e)
-            )
+        """删除记忆条目（SQLite 软删除 + FTS5 删除 → ChromaDB 删除）.
 
-        # 2. SQLite 软删除 + FTS5 索引删除
+        先软删 SQLite（可回滚），再删 ChromaDB；ChromaDB 失败时回滚 SQLite。
+        """
+        await self.initialize()
+
+        # 1. 先软删 SQLite
         try:
             async with get_session() as session:
                 async with session.begin():
                     now = datetime.now().isoformat()
-                    # 软删除 memories 记录
                     await session.execute(
                         update(MemoryModel)
                         .where(MemoryModel.id == memory_id)
                         .values(deleted_time=now)
                     )
-                    # 删除 FTS5 索引条目
                     await session.execute(
                         text("DELETE FROM memory_fts WHERE memory_id = :memory_id"),
                         {"memory_id": memory_id},
@@ -354,6 +353,17 @@ class MemoryManager:
             logger.error(
                 "memory_delete_sqlite_failed", memory_id=memory_id, error=str(e)
             )
+            raise
+
+        # 2. 再删 ChromaDB；失败则回滚 SQLite 软删除
+        try:
+            self.collection.delete(ids=[memory_id])
+        except Exception as e:
+            logger.error(
+                "memory_delete_chromadb_failed", memory_id=memory_id, error=str(e)
+            )
+            await self._rollback_delete(memory_id)
+            raise
 
         logger.info("memory_deleted", memory_id=memory_id)
 
@@ -362,9 +372,28 @@ class MemoryManager:
     # ------------------------------------------------------------------
 
     async def pin(self, memory_id: str, pinned: bool = True) -> None:
-        """固定/取消固定记忆（避免 TTL 清理）."""
+        """固定/取消固定记忆（避免 TTL 清理）.
+
+        先更新 SQLite，再更新 ChromaDB；ChromaDB 失败时回滚 SQLite。
+        """
         await self.initialize()
-        # 1. 更新 ChromaDB
+        expires_at = None if pinned else datetime.now().isoformat()
+        new_pinned = 1 if pinned else 0
+
+        # 1. 先更新 SQLite
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(MemoryModel)
+                        .where(MemoryModel.id == memory_id)
+                        .values(pinned=new_pinned, expires_at=expires_at)
+                    )
+        except Exception as e:
+            logger.error("memory_pin_sqlite_failed", memory_id=memory_id, error=str(e))
+            raise
+
+        # 2. 再更新 ChromaDB；失败则回滚 SQLite
         try:
             self.collection.update(
                 ids=[memory_id],
@@ -379,26 +408,18 @@ class MemoryManager:
             logger.error(
                 "memory_pin_chromadb_failed", memory_id=memory_id, error=str(e)
             )
-
-        # 2. 更新 SQLite
-        try:
-            async with get_session() as session:
-                async with session.begin():
-                    expires_at = None if pinned else datetime.now().isoformat()
-                    await session.execute(
-                        update(MemoryModel)
-                        .where(MemoryModel.id == memory_id)
-                        .values(pinned=1 if pinned else 0, expires_at=expires_at)
-                    )
-        except Exception as e:
-            logger.error("memory_pin_sqlite_failed", memory_id=memory_id, error=str(e))
+            await self._rollback_pin(memory_id)
+            raise
 
     # ------------------------------------------------------------------
     # 清理过期记忆（双写同步）
     # ------------------------------------------------------------------
 
     async def cleanup_expired(self) -> int:
-        """清理过期且未固定的记忆."""
+        """清理过期且未固定的记忆.
+
+        先软删 SQLite，再删 ChromaDB；ChromaDB 失败时回滚 SQLite。
+        """
         await self.initialize()
         try:
             all_data = self.collection.get(
@@ -409,8 +430,6 @@ class MemoryManager:
                 return 0
             now = datetime.now()
             expired_ids: list[str] = []
-            # 注意：metadatas 声明为 list[Metadata] | None，必须用 or [] 消除 None，
-            # 不能依赖 .get(key, []) 的默认值（pyright 仍视为可能为 None）
             for mid, meta in zip(ids, all_data.get("metadatas") or []):
                 meta = meta or {}
                 if meta.get("pinned"):
@@ -424,12 +443,15 @@ class MemoryManager:
                         expired_ids.append(mid)
                 except (ValueError, TypeError):
                     continue
-            if expired_ids:
-                # 双删
-                self.collection.delete(ids=expired_ids)
+            if not expired_ids:
+                return 0
+
+            now_iso = now.isoformat()
+
+            # 1. 先软删 SQLite
+            try:
                 async with get_session() as session:
                     async with session.begin():
-                        now_iso = now.isoformat()
                         for mid in expired_ids:
                             await session.execute(
                                 update(MemoryModel)
@@ -440,11 +462,124 @@ class MemoryManager:
                                 text("DELETE FROM memory_fts WHERE memory_id = :mid"),
                                 {"mid": mid},
                             )
-                logger.info("memory_cleanup", count=len(expired_ids))
+            except Exception as e:
+                logger.error("memory_cleanup_sqlite_failed", error=str(e))
+                raise
+
+            # 2. 再删 ChromaDB；失败则回滚 SQLite 软删除
+            try:
+                self.collection.delete(ids=expired_ids)
+            except Exception as e:
+                logger.error("memory_cleanup_chromadb_failed", error=str(e))
+                await self._rollback_cleanup(expired_ids)
+                raise
+
+            logger.info("memory_cleanup", count=len(expired_ids))
             return len(expired_ids)
         except Exception as e:
             logger.error("memory_cleanup_failed", error=str(e))
             return 0
+
+    # ------------------------------------------------------------------
+    # 回滚补偿（ChromaDB 失败时撤销已提交的 SQLite 写入）
+    # ------------------------------------------------------------------
+
+    async def _rollback_add(self, memory_id: str) -> None:
+        """回滚 add_memory：硬删 SQLite 记录 + FTS5 索引."""
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        text("DELETE FROM memories WHERE id = :id"),
+                        {"id": memory_id},
+                    )
+                    await session.execute(
+                        text("DELETE FROM memory_fts WHERE memory_id = :id"),
+                        {"id": memory_id},
+                    )
+            logger.warning("rollback_add_succeeded", memory_id=memory_id)
+        except Exception as e:
+            logger.error("rollback_add_failed", memory_id=memory_id, error=str(e))
+
+    async def _rollback_delete(self, memory_id: str) -> None:
+        """回滚 delete：恢复 SQLite 软删除（置空 deleted_time）+ 重建 FTS5 索引."""
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(MemoryModel)
+                        .where(MemoryModel.id == memory_id)
+                        .values(deleted_time=None)
+                    )
+                    # 从 memories 表取回 content 重建 FTS5
+                    row = (
+                        await session.execute(
+                            text("SELECT content FROM memories WHERE id = :id"),
+                            {"id": memory_id},
+                        )
+                    ).fetchone()
+                    if row:
+                        await session.execute(
+                            text(
+                                "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :id)"
+                            ),
+                            {"content": row.content, "id": memory_id},
+                        )
+            logger.warning("rollback_delete_succeeded", memory_id=memory_id)
+        except Exception as e:
+            logger.error("rollback_delete_failed", memory_id=memory_id, error=str(e))
+
+    async def _rollback_pin(self, memory_id: str) -> None:
+        """回滚 pin：恢复 SQLite 的 pinned 和 expires_at 到操作前的值."""
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    # 读取当前值来反转
+                    row = (
+                        await session.execute(
+                            text("SELECT pinned, expires_at FROM memories WHERE id = :id"),
+                            {"id": memory_id},
+                        )
+                    ).fetchone()
+                    if row:
+                        reverted_pinned = 0 if row.pinned else 1
+                        reverted_expires = None if row.pinned else (row.expires_at or datetime.now().isoformat())
+                        await session.execute(
+                            update(MemoryModel)
+                            .where(MemoryModel.id == memory_id)
+                            .values(pinned=reverted_pinned, expires_at=reverted_expires)
+                        )
+            logger.warning("rollback_pin_succeeded", memory_id=memory_id)
+        except Exception as e:
+            logger.error("rollback_pin_failed", memory_id=memory_id, error=str(e))
+
+    async def _rollback_cleanup(self, memory_ids: list[str]) -> None:
+        """回滚 cleanup_expired：恢复 SQLite 软删除 + 重建 FTS5 索引."""
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    for mid in memory_ids:
+                        await session.execute(
+                            update(MemoryModel)
+                            .where(MemoryModel.id == mid)
+                            .values(deleted_time=None)
+                        )
+                        row = (
+                            await session.execute(
+                                text("SELECT content FROM memories WHERE id = :id"),
+                                {"id": mid},
+                            )
+                        ).fetchone()
+                        if row:
+                            await session.execute(
+                                text(
+                                    "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :id)"
+                                ),
+                                {"content": row.content, "id": mid},
+                            )
+            logger.warning("rollback_cleanup_succeeded", count=len(memory_ids))
+        except Exception as e:
+            logger.error("rollback_cleanup_failed", error=str(e))
 
 
 # 全局单例
@@ -455,8 +590,8 @@ def get_memory_manager() -> MemoryManager:
     """获取记忆管理器单例."""
     return _memory_manager
 
+
 def set_memory_manager(manager: MemoryManager) -> None:
     """设置全局记忆管理器实例（测试用）."""
     global _memory_manager
     _memory_manager = manager
-

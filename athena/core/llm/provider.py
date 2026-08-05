@@ -162,9 +162,8 @@ class LLMProvider:
         return self._model.with_structured_output(schema)
 
     @classmethod
-    def from_settings(cls, settings: Settings | None = None) -> "LLMProvider":
+    def from_settings(cls, settings: Settings) -> "LLMProvider":
         """根据配置创建 Provider 实例."""
-        settings = settings or get_settings()
         model = _create_chat_model(settings)
         retry_config = RetryConfig(
             max_attempts=3,
@@ -237,19 +236,15 @@ def _create_chat_model(settings: Settings) -> BaseChatModel:
 
 
 # 全局单例
-_llm_instance: LLMProvider | None = None
+_llm_instance: LLMProvider
 
 
-def get_llm_provider(settings: Settings | None = None) -> LLMProvider:
+def get_llm_provider() -> LLMProvider:
     """获取 LLM Provider 单例."""
-    global _llm_instance
-    if _llm_instance is None:
-        _llm_instance = LLMProvider.from_settings(settings)
-        logger.info("llm_provider_initialized", provider=get_settings().llm_provider)
     return _llm_instance
 
-
-def reset_llm_provider() -> None:
-    """重置单例（测试用）."""
+def set_llm_provider(provider: LLMProvider) -> None:
+    """设置全局 LLM Provider 实例（测试用）."""
     global _llm_instance
-    _llm_instance = None
+    _llm_instance = provider
+

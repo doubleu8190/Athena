@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from athena.core.tools.base import NativeTool
+from athena.core.tools.base import MCPTool, NativeTool
 from athena.core.tools.builtin.registry import register_builtin_tools
 from athena.core.tools.manager import UnifiedToolManager
 from athena.models.tool import RiskLevel, ToolExecutionMode
@@ -90,3 +90,59 @@ def test_langchain_tools_conversion(manager: UnifiedToolManager):
     assert len(tools) == 4
     names = {t.name for t in tools}
     assert names == {"read_file", "write_file", "list_directory", "exec_shell"}
+
+
+class _ObjResponse:
+    """模拟 SDK 式 MCP 响应对象（带 content / isError 属性）."""
+
+    def __init__(self, content: object, is_error: bool = False) -> None:
+        self.content = content
+        self.isError = is_error
+
+
+class _FakeMCPClient:
+    """返回预设结果的假 MCP 客户端."""
+
+    def __init__(self, result: object) -> None:
+        self._result = result
+
+    async def call_tool(self, tool_name: str, arguments: dict) -> object:
+        return self._result
+
+
+def _make_mcp_tool(client: _FakeMCPClient) -> MCPTool:
+    return MCPTool(
+        name="remote",
+        description="远程工具",
+        parameters={"type": "object", "properties": {}},
+        mcp_client=client,
+        server_name="srv",
+        remote_name="remote",
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_object_response_text_blocks():
+    """对象式响应：内容块列表应拼接为干净文本，而非 Python repr."""
+    client = _FakeMCPClient(
+        _ObjResponse(
+            content=[
+                {"type": "text", "text": "hello"},
+                {"type": "text", "text": "world"},
+            ]
+        )
+    )
+    result = await _make_mcp_tool(client).execute()
+    assert result.status == "success"
+    assert result.output == "hello\nworld"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_object_response_error():
+    """对象式响应：isError=True 时走失败路径并带出文本内容."""
+    client = _FakeMCPClient(
+        _ObjResponse(content=[{"type": "text", "text": "boom"}], is_error=True)
+    )
+    result = await _make_mcp_tool(client).execute()
+    assert result.status == "failed"
+    assert result.error == "boom"

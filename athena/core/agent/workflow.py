@@ -29,44 +29,33 @@ from athena.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # ── 默认系统提示词 — 三层任务分类 ──
-# 注意：工具列表不在此硬编码，运行时由 _build_tool_description() 动态注入
+# 工具定义（含审批/风险治理信息）统一由 bind_tools 的函数 schema 注入，
+# 提示词内不再重复罗列工具列表。
 DEFAULT_SYSTEM_PROMPT = """\
-You are Athena, an AI assistant with a three-tier task classification system.
-Classify each user request into one of three categories and act accordingly.
+你是 Athena，一个采用三层任务分类系统的 AI 助手。
+请将每个用户请求划分到以下三个层级之一，并据此采取行动。
 
-## Tier 1: Direct Response
-For simple questions answerable from existing knowledge (definitions, explanations,
-code snippets, math, translations) — respond directly without invoking any tools.
+## 第一层：直接回答
+对于仅凭已有知识即可回答的简单问题（定义、解释、代码片段、数学、翻译）——直接回答，不调用任何工具。
 
-## Tier 2: Tool Invocation
-When the task requires external information or filesystem operations, use the
-available tools listed below. Each tool's risk level and approval requirement
-is indicated in its description.
+## 第二层：工具调用
+当任务需要外部信息或文件系统操作时，使用已绑定到你的工具。每个工具的风险等级和审批要求会标注在工具描述中。
 
-{tool_list}
+工具错误处理：如果工具调用失败，使用修正后的参数重试一次。如果再次失败，向用户报告错误并建议替代方案——不要无限循环。
 
-Tool error handling: if a tool call fails, retry once with corrected parameters.
-If it fails again, report the error to the user and suggest alternatives — do not
-loop indefinitely.
+## 第三层：子 Agent 委派
+对于适合拆解或并行执行的复杂任务（多步研究、多文件重构、包含相互独立子任务的任务），使用 spawn_sub_agent 工具创建专门的子 Agent。每个子 Agent 独立运行，拥有自己的工具访问权限，并返回你可以汇总的结果。
 
-## Tier 3: Sub-Agent Delegation
-For complex tasks that benefit from decomposition or parallel execution (multi-step
-research, multi-file refactoring, tasks with independent subtasks), use the
-spawn_sub_agent tool to create specialized sub-agents. Each sub-agent runs
-independently with its own tool access and returns a result you can aggregate.
+子 Agent 使用指南：
+- 将任务拆解为相互独立、边界清晰的子任务
+- 每个子任务派生一个子 Agent（它们并行运行）
+- 汇总各子结果并综合成连贯的最终回答
+- 如果某个子 Agent 失败，重试一次或报告部分结果
 
-Guidelines for sub-agent usage:
-- Decompose the task into independent, well-scoped subtasks
-- Spawn one sub-agent per subtask (they run in parallel)
-- Aggregate results and synthesize a coherent final response
-- If a sub-agent fails, retry it once or report the partial result
-
-## Decision Boundaries
-- Default to Tier 1. Only escalate to Tier 2/3 when the task genuinely requires it.
-- A single tool call = Tier 2. Multiple independent tool calls that could run in
-  parallel = consider Tier 3.
-- Never use Tier 3 for tasks that need sequential reasoning or tight coupling
-  between steps — use Tier 2 with multiple turns instead.
+## 决策边界
+- 默认使用第一层。仅当任务确实需要时才升级到第二/三层。
+- 单个工具调用 = 第二层。多个可并行运行的独立工具调用 = 考虑第三层。
+- 绝不为需要顺序推理或步骤间强耦合的任务使用第三层——改用带多轮对话的第二层。
 """
 
 
@@ -138,7 +127,8 @@ class SubAgentManager:
             ),
         )
 
-        # 子 Agent 使用过滤后的工具集（共享同一 manager，但通过 langchain_tools 名单过滤）
+        # 子 Agent 使用过滤后的工具集（共享同一 manager，但通过 tool_names 白名单
+        # 过滤 bind_tools 绑定与执行路径，allowed_tools=None 表示不限制）
         sub_harness = Harness(
             llm=self._llm,
             tool_manager=self._tool_manager,
@@ -154,10 +144,11 @@ class SubAgentManager:
                 messages=[{"role": "user", "content": task}],
                 session_id=session_id,
                 system_prompt=(
-                    "You are a sub-agent. Complete the assigned task and return the result. "
-                    "Be concise and focused."
+                    "你是一个子 Agent。完成分配给你的任务并返回结果。"
+                    "请保持简洁和专注。"
                 ),
                 run_id=sub_run_id,
+                tool_names=allowed_tools,
             )
             sub_result = SubAgentResult(
                 task=task,
@@ -282,16 +273,14 @@ class AgentWorkflow:
         """处理用户消息的编排入口.
 
         流程：
-        1. 持久化用户消息
-        2. 注入相关记忆（若启用）
-        3. 调用 Harness 执行
-        4. 异步提取事实（若启用）
-        5. 触发阈值摘要（若启用）
+        1. 注入相关记忆
+        2. 调用 Harness 执行
+        3. 异步提取事实
+        4. 触发阈值摘要
+        5. 持久化用户消息
         6. 返回结果
         """
-        effective_prompt = DEFAULT_SYSTEM_PROMPT.format(
-            tool_list=self._build_tool_description()
-        )
+        effective_prompt = DEFAULT_SYSTEM_PROMPT
         logger.info(
             "task_classification_start",
             session_id=session_id,
@@ -300,19 +289,16 @@ class AgentWorkflow:
 
         # 1. 注入相关记忆
         memory_context = ""
-        if self._memory_retrieval is not None:
-            try:
-                memory_context = await self._memory_retrieval.get_relevant_memories(
-                    user_message=user_message,
-                    session_id=session_id,
-                )
-            except Exception as e:
-                logger.warning("memory_injection_failed", error=str(e))
+        try:
+            memory_context = await self._memory_retrieval.get_relevant_memories(
+                user_message=user_message,
+                session_id=session_id,
+            )
+        except Exception as e:
+            logger.warning("memory_injection_failed", error=str(e))
 
         # 2. 加载历史消息
-        history: list[dict[str, Any]] = []
-        if self._db is not None:
-            history = await self._db.get_messages(session_id)
+        history: list[dict[str, Any]] = await self._db.get_messages(session_id)
 
         # 3. 构建系统提示（含记忆上下文）
         full_system_prompt = system_prompt or effective_prompt
@@ -392,25 +378,6 @@ class AgentWorkflow:
             )
         except Exception as e:
             logger.warning("fact_extraction_failed", error=str(e))
-
-    def _build_tool_description(self) -> str:
-        """从 UnifiedToolManager 动态生成工具列表描述.
-
-        遍历当前注册的所有工具，生成包含名称、描述、风险等级和审批要求的
-        格式化列表，用于注入系统提示词。工具集变化时无需修改代码。
-        """
-        lines: list[str] = []
-        for tool in self._tool_manager.list_tools():
-            schema = tool.schema
-            flags = []
-            if schema.require_approval:
-                flags.append("requires approval")
-            flags.append(
-                f"risk: {schema.risk_level.value if hasattr(schema.risk_level, 'value') else schema.risk_level}"
-            )
-            flag_str = f" ({', '.join(flags)})" if flags else ""
-            lines.append(f"- {schema.name}: {schema.description}{flag_str}")
-        return "\n".join(lines) if lines else "(no tools available)"
 
     async def _spawn_sub_agent_handler(self, task: str, session_id: str) -> str:
         """spawn_sub_agent 工具的执行处理器.

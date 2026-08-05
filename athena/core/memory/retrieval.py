@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage
 from athena.config.settings import Settings, get_settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
+from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -84,15 +85,30 @@ class HybridRetrievalManager:
         return filtered[: self._top_k]
 
     async def _expand_query(self, query: str) -> str:
-        """使用 LLM 扩展查询."""
+        """使用 LLM 扩展查询.
+
+        扩展结果仅用于向量语义检索（关键词检索使用原始查询走 FTS5），
+        因此提示词明确语义检索目标、约束输出为单行语句。
+        """
         prompt = (
-            "请将以下用户查询扩展为更完整的搜索语句，提取关键实体和意图，"
-            "直接返回扩展后的查询（不要解释）：\n\n原查询: " + query
+            "你是记忆检索查询优化器。请将用户查询改写为适合向量语义检索的"
+            "搜索语句，用于从用户的历史记忆中召回相关内容。\n"
+            "要求：\n"
+            "- 突出核心实体与意图（人名、项目名、技术名词、日期等）\n"
+            "- 补充近义词或同义改写以扩大语义召回\n"
+            "- 保持与原始查询相同的语言\n"
+            "- 只返回一行搜索语句，不要任何解释、前缀、引号或编号\n\n"
+            f"原始查询：{query}"
         )
         try:
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
-            content = getattr(response, "content", str(response))
-            return content.strip() if isinstance(content, str) else str(content).strip()
+            expanded = extract_message_text(response).strip()
+            if not expanded:
+                # 空响应（模型返回工具调用/错误/无文本）静默回落为 "None" 曾导致
+                # 下游检索被垃圾查询污染且无日志，这里显式记录并回退原查询。
+                logger.warning("query_expand_empty", query=query[:50])
+                return query
+            return expanded
         except Exception as e:
             logger.warning("query_expand_failed", error=str(e))
             return query
@@ -211,10 +227,9 @@ class MemoryRetrievalService:
         self,
         user_message: str,
         session_id: str,
-        max_tokens: int | None = None,
     ) -> str:
         """获取相关记忆并格式化为系统提示."""
-        max_tokens = max_tokens or get_settings().memory_max_tokens
+        max_tokens = get_settings().memory_max_tokens
         try:
             results = await self._manager.retrieve(
                 query=user_message,

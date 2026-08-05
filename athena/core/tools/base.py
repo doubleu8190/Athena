@@ -12,6 +12,7 @@ import json
 from typing import Any, TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkable
 
 from athena.models.tool import RiskLevel, ToolExecutionMode, ToolResult, ToolSchema
+from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -157,9 +158,10 @@ class MCPTool:
                 else:
                     output = str(content)
             else:
-                # 对象式 MCP 响应
+                # 对象式 MCP 响应（如 SDK 的 CallToolResult）：content 为内容块列表，
+                # 复用 extract_message_text 提取文本，避免 str() 产生 repr 垃圾
                 is_error = getattr(result, "isError", False)
-                output = str(getattr(result, "content", result))
+                output = extract_message_text(result)
 
             if is_error:
                 logger.warning("mcp_tool_error", tool=self.schema.name, server=self._server_name)

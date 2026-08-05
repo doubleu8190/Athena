@@ -11,13 +11,13 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from collections import deque
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 from athena.models.approval import ApprovalDecision, ApprovalRequest
 from athena.schemas.events import EventType, build_event
+from athena.utils.ids import generate_time_id
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -73,7 +73,7 @@ class ApprovalManager:
         关键：此方法立即返回，不等待审批完成。
         调用方通过 await request.future 等待审批结果。
         """
-        approval_id = str(uuid.uuid4())
+        approval_id = generate_time_id()
         future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
 
         request = ApprovalRequest(
@@ -286,7 +286,7 @@ class ApprovalManager:
             from datetime import datetime
 
             await self._db.save_approval_log({
-                "id": str(uuid.uuid4()),
+                "id": generate_time_id(),
                 "session_id": request.session_id,
                 "tool_call_id": request.tool_call_id or request.id,
                 "tool_name": request.tool_name,
@@ -356,31 +356,13 @@ class ApprovalManager:
 
 
 # 全局单例
-_approval_manager: ApprovalManager | None = None
+_approval_manager: ApprovalManager
 
-
-def get_approval_manager(
-    approval_timeout: int = 120,
-    websocket_manager: WebSocketManager | None = None,
-    db: Database | None = None,
-) -> ApprovalManager:
+def get_approval_manager() -> ApprovalManager:
     """获取审批管理器单例."""
-    global _approval_manager
-    if _approval_manager is None:
-        _approval_manager = ApprovalManager(
-            approval_timeout=approval_timeout,
-            websocket_manager=websocket_manager,
-            db=db,
-        )
     return _approval_manager
-
 
 def set_approval_manager(manager: ApprovalManager) -> None:
     global _approval_manager
     _approval_manager = manager
 
-
-def reset_approval_manager() -> None:
-    """重置单例（测试用）."""
-    global _approval_manager
-    _approval_manager = None

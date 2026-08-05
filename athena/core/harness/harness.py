@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import time
 import traceback
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -35,7 +34,7 @@ from athena.gateway.ws.manager import WebSocketManager
 from athena.models.step import StepStatus, StepType
 from athena.models.tool import ToolCallStatus
 from athena.schemas.events import EventType, build_event
-from athena.utils.ids import RunIdGenerator
+from athena.utils.ids import RunIdGenerator, generate_time_id
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -89,6 +88,7 @@ class Harness:
             tool_timeout=self._settings.tool_timeout,
         )
         self._stop_event = asyncio.Event()
+        self._allowed_tool_names: set[str] | None = None
         self._register_default_routes()
 
     def _register_default_routes(self) -> None:
@@ -116,6 +116,7 @@ class Harness:
         session_id: str,
         system_prompt: str = "",
         run_id: str | None = None,
+        tool_names: list[str] | None = None,
     ) -> HarnessRunResult:
         """执行单次 Agent 运行.
 
@@ -124,6 +125,7 @@ class Harness:
             session_id: 会话 ID
             system_prompt: 系统提示词
             run_id: 可选 run_id（子 Agent 使用），未提供则生成主 run_id
+            tool_names: 可选工具白名单（子 Agent 使用），None 表示全部工具
         """
         rid = run_id or RunIdGenerator.generate_main_run_id()
         budget = Budget(
@@ -145,8 +147,9 @@ class Harness:
         for m in messages:
             lc_messages.append(self._dict_to_message(m))
 
-        # 绑定工具
-        lc_tools = self._tool_manager.get_langchain_tools()
+        # 绑定工具（子 Agent 按 tool_names 白名单过滤，None = 全部）
+        self._allowed_tool_names = set(tool_names) if tool_names else None
+        lc_tools = self._tool_manager.get_langchain_tools(names=tool_names)
         bound_llm = self._llm.bind_tools(lc_tools) if lc_tools else self._llm
 
         step_counter = 0
@@ -169,7 +172,7 @@ class Harness:
 
                 # Step: LLM 调用
                 step_counter += 1
-                llm_step_id = str(uuid.uuid4())
+                llm_step_id = generate_time_id()
                 budget.increment_turn()
 
                 await self._save_step({
@@ -269,7 +272,7 @@ class Harness:
                 # 持久化 assistant 消息（中断恢复关键）
                 if self._db is not None:
                     await self._db.save_message(session_id, {
-                        "id": str(uuid.uuid4()),
+                        "id": generate_time_id(),
                         "role": "assistant",
                         "content": full_content,
                         "tool_calls": final_tc,
@@ -286,7 +289,7 @@ class Harness:
                 tool_step_starts: list[tuple[int, str, dict[str, Any]]] = []
                 for tc in final_tc:
                     step_counter += 1
-                    tool_step_id = str(uuid.uuid4())
+                    tool_step_id = generate_time_id()
                     tool_step_starts.append((step_counter, tool_step_id, tc))
 
                 tool_messages = await self._execute_tool_calls(
@@ -367,7 +370,7 @@ class Harness:
         ) -> ToolMessage:
             tool_name = tc.get("name", "")
             args = tc.get("args", {}) or tc.get("arguments", {}) or {}
-            tc_id = tc.get("id", str(uuid.uuid4()))
+            tc_id = tc.get("id", generate_time_id())
 
             # 创建 tool_execution step
             await self._save_step({
@@ -382,7 +385,7 @@ class Harness:
             })
 
             # 创建 tool_call 记录
-            tc_record_id = str(uuid.uuid4())
+            tc_record_id = generate_time_id()
             if self._db is not None:
                 await self._db.save_tool_call({
                     "id": tc_record_id,
@@ -461,7 +464,7 @@ class Harness:
             # 持久化 tool 消息
             if self._db is not None:
                 await self._db.save_message(session_id, {
-                    "id": str(uuid.uuid4()),
+                    "id": generate_time_id(),
                     "role": "tool",
                     "content": result_content,
                     "tool_call_id": tc_id,
@@ -484,7 +487,7 @@ class Harness:
                 logger.error("tool_execution_failed", error=str(r))
                 tool_messages.append(ToolMessage(
                     content=f"[工具执行异常] {r}",
-                    tool_call_id=str(uuid.uuid4()),
+                    tool_call_id=generate_time_id(),
                 ))
             elif isinstance(r, ToolMessage):
                 tool_messages.append(r)
@@ -502,6 +505,18 @@ class Harness:
 
         project_memory 约束：自愈路由器集成到本方法，工具失败时先查 Fallback 路由表。
         """
+        # 子 Agent 工具白名单校验：白名单外的工具一律拒绝执行（防御模型误调）
+        if (
+            self._allowed_tool_names is not None
+            and tool_name not in self._allowed_tool_names
+        ):
+            return (
+                f"[工具 {tool_name} 不在当前 Agent 的允许列表]",
+                "failed",
+                f"Tool '{tool_name}' is not allowed for this agent",
+                None,
+            )
+
         last_error: Exception | None = None
         params = dict(args)
 
@@ -586,7 +601,7 @@ class Harness:
             if tcs:
                 return [
                     {
-                        "id": tc.get("id", str(uuid.uuid4())),
+                        "id": tc.get("id", generate_time_id()),
                         "name": tc.get("name", ""),
                         "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
                     }
@@ -649,7 +664,7 @@ class Harness:
             if tool_calls:
                 lc_tcs = [
                     {
-                        "id": tc.get("id", str(uuid.uuid4())),
+                        "id": tc.get("id", generate_time_id()),
                         "name": tc.get("name", ""),
                         "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
                         "type": "tool_call",

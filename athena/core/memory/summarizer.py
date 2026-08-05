@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from athena.config.settings import Settings, get_settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
+from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -221,13 +222,7 @@ conversation_text:
             import re
 
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
-            content = getattr(response, "content", str(response))
-            if isinstance(content, list):
-                # 多模态消息：拼接文本部分
-                content = "\n".join(
-                    c.get("text", "") if isinstance(c, dict) else str(c)
-                    for c in content
-                )
+            content = extract_message_text(response)
             match = re.search(r"\{[\s\S]*\}", content)
             if not match:
                 return []
@@ -386,12 +381,7 @@ class ConversationSummarizer:
             import re
 
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
-            content = getattr(response, "content", str(response))
-            if isinstance(content, list):
-                content = "\n".join(
-                    c.get("text", "") if isinstance(c, dict) else str(c)
-                    for c in content
-                )
+            content = extract_message_text(response)
             match = re.search(r"\{[\s\S]*\}", content)
             if not match:
                 return []

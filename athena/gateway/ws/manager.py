@@ -86,13 +86,10 @@ class WebSocketManager:
 
 
 # 全局单例
-_ws_manager: WebSocketManager | None = None
+_ws_manager: WebSocketManager
 
 
 def get_websocket_manager() -> WebSocketManager:
-    global _ws_manager
-    if _ws_manager is None:
-        _ws_manager = WebSocketManager()
     return _ws_manager
 
 

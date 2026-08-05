@@ -85,8 +85,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
 async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
     """处理用户命令（异步执行，避免阻塞 WebSocket 接收）."""
     from athena.gateway.routes._runtime import get_workflow, reset_session_stop_event
-    workflow: AgentWorkflow | None = get_workflow()
+    workflow: AgentWorkflow = get_workflow()
     if workflow is None:
+        logger.error("workflow_not_initialized", session_id=session_id)
         return
     message = data.get("message", "")
     logger.info(

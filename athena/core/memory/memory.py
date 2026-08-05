@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from datetime import datetime, timedelta
 from typing import Any, TYPE_CHECKING
 
@@ -21,6 +20,7 @@ from sqlalchemy import insert, text, update
 from athena.config.settings import Settings, get_settings
 from athena.db.engine import get_session
 from athena.db.models import MemoryModel
+from athena.utils.ids import generate_time_id
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -96,7 +96,7 @@ class MemoryManager:
             记忆 ID
         """
         await self.initialize()
-        memory_id = str(uuid.uuid4())
+        memory_id = generate_time_id()
         now = datetime.now().isoformat()
         ttl_days = self._settings.memory_ttl_days
         expires_at = (
@@ -447,21 +447,15 @@ class MemoryManager:
 
 
 # 全局单例
-_memory_manager: MemoryManager | None = None
+_memory_manager: MemoryManager
 
 
-def get_memory_manager(
-    chroma_client: ClientAPI | None = None,
-    settings: Settings | None = None,
-) -> MemoryManager:
+def get_memory_manager() -> MemoryManager:
     """获取记忆管理器单例."""
-    global _memory_manager
-    if _memory_manager is None:
-        _memory_manager = MemoryManager(chroma_client=chroma_client, settings=settings)
     return _memory_manager
 
-
-def reset_memory_manager() -> None:
-    """重置单例（测试用）."""
+def set_memory_manager(manager: MemoryManager) -> None:
+    """设置全局记忆管理器实例（测试用）."""
     global _memory_manager
-    _memory_manager = None
+    _memory_manager = manager
+

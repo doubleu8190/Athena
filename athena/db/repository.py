@@ -23,6 +23,7 @@ from athena.db.models import (
     StepModel,
     ToolCallModel,
 )
+from athena.utils.ids import generate_time_id
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -214,9 +215,7 @@ class MessageRepository:
 
     async def save(self, session_id: str, message: dict[str, Any]) -> str:
         """保存消息."""
-        import uuid
-
-        msg_id = message.get("id") or str(uuid.uuid4())
+        msg_id = message.get("id") or generate_time_id()
         async with get_session() as session:
             async with session.begin():
                 model = MessageModel(

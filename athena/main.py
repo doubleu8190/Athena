@@ -21,13 +21,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from athena.config.settings import get_settings
+from athena.core.llm.provider import LLMProvider
+from athena.core.memory.memory import set_memory_manager
 from athena.db.database import close_database, get_database
-from athena.gateway.approval import get_approval_manager, set_approval_manager
+
+from athena.gateway.approval import ApprovalManager
 from athena.gateway.routes import api_router
-from athena.gateway.routes._runtime import set_workflow
+
 from athena.gateway.ws.handler import websocket_endpoint
-from athena.gateway.ws.manager import get_websocket_manager, set_websocket_manager
-from athena.gateway.recovery import recover_interrupted_sessions
+
+from athena.gateway.ws.manager import WebSocketManager
 from athena.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -44,17 +47,19 @@ async def lifespan(app: FastAPI):
     db = await get_database(settings.sqlite_db_path)
 
     # 2. WebSocket 管理器
-    ws_manager = get_websocket_manager()
+    from athena.gateway.ws.manager import set_websocket_manager
+
+    ws_manager = WebSocketManager()
     set_websocket_manager(ws_manager)
 
     # 3. 审批管理器（绑定 ws + db）
-    approval_manager = get_approval_manager(
+    from athena.gateway.approval import set_approval_manager
+
+    approval_manager = ApprovalManager(
         approval_timeout=settings.approval_timeout,
         websocket_manager=ws_manager,
         db=db,
     )
-    approval_manager.set_websocket_manager(ws_manager)
-    approval_manager.set_db(db)
     set_approval_manager(approval_manager)
 
     # 4. 工具管理器（注册内置工具）
@@ -66,42 +71,48 @@ async def lifespan(app: FastAPI):
     set_tool_manager(tool_manager)
 
     # 5. LLM / 记忆 / 压缩
-    from athena.core.llm.provider import get_llm_provider
+    from athena.core.llm.provider import set_llm_provider
 
-    llm = get_llm_provider(settings)
+    llm = LLMProvider.from_settings(settings=settings)
+    set_llm_provider(llm)
 
     from athena.core.memory.memory import MemoryManager
-    
+
     memory_manager = MemoryManager(settings=settings)
     try:
         await memory_manager.initialize()
     except Exception as e:
         logger.warning("memory_init_skipped", error=str(e))
         raise e
-
+    set_memory_manager(memory_manager)
+    
     from athena.core.memory.retrieval import (
-            HybridRetrievalManager,
-            MemoryRetrievalService,
-        )
-    retrieval_manager = HybridRetrievalManager(llm, memory_manager, settings=settings)
+        HybridRetrievalManager,
+        MemoryRetrievalService,
+    )
 
+    retrieval_manager = HybridRetrievalManager(llm, memory_manager, settings=settings)
     memory_retrieval = MemoryRetrievalService(retrieval_manager)
 
     from athena.core.memory.summarizer import ConversationSummarizer
+
     conversation_summarizer = ConversationSummarizer(
         llm, memory_manager, settings=settings
     )
 
     from athena.core.memory.summarizer import FactExtractor
+
     fact_extractor = FactExtractor(llm)
 
     from athena.core.compression.compressor import ContextCompressor
+
     compressor = ContextCompressor(
         llm=llm, memory_manager=memory_manager, settings=settings
     )
 
     # 6. AgentWorkflow
     from athena.core.agent.workflow import AgentWorkflow
+    from athena.gateway.routes._runtime import set_workflow
 
     workflow = AgentWorkflow(
         llm=llm,
@@ -118,6 +129,8 @@ async def lifespan(app: FastAPI):
     set_workflow(workflow)
 
     # 7. 被动会话恢复（project_memory 约束：通知用户 → 等待确认 → 执行恢复）
+    from athena.gateway.recovery import recover_interrupted_sessions
+
     await recover_interrupted_sessions(db)
 
     logger.info("athena_started")

@@ -8,7 +8,7 @@ from typing import Any
 from athena.core.agent.workflow import AgentWorkflow
 
 # 全局 AgentWorkflow 实例（main.py 启动时注入）
-_workflow: AgentWorkflow | None = None
+_workflow: AgentWorkflow
 
 # 会话级停止事件（session_id → asyncio.Event）
 _stop_events: dict[str, asyncio.Event] = {}
@@ -19,7 +19,7 @@ def set_workflow(workflow: AgentWorkflow) -> None:
     _workflow = workflow
 
 
-def get_workflow() -> AgentWorkflow | None:
+def get_workflow() -> AgentWorkflow:
     return _workflow
 
 

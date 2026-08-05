@@ -20,7 +20,7 @@ from athena.core.tools.base import (
     ToolProtocol,
     _infer_parameters,
 )
-from athena.models.tool import RiskLevel, ToolResult
+from athena.models.tool import RiskLevel, ToolResult, ToolSchema
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -201,9 +201,23 @@ class UnifiedToolManager:
         return StructuredTool.from_function(
             coroutine=_runner,
             name=schema.name,
-            description=schema.description,
+            description=self._describe_tool(schema),
             args_schema=args_model,
         )
+
+    @staticmethod
+    def _describe_tool(schema: ToolSchema) -> str:
+        """拼接工具描述与治理信息（是否需要审批 + 风险等级）.
+
+        治理信息并入 bind_tools 的函数描述，由函数 schema 注入给模型，
+        系统提示词不再重复罗列工具列表。
+        """
+        flags: list[str] = []
+        if schema.require_approval:
+            flags.append("requires approval")
+        flags.append(f"risk: {schema.risk_level.value}")
+        flag_str = f" ({', '.join(flags)})" if flags else ""
+        return f"{schema.description}{flag_str}"
 
     def _build_args_model(self, tool: ToolProtocol) -> type:
         """根据工具 parameters JSON Schema 构建 Pydantic 模型."""
@@ -237,16 +251,11 @@ class UnifiedToolManager:
 
 
 # 全局单例
-_tool_manager: UnifiedToolManager | None = None
+_tool_manager: UnifiedToolManager 
 
 
-def get_tool_manager(
-    approval_manager: ApprovalManager | None = None,
-) -> UnifiedToolManager:
+def get_tool_manager() -> UnifiedToolManager:
     """获取工具管理器单例."""
-    global _tool_manager
-    if _tool_manager is None:
-        _tool_manager = UnifiedToolManager(approval_manager=approval_manager)
     return _tool_manager
 
 
@@ -254,8 +263,3 @@ def set_tool_manager(manager: UnifiedToolManager) -> None:
     global _tool_manager
     _tool_manager = manager
 
-
-def reset_tool_manager() -> None:
-    """重置单例（测试用）."""
-    global _tool_manager
-    _tool_manager = None

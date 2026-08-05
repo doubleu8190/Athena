@@ -26,7 +26,7 @@ class SaveMemoryRequest(BaseModel):
 
 class SearchMemoryRequest(BaseModel):
     query: str
-    session_id: str | None = None
+    where: dict[str, Any] | None = None
     n_results: int = 5
 
 
@@ -70,8 +70,8 @@ async def search_memory(req: SearchMemoryRequest) -> list[dict[str, Any]]:
     try:
         return await manager.search(
             query=req.query,
-            session_id=req.session_id,
             n_results=req.n_results,
+            where=req.where,
         )
     except Exception as e:
         logger.exception("search_memory_failed")

@@ -189,7 +189,7 @@ conversation_text:
         """检索相关已有记忆，供提示词做语义去重."""
         try:
             results = await memory_manager.search(
-                query=message, session_id=session_id, n_results=limit
+                query=message, n_results=limit, where={"session_id": session_id}
             )
         except Exception as e:
             logger.warning("existing_memory_fetch_failed", error=str(e))

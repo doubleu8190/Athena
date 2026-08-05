@@ -166,17 +166,17 @@ class MemoryManager:
     async def search(
         self,
         query: str,
-        session_id: str | None = None,
         n_results: int = 5,
         where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """向量检索记忆（ChromaDB）."""
+        """向量检索记忆（ChromaDB）.
+
+        Args:
+            query: 查询文本
+            n_results: 返回结果数量
+            where: ChromaDB 过滤条件（如 {"session_id": "xxx"}）
+        """
         await self.initialize()
-        query_filter: dict[str, Any] = {}
-        if session_id:
-            query_filter["session_id"] = session_id
-        if where:
-            query_filter.update(where)
 
         try:
             kwargs: dict[str, Any] = {
@@ -184,8 +184,8 @@ class MemoryManager:
                 "n_results": n_results,
                 "include": ["documents", "metadatas", "distances"],
             }
-            if query_filter:
-                kwargs["where"] = query_filter
+            if where:
+                kwargs["where"] = where
             results = self.collection.query(**kwargs)
         except Exception as e:
             logger.error("memory_search_failed", error=str(e))
@@ -223,13 +223,18 @@ class MemoryManager:
     async def keyword_search(
         self,
         query: str,
-        session_id: str | None = None,
         n_results: int = 10,
+        where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """关键词检索记忆（SQLite FTS5 MATCH）.
 
         使用 FTS5 的 MATCH 操作符进行全文检索，
         tokenize='unicode61' 支持中文分词。
+
+        Args:
+            query: 查询文本
+            n_results: 返回结果数量
+            where: SQL 过滤条件（仅支持 memories 表顶层列，如 {"session_id": "xxx"}）
         """
         # 构建 FTS5 MATCH 查询：对查询中的每个词用 OR 连接
         # FTS5 语法：双引号包裹避免特殊字符干扰
@@ -247,7 +252,7 @@ class MemoryManager:
         try:
             async with get_session() as session:
                 # FTS5 MATCH 查询 + 关联 memories 表获取完整数据
-                sql = text("""
+                base_sql = """
                     SELECT m.id, m.content, m.metadata_json, m.session_id,
                            m.created_at, m.pinned, m.expires_at,
                            bm25(memory_fts) AS rank
@@ -255,22 +260,18 @@ class MemoryManager:
                     JOIN memories m ON memory_fts.memory_id = m.id
                     WHERE memory_fts MATCH :match_expr
                       AND m.deleted_time IS NULL
-                """)
+                """
                 params: dict[str, Any] = {"match_expr": match_terms}
-                if session_id:
-                    sql = text("""
-                        SELECT m.id, m.content, m.metadata_json, m.session_id,
-                               m.created_at, m.pinned, m.expires_at,
-                               bm25(memory_fts) AS rank
-                        FROM memory_fts
-                        JOIN memories m ON memory_fts.memory_id = m.id
-                        WHERE memory_fts MATCH :match_expr
-                          AND m.deleted_time IS NULL
-                          AND m.session_id = :session_id
-                    """)
-                    params["session_id"] = session_id
 
-                sql = text(str(sql.text) + f" LIMIT {n_results}")
+                # 将 where 条件转为 SQL AND 子句（仅支持 memories 表顶层列）
+                extra_conditions = ""
+                if where:
+                    for key, value in where.items():
+                        param_name = f"_where_{key}"
+                        extra_conditions += f" AND m.{key} = :{param_name}"
+                        params[param_name] = value
+
+                sql = text(base_sql + extra_conditions + f" LIMIT {n_results}")
                 result = await session.execute(sql, params)
                 rows = result.fetchall()
         except Exception as e:

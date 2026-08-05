@@ -120,12 +120,14 @@ class HybridRetrievalManager:
         filter_params: dict[str, Any] | None,
     ) -> list[SearchResult]:
         """向量检索."""
+        where = {"session_id": session_id}
+        if filter_params:
+            where.update(filter_params)
         try:
             results = await self._memory.search(
                 query=query,
-                session_id=session_id,
                 n_results=self._top_k * 2,
-                where=filter_params,
+                where=where,
             )
         except Exception as e:
             logger.warning("vector_search_failed", error=str(e))
@@ -156,8 +158,8 @@ class HybridRetrievalManager:
         try:
             results = await self._memory.keyword_search(
                 query=query,
-                session_id=session_id,
                 n_results=self._top_k * 2,
+                where={"session_id": session_id},
             )
         except Exception as e:
             logger.warning("keyword_search_failed", error=str(e))

@@ -234,7 +234,7 @@ async def retry_with_backoff(
                     delay_s = (delay_ms + jitter_ms) / 1000
 
                 await on_retry(category, attempt + 1, e, delay_s)
-                
+
                 await asyncio.sleep(delay_s)
 
     total_duration = (time.time() * 1000) - start_time

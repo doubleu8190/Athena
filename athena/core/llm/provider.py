@@ -195,6 +195,37 @@ class LLMProvider:
 
         return cls(model, retry_manager=retry_manager)
 
+    @classmethod
+    def from_secondary_settings(cls, settings: Settings) -> "LLMProvider | None":
+        """根据配置创建副 Provider（用于检索、摘要等轻量任务）.
+
+        优先使用 secondary 配置；若未配置 secondary 则回退到 fallback；
+        若只配了一个 provider 则返回 None（调用方应使用主 provider）。
+        """
+        secondary_config = settings.secondary_llm
+        if secondary_config is None:
+            fallback_list = settings.fallback_llm_list
+            secondary_config = fallback_list[0] if fallback_list else None
+        if secondary_config is None:
+            return None
+
+        model = _create_chat_model(secondary_config, settings)
+        retry_config = RetryConfig(
+            max_attempts=2,
+            min_delay_ms=1000,
+            max_delay_ms=15000,
+            jitter=0.1,
+            timeout_ms=30000,
+        )
+        retry_manager = LLMRetryManager(retry_config=retry_config)
+        logger.info(
+            "llm_secondary_created",
+            name=secondary_config.name,
+            provider=secondary_config.provider,
+            model=secondary_config.model,
+        )
+        return cls(model, retry_manager=retry_manager)
+
 
 def _create_chat_model(
     config: LLMProviderConfig, settings: Settings

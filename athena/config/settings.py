@@ -114,14 +114,9 @@ class Settings(BaseSettings):
         return self.llm_providers[1] if len(self.llm_providers) > 1 else None
 
     @property
-    def fallback_llm(self) -> LLMProviderConfig | None:
-        """获取 fallback provider 配置（兜底容灾）."""
-        return self.llm_providers[2] if len(self.llm_providers) > 2 else None
-
-    @property
     def fallback_llm_list(self) -> list[LLMProviderConfig]:
-        """获取所有 fallback provider 配置（secondary 及之后的）."""
-        return self.llm_providers[1:] if len(self.llm_providers) > 1 else []
+        """获取所有 fallback provider 配置（secondary 之后的）."""
+        return self.llm_providers[2:] if len(self.llm_providers) > 2 else []
 
     @property
     def db_path(self) -> Path:

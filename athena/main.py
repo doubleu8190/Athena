@@ -76,6 +76,9 @@ async def lifespan(app: FastAPI):
     llm = LLMProvider.from_settings(settings=settings)
     set_llm_provider(llm)
 
+    # 副 Provider：用于检索、摘要、事实提取、压缩等轻量任务
+    llm_secondary = LLMProvider.from_secondary_settings(settings=settings) or llm
+
     from athena.core.memory.memory import MemoryManager
 
     memory_manager = MemoryManager(settings=settings)
@@ -85,29 +88,31 @@ async def lifespan(app: FastAPI):
         logger.warning("memory_init_skipped", error=str(e))
         raise e
     set_memory_manager(memory_manager)
-    
+
     from athena.core.memory.retrieval import (
         HybridRetrievalManager,
         MemoryRetrievalService,
     )
 
-    retrieval_manager = HybridRetrievalManager(llm, memory_manager, settings=settings)
+    retrieval_manager = HybridRetrievalManager(
+        llm_secondary, memory_manager, settings=settings
+    )
     memory_retrieval = MemoryRetrievalService(retrieval_manager)
 
     from athena.core.memory.summarizer import ConversationSummarizer
 
     conversation_summarizer = ConversationSummarizer(
-        llm, memory_manager, settings=settings
+        llm_secondary, memory_manager, settings=settings
     )
 
     from athena.core.memory.summarizer import FactExtractor
 
-    fact_extractor = FactExtractor(llm)
+    fact_extractor = FactExtractor(llm_secondary)
 
     from athena.core.compression.compressor import ContextCompressor
 
     compressor = ContextCompressor(
-        llm=llm, memory_manager=memory_manager, settings=settings
+        llm=llm_secondary, memory_manager=memory_manager, settings=settings
     )
 
     # 6. AgentWorkflow

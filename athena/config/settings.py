@@ -5,8 +5,30 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class LLMProviderConfig(BaseModel):
+    """单个 LLM Provider 的配置.
+
+    Attributes:
+        name: 标识名 — primary(主) / secondary(副) / fallback(兜底)
+        provider: 厂商标识 — openai / anthropic / deepseek / ollama
+        model: 模型名称
+        api_key: API 密钥（ollama 可留空）
+        base_url: 自定义 API 端点（留空使用厂商默认）
+        temperature: 采样温度（-1 则使用全局默认值）
+        max_tokens: 最大输出 token 数（-1 则使用全局默认值）
+    """
+
+    name: str = "primary"
+    provider: str = "openai"
+    model: str = "gpt-4o"
+    api_key: str = ""
+    base_url: str = ""
+    temperature: float = -1
+    max_tokens: int = -1
 
 
 class Settings(BaseSettings):
@@ -23,13 +45,17 @@ class Settings(BaseSettings):
     port: int = 8000
     debug: bool = True
 
-    # --- LLM Provider ---
-    llm_provider: str = "openai"  # openai/anthropic/deepseek/ollama
-    llm_model: str = "gpt-4o"
-    llm_api_key: str = ""
-    llm_base_url: str = ""
+    # --- LLM Providers ---
+    # 按优先级排列：primary → secondary → fallback
+    llm_providers: list[LLMProviderConfig] = Field(
+        default_factory=lambda: [
+            LLMProviderConfig(name="primary", provider="openai", model="gpt-4o"),
+        ]
+    )
+    # 全局 LLM 参数（provider 级别的值为 -1 时使用这些默认值）
     llm_temperature: float = 0.7
     llm_max_tokens: int = 4096
+    
 
     # --- Database ---
     sqlite_db_path: str = "./data/athena.db"
@@ -74,6 +100,28 @@ class Settings(BaseSettings):
     approval_batch_mode: str = "sequential"  # sequential / batch
     approval_keyboard_shortcuts: bool = True
     approval_sound_alert: bool = False
+
+    @property
+    def primary_llm(self) -> LLMProviderConfig:
+        """获取主 provider 配置."""
+        if not self.llm_providers:
+            raise ValueError("llm_providers 不能为空")
+        return self.llm_providers[0]
+
+    @property
+    def secondary_llm(self) -> LLMProviderConfig | None:
+        """获取副 provider 配置（模型能力稍弱，用于次要任务）."""
+        return self.llm_providers[1] if len(self.llm_providers) > 1 else None
+
+    @property
+    def fallback_llm(self) -> LLMProviderConfig | None:
+        """获取 fallback provider 配置（兜底容灾）."""
+        return self.llm_providers[2] if len(self.llm_providers) > 2 else None
+
+    @property
+    def fallback_llm_list(self) -> list[LLMProviderConfig]:
+        """获取所有 fallback provider 配置（secondary 及之后的）."""
+        return self.llm_providers[1:] if len(self.llm_providers) > 1 else []
 
     @property
     def db_path(self) -> Path:

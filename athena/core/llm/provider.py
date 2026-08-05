@@ -15,7 +15,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, StructuredTool
 
-from athena.config.settings import Settings, get_settings
+from athena.config.settings import LLMProviderConfig, Settings, get_settings
 from athena.core.llm.retry import (
     ErrorCategory,
     LLMRetryManager,
@@ -163,8 +163,15 @@ class LLMProvider:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "LLMProvider":
-        """根据配置创建 Provider 实例."""
-        model = _create_chat_model(settings)
+        """根据配置创建主 Provider，并将 secondary/fallback 注入重试链.
+
+        创建顺序：
+        1. 用 primary config 创建主 provider
+        2. 用 secondary 及之后的 config 创建 fallback providers
+        3. 将 fallback providers 注入 retry_manager 的故障转移链
+        """
+        primary_config = settings.primary_llm
+        model = _create_chat_model(primary_config, settings)
         retry_config = RetryConfig(
             max_attempts=3,
             min_delay_ms=2000,
@@ -173,15 +180,36 @@ class LLMProvider:
             timeout_ms=60000,
         )
         retry_manager = LLMRetryManager(retry_config=retry_config)
+
+        # 注入 secondary / fallback providers 到故障转移链
+        for fallback_config in settings.fallback_llm_list:
+            fallback_model = _create_chat_model(fallback_config, settings)
+            fallback_provider = cls(fallback_model)
+            retry_manager.add_fallback_provider(fallback_provider)
+            logger.info(
+                "llm_fallback_registered",
+                name=fallback_config.name,
+                provider=fallback_config.provider,
+                model=fallback_config.model,
+            )
+
         return cls(model, retry_manager=retry_manager)
 
 
-def _create_chat_model(settings: Settings) -> BaseChatModel:
-    """根据配置创建对应的 LangChain ChatModel，统一以 streaming=True 初始化."""
-    provider = settings.llm_provider.lower()
+def _create_chat_model(
+    config: LLMProviderConfig, settings: Settings
+) -> BaseChatModel:
+    """根据 LLMProviderConfig 创建对应的 LangChain ChatModel.
+
+    provider 级别的 temperature / max_tokens 为 -1 时回退到全局默认值。
+    """
+    provider = config.provider.lower()
+    temperature = config.temperature if config.temperature >= 0 else settings.llm_temperature
+    max_tokens = config.max_tokens if config.max_tokens >= 0 else settings.llm_max_tokens
+
     common_kwargs: dict[str, Any] = {
-        "temperature": settings.llm_temperature,
-        "max_tokens": settings.llm_max_tokens,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
         "streaming": True,
     }
 
@@ -189,47 +217,35 @@ def _create_chat_model(settings: Settings) -> BaseChatModel:
         from langchain_openai import ChatOpenAI
 
         kwargs: dict[str, Any] = {
-            "model": settings.llm_model,
-            "api_key": settings.llm_api_key,
+            "model": config.model,
+            "api_key": config.api_key,
             **common_kwargs,
         }
-        if settings.llm_base_url:
-            kwargs["base_url"] = settings.llm_base_url
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
         return ChatOpenAI(**kwargs)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
         kwargs = {
-            "model": settings.llm_model,
-            "api_key": settings.llm_api_key,
+            "model": config.model,
+            "api_key": config.api_key,
             **common_kwargs,
         }
-        if settings.llm_base_url:
-            kwargs["base_url"] = settings.llm_base_url
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
         return ChatAnthropic(**kwargs)
-
-    if provider == "deepseek":
-        # DeepSeek 兼容 OpenAI 接口
-        from langchain_openai import ChatOpenAI
-
-        kwargs = {
-            "model": settings.llm_model,
-            "api_key": settings.llm_api_key,
-            "base_url": settings.llm_base_url or "https://api.deepseek.com",
-            **common_kwargs,
-        }
-        return ChatOpenAI(**kwargs)
 
     if provider == "ollama":
         from langchain_ollama import ChatOllama
 
         kwargs: dict[str, Any] = {
-            "model": settings.llm_model,
+            "model": config.model,
             **common_kwargs,
         }
-        if settings.llm_base_url:
-            kwargs["base_url"] = settings.llm_base_url
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
         return ChatOllama(**kwargs)
 
     raise ValueError(f"Unsupported LLM provider: {provider}")

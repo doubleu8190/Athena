@@ -60,12 +60,20 @@ class RetryConfig:
 
 # 各错误类别的默认重试配置
 RETRY_CONFIGS: dict[ErrorCategory, RetryConfig | None] = {
-    ErrorCategory.TRANSIENT: RetryConfig(max_attempts=3, min_delay_ms=2000, max_delay_ms=30000),
-    ErrorCategory.RATE_LIMITED: RetryConfig(max_attempts=5, min_delay_ms=5000, max_delay_ms=60000),
+    ErrorCategory.TRANSIENT: RetryConfig(
+        max_attempts=3, min_delay_ms=2000, max_delay_ms=30000
+    ),
+    ErrorCategory.RATE_LIMITED: RetryConfig(
+        max_attempts=5, min_delay_ms=5000, max_delay_ms=60000
+    ),
     ErrorCategory.CONTEXT_OVERFLOW: None,  # 不重试，需压缩上下文
-    ErrorCategory.MODEL_MISBEHAVIOR: RetryConfig(max_attempts=1, min_delay_ms=1000, max_delay_ms=5000),
+    ErrorCategory.MODEL_MISBEHAVIOR: RetryConfig(
+        max_attempts=1, min_delay_ms=1000, max_delay_ms=5000
+    ),
     ErrorCategory.PERMANENT: None,  # 不重试，快速失败
-    ErrorCategory.UNKNOWN: RetryConfig(max_attempts=1, min_delay_ms=2000, max_delay_ms=10000),
+    ErrorCategory.UNKNOWN: RetryConfig(
+        max_attempts=1, min_delay_ms=2000, max_delay_ms=10000
+    ),
 }
 
 
@@ -87,7 +95,9 @@ def categorize_error(error: Exception) -> ErrorCategory:
         return ErrorCategory.RATE_LIMITED
 
     # 上下文溢出
-    if "context" in error_str and ("length" in error_str or "too long" in error_str or "overflow" in error_str):
+    if "context" in error_str and (
+        "length" in error_str or "too long" in error_str or "overflow" in error_str
+    ):
         return ErrorCategory.CONTEXT_OVERFLOW
     if "maximum context length" in error_str:
         return ErrorCategory.CONTEXT_OVERFLOW
@@ -110,7 +120,9 @@ def get_retry_after(error: Exception) -> float | None:
     if hasattr(error, "response"):
         response = getattr(error, "response", None)
         if response and hasattr(response, "headers"):
-            retry_after = response.headers.get("retry-after") or response.headers.get("retry-after-ms")
+            retry_after = response.headers.get("retry-after") or response.headers.get(
+                "retry-after-ms"
+            )
             if retry_after:
                 try:
                     value = float(retry_after)
@@ -157,6 +169,16 @@ async def retry_with_backoff(
         retry_config = RETRY_CONFIGS.get(error_category)
     if retry_config is None:
         retry_config = RetryConfig(max_attempts=1)
+
+    if on_retry is None:
+        on_retry = lambda category, attempt, error, delay: logger.warning(
+            "llm_retry",
+            attempt=attempt + 1,
+            max_attempts=retry_config.max_attempts,
+            error=str(error),
+            category=category,
+            delay_s=round(delay, 2),
+        )
 
     last_error: Exception | None = None
     start_time = time.time() * 1000
@@ -206,22 +228,13 @@ async def retry_with_backoff(
                 if retry_after:
                     delay_s = retry_after
                 else:
-                    base_delay_ms = retry_config.min_delay_ms * (2 ** attempt)
+                    base_delay_ms = retry_config.min_delay_ms * (2**attempt)
                     delay_ms = min(base_delay_ms, retry_config.max_delay_ms)
                     jitter_ms = delay_ms * retry_config.jitter * random.random()
                     delay_s = (delay_ms + jitter_ms) / 1000
 
-                if on_retry:
-                    await on_retry(attempt + 1, e, delay_s)
-
-                logger.warning(
-                    "llm_retry",
-                    attempt=attempt + 1,
-                    max_attempts=retry_config.max_attempts,
-                    error=str(e),
-                    category=category,
-                    delay_s=round(delay_s, 2),
-                )
+                await on_retry(category, attempt + 1, e, delay_s)
+                
                 await asyncio.sleep(delay_s)
 
     total_duration = (time.time() * 1000) - start_time
@@ -230,7 +243,9 @@ async def retry_with_backoff(
         error=last_error,
         attempts=attempts,
         total_duration_ms=total_duration,
-        error_category=categorize_error(last_error) if last_error else ErrorCategory.UNKNOWN,
+        error_category=(
+            categorize_error(last_error) if last_error else ErrorCategory.UNKNOWN
+        ),
     )
 
 
@@ -261,7 +276,8 @@ class LLMRetryManager:
         """
         # 阶段 1: 同模型重试
         result = await retry_with_backoff(
-            func, *args,
+            func,
+            *args,
             retry_config=self._config,
             on_retry=on_retry,
             **kwargs,
@@ -276,7 +292,9 @@ class LLMRetryManager:
             ErrorCategory.MODEL_MISBEHAVIOR,
         ):
             for fallback in self._fallback_providers:
-                logger.info("trying_fallback_provider", provider=type(fallback).__name__)
+                logger.info(
+                    "trying_fallback_provider", provider=type(fallback).__name__
+                )
                 try:
                     fallback_result = await func(*args, **kwargs)
                     return RetryResult(

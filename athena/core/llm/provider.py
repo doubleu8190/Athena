@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Protocol, cast, runtime_checkable
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
@@ -153,9 +153,19 @@ class LLMProvider:
             raise last_error
 
     def bind_tools(self, tools: list[StructuredTool]) -> LLMProvider:
-        """绑定工具到模型，返回新的 provider 实例."""
-        self._model.bind_tools(tools)
-        return LLMProvider(self._model, retry_manager=self._retry_manager)
+        """绑定工具到模型，返回新的 provider 实例（不可变）.
+
+        LangChain 的 bind_tools/bind 是不可变 API：返回新的 RunnableBinding，
+        不修改原模型。必须接住返回值并包装绑定后的模型，否则工具定义永远不会
+        到达模型（静默失效）。共享同一 LLMProvider 时每次调用各得独立 binding，
+        互不污染；严禁原地改写 self._model（并发 run 绑定不同工具集会竞态）。
+        """
+        # LangChain 把 bind_tools 返回类型标注为 Runnable（运行期实为
+        # _ChatModelBinding），但其方法面（ainvoke/astream/bind_tools/
+        # with_structured_output）与 BaseChatModel 一致，故 cast 收窄仅为
+        # 消除类型标注差异，运行期安全。
+        bound_model = cast(BaseChatModel, self._model.bind_tools(tools))
+        return LLMProvider(bound_model, retry_manager=self._retry_manager)
 
     def with_structured_output(self, schema: type) -> Runnable:
         """绑定结构化输出 schema，返回可调用的 runnable."""

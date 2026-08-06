@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -89,6 +90,9 @@ async def lifespan(app: FastAPI):
         raise e
     set_memory_manager(memory_manager)
 
+    # 后台看门狗：周期 flush 访问统计 + 清理过期记忆
+    memory_flush_task = asyncio.create_task(memory_manager.run_periodic_flush())
+
     from athena.core.memory.retrieval import (
         HybridRetrievalManager,
         MemoryRetrievalService,
@@ -147,6 +151,16 @@ async def lifespan(app: FastAPI):
         await approval_manager.cancel_all_pending("")
     except Exception:
         pass
+    # 停掉后台看门狗，并落盘内存中未同步的访问统计
+    memory_flush_task.cancel()
+    try:
+        await memory_flush_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await memory_manager.flush_access_stats()
+    except Exception as e:
+        logger.warning("memory_final_flush_failed", error=str(e))
     await close_database()
     logger.info("athena_stopped")
 

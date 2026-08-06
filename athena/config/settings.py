@@ -72,8 +72,9 @@ class Settings(BaseSettings):
     memory_sync_interval: int = 900
     memory_min_score: float = 0.7
     memory_ttl_days: int = 90
-    vector_weight: float = 0.6
-    keyword_weight: float = 0.4
+    memory_access_window_days: int = 7
+    vector_weight: float = 0.75
+    keyword_weight: float = 0.25
     rrf_k: int = 60
     retrieval_top_k: int = 5
     memory_max_tokens: int = 2000

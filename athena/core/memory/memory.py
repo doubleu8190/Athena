@@ -9,13 +9,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, TYPE_CHECKING
+from typing import Any, Iterable, TYPE_CHECKING
 
 from chromadb import Collection, QueryResult
 from chromadb.api import ClientAPI
-from sqlalchemy import insert, text, update
+from sqlalchemy import case, insert, select, text, update
 
 from athena.config.settings import Settings, get_settings
 from athena.db.engine import get_session
@@ -27,6 +29,14 @@ if TYPE_CHECKING:
     import chromadb
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _AccessStat:
+    """内存中累积的一次访问统计（待批量落盘）."""
+
+    count: int = 1
+    last_accessed: str = ""
 
 
 class MemoryManager:
@@ -42,6 +52,8 @@ class MemoryManager:
         self._collection_name = "athena_memory"
         self._collection: Collection | None = None
         self._initialized = False
+        # 内存中的访问统计累积（读路径 O(1) 记录，周期批量落盘）
+        self._access_stats: dict[str, _AccessStat] = {}
 
     async def initialize(self) -> None:
         """初始化 ChromaDB 客户端与集合."""
@@ -72,6 +84,139 @@ class MemoryManager:
                 "MemoryManager not initialized. Call initialize() first."
             )
         return self._collection
+
+    # ------------------------------------------------------------------
+    # 访问追踪：读路径内存累积 + 周期批量落盘（滑动 TTL 在此刷新）
+    # ------------------------------------------------------------------
+
+    def _record_access(self, memory_id: str) -> None:
+        """O(1) 记录一次访问，仅累积在内存，不触发任何 I/O.
+
+        单线程 asyncio 下，与 flush 的"快照+清空"之间无 await，不会交错。
+        """
+        now_iso = datetime.now().isoformat()
+        st = self._access_stats.get(memory_id)
+        if st is None:
+            self._access_stats[memory_id] = _AccessStat(count=1, last_accessed=now_iso)
+        else:
+            st.count += 1
+            st.last_accessed = now_iso
+
+    def pending_access_stats(self, ids: Iterable[str]) -> dict[str, tuple[int, str]]:
+        """返回内存中尚未落盘的访问统计，供检索打分实时叠加.
+
+        Returns:
+            {memory_id: (count, last_accessed)}
+        """
+        out: dict[str, tuple[int, str]] = {}
+        for mid in ids:
+            st = self._access_stats.get(mid)
+            if st is not None:
+                out[mid] = (st.count, st.last_accessed)
+        return out
+
+    async def flush_access_stats(self) -> int:
+        """把累积的访问统计批量持久化到 SQLite，并镜像到 ChromaDB.
+
+        SQLite 为唯一事实源（保持"先 SQLite 后 Chroma"惯例）；Chroma 仅按
+        逐 key 合并更新 3 个字段。滑动 TTL：非 pinned 记忆的 expires_at
+        刷新为 now + ttl_days。
+
+        Returns:
+            本次落盘的记忆条数
+        """
+        # 快照 + 清空必须是同步对（无 await 间隔），防止并发访问交错
+        stats = dict(self._access_stats)
+        self._access_stats.clear()
+        if not stats:
+            return 0
+
+        await self.initialize()
+        new_expires = (
+            datetime.now() + timedelta(days=self._settings.memory_ttl_days)
+        ).isoformat()
+
+        # 1. SQLite：增量计数 + 滑动 TTL（仅非 pinned），跳过软删除行
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    for mid, st in stats.items():
+                        await session.execute(
+                            update(MemoryModel)
+                            .where(
+                                MemoryModel.id == mid,
+                                MemoryModel.deleted_time.is_(None),
+                            )
+                            .values(
+                                last_accessed=st.last_accessed,
+                                access_count=MemoryModel.access_count + st.count,
+                                expires_at=case(
+                                    (MemoryModel.pinned == 0, new_expires),
+                                    else_=MemoryModel.expires_at,
+                                ),
+                            )
+                        )
+        except Exception as e:
+            logger.error("memory_flush_sqlite_failed", error=str(e))
+            raise
+
+        # 2. readback 取 fresh 值作为镜像 Chroma 的规范值
+        rows: Any = []
+        try:
+            async with get_session() as session:
+                rows = (
+                    await session.execute(
+                        select(
+                            MemoryModel.id,
+                            MemoryModel.pinned,
+                            MemoryModel.expires_at,
+                            MemoryModel.last_accessed,
+                            MemoryModel.access_count,
+                        ).where(MemoryModel.id.in_(list(stats)))
+                    )
+                ).fetchall()
+        except Exception as e:
+            logger.error("memory_flush_readback_failed", error=str(e))
+            raise
+
+        # 3. Chroma 镜像（update 为逐 key 合并，仅改这 3 个字段）
+        if rows:
+            try:
+                self.collection.update(
+                    ids=[r.id for r in rows],
+                    metadatas=[
+                        {
+                            "last_accessed": r.last_accessed,
+                            "access_count": r.access_count,
+                            "expires_at": "" if r.pinned else (r.expires_at or ""),
+                        }
+                        for r in rows
+                    ],
+                )
+            except Exception as e:
+                # SQLite 已提交，仅 Chroma 落后一个周期；下次访问自动补同步
+                logger.error("memory_flush_chromadb_failed", error=str(e))
+                raise
+
+        logger.info("memory_access_flushed", count=len(stats))
+        return len(stats)
+
+    async def run_periodic_flush(self) -> None:
+        """后台看门狗：按 memory_sync_interval 周期 flush 访问统计并清理过期.
+
+        先 flush 再 cleanup：刚被访问的记忆先滑动 TTL，随后才判定过期，
+        避免活跃记忆被误删。两步各自独立守护，一次失败不中断循环。
+        """
+        while True:
+            await asyncio.sleep(self._settings.memory_sync_interval)
+            try:
+                await self.flush_access_stats()
+            except Exception as e:
+                logger.error("memory_periodic_flush_failed", error=str(e))
+            try:
+                await self.cleanup_expired()
+            except Exception as e:
+                logger.error("memory_periodic_cleanup_failed", error=str(e))
 
     # ------------------------------------------------------------------
     # 写入：双写 SQLite + ChromaDB (memories 表 + memory_fts 虚拟表)
@@ -208,7 +353,7 @@ class MemoryManager:
 
         out: list[dict[str, Any]] = []
         for doc_id, doc, meta, dist in zip(row_ids, documents, metadatas, distances):
-            # cosine 距离 ∈ [0,2]，线性归一化为 0-1 相似度
+            # 在 ChromaDB 中，距离值越小，代表越相似，cosine 距离 ∈ [0,2]，线性归一化为 0-1 相似度
             score = max(0.0, 1.0 - (float(dist) / 2.0))
             out.append(
                 {
@@ -219,6 +364,8 @@ class MemoryManager:
                     "source": "vector",
                 }
             )
+        for item in out:
+            self._record_access(item["id"])
         return out
 
     # ------------------------------------------------------------------
@@ -233,8 +380,11 @@ class MemoryManager:
     ) -> list[dict[str, Any]]:
         """关键词检索记忆（SQLite FTS5 MATCH）.
 
-        使用 FTS5 的 MATCH 操作符进行全文检索，
-        tokenize='unicode61' 支持中文分词。
+        职责边界：FTS5 只做精确词/整段/前缀召回，不做中文语义分词
+        （分词语义由向量检索承担）。tokenize='unicode61' 把连续字符段
+        （含中英混排）索引为单个 token，因此本方法：
+        - 按 ASCII 词与 CJK 段分开切 token，避免中英粘连成不可命中的 token
+        - 对 CJK 段及较长 ASCII 词追加前缀形式（"北京"* 可命中"北京烤鸭好吃"）
 
         Args:
             query: 查询文本
@@ -245,12 +395,23 @@ class MemoryManager:
         # FTS5 语法：双引号包裹避免特殊字符干扰
         import re
 
-        tokens = re.findall(r"[\w\u4e00-\u9fa5]+", query)
+        tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fa5]+", query)
         if not tokens:
             return []
 
-        # 转义双引号并构建 MATCH 表达式
-        match_terms = " OR ".join(f'"{t}"' for t in tokens if len(t) > 0)
+        terms: list[str] = []
+        for t in tokens:
+            if re.search(r"[\u4e00-\u9fa5]", t):
+                # CJK 段整段为单 token，精确匹配几乎不可命中；前缀可召回
+                # 以该段开头的记忆（如"北京"→"北京烤鸭好吃"）
+                terms.append(f'"{t}" OR "{t}"*')
+            elif len(t) >= 3:
+                # 较长 ASCII 词可能是中英混排段的词首（"ipv6"→"ipv6配置"）
+                terms.append(f'"{t}" OR "{t}"*')
+            else:
+                # 短 ASCII 词精确匹配即可，前缀易引入 "we*"→"west" 类噪声
+                terms.append(f'"{t}"')
+        match_terms = " OR ".join(terms)
         if not match_terms:
             return []
 
@@ -260,6 +421,7 @@ class MemoryManager:
                 base_sql = """
                     SELECT m.id, m.content, m.metadata_json, m.session_id,
                            m.created_at, m.pinned, m.expires_at,
+                           m.last_accessed, m.access_count,
                            bm25(memory_fts) AS rank
                     FROM memory_fts
                     JOIN memories m ON memory_fts.memory_id = m.id
@@ -276,7 +438,11 @@ class MemoryManager:
                         extra_conditions += f" AND m.{key} = :{param_name}"
                         params[param_name] = value
 
-                sql = text(base_sql + extra_conditions + f" LIMIT {n_results}")
+                # FTS5 无 ORDER BY 时按 rowid/插入序返回（非相关序），
+                # 必须显式按 rank(=bm25, 升序=最相关在前) 排序，否则 RRF 的 rank 输入无效
+                sql = text(
+                    base_sql + extra_conditions + f" ORDER BY rank LIMIT {n_results}"
+                )
                 result = await session.execute(sql, params)
                 rows = result.fetchall()
         except Exception as e:
@@ -289,10 +455,15 @@ class MemoryManager:
             try:
                 meta = json.loads(row.metadata_json) if row.metadata_json else {}
             except (json.JSONDecodeError, TypeError):
+                logger.warning("memory_metadata_json_invalid", memory_id=row.id)
                 pass
-            # bm25 返回负值，越小越相关，转换为 0-1 的分数
+            # metadata_json 是创建时冻结的快照，访问字段以 live 列为准覆盖
+            meta["last_accessed"] = row.last_accessed
+            meta["access_count"] = row.access_count
+            # bm25 返回负值，越小（越负）越相关；abs/(1+abs) 映射为单调递增的
+            # 0-1 相似度，与向量路径"score 越大越相似"的语义一致
             raw_rank = row.rank if row.rank is not None else 0.0
-            score = max(0.0, min(1.0, 1.0 / (1.0 + abs(raw_rank))))
+            score = abs(raw_rank) / (1.0 + abs(raw_rank))
             out.append(
                 {
                     "id": row.id,
@@ -302,6 +473,8 @@ class MemoryManager:
                     "source": "keyword",
                 }
             )
+        for item in out:
+            self._record_access(item["id"])
         return out
 
     # ------------------------------------------------------------------
@@ -315,6 +488,7 @@ class MemoryManager:
             result = self.collection.get(ids=[memory_id])
             if not result or not result.get("ids"):
                 return None
+            self._record_access(memory_id)
             return {
                 "id": result["ids"][0],
                 "content": result["documents"][0] if result["documents"] else "",
@@ -377,7 +551,14 @@ class MemoryManager:
         先更新 SQLite，再更新 ChromaDB；ChromaDB 失败时回滚 SQLite。
         """
         await self.initialize()
-        expires_at = None if pinned else datetime.now().isoformat()
+        # 取消固定后仍给予完整 TTL 窗口（滑动语义），而非立即过期
+        ttl_days = self._settings.memory_ttl_days
+        if pinned:
+            expires_at = None
+            chroma_expires_at = ""
+        else:
+            expires_at = (datetime.now() + timedelta(days=ttl_days)).isoformat()
+            chroma_expires_at = expires_at
         new_pinned = 1 if pinned else 0
 
         # 1. 先更新 SQLite
@@ -400,7 +581,7 @@ class MemoryManager:
                 metadatas=[
                     {
                         "pinned": pinned,
-                        "expires_at": "" if pinned else datetime.now().isoformat(),
+                        "expires_at": chroma_expires_at,
                     }
                 ],
             )
@@ -537,13 +718,19 @@ class MemoryManager:
                     # 读取当前值来反转
                     row = (
                         await session.execute(
-                            text("SELECT pinned, expires_at FROM memories WHERE id = :id"),
+                            text(
+                                "SELECT pinned, expires_at FROM memories WHERE id = :id"
+                            ),
                             {"id": memory_id},
                         )
                     ).fetchone()
                     if row:
                         reverted_pinned = 0 if row.pinned else 1
-                        reverted_expires = None if row.pinned else (row.expires_at or datetime.now().isoformat())
+                        reverted_expires = (
+                            None
+                            if row.pinned
+                            else (row.expires_at or datetime.now().isoformat())
+                        )
                         await session.execute(
                             update(MemoryModel)
                             .where(MemoryModel.id == memory_id)

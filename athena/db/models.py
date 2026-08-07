@@ -151,7 +151,6 @@ class MemoryModel(Base):
 
 
 # FTS5 虚拟表 DDL（SQLAlchemy ORM 不支持 FTS5，需通过原生 SQL 创建）
-# tokenize='unicode61' 支持中文分词
 MEMORY_FTS_DDL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     content,

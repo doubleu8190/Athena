@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from athena.core.agent.workflow import AgentWorkflow
 from athena.db.database import Database, get_database
+from athena.models import Message, Session, Step, ToolCallRecord
 from athena.utils.ids import generate_session_id
 from athena.utils.logging import get_logger
 
@@ -39,7 +40,7 @@ async def _get_workflow() -> AgentWorkflow | None:
 
 
 @router.post("")
-async def create_session(req: CreateSessionRequest) -> dict[str, Any]:
+async def create_session(req: CreateSessionRequest) -> Session:
     """创建新会话."""
     db = await _get_db()
     session_id = generate_session_id()
@@ -48,14 +49,14 @@ async def create_session(req: CreateSessionRequest) -> dict[str, Any]:
 
 
 @router.get("")
-async def list_sessions() -> list[dict[str, Any]]:
+async def list_sessions() -> list[Session]:
     """列出所有会话."""
     db = await _get_db()
     return await db.list_sessions()
 
 
 @router.get("/{session_id}")
-async def get_session(session_id: str) -> dict[str, Any]:
+async def get_session(session_id: str) -> Session:
     """获取会话详情."""
     db = await _get_db()
     session = await db.get_session(session_id)
@@ -73,7 +74,7 @@ async def delete_session(session_id: str) -> dict[str, str]:
 
 
 @router.get("/{session_id}/messages")
-async def get_messages(session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
+async def get_messages(session_id: str, limit: int | None = None) -> list[Message]:
     """获取会话消息列表."""
     db = await _get_db()
     if not await db.get_session(session_id):
@@ -104,7 +105,7 @@ async def send_message(session_id: str, req: SendMessageRequest) -> dict[str, An
 
 
 @router.get("/{session_id}/steps")
-async def get_steps(session_id: str) -> list[dict[str, Any]]:
+async def get_steps(session_id: str) -> list[Step]:
     """获取会话执行步骤."""
     db = await _get_db()
     if not await db.get_session(session_id):
@@ -113,7 +114,7 @@ async def get_steps(session_id: str) -> list[dict[str, Any]]:
 
 
 @router.get("/{session_id}/tool_calls")
-async def get_tool_calls(session_id: str, status: str | None = None) -> list[dict[str, Any]]:
+async def get_tool_calls(session_id: str, status: str | None = None) -> list[ToolCallRecord]:
     """获取会话工具调用记录."""
     db = await _get_db()
     return await db.query_tool_calls(session_id, status=status)

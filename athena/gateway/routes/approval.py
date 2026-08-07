@@ -7,6 +7,7 @@ from typing import Any, TYPE_CHECKING
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from athena.models import ApprovalLog
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -77,7 +78,7 @@ async def cancel_session_approvals(session_id: str) -> dict[str, Any]:
 
 
 @router.get("/logs/{session_id}")
-async def get_approval_logs(session_id: str) -> list[dict[str, Any]]:
+async def get_approval_logs(session_id: str) -> list[ApprovalLog]:
     """获取会话审批日志."""
     from athena.config.settings import get_settings
     from athena.db.database import get_database

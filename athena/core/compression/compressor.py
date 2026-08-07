@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from langchain_core.messages import BaseMessage, SystemMessage
 
 from athena.config.settings import Settings, get_settings
 from athena.core.compression.pairer import MessagePairer
@@ -22,33 +22,19 @@ from athena.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-class ContextSizeChecker:
-    """上下文大小检测器."""
+def _estimate_tokens(text: str) -> int:
+    """粗略估算 token 数（4 字符 ≈ 1 token）.
 
-    def __init__(self, max_context_tokens: int = 128000, threshold: float = 0.8) -> None:
-        self._max_tokens = max_context_tokens
-        self._threshold = threshold
+    project_memory 约束：使用 model.get_num_tokens()，缺失时回退到 len/4。
+    此处采用回退方案，因为底层模型实例不一定暴露 get_num_tokens。
+    """
+    return len(text) // 4
 
-    async def should_compress(self, messages: list[dict[str, Any]]) -> bool:
-        """检查是否需要压缩（超过阈值时触发）."""
-        total = sum(self._estimate_tokens(m.get("content", "")) for m in messages)
-        # 也计入 tool_calls 的 token
-        for m in messages:
-            tcs = m.get("tool_calls") or []
-            for tc in tcs:
-                total += self._estimate_tokens(str(tc.get("args", {})))
-        return total > self._max_tokens * self._threshold
 
-    def estimate_total(self, messages: list[dict[str, Any]]) -> int:
-        return sum(self._estimate_tokens(m.get("content", "")) for m in messages)
-
-    def _estimate_tokens(self, text: str) -> int:
-        """粗略估算 token 数（4 字符 ≈ 1 token）.
-
-        project_memory 约束：使用 model.get_num_tokens()，缺失时回退到 len/4。
-        此处采用回退方案，因为底层模型实例不一定暴露 get_num_tokens。
-        """
-        return len(text) // 4
+def _get_message_id(msg: BaseMessage) -> str | None:
+    """从 BaseMessage.metadata 中提取原始消息 ID."""
+    meta = getattr(msg, "metadata", None) or {}
+    return meta.get("message_id")
 
 
 class ContextCompressor:
@@ -63,10 +49,8 @@ class ContextCompressor:
         self._llm = llm
         self._settings = settings or get_settings()
         self._db = db
-        self._size_checker = ContextSizeChecker(
-            max_context_tokens=self._settings.max_context_tokens,
-            threshold=self._settings.compression_threshold,
-        )
+        self._max_tokens = self._settings.max_context_tokens
+        self._threshold = self._settings.compression_threshold
         self._pairer = MessagePairer()
         self._summarizer = IncrementalSummarizer(
             llm=llm,
@@ -79,11 +63,24 @@ class ContextCompressor:
     def summarizer(self) -> IncrementalSummarizer:
         return self._summarizer
 
+    def _should_compress(self, messages: list[BaseMessage]) -> bool:
+        """检查是否需要压缩（超过阈值时触发）."""
+        total = 0
+        for m in messages:
+            total += _estimate_tokens(getattr(m, "content", "") or "")
+            for tc in getattr(m, "tool_calls", None) or []:
+                total += _estimate_tokens(str(tc.get("args", {})))
+        return total > self._max_tokens * self._threshold
+
+    def _estimate_total(self, messages: list[BaseMessage]) -> int:
+        """估算消息列表总 token 数."""
+        return sum(_estimate_tokens(getattr(m, "content", "") or "") for m in messages)
+
     async def compress(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[BaseMessage],
         session_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[BaseMessage]:
         """压缩消息列表.
 
         增量压缩模式：若 session 记录了上次压缩的消息 ID，只处理该 ID 之后的新消息，
@@ -97,7 +94,7 @@ class ContextCompressor:
             压缩后的消息列表（若未触发压缩，则原样返回）
         """
         # 1. 检查是否需要压缩
-        if not await self._size_checker.should_compress(messages):
+        if not self._should_compress(messages):
             return messages
 
         sid = session_id or "_default"
@@ -134,14 +131,14 @@ class ContextCompressor:
         # 7. 记录本次压缩的最后一条消息 ID（用于下次增量查询）
         await self._update_last_compressed_id(messages, session_id)
 
-        await self._emit_compression_event(messages, compressed)
+        self._emit_compression_event(messages, compressed)
         return compressed
 
     async def _get_incremental_messages(
         self,
-        all_messages: list[dict[str, Any]],
+        all_messages: list[BaseMessage],
         session_id: str | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[BaseMessage]:
         """获取增量消息：若存在上次压缩记录，只返回该记录之后的消息."""
         if not session_id or not self._db:
             return all_messages
@@ -151,13 +148,15 @@ class ContextCompressor:
             if not session:
                 return all_messages
 
-            last_compressed_id = session.get("last_compressed_message_id")
+            last_compressed_id = session.last_compressed_message_id
             if not last_compressed_id:
                 return all_messages
 
-            # 从数据库查询增量消息
-            incremental = await self._db.get_messages_after(session_id, last_compressed_id)
-            if incremental:
+            # 从数据库查询增量消息，转换为 BaseMessage
+            incremental_messages = await self._db.get_messages_after(session_id, last_compressed_id)
+            if incremental_messages:
+                from athena.utils.message import dicts_to_messages
+                incremental = dicts_to_messages(incremental_messages)
                 logger.info(
                     "incremental_messages_loaded",
                     session_id=session_id,
@@ -172,17 +171,17 @@ class ContextCompressor:
 
     async def _update_last_compressed_id(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[BaseMessage],
         session_id: str | None,
     ) -> None:
         """更新 session 表 last_compressed_message_id 字段."""
         if not session_id or not self._db:
             return
 
-        # 找到最后一条有 ID 的消息
+        # 从后往前找最后一条有原始 ID 的消息
         last_id = None
         for msg in reversed(messages):
-            last_id = msg.get("id")
+            last_id = _get_message_id(msg)
             if last_id:
                 break
 
@@ -198,30 +197,26 @@ class ContextCompressor:
     def _rebuild_messages(
         self,
         summary: str,
-        recent_turns: list[list[dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
+        recent_turns: list[list[BaseMessage]],
+    ) -> list[BaseMessage]:
         """重建压缩后的消息列表."""
-        summary_msg = {
-            "role": "system",
-            "content": f"[对话历史摘要]\n{summary}",
-            "metadata": {
-                "type": "conversation_summary",
-                "is_incremental": True,
-            },
-        }
-        recent_messages: list[dict[str, Any]] = []
+        summary_msg = SystemMessage(
+            content=f"[对话历史摘要]\n{summary}",
+            metadata={"type": "conversation_summary", "is_incremental": True},
+        )
+        recent_messages: list[BaseMessage] = []
         for turn in recent_turns:
             recent_messages.extend(turn)
         return [summary_msg] + recent_messages
 
-    async def _emit_compression_event(
+    def _emit_compression_event(
         self,
-        original: list[dict[str, Any]],
-        compressed: list[dict[str, Any]],
+        original: list[BaseMessage],
+        compressed: list[BaseMessage],
     ) -> None:
         """发送压缩统计事件（供调用方推送）."""
-        original_tokens = self._size_checker.estimate_total(original)
-        compressed_tokens = self._size_checker.estimate_total(compressed)
+        original_tokens = self._estimate_total(original)
+        compressed_tokens = self._estimate_total(compressed)
         saved_percent = (
             (1 - compressed_tokens / max(original_tokens, 1)) * 100
             if original_tokens > 0

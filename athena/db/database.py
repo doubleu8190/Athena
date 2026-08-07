@@ -1,6 +1,7 @@
 """SQLite 数据库管理 — 基于 SQLAlchemy ORM 的异步访问层.
 
 本模块作为兼容层，内部委托给 Repository 实例，保持与旧代码相同的公共 API。
+查询返回类型化领域模型（athena.models），save 接受类型化模型。
 所有删除操作为软删除（设置 deleted_time）。
 """
 
@@ -15,13 +16,18 @@ from athena.db.repository import (
     SessionRepository,
     StepRepository,
     ToolCallRepository,
+    _SENTINEL,
+)
+from athena.models import (
+    ApprovalLog,
+    Message,
+    Session,
+    Step,
+    ToolCallRecord,
 )
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-# 用于区分"未传参"和"显式传 None"的哨兵对象（与 repository._SENTINEL 独立）
-_SENTINEL = object()
 
 
 class Database:
@@ -53,13 +59,13 @@ class Database:
     # Sessions
     # ------------------------------------------------------------------
 
-    async def create_session(self, session_id: str, title: str = "New Session") -> dict[str, Any]:
+    async def create_session(self, session_id: str, title: str = "New Session") -> Session:
         return await self._sessions.create(session_id, title)
 
-    async def get_session(self, session_id: str) -> dict[str, Any] | None:
+    async def get_session(self, session_id: str) -> Session | None:
         return await self._sessions.get(session_id)
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
+    async def list_sessions(self) -> list[Session]:
         return await self._sessions.list_all()
 
     async def update_session(
@@ -74,7 +80,7 @@ class Database:
             last_compressed_message_id=last_compressed_message_id,
         )
 
-    async def query_sessions(self, status: list[str]) -> list[dict[str, Any]]:
+    async def query_sessions(self, status: list[str]) -> list[Session]:
         return await self._sessions.query_by_status(status)
 
     async def delete_session(self, session_id: str) -> None:
@@ -85,15 +91,15 @@ class Database:
     # Messages
     # ------------------------------------------------------------------
 
-    async def save_message(self, session_id: str, message: dict[str, Any]) -> str:
-        msg_id = await self._messages.save(session_id, message)
-        await self.update_session(session_id)  # refresh updated_at
+    async def save_message(self, message: Message) -> str:
+        msg_id = await self._messages.save(message)
+        await self.update_session(message.session_id)  # refresh updated_at
         return msg_id
 
-    async def get_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
+    async def get_messages(self, session_id: str, limit: int | None = None) -> list[Message]:
         return await self._messages.get_by_session(session_id, limit=limit)
 
-    async def get_messages_after(self, session_id: str, after_id: str) -> list[dict[str, Any]]:
+    async def get_messages_after(self, session_id: str, after_id: str) -> list[Message]:
         """获取指定消息之后的消息列表（用于增量压缩）."""
         return await self._messages.get_after_message(session_id, after_id)
 
@@ -101,16 +107,16 @@ class Database:
     # Steps
     # ------------------------------------------------------------------
 
-    async def save_step(self, step: dict[str, Any]) -> None:
+    async def save_step(self, step: Step) -> None:
         await self._steps.save(step)
 
     async def update_step(self, step_id: str, updates: dict[str, Any]) -> None:
         await self._steps.update(step_id, updates)
 
-    async def get_steps(self, session_id: str) -> list[dict[str, Any]]:
+    async def get_steps(self, session_id: str) -> list[Step]:
         return await self._steps.get_by_session(session_id)
 
-    async def get_steps_by_run(self, run_id: str) -> list[dict[str, Any]]:
+    async def get_steps_by_run(self, run_id: str) -> list[Step]:
         return await self._steps.get_by_run(run_id)
 
     async def get_last_step_number(self, run_id: str) -> int:
@@ -120,7 +126,7 @@ class Database:
     # Tool calls
     # ------------------------------------------------------------------
 
-    async def save_tool_call(self, tool_call: dict[str, Any]) -> None:
+    async def save_tool_call(self, tool_call: ToolCallRecord) -> None:
         await self._tool_calls.save(tool_call)
 
     async def update_tool_call(self, tool_call_id: str, updates: dict[str, Any]) -> None:
@@ -128,20 +134,20 @@ class Database:
 
     async def query_tool_calls(
         self, session_id: str, status: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> list[ToolCallRecord]:
         return await self._tool_calls.query(session_id, status=status)
 
     # ------------------------------------------------------------------
     # Approval logs
     # ------------------------------------------------------------------
 
-    async def save_approval_log(self, log: dict[str, Any]) -> None:
+    async def save_approval_log(self, log: ApprovalLog) -> None:
         await self._approval_logs.save(log)
 
-    async def get_approval_logs(self, session_id: str) -> list[dict[str, Any]]:
+    async def get_approval_logs(self, session_id: str) -> list[ApprovalLog]:
         return await self._approval_logs.get_by_session(session_id)
 
-    async def query_approval(self, tool_call_id: str) -> dict[str, Any] | None:
+    async def query_approval(self, tool_call_id: str) -> ApprovalLog | None:
         return await self._approval_logs.query_by_tool_call(tool_call_id)
 
 

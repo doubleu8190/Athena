@@ -171,14 +171,19 @@ async def retry_with_backoff(
         retry_config = RetryConfig(max_attempts=1)
 
     if on_retry is None:
-        on_retry = lambda category, attempt, error, delay: logger.warning(
-            "llm_retry",
-            attempt=attempt + 1,
-            max_attempts=retry_config.max_attempts,
-            error=str(error),
-            category=category,
-            delay_s=round(delay, 2),
-        )
+        async def _default_on_retry(
+            attempt: int, error: Exception, delay_s: float
+        ) -> None:
+            logger.warning(
+                "llm_retry",
+                attempt=attempt,
+                max_attempts=retry_config.max_attempts,
+                error=str(error),
+                category=categorize_error(error),
+                delay_s=round(delay_s, 2),
+            )
+
+        on_retry = _default_on_retry
 
     last_error: Exception | None = None
     start_time = time.time() * 1000
@@ -233,7 +238,7 @@ async def retry_with_backoff(
                     jitter_ms = delay_ms * retry_config.jitter * random.random()
                     delay_s = (delay_ms + jitter_ms) / 1000
 
-                await on_retry(category, attempt + 1, e, delay_s)
+                await on_retry(attempt + 1, e, delay_s)
 
                 await asyncio.sleep(delay_s)
 

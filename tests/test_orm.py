@@ -9,6 +9,17 @@ from datetime import datetime
 import pytest
 
 from athena.db.database import Database
+from athena.models import (
+    ApprovalDecision,
+    ApprovalLog,
+    Message,
+    MessageRole,
+    Step,
+    StepStatus,
+    StepType,
+    ToolCallRecord,
+    ToolCallStatus,
+)
 
 
 @pytest.fixture
@@ -40,7 +51,7 @@ async def test_soft_delete_session(db: Database):
     # 验证会话存在
     session = await db.get_session("s1")
     assert session is not None
-    assert session["title"] == "Test Session"
+    assert session.title == "Test Session"
 
     # 软删除会话
     await db.delete_session("s1")
@@ -61,32 +72,47 @@ async def test_soft_delete_cascade(db: Database):
     await db.create_session("s1")
 
     # 添加消息
-    await db.save_message("s1", {
-        "id": "m1", "role": "user", "content": "hello",
-        "timestamp": datetime.now().isoformat(),
-    })
+    await db.save_message(Message(
+        id="m1",
+        session_id="s1",
+        role=MessageRole.USER,
+        content="hello",
+        timestamp=datetime.now(),
+    ))
 
     # 添加步骤
-    await db.save_step({
-        "id": "step-1", "session_id": "s1", "run_id": "r1",
-        "step_number": 1, "step_type": "llm_call",
-        "status": "running", "started_at": datetime.now().isoformat(),
-    })
+    await db.save_step(Step(
+        id="step-1",
+        session_id="s1",
+        run_id="r1",
+        step_number=1,
+        step_type=StepType.LLM_CALL,
+        status=StepStatus.RUNNING,
+        started_at=datetime.now(),
+    ))
 
     # 添加工具调用
-    await db.save_tool_call({
-        "id": "tc-1", "session_id": "s1", "step_id": "step-1",
-        "tool_name": "read_file", "arguments": {"path": "/tmp"},
-        "status": "running", "started_at": datetime.now().isoformat(),
-    })
+    await db.save_tool_call(ToolCallRecord(
+        id="tc-1",
+        session_id="s1",
+        step_id="step-1",
+        tool_name="read_file",
+        arguments={"path": "/tmp"},
+        status=ToolCallStatus.RUNNING,
+        started_at=datetime.now(),
+    ))
 
     # 添加审批日志
-    await db.save_approval_log({
-        "id": "al-1", "session_id": "s1", "tool_call_id": "tc-1",
-        "tool_name": "read_file", "arguments": {"path": "/tmp"},
-        "risk_level": "low", "decision": "approved",
-        "timestamp": datetime.now().isoformat(),
-    })
+    await db.save_approval_log(ApprovalLog(
+        id="al-1",
+        session_id="s1",
+        tool_call_id="tc-1",
+        tool_name="read_file",
+        arguments={"path": "/tmp"},
+        risk_level="low",
+        decision=ApprovalDecision.APPROVED,
+        timestamp=datetime.now(),
+    ))
 
     # 软删除会话
     await db.delete_session("s1")
@@ -144,7 +170,7 @@ async def test_transaction_rollback_on_error(db: Database):
     # 验证原会话状态未变
     session = await db.get_session("s1")
     assert session is not None
-    assert session["status"] == "idle"
+    assert session.status == "idle"
 
 
 # ---------------------------------------------------------------------------
@@ -164,16 +190,19 @@ async def test_json_field_serialization(db: Database):
         "list": [1, 2, 3],
         "unicode": "中文测试",
     }
-    await db.save_message("s1", {
-        "id": "m1", "role": "user", "content": "test",
-        "metadata": complex_metadata,
-        "timestamp": datetime.now().isoformat(),
-    })
+    await db.save_message(Message(
+        id="m1",
+        session_id="s1",
+        role=MessageRole.USER,
+        content="test",
+        metadata=complex_metadata,
+        timestamp=datetime.now(),
+    ))
 
     # 获取消息并验证 JSON 反序列化
     messages = await db.get_messages("s1")
     assert len(messages) == 1
-    assert messages[0]["metadata"] == complex_metadata
+    assert messages[0].metadata == complex_metadata
 
 
 @pytest.mark.asyncio
@@ -186,15 +215,18 @@ async def test_json_field_with_tool_calls(db: Database):
         {"id": "tc2", "name": "write_file", "args": {"path": "/tmp", "content": "test"}},
     ]
 
-    await db.save_message("s1", {
-        "id": "m1", "role": "assistant", "content": "",
-        "tool_calls": tool_calls,
-        "timestamp": datetime.now().isoformat(),
-    })
+    await db.save_message(Message(
+        id="m1",
+        session_id="s1",
+        role=MessageRole.ASSISTANT,
+        content="",
+        tool_calls=tool_calls,
+        timestamp=datetime.now(),
+    ))
 
     messages = await db.get_messages("s1")
     assert len(messages) == 1
-    assert messages[0]["tool_calls"] == tool_calls
+    assert messages[0].tool_calls == tool_calls
 
 
 # ---------------------------------------------------------------------------
@@ -212,10 +244,13 @@ async def test_concurrent_operations(db: Database):
 
     # 并发保存多条消息
     async def save_message(i: int):
-        await db.save_message("s1", {
-            "id": f"m{i}", "role": "user", "content": f"message {i}",
-            "timestamp": datetime.now().isoformat(),
-        })
+        await db.save_message(Message(
+            id=f"m{i}",
+            session_id="s1",
+            role=MessageRole.USER,
+            content=f"message {i}",
+            timestamp=datetime.now(),
+        ))
 
     # 并发执行
     tasks = [save_message(i) for i in range(10)]
@@ -278,11 +313,15 @@ async def test_get_last_step_number(db: Database):
 
     # 添加多个步骤
     for i in range(1, 6):
-        await db.save_step({
-            "id": f"step-{i}", "session_id": "s1", "run_id": "r1",
-            "step_number": i, "step_type": "llm_call",
-            "status": "completed", "started_at": datetime.now().isoformat(),
-        })
+        await db.save_step(Step(
+            id=f"step-{i}",
+            session_id="s1",
+            run_id="r1",
+            step_number=i,
+            step_type=StepType.LLM_CALL,
+            status=StepStatus.COMPLETED,
+            started_at=datetime.now(),
+        ))
 
     last_num = await db.get_last_step_number("r1")
     assert last_num == 5

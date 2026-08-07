@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any, TYPE_CHECKING
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from athena.core.llm.provider import LLMProvider
 from athena.utils.llm import extract_message_text
@@ -97,7 +97,7 @@ class IncrementalSummarizer:
             if not session:
                 return
 
-            summary = session.get("compression_summary")
+            summary = session.compression_summary
             if summary:
                 self._buffers[session_id] = summary
                 logger.info(
@@ -129,15 +129,14 @@ class IncrementalSummarizer:
 
     async def update_summary(
         self,
-        old_turns: list[list[dict[str, Any]]],
+        old_turns: list[list[BaseMessage]],
         session_id: str | None = None,
     ) -> str:
         """增量更新摘要.
 
         Args:
             old_turns: 需摘要的旧轮次
-            session_id: 会话 ID（用于隔离缓冲区和持久化到记忆系统）
-            memory_manager: 记忆管理器（可选，用于持久化摘要缓冲区）
+            session_id: 会话 ID（用于隔离缓冲区和持久化到 session 表）
 
         Returns:
             更新后的完整摘要文本
@@ -183,18 +182,17 @@ class IncrementalSummarizer:
         except Exception as e:
             logger.warning("summary_buffer_persist_failed", error=str(e), session_id=session_id)
 
-    def _format_turns_for_summary(self, turns: list[list[dict[str, Any]]]) -> str:
+    def _format_turns_for_summary(self, turns: list[list[BaseMessage]]) -> str:
         """将轮次格式化为摘要输入."""
         formatted: list[str] = []
         for i, turn in enumerate(turns, 1):
             turn_content: list[str] = []
             for msg in turn:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                tool_calls = msg.get("tool_calls", [])
-                if role == "user":
+                content = getattr(msg, "content", "") or ""
+                if isinstance(msg, HumanMessage):
                     turn_content.append(f"用户: {content}")
-                elif role == "assistant":
+                elif isinstance(msg, AIMessage):
+                    tool_calls = getattr(msg, "tool_calls", None) or []
                     if tool_calls:
                         calls_desc = "; ".join(
                             f"{tc.get('name', '')}({json.dumps(tc.get('args', {}), ensure_ascii=False)})"
@@ -203,8 +201,8 @@ class IncrementalSummarizer:
                         turn_content.append(f"助手: {content}\n  调用工具: {calls_desc}")
                     else:
                         turn_content.append(f"助手: {content}")
-                elif role == "tool":
-                    tc_id = msg.get("tool_call_id", "")
+                elif isinstance(msg, ToolMessage):
+                    tc_id = getattr(msg, "tool_call_id", "")
                     turn_content.append(f"工具结果 [{tc_id}]: {content[:500]}")
             formatted.append(f"--- 轮次 {i} ---\n" + "\n".join(turn_content))
         return "\n\n".join(formatted)

@@ -18,6 +18,7 @@ from typing import Any, TYPE_CHECKING
 
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
+from athena.models import Message, ToolCallRecord
 from athena.schemas.events import EventType, build_event
 from athena.utils.logging import get_logger
 
@@ -68,7 +69,7 @@ class SessionRecovery:
 
         logger.info("recovering_interrupted_sessions", count=len(interrupted))
         for session in interrupted:
-            session_id = session["id"]
+            session_id = session.id
             try:
                 await self._recover_session(session_id)
             except Exception as e:
@@ -134,7 +135,7 @@ class SessionRecovery:
         await self._db.update_session(session_id, status="failed")
         logger.error("session_recovery_failed_all_attempts", session_id=session_id)
 
-    def _determine_resume_point(self, messages: list[dict[str, Any]]) -> ResumePoint:
+    def _determine_resume_point(self, messages: list[Message]) -> ResumePoint:
         """判断恢复起点.
 
         根据最后一条消息的角色决定从哪里恢复：
@@ -147,13 +148,12 @@ class SessionRecovery:
             return ResumePoint.NONE
 
         last_msg = messages[-1]
-        role = last_msg.get("role", "")
+        role = last_msg.role
 
         if role == "user":
             return ResumePoint.RE_RUN_AGENT
         elif role == "assistant":
-            tool_calls = last_msg.get("tool_calls", [])
-            if tool_calls:
+            if last_msg.tool_calls:
                 return ResumePoint.RE_EXECUTE_TOOLS
             return ResumePoint.NONE
         elif role == "tool":
@@ -173,11 +173,11 @@ class SessionRecovery:
         )
 
         for tc in running_tools:
-            approval = await self._db.query_approval(tool_call_id=tc["id"])
+            approval = await self._db.query_approval(tool_call_id=tc.id)
             if not approval:
                 # 审批中断，更新状态并通知用户
                 await self._db.update_tool_call(
-                    tc["id"],
+                    tc.id,
                     {
                         "status": "interrupted",
                         "error_message": "进程中断，审批未完成",
@@ -190,10 +190,10 @@ class SessionRecovery:
                         build_event(
                             EventType.APPROVAL_INTERRUPTED,
                             {
-                                "tool_call_id": tc["id"],
-                                "tool_name": tc["tool_name"],
-                                "arguments": tc.get("arguments", {}),
-                                "message": f"上次中断在等待审批：{tc['tool_name']}",
+                                "tool_call_id": tc.id,
+                                "tool_name": tc.tool_name,
+                                "arguments": tc.arguments,
+                                "message": f"上次中断在等待审批：{tc.tool_name}",
                             },
                             session_id=session_id,
                         ),
@@ -201,8 +201,8 @@ class SessionRecovery:
                 logger.info(
                     "pending_approval_detected",
                     session_id=session_id,
-                    tool_call_id=tc["id"],
-                    tool_name=tc["tool_name"],
+                    tool_call_id=tc.id,
+                    tool_name=tc.tool_name,
                 )
 
     async def _handle_interrupted_tools(self, session_id: str) -> None:
@@ -217,7 +217,7 @@ class SessionRecovery:
             if strategy == InterruptedToolStrategy.RETRY:
                 # 标记为待重试
                 await self._db.update_tool_call(
-                    tc["id"],
+                    tc.id,
                     {
                         "status": "pending_retry",
                         "error_message": "进程中断，待重试",
@@ -226,7 +226,7 @@ class SessionRecovery:
             elif strategy == InterruptedToolStrategy.SKIP:
                 # 标记为已完成
                 await self._db.update_tool_call(
-                    tc["id"],
+                    tc.id,
                     {
                         "status": "completed",
                         "error_message": "进程中断，但操作可能已完成",
@@ -234,7 +234,7 @@ class SessionRecovery:
                 )
             else:  # NOTIFY_USER
                 await self._db.update_tool_call(
-                    tc["id"],
+                    tc.id,
                     {
                         "status": "interrupted",
                         "error_message": "进程中断，状态未知",
@@ -247,19 +247,19 @@ class SessionRecovery:
                         build_event(
                             EventType.TOOL_INTERRUPTED,
                             {
-                                "tool_call_id": tc["id"],
-                                "tool_name": tc["tool_name"],
-                                "message": f"工具 {tc['tool_name']} 执行中断，状态未知",
+                                "tool_call_id": tc.id,
+                                "tool_name": tc.tool_name,
+                                "message": f"工具 {tc.tool_name} 执行中断，状态未知",
                             },
                             session_id=session_id,
                         ),
                     )
 
     def _get_interrupted_tool_strategy(
-        self, tool_call: dict[str, Any]
+        self, tool_call: ToolCallRecord
     ) -> InterruptedToolStrategy:
         """根据工具类型确定中断后的处理策略."""
-        tool_name = tool_call.get("tool_name", "")
+        tool_name = tool_call.tool_name
 
         # 只读操作，安全重试
         if tool_name in ("read_file", "list_directory"):
@@ -267,7 +267,7 @@ class SessionRecovery:
 
         # 写操作，检查是否已正确完成
         if tool_name == "write_file":
-            args = tool_call.get("arguments", {})
+            args = tool_call.arguments
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
@@ -294,7 +294,7 @@ class SessionRecovery:
         return InterruptedToolStrategy.NOTIFY_USER
 
     def _build_recovery_prompt(
-        self, resume_point: ResumePoint, messages: list[dict[str, Any]]
+        self, resume_point: ResumePoint, messages: list[Message]
     ) -> str:
         """构造恢复提示词."""
         if resume_point == ResumePoint.RE_RUN_AGENT:
@@ -303,8 +303,8 @@ class SessionRecovery:
                 "请从现有对话历史继续，回复用户的问题。"
             )
         elif resume_point == ResumePoint.RE_EXECUTE_TOOLS:
-            last_msg = messages[-1] if messages else {}
-            tool_calls = last_msg.get("tool_calls", [])
+            last_msg = messages[-1] if messages else None
+            tool_calls = last_msg.tool_calls if last_msg else []
             tool_names = [tc.get("name", "unknown") for tc in tool_calls]
             return (
                 f"[系统] 你的上一轮执行被中断，以下工具调用未完成：{', '.join(tool_names)}。"

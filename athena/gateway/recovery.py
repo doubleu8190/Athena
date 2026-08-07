@@ -22,11 +22,11 @@ async def recover_interrupted_sessions(db: Database) -> None:
     try:
         interrupted = await db.query_sessions(status=["interrupted", "running"])
         for session in interrupted:
-            await db.update_session(session["id"], status="idle")
+            await db.update_session(session.id, status="idle")
             logger.info(
                 "session_recovered_passive",
-                session_id=session["id"],
-                previous_status=session.get("status"),
+                session_id=session.id,
+                previous_status=session.status.value,
             )
     except Exception as e:
         logger.warning("recovery_check_failed", error=str(e))

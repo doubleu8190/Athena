@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 from athena.config.settings import Settings, get_settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
+from athena.models import Message
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 
@@ -330,7 +332,7 @@ class ConversationSummarizer:
         self,
         session_id: str,
         turn_count: int,
-        messages: list[dict[str, Any]] | None = None,
+        messages: Sequence[Message | dict[str, Any]] | None = None,
     ) -> str | None:
         """达到阈值时生成摘要并写入记忆."""
         if turn_count <= 0 or turn_count % self._summary_threshold != 0:
@@ -391,13 +393,17 @@ class ConversationSummarizer:
             logger.warning("summary_generation_failed", error=str(e))
             return []
 
-    def _format_messages(self, messages: list[dict[str, Any]]) -> str:
+    def _format_messages(self, messages: Sequence[Message | dict[str, Any]]) -> str:
         if not messages:
             return ""
         parts: list[str] = []
         for m in messages:
-            role = m.get("role", "")
-            content = m.get("content", "")
+            if isinstance(m, Message):
+                role = m.role.value
+                content = m.content
+            else:
+                role = m.get("role", "")
+                content = m.get("content", "")
             if role and content:
                 parts.append(f"{role}: {content}")
         return "\n".join(parts)

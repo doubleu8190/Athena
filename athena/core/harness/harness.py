@@ -15,13 +15,14 @@ project_memory 约束：
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
 from athena.config.settings import Settings, get_settings
 from athena.core.compression.compressor import ContextCompressor
@@ -31,11 +32,13 @@ from athena.core.llm.provider import LLMProvider
 from athena.core.tools.manager import UnifiedToolManager
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
+from athena.models import Message, MessageRole, Step, ToolCallRecord
 from athena.models.step import StepStatus, StepType
 from athena.models.tool import ToolCallStatus
 from athena.schemas.events import EventType, build_event
 from athena.utils.ids import RunIdGenerator, generate_time_id
 from athena.utils.logging import get_logger
+from athena.utils.message import dict_to_message
 
 logger = get_logger(__name__)
 
@@ -112,7 +115,7 @@ class Harness:
 
     async def run(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[Message | dict[str, Any]],
         session_id: str,
         system_prompt: str = "",
         run_id: str | None = None,
@@ -145,7 +148,7 @@ class Harness:
         if system_prompt:
             lc_messages.append(SystemMessage(content=system_prompt))
         for m in messages:
-            lc_messages.append(self._dict_to_message(m))
+            lc_messages.append(dict_to_message(m))
 
         # 绑定工具（子 Agent 按 tool_names 白名单过滤，None = 全部）
         self._allowed_tool_names = set(tool_names) if tool_names else None
@@ -162,28 +165,27 @@ class Harness:
             while not self._stop_event.is_set():
                 # 上下文压缩
                 if self._compressor is not None:
-                    dict_messages = [self._message_to_dict(m) for m in lc_messages]
                     compressed = await self._compressor.compress(
-                        dict_messages,
+                        lc_messages,
                         session_id=session_id,
                     )
-                    if len(compressed) < len(dict_messages):
-                        lc_messages = [self._dict_to_message(m) for m in compressed]
+                    if len(compressed) < len(lc_messages):
+                        lc_messages = compressed
 
                 # Step: LLM 调用
                 step_counter += 1
                 llm_step_id = generate_time_id()
                 budget.increment_turn()
 
-                await self._save_step({
-                    "id": llm_step_id,
-                    "session_id": session_id,
-                    "run_id": rid,
-                    "step_number": step_counter,
-                    "step_type": str(StepType.LLM_CALL),
-                    "status": str(StepStatus.RUNNING),
-                    "started_at": datetime.now().isoformat(),
-                })
+                await self._save_step(Step(
+                    id=llm_step_id,
+                    session_id=session_id,
+                    run_id=rid,
+                    step_number=step_counter,
+                    step_type=StepType.LLM_CALL,
+                    status=StepStatus.RUNNING,
+                    started_at=datetime.now(),
+                ))
 
                 await self._emit(
                     EventType.LLM_CALL_START,
@@ -271,14 +273,15 @@ class Harness:
 
                 # 持久化 assistant 消息（中断恢复关键）
                 if self._db is not None:
-                    await self._db.save_message(session_id, {
-                        "id": generate_time_id(),
-                        "role": "assistant",
-                        "content": full_content,
-                        "tool_calls": final_tc,
-                        "metadata": {"step_id": llm_step_id, "run_id": rid},
-                        "timestamp": datetime.now().isoformat(),
-                    })
+                    await self._db.save_message(Message(
+                        id=generate_time_id(),
+                        session_id=session_id,
+                        role=MessageRole.ASSISTANT,
+                        content=full_content,
+                        tool_calls=final_tc,
+                        metadata={"step_id": llm_step_id, "run_id": rid},
+                        timestamp=datetime.now(),
+                    ))
 
                 # 没有工具调用 → 终止循环
                 if not final_tc:
@@ -293,7 +296,6 @@ class Harness:
                     tool_step_starts.append((step_counter, tool_step_id, tc))
 
                 tool_messages = await self._execute_tool_calls(
-                    final_tc=final_tc,
                     tool_step_starts=tool_step_starts,
                     parent_step_id=llm_step_id,
                     session_id=session_id,
@@ -356,7 +358,6 @@ class Harness:
 
     async def _execute_tool_calls(
         self,
-        final_tc: list[dict[str, Any]],
         tool_step_starts: list[tuple[int, str, dict[str, Any]]],
         parent_step_id: str,
         session_id: str,
@@ -373,29 +374,29 @@ class Harness:
             tc_id = tc.get("id", generate_time_id())
 
             # 创建 tool_execution step
-            await self._save_step({
-                "id": step_id,
-                "session_id": session_id,
-                "run_id": run_id,
-                "step_number": step_number,
-                "step_type": str(StepType.TOOL_EXECUTION),
-                "parent_step_id": parent_step_id,
-                "status": str(StepStatus.RUNNING),
-                "started_at": datetime.now().isoformat(),
-            })
+            await self._save_step(Step(
+                id=step_id,
+                session_id=session_id,
+                run_id=run_id,
+                step_number=step_number,
+                step_type=StepType.TOOL_EXECUTION,
+                parent_step_id=parent_step_id,
+                status=StepStatus.RUNNING,
+                started_at=datetime.now(),
+            ))
 
             # 创建 tool_call 记录
             tc_record_id = generate_time_id()
             if self._db is not None:
-                await self._db.save_tool_call({
-                    "id": tc_record_id,
-                    "session_id": session_id,
-                    "step_id": step_id,
-                    "tool_name": tool_name,
-                    "arguments": args,
-                    "status": str(ToolCallStatus.RUNNING),
-                    "started_at": datetime.now().isoformat(),
-                })
+                await self._db.save_tool_call(ToolCallRecord(
+                    id=tc_record_id,
+                    session_id=session_id,
+                    step_id=step_id,
+                    tool_name=tool_name,
+                    arguments=args,
+                    status=ToolCallStatus.RUNNING,
+                    started_at=datetime.now(),
+                ))
 
             await self._emit(
                 EventType.TOOL_CALL_START,
@@ -463,14 +464,15 @@ class Harness:
 
             # 持久化 tool 消息
             if self._db is not None:
-                await self._db.save_message(session_id, {
-                    "id": generate_time_id(),
-                    "role": "tool",
-                    "content": result_content,
-                    "tool_call_id": tc_id,
-                    "metadata": {"step_id": step_id, "tool_call_record_id": tc_record_id},
-                    "timestamp": datetime.now().isoformat(),
-                })
+                await self._db.save_message(Message(
+                    id=generate_time_id(),
+                    session_id=session_id,
+                    role=MessageRole.TOOL,
+                    content=result_content,
+                    tool_call_id=tc_id,
+                    metadata={"step_id": step_id, "tool_call_record_id": tc_record_id},
+                    timestamp=datetime.now(),
+                ))
 
             return ToolMessage(content=result_content, tool_call_id=tc_id)
 
@@ -617,7 +619,7 @@ class Harness:
         """请求停止当前运行（优雅退出）."""
         self._stop_event.set()
 
-    async def _save_step(self, step: dict[str, Any]) -> None:
+    async def _save_step(self, step: Step) -> None:
         if self._db is None:
             return
         try:
@@ -649,56 +651,6 @@ class Harness:
             )
         except Exception as e:
             logger.warning("emit_event_failed", event_type=str(event_type), error=str(e))
-
-    def _dict_to_message(self, m: dict[str, Any]) -> BaseMessage:
-        """字典 → LangChain Message."""
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        tool_calls = m.get("tool_calls") or []
-        tool_call_id = m.get("tool_call_id")
-        if role == "user":
-            return HumanMessage(content=content)
-        if role == "system":
-            return SystemMessage(content=content)
-        if role == "assistant":
-            if tool_calls:
-                lc_tcs = [
-                    {
-                        "id": tc.get("id", generate_time_id()),
-                        "name": tc.get("name", ""),
-                        "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
-                        "type": "tool_call",
-                    }
-                    for tc in tool_calls
-                ]
-                return AIMessage(content=content, tool_calls=lc_tcs)
-            return AIMessage(content=content)
-        if role == "tool":
-            return ToolMessage(content=content, tool_call_id=tool_call_id or "")
-        return HumanMessage(content=content)
-
-    def _message_to_dict(self, m: BaseMessage) -> dict[str, Any]:
-        """LangChain Message → 字典."""
-        role_map = {
-            HumanMessage: "user",
-            SystemMessage: "system",
-            AIMessage: "assistant",
-            ToolMessage: "tool",
-        }
-        role = "user"
-        for cls, r in role_map.items():
-            if isinstance(m, cls):
-                role = r
-                break
-        d: dict[str, Any] = {"role": role, "content": getattr(m, "content", "")}
-        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-            d["tool_calls"] = [
-                {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}
-                for tc in m.tool_calls
-            ]
-        if isinstance(m, ToolMessage):
-            d["tool_call_id"] = getattr(m, "tool_call_id", "")
-        return d
 
     def _estimate_tokens(self, messages: list[BaseMessage]) -> int:
         """粗略估算 token 数（project_memory: len/4 回退方案）."""

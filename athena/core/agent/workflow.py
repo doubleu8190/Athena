@@ -22,6 +22,7 @@ from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
 from athena.core.tools.manager import UnifiedToolManager
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
+from athena.models import Message, MessageRole
 from athena.schemas.events import EventType, build_event
 from athena.utils.ids import RunIdGenerator, generate_time_id
 from athena.utils.logging import get_logger
@@ -298,7 +299,7 @@ class AgentWorkflow:
             logger.warning("memory_injection_failed", error=str(e))
 
         # 2. 加载历史消息
-        history: list[dict[str, Any]] = await self._db.get_messages(session_id)
+        history: list[Message] = await self._db.get_messages(session_id)
 
         # 3. 构建系统提示（含记忆上下文）
         full_system_prompt = system_prompt or effective_prompt
@@ -314,7 +315,15 @@ class AgentWorkflow:
             ws_manager=self._ws,
             compressor=self._compressor,
         )
-        messages_for_harness = history + [{"role": "user", "content": user_message}]
+        user_msg = Message(
+            id=generate_time_id(),  # 微秒级时间戳，单调递增且并发安全
+            session_id=session_id,
+            role=MessageRole.USER,
+            content=user_message,
+            metadata={},
+            timestamp=datetime.now(),
+        )
+        messages_for_harness = history + [user_msg]
         result = await harness.run(
             messages=messages_for_harness,
             session_id=session_id,
@@ -322,16 +331,7 @@ class AgentWorkflow:
         )
 
         # 5. 持久化用户消息
-        await self._db.save_message(
-            session_id,
-            {
-                "id": generate_time_id(),  # 微秒级时间戳，单调递增且并发安全
-                "role": "user",
-                "content": user_message,
-                "metadata": {},
-                "timestamp": datetime.now().isoformat(),
-            },
-        )
+        await self._db.save_message(user_msg)
         # 日志：记录任务分类决策结果（工具使用情况反映分类）
         logger.info(
             "task_classification_result",

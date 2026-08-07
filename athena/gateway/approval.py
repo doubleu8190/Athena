@@ -15,7 +15,7 @@ from collections import deque
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
-from athena.models.approval import ApprovalDecision, ApprovalRequest
+from athena.models.approval import ApprovalDecision, ApprovalLog, ApprovalRequest
 from athena.schemas.events import EventType, build_event
 from athena.utils.ids import generate_time_id
 from athena.utils.logging import get_logger
@@ -285,17 +285,17 @@ class ApprovalManager:
             }
             from datetime import datetime
 
-            await self._db.save_approval_log({
-                "id": generate_time_id(),
-                "session_id": request.session_id,
-                "tool_call_id": request.tool_call_id or request.id,
-                "tool_name": request.tool_name,
-                "arguments": request.arguments,
-                "risk_level": request.risk_level,
-                "decision": str(decision_map.get(request.resolution, ApprovalDecision.DENIED)),
-                "decision_time_ms": decision_time_ms,
-                "timestamp": datetime.now().isoformat(),
-            })
+            await self._db.save_approval_log(ApprovalLog(
+                id=generate_time_id(),
+                session_id=request.session_id,
+                tool_call_id=request.tool_call_id or request.id,
+                tool_name=request.tool_name,
+                arguments=request.arguments,
+                risk_level=request.risk_level,
+                decision=decision_map.get(request.resolution, ApprovalDecision.DENIED),
+                decision_time_ms=decision_time_ms,
+                timestamp=datetime.now(),
+            ))
         except Exception as e:
             logger.error("approval_log_failed", approval_id=request.id, error=str(e))
 

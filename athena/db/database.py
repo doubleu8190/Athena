@@ -20,6 +20,9 @@ from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# 用于区分"未传参"和"显式传 None"的哨兵对象（与 repository._SENTINEL 独立）
+_SENTINEL = object()
+
 
 class Database:
     """异步数据库访问层（兼容层）.
@@ -62,8 +65,14 @@ class Database:
     async def update_session(
         self, session_id: str, *, status: str | None = None, run_id: str | None = None,
         title: str | None = None,
+        compression_summary: str | None = _SENTINEL,
+        last_compressed_message_id: str | None = _SENTINEL,
     ) -> None:
-        await self._sessions.update(session_id, status=status, run_id=run_id, title=title)
+        await self._sessions.update(
+            session_id, status=status, run_id=run_id, title=title,
+            compression_summary=compression_summary,
+            last_compressed_message_id=last_compressed_message_id,
+        )
 
     async def query_sessions(self, status: list[str]) -> list[dict[str, Any]]:
         return await self._sessions.query_by_status(status)
@@ -83,6 +92,10 @@ class Database:
 
     async def get_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         return await self._messages.get_by_session(session_id, limit=limit)
+
+    async def get_messages_after(self, session_id: str, after_id: str) -> list[dict[str, Any]]:
+        """获取指定消息之后的消息列表（用于增量压缩）."""
+        return await self._messages.get_after_message(session_id, after_id)
 
     # ------------------------------------------------------------------
     # Steps

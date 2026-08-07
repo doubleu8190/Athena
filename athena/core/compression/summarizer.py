@@ -2,20 +2,22 @@
 
 每次压缩时只处理新增内容，与已有摘要合并，避免重复处理。
 _summary_buffer 按 session_id 隔离，避免跨会话数据污染。
-缓冲区持久化到记忆系统（session_id 绑定）并可在启动时恢复。
+缓冲区持久化到 session metadata（session_id 绑定）并可在启动时恢复。
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
 
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.memory import MemoryManager
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from athena.db.database import Database
 
 logger = get_logger(__name__)
 
@@ -77,47 +79,53 @@ SUMMARY_PROMPT = """# 角色
 class IncrementalSummarizer:
     """增量摘要生成器 — 按 session_id 隔离摘要缓冲区."""
 
-    BUFFER_METADATA_KEY = "compression_summary_buffer"
-
-    def __init__(self, llm: LLMProvider, memory_manager: MemoryManager, max_summary_tokens: int = 2000) -> None:
+    def __init__(self, llm: LLMProvider, db: Database, max_summary_tokens: int = 2000) -> None:
         self._llm = llm
         self._max_summary_tokens = max_summary_tokens
-        self._memory_manager = memory_manager
+        self._db = db
         # 按 session_id 隔离，避免跨会话数据污染
         self._buffers: dict[str, str] = {}
-        self._summarized_turns: dict[str, int] = {}
 
-    def _get_buffer(self, session_id: str) -> str:
-        """获取指定会话的摘要缓冲区."""
+    def _get_buffer_local(self, session_id: str) -> str:
+        """获取内存中的摘要缓冲区（不触发懒加载）."""
         return self._buffers.get(session_id, "")
 
-    def _get_turns(self, session_id: str) -> int:
-        """获取指定会话的已摘要轮次数."""
-        return self._summarized_turns.get(session_id, 0)
+    async def _load_buffer(self, session_id: str) -> None:
+        """从 session 表懒加载摘要缓冲区."""
+        try:
+            session = await self._db.get_session(session_id)
+            if not session:
+                return
 
-    def get_summary(self, session_id: str) -> str:
-        """获取指定会话的当前摘要."""
-        return self._get_buffer(session_id)
+            summary = session.get("compression_summary")
+            if summary:
+                self._buffers[session_id] = summary
+                logger.info(
+                    "summary_buffer_lazy_loaded",
+                    session_id=session_id,
+                    buffer_tokens=len(summary) // 4,
+                )
+        except Exception as e:
+            logger.warning("summary_buffer_load_failed", error=str(e), session_id=session_id)
 
-    def get_summarized_turns(self, session_id: str) -> int:
-        """获取指定会话的已摘要轮次数."""
-        return self._get_turns(session_id)
+    async def get_summary(self, session_id: str) -> str:
+        """获取指定会话的当前摘要（懒加载：内存无缓存时从 session 表恢复）."""
+        if session_id not in self._buffers:
+            await self._load_buffer(session_id)
+        return self._buffers.get(session_id, "")
 
-    def set_buffer(self, session_id: str, buffer: str, summarized_turns: int = 0) -> None:
-        """恢复持久化的摘要缓冲区（启动时调用）."""
+    def set_buffer(self, session_id: str, buffer: str) -> None:
+        """直接设置摘要缓冲区（用于测试或外部恢复）."""
         self._buffers[session_id] = buffer
-        self._summarized_turns[session_id] = summarized_turns
         logger.info(
-            "summary_buffer_restored",
+            "summary_buffer_set",
             session_id=session_id,
             buffer_tokens=len(buffer) // 4,
-            summarized_turns=summarized_turns,
         )
 
     def reset(self, session_id: str) -> None:
         """重置指定会话的摘要（新会话或会话结束时调用）."""
         self._buffers.pop(session_id, None)
-        self._summarized_turns.pop(session_id, None)
 
     async def update_summary(
         self,
@@ -135,10 +143,10 @@ class IncrementalSummarizer:
             更新后的完整摘要文本
         """
         if not old_turns:
-            return "" if session_id is None else self._get_buffer(session_id)
+            return "" if session_id is None else await self.get_summary(session_id)
 
         sid = session_id or "_default"
-        current_buffer = self._get_buffer(sid)
+        current_buffer = await self.get_summary(sid)
 
         new_content = self._format_turns_for_summary(old_turns)
         existing_section = ""
@@ -159,26 +167,18 @@ class IncrementalSummarizer:
             # 失败时保留旧摘要，不更新
             return current_buffer
 
-        self._summarized_turns[sid] = self._get_turns(sid) + len(old_turns)
-
-        # 持久化到记忆系统（project_memory 约束：session_id 绑定）
+        # 持久化到 session metadata
         if session_id:
             await self._persist_buffer(session_id)
 
         return self._buffers[sid]
 
     async def _persist_buffer(self, session_id: str) -> None:
-        """持久化摘要缓冲区到记忆系统."""
+        """持久化摘要缓冲区到 session 表 compression_summary 字段."""
         try:
-            await self._memory_manager.add_memory(
-                content=self._get_buffer(session_id),
-                metadata={
-                    "session_id": session_id,
-                    "type": self.BUFFER_METADATA_KEY,
-                    "summarized_turns": self._get_turns(session_id),
-                    "source": "compression",
-                },
-                pinned=True,
+            await self._db.update_session(
+                session_id,
+                compression_summary=self._get_buffer_local(session_id),
             )
         except Exception as e:
             logger.warning("summary_buffer_persist_failed", error=str(e), session_id=session_id)

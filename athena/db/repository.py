@@ -28,6 +28,9 @@ from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# 用于区分"未传参"和"显式传 None"的哨兵对象
+_SENTINEL = object()
+
 
 def _now_iso() -> str:
     """返回当前时间的 ISO 格式字符串."""
@@ -98,6 +101,8 @@ class SessionRepository:
                 "created_at": row.created_at,
                 "updated_at": row.updated_at,
                 "metadata": _json_loads(row.metadata_json, {}),
+                "compression_summary": row.compression_summary,
+                "last_compressed_message_id": row.last_compressed_message_id,
             }
 
     async def list_all(self, include_deleted: bool = False) -> list[dict[str, Any]]:
@@ -117,6 +122,8 @@ class SessionRepository:
                     "created_at": row.created_at,
                     "updated_at": row.updated_at,
                     "metadata": _json_loads(row.metadata_json, {}),
+                    "compression_summary": row.compression_summary,
+                    "last_compressed_message_id": row.last_compressed_message_id,
                 }
                 for row in rows
             ]
@@ -128,8 +135,15 @@ class SessionRepository:
         status: str | None = None,
         run_id: str | None = None,
         title: str | None = None,
+        compression_summary: str | None = _SENTINEL,
+        last_compressed_message_id: str | None = _SENTINEL,
     ) -> None:
-        """更新会话字段."""
+        """更新会话字段.
+
+        Args:
+            compression_summary: 摘要缓冲区文本（None 表示清空，_SENTINEL 表示不更新）
+            last_compressed_message_id: 上次压缩的最后一条消息 ID
+        """
         values: dict[str, Any] = {"updated_at": _now_iso()}
         if status is not None:
             values["status"] = status
@@ -137,6 +151,10 @@ class SessionRepository:
             values["run_id"] = run_id
         if title is not None:
             values["title"] = title
+        if compression_summary is not _SENTINEL:
+            values["compression_summary"] = compression_summary
+        if last_compressed_message_id is not _SENTINEL:
+            values["last_compressed_message_id"] = last_compressed_message_id
 
         async with get_session() as session:
             async with session.begin():
@@ -245,6 +263,41 @@ class MessageRepository:
                 stmt = stmt.where(MessageModel.deleted_time.is_(None))
             if limit:
                 stmt = stmt.limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "session_id": row.session_id,
+                    "role": row.role,
+                    "content": row.content,
+                    "tool_calls": _json_loads(row.tool_calls_json, []),
+                    "tool_call_id": row.tool_call_id,
+                    "metadata": _json_loads(row.metadata_json, {}),
+                    "timestamp": row.timestamp,
+                }
+                for row in rows
+            ]
+
+    async def get_after_message(
+        self, session_id: str, after_id: str, include_deleted: bool = False
+    ) -> list[dict[str, Any]]:
+        """获取指定消息之后的消息列表（用于增量压缩）.
+
+        消息 ID 采用 generate_time_id() 生成（微秒级时间戳，单调递增），
+        因此可直接通过字符串比较实现时序过滤。
+        """
+        async with get_session() as session:
+            stmt = (
+                select(MessageModel)
+                .where(
+                    MessageModel.session_id == session_id,
+                    MessageModel.id > after_id,  # ID 单调递增，字符串比较即可
+                )
+                .order_by(MessageModel.id.asc())
+            )
+            if not include_deleted:
+                stmt = stmt.where(MessageModel.deleted_time.is_(None))
             result = await session.execute(stmt)
             rows = result.scalars().all()
             return [

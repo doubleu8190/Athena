@@ -23,7 +23,7 @@ from athena.core.tools.manager import UnifiedToolManager
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.schemas.events import EventType, build_event
-from athena.utils.ids import RunIdGenerator, generate_message_id
+from athena.utils.ids import RunIdGenerator, generate_time_id
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -325,7 +325,7 @@ class AgentWorkflow:
         await self._db.save_message(
             session_id,
             {
-                "id": generate_message_id(),  # 毫秒级时间戳 + 随机后缀，时序可排序且并发安全
+                "id": generate_time_id(),  # 微秒级时间戳，单调递增且并发安全
                 "role": "user",
                 "content": user_message,
                 "metadata": {},

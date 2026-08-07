@@ -27,6 +27,9 @@ class SessionModel(Base):
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    # 压缩相关字段（从 metadata_json 拆出）
+    compression_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_compressed_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 

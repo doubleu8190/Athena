@@ -116,7 +116,7 @@ async def lifespan(app: FastAPI):
     from athena.core.compression.compressor import ContextCompressor
 
     compressor = ContextCompressor(
-        llm=llm_secondary, memory_manager=memory_manager, settings=settings
+        llm=llm_secondary, db=db, settings=settings
     )
 
     # 6. AgentWorkflow

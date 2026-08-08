@@ -409,6 +409,41 @@ class StepRepository:
                     .values(**values)
                 )
 
+    async def update_running_by_session(
+        self, session_id: str, updates: dict[str, Any]
+    ) -> None:
+        """批量更新指定会话所有 running 步骤（进程中断恢复清理）."""
+        if not updates:
+            return
+        allowed = {
+            "status", "completed_at", "duration_ms", "llm_input_tokens",
+            "llm_output_tokens", "error_message", "metadata",
+        }
+        values: dict[str, Any] = {}
+        for key, value in updates.items():
+            if key not in allowed:
+                continue
+            # ORM 列名为 metadata_json，外部 API 使用 "metadata"
+            if key == "metadata":
+                value = _json_dumps(value)
+                values["metadata_json"] = value
+            else:
+                values[key] = value
+        if not values:
+            return
+
+        async with get_session() as session:
+            async with session.begin():
+                await session.execute(
+                    update(StepModel)
+                    .where(
+                        StepModel.session_id == session_id,
+                        StepModel.status == "running",
+                        StepModel.deleted_time.is_(None),
+                    )
+                    .values(**values)
+                )
+
     async def get_by_session(self, session_id: str, include_deleted: bool = False) -> list[Step]:
         """获取会话的执行步骤."""
         async with get_session() as session:
@@ -500,6 +535,36 @@ class ToolCallRepository:
                 await session.execute(
                     update(ToolCallModel)
                     .where(ToolCallModel.id == tool_call_id, ToolCallModel.deleted_time.is_(None))
+                    .values(**values)
+                )
+
+    async def update_running_by_session(
+        self, session_id: str, updates: dict[str, Any]
+    ) -> None:
+        """批量更新指定会话所有 running 工具调用（进程中断恢复清理）."""
+        if not updates:
+            return
+        allowed = {
+            "raw_output", "status", "completed_at", "duration_ms",
+            "error_message", "error_stack",
+        }
+        values: dict[str, Any] = {}
+        for key, value in updates.items():
+            if key not in allowed:
+                continue
+            values[key] = value
+        if not values:
+            return
+
+        async with get_session() as session:
+            async with session.begin():
+                await session.execute(
+                    update(ToolCallModel)
+                    .where(
+                        ToolCallModel.session_id == session_id,
+                        ToolCallModel.status == "running",
+                        ToolCallModel.deleted_time.is_(None),
+                    )
                     .values(**values)
                 )
 

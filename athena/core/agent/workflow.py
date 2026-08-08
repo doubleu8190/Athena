@@ -106,6 +106,7 @@ class SubAgentManager:
         session_id: str,
         allowed_tools: list[str] | None = None,
         max_turns: int = 5,
+        stop_signal: asyncio.Event | None = None,
     ) -> SubAgentResult:
         """创建子 Agent 执行独立任务."""
         async with self._lock:
@@ -150,6 +151,7 @@ class SubAgentManager:
                 ),
                 run_id=sub_run_id,
                 tool_names=allowed_tools,
+                stop_signal=stop_signal,
             )
             sub_result = SubAgentResult(
                 task=task,
@@ -193,10 +195,11 @@ class SubAgentManager:
         tasks: list[str],
         session_id: str,
         allowed_tools: list[str] | None = None,
+        stop_signal: asyncio.Event | None = None,
     ) -> list[SubAgentResult]:
         """并行执行多个子任务."""
         results = await asyncio.gather(
-            *[self.spawn(t, session_id, allowed_tools) for t in tasks],
+            *[self.spawn(t, session_id, allowed_tools, stop_signal=stop_signal) for t in tasks],
             return_exceptions=True,
         )
         out: list[SubAgentResult] = []
@@ -235,6 +238,8 @@ class AgentWorkflow:
         self._memory_manager = memory_manager
         self._settings = settings or get_settings()
         self._turn_counts: dict[str, int] = {}
+        # 会话级 stop_signal（当前 run 的停止事件），供 spawn_sub_agent 工具 handler 透传给子 Agent
+        self._session_stop_signals: dict[str, asyncio.Event | None] = {}
 
         # 注册 spawn_sub_agent 工具，使 LLM 可通过 tool call 创建子 Agent
         if "spawn_sub_agent" not in self._tool_manager._tools:
@@ -270,6 +275,7 @@ class AgentWorkflow:
         session_id: str,
         user_message: str,
         system_prompt: str | None = None,
+        stop_signal: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         """处理用户消息的编排入口.
 
@@ -280,8 +286,13 @@ class AgentWorkflow:
         4. 触发阈值摘要
         5. 持久化用户消息
         6. 返回结果
+
+        Args:
+            stop_signal: 会话级停止事件，由 gateway 层注入，透传给 Harness
+                及子 Agent（任一置位即终止运行）
         """
         effective_prompt = DEFAULT_SYSTEM_PROMPT
+        self._session_stop_signals[session_id] = stop_signal
         logger.info(
             "task_classification_start",
             session_id=session_id,
@@ -331,6 +342,7 @@ class AgentWorkflow:
             messages=messages_for_harness,
             session_id=session_id,
             system_prompt=full_system_prompt,
+            stop_signal=stop_signal,
         )
 
         # 日志：记录任务分类决策结果（工具使用情况反映分类）
@@ -393,7 +405,10 @@ class AgentWorkflow:
         )
         try:
             manager = self.get_sub_agent_manager()
-            result = await manager.spawn(task=task, session_id=session_id)
+            stop_signal = self._session_stop_signals.get(session_id)
+            result = await manager.spawn(
+                task=task, session_id=session_id, stop_signal=stop_signal
+            )
             if result.error:
                 logger.warning(
                     "sub_agent_tool_error",

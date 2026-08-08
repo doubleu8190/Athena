@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -193,11 +194,17 @@ def run() -> None:
     import uvicorn
 
     settings = get_settings()
+    # reload 模式只监听源码目录，避免误重启：
+    # 内置工具(write_file / exec_shell)会向项目根目录写 .py 产物
+    # （如 create_paper.py），pip install 也会向 .venv 写 .py；
+    # 若按 uvicorn 默认监视整个 CWD，这些写入都会触发热重启。
+    reload_dirs = [str(Path(__file__).resolve().parent)] if settings.debug else None
     uvicorn.run(
         "athena.main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug,
+        reload_dirs=reload_dirs,
         log_level="debug" if settings.debug else "info",
     )
 

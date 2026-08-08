@@ -15,6 +15,7 @@ from athena.core.harness.harness import Harness, HarnessSettings
 from athena.core.llm.provider import LLMProvider
 from athena.core.tools.manager import UnifiedToolManager
 from athena.db.database import Database
+from athena.models.tool import ToolResult
 from athena.schemas.events import EventType
 
 
@@ -340,3 +341,245 @@ async def test_harness_emits_llm_call_end_failed_on_exception():
     assert len(call_ends) == 2
     assert call_ends[0]["data"]["status"] == "failed"
     assert call_ends[1]["data"]["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# 回归测试：stop_signal 接线 / LLM 流式超时 / 工具失败状态落库
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_harness_stop_signal_interrupts_run(db: Database):
+    """stop_signal 置位后 run 应立即终止，且 session 状态为 interrupted."""
+    await db.create_session("s-stop")
+    stop_signal = asyncio.Event()
+    stop_signal.set()
+    model = _StreamingTextModel()
+    harness = Harness(
+        llm=LLMProvider(model),
+        tool_manager=UnifiedToolManager(),
+        db=db,
+        harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=2, tool_timeout=5),
+    )
+    result = await harness.run(
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="s-stop",
+        run_id="20260808",
+        stop_signal=stop_signal,
+    )
+    assert result.interrupted is True
+    session = await db.get_session("s-stop")
+    assert session.status.value == "interrupted"
+
+
+class _StopMidStreamModel:
+    """yield 一个 chunk 后置位 stop_signal，再 yield 一个 chunk 让循环命中 stop 检查."""
+
+    def __init__(self, stop_signal: asyncio.Event) -> None:
+        self._stop_signal = stop_signal
+
+    async def ainvoke(self, messages: Any, **kwargs: Any) -> AIMessage:
+        return AIMessage(content="ok")
+
+    def astream(self, messages: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        return self._gen()
+
+    async def _gen(self) -> AsyncIterator[Any]:
+        yield AIMessageChunk(content="partial")
+        self._stop_signal.set()
+        yield AIMessageChunk(content=" more")
+        await asyncio.sleep(3600)  # 不会到达：stop break 应在第二次 yield 后触发
+
+    def bind_tools(self, tools: Any) -> "_StopMidStreamModel":
+        return self
+
+    def with_structured_output(self, schema: Any) -> Any:
+        return self
+
+
+@pytest.mark.asyncio
+async def test_harness_stop_mid_stream_finalizes_step(db: Database):
+    """流式中途 stop：llm step 应被终态化（非 running）、补发 LLM_CALL_END，
+    且不落库残缺 assistant 消息."""
+    await db.create_session("s-stopmid")
+    stop_signal = asyncio.Event()
+    ws = _RecordingWs()
+    harness = Harness(
+        llm=LLMProvider(_StopMidStreamModel(stop_signal)),
+        tool_manager=UnifiedToolManager(),
+        db=db,
+        ws_manager=ws,
+        harness_settings=HarnessSettings(
+            max_turns_per_run=5, retry_budget=2, tool_timeout=5, llm_stream_timeout=30
+        ),
+    )
+    result = await harness.run(
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="s-stopmid",
+        run_id="20260808",
+        stop_signal=stop_signal,
+    )
+    assert result.interrupted is True
+    # 当前 llm step 被终态化，无遗留 running
+    steps = await db.get_steps("s-stopmid")
+    assert steps
+    assert all(s.status.value != "running" for s in steps)
+    assert any(s.status.value == "failed" for s in steps)
+    # 补发 LLM_CALL_END failed，前端气泡结束
+    call_ends = [e for e in ws.events if e["type"] == EventType.LLM_CALL_END]
+    assert call_ends and call_ends[-1]["data"]["status"] == "failed"
+    # 不落库残缺 assistant 消息
+    msgs = await db.get_messages("s-stopmid")
+    assert all(m.role.value != "assistant" for m in msgs)
+    session = await db.get_session("s-stopmid")
+    assert session.status.value == "interrupted"
+
+
+class _HangingIterator:
+    """astream 挂死：__anext__ 永不返回."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(3600)
+        raise StopAsyncIteration
+
+
+class _HangingModel:
+    """astream 永不返回，用于验证 llm_stream_timeout 兜底."""
+
+    async def ainvoke(self, messages: Any, **kwargs: Any) -> AIMessage:
+        await asyncio.sleep(3600)
+
+    def astream(self, messages: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        return _HangingIterator()
+
+    def bind_tools(self, tools: Any) -> "_HangingModel":
+        return self
+
+    def with_structured_output(self, schema: Any) -> Any:
+        return self
+
+
+@pytest.mark.asyncio
+async def test_harness_llm_stream_timeout_terminates_run(db: Database):
+    """流式挂死时 llm_stream_timeout 应终态化 step，run 结束而非永久 running."""
+    await db.create_session("s-hang")
+    model = _HangingModel()
+    harness = Harness(
+        llm=LLMProvider(model),
+        tool_manager=UnifiedToolManager(),
+        db=db,
+        harness_settings=HarnessSettings(
+            max_turns_per_run=5, retry_budget=1, tool_timeout=5, llm_stream_timeout=1
+        ),
+    )
+    result = await harness.run(
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="s-hang",
+        run_id="20260808",
+    )
+    assert result.error is not None
+    steps = await db.get_steps("s-hang")
+    assert steps
+    # 所有 llm_call step 都被终态化（failed），无遗留 running
+    assert all(s.status.value != "running" for s in steps)
+    assert any(s.error_message and "超时" in s.error_message for s in steps)
+
+
+def _tool_call_chunk() -> AIMessageChunk:
+    """构造触发 exec_shell 工具调用的流式 chunk."""
+    return AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            {"index": 0, "id": "call_1", "name": "exec_shell", "args": '{"command": "boom"}'},
+        ],
+    )
+
+
+class _ToolCallThenAnswerModel:
+    """第一次 astream 返回工具调用，后续返回纯文本（避免无限循环）."""
+
+    def __init__(self) -> None:
+        self._calls = 0
+
+    async def ainvoke(self, messages: Any, **kwargs: Any) -> AIMessage:
+        return AIMessage(content="")
+
+    def astream(self, messages: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        self._calls += 1
+        if self._calls == 1:
+            return _AsyncIterator([_tool_call_chunk()])
+        return _AsyncIterator([AIMessage(content="final answer")])
+
+    def bind_tools(self, tools: Any) -> "_ToolCallThenAnswerModel":
+        return self
+
+    def with_structured_output(self, schema: Any) -> Any:
+        return self
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_records_failure_not_success():
+    """工具返回 failed 时熔断器应记失败而非 success（修复 record_result 顺序）."""
+    harness = Harness(
+        llm=LLMProvider(_FakeModel()),
+        tool_manager=UnifiedToolManager(),
+        harness_settings=HarnessSettings(max_turns_per_run=3, retry_budget=1, tool_timeout=5),
+    )
+
+    async def _fake_call_tool(**kwargs: Any) -> ToolResult:
+        return ToolResult(status="failed", error="exit_code=2: boom")
+
+    harness._tool_manager.call_tool = _fake_call_tool  # type: ignore[method-assign]
+
+    content, status, err, stack = await harness._execute_single_tool(
+        tool_name="exec_shell",
+        args={"command": "boom"},
+        session_id="s-rec",
+        run_id="20260808",
+        tool_call_id="tc-1",
+    )
+    assert status == "failed"
+    assert err == "exit_code=2: boom"
+    records = harness._error_handler.circuit_breaker._records["exec_shell"]
+    assert records
+    # 修复前会先无条件记一条 success，修复后全部为失败
+    assert all(not ok for ok, _ in records)
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_persisted_as_failed(db: Database):
+    """完整 run：工具失败应落库 tool_call.status=failed，且失败详情回传给 LLM."""
+    await db.create_session("s-toolfail")
+    harness = Harness(
+        llm=LLMProvider(_ToolCallThenAnswerModel()),
+        tool_manager=UnifiedToolManager(),
+        db=db,
+        harness_settings=HarnessSettings(max_turns_per_run=3, retry_budget=1, tool_timeout=5),
+    )
+
+    async def _fake_call_tool(**kwargs: Any) -> ToolResult:
+        return ToolResult(status="failed", error="exit_code=2: command failed")
+
+    harness._tool_manager.call_tool = _fake_call_tool  # type: ignore[method-assign]
+
+    result = await harness.run(
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="s-toolfail",
+        run_id="20260808",
+    )
+    assert result.error is None
+    # tool_call 落库 failed
+    tool_calls = await db.query_tool_calls("s-toolfail")
+    assert tool_calls
+    assert all(tc.status.value == "failed" for tc in tool_calls)
+    # 失败详情进入 tool 消息，供 LLM 下一轮自愈
+    tool_msgs = [m for m in await db.get_messages("s-toolfail") if m.role.value == "tool"]
+    assert tool_msgs
+    assert "exit_code=2: command failed" in tool_msgs[0].content
+    # 工具 step 落库 failed
+    tool_steps = [s for s in await db.get_steps("s-toolfail") if s.step_type.value == "tool_execution"]
+    assert tool_steps
+    assert all(s.status.value == "failed" for s in tool_steps)

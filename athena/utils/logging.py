@@ -25,7 +25,10 @@ def configure_logging(debug: bool = False) -> None:
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.dev.set_exc_info,
             structlog.processors.StackInfoRenderer(),
-            structlog.dev.ConsoleRenderer(),
+            # colors=isatty():仅当输出到真实终端时着色，
+            # 重定向到文件(如 start.sh >> logs/backend.log)时输出纯文本，
+            # 避免日志文件被 ANSI 颜色转义序列污染。
+            structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty()),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.PrintLoggerFactory(),

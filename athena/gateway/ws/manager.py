@@ -52,6 +52,7 @@ class WebSocketManager:
         for ws in self._connections[session_id]:
             try:
                 await ws.send_text(text)
+                logger.info("ws_send_success", session_id=session_id, message=text)
             except Exception as e:
                 logger.warning("ws_send_failed", session_id=session_id, error=str(e))
                 dead.append(ws)

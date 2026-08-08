@@ -4,6 +4,7 @@ import type {
   WebSocketEvent,
   ApprovalRequest,
   ToolCall,
+  Message,
 } from "../types"
 import { useChatStore } from "../store/chatStore"
 
@@ -231,6 +232,12 @@ export function useWebSocket(options: UseWebSocketOptions) {
             setAgentStatus("running")
           }
           const buildingId = buildingMessageId.current
+          // 纯工具调用回合（无文本）结束时把工具调用挂到气泡上，
+          // 使实时流也能展示工具卡片（与历史视图一致）
+          const tc = data.tool_calls as Message["tool_calls"]
+          if (buildingId && tc?.length) {
+            updateMessage(buildingId, { tool_calls: tc })
+          }
           buildingMessageId.current = null
           // status=failed（空响应/异常重试路径）：移除本次调用创建的气泡，
           // 避免残留空气泡；下次 LLM_CALL_START 会创建新气泡

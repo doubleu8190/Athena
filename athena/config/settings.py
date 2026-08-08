@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     max_turns_per_run: int = 20
     retry_budget: int = 3
     tool_timeout: int = 60
+    llm_stream_timeout: int = 120
     approval_timeout: int = 120
 
     # --- Memory ---

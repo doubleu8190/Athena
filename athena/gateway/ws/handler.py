@@ -84,7 +84,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
 
 async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
     """处理用户命令（异步执行，避免阻塞 WebSocket 接收）."""
-    from athena.gateway.routes._runtime import get_workflow, reset_session_stop_event
+    from athena.gateway.routes._runtime import (
+        clear_session_stop_event,
+        get_workflow,
+        get_session_stop_event,
+        reset_session_stop_event,
+    )
     workflow: AgentWorkflow = get_workflow()
     if workflow is None:
         logger.error("workflow_not_initialized", session_id=session_id)
@@ -95,14 +100,19 @@ async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
         session_id=session_id,
         message_length=len(message),
     )
+    # 传入会话级 stop 事件，使 SESSION_STOP / POST /stop 真正能终止 run
+    stop_signal = get_session_stop_event(session_id)
     reset_session_stop_event(session_id)
     # 异步执行不等待，避免阻塞 ws 接收循环
-    asyncio.create_task(
+    task = asyncio.create_task(
         workflow.process_message(
             session_id=session_id,
             user_message=message,
+            stop_signal=stop_signal,
         )
     )
+    # run 结束时消费掉 stop 事件，避免粘滞误停下一次 run（clear 此前无人调用）
+    task.add_done_callback(lambda _t: clear_session_stop_event(session_id))
 
 
 async def _handle_approval_response(session_id: str, data: dict[str, Any]) -> None:

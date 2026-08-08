@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from athena.db.engine import close_engine, init_engine
@@ -25,6 +26,8 @@ from athena.models import (
     Step,
     ToolCallRecord,
 )
+from athena.models.step import StepStatus
+from athena.models.tool import ToolCallStatus
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -136,6 +139,30 @@ class Database:
         self, session_id: str, status: str | None = None
     ) -> list[ToolCallRecord]:
         return await self._tool_calls.query(session_id, status=status)
+
+    # ------------------------------------------------------------------
+    # 会话中断清理
+    # ------------------------------------------------------------------
+
+    async def cleanup_interrupted_session(self, session_id: str) -> None:
+        """清理进程中断遗留的 running 步骤/工具调用，统一标记为 failed.
+
+        仅在服务启动恢复阶段调用（此时不存在运行中的 run）。
+        状态值必须用 enum 合法值（failed），否则 repository 反序列化时
+        _row_to_step / _row_to_tool_call 的枚举转换会抛 ValueError。
+        """
+        now = datetime.now().isoformat()
+        err = "进程中断(服务重启)"
+        await self._steps.update_running_by_session(session_id, {
+            "status": str(StepStatus.FAILED),
+            "completed_at": now,
+            "error_message": err,
+        })
+        await self._tool_calls.update_running_by_session(session_id, {
+            "status": str(ToolCallStatus.FAILED),
+            "completed_at": now,
+            "error_message": err,
+        })
 
     # ------------------------------------------------------------------
     # Approval logs

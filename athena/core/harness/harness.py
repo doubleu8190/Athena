@@ -57,6 +57,7 @@ class HarnessSettings:
     max_turns_per_run: int = 20
     retry_budget: int = 3
     tool_timeout: int = 60
+    llm_stream_timeout: int = 120
 
 
 @dataclass
@@ -96,8 +97,10 @@ class Harness:
             max_turns_per_run=self._settings.max_turns_per_run,
             retry_budget=self._settings.retry_budget,
             tool_timeout=self._settings.tool_timeout,
+            llm_stream_timeout=self._settings.llm_stream_timeout,
         )
         self._stop_event = asyncio.Event()
+        self._stop_signal: asyncio.Event | None = None
         self._allowed_tool_names: set[str] | None = None
         self._register_default_routes()
 
@@ -127,6 +130,7 @@ class Harness:
         system_prompt: str = "",
         run_id: str | None = None,
         tool_names: list[str] | None = None,
+        stop_signal: asyncio.Event | None = None,
     ) -> HarnessRunResult:
         """执行单次 Agent 运行.
 
@@ -136,6 +140,8 @@ class Harness:
             system_prompt: 系统提示词
             run_id: 可选 run_id（子 Agent 使用），未提供则生成主 run_id
             tool_names: 可选工具白名单（子 Agent 使用），None 表示全部工具
+            stop_signal: 外部停止信号（会话级 stop 事件），由 gateway 层注入；
+                与 request_stop() 的 _stop_event 等价，任一置位即终止运行
         """
         rid = run_id or RunIdGenerator.generate_main_run_id()
         budget = Budget(
@@ -143,6 +149,7 @@ class Harness:
             retry_budget=self._harness_settings.retry_budget,
         )
         self._stop_event.clear()
+        self._stop_signal = stop_signal
 
         # 更新会话状态为 running
         if self._db is not None:
@@ -169,7 +176,7 @@ class Harness:
         interrupted = False
 
         try:
-            while not self._stop_event.is_set():
+            while not self._should_stop():
                 # 上下文压缩
                 if self._compressor is not None:
                     compressed = await self._compressor.compress(
@@ -205,27 +212,47 @@ class Harness:
                 full_content = ""
                 stream_chunks: list[AIMessageChunk] = []
                 try:
-                    async for chunk in bound_llm.astream(lc_messages):
-                        if self._stop_event.is_set():
-                            break
-                        if isinstance(chunk, AIMessageChunk):
-                            stream_chunks.append(chunk)
-                        chunk_content = extract_message_text(chunk)
-                        if chunk_content:
-                            full_content += chunk_content
-                            await self._emit(
-                                EventType.LLM_TOKEN,
-                                {"token": chunk_content},
-                                session_id,
-                                rid,
-                            )
+                    # 流式调用整体包超时兜底：流挂死时 stop 的 _should_stop() break
+                    # 永远等不到 __anext__，只有超时能终态化当前 LLM step
+                    async with asyncio.timeout(self._harness_settings.llm_stream_timeout):
+                        async for chunk in bound_llm.astream(lc_messages):
+                            if self._should_stop():
+                                break
+                            if isinstance(chunk, AIMessageChunk):
+                                stream_chunks.append(chunk)
+                            chunk_content = extract_message_text(chunk)
+                            if chunk_content:
+                                full_content += chunk_content
+                                await self._emit(
+                                    EventType.LLM_TOKEN,
+                                    {"token": chunk_content},
+                                    session_id,
+                                    rid,
+                                )
 
-                    # 合并流式 chunk → 完整响应（content + tool_calls）
-                    merged_content, final_tc = self._assemble_response(
-                        stream_chunks, full_content
-                    )
+                        # 合并流式 chunk → 完整响应（content + tool_calls）
+                        merged_content, final_tc = self._assemble_response(
+                            stream_chunks, full_content
+                        )
                     if merged_content:
                         full_content = merged_content
+
+                    # 停止信号在流式中途置位 → 结束本轮 run
+                    # （不落库残缺 assistant 消息、不执行残缺 tool_calls；
+                    #   必须终态化当前 llm step 并补发 LLM_CALL_END，
+                    #   否则 step 遗留 running、前端气泡不结束）
+                    if self._should_stop():
+                        interrupted = True
+                        await self._update_step(llm_step_id, {
+                            "status": str(StepStatus.FAILED),
+                            "completed_at": datetime.now().isoformat(),
+                            "duration_ms": (time.time() - start_time) * 1000,
+                            "error_message": "运行被用户停止",
+                        })
+                        await self._emit_llm_call_end(
+                            llm_step_id, status="failed", session_id=session_id, run_id=rid
+                        )
+                        break
 
                     # 空响应检测：无文本且无工具调用 → 不落库、有界重试
                     if not full_content.strip() and not final_tc:
@@ -260,6 +287,28 @@ class Harness:
                     last_content = full_content
                     error_msg = None
 
+                except TimeoutError:
+                    error_msg = (
+                        f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）"
+                    )
+                    logger.warning("llm_stream_timeout", run_id=rid, error=error_msg)
+                    await self._update_step(llm_step_id, {
+                        "status": str(StepStatus.FAILED),
+                        "completed_at": datetime.now().isoformat(),
+                        "duration_ms": (time.time() - start_time) * 1000,
+                        "error_message": error_msg,
+                    })
+                    await self._emit(
+                        EventType.ERROR,
+                        {"step_id": llm_step_id, "error": error_msg, "phase": "llm_call"},
+                        session_id,
+                        rid,
+                    )
+                    await self._emit_llm_call_end(
+                        llm_step_id, status="failed", session_id=session_id, run_id=rid
+                    )
+                    budget.increment_retry()
+                    continue
                 except Exception as e:
                     logger.error("llm_call_failed", error=str(e), run_id=rid)
                     error_msg = f"LLM 调用失败: {e}"
@@ -300,6 +349,7 @@ class Harness:
                     run_id=rid,
                     duration_ms=duration_ms,
                     tool_calls_count=len(final_tc),
+                    tool_calls=final_tc,
                 )
 
                 # 持久化 assistant 消息（中断恢复关键）
@@ -341,7 +391,7 @@ class Harness:
                 # 工具调用成功 → 重置重试计数
                 budget.reset_retries()
 
-                if self._stop_event.is_set():
+                if self._should_stop():
                     interrupted = True
                     break
 
@@ -363,6 +413,10 @@ class Harness:
                 session_id,
                 rid,
             )
+
+        # 停止信号触发的提前退出：统一标记 interrupted（覆盖 while 顶部退出路径）
+        if self._should_stop():
+            interrupted = True
 
         # 后处理
         await self._emit(
@@ -494,19 +548,31 @@ class Harness:
                 "error": error_msg,
             })
 
+            # 失败时把错误详情回传给 LLM，使其能据此自愈
+            # （_execute_single_tool 失败返回的 result_content 只有占位符，
+            #   真正的 err_msg 仅在 error_message 里，不带上则 LLM 拿到空诊断）
+            tool_content = result_content
+            if status != "success" and error_msg:
+                tool_content = f"[工具 {tool_name} 失败]: {error_msg}"
+
             # 持久化 tool 消息
             if self._db is not None:
                 await self._db.save_message(Message(
                     id=generate_time_id(),
                     session_id=session_id,
                     role=MessageRole.TOOL,
-                    content=result_content,
+                    content=tool_content,
                     tool_call_id=tc_id,
-                    metadata={"step_id": step_id, "tool_call_record_id": tc_record_id},
+                    metadata={
+                        "step_id": step_id,
+                        "tool_call_record_id": tc_record_id,
+                        # 前端据此给工具气泡标名（避免跨表 join）
+                        "tool_name": tool_name,
+                    },
                     timestamp=datetime.now(),
                 ))
 
-            return ToolMessage(content=result_content, tool_call_id=tc_id)
+            return ToolMessage(content=tool_content, tool_call_id=tc_id)
 
         # 并行执行
         tasks = [
@@ -566,12 +632,14 @@ class Harness:
                     ),
                     timeout=self._harness_settings.tool_timeout,
                 )
-                self._error_handler.record_result(tool_name, success=True)
                 output = result.output if result.output is not None else ""
                 if result.status == "denied":
+                    # 用户拒绝不是工具可靠性信号，不记入熔断器
                     return output, "denied", None, None
                 if result.status != "success":
                     raise RuntimeError(result.error or f"工具 {tool_name} 返回失败状态: {result.status}")
+                # 在确认 status 为 success 之后才记录，避免失败结果先被记成成功
+                self._error_handler.record_result(tool_name, success=True)
                 return output, "success", None, None
             except Exception as e:
                 last_error = e
@@ -662,6 +730,12 @@ class Harness:
         """请求停止当前运行（优雅退出）."""
         self._stop_event.set()
 
+    def _should_stop(self) -> bool:
+        """是否应停止：内部 request_stop() 或外部 stop_signal 任一置位."""
+        return self._stop_event.is_set() or bool(
+            self._stop_signal is not None and self._stop_signal.is_set()
+        )
+
     async def _save_step(self, step: Step) -> None:
         if self._db is None:
             return
@@ -703,12 +777,15 @@ class Harness:
         run_id: str,
         duration_ms: float = 0,
         tool_calls_count: int = 0,
+        tool_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         """推送 LLM 调用结束事件（status: completed / failed）.
 
         前端据此结束流式气泡：status=failed 时移除本次调用创建的无内容
         building 气泡，避免空响应/异常重试路径在界面上残留空气泡。
         成功路径与失败路径都必须调用，保证事件生命周期成对。
+        纯工具调用回合（无文本）通过 tool_calls 把工具名/参数带给前端，
+        使其与历史视图一致地展示该回合的工具卡片。
         """
         await self._emit(
             EventType.LLM_CALL_END,
@@ -717,6 +794,7 @@ class Harness:
                 "status": status,
                 "duration_ms": duration_ms,
                 "tool_calls_count": tool_calls_count,
+                "tool_calls": tool_calls or [],
             },
             session_id,
             run_id,

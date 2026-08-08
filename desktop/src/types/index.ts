@@ -27,6 +27,12 @@ export interface Step {
 
 export type MessageRole = "user" | "assistant" | "system" | "tool"
 
+export interface ToolCallInvocation {
+  id: string
+  name: string
+  args: Record<string, unknown>
+}
+
 export interface Message {
   id: string
   role: MessageRole
@@ -35,6 +41,8 @@ export interface Message {
   session_id?: string
   tool_name?: string
   tool_call_id?: string
+  /** assistant 回合发起/已落库的工具调用（来自后端 Message.tool_calls） */
+  tool_calls?: ToolCallInvocation[]
   metadata?: Record<string, unknown>
 }
 

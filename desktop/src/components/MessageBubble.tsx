@@ -1,6 +1,6 @@
 import { Bot, User, Wrench, Clock } from "lucide-react"
 import ReactMarkdown from "react-markdown"
-import type { Message } from "../types"
+import type { Message, ToolCallInvocation } from "../types"
 import { ToolCard } from "./ToolCard"
 import { useChatStore } from "../store/chatStore"
 
@@ -16,8 +16,12 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
 
-  // 无内容的 assistant 气泡直接不渲染（空气泡），避免工具调用回合残留空气泡
-  if (!isUser && !isTool && !isSystem && !message.content.trim()) {
+  const hasText = !!message.content.trim()
+  const hasToolCalls = (message.tool_calls?.length ?? 0) > 0
+
+  // 无内容且无工具调用的消息不渲染（空气泡）；
+  // 纯工具调用回合（content 为空但 tool_calls 有值）需要展示工具卡片。
+  if (!isUser && !isTool && !isSystem && !hasText && !hasToolCalls) {
     return null
   }
 
@@ -72,6 +76,15 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           isUser ? "items-end" : "items-start"
         }`}
       >
+        {/* Assistant 回合发起/落库的工具调用（纯工具回合 content 为空时也可见） */}
+        {!isUser && !isTool && hasToolCalls && (
+          <div className="flex flex-col gap-2 w-full">
+            {(message.tool_calls ?? []).map((tc) => (
+              <InlineToolCallCard key={tc.id} toolCall={tc} />
+            ))}
+          </div>
+        )}
+
         {/* Tool Call Cards */}
         {relatedToolCalls.length > 0 && (
           <div className="flex flex-col gap-2 w-full">
@@ -81,28 +94,36 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           </div>
         )}
 
-        {/* Message Bubble */}
-        <div
-          className={`rounded-2xl px-4 py-3 ${
-            isUser
-              ? "bg-athena-accent text-white rounded-tr-sm"
-              : isTool
-                ? "bg-yellow-500/10 border border-yellow-500/30 rounded-tl-sm"
-                : "bg-athena-surface border border-athena-border rounded-tl-sm"
-          }`}
-        >
-          {isTool ? (
-            <ToolMessageContent content={message.content} toolName={message.tool_name} />
-          ) : (
-            <div
-              className={`prose-custom max-w-none text-sm ${
-                isStreaming ? "typing-cursor" : ""
-              }`}
-            >
-              <ReactMarkdown>{message.content}</ReactMarkdown>
-            </div>
-          )}
-        </div>
+        {/* Message Bubble（assistant 纯工具回合无文本，不渲染空气泡） */}
+        {(isUser || isTool || isSystem || hasText) && (
+          <div
+            className={`rounded-2xl px-4 py-3 ${
+              isUser
+                ? "bg-athena-accent text-white rounded-tr-sm"
+                : isTool
+                  ? "bg-yellow-500/10 border border-yellow-500/30 rounded-tl-sm"
+                  : "bg-athena-surface border border-athena-border rounded-tl-sm"
+            }`}
+          >
+            {isTool ? (
+              <ToolMessageContent
+                content={message.content}
+                toolName={
+                  (message.metadata?.tool_name as string | undefined) ??
+                  message.tool_name
+                }
+              />
+            ) : (
+              <div
+                className={`prose-custom max-w-none text-sm ${
+                  isStreaming ? "typing-cursor" : ""
+                }`}
+              >
+                <ReactMarkdown>{message.content}</ReactMarkdown>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Timestamp */}
         <div
@@ -114,6 +135,33 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           {formatTime(message.timestamp)}
         </div>
       </div>
+    </div>
+  )
+}
+
+function InlineToolCallCard({ toolCall }: { toolCall: ToolCallInvocation }) {
+  const argCount = Object.keys(toolCall.args ?? {}).length
+  return (
+    <div className="card overflow-hidden transition-all">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-athena-bg/50 border-b border-athena-border">
+        <Wrench className="w-4 h-4 text-athena-accent" />
+        <span className="font-mono text-sm font-medium">{toolCall.name}</span>
+        <span className="ml-auto text-xs text-athena-muted">CALLED</span>
+      </div>
+      {/* Body */}
+      {argCount > 0 && (
+        <div className="px-3 py-2">
+          <details className="group">
+            <summary className="cursor-pointer text-xs text-athena-muted hover:text-athena-text select-none">
+              Arguments ({argCount})
+            </summary>
+            <pre className="mt-2 text-xs bg-athena-bg rounded p-2 overflow-x-auto text-athena-text/80 max-h-64 overflow-y-auto">
+              {JSON.stringify(toolCall.args, null, 2)}
+            </pre>
+          </details>
+        </div>
+      )}
     </div>
   )
 }

@@ -22,7 +22,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from athena.config.settings import Settings, get_settings
 from athena.core.compression.compressor import ContextCompressor
@@ -37,6 +43,7 @@ from athena.models.step import StepStatus, StepType
 from athena.models.tool import ToolCallStatus
 from athena.schemas.events import EventType, build_event
 from athena.utils.ids import RunIdGenerator, generate_time_id
+from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.message import dict_to_message
 
@@ -196,17 +203,14 @@ class Harness:
 
                 start_time = time.time()
                 full_content = ""
-                tool_calls_raw: list[dict[str, Any]] = []
+                stream_chunks: list[AIMessageChunk] = []
                 try:
                     async for chunk in bound_llm.astream(lc_messages):
                         if self._stop_event.is_set():
                             break
-                        chunk_content = getattr(chunk, "content", "")
-                        if isinstance(chunk_content, list):
-                            chunk_content = "".join(
-                                c.get("text", "") if isinstance(c, dict) else str(c)
-                                for c in chunk_content
-                            )
+                        if isinstance(chunk, AIMessageChunk):
+                            stream_chunks.append(chunk)
+                        chunk_content = extract_message_text(chunk)
                         if chunk_content:
                             full_content += chunk_content
                             await self._emit(
@@ -215,17 +219,43 @@ class Harness:
                                 session_id,
                                 rid,
                             )
-                        # 收集 tool_calls（最后一块通常含完整 tool_calls）
-                        chunk_tc = getattr(chunk, "tool_call_chunks", None) or []
-                        for tc_chunk in chunk_tc:
-                            if isinstance(tc_chunk, dict):
-                                tool_calls_raw.append(tc_chunk)
 
-                    # 从最终 AIMessage 提取 tool_calls
-                    ai_message = AIMessage(content=full_content)
-                    final_tc = self._extract_tool_calls(bound_llm, lc_messages)
-                    if final_tc:
-                        ai_message = AIMessage(content=full_content, tool_calls=final_tc)
+                    # 合并流式 chunk → 完整响应（content + tool_calls）
+                    merged_content, final_tc = self._assemble_response(
+                        stream_chunks, full_content
+                    )
+                    if merged_content:
+                        full_content = merged_content
+
+                    # 空响应检测：无文本且无工具调用 → 不落库、有界重试
+                    if not full_content.strip() and not final_tc:
+                        error_msg = "LLM 返回空响应（无内容且无工具调用）"
+                        logger.warning("llm_empty_response", run_id=rid, error=error_msg)
+                        await self._update_step(llm_step_id, {
+                            "status": str(StepStatus.FAILED),
+                            "completed_at": datetime.now().isoformat(),
+                            "duration_ms": (time.time() - start_time) * 1000,
+                            "error_message": error_msg,
+                        })
+                        await self._emit(
+                            EventType.ERROR,
+                            {"step_id": llm_step_id, "error": error_msg, "phase": "llm_call"},
+                            session_id,
+                            rid,
+                        )
+                        # 失败路径同样需结束 LLM 调用生命周期：前端据此移除
+                        # 本次调用创建的流式气泡，避免重试残留空气泡
+                        await self._emit_llm_call_end(
+                            llm_step_id, status="failed", session_id=session_id, run_id=rid
+                        )
+                        if budget.remaining_retries() > 0:
+                            budget.increment_retry()
+                            continue
+                        break
+
+                    ai_message = AIMessage(
+                        content=full_content, tool_calls=final_tc
+                    ) if final_tc else AIMessage(content=full_content)
                     lc_messages.append(ai_message)
                     last_content = full_content
                     error_msg = None
@@ -245,6 +275,9 @@ class Harness:
                         session_id,
                         rid,
                     )
+                    await self._emit_llm_call_end(
+                        llm_step_id, status="failed", session_id=session_id, run_id=rid
+                    )
                     budget.increment_retry()
                     if not isinstance(e, BudgetExceeded):
                         continue
@@ -260,19 +293,18 @@ class Harness:
                     "llm_output_tokens": self._estimate_tokens([ai_message]),
                 })
 
-                await self._emit(
-                    EventType.LLM_CALL_END,
-                    {
-                        "step_id": llm_step_id,
-                        "duration_ms": duration_ms,
-                        "tool_calls_count": len(final_tc),
-                    },
-                    session_id,
-                    rid,
+                await self._emit_llm_call_end(
+                    llm_step_id,
+                    status="completed",
+                    session_id=session_id,
+                    run_id=rid,
+                    duration_ms=duration_ms,
+                    tool_calls_count=len(final_tc),
                 )
 
                 # 持久化 assistant 消息（中断恢复关键）
-                if self._db is not None:
+                # 守卫：仅在确实有输出（文本或工具调用）时落库，避免空消息污染对话
+                if self._db is not None and (full_content.strip() or final_tc):
                     await self._db.save_message(Message(
                         id=generate_time_id(),
                         session_id=session_id,
@@ -589,27 +621,38 @@ class Harness:
         err_stack = traceback.format_exc() if last_error else None
         return f"[工具 {tool_name} 执行失败]", "failed", err_msg, err_stack
 
-    def _extract_tool_calls(
-        self, bound_llm: LLMProvider, messages: list[BaseMessage]
-    ) -> list[dict[str, Any]]:
-        """从最后一次 LLM 调用提取完整 tool_calls.
+    def _assemble_response(
+        self,
+        stream_chunks: list[AIMessageChunk],
+        fallback_content: str = "",
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """合并流式 chunk，提取完整 content 与 tool_calls.
 
-        简化实现：流式 chunk 中累积的 tool_call_chunks 在最后一条 AIMessage 中提取。
-        本实现采用重新绑定并使用非流式 ainvoke 的兜底方式获取完整 tool_calls。
+        langchain 的 AIMessageChunk.__add__ 会拼接文本分片并累加 tool_call
+        的 args JSON 分片，比手动拼装可靠。空流时回退到已累积的 full_content。
         """
-        # 优先从最后一条 AIMessage 读取（如果 astreem chunk 已聚合）
-        if messages and isinstance(messages[-1], AIMessage):
-            tcs = getattr(messages[-1], "tool_calls", None) or []
-            if tcs:
-                return [
-                    {
-                        "id": tc.get("id", generate_time_id()),
-                        "name": tc.get("name", ""),
-                        "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
-                    }
-                    for tc in tcs
-                ]
-        return []
+        if not stream_chunks:
+            return fallback_content, []
+        merged = stream_chunks[0]
+        for c in stream_chunks[1:]:
+            merged = merged + c
+        content = extract_message_text(merged) or fallback_content
+        raw_tcs = getattr(merged, "tool_calls", None) or []
+        return content, self._normalize_tool_calls(raw_tcs)
+
+    @staticmethod
+    def _normalize_tool_calls(
+        tool_calls: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """将 langchain tool_calls 归一化为内部格式."""
+        return [
+            {
+                "id": tc.get("id", generate_time_id()),
+                "name": tc.get("name", ""),
+                "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
+            }
+            for tc in tool_calls
+        ]
 
     # ------------------------------------------------------------------
     # 辅助方法
@@ -651,6 +694,33 @@ class Harness:
             )
         except Exception as e:
             logger.warning("emit_event_failed", event_type=str(event_type), error=str(e))
+
+    async def _emit_llm_call_end(
+        self,
+        step_id: str,
+        status: str,
+        session_id: str,
+        run_id: str,
+        duration_ms: float = 0,
+        tool_calls_count: int = 0,
+    ) -> None:
+        """推送 LLM 调用结束事件（status: completed / failed）.
+
+        前端据此结束流式气泡：status=failed 时移除本次调用创建的无内容
+        building 气泡，避免空响应/异常重试路径在界面上残留空气泡。
+        成功路径与失败路径都必须调用，保证事件生命周期成对。
+        """
+        await self._emit(
+            EventType.LLM_CALL_END,
+            {
+                "step_id": step_id,
+                "status": status,
+                "duration_ms": duration_ms,
+                "tool_calls_count": tool_calls_count,
+            },
+            session_id,
+            run_id,
+        )
 
     def _estimate_tokens(self, messages: list[BaseMessage]) -> int:
         """粗略估算 token 数（project_memory: len/4 回退方案）."""

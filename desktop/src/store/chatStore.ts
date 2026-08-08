@@ -33,6 +33,7 @@ interface ChatStore {
   messages: Message[]
   addMessage: (message: Message) => void
   updateMessage: (messageId: string, updates: Partial<Message>) => void
+  removeMessage: (messageId: string) => void
   clearMessages: () => void
   setMessages: (messages: Message[]) => void
 
@@ -106,6 +107,10 @@ export const useChatStore = create<ChatStore>((set) => ({
       messages: state.messages.map((m) =>
         m.id === messageId ? { ...m, ...updates } : m,
       ),
+    })),
+  removeMessage: (messageId) =>
+    set((state) => ({
+      messages: state.messages.filter((m) => m.id !== messageId),
     })),
   clearMessages: () => set({ messages: [] }),
   setMessages: (messages) => set({ messages }),

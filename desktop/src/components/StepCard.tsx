@@ -27,7 +27,6 @@ export function StepCard({ step, compact = false }: StepCardProps) {
   } = step
 
   const isLlmCall = step_type === "llm_call"
-  const isToolExecution = step_type === "tool_execution"
 
   const statusIcon = () => {
     switch (status) {

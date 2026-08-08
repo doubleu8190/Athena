@@ -210,6 +210,9 @@ function Chat({ sendEvent }: ChatProps) {
   const phaseGroups: PhaseGroup[] = []
   let currentPhase: Phase | null = null
   for (const msg of messages) {
+    // 跳过无内容的 assistant 消息：工具调用回合模型只发 tool_call 不发文本，
+    // 这类消息渲染为空气泡；其工具结果已由 processing 阶段的 tool 消息展示。
+    if (msg.role === "assistant" && !msg.content.trim()) continue
     let msgPhase: Phase
     if (msg.role === "user") {
       msgPhase = "request"

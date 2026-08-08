@@ -16,6 +16,11 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
 
+  // 无内容的 assistant 气泡直接不渲染（空气泡），避免工具调用回合残留空气泡
+  if (!isUser && !isTool && !isSystem && !message.content.trim()) {
+    return null
+  }
+
   // 关联的工具调用卡片
   const relatedToolCalls = isUser
     ? []

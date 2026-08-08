@@ -27,6 +27,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
     setAgentStatus,
     addMessage,
     updateMessage,
+    removeMessage,
     addToolCall,
     updateToolCall,
     addApproval,
@@ -68,7 +69,13 @@ export function useWebSocket(options: UseWebSocketOptions) {
       ws.onclose = () => {
         setConnectionStatus("disconnected")
         onClose?.()
-        wsRef.current = null
+        // 只在当前 socket 仍是本 socket 时才清空引用。快速切换 session 时，
+        // 旧 socket 的 onclose 可能晚于新 socket 建立才触发，若无条件置 null
+        // 会清掉指向新 socket 的引用，导致后续 disconnect() 变 no-op，
+        // 旧连接一直挂在服务端 → 同一会话累积多条连接 → 事件重复推送。
+        if (wsRef.current === ws) {
+          wsRef.current = null
+        }
 
         // 自动重连（最多 5 次）
         if (reconnectAttempts.current < 5) {
@@ -219,13 +226,20 @@ export function useWebSocket(options: UseWebSocketOptions) {
           break
         }
 
-        case EventType.LLM_CALL_END:
+        case EventType.LLM_CALL_END: {
           if (hasUserCommandRef.current) {
             setAgentStatus("running")
           }
+          const buildingId = buildingMessageId.current
           buildingMessageId.current = null
+          // status=failed（空响应/异常重试路径）：移除本次调用创建的气泡，
+          // 避免残留空气泡；下次 LLM_CALL_START 会创建新气泡
+          if (buildingId && data.status === "failed") {
+            removeMessage(buildingId)
+          }
           clearThinking()
           break
+        }
 
         case EventType.TOOL_CALL_START: {
           const tc: ToolCall = {
@@ -324,6 +338,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
       clearThinking,
       addMessage,
       updateMessage,
+      removeMessage,
       addToolCall,
       updateToolCall,
       addApproval,

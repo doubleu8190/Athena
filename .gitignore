@@ -38,6 +38,7 @@ node_modules/
 dist/
 dist-electron/
 *.local
+desktop/out/
 
 # Logs
 *.log

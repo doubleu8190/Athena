@@ -324,14 +324,15 @@ class AgentWorkflow:
             timestamp=datetime.now(),
         )
         messages_for_harness = history + [user_msg]
+        # 5. 先持久化用户消息（中断恢复关键：run 中途崩溃时用户消息已在库中，
+        #    避免出现没有对应用户消息的孤儿 assistant 消息）
+        await self._db.save_message(user_msg)
         result = await harness.run(
             messages=messages_for_harness,
             session_id=session_id,
             system_prompt=full_system_prompt,
         )
 
-        # 5. 持久化用户消息
-        await self._db.save_message(user_msg)
         # 日志：记录任务分类决策结果（工具使用情况反映分类）
         logger.info(
             "task_classification_result",

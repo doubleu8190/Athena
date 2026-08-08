@@ -248,19 +248,18 @@ def _create_chat_model(
     temperature = config.temperature if config.temperature >= 0 else settings.llm_temperature
     max_tokens = config.max_tokens if config.max_tokens >= 0 else settings.llm_max_tokens
 
-    common_kwargs: dict[str, Any] = {
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "streaming": True,
-    }
-
+    # 注意：各 Provider 的参数名不一致。max_tokens 只对 openai/anthropic 有效；
+    # ChatOllama 用 num_predict（且无 streaming 字段，流式由 .astream() 方法控制），
+    # 直接传 max_tokens/streaming 会被 pydantic 静默忽略，导致 max_tokens 配置不生效。
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
         kwargs: dict[str, Any] = {
             "model": config.model,
             "api_key": config.api_key,
-            **common_kwargs,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "streaming": True,
         }
         if config.base_url:
             kwargs["base_url"] = config.base_url
@@ -272,7 +271,9 @@ def _create_chat_model(
         kwargs = {
             "model": config.model,
             "api_key": config.api_key,
-            **common_kwargs,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "streaming": True,
         }
         if config.base_url:
             kwargs["base_url"] = config.base_url
@@ -281,9 +282,10 @@ def _create_chat_model(
     if provider == "ollama":
         from langchain_ollama import ChatOllama
 
-        kwargs: dict[str, Any] = {
+        kwargs = {
             "model": config.model,
-            **common_kwargs,
+            "temperature": temperature,
+            "num_predict": max_tokens,
         }
         if config.base_url:
             kwargs["base_url"] = config.base_url

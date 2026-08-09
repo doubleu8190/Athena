@@ -25,5 +25,6 @@ class Message(BaseModel):
     content: str = ""
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     tool_call_id: str | None = None
+    run_id: str | None = None  # 所属运行 ID（一次用户请求 ≈ 一个 run），前端按此分组
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime

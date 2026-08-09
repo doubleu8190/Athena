@@ -1,7 +1,8 @@
 import { Bot, User, Wrench, Clock } from "lucide-react"
 import ReactMarkdown from "react-markdown"
-import type { Message, ToolCallInvocation } from "../types"
+import type { Message } from "../types"
 import { ToolCard } from "./ToolCard"
+import { safeStringify } from "../utils/safeStringify"
 import { useChatStore } from "../store/chatStore"
 
 interface MessageBubbleProps {
@@ -38,8 +39,11 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   if (isSystem) {
     return (
       <div className="flex justify-center py-2">
-        <div className="px-3 py-1 rounded-full bg-athena-surface border border-athena-border text-xs text-athena-muted">
-          {message.content}
+        <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-athena-surface border border-athena-border">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-athena-accent border border-athena-accent/40 rounded px-1.5 py-0.5 flex-shrink-0">
+            System
+          </span>
+          <span className="text-xs text-athena-muted">{message.content}</span>
         </div>
       </div>
     )
@@ -80,7 +84,7 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         {!isUser && !isTool && hasToolCalls && (
           <div className="flex flex-col gap-2 w-full">
             {(message.tool_calls ?? []).map((tc) => (
-              <InlineToolCallCard key={tc.id} toolCall={tc} />
+              <ToolCard key={tc.id} toolCall={tc} />
             ))}
           </div>
         )}
@@ -139,33 +143,6 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   )
 }
 
-function InlineToolCallCard({ toolCall }: { toolCall: ToolCallInvocation }) {
-  const argCount = Object.keys(toolCall.args ?? {}).length
-  return (
-    <div className="card overflow-hidden transition-all">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2 bg-athena-bg/50 border-b border-athena-border">
-        <Wrench className="w-4 h-4 text-athena-accent" />
-        <span className="font-mono text-sm font-medium">{toolCall.name}</span>
-        <span className="ml-auto text-xs text-athena-muted">CALLED</span>
-      </div>
-      {/* Body */}
-      {argCount > 0 && (
-        <div className="px-3 py-2">
-          <details className="group">
-            <summary className="cursor-pointer text-xs text-athena-muted hover:text-athena-text select-none">
-              Arguments ({argCount})
-            </summary>
-            <pre className="mt-2 text-xs bg-athena-bg rounded p-2 overflow-x-auto text-athena-text/80 max-h-64 overflow-y-auto">
-              {JSON.stringify(toolCall.args, null, 2)}
-            </pre>
-          </details>
-        </div>
-      )}
-    </div>
-  )
-}
-
 function ToolMessageContent({
   content,
   toolName,
@@ -190,11 +167,11 @@ function ToolMessageContent({
         </div>
       )}
       {parsedContent !== null ? (
-        <pre className="text-xs bg-athena-bg/50 rounded p-2 overflow-x-auto text-athena-text/80">
-          {JSON.stringify(parsedContent, null, 2)}
+        <pre className="text-xs bg-athena-bg/50 rounded p-2 overflow-x-auto overflow-y-auto text-athena-text/80 max-h-[24rem] whitespace-pre-wrap">
+          {safeStringify(parsedContent, 50000)}
         </pre>
       ) : (
-        <span className="text-athena-text/80">{content}</span>
+        <span className="text-athena-text/80 whitespace-pre-wrap">{content}</span>
       )}
     </div>
   )

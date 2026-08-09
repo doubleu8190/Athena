@@ -6,8 +6,8 @@ import asyncio
 import re
 
 from athena.utils.ids import (
-    RunIdGenerator,
     generate_session_id,
+    generate_sub_run_id,
     generate_time_id,
 )
 
@@ -20,24 +20,13 @@ def test_generate_session_id_format():
     assert all(p.isdigit() for p in parts)
 
 
-def test_main_run_id_uses_date_format():
-    RunIdGenerator.reset_counter()
-    rid = RunIdGenerator.generate_main_run_id()
-    assert len(rid) == 8
-    assert rid.isdigit()
-
-
-def test_main_run_id_increments_within_day():
-    RunIdGenerator.reset_counter()
-    r1 = RunIdGenerator.generate_main_run_id()
-    r2 = RunIdGenerator.generate_main_run_id()
-    assert r1 != r2
-    assert "_" in r2  # 第二次运行应带序号后缀
-
-
 def test_sub_run_id_format():
-    sub = RunIdGenerator.generate_sub_run_id("20260730", 1)
-    assert sub == "20260730_1"
+    """子 run_id = "主run_序号"，归组时去掉末尾序号即回到父任务"""
+    main = generate_time_id()
+    sub = generate_sub_run_id(main, 1)
+    assert sub == f"{main}_1"
+    # 主 run_id 本身不含下划线，归组可安全按最后一个 "_" 切分
+    assert sub.rsplit("_", 1)[0] == main
 
 
 # ── generate_time_id 测试 ──

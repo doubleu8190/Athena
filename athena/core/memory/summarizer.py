@@ -54,12 +54,9 @@ class FactExtractor:
 并严格避免与已有记忆重复。
 
 # 输入
-- `incomplete_notice`: 指示对话是否可能未结束的标记（如"对话尚未结束"或空字符串）。
 - `existing_memories`: 之前提取的原子事实与摘要列表。任何与已有记忆语义等价的内容
   都不得再次提取。
 - `conversation_text`: 待提取的对话内容（用户与助手消息）。
-
-incomplete_notice: {incomplete_notice}
 
 existing_memories:
 {existing_memories}
@@ -161,7 +158,7 @@ conversation_text:
     ) -> list[AtomicFact]:
         """使用 LLM 从消息中提取原子事实并写入记忆."""
         existing = await self._fetch_existing_memories(
-            memory_manager, message, session_id
+            memory_manager, message
         )
         facts = await self._extract_facts(message, existing)
         for fact in facts:
@@ -185,14 +182,16 @@ conversation_text:
         self,
         memory_manager: MemoryManager,
         message: str,
-        session_id: str,
         limit: int = 8,
     ) -> str:
-        """检索相关已有记忆，供提示词做语义去重."""
+        """检索相关已有记忆，供提示词做语义去重.
+
+        跨会话召回：与任何会话已建立的记忆做语义比较，避免重复提取。
+        历史上按当前会话过滤会漏掉其它会话已提取的事实，导致同一事实被
+        重复写入记忆库。
+        """
         try:
-            results = await memory_manager.search(
-                query=message, n_results=limit, where={"session_id": session_id}
-            )
+            results = await memory_manager.search(query=message, n_results=limit)
         except Exception as e:
             logger.warning("existing_memory_fetch_failed", error=str(e))
             return "(无已有记忆)"
@@ -215,7 +214,6 @@ conversation_text:
         且 ainvoke 会经过重试管理器（with_structured_output 不会）。
         """
         prompt = self.EXTRACTION_PROMPT.format(
-            incomplete_notice="",
             existing_memories=existing_memories,
             conversation_text=conversation_text,
         )

@@ -1,7 +1,13 @@
-"""Agent 工作流编排 + 子 Agent 管理.
+"""Agent 工作流编排与子 Agent 管理.
 
-- AgentWorkflow.process_message: 处理用户消息的编排入口
-- SubAgentManager: 子 Agent 并行执行管理器
+本模块是 Athena 系统的核心编排层，负责将用户消息路由到合适的执行路径，
+并协调记忆注入、上下文压缩、事实提取、阈值摘要等子系统。
+
+核心组件：
+- ``AgentWorkflow``  — 消息处理的顶层编排入口，串联记忆检索 → Harness 执行
+  → 事实提取 → 阈值摘要的完整流水线。
+- ``SubAgentManager`` — 子 Agent 生命周期管理器，支持串行 / 并行子任务派生，
+  与父级共享工具集与审批队列。
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, MessageRole
 from athena.schemas.events import EventType, build_event
-from athena.utils.ids import RunIdGenerator, generate_time_id
+from athena.utils.ids import generate_sub_run_id, generate_time_id
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -61,7 +67,16 @@ DEFAULT_SYSTEM_PROMPT = """\
 
 
 class SubAgentResult(BaseModel):
-    """子 Agent 执行结果."""
+    """子 Agent 执行结果.
+
+    Attributes:
+        task: 分配给子 Agent 的任务描述。
+        content: 子 Agent 返回的文本内容；执行失败时为空字符串。
+        turn_count: 子 Agent 与 LLM 的交互轮次。
+        tool_results: 子 Agent 调用工具的返回结果列表。
+        error: 错误信息；成功时为 ``None``。
+        run_id: 子 Agent 的运行 ID，格式为 ``"{parent_run_id}_{index}"``。
+    """
 
     task: str
     content: str
@@ -72,10 +87,25 @@ class SubAgentResult(BaseModel):
 
 
 class SubAgentManager:
-    """子 Agent 管理器 - 共享父 ApprovalManager 与工具集.
+    """子 Agent 生命周期管理器。
 
-    project_memory 约束：子 Agent 通过依赖注入共享父 ApprovalManager，
-    以保持顺序审批队列。
+    通过依赖注入共享父级的 LLM、工具集、数据库连接和审批队列，
+    使子 Agent 能够无缝访问父级资源，同时保持独立的运行上下文。
+
+    设计约束：
+        子 Agent 共享父 ``UnifiedToolManager`` 实例，通过 ``allowed_tools``
+        白名单过滤可用工具；共享同一 ``ContextCompressor`` 实例以复用
+        压缩摘要缓冲区。
+
+    Args:
+        llm: LLM 提供者实例。
+        tool_manager: 统一工具管理器（与父级共享）。
+        db: 数据库连接。
+        ws_manager: WebSocket 管理器，用于推送子 Agent 生命周期事件。
+        compressor: 上下文压缩器（与父级共享摘要缓冲区）。
+        memory_manager: 长期记忆管理器。
+        settings: 全局配置。
+        main_run_id: 父级运行 ID，用于生成子 Agent 的 ``sub_run_id``。
     """
 
     def __init__(
@@ -108,14 +138,30 @@ class SubAgentManager:
         max_turns: int = 5,
         stop_signal: asyncio.Event | None = None,
     ) -> SubAgentResult:
-        """创建子 Agent 执行独立任务."""
+        """创建并执行一个子 Agent。
+
+        子 Agent 在独立的 Harness 中运行，拥有自己的 LLM 交互轮次上限，
+        但共享父级的工具集和审批队列。执行完成后通过 WebSocket 推送
+        生命周期事件（启动 / 完成 / 失败）。
+
+        Args:
+            task: 子任务的自然语言描述，直接作为子 Agent 的首轮用户消息。
+            session_id: 当前会话 ID，用于事件推送和消息持久化。
+            allowed_tools: 工具白名单；``None`` 表示不限制，继承父级全部工具。
+            max_turns: 子 Agent 最大 LLM 交互轮次，默认 5。
+            stop_signal: 停止事件，置位时终止子 Agent 执行。
+
+        Returns:
+            ``SubAgentResult``：包含子 Agent 输出内容、轮次数和工具调用结果。
+            执行失败时 ``error`` 字段非空，``content`` 为空字符串。
+        """
         async with self._lock:
             self._sub_counter += 1
             index = self._sub_counter
         sub_run_id = (
-            RunIdGenerator.generate_sub_run_id(self._main_run_id, index)
+            generate_sub_run_id(self._main_run_id, index)
             if self._main_run_id
-            else RunIdGenerator.generate_main_run_id()
+            else generate_time_id()
         )
 
         # 推送子 Agent 启动事件
@@ -150,6 +196,7 @@ class SubAgentManager:
                     "请保持简洁和专注。"
                 ),
                 run_id=sub_run_id,
+                parent_run_id=self._main_run_id,
                 tool_names=allowed_tools,
                 stop_signal=stop_signal,
             )
@@ -197,9 +244,26 @@ class SubAgentManager:
         allowed_tools: list[str] | None = None,
         stop_signal: asyncio.Event | None = None,
     ) -> list[SubAgentResult]:
-        """并行执行多个子任务."""
+        """并行派生并执行多个子 Agent。
+
+        使用 ``asyncio.gather`` 并发调度所有子任务，单个子 Agent 的异常
+        不会影响其余子 Agent 的执行。
+
+        Args:
+            tasks: 子任务描述列表，每个元素对应一个子 Agent。
+            session_id: 当前会话 ID。
+            allowed_tools: 工具白名单，所有子 Agent 共享。
+            stop_signal: 停止事件，置位时终止所有子 Agent。
+
+        Returns:
+            执行结果列表，长度 <= ``len(tasks)``。失败的子 Agent 结果
+            以日志形式记录，不包含在返回值中。
+        """
         results = await asyncio.gather(
-            *[self.spawn(t, session_id, allowed_tools, stop_signal=stop_signal) for t in tasks],
+            *[
+                self.spawn(t, session_id, allowed_tools, stop_signal=stop_signal)
+                for t in tasks
+            ],
             return_exceptions=True,
         )
         out: list[SubAgentResult] = []
@@ -212,7 +276,20 @@ class SubAgentManager:
 
 
 class AgentWorkflow:
-    """Agent 工作流编排入口."""
+    """Agent 工作流编排入口。
+
+    负责将用户消息路由到 Harness 执行引擎，并协调以下子系统：
+
+    - **记忆检索**：从长期记忆中召回与当前消息相关的上下文，注入系统提示。
+    - **上下文压缩**：通过增量摘要控制 LLM 的上下文窗口大小。
+    - **事实提取**：异步从用户消息中提取原子事实，写入长期记忆。
+    - **阈值摘要**：每 N 轮对话触发一次摘要，丰富长期记忆中的对话概览。
+    - **子 Agent 派生**：将可并行的子任务委托给独立的子 Agent 执行。
+
+    生命周期：
+        每次 ``process_message()`` 调用构成一次完整的编排流水线，
+        从记忆注入到结果返回，全程不阻塞主事件循环。
+    """
 
     def __init__(
         self,
@@ -237,11 +314,12 @@ class AgentWorkflow:
         self._fact_extractor = fact_extractor
         self._memory_manager = memory_manager
         self._settings = settings or get_settings()
+        # 每个会话的累计 LLM 交互轮次，用于触发阈值摘要。
         self._turn_counts: dict[str, int] = {}
-        # 会话级 stop_signal（当前 run 的停止事件），供 spawn_sub_agent 工具 handler 透传给子 Agent
+        # 会话级停止事件，由 gateway 层注入，透传给 Harness 及子 Agent。
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
 
-        # 注册 spawn_sub_agent 工具，使 LLM 可通过 tool call 创建子 Agent
+        # 注册 spawn_sub_agent native 工具，使 LLM 可通过 tool call 派生子 Agent。
         if "spawn_sub_agent" not in self._tool_manager._tools:
             self._tool_manager.register_native(
                 name="spawn_sub_agent",
@@ -277,19 +355,32 @@ class AgentWorkflow:
         system_prompt: str | None = None,
         stop_signal: asyncio.Event | None = None,
     ) -> dict[str, Any]:
-        """处理用户消息的编排入口.
+        """处理用户消息的编排入口。
 
-        流程：
-        1. 注入相关记忆
-        2. 调用 Harness 执行
-        3. 异步提取事实
-        4. 触发阈值摘要
-        5. 持久化用户消息
-        6. 返回结果
+        完整流水线：
+        1. 注入相关长期记忆到系统提示。
+        2. 加载历史消息（优先使用摘要 + 增量消息，避免全量加载）。
+        3. 构建系统提示（含记忆上下文）。
+        4. 持久化用户消息（中断恢复保障）。
+        5. 调用 Harness 执行 LLM 交互与工具调用。
+        6. 异步提取事实（不阻塞主流程）。
+        7. 触发阈值摘要（每 N 轮对话自动生成摘要）。
 
         Args:
+            session_id: 会话唯一标识。
+            user_message: 用户输入的原始文本。
+            system_prompt: 自定义系统提示；为 ``None`` 时使用默认三层分类提示。
             stop_signal: 会话级停止事件，由 gateway 层注入，透传给 Harness
-                及子 Agent（任一置位即终止运行）
+                及子 Agent（任一置位即终止运行）。
+
+        Returns:
+            包含以下字段的字典：
+            - ``content`` (str): 助手回复的最终文本内容。
+            - ``run_id`` (str): 本次运行的唯一标识。
+            - ``turn_count`` (int): LLM 交互轮次。
+            - ``tool_results`` (list[dict]): 工具调用结果列表。
+            - ``error`` (str | None): 错误信息；成功时为 ``None``。
+            - ``interrupted`` (bool): 是否因停止信号而中断。
         """
         effective_prompt = DEFAULT_SYSTEM_PROMPT
         self._session_stop_signals[session_id] = stop_signal
@@ -299,25 +390,71 @@ class AgentWorkflow:
             available_tools=self._tool_manager.list_names(),
         )
 
-        # 1. 注入相关记忆
+        # ── Step 1: 记忆检索 ──
+        # 从长期记忆中召回与当前消息相关的上下文，注入系统提示。
         memory_context = ""
         try:
             memory_context = await self._memory_retrieval.get_relevant_memories(
                 user_message=user_message,
-                session_id=session_id,
             )
         except Exception as e:
             logger.warning("memory_injection_failed", error=str(e))
 
-        # 2. 加载历史消息
-        history: list[Message] = await self._db.get_messages(session_id)
+        # ── Step 2: 加载历史消息 ──
+        # 优先使用压缩摘要 + 增量消息，避免随对话增长而全量加载。
+        # 首次压缩由 ContextCompressor 在 Harness 循环中触发并持久化摘要；
+        # 后续调用直接复用已有摘要，只加载压缩点之后的增量消息。
+        session = await self._db.get_session(session_id)
+        compression_summary = session.compression_summary if session else None
+        last_compressed_id = session.last_compressed_message_id if session else None
 
-        # 3. 构建系统提示（含记忆上下文）
+        if compression_summary and last_compressed_id:
+            history_after = await self._db.get_messages_after(
+                session_id, last_compressed_id,
+            )
+            summary_msg = Message(
+                id=generate_time_id(),
+                session_id=session_id,
+                role=MessageRole.SYSTEM,
+                content=f"[对话历史摘要]\n{compression_summary}",
+                metadata={"type": "conversation_summary"},
+                timestamp=datetime.now(),
+            )
+            history: list[Message] = [summary_msg] + history_after
+            logger.info(
+                "history_loaded_with_summary",
+                session_id=session_id,
+                incremental_count=len(history_after),
+            )
+        else:
+            history: list[Message] = await self._db.get_messages(session_id)
+
+        # ── Step 3: 构建系统提示 ──
         full_system_prompt = system_prompt or effective_prompt
         if memory_context:
             full_system_prompt = (full_system_prompt + "\n\n" + memory_context).strip()
 
-        # 4. 调用 Harness
+        # ── Step 4: 生成 run_id 并持久化用户消息 ──
+        # run_id 在持久化之前生成，使用户消息与 steps 共享同一分组键：
+        # 前端据此把工具/步骤按"用户请求"归组；同时避免旧 run_id
+        # 按日期+计数方案在进程重启后同一天重号的问题。
+        rid = generate_time_id()
+
+        # 中断恢复保障：run 中途崩溃时用户消息已在库中，
+        # 避免出现没有对应用户消息的孤儿 assistant 消息。
+        user_msg = Message(
+            id=generate_time_id(),
+            session_id=session_id,
+            role=MessageRole.USER,
+            content=user_message,
+            run_id=rid,
+            metadata={},
+            timestamp=datetime.now(),
+        )
+        await self._db.save_message(user_msg)
+        messages_for_harness = history + [user_msg]
+
+        # ── Step 5: 调用 Harness 执行 LLM 交互与工具调用 ──
         harness = Harness(
             llm=self._llm,
             tool_manager=self._tool_manager,
@@ -326,26 +463,15 @@ class AgentWorkflow:
             ws_manager=self._ws,
             compressor=self._compressor,
         )
-        user_msg = Message(
-            id=generate_time_id(),  # 微秒级时间戳，单调递增且并发安全
-            session_id=session_id,
-            role=MessageRole.USER,
-            content=user_message,
-            metadata={},
-            timestamp=datetime.now(),
-        )
-        messages_for_harness = history + [user_msg]
-        # 5. 先持久化用户消息（中断恢复关键：run 中途崩溃时用户消息已在库中，
-        #    避免出现没有对应用户消息的孤儿 assistant 消息）
-        await self._db.save_message(user_msg)
         result = await harness.run(
             messages=messages_for_harness,
             session_id=session_id,
             system_prompt=full_system_prompt,
+            run_id=rid,
             stop_signal=stop_signal,
         )
 
-        # 日志：记录任务分类决策结果（工具使用情况反映分类）
+        # 工具使用情况反映了三层分类的决策结果，记录用于可观测性。
         logger.info(
             "task_classification_result",
             session_id=session_id,
@@ -355,10 +481,11 @@ class AgentWorkflow:
             interrupted=result.interrupted,
         )
 
-        # 6. 异步提取事实（不阻塞主流程）
+        # ── Step 6: 异步提取事实 ──
+        # 从用户消息中提取原子事实写入长期记忆，不阻塞主流程。
         asyncio.create_task(self._extract_facts_async(user_message, session_id))
 
-        # 7. 触发阈值摘要
+        # ── Step 7: 阈值摘要 ──
         self._turn_counts[session_id] = (
             self._turn_counts.get(session_id, 0) + result.turn_count
         )
@@ -384,7 +511,15 @@ class AgentWorkflow:
         }
 
     async def _extract_facts_async(self, message: str, session_id: str) -> None:
-        """异步提取事实（不阻塞主流程）."""
+        """异步提取用户消息中的原子事实并写入长期记忆。
+
+        作为 ``asyncio.create_task`` 的目标运行，不阻塞主编排流程。
+        提取失败时仅记录警告日志，不影响主流程返回结果。
+
+        Args:
+            message: 用户消息的原始文本。
+            session_id: 当前会话 ID。
+        """
         try:
             await self._fact_extractor.extract(
                 message, session_id, self._memory_manager
@@ -392,19 +527,35 @@ class AgentWorkflow:
         except Exception as e:
             logger.warning("fact_extraction_failed", error=str(e))
 
-    async def _spawn_sub_agent_handler(self, task: str, session_id: str) -> str:
-        """spawn_sub_agent 工具的执行处理器.
+    async def _spawn_sub_agent_handler(
+        self, task: str, session_id: str, parent_run_id: str | None = None
+    ) -> str:
+        """``spawn_sub_agent`` 工具的执行处理器。
 
-        创建子 Agent 执行独立子任务，返回子 Agent 的输出结果。
-        失败时返回错误信息而非抛出异常，使 LLM 可以处理失败情况。
+        作为注册到 ``UnifiedToolManager`` 的 native handler 被 Harness 调用。
+        创建子 Agent 执行独立子任务，返回其输出结果。失败时返回错误信息
+        而非抛出异常，使 LLM 能够感知失败并决定是否重试或降级处理。
+
+        Args:
+            task: 子任务的自然语言描述。
+            session_id: 当前会话 ID。
+            parent_run_id: 父级运行 ID，由工具管理器从调用链注入
+                （Harness 执行工具时携带自身 run_id）。子 Agent 据此生成
+                带父链的 sub_run_id（``"{parent_run_id}_{index}"``），
+                前端可将子任务的步骤归组到父请求下。
+
+        Returns:
+            子 Agent 的输出文本；失败时返回 ``"[SUB-AGENT ERROR] {error}"``；
+            无输出时返回 ``"[SUB-AGENT] Completed with no output."``。
         """
         logger.info(
             "sub_agent_tool_invoked",
             session_id=session_id,
+            parent_run_id=parent_run_id,
             task=task[:200],
         )
         try:
-            manager = self.get_sub_agent_manager()
+            manager = self.get_sub_agent_manager(main_run_id=parent_run_id)
             stop_signal = self._session_stop_signals.get(session_id)
             result = await manager.spawn(
                 task=task, session_id=session_id, stop_signal=stop_signal
@@ -427,7 +578,17 @@ class AgentWorkflow:
             return f"[SUB-AGENT ERROR] {e}"
 
     def get_sub_agent_manager(self, main_run_id: str | None = None) -> SubAgentManager:
-        """获取子 Agent 管理器实例（共享父级依赖）."""
+        """创建子 Agent 管理器实例。
+
+        每次调用返回新实例，共享当前工作流的 LLM、工具集、数据库连接
+        和压缩器等依赖。``main_run_id`` 用于生成子 Agent 的 ``sub_run_id``。
+
+        Args:
+            main_run_id: 父级运行 ID；为 ``None`` 时子 Agent 使用独立的时间戳 ID。
+
+        Returns:
+            配置完成的 ``SubAgentManager`` 实例。
+        """
         return SubAgentManager(
             llm=self._llm,
             tool_manager=self._tool_manager,

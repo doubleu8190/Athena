@@ -583,3 +583,35 @@ async def test_tool_failure_persisted_as_failed(db: Database):
     tool_steps = [s for s in await db.get_steps("s-toolfail") if s.step_type.value == "tool_execution"]
     assert tool_steps
     assert all(s.status.value == "failed" for s in tool_steps)
+
+
+@pytest.mark.asyncio
+async def test_steps_record_parent_run_id(db: Database):
+    """主 run 步骤 parent_run_id 为 None；子 run（带父链）步骤指向父 run."""
+    await db.create_session("s-parent")
+    harness = Harness(
+        llm=LLMProvider(_StreamingTextModel()),
+        tool_manager=UnifiedToolManager(),
+        db=db,
+        harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=2, tool_timeout=5),
+    )
+    # 主 run：不传 parent_run_id
+    await harness.run(
+        messages=[{"role": "user", "content": "main"}],
+        session_id="s-parent",
+        run_id="main_run",
+    )
+    main_steps = await db.get_steps("s-parent")
+    assert main_steps
+    assert all(s.parent_run_id is None for s in main_steps)
+
+    # 子 run：同一 harness 实例传入 parent_run_id
+    await harness.run(
+        messages=[{"role": "user", "content": "sub"}],
+        session_id="s-parent",
+        run_id="main_run_1",
+        parent_run_id="main_run",
+    )
+    sub_steps = [s for s in await db.get_steps("s-parent") if s.run_id == "main_run_1"]
+    assert sub_steps
+    assert all(s.parent_run_id == "main_run" for s in sub_steps)

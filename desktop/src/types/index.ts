@@ -13,6 +13,8 @@ export interface Step {
   step_number: number
   step_type: StepType
   parent_step_id?: string | null
+  /** 父 run ID（子 Agent 步骤指向其父 run；主 run 步骤为 null） */
+  parent_run_id?: string | null
   status: StepStatus
   started_at: string
   completed_at?: string | null
@@ -41,6 +43,8 @@ export interface Message {
   session_id?: string
   tool_name?: string
   tool_call_id?: string
+  /** 所属运行 ID（一次用户请求 ≈ 一个 run），Activity 面板按此归组 */
+  run_id?: string
   /** assistant 回合发起/已落库的工具调用（来自后端 Message.tool_calls） */
   tool_calls?: ToolCallInvocation[]
   metadata?: Record<string, unknown>
@@ -79,7 +83,9 @@ export interface ToolCall {
   output?: string
   error?: string
   risk_level: "low" | "medium" | "high"
+  /** 实时流由 TOOL_CALL_START 事件补全，用于归组 */
   step_id?: string
+  run_id?: string
 }
 
 export interface ToolCallCardData {

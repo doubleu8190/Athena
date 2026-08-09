@@ -91,6 +91,7 @@ def _row_to_message(row: MessageModel) -> Message:
         content=row.content,
         tool_calls=_json_loads(row.tool_calls_json, []),
         tool_call_id=row.tool_call_id,
+        run_id=row.run_id,
         metadata=_json_loads(row.metadata_json, {}),
         timestamp=datetime.fromisoformat(row.timestamp),
     )
@@ -104,6 +105,7 @@ def _row_to_step(row: StepModel) -> Step:
         step_number=row.step_number,
         step_type=StepType(row.step_type),
         parent_step_id=row.parent_step_id,
+        parent_run_id=row.parent_run_id,
         status=StepStatus(row.status),
         started_at=datetime.fromisoformat(row.started_at),
         completed_at=datetime.fromisoformat(row.completed_at) if row.completed_at else None,
@@ -302,6 +304,7 @@ class MessageRepository:
                     content=message.content,
                     tool_calls_json=_json_dumps(message.tool_calls),
                     tool_call_id=message.tool_call_id,
+                    run_id=message.run_id,
                     metadata_json=_json_dumps(message.metadata),
                     timestamp=message.timestamp.isoformat(),
                 )
@@ -369,6 +372,7 @@ class StepRepository:
                     step_number=step.step_number,
                     step_type=step.step_type.value,
                     parent_step_id=step.parent_step_id,
+                    parent_run_id=step.parent_run_id,
                     status=step.status.value,
                     started_at=step.started_at.isoformat(),
                     completed_at=step.completed_at.isoformat() if step.completed_at else None,

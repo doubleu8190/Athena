@@ -404,11 +404,67 @@ async def test_retrieve_ranks_hot_memory_higher():
         memory_manager=_StubMemory(vector_results=[hot, cold], pending={}),
         settings=_make_settings(),
     )
-    results = await mgr.retrieve("query", "s1")
+    results = await mgr.retrieve("query")
     # 阈值修复 canary：旧 0.07 阈值下两者都会被滤掉而返回空
     assert len(results) == 2
     assert results[0].chunk_id == "hot"
     assert results[0].score > results[1].score
+
+
+class _WhereCapturingMemory(_StubMemory):
+    """记录每次检索传入的 where，用于断言检索不再按会话过滤."""
+
+    def __init__(
+        self,
+        vector_results: list[dict[str, Any]],
+        keyword_results: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(vector_results)
+        self._keyword_results = keyword_results or []
+        self.search_wheres: list[dict[str, Any] | None] = []
+        self.keyword_wheres: list[dict[str, Any] | None] = []
+
+    async def search(
+        self, query: str, n_results: int = 5, where: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        self.search_wheres.append(where)
+        return self._vector_results
+
+    async def keyword_search(
+        self, query: str, n_results: int = 10, where: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        self.keyword_wheres.append(where)
+        return self._keyword_results
+
+
+@pytest.mark.asyncio
+async def test_retrieve_is_cross_session_without_session_filter():
+    """跨会话回归：检索不再按 session_id 过滤，其它会话的记忆也可召回."""
+    now = datetime.now().isoformat()
+    other = {
+        "id": "other",
+        "content": "来自其它会话的记忆",
+        "metadata": {
+            "session_id": "other-sess",
+            "created_at": now,
+            "access_count": 0,
+        },
+        "score": 1.0,
+    }
+    mem = _WhereCapturingMemory(vector_results=[other])
+    mgr = HybridRetrievalManager(
+        llm_provider=_StubLLM(),
+        memory_manager=mem,
+        settings=_make_settings(),
+    )
+    results = await mgr.retrieve("query")
+    # 其它会话的记忆未被过滤掉，可被召回
+    assert len(results) == 1
+    assert results[0].chunk_id == "other"
+    assert results[0].metadata.get("session_id") == "other-sess"
+    # 向量/关键词两条路径都不再携带 session 过滤条件
+    assert all(w is None or "session_id" not in w for w in mem.search_wheres)
+    assert all(w is None or "session_id" not in w for w in mem.keyword_wheres)
 
 
 @pytest.mark.asyncio

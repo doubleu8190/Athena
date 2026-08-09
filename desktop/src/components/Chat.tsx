@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Send, Square, Loader2, Sparkles, ChevronDown, ChevronRight, ListChecks, Clock, CheckCircle } from "lucide-react"
+import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
-import { StepCard } from "./StepCard"
 import { ApprovalDialog } from "./ApprovalDialog"
+import { ActivityPanel } from "./ActivityPanel"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
@@ -16,6 +16,7 @@ function Chat({ sendEvent }: ChatProps) {
   const {
     messages,
     steps,
+    toolCalls,
     activeSessionId,
     agentStatus,
     pendingApprovals,
@@ -37,7 +38,7 @@ function Chat({ sendEvent }: ChatProps) {
   const [input, setInput] = useState("")
   const [isSending, setIsSending] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
-  const [showSteps, setShowSteps] = useState(false)
+  const [showActivity, setShowActivity] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const loadingSessionIdRef = useRef<string | null>(null)
@@ -183,6 +184,9 @@ function Chat({ sendEvent }: ChatProps) {
     !thinking?.active &&
     messages.some((m) => m.role === "assistant")
 
+  // 会话完成总结（原 EXECUTION TRACE 的聚合信息）
+  const failedStepCount = steps.filter((s) => s.status === "failed").length
+
   // Format conversation time range
   const conversationTime = (() => {
     if (messages.length === 0) return null
@@ -200,7 +204,9 @@ function Chat({ sendEvent }: ChatProps) {
   })()
 
   // Group messages into phases: user request → processing → response
-  // We iterate through messages and track phase transitions
+  // assistant 消息是否属于"处理中"不再只看 role —— 模型会在工具调用中途输出文本
+  // （如「我来帮你完成…」）并发起纯工具调用回合（content 为空但 tool_calls 有值），
+  // 这些都应归入 AGENT PROCESSING；只有真正的最终答复才标为 AGENT RESPONSE。
   type Phase = "request" | "processing" | "response"
   interface PhaseGroup {
     phase: Phase
@@ -209,17 +215,27 @@ function Chat({ sendEvent }: ChatProps) {
 
   const phaseGroups: PhaseGroup[] = []
   let currentPhase: Phase | null = null
-  for (const msg of messages) {
-    // 跳过无内容的 assistant 消息：工具调用回合模型只发 tool_call 不发文本，
-    // 这类消息渲染为空气泡；其工具结果已由 processing 阶段的 tool 消息展示。
-    if (msg.role === "assistant" && !msg.content.trim()) continue
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]
     let msgPhase: Phase
     if (msg.role === "user") {
       msgPhase = "request"
     } else if (msg.role === "tool") {
       msgPhase = "processing"
+    } else if (msg.role === "assistant") {
+      const hasContent = !!msg.content.trim()
+      const hasToolCalls = (msg.tool_calls?.length ?? 0) > 0
+      const nextIsTool = messages[i + 1]?.role === "tool"
+      // 携带工具调用 / 紧随其后的消息是工具结果 → 处理中；真正的最终答复 → response
+      if (hasToolCalls || nextIsTool) {
+        msgPhase = "processing"
+      } else if (hasContent) {
+        msgPhase = "response"
+      } else {
+        continue // 无内容且无工具调用，跳过空气泡
+      }
     } else {
-      // assistant
+      // system 及其它
       msgPhase = "response"
     }
     if (msgPhase !== currentPhase) {
@@ -235,9 +251,28 @@ function Chat({ sendEvent }: ChatProps) {
   const hasProcessingPhase = phaseGroups.some((g) => g.phase === "processing")
 
   return (
-    <div className="flex-1 flex flex-col h-full min-w-0">
+    <div className="flex-1 flex flex-row h-full min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 relative">
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto">
+        {/* Activity 面板开关(固定悬浮于消息区右上角) */}
+        {(messages.length > 0 || isAgentActive) && (
+          <div className="absolute top-3 right-4 z-10">
+            <button
+              type="button"
+              onClick={() => setShowActivity((v) => !v)}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors ${
+                showActivity
+                  ? "bg-athena-accent/10 border-athena-accent/40 text-athena-accent"
+                  : "bg-athena-surface border-athena-border text-athena-muted hover:text-athena-text hover:bg-athena-bg"
+              }`}
+              title="Toggle activity panel"
+            >
+              <PanelRight className="w-3.5 h-3.5" />
+              Activity
+            </button>
+          </div>
+        )}
         <div className="max-w-3xl mx-auto px-4 py-6">
           {/* Loading History Indicator */}
           {isLoadingHistory && (
@@ -398,9 +433,14 @@ function Chat({ sendEvent }: ChatProps) {
                             <span></span>
                           </div>
                           {thinking?.content && (
-                            <div className="mt-2 text-sm text-athena-text/80 font-mono whitespace-pre-wrap max-h-48 overflow-hidden">
-                              {thinking.content}
-                            </div>
+                            <details className="mt-2" open>
+                              <summary className="cursor-pointer text-xs text-athena-muted hover:text-athena-text select-none">
+                                Thinking details
+                              </summary>
+                              <div className="mt-2 text-sm text-athena-text/80 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
+                                {thinking.content}
+                              </div>
+                            </details>
                           )}
                         </div>
                       </div>
@@ -409,57 +449,17 @@ function Chat({ sendEvent }: ChatProps) {
                 </>
               )}
 
-              {/* Execution Trace */}
-              {!isLoadingHistory && steps.length > 0 && (
-                <>
-                  <div className="phase-divider">
-                    <span className="phase-label phase-trace">
-                      <span className="dot"></span>
-                      EXECUTION TRACE
-                    </span>
-                    <span className="text-xs text-athena-muted font-mono">
-                      {steps.length} step{steps.length !== 1 ? "s" : ""}
-                      {isConversationCompleted && (
-                        <> · total {formatTotalDuration(steps)}</>
-                      )}
-                    </span>
-                  </div>
-
-                  <div className="mb-4">
-                    {/* Collapsed view for active, expandable for both */}
-                    <button
-                      onClick={() => setShowSteps(!showSteps)}
-                      className="flex items-center gap-2 w-full px-3 py-2 rounded-lg bg-athena-surface border border-athena-border hover:bg-athena-bg transition-colors text-sm"
-                    >
-                      <ListChecks className="w-4 h-4 text-athena-muted" />
-                      <span className="font-medium text-athena-text">Execution Steps</span>
-                      <span className="text-xs text-athena-muted ml-1">({steps.length})</span>
-                      <span className="ml-auto text-xs text-athena-muted">
-                        {isConversationCompleted ? "Show details" : showSteps ? "Hide" : "Show details"}
-                      </span>
-                      {showSteps ? (
-                        <ChevronDown className="w-4 h-4 text-athena-muted" />
-                      ) : (
-                        <ChevronRight className="w-4 h-4 text-athena-muted" />
-                      )}
-                    </button>
-                    {showSteps && (
-                      <div className="mt-2 space-y-2">
-                        {steps.map((step) => (
-                          <StepCard key={step.id} step={step} compact={false} />
-                        ))}
-                      </div>
-                    )}
-                    {/* For completed conversations, also show expanded trace by default */}
-                    {isConversationCompleted && !showSteps && (
-                      <div className="mt-2 space-y-2">
-                        {steps.map((step) => (
-                          <StepCard key={step.id} step={step} compact />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </>
+              {/* 会话完成总结 — 原 EXECUTION TRACE 列表移入右侧 Activity 面板，
+                  聊天流仅保留一行聚合信息，避免随任务增长而冗长 */}
+              {isConversationCompleted && steps.length > 0 && (
+                <div className="flex justify-center pt-3">
+                  <span className="text-xs text-athena-muted flex items-center gap-1.5">
+                    <CheckCircle className="w-3.5 h-3.5 text-athena-success" />
+                    Conversation completed · {steps.length} step{steps.length !== 1 ? "s" : ""}
+                    · total {formatTotalDuration(steps)}
+                    {failedStepCount > 0 && <> · {failedStepCount} failed</>}
+                  </span>
+                </div>
               )}
             </>
           )}
@@ -513,6 +513,17 @@ function Chat({ sendEvent }: ChatProps) {
           </p>
         </div>
       </div>
+      </div>
+
+      {/* Activity / Workbench 面板(双视图) */}
+      {showActivity && (
+        <ActivityPanel
+          messages={messages}
+          toolCalls={toolCalls}
+          steps={steps}
+          onClose={() => setShowActivity(false)}
+        />
+      )}
 
       {/* Approval Dialogs */}
       {pendingApprovals.map((approval) => (

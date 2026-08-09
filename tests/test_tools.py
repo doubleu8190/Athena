@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from athena.core.tools.base import MCPTool, NativeTool
@@ -146,3 +148,57 @@ async def test_mcp_tool_object_response_error():
     result = await _make_mcp_tool(client).execute()
     assert result.status == "failed"
     assert result.error == "boom"
+
+
+# ---------------------------------------------------------------------------
+# parent_run_id 运行上下文透传
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_native_tool_receives_parent_run_id_context():
+    """call_tool 应把当前 run_id 作为 parent_run_id 透传给声明该参数的 handler."""
+    received: dict[str, Any] = {}
+
+    async def spawn_handler(task: str, session_id: str, parent_run_id: str | None = None) -> str:
+        received["parent_run_id"] = parent_run_id
+        return f"done:{task}"
+
+    m = UnifiedToolManager()
+    m.register_native(
+        name="spawn_sub_agent",
+        description="spawn sub agent",
+        handler=spawn_handler,
+        parameters={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "session_id": {"type": "string"},
+            },
+            "required": ["task", "session_id"],
+        },
+    )
+    result = await m.call_tool(
+        "spawn_sub_agent",
+        {"task": "t", "session_id": "s"},
+        session_id="s",
+        run_id="20260809_abc",
+    )
+    assert result.status == "success"
+    assert received["parent_run_id"] == "20260809_abc"
+
+
+@pytest.mark.asyncio
+async def test_builtin_tool_ignores_parent_run_id_context(tmp_path):
+    """未声明 parent_run_id 的内置 handler 不应收到上下文注入（无 TypeError）."""
+    (tmp_path / "f.txt").write_text("x")
+    m = UnifiedToolManager()
+    register_builtin_tools(m)
+    result = await m.call_tool(
+        "list_directory",
+        {"path": str(tmp_path)},
+        session_id="s",
+        run_id="20260809_abc",
+    )
+    assert result.status == "success"
+    assert "f.txt" in (result.output or "")

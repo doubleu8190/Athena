@@ -62,20 +62,24 @@ class HybridRetrievalManager:
     async def retrieve(
         self,
         query: str,
-        session_id: str,
         filter_params: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
-        """执行混合检索."""
+        """执行混合检索（默认跨会话全库）.
+
+        长期记忆定位为跨会话召回：不按 session_id 过滤，任何会话沉淀的
+        记忆都可被召回；filter_params 为可选显式过滤（按需传入 category/
+        type 等），产线不传即全库检索。
+        """
         # 1. LLM 查询扩展
         expanded_query = await self._expand_query(query)
 
         # 2. 向量检索
         vector_results = await self._vector_search(
-            expanded_query or query, session_id, filter_params
+            expanded_query or query, filter_params
         )
 
         # 3. 关键词检索
-        keyword_results = await self._keyword_search(query, session_id, filter_params)
+        keyword_results = await self._keyword_search(query, filter_params)
 
         # 4. RRF 融合
         fused = self._reciprocal_rank_fusion(vector_results, keyword_results)
@@ -143,18 +147,14 @@ class HybridRetrievalManager:
     async def _vector_search(
         self,
         query: str,
-        session_id: str,
         filter_params: dict[str, Any] | None,
     ) -> list[SearchResult]:
-        """向量检索."""
-        where = {"session_id": session_id}
-        if filter_params:
-            where.update(filter_params)
+        """向量检索（跨会话全库；filter_params 为可选显式过滤）."""
         try:
             results = await self._memory.search(
                 query=query,
                 n_results=self._top_k * 2,
-                where=where,
+                where=filter_params,
             )
         except Exception as e:
             logger.warning("vector_search_failed", error=str(e))
@@ -181,7 +181,6 @@ class HybridRetrievalManager:
     async def _keyword_search(
         self,
         query: str,
-        session_id: str,
         filter_params: dict[str, Any] | None,
     ) -> list[SearchResult]:
         """关键词检索（SQLite FTS5 MATCH 全文检索）.
@@ -189,12 +188,15 @@ class HybridRetrievalManager:
         通过 MemoryManager.keyword_search() 走 FTS5 虚拟表的 MATCH 操作符，
         tokenize='unicode61' 仅做精确词/整段/前缀召回，不做中文语义分词
         （分词语义由向量检索承担），bm25 算法排序。
+
+        跨会话全库检索：不再按 session_id 过滤，跨会话的关键词命中也参与
+        RRF 融合；filter_params 为可选显式过滤（仅支持 memories 表顶层列）。
         """
         try:
             results = await self._memory.keyword_search(
                 query=query,
                 n_results=self._top_k * 2,
-                where={"session_id": session_id},
+                where=filter_params,
             )
         except Exception as e:
             logger.warning("keyword_search_failed", error=str(e))
@@ -303,14 +305,12 @@ class MemoryRetrievalService:
     async def get_relevant_memories(
         self,
         user_message: str,
-        session_id: str,
     ) -> str:
-        """获取相关记忆并格式化为系统提示."""
+        """获取相关记忆并格式化为系统提示（跨会话召回）."""
         max_tokens = get_settings().memory_max_tokens
         try:
             results = await self._manager.retrieve(
                 query=user_message,
-                session_id=session_id,
             )
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))

@@ -1,9 +1,10 @@
 """标识符生成工具 — 统一的时间格式 ID 生成规范.
 
 - generate_time_id: 通用时间格式 ID（微秒级时间戳），全局公用 ID 生成器。
-  用于消息 ID、工具调用 ID 等需要单调递增的场景。
+  用于消息 ID、工具调用 ID、run_id 等需要单调递增的场景（进程重启也不重号）。
 - session_id: 时间格式字符串（YYYY_MM_DD_HH_MM_SS_mmm），会话级别唯一。
-- run_id: 日期格式字符串（YYYYMMDD），子 Agent 在主 run_id 基础上添加下划线+序号。
+- 子 Agent run_id 在主 run_id 基础上添加下划线+序号（generate_sub_run_id），
+  归组时去掉末尾 "_序号" 即回到父任务。
 """
 
 from __future__ import annotations
@@ -47,33 +48,11 @@ def generate_session_id() -> str:
     return f"{now.strftime('%Y_%m_%d_%H_%M_%S')}_{now.microsecond // 1000:03d}"
 
 
-class RunIdGenerator:
-    """运行 ID 生成器.
+def generate_sub_run_id(main_run_id: str, index: int) -> str:
+    """生成子 Agent run_id.
 
-    主 run_id 采用时间格式字符串（如 20260730），同一天多次运行通过序号补充唯一性。
-    子 Agent run_id 在主 run_id 基础上添加下划线和序号（如 20260730_1）。
+    主 run_id 为 generate_time_id()（20 位微秒时间戳，无下划线），
+    子 run_id = "主run_序号"（如 20260808153000123456_1），
+    前端按 run 归组时去掉末尾 "_序号" 即回到父任务。
     """
-
-    _counter: dict[str, int] = {}  # 按日期计数
-
-    @classmethod
-    def generate_main_run_id(cls) -> str:
-        """生成主 Agent run_id."""
-        today = datetime.now().strftime("%Y%m%d")
-        if today not in cls._counter:
-            cls._counter[today] = 0
-        cls._counter[today] += 1
-
-        if cls._counter[today] == 1:
-            return today
-        return f"{today}_{cls._counter[today]}"
-
-    @classmethod
-    def generate_sub_run_id(cls, main_run_id: str, index: int) -> str:
-        """生成子 Agent run_id."""
-        return f"{main_run_id}_{index}"
-
-    @classmethod
-    def reset_counter(cls) -> None:
-        """重置计数器（测试用）."""
-        cls._counter.clear()
+    return f"{main_run_id}_{index}"

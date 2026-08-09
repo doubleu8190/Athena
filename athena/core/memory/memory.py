@@ -235,7 +235,8 @@ class MemoryManager:
 
         Args:
             content: 记忆文本内容
-            metadata: 附加元数据（须包含 session_id，以及 category/confidence/type 等）
+            metadata: 附加元数据（建议包含 session_id 溯源，以及 category/confidence/type 等；
+                检索不按会话过滤，session_id 仅用于来源追踪）
             pinned: 是否固定（不被 TTL 清理）
 
         Returns:
@@ -321,10 +322,14 @@ class MemoryManager:
     ) -> list[dict[str, Any]]:
         """向量检索记忆（ChromaDB）.
 
+        ChromaDB 定位为长期记忆存储，默认跨会话全库检索：session_id 仅作
+        溯源元数据，不作为检索隔离维度。需要显式缩小范围时才传 where。
+
         Args:
             query: 查询文本
             n_results: 返回结果数量
-            where: ChromaDB 过滤条件（如 {"session_id": "xxx"}）
+            where: 可选过滤条件（ChromaDB metadata 过滤语法，如
+                {"category": "preference"}）；默认 None 即全库检索
         """
         await self.initialize()
 
@@ -389,7 +394,8 @@ class MemoryManager:
         Args:
             query: 查询文本
             n_results: 返回结果数量
-            where: SQL 过滤条件（仅支持 memories 表顶层列，如 {"session_id": "xxx"}）
+            where: 可选 SQL 过滤条件（仅支持 memories 表顶层列，如
+                {"category": "preference"}）；默认 None 即跨会话全库检索
         """
         # 构建 FTS5 MATCH 查询：对查询中的每个词用 OR 连接
         # FTS5 语法：双引号包裹避免特殊字符干扰

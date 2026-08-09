@@ -42,7 +42,7 @@ from athena.models import Message, MessageRole, Step, ToolCallRecord
 from athena.models.step import StepStatus, StepType
 from athena.models.tool import ToolCallStatus
 from athena.schemas.events import EventType, build_event
-from athena.utils.ids import RunIdGenerator, generate_time_id
+from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.message import dict_to_message
@@ -102,6 +102,7 @@ class Harness:
         self._stop_event = asyncio.Event()
         self._stop_signal: asyncio.Event | None = None
         self._allowed_tool_names: set[str] | None = None
+        self._parent_run_id: str | None = None  # 当前 run 的父 run（子 Agent 运行时非空）
         self._register_default_routes()
 
     def _register_default_routes(self) -> None:
@@ -129,6 +130,7 @@ class Harness:
         session_id: str,
         system_prompt: str = "",
         run_id: str | None = None,
+        parent_run_id: str | None = None,
         tool_names: list[str] | None = None,
         stop_signal: asyncio.Event | None = None,
     ) -> HarnessRunResult:
@@ -139,11 +141,14 @@ class Harness:
             session_id: 会话 ID
             system_prompt: 系统提示词
             run_id: 可选 run_id（子 Agent 使用），未提供则生成主 run_id
+            parent_run_id: 父 run_id（子 Agent 运行时指向其父 run；主 run 为 None），
+                写入每个 step，使步骤能显式追溯所属的任务树
             tool_names: 可选工具白名单（子 Agent 使用），None 表示全部工具
             stop_signal: 外部停止信号（会话级 stop 事件），由 gateway 层注入；
                 与 request_stop() 的 _stop_event 等价，任一置位即终止运行
         """
-        rid = run_id or RunIdGenerator.generate_main_run_id()
+        rid = run_id or generate_time_id()
+        self._parent_run_id = parent_run_id
         budget = Budget(
             max_turns=self._harness_settings.max_turns_per_run,
             retry_budget=self._harness_settings.retry_budget,
@@ -361,7 +366,8 @@ class Harness:
                         role=MessageRole.ASSISTANT,
                         content=full_content,
                         tool_calls=final_tc,
-                        metadata={"step_id": llm_step_id, "run_id": rid},
+                        run_id=rid,
+                        metadata={"step_id": llm_step_id},
                         timestamp=datetime.now(),
                     ))
 
@@ -563,6 +569,7 @@ class Harness:
                     role=MessageRole.TOOL,
                     content=tool_content,
                     tool_call_id=tc_id,
+                    run_id=run_id,
                     metadata={
                         "step_id": step_id,
                         "tool_call_record_id": tc_record_id,
@@ -740,6 +747,9 @@ class Harness:
         if self._db is None:
             return
         try:
+            # 步骤显式记录父 run（子 Agent 运行时由 run() 注入）
+            if step.parent_run_id is None:
+                step.parent_run_id = self._parent_run_id
             await self._db.save_step(step)
         except Exception as e:
             logger.error("save_step_failed", error=str(e))

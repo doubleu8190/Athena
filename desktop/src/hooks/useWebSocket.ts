@@ -256,6 +256,9 @@ export function useWebSocket(options: UseWebSocketOptions) {
             status: "running",
             started_at: new Date().toISOString(),
             risk_level: (data.risk_level as "low" | "medium" | "high") ?? "low",
+            // 归组键：step_id → steps.run_id；run_id 直接来自事件
+            step_id: data.step_id as string | undefined,
+            run_id: event.run_id as string | undefined,
           }
           addToolCall(tc)
           break

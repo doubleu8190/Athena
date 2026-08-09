@@ -314,8 +314,6 @@ class AgentWorkflow:
         self._fact_extractor = fact_extractor
         self._memory_manager = memory_manager
         self._settings = settings or get_settings()
-        # 每个会话的累计 LLM 交互轮次，用于触发阈值摘要。
-        self._turn_counts: dict[str, int] = {}
         # 会话级停止事件，由 gateway 层注入，透传给 Harness 及子 Agent。
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
 
@@ -396,6 +394,11 @@ class AgentWorkflow:
         try:
             memory_context = await self._memory_retrieval.get_relevant_memories(
                 user_message=user_message,
+            )
+            logger.info(
+                "memory_injection_success",
+                session_id=session_id,
+                memory_context=memory_context,
             )
         except Exception as e:
             logger.warning("memory_injection_failed", error=str(e))
@@ -483,20 +486,15 @@ class AgentWorkflow:
 
         # ── Step 6: 异步提取事实 ──
         # 从用户消息中提取原子事实写入长期记忆，不阻塞主流程。
-        asyncio.create_task(self._extract_facts_async(user_message, session_id))
+        asyncio.create_task(self._extract_facts_async(user_message, result.content, session_id))
 
-        # ── Step 7: 阈值摘要 ──
-        self._turn_counts[session_id] = (
-            self._turn_counts.get(session_id, 0) + result.turn_count
-        )
+        # ── Step 7: 阈值摘要（增量，按完整轮次触发） ──
+        # summarizer 自行从 DB 加载增量消息，按完整对话轮次边界处理，
+        # 通过 last_summarized_message_id 指针保证每条消息恰好处理一次。
         try:
-            recent_messages = (
-                history[-self._settings.summary_threshold * 2 :] if history else []
-            )
             await self._conversation_summarizer.summarize_if_needed(
                 session_id=session_id,
-                turn_count=self._turn_counts[session_id],
-                messages=recent_messages,
+                db=self._db,
             )
         except Exception as e:
             logger.warning("summary_trigger_failed", error=str(e))
@@ -510,19 +508,29 @@ class AgentWorkflow:
             "interrupted": result.interrupted,
         }
 
-    async def _extract_facts_async(self, message: str, session_id: str) -> None:
-        """异步提取用户消息中的原子事实并写入长期记忆。
+    async def _extract_facts_async(
+        self,
+        user_message: str,
+        assistant_reply: str,
+        session_id: str,
+    ) -> None:
+        """异步提取对话中的原子事实并写入长期记忆。
+
+        将用户消息与助手回复组合为对话文本进行提取，以捕获决策闭环
+        （如用户采纳助手建议的方案）。``user_message`` 单独用于记忆检索
+        的语义查询，确保召回与用户意图相关的已有记忆。
 
         作为 ``asyncio.create_task`` 的目标运行，不阻塞主编排流程。
         提取失败时仅记录警告日志，不影响主流程返回结果。
 
         Args:
-            message: 用户消息的原始文本。
+            user_message: 用户消息的原始文本。
+            assistant_reply: 助手回复的文本内容；为空时退化为仅提取用户消息。
             session_id: 当前会话 ID。
         """
         try:
             await self._fact_extractor.extract(
-                message, session_id, self._memory_manager
+                user_message, assistant_reply, session_id, self._memory_manager,
             )
         except Exception as e:
             logger.warning("fact_extraction_failed", error=str(e))

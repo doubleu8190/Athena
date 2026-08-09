@@ -29,13 +29,14 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 # ---------------------------------------------------------------------------
 
 # 当前 schema 版本号（每次表结构变更时递增）
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # 按版本号排列的迁移 SQL，key 为目标版本号（执行后达到的版本）
 # v1: 初始版本（旧字段名 metadata / tool_calls / arguments，无 deleted_time）
 # v2: 重命名 *_json 列 + 所有表新增 deleted_time + 新增 memories/memory_fts 表
 # v3: messages 表新增 run_id 列（按用户请求/run 归组的前端 join 键）
 # v4: steps 表新增 parent_run_id 列（子 Agent 步骤显式指向其父 run）
+# v5: sessions 表新增 last_summarized_message_id 列（阈值摘要增量指针）
 _MIGRATIONS: dict[int, str] = {
     2: """
     -- ===== sessions 表：重命名 metadata → metadata_json，新增 deleted_time =====
@@ -66,6 +67,10 @@ _MIGRATIONS: dict[int, str] = {
     4: """
     -- ===== steps 表：新增 parent_run_id 列（子 Agent 步骤指向父 run） =====
     ALTER TABLE steps ADD COLUMN parent_run_id TEXT;
+    """,
+    5: """
+    -- ===== sessions 表：新增 last_summarized_message_id 列（阈值摘要增量指针） =====
+    ALTER TABLE sessions ADD COLUMN last_summarized_message_id TEXT;
     """,
 }
 

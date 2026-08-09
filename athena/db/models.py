@@ -30,6 +30,7 @@ class SessionModel(Base):
     # 压缩相关字段（从 metadata_json 拆出）
     compression_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_compressed_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_summarized_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 

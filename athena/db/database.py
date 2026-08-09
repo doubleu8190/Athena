@@ -76,11 +76,13 @@ class Database:
         title: str | None = None,
         compression_summary: str | None = _SENTINEL,
         last_compressed_message_id: str | None = _SENTINEL,
+        last_summarized_message_id: str | None = _SENTINEL,
     ) -> None:
         await self._sessions.update(
             session_id, status=status, run_id=run_id, title=title,
             compression_summary=compression_summary,
             last_compressed_message_id=last_compressed_message_id,
+            last_summarized_message_id=last_summarized_message_id,
         )
 
     async def query_sessions(self, status: list[str]) -> list[Session]:

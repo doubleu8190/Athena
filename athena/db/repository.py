@@ -80,6 +80,7 @@ def _row_to_session(row: SessionModel) -> Session:
         metadata=_json_loads(row.metadata_json, {}),
         compression_summary=row.compression_summary,
         last_compressed_message_id=row.last_compressed_message_id,
+        last_summarized_message_id=row.last_summarized_message_id,
     )
 
 
@@ -210,12 +211,14 @@ class SessionRepository:
         title: str | None = None,
         compression_summary: str | None = _SENTINEL,
         last_compressed_message_id: str | None = _SENTINEL,
+        last_summarized_message_id: str | None = _SENTINEL,
     ) -> None:
         """更新会话字段.
 
         Args:
             compression_summary: 摘要缓冲区文本（None 表示清空，_SENTINEL 表示不更新）
             last_compressed_message_id: 上次压缩的最后一条消息 ID
+            last_summarized_message_id: 上次阈值摘要的最后一条消息 ID
         """
         values: dict[str, Any] = {"updated_at": _now_iso()}
         if status is not None:
@@ -228,6 +231,8 @@ class SessionRepository:
             values["compression_summary"] = compression_summary
         if last_compressed_message_id is not _SENTINEL:
             values["last_compressed_message_id"] = last_compressed_message_id
+        if last_summarized_message_id is not _SENTINEL:
+            values["last_summarized_message_id"] = last_summarized_message_id
 
         async with get_session() as session:
             async with session.begin():

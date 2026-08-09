@@ -41,3 +41,4 @@ class Session(BaseModel):
     # 压缩相关字段
     compression_summary: str | None = None
     last_compressed_message_id: str | None = None
+    last_summarized_message_id: str | None = None

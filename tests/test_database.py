@@ -189,6 +189,6 @@ async def test_migration_v4_adds_parent_run_id(tmp_path):
             cols = [row[1] for row in result.fetchall()]
             assert "parent_run_id" in cols
             result = await conn.execute(text("PRAGMA user_version;"))
-            assert result.scalar() == 4
+            assert result.scalar() == 5
     finally:
         await engine.dispose()

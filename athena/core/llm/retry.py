@@ -301,7 +301,7 @@ class LLMRetryManager:
                     "trying_fallback_provider", provider=type(fallback).__name__
                 )
                 try:
-                    fallback_result = await func(*args, **kwargs)
+                    fallback_result = await fallback.ainvoke(*args, **kwargs)
                     return RetryResult(
                         success=True,
                         result=fallback_result,

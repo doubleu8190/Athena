@@ -1,14 +1,17 @@
-"""Harness 执行引擎 — 自定义 while 循环 + 预算控制 + step 日志 + 事件推送.
+"""Harness 执行引擎 — Agent 运行的核心编排器.
 
-核心职责：
-- 执行 LLM 调用（流式）
-- 编排工具调用（并行执行无依赖工具）
-- 预算控制（maxTurns + retryBudget）
-- 事件流式推送到前端
-- 执行过程日志持久化到 SQLite
+核心职责:
+- 执行 LLM 调用（流式输出，支持超时兜底）
+- 编排工具调用（asyncio.gather 并行执行无依赖工具）
+- 预算控制（max_turns + retry_budget 双重限制）
+- 事件流式推送到前端（WebSocket）
+- 执行过程日志持久化到 SQLite（Step + ToolCallRecord）
 
-project_memory 约束：
-- step_number 在 run_id 范围内全局递增，并行工具调用前预分配序号
+执行流程:
+    用户消息 → LLM 流式调用 → 工具调用（并行） → LLM 再调用 → ... → 终止
+
+project_memory 约束:
+- step_number 在 run_id 范围内全局递增，并行工具调用前预分配序号（避免 race condition）
 - 一次 LLM 调用 = 1 step，一次工具执行 = 1 step
 """
 
@@ -52,7 +55,15 @@ logger = get_logger(__name__)
 
 @dataclass
 class HarnessSettings:
-    """Harness 配置."""
+    """Harness 运行时配置.
+
+    Attributes:
+        max_turns_per_run: 单次 run 的最大 LLM 调用轮次。
+        retry_budget: 工具调用失败后的最大重试次数（工具成功后重置）。
+        tool_timeout: 单个工具调用的超时时间（秒）。
+        llm_stream_timeout: LLM 流式调用的整体超时时间（秒），
+            防止流挂死导致 run 无法终止。
+    """
 
     max_turns_per_run: int = 20
     retry_budget: int = 3
@@ -62,7 +73,17 @@ class HarnessSettings:
 
 @dataclass
 class HarnessRunResult:
-    """单次 Harness 运行结果."""
+    """单次 Harness 运行结果.
+
+    Attributes:
+        content: 最后一轮 LLM 返回的文本内容。
+        run_id: 本次运行的唯一标识。
+        turn_count: 实际 LLM 调用轮次。
+        tool_results: 所有工具调用的结果列表，每项包含
+            tool_name / arguments / output / status / duration_ms / error。
+        error: 错误信息（成功时为 None）。
+        interrupted: 是否因用户停止信号而中断。
+    """
 
     content: str
     run_id: str
@@ -73,7 +94,13 @@ class HarnessRunResult:
 
 
 class Harness:
-    """Agent 执行引擎."""
+    """Agent 执行引擎 — 编排 LLM 调用与工具执行的核心循环.
+
+    典型用法::
+
+        harness = Harness(llm=provider, tool_manager=manager)
+        result = await harness.run(messages=msgs, session_id="s1")
+    """
 
     def __init__(
         self,
@@ -86,6 +113,19 @@ class Harness:
         error_handler: ToolErrorHandler | None = None,
         harness_settings: HarnessSettings | None = None,
     ) -> None:
+        """初始化 Harness 实例.
+
+        Args:
+            llm: LLM Provider，负责模型调用（流式/非流式）。
+            tool_manager: 统一工具管理器，负责工具注册与调用。
+            settings: 全局配置（未提供时从 get_settings() 获取）。
+            db: 数据库实例，用于持久化 Step / Message / ToolCallRecord。
+                None 时跳过所有持久化操作。
+            ws_manager: WebSocket 管理器，用于向前端推送事件。None 时跳过推送。
+            compressor: 上下文压缩器，在每轮 LLM 调用前压缩消息列表。None 时不压缩。
+            error_handler: 工具错误自愈路由器（含熔断器）。未提供时使用默认实例。
+            harness_settings: Harness 运行时配置。未提供时从全局 Settings 派生。
+        """
         self._llm = llm
         self._tool_manager = tool_manager
         self._settings = settings or get_settings()
@@ -102,11 +142,16 @@ class Harness:
         self._stop_event = asyncio.Event()
         self._stop_signal: asyncio.Event | None = None
         self._allowed_tool_names: set[str] | None = None
-        self._parent_run_id: str | None = None  # 当前 run 的父 run（子 Agent 运行时非空）
+        self._parent_run_id: str | None = None
         self._register_default_routes()
 
     def _register_default_routes(self) -> None:
-        """注册默认 Fallback 路由."""
+        """注册默认 Fallback 路由.
+
+        为 exec_shell 工具注册两条路由:
+        - timeout: 自动重试 1 次，timeout 参数翻倍
+        - permission_denied: 升级为用户可见错误（escalate）
+        """
         self._error_handler.register_fallback(
             tool_name="exec_shell",
             on_errors=["timeout", "timed out"],
@@ -136,16 +181,26 @@ class Harness:
     ) -> HarnessRunResult:
         """执行单次 Agent 运行.
 
+        主循环流程: LLM 流式调用 → 工具并行执行 → LLM 再调用 → ...
+        终止条件: LLM 无工具调用 / 预算超限 / 停止信号 / 异常。
+
         Args:
-            messages: 对话历史（含最新用户消息）
-            session_id: 会话 ID
-            system_prompt: 系统提示词
-            run_id: 可选 run_id（子 Agent 使用），未提供则生成主 run_id
+            messages: 对话历史（含最新用户消息）。支持 Message 对象或 dict 格式。
+            session_id: 会话 ID，用于关联 Step / Message / 事件推送。
+            system_prompt: 系统提示词，作为第一条 SystemMessage 注入。
+            run_id: 可选 run_id（子 Agent 使用），未提供则自动生成。
             parent_run_id: 父 run_id（子 Agent 运行时指向其父 run；主 run 为 None），
-                写入每个 step，使步骤能显式追溯所属的任务树
-            tool_names: 可选工具白名单（子 Agent 使用），None 表示全部工具
+                写入每个 step，使步骤能显式追溯所属的任务树。
+            tool_names: 可选工具白名单（子 Agent 使用），None 表示允许全部工具。
             stop_signal: 外部停止信号（会话级 stop 事件），由 gateway 层注入；
-                与 request_stop() 的 _stop_event 等价，任一置位即终止运行
+                与 request_stop() 的 _stop_event 等价，任一置位即终止运行。
+
+        Returns:
+            HarnessRunResult，包含最终文本、run_id、轮次、工具结果、错误和中断状态。
+
+        Raises:
+            BudgetExceeded: 预算超限且无剩余重试次数时抛出。
+            Exception: 未预期的执行异常（会被捕获并记录到 error 字段）。
         """
         rid = run_id or generate_time_id()
         self._parent_run_id = parent_run_id
@@ -456,130 +511,159 @@ class Harness:
         run_id: str,
         tool_results_all: list[dict[str, Any]],
     ) -> list[ToolMessage]:
-        """并行执行所有工具调用，同时记录日志与推送事件."""
+        """并行执行所有工具调用，同时记录日志与推送事件.
+
+        使用 asyncio.gather 并行执行，每个工具调用独立创建 Step 和
+        ToolCallRecord 记录。单个工具的异常不会影响其他工具执行。
+
+        Args:
+            tool_step_starts: 预分配的工具执行计划，每项为
+                (step_number, step_id, tool_call_dict)。
+            parent_step_id: 父 LLM 调用的 step_id，用于建立步骤层级关系。
+            session_id: 会话 ID。
+            run_id: 运行 ID。
+            tool_results_all: 累积工具结果的列表（原地追加）。
+
+        Returns:
+            ToolMessage 列表，按输入顺序排列，用于追加到 LLM 消息上下文。
+        """
 
         async def _execute_one(
             step_number: int, step_id: str, tc: dict[str, Any]
         ) -> ToolMessage:
+            """执行单个工具调用的完整生命周期: 创建记录 → 执行 → 更新状态 → 推送事件.
+
+            异常会被内部捕获并转换为 ToolMessage 错误响应，确保不会中断
+            asyncio.gather 中的其他工具执行。
+            """
             tool_name = tc.get("name", "")
             args = tc.get("args", {}) or tc.get("arguments", {}) or {}
             tc_id = tc.get("id", generate_time_id())
 
-            # 创建 tool_execution step
-            await self._save_step(Step(
-                id=step_id,
-                session_id=session_id,
-                run_id=run_id,
-                step_number=step_number,
-                step_type=StepType.TOOL_EXECUTION,
-                parent_step_id=parent_step_id,
-                status=StepStatus.RUNNING,
-                started_at=datetime.now(),
-            ))
-
-            # 创建 tool_call 记录
-            tc_record_id = generate_time_id()
-            if self._db is not None:
-                await self._db.save_tool_call(ToolCallRecord(
-                    id=tc_record_id,
+            try:
+                # 创建 tool_execution step
+                await self._save_step(Step(
+                    id=step_id,
                     session_id=session_id,
-                    step_id=step_id,
-                    tool_name=tool_name,
-                    arguments=args,
-                    status=ToolCallStatus.RUNNING,
+                    run_id=run_id,
+                    step_number=step_number,
+                    step_type=StepType.TOOL_EXECUTION,
+                    parent_step_id=parent_step_id,
+                    status=StepStatus.RUNNING,
                     started_at=datetime.now(),
                 ))
 
-            await self._emit(
-                EventType.TOOL_CALL_START,
-                {
-                    "tool_call_id": tc_record_id,
-                    "step_id": step_id,
-                    "tool_name": tool_name,
-                    "arguments": args,
-                },
-                session_id,
-                run_id,
-            )
+                # 创建 tool_call 记录
+                tc_record_id = generate_time_id()
+                if self._db is not None:
+                    await self._db.save_tool_call(ToolCallRecord(
+                        id=tc_record_id,
+                        session_id=session_id,
+                        step_id=step_id,
+                        tool_name=tool_name,
+                        arguments=args,
+                        status=ToolCallStatus.RUNNING,
+                        started_at=datetime.now(),
+                    ))
 
-            start_time = time.time()
-            result_content, status, error_msg, error_stack = await self._execute_single_tool(
-                tool_name=tool_name,
-                args=args,
-                session_id=session_id,
-                run_id=run_id,
-                tool_call_id=tc_record_id,
-            )
-            duration_ms = (time.time() - start_time) * 1000
+                await self._emit(
+                    EventType.TOOL_CALL_START,
+                    {
+                        "tool_call_id": tc_record_id,
+                        "step_id": step_id,
+                        "tool_name": tool_name,
+                        "arguments": args,
+                    },
+                    session_id,
+                    run_id,
+                )
 
-            # 更新 tool_call 记录
-            if self._db is not None:
-                await self._db.update_tool_call(tc_record_id, {
-                    "raw_output": result_content if status == "success" else None,
-                    "status": status,
+                start_time = time.time()
+                result_content, status, error_msg, error_stack = await self._execute_single_tool(
+                    tool_name=tool_name,
+                    args=args,
+                    session_id=session_id,
+                    run_id=run_id,
+                    tool_call_id=tc_record_id,
+                )
+                duration_ms = (time.time() - start_time) * 1000
+
+                # 更新 tool_call 记录
+                if self._db is not None:
+                    await self._db.update_tool_call(tc_record_id, {
+                        "raw_output": result_content if status == "success" else None,
+                        "status": status,
+                        "completed_at": datetime.now().isoformat(),
+                        "duration_ms": duration_ms,
+                        "error_message": error_msg,
+                        "error_stack": error_stack,
+                    })
+
+                # 更新 tool_execution step
+                await self._update_step(step_id, {
+                    "status": str(StepStatus.COMPLETED) if status == "success" else str(StepStatus.FAILED),
                     "completed_at": datetime.now().isoformat(),
                     "duration_ms": duration_ms,
                     "error_message": error_msg,
-                    "error_stack": error_stack,
                 })
 
-            # 更新 tool_execution step
-            await self._update_step(step_id, {
-                "status": str(StepStatus.COMPLETED) if status == "success" else str(StepStatus.FAILED),
-                "completed_at": datetime.now().isoformat(),
-                "duration_ms": duration_ms,
-                "error_message": error_msg,
-            })
-
-            await self._emit(
-                EventType.TOOL_CALL_END,
-                {
-                    "tool_call_id": tc_record_id,
-                    "tool_name": tool_name,
-                    "status": status,
-                    "output": result_content if status == "success" else None,
-                    "error": error_msg,
-                    "duration_ms": duration_ms,
-                },
-                session_id,
-                run_id,
-            )
-
-            tool_results_all.append({
-                "tool_name": tool_name,
-                "arguments": args,
-                "output": result_content,
-                "status": status,
-                "duration_ms": duration_ms,
-                "error": error_msg,
-            })
-
-            # 失败时把错误详情回传给 LLM，使其能据此自愈
-            # （_execute_single_tool 失败返回的 result_content 只有占位符，
-            #   真正的 err_msg 仅在 error_message 里，不带上则 LLM 拿到空诊断）
-            tool_content = result_content
-            if status != "success" and error_msg:
-                tool_content = f"[工具 {tool_name} 失败]: {error_msg}"
-
-            # 持久化 tool 消息
-            if self._db is not None:
-                await self._db.save_message(Message(
-                    id=generate_time_id(),
-                    session_id=session_id,
-                    role=MessageRole.TOOL,
-                    content=tool_content,
-                    tool_call_id=tc_id,
-                    run_id=run_id,
-                    metadata={
-                        "step_id": step_id,
-                        "tool_call_record_id": tc_record_id,
-                        # 前端据此给工具气泡标名（避免跨表 join）
+                await self._emit(
+                    EventType.TOOL_CALL_END,
+                    {
+                        "tool_call_id": tc_record_id,
                         "tool_name": tool_name,
+                        "status": status,
+                        "output": result_content if status == "success" else None,
+                        "error": error_msg,
+                        "duration_ms": duration_ms,
                     },
-                    timestamp=datetime.now(),
-                ))
+                    session_id,
+                    run_id,
+                )
 
-            return ToolMessage(content=tool_content, tool_call_id=tc_id)
+                tool_results_all.append({
+                    "tool_name": tool_name,
+                    "arguments": args,
+                    "output": result_content,
+                    "status": status,
+                    "duration_ms": duration_ms,
+                    "error": error_msg,
+                })
+
+                # 失败时把错误详情回传给 LLM，使其能据此自愈
+                # （_execute_single_tool 失败返回的 result_content 只有占位符，
+                #   真正的 err_msg 仅在 error_message 里，不带上则 LLM 拿到空诊断）
+                tool_content = result_content
+                if status != "success" and error_msg:
+                    tool_content = f"[工具 {tool_name} 失败]: {error_msg}"
+
+                # 持久化 tool 消息
+                if self._db is not None:
+                    await self._db.save_message(Message(
+                        id=generate_time_id(),
+                        session_id=session_id,
+                        role=MessageRole.TOOL,
+                        content=tool_content,
+                        tool_call_id=tc_id,
+                        run_id=run_id,
+                        metadata={
+                            "step_id": step_id,
+                            "tool_call_record_id": tc_record_id,
+                            # 前端据此给工具气泡标名（避免跨表 join）
+                            "tool_name": tool_name,
+                        },
+                        timestamp=datetime.now(),
+                    ))
+
+                return ToolMessage(content=tool_content, tool_call_id=tc_id)
+
+            except Exception as e:
+                # 捕获未处理异常，保留原始 tc_id 以便 LLM 关联 tool_call → tool_message
+                logger.error("tool_execution_failed", tool=tool_name, error=str(e))
+                return ToolMessage(
+                    content=f"[工具执行异常] {e}",
+                    tool_call_id=tc_id,
+                )
 
         # 并行执行
         tasks = [
@@ -591,9 +675,11 @@ class Harness:
         tool_messages: list[ToolMessage] = []
         for r in results:
             if isinstance(r, BaseException):
-                logger.error("tool_execution_failed", error=str(r))
+                # 理论上不应到达这里（_execute_one 已内部捕获），
+                # 但保留防御性处理以防 gather 本身出错（如 CancelledError）
+                logger.error("tool_task_failed", error=str(r))
                 tool_messages.append(ToolMessage(
-                    content=f"[工具执行异常] {r}",
+                    content=f"[工具任务异常] {r}",
                     tool_call_id=generate_time_id(),
                 ))
             elif isinstance(r, ToolMessage):
@@ -608,9 +694,27 @@ class Harness:
         run_id: str,
         tool_call_id: str,
     ) -> tuple[str, str, str | None, str | None]:
-        """执行单个工具，失败时尝试自愈.
+        """执行单个工具调用，失败时通过 Fallback 路由表尝试自愈.
 
-        project_memory 约束：自愈路由器集成到本方法，工具失败时先查 Fallback 路由表。
+        自愈流程:
+        1. 白名单校验（子 Agent 防御性拒绝）
+        2. 执行工具（带超时）
+        3. 失败时查 Fallback 路由 → retry / alternate / passthrough / escalate
+        4. 熔断器打开时直接返回失败
+
+        Args:
+            tool_name: 工具名称。
+            args: 工具调用参数。
+            session_id: 会话 ID。
+            run_id: 运行 ID。
+            tool_call_id: 工具调用记录 ID。
+
+        Returns:
+            四元组 ``(result_content, status, error_msg, error_stack)``:
+            - result_content: 工具输出文本（成功）或错误描述（失败）。
+            - status: "success" / "failed" / "denied"。
+            - error_msg: 错误信息（成功时为 None）。
+            - error_stack: 错误堆栈（成功时为 None）。
         """
         # 子 Agent 工具白名单校验：白名单外的工具一律拒绝执行（防御模型误调）
         if (
@@ -652,11 +756,12 @@ class Harness:
                 last_error = e
                 self._error_handler.record_result(tool_name, success=False)
 
-                # 熔断器打开 → 直接抛出
+                # 熔断器三态: CLOSED → OPEN（失败率达阈值）→ HALF_OPEN（超时后探测）
+                # OPEN 状态下直接跳过 Fallback，返回失败
                 if self._error_handler.is_circuit_open(tool_name):
                     break
 
-                # 查找 Fallback 路由
+                # 查找 Fallback 路由（按 tool_name + error 关键词匹配）
                 fallback = self._error_handler.get_fallback(tool_name, e)
                 if fallback is None:
                     break
@@ -703,8 +808,17 @@ class Harness:
     ) -> tuple[str, list[dict[str, Any]]]:
         """合并流式 chunk，提取完整 content 与 tool_calls.
 
-        langchain 的 AIMessageChunk.__add__ 会拼接文本分片并累加 tool_call
-        的 args JSON 分片，比手动拼装可靠。空流时回退到已累积的 full_content。
+        利用 langchain 的 AIMessageChunk.__add__ 拼接文本分片并累加 tool_call
+        的 args JSON 分片，比手动拼装可靠。空流时回退到已累积的 fallback_content。
+
+        Args:
+            stream_chunks: LLM 流式返回的 AIMessageChunk 列表。
+            fallback_content: 流为空时的回退文本（来自已累积的 full_content）。
+
+        Returns:
+            二元组 ``(content, tool_calls)``:
+            - content: 合并后的完整文本内容。
+            - tool_calls: 归一化后的工具调用列表，每项含 id / name / args。
         """
         if not stream_chunks:
             return fallback_content, []
@@ -719,7 +833,17 @@ class Harness:
     def _normalize_tool_calls(
         tool_calls: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """将 langchain tool_calls 归一化为内部格式."""
+        """将 langchain tool_calls 归一化为统一的内部格式.
+
+        统一处理 langchain 不同版本的字段差异（args vs arguments），
+        并为缺失 id 的工具调用自动生成。
+
+        Args:
+            tool_calls: langchain 返回的原始 tool_calls 列表。
+
+        Returns:
+            归一化后的列表，每项包含 id / name / args 三个字段。
+        """
         return [
             {
                 "id": tc.get("id", generate_time_id()),
@@ -734,16 +858,32 @@ class Harness:
     # ------------------------------------------------------------------
 
     def request_stop(self) -> None:
-        """请求停止当前运行（优雅退出）."""
+        """请求停止当前运行（优雅退出）.
+
+        设置内部停止事件，主循环在下一个检查点检测到后终止。
+        与外部 stop_signal 等价，任一置位即终止。
+        """
         self._stop_event.set()
 
     def _should_stop(self) -> bool:
-        """是否应停止：内部 request_stop() 或外部 stop_signal 任一置位."""
+        """检查是否应停止运行.
+
+        Returns:
+            True 表示内部 request_stop() 或外部 stop_signal 任一已置位。
+        """
         return self._stop_event.is_set() or bool(
             self._stop_signal is not None and self._stop_signal.is_set()
         )
 
     async def _save_step(self, step: Step) -> None:
+        """持久化步骤记录到数据库.
+
+        自动注入 parent_run_id（子 Agent 运行时由 run() 设置）。
+        db 为 None 时静默跳过；异常仅记录日志，不向上抛出。
+
+        Args:
+            step: 待持久化的 Step 实例。
+        """
         if self._db is None:
             return
         try:
@@ -755,6 +895,12 @@ class Harness:
             logger.error("save_step_failed", error=str(e))
 
     async def _update_step(self, step_id: str, updates: dict[str, Any]) -> None:
+        """更新已有步骤记录的部分字段.
+
+        Args:
+            step_id: 步骤 ID。
+            updates: 待更新的字段字典，键为字段名，值为新值。
+        """
         if self._db is None:
             return
         try:
@@ -769,6 +915,16 @@ class Harness:
         session_id: str,
         run_id: str,
     ) -> None:
+        """向前端推送事件（WebSocket）.
+
+        ws_manager 为 None 时静默跳过；异常仅记录警告日志，不向上抛出。
+
+        Args:
+            event_type: 事件类型枚举。
+            data: 事件数据字典。
+            session_id: 会话 ID。
+            run_id: 运行 ID。
+        """
         if self._ws is None:
             return
         try:
@@ -789,13 +945,22 @@ class Harness:
         tool_calls_count: int = 0,
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> None:
-        """推送 LLM 调用结束事件（status: completed / failed）.
+        """推送 LLM 调用结束事件.
 
-        前端据此结束流式气泡：status=failed 时移除本次调用创建的无内容
+        前端据此结束流式气泡: status=failed 时移除本次调用创建的无内容
         building 气泡，避免空响应/异常重试路径在界面上残留空气泡。
         成功路径与失败路径都必须调用，保证事件生命周期成对。
         纯工具调用回合（无文本）通过 tool_calls 把工具名/参数带给前端，
         使其与历史视图一致地展示该回合的工具卡片。
+
+        Args:
+            step_id: LLM 调用步骤 ID。
+            status: "completed" 或 "failed"。
+            session_id: 会话 ID。
+            run_id: 运行 ID。
+            duration_ms: 调用耗时（毫秒）。
+            tool_calls_count: 工具调用数量。
+            tool_calls: 工具调用详情列表（含 name / args），用于前端展示。
         """
         await self._emit(
             EventType.LLM_CALL_END,
@@ -811,7 +976,17 @@ class Harness:
         )
 
     def _estimate_tokens(self, messages: list[BaseMessage]) -> int:
-        """粗略估算 token 数（project_memory: len/4 回退方案）."""
+        """粗略估算消息列表的 token 数.
+
+        使用 ``len(content) // 4`` 作为近似值（中文约 1 字 ≈ 2~3 token，
+        英文约 4 字符 ≈ 1 token，取折中值）。不使用 tiktoken 以避免额外依赖。
+
+        Args:
+            messages: 消息列表，支持 BaseMessage 和 dict 两种格式。
+
+        Returns:
+            估算的总 token 数。
+        """
         total = 0
         for m in messages:
             if isinstance(m, BaseMessage):

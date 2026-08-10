@@ -1,20 +1,19 @@
 """LLM 调用重试策略 — 指数退避 + 错误分类 + 多级故障转移.
 
-错误分类：
-- TRANSIENT: 网络超时、连接重置 → 可重试
-- RATE_LIMITED: API 限流 (429) → 需冷却等待
-- CONTEXT_OVERFLOW: 上下文超长 → 需压缩上下文
-- MODEL_MISBEHAVIOR: 模型返回无效格式 → 切换模型
-- PERMANENT: 无效 API Key、计费问题 → 不可恢复
+核心组件:
+- ErrorCategory: 错误语义化分类（TRANSIENT / RATE_LIMITED / CONTEXT_OVERFLOW /
+  MODEL_MISBEHAVIOR / PERMANENT / UNKNOWN）
+- retry_with_backoff(): 通用指数退避重试函数
+- LLMRetryManager: 封装多级故障转移逻辑的管理器
 
-重试参数：
+重试参数默认值:
 - max_attempts=3, min_delay_ms=2000, max_delay_ms=30000, jitter=0.1
 - timeout_ms=60000
 
-多级故障转移：
-- 阶段 1: 同模型重试（指数退避）
-- 阶段 2: 换模型（如果配置了 fallbacks）
-- 阶段 3: 安全模式（移除工具，简化提示）
+多级故障转移策略（LLMRetryManager）:
+1. 同模型重试（指数退避）
+2. 换模型（遍历 fallback_providers，仅可恢复错误类别触发）
+3. 返回最终失败结果
 """
 
 from __future__ import annotations
@@ -37,19 +36,46 @@ logger = get_logger(__name__)
 
 
 class ErrorCategory(StrEnum):
-    """LLM 调用错误分类."""
+    """LLM 调用错误分类.
+
+    根据错误的可恢复性进行语义化分类，决定重试策略：
+    - TRANSIENT / RATE_LIMITED / MODEL_MISBEHAVIOR: 可重试
+    - CONTEXT_OVERFLOW / PERMANENT: 不可重试，快速失败
+    """
 
     TRANSIENT = "transient"
+    """网络超时、连接重置等瞬态错误，可重试。"""
+
     RATE_LIMITED = "rate_limited"
+    """API 限流 (429)，需冷却等待后重试。"""
+
     CONTEXT_OVERFLOW = "context_overflow"
+    """上下文超长，需压缩上下文而非重试。"""
+
     MODEL_MISBEHAVIOR = "model_misbehavior"
+    """模型返回无效格式，可重试或切换模型。"""
+
     PERMANENT = "permanent"
+    """无效 API Key、计费问题等永久错误，不可恢复。"""
+
     UNKNOWN = "unknown"
+    """未分类错误，默认按可重试处理。"""
 
 
 @dataclass
 class RetryConfig:
-    """重试配置."""
+    """重试配置.
+
+    控制指数退避重试的行为参数。延迟计算公式:
+        delay = min(min_delay_ms * 2^attempt, max_delay_ms) + jitter
+
+    Attributes:
+        max_attempts: 最大重试次数（含首次调用）。
+        min_delay_ms: 首次重试的最小延迟（毫秒）。
+        max_delay_ms: 延迟上限（毫秒），防止指数退避无限增长。
+        jitter: 随机抖动系数 (0~1)，避免重试风暴。实际抖动 = delay * jitter * random()。
+        timeout_ms: 整个重试流程的总超时时间（毫秒）。
+    """
 
     max_attempts: int = 3
     min_delay_ms: int = 2000
@@ -58,7 +84,7 @@ class RetryConfig:
     timeout_ms: int = 60000
 
 
-# 各错误类别的默认重试配置
+# 各错误类别的默认重试配置；None 表示该类别不可重试
 RETRY_CONFIGS: dict[ErrorCategory, RetryConfig | None] = {
     ErrorCategory.TRANSIENT: RetryConfig(
         max_attempts=3, min_delay_ms=2000, max_delay_ms=30000
@@ -78,7 +104,17 @@ RETRY_CONFIGS: dict[ErrorCategory, RetryConfig | None] = {
 
 
 def categorize_error(error: Exception) -> ErrorCategory:
-    """对异常进行语义化分类."""
+    """对异常进行语义化分类，决定重试策略.
+
+    分类优先级：TRANSIENT > RATE_LIMITED > CONTEXT_OVERFLOW >
+    MODEL_MISBEHAVIOR > PERMANENT > UNKNOWN。
+
+    Args:
+        error: 待分类的异常实例。
+
+    Returns:
+        错误类别枚举值。
+    """
     error_str = str(error).lower()
     error_type = type(error).__name__.lower()
 
@@ -116,7 +152,18 @@ def categorize_error(error: Exception) -> ErrorCategory:
 
 
 def get_retry_after(error: Exception) -> float | None:
-    """从 HTTP 错误中提取 retry-after 头."""
+    """从 HTTP 错误中提取 retry-after 头，用于覆盖默认退避延迟.
+
+    支持两种 header 格式:
+    - ``retry-after``: 秒数（标准 HTTP header）
+    - ``retry-after-ms``: 毫秒数（部分 API 扩展）
+
+    Args:
+        error: HTTP 相关异常，需具有 ``response.headers`` 属性。
+
+    Returns:
+        建议等待秒数（上限 60s），无法提取时返回 None。
+    """
     if hasattr(error, "response"):
         response = getattr(error, "response", None)
         if response and hasattr(response, "headers"):
@@ -136,7 +183,16 @@ def get_retry_after(error: Exception) -> float | None:
 
 @dataclass
 class RetryResult:
-    """重试结果."""
+    """重试结果.
+
+    Attributes:
+        success: 是否最终成功。
+        result: 成功时的 LLM 响应消息。
+        error: 失败时的最后一次异常。
+        attempts: 实际尝试次数（含首次调用）。
+        total_duration_ms: 整个重试流程的总耗时（毫秒）。
+        error_category: 最后一次失败的错误类别。
+    """
 
     success: bool
     result: BaseMessage | None = None
@@ -147,23 +203,31 @@ class RetryResult:
 
 
 async def retry_with_backoff(
-    func,
-    *args,
+    func: Callable[..., Awaitable[Any]],
+    *args: Any,
     retry_config: RetryConfig | None = None,
     error_category: ErrorCategory | None = None,
-    on_retry: Callable[..., Awaitable[None]] | None = None,
-    **kwargs,
+    on_retry: Callable[[int, Exception, float], Awaitable[None]] | None = None,
+    **kwargs: Any,
 ) -> RetryResult:
-    """执行函数，失败时使用指数退避重试.
+    """执行异步函数，失败时使用指数退避重试.
+
+    延迟计算: ``delay = min(min_delay_ms * 2^attempt, max_delay_ms) + jitter``。
+    若异常携带 HTTP retry-after header，优先使用该值。
+    不可重试的错误类别（CONTEXT_OVERFLOW / PERMANENT）立即返回失败。
 
     Args:
-        func: 异步函数
-        retry_config: 重试配置（默认根据 error_category 查找）
-        error_category: 错误类别（用于查找默认配置）
-        on_retry: 重试回调(attempt, error, delay)
+        func: 待执行的异步函数。
+        *args: 传递给 func 的位置参数。
+        retry_config: 重试配置。未提供时根据 error_category 从 RETRY_CONFIGS 查找；
+            若也无对应配置，默认 max_attempts=1（不重试）。
+        error_category: 错误类别，用于查找默认重试配置。
+        on_retry: 每次重试前的回调 ``(attempt, error, delay_s) -> None``。
+            未提供时使用默认 logger.warning 回调。
+        **kwargs: 传递给 func 的关键字参数。
 
     Returns:
-        RetryResult 包含成功/失败状态和详细信息
+        RetryResult，包含成功/失败状态、结果或异常、尝试次数和总耗时。
     """
     if retry_config is None and error_category is not None:
         retry_config = RETRY_CONFIGS.get(error_category)
@@ -204,7 +268,7 @@ async def retry_with_backoff(
             last_error = e
             category = categorize_error(e)
 
-            # 不可重试的错误
+            # 不可重试的错误类别（CONTEXT_OVERFLOW / PERMANENT）立即返回
             if RETRY_CONFIGS.get(category) is None:
                 total_duration = (time.time() * 1000) - start_time
                 return RetryResult(
@@ -215,7 +279,7 @@ async def retry_with_backoff(
                     error_category=category,
                 )
 
-            # 检查总超时
+            # 总超时检查：防止重试循环耗时超过 timeout_ms
             elapsed_ms = (time.time() * 1000) - start_time
             if elapsed_ms >= retry_config.timeout_ms:
                 total_duration = elapsed_ms
@@ -227,14 +291,16 @@ async def retry_with_backoff(
                     error_category=category,
                 )
 
-            # 计算延迟
+            # 计算退避延迟：优先使用 HTTP retry-after header，否则指数退避 + jitter
             if attempt < retry_config.max_attempts - 1:
                 retry_after = get_retry_after(e)
                 if retry_after:
                     delay_s = retry_after
                 else:
+                    # 指数退避: base = min_delay * 2^attempt，上限 max_delay
                     base_delay_ms = retry_config.min_delay_ms * (2**attempt)
                     delay_ms = min(base_delay_ms, retry_config.max_delay_ms)
+                    # 随机抖动防止多客户端同时重试形成"惊群效应"
                     jitter_ms = delay_ms * retry_config.jitter * random.random()
                     delay_s = (delay_ms + jitter_ms) / 1000
 
@@ -255,29 +321,49 @@ async def retry_with_backoff(
 
 
 class LLMRetryManager:
-    """LLM 重试管理器 — 封装重试逻辑供 LLMProvider 使用."""
+    """LLM 重试管理器 — 封装重试与多级故障转移逻辑供 LLMProvider 使用.
+
+    故障转移策略:
+    1. 同模型重试（指数退避）
+    2. 换模型（遍历 fallback_providers，仅 TRANSIENT / RATE_LIMITED /
+       MODEL_MISBEHAVIOR 触发）
+    3. 返回最终失败结果
+    """
 
     def __init__(self, retry_config: RetryConfig | None = None) -> None:
+        """初始化重试管理器.
+
+        Args:
+            retry_config: 重试配置，未提供时使用默认值。
+        """
         self._config = retry_config or RetryConfig()
         self._fallback_providers: list[LLMProvider] = []
 
     def add_fallback_provider(self, provider: LLMProvider) -> None:
-        """添加备用 LLM Provider（故障转移用）."""
+        """添加备用 LLM Provider（故障转移用）.
+
+        Args:
+            provider: 备用 LLM Provider 实例，按添加顺序依次尝试。
+        """
         self._fallback_providers.append(provider)
 
     async def execute_with_retry(
         self,
-        func,
-        *args,
-        on_retry: Callable[..., Awaitable[None]] | None = None,
-        **kwargs,
+        func: Callable[..., Awaitable[Any]],
+        *args: Any,
+        on_retry: Callable[[int, Exception, float], Awaitable[None]] | None = None,
+        **kwargs: Any,
     ) -> RetryResult:
-        """执行 LLM 调用，失败时重试.
+        """执行 LLM 调用，失败时按多级故障转移策略重试.
 
-        多级故障转移：
-        1. 同模型重试（指数退避）
-        2. 换模型（如果配置了 fallbacks）
-        3. 返回失败
+        Args:
+            func: 待执行的 LLM 调用异步函数。
+            *args: 传递给 func 的位置参数。
+            on_retry: 每次重试前的回调，参见 ``retry_with_backoff``。
+            **kwargs: 传递给 func 的关键字参数。
+
+        Returns:
+            RetryResult，包含成功/失败状态、结果或异常、尝试次数和总耗时。
         """
         # 阶段 1: 同模型重试
         result = await retry_with_backoff(

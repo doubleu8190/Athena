@@ -49,6 +49,7 @@ class EventType(StrEnum):
     SUB_AGENT_PROGRESS = "sub_agent_progress"
     SUB_AGENT_COMPLETE = "sub_agent_complete"
     SUB_AGENT_FAILED = "sub_agent_failed"
+    PARALLEL_AGENTS_STARTED = "parallel_agents_started"
 
     # 记忆系统
     MEMORY_EXTRACTED = "memory_extracted"

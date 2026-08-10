@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from typing import Any
 
@@ -106,6 +107,7 @@ class SubAgentManager:
         self._main_run_id = main_run_id
         self._sub_counter = 0
         self._lock = asyncio.Lock()
+        self._parallel_semaphore = asyncio.Semaphore(6)
 
     async def spawn(
         self,
@@ -216,28 +218,38 @@ class SubAgentManager:
         tasks: list[str],
         session_id: str,
         allowed_tools: list[str] | None = None,
+        max_turns: int = 5,
         stop_signal: asyncio.Event | None = None,
     ) -> list[SubAgentResult]:
         """并行派生并执行多个子 Agent。
 
-        使用 ``asyncio.gather`` 并发调度所有子任务，单个子 Agent 的异常
-        不会影响其余子 Agent 的执行。
+        使用 ``asyncio.gather`` 并发调度所有子任务，受 ``_parallel_semaphore``
+        限制最大并发数。单个子 Agent 的异常不影响其余子 Agent 的执行。
 
         Args:
             tasks: 子任务描述列表，每个元素对应一个子 Agent。
             session_id: 当前会话 ID。
             allowed_tools: 工具白名单，所有子 Agent 共享。
+            max_turns: 每个子 Agent 的最大 LLM 交互轮次。
             stop_signal: 停止事件，置位时终止所有子 Agent。
 
         Returns:
             执行结果列表，长度 <= ``len(tasks)``。失败的子 Agent 结果
             以日志形式记录，不包含在返回值中。
         """
+
+        async def _spawn_with_semaphore(task: str) -> SubAgentResult:
+            async with self._parallel_semaphore:
+                return await self.spawn(
+                    task,
+                    session_id,
+                    allowed_tools,
+                    max_turns=max_turns,
+                    stop_signal=stop_signal,
+                )
+
         results = await asyncio.gather(
-            *[
-                self.spawn(t, session_id, allowed_tools, stop_signal=stop_signal)
-                for t in tasks
-            ],
+            *[_spawn_with_semaphore(t) for t in tasks],
             return_exceptions=True,
         )
         out: list[SubAgentResult] = []
@@ -296,10 +308,10 @@ class AgentWorkflow:
             self._tool_manager.register_native(
                 name="spawn_sub_agent",
                 description=(
-                    "Create a sub-agent to handle an independent subtask. "
-                    "Use this for complex tasks that can be decomposed into "
-                    "parallel or independent subtasks. The sub-agent runs with "
-                    "its own tool access and returns a result."
+                    "Create a single sub-agent to handle one independent subtask. "
+                    "Use this for a single delegation that does not need parallelism. "
+                    "For multiple independent subtasks that can run concurrently, "
+                    "use spawn_parallel_agents instead."
                 ),
                 handler=self._spawn_sub_agent_handler,
                 parameters={
@@ -315,6 +327,41 @@ class AgentWorkflow:
                         },
                     },
                     "required": ["task", "session_id"],
+                },
+                risk_level="medium",
+                require_approval=False,
+            )
+
+        # 注册 spawn_parallel_agents native 工具，使 LLM 可并行派生多个子 Agent。
+        if "spawn_parallel_agents" not in self._tool_manager._tools:
+            self._tool_manager.register_native(
+                name="spawn_parallel_agents",
+                description=self._build_parallel_spawn_description(),
+                handler=self._spawn_parallel_handler,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "tasks": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 6,
+                            "description": (
+                                "List of 2-6 independent subtask descriptions. "
+                                "Each task runs in its own sub-agent concurrently."
+                            ),
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "The current session ID.",
+                        },
+                        "max_turns": {
+                            "type": "integer",
+                            "description": "Max LLM interaction turns per sub-agent. Default: 5.",
+                            "default": 5,
+                        },
+                    },
+                    "required": ["tasks", "session_id"],
                 },
                 risk_level="medium",
                 require_approval=False,
@@ -387,7 +434,8 @@ class AgentWorkflow:
 
         if compression_summary and last_compressed_id:
             history_after = await self._db.messages.get_after_message(
-                session_id, last_compressed_id,
+                session_id,
+                last_compressed_id,
             )
             summary_msg = Message(
                 id=generate_time_id(),
@@ -460,7 +508,9 @@ class AgentWorkflow:
 
         # ── Step 6: 异步提取事实 ──
         # 从用户消息中提取原子事实写入长期记忆，不阻塞主流程。
-        asyncio.create_task(self._extract_facts_async(user_message, result.content, session_id))
+        asyncio.create_task(
+            self._extract_facts_async(user_message, result.content, session_id)
+        )
 
         # ── Step 7: 阈值摘要（增量，按完整轮次触发） ──
         # summarizer 自行从 DB 加载增量消息，按完整对话轮次边界处理，
@@ -504,13 +554,123 @@ class AgentWorkflow:
         """
         try:
             await self._fact_extractor.extract(
-                user_message, assistant_reply, session_id, self._memory_manager,
+                user_message,
+                assistant_reply,
+                session_id,
+                self._memory_manager,
             )
         except Exception as e:
             logger.warning("fact_extraction_failed", error=str(e))
 
+    @staticmethod
+    def _build_parallel_spawn_description() -> str:
+        """构建 ``spawn_parallel_agents`` 工具描述。
+
+        指导 LLM 在何时使用并行子 Agent 而非串行子 Agent。
+        """
+        return (
+            "Spawn multiple independent sub-agents that run concurrently. "
+            "Use this when a task can be decomposed into independent subtasks "
+            "that have no data dependencies between them and each can be "
+            "completed in isolation. This reduces total execution time by "
+            "running them in parallel.\n\n"
+            "Do NOT use when:\n"
+            "- Subtasks depend on each other's results\n"
+            "- The task requires sequential reasoning\n"
+            "- Only one subtask is needed (use spawn_sub_agent instead)\n\n"
+            "Each sub-agent runs independently with its own LLM context. "
+            "Results are returned as a JSON array after ALL agents complete."
+        )
+
+    async def _spawn_parallel_handler(
+        self,
+        tasks: list[str],
+        session_id: str,
+        parent_run_id: str,
+        max_turns: int = 5,
+    ) -> str:
+        """``spawn_parallel_agents`` 工具的执行处理器。
+
+        并行派生多个子 Agent 执行独立子任务，汇总结果后返回 JSON 数组。
+
+        Args:
+            tasks: 子任务描述列表（2-6 个）。
+            session_id: 当前会话 ID。
+            parent_run_id: 父级运行 ID，由工具管理器从调用链注入。
+            max_turns: 每个子 Agent 的最大 LLM 交互轮次。
+
+        Returns:
+            JSON 数组字符串，每个元素包含 task/status/output/error/turns_used；
+            输入校验失败时返回错误信息 JSON。
+        """
+        if len(tasks) < 2:
+            return json.dumps(
+                {"error": "Need at least 2 tasks for parallel execution"},
+                ensure_ascii=False,
+            )
+        if len(tasks) > 6:
+            return json.dumps(
+                {"error": "Maximum 6 parallel tasks allowed"},
+                ensure_ascii=False,
+            )
+
+        logger.info(
+            "parallel_agents_invoked",
+            session_id=session_id,
+            parent_run_id=parent_run_id,
+            task_count=len(tasks),
+        )
+
+        # 推送并行启动事件
+        await self._ws.send_to_session(
+            session_id,
+            build_event(
+                EventType.PARALLEL_AGENTS_STARTED,
+                {"task_count": len(tasks), "tasks": [t[:500] for t in tasks]},
+                session_id=session_id,
+                run_id=parent_run_id,
+            ),
+        )
+
+        try:
+            manager = self.get_sub_agent_manager(main_run_id=parent_run_id)
+            stop_signal = self._session_stop_signals.get(session_id)
+            results = await manager.parallel(
+                tasks=tasks,
+                session_id=session_id,
+                max_turns=max_turns,
+                stop_signal=stop_signal,
+            )
+
+            output = [
+                {
+                    "task": r.task,
+                    "status": "success" if not r.error else "error",
+                    "output": r.content[:2000] if r.content else "",
+                    "error": r.error,
+                    "turns_used": r.turn_count,
+                }
+                for r in results
+            ]
+
+            success_count = sum(1 for r in results if not r.error)
+            logger.info(
+                "parallel_agents_completed",
+                session_id=session_id,
+                total=len(tasks),
+                success=success_count,
+                failed=len(tasks) - success_count,
+            )
+            return json.dumps(output, ensure_ascii=False)
+        except Exception as e:
+            logger.exception("parallel_agents_exception", session_id=session_id)
+            return json.dumps(
+                {"error": f"[PARALLEL AGENTS ERROR] {e}"},
+                ensure_ascii=False,
+            )
+
     async def _spawn_sub_agent_handler(
-        self, task: str, session_id: str, parent_run_id: str | None = None
+        self, task: str, session_id: str, parent_run_id: str
     ) -> str:
         """``spawn_sub_agent`` 工具的执行处理器。
 
@@ -559,7 +719,7 @@ class AgentWorkflow:
             logger.exception("sub_agent_tool_exception", session_id=session_id)
             return f"[SUB-AGENT ERROR] {e}"
 
-    def get_sub_agent_manager(self, main_run_id: str | None = None) -> SubAgentManager:
+    def get_sub_agent_manager(self, main_run_id: str) -> SubAgentManager:
         """创建子 Agent 管理器实例。
 
         每次调用返回新实例，共享当前工作流的 LLM、工具集、数据库连接

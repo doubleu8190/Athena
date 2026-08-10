@@ -15,7 +15,7 @@ from langchain_core.messages import HumanMessage
 from athena.config.settings import Settings, get_settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
-from athena.utils.llm import extract_message_text
+from athena.utils.llm import estimate_tokens, extract_message_text
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -322,7 +322,7 @@ class MemoryRetrievalService:
         parts = ["[相关记忆]"]
         total_tokens = 0
         for r in results:
-            content_tokens = len(r.content) // 4
+            content_tokens = estimate_tokens(r.content)
             if total_tokens + content_tokens > max_tokens:
                 break
             parts.append(f"- {r.content}")

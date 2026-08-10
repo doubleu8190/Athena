@@ -48,7 +48,7 @@ from athena.schemas.events import EventType, build_event
 from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
-from athena.utils.message import dict_to_message
+from athena.utils.message import dict_to_message, normalize_tool_calls
 
 logger = get_logger(__name__)
 
@@ -833,25 +833,8 @@ class Harness:
     def _normalize_tool_calls(
         tool_calls: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """将 langchain tool_calls 归一化为统一的内部格式.
-
-        统一处理 langchain 不同版本的字段差异（args vs arguments），
-        并为缺失 id 的工具调用自动生成。
-
-        Args:
-            tool_calls: langchain 返回的原始 tool_calls 列表。
-
-        Returns:
-            归一化后的列表，每项包含 id / name / args 三个字段。
-        """
-        return [
-            {
-                "id": tc.get("id", generate_time_id()),
-                "name": tc.get("name", ""),
-                "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
-            }
-            for tc in tool_calls
-        ]
+        """将 langchain tool_calls 归一化为统一的内部格式."""
+        return normalize_tool_calls(tool_calls)
 
     # ------------------------------------------------------------------
     # 辅助方法

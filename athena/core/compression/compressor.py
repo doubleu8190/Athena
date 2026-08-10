@@ -22,13 +22,7 @@ from athena.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-def _estimate_tokens(text: str) -> int:
-    """粗略估算 token 数（4 字符 ≈ 1 token）.
-
-    project_memory 约束：使用 model.get_num_tokens()，缺失时回退到 len/4。
-    此处采用回退方案，因为底层模型实例不一定暴露 get_num_tokens。
-    """
-    return len(text) // 4
+from athena.utils.llm import estimate_tokens
 
 
 def _get_message_id(msg: BaseMessage) -> str | None:
@@ -67,14 +61,14 @@ class ContextCompressor:
         """检查是否需要压缩（超过阈值时触发）."""
         total = 0
         for m in messages:
-            total += _estimate_tokens(getattr(m, "content", "") or "")
+            total += estimate_tokens(getattr(m, "content", "") or "")
             for tc in getattr(m, "tool_calls", None) or []:
-                total += _estimate_tokens(str(tc.get("args", {})))
+                total += estimate_tokens(str(tc.get("args", {})))
         return total > self._max_tokens * self._threshold
 
     def _estimate_total(self, messages: list[BaseMessage]) -> int:
         """估算消息列表总 token 数."""
-        return sum(_estimate_tokens(getattr(m, "content", "") or "") for m in messages)
+        return sum(estimate_tokens(getattr(m, "content", "") or "") for m in messages)
 
     async def compress(
         self,

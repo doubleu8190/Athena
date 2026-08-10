@@ -38,12 +38,7 @@ def dict_to_message(m: Message | dict[str, Any]) -> BaseMessage:
     if role == "assistant":
         if tool_calls:
             lc_tcs = [
-                {
-                    "id": tc.get("id", generate_time_id()),
-                    "name": tc.get("name", ""),
-                    "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
-                    "type": "tool_call",
-                }
+                {**normalize_tool_call(tc), "type": "tool_call"}
                 for tc in tool_calls
             ]
             return AIMessage(content=content, tool_calls=lc_tcs, metadata=meta)
@@ -87,6 +82,30 @@ def message_to_dict(m: BaseMessage) -> dict[str, Any]:
     return d
 
 
+def normalize_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
+    """将 langchain tool_call 归一化为统一的内部格式.
+
+    统一处理 langchain 不同版本的字段差异（args vs arguments），
+    并为缺失 id 的工具调用自动生成。
+
+    Args:
+        tc: langchain 返回的原始 tool_call 字典。
+
+    Returns:
+        归一化后的字典，包含 id / name / args 三个字段。
+    """
+    return {
+        "id": tc.get("id", generate_time_id()),
+        "name": tc.get("name", ""),
+        "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
+    }
+
+
+def normalize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """批量归一化 tool_calls 列表."""
+    return [normalize_tool_call(tc) for tc in tool_calls]
+
+
 def dicts_to_messages(messages: Sequence[Message | dict[str, Any]]) -> list[BaseMessage]:
     """批量转换：消息模型/字典列表 → BaseMessage 列表."""
     return [dict_to_message(m) for m in messages]
@@ -95,3 +114,37 @@ def dicts_to_messages(messages: Sequence[Message | dict[str, Any]]) -> list[Base
 def messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, Any]]:
     """批量转换：BaseMessage 列表 → 字典列表."""
     return [message_to_dict(m) for m in messages]
+
+
+def format_messages_brief(
+    messages: Sequence[Message | dict[str, Any]],
+    role_labels: dict[str, str] | None = None,
+) -> str:
+    """将消息列表格式化为 ``role: content`` 逐行文本（通用简洁版）.
+
+    兼容 ``Message`` 域模型和原始 dict 两种输入格式，
+    跳过 role 或 content 为空的消息。
+
+    Args:
+        messages: 消息列表，元素为 ``Message`` 实例或 ``{"role": ..., "content": ...}`` dict。
+        role_labels: 可选的角色名映射（如 ``{"user": "用户", "assistant": "助手"}``），
+                     未映射的角色使用原始 role 值。
+
+    Returns:
+        格式化的对话文本，每行一条消息；列表为空时返回空字符串。
+    """
+    if not messages:
+        return ""
+    labels = role_labels or {}
+    parts: list[str] = []
+    for m in messages:
+        if isinstance(m, Message):
+            role = m.role.value
+            content = m.content
+        else:
+            role = m.get("role", "")
+            content = m.get("content", "")
+        if role and content:
+            display_role = labels.get(role, role)
+            parts.append(f"{display_role}: {content}")
+    return "\n".join(parts)

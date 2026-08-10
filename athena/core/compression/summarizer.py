@@ -13,7 +13,7 @@ from typing import Any, TYPE_CHECKING
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from athena.core.llm.provider import LLMProvider
-from athena.utils.llm import extract_message_text
+from athena.utils.llm import estimate_tokens, extract_message_text
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -103,7 +103,7 @@ class IncrementalSummarizer:
                 logger.info(
                     "summary_buffer_lazy_loaded",
                     session_id=session_id,
-                    buffer_tokens=len(summary) // 4,
+                    buffer_tokens=estimate_tokens(summary),
                 )
         except Exception as e:
             logger.warning("summary_buffer_load_failed", error=str(e), session_id=session_id)
@@ -120,7 +120,7 @@ class IncrementalSummarizer:
         logger.info(
             "summary_buffer_set",
             session_id=session_id,
-            buffer_tokens=len(buffer) // 4,
+            buffer_tokens=estimate_tokens(buffer),
         )
 
     def reset(self, session_id: str) -> None:

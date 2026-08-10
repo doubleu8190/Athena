@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Iterable, TYPE_CHECKING
@@ -22,6 +21,7 @@ from sqlalchemy import case, insert, select, text, update
 from athena.config.settings import Settings, get_settings
 from athena.db.engine import get_session
 from athena.db.models import MemoryModel
+from athena.db.repository import _json_dumps, _json_loads
 from athena.utils.ids import generate_time_id
 from athena.utils.logging import get_logger
 
@@ -275,9 +275,7 @@ class MemoryManager:
                             id=memory_id,
                             session_id=session_id,
                             content=content,
-                            metadata_json=json.dumps(
-                                meta, ensure_ascii=False, default=str
-                            ),
+                            metadata_json=_json_dumps(meta),
                             pinned=1 if pinned else 0,
                             expires_at=expires_at,
                             created_at=now,
@@ -457,12 +455,7 @@ class MemoryManager:
 
         out: list[dict[str, Any]] = []
         for row in rows:
-            meta = {}
-            try:
-                meta = json.loads(row.metadata_json) if row.metadata_json else {}
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("memory_metadata_json_invalid", memory_id=row.id)
-                pass
+            meta = _json_loads(row.metadata_json, {})
             # metadata_json 是创建时冻结的快照，访问字段以 live 列为准覆盖
             meta["last_accessed"] = row.last_accessed
             meta["access_count"] = row.access_count
@@ -634,7 +627,7 @@ class MemoryManager:
         if not expired_ids:
             return 0
 
-        # 2. 软删 SQLite（单条批量 UPDATE + 批量 FTS 清理）
+        # 2. 软删 SQLite（单条批量 UPDATE + 逐条 FTS 清理）
         try:
             async with get_session() as session:
                 async with session.begin():
@@ -643,10 +636,11 @@ class MemoryManager:
                         .where(MemoryModel.id.in_(expired_ids))
                         .values(deleted_time=now_iso)
                     )
-                    await session.execute(
-                        text("DELETE FROM memory_fts WHERE memory_id IN :ids"),
-                        {"ids": tuple(expired_ids)},
-                    )
+                    for mid in expired_ids:
+                        await session.execute(
+                            text("DELETE FROM memory_fts WHERE memory_id = :mid"),
+                            {"mid": mid},
+                        )
         except Exception as e:
             logger.error("memory_cleanup_sqlite_failed", error=str(e))
             raise

@@ -24,7 +24,8 @@ from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
 from athena.db.database import Database
 from athena.models import Message, MessageRole
-from athena.utils.llm import extract_message_text
+from athena.utils.llm import extract_json_from_llm_response, extract_message_text
+from athena.utils.message import format_messages_brief
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -343,15 +344,11 @@ conversation_text:
             conversation_text=conversation_text,
         )
         try:
-            import json
-            import re
-
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
             content = extract_message_text(response)
-            match = re.search(r"\{[\s\S]*\}", content)
-            if not match:
+            data = extract_json_from_llm_response(content)
+            if data is None:
                 return []
-            data = json.loads(match.group(0))
             return AtomicFactList.model_validate(data).atomic_facts
         except Exception as e:
             logger.warning("fact_extraction_failed", error=str(e))
@@ -616,44 +613,19 @@ class ConversationSummarizer:
         """
         prompt = self.SUMMARIES_PROMPT.format(conversation=conversation)
         try:
-            import json
-            import re
-
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
             content = extract_message_text(response)
-            match = re.search(r"\{[\s\S]*\}", content)
-            if not match:
+            data = extract_json_from_llm_response(content)
+            if data is None:
                 return []
-            data = json.loads(match.group(0))
             return SummaryList.model_validate(data).summaries
         except Exception as e:
             logger.warning("summary_generation_failed", error=str(e))
             return []
 
+    @staticmethod
     def _format_messages(
-        self, messages: Sequence[Message | dict[str, Any]],
+        messages: Sequence[Message | dict[str, Any]],
     ) -> str:
-        """将消息列表格式化为 ``role: content`` 逐行文本。
-
-        兼容 ``Message`` 域模型和原始 dict 两种输入格式，
-        跳过 role 或 content 为空的消息。
-
-        Args:
-            messages: 消息列表，元素为 ``Message`` 实例或 ``{"role": ..., "content": ...}`` dict。
-
-        Returns:
-            格式化的对话文本，每行一条消息；列表为空时返回空字符串。
-        """
-        if not messages:
-            return ""
-        parts: list[str] = []
-        for m in messages:
-            if isinstance(m, Message):
-                role = m.role.value
-                content = m.content
-            else:
-                role = m.get("role", "")
-                content = m.get("content", "")
-            if role and content:
-                parts.append(f"{role}: {content}")
-        return "\n".join(parts)
+        """将消息列表格式化为 ``role: content`` 逐行文本。"""
+        return format_messages_brief(messages)

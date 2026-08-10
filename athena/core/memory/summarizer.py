@@ -497,13 +497,13 @@ class ConversationSummarizer:
             生成的摘要文本（多条以换行连接）；未触发或生成失败时返回 ``None``。
         """
         # ── 1. 加载增量消息 ──
-        session_obj = await db.get_session(session_id)
+        session_obj = await db.sessions.get(session_id)
         last_id = session_obj.last_summarized_message_id if session_obj else None
 
         if last_id:
-            raw = await db.get_messages_after(session_id, last_id)
+            raw = await db.messages.get_after_message(session_id, last_id)
         else:
-            raw = await db.get_messages(session_id)
+            raw = await db.messages.get_by_session(session_id)
 
         if not raw:
             return None
@@ -559,7 +559,7 @@ class ConversationSummarizer:
         if saved_texts and all_msgs:
             last_msg_id = all_msgs[-1].id
             try:
-                await db.update_session(
+                await db.sessions.update(
                     session_id,
                     last_summarized_message_id=last_msg_id,
                 )

@@ -83,4 +83,4 @@ async def get_approval_logs(session_id: str) -> list[ApprovalLog]:
     from athena.config.settings import get_settings
     from athena.db.database import get_database
     db = await get_database(get_settings().sqlite_db_path)
-    return await db.get_approval_logs(session_id)
+    return await db.approval_logs.get_by_session(session_id)

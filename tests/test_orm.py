@@ -46,22 +46,22 @@ async def db():
 async def test_soft_delete_session(db: Database):
     """验证会话软删除功能."""
     # 创建会话
-    await db.create_session("s1", title="Test Session")
+    await db.sessions.create("s1", title="Test Session")
 
     # 验证会话存在
-    session = await db.get_session("s1")
+    session = await db.sessions.get("s1")
     assert session is not None
     assert session.title == "Test Session"
 
     # 软删除会话
-    await db.delete_session("s1")
+    await db.sessions.delete("s1")
 
     # 验证会话已被软删除（查询不到）
-    session = await db.get_session("s1")
+    session = await db.sessions.get("s1")
     assert session is None
 
     # 验证会话列表中不包含已删除的会话
-    sessions = await db.list_sessions()
+    sessions = await db.sessions.list_all()
     assert len(sessions) == 0
 
 
@@ -69,10 +69,10 @@ async def test_soft_delete_session(db: Database):
 async def test_soft_delete_cascade(db: Database):
     """验证软删除级联操作."""
     # 创建会话和关联数据
-    await db.create_session("s1")
+    await db.sessions.create("s1")
 
     # 添加消息
-    await db.save_message(Message(
+    await db.messages.save(Message(
         id="m1",
         session_id="s1",
         role=MessageRole.USER,
@@ -81,7 +81,7 @@ async def test_soft_delete_cascade(db: Database):
     ))
 
     # 添加步骤
-    await db.save_step(Step(
+    await db.steps.save(Step(
         id="step-1",
         session_id="s1",
         run_id="r1",
@@ -92,7 +92,7 @@ async def test_soft_delete_cascade(db: Database):
     ))
 
     # 添加工具调用
-    await db.save_tool_call(ToolCallRecord(
+    await db.tool_calls.save(ToolCallRecord(
         id="tc-1",
         session_id="s1",
         step_id="step-1",
@@ -103,7 +103,7 @@ async def test_soft_delete_cascade(db: Database):
     ))
 
     # 添加审批日志
-    await db.save_approval_log(ApprovalLog(
+    await db.approval_logs.save(ApprovalLog(
         id="al-1",
         session_id="s1",
         tool_call_id="tc-1",
@@ -115,14 +115,14 @@ async def test_soft_delete_cascade(db: Database):
     ))
 
     # 软删除会话
-    await db.delete_session("s1")
+    await db.sessions.delete("s1")
 
     # 验证所有关联数据都被软删除
-    assert await db.get_session("s1") is None
-    assert await db.get_messages("s1") == []
-    assert await db.get_steps("s1") == []
-    assert await db.query_tool_calls("s1") == []
-    assert await db.get_approval_logs("s1") == []
+    assert await db.sessions.get("s1") is None
+    assert await db.messages.get_by_session("s1") == []
+    assert await db.steps.get_by_session("s1") == []
+    assert await db.tool_calls.query("s1") == []
+    assert await db.approval_logs.get_by_session("s1") == []
 
 
 @pytest.mark.asyncio
@@ -133,10 +133,10 @@ async def test_soft_delete_preserves_data(db: Database):
     from sqlalchemy import select
 
     # 创建会话
-    await db.create_session("s1", title="Test")
+    await db.sessions.create("s1", title="Test")
 
     # 软删除会话
-    await db.delete_session("s1")
+    await db.sessions.delete("s1")
 
     # 直接查询数据库，验证记录仍然存在
     async with get_session() as session:
@@ -162,13 +162,13 @@ async def test_transaction_rollback_on_error(db: Database):
     from sqlalchemy import select
 
     # 创建会话
-    await db.create_session("s1", title="Original")
+    await db.sessions.create("s1", title="Original")
 
     # 尝试更新一个不存在的会话（应该成功，不影响其他操作）
-    await db.update_session("nonexistent", status="running")
+    await db.sessions.update("nonexistent", status="running")
 
     # 验证原会话状态未变
-    session = await db.get_session("s1")
+    session = await db.sessions.get("s1")
     assert session is not None
     assert session.status == "idle"
 
@@ -182,7 +182,7 @@ async def test_transaction_rollback_on_error(db: Database):
 async def test_json_field_serialization(db: Database):
     """验证 JSON 字段的序列化/反序列化."""
     # 创建带有复杂 metadata 的会话
-    await db.create_session("s1")
+    await db.sessions.create("s1")
 
     # 保存带有复杂数据的消息
     complex_metadata = {
@@ -190,7 +190,7 @@ async def test_json_field_serialization(db: Database):
         "list": [1, 2, 3],
         "unicode": "中文测试",
     }
-    await db.save_message(Message(
+    await db.messages.save(Message(
         id="m1",
         session_id="s1",
         role=MessageRole.USER,
@@ -200,7 +200,7 @@ async def test_json_field_serialization(db: Database):
     ))
 
     # 获取消息并验证 JSON 反序列化
-    messages = await db.get_messages("s1")
+    messages = await db.messages.get_by_session("s1")
     assert len(messages) == 1
     assert messages[0].metadata == complex_metadata
 
@@ -208,14 +208,14 @@ async def test_json_field_serialization(db: Database):
 @pytest.mark.asyncio
 async def test_json_field_with_tool_calls(db: Database):
     """验证 tool_calls JSON 字段的序列化/反序列化."""
-    await db.create_session("s1")
+    await db.sessions.create("s1")
 
     tool_calls = [
         {"id": "tc1", "name": "read_file", "args": {"path": "/tmp"}},
         {"id": "tc2", "name": "write_file", "args": {"path": "/tmp", "content": "test"}},
     ]
 
-    await db.save_message(Message(
+    await db.messages.save(Message(
         id="m1",
         session_id="s1",
         role=MessageRole.ASSISTANT,
@@ -224,7 +224,7 @@ async def test_json_field_with_tool_calls(db: Database):
         timestamp=datetime.now(),
     ))
 
-    messages = await db.get_messages("s1")
+    messages = await db.messages.get_by_session("s1")
     assert len(messages) == 1
     assert messages[0].tool_calls == tool_calls
 
@@ -240,11 +240,11 @@ async def test_concurrent_operations(db: Database):
     import asyncio
 
     # 创建会话
-    await db.create_session("s1")
+    await db.sessions.create("s1")
 
     # 并发保存多条消息
     async def save_message(i: int):
-        await db.save_message(Message(
+        await db.messages.save(Message(
             id=f"m{i}",
             session_id="s1",
             role=MessageRole.USER,
@@ -257,7 +257,7 @@ async def test_concurrent_operations(db: Database):
     await asyncio.gather(*tasks)
 
     # 验证所有消息都保存成功
-    messages = await db.get_messages("s1")
+    messages = await db.messages.get_by_session("s1")
     assert len(messages) == 10
 
 
@@ -269,7 +269,7 @@ async def test_concurrent_operations(db: Database):
 @pytest.mark.asyncio
 async def test_get_nonexistent_session(db: Database):
     """验证获取不存在的会话返回 None."""
-    session = await db.get_session("nonexistent")
+    session = await db.sessions.get("nonexistent")
     assert session is None
 
 
@@ -277,43 +277,43 @@ async def test_get_nonexistent_session(db: Database):
 async def test_update_nonexistent_session(db: Database):
     """验证更新不存在的会话不会抛出异常."""
     # 应该成功执行，不影响其他操作
-    await db.update_session("nonexistent", status="running")
+    await db.sessions.update("nonexistent", status="running")
 
 
 @pytest.mark.asyncio
 async def test_empty_database_operations(db: Database):
     """验证空数据库的各种操作."""
-    sessions = await db.list_sessions()
+    sessions = await db.sessions.list_all()
     assert sessions == []
 
-    messages = await db.get_messages("s1")
+    messages = await db.messages.get_by_session("s1")
     assert messages == []
 
-    steps = await db.get_steps("s1")
+    steps = await db.steps.get_by_session("s1")
     assert steps == []
 
-    tool_calls = await db.query_tool_calls("s1")
+    tool_calls = await db.tool_calls.query("s1")
     assert tool_calls == []
 
-    approval_logs = await db.get_approval_logs("s1")
+    approval_logs = await db.approval_logs.get_by_session("s1")
     assert approval_logs == []
 
 
 @pytest.mark.asyncio
 async def test_get_last_step_number_empty(db: Database):
     """验证获取空 run_id 的最大步骤号."""
-    last_num = await db.get_last_step_number("nonexistent")
+    last_num = await db.steps.get_last_step_number("nonexistent")
     assert last_num == 0
 
 
 @pytest.mark.asyncio
 async def test_get_last_step_number(db: Database):
     """验证获取最大步骤号."""
-    await db.create_session("s1")
+    await db.sessions.create("s1")
 
     # 添加多个步骤
     for i in range(1, 6):
-        await db.save_step(Step(
+        await db.steps.save(Step(
             id=f"step-{i}",
             session_id="s1",
             run_id="r1",
@@ -323,5 +323,5 @@ async def test_get_last_step_number(db: Database):
             started_at=datetime.now(),
         ))
 
-    last_num = await db.get_last_step_number("r1")
+    last_num = await db.steps.get_last_step_number("r1")
     assert last_num == 5

@@ -44,7 +44,7 @@ async def create_session(req: CreateSessionRequest) -> Session:
     """创建新会话."""
     db = await _get_db()
     session_id = generate_session_id()
-    session = await db.create_session(session_id, title=req.title)
+    session = await db.sessions.create(session_id, title=req.title)
     return session
 
 
@@ -52,14 +52,14 @@ async def create_session(req: CreateSessionRequest) -> Session:
 async def list_sessions() -> list[Session]:
     """列出所有会话."""
     db = await _get_db()
-    return await db.list_sessions()
+    return await db.sessions.list_all()
 
 
 @router.get("/{session_id}")
 async def get_session(session_id: str) -> Session:
     """获取会话详情."""
     db = await _get_db()
-    session = await db.get_session(session_id)
+    session = await db.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
@@ -69,7 +69,7 @@ async def get_session(session_id: str) -> Session:
 async def delete_session(session_id: str) -> dict[str, str]:
     """删除会话及其所有关联数据."""
     db = await _get_db()
-    await db.delete_session(session_id)
+    await db.sessions.delete(session_id)
     return {"status": "deleted", "session_id": session_id}
 
 
@@ -77,16 +77,16 @@ async def delete_session(session_id: str) -> dict[str, str]:
 async def get_messages(session_id: str, limit: int | None = None) -> list[Message]:
     """获取会话消息列表."""
     db = await _get_db()
-    if not await db.get_session(session_id):
+    if not await db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-    return await db.get_messages(session_id, limit=limit)
+    return await db.messages.get_by_session(session_id, limit=limit)
 
 
 @router.post("/{session_id}/messages")
 async def send_message(session_id: str, req: SendMessageRequest) -> dict[str, Any]:
     """发送消息到会话（同步返回结果，流式输出走 WebSocket）."""
     db = await _get_db()
-    if not await db.get_session(session_id):
+    if not await db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     workflow = await _get_workflow()
@@ -108,16 +108,16 @@ async def send_message(session_id: str, req: SendMessageRequest) -> dict[str, An
 async def get_steps(session_id: str) -> list[Step]:
     """获取会话执行步骤."""
     db = await _get_db()
-    if not await db.get_session(session_id):
+    if not await db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-    return await db.get_steps(session_id)
+    return await db.steps.get_by_session(session_id)
 
 
 @router.get("/{session_id}/tool_calls")
 async def get_tool_calls(session_id: str, status: str | None = None) -> list[ToolCallRecord]:
     """获取会话工具调用记录."""
     db = await _get_db()
-    return await db.query_tool_calls(session_id, status=status)
+    return await db.tool_calls.query(session_id, status=status)
 
 
 @router.post("/{session_id}/stop")

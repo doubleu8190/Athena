@@ -285,7 +285,7 @@ class ApprovalManager:
             }
             from datetime import datetime
 
-            await self._db.save_approval_log(ApprovalLog(
+            await self._db.approval_logs.save(ApprovalLog(
                 id=generate_time_id(),
                 session_id=request.session_id,
                 tool_call_id=request.tool_call_id or request.id,

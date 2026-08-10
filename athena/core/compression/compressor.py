@@ -138,7 +138,7 @@ class ContextCompressor:
             return all_messages
 
         try:
-            session = await self._db.get_session(session_id)
+            session = await self._db.sessions.get(session_id)
             if not session:
                 return all_messages
 
@@ -147,7 +147,7 @@ class ContextCompressor:
                 return all_messages
 
             # 从数据库查询增量消息，转换为 BaseMessage
-            incremental_messages = await self._db.get_messages_after(session_id, last_compressed_id)
+            incremental_messages = await self._db.messages.get_after_message(session_id, last_compressed_id)
             if incremental_messages:
                 from athena.utils.message import dicts_to_messages
                 incremental = dicts_to_messages(incremental_messages)
@@ -181,7 +181,7 @@ class ContextCompressor:
 
         if last_id:
             try:
-                await self._db.update_session(
+                await self._db.sessions.update(
                     session_id,
                     last_compressed_message_id=last_id,
                 )

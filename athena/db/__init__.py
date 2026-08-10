@@ -4,8 +4,7 @@
 - models.py: ORM 模型定义（软删除策略）
 - engine.py: AsyncEngine 和会话工厂
 - repository.py: Repository 模式封装 CRUD
-- database.py: 兼容层，保持旧 API 不变
-- schema.py: 原始 DDL（已废弃，保留向后兼容）
+- database.py: Database 持有各 Repository 实例并管理引擎生命周期
 """
 
 from athena.db.database import Database, close_database, get_database
@@ -27,7 +26,7 @@ from athena.db.repository import (
 )
 
 __all__ = [
-    # 兼容层
+    # Database
     "Database",
     "get_database",
     "close_database",

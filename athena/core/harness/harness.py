@@ -213,7 +213,7 @@ class Harness:
 
         # 更新会话状态为 running
         if self._db is not None:
-            await self._db.update_session(session_id, status="running", run_id=rid)
+            await self._db.sessions.update(session_id, status="running", run_id=rid)
 
         await self._emit(EventType.STREAM_START, {"run_id": rid}, session_id, rid)
 
@@ -415,7 +415,7 @@ class Harness:
                 # 持久化 assistant 消息（中断恢复关键）
                 # 守卫：仅在确实有输出（文本或工具调用）时落库，避免空消息污染对话
                 if self._db is not None and (full_content.strip() or final_tc):
-                    await self._db.save_message(Message(
+                    await self._db.messages.save(Message(
                         id=generate_time_id(),
                         session_id=session_id,
                         role=MessageRole.ASSISTANT,
@@ -488,7 +488,7 @@ class Harness:
         )
 
         if self._db is not None:
-            await self._db.update_session(session_id, status="idle" if not interrupted else "interrupted")
+            await self._db.sessions.update(session_id, status="idle" if not interrupted else "interrupted")
 
         return HarnessRunResult(
             content=last_content,
@@ -556,7 +556,7 @@ class Harness:
                 # 创建 tool_call 记录
                 tc_record_id = generate_time_id()
                 if self._db is not None:
-                    await self._db.save_tool_call(ToolCallRecord(
+                    await self._db.tool_calls.save(ToolCallRecord(
                         id=tc_record_id,
                         session_id=session_id,
                         step_id=step_id,
@@ -590,7 +590,7 @@ class Harness:
 
                 # 更新 tool_call 记录
                 if self._db is not None:
-                    await self._db.update_tool_call(tc_record_id, {
+                    await self._db.tool_calls.update(tc_record_id, {
                         "raw_output": result_content if status == "success" else None,
                         "status": status,
                         "completed_at": datetime.now().isoformat(),
@@ -639,7 +639,7 @@ class Harness:
 
                 # 持久化 tool 消息
                 if self._db is not None:
-                    await self._db.save_message(Message(
+                    await self._db.messages.save(Message(
                         id=generate_time_id(),
                         session_id=session_id,
                         role=MessageRole.TOOL,
@@ -873,7 +873,7 @@ class Harness:
             # 步骤显式记录父 run（子 Agent 运行时由 run() 注入）
             if step.parent_run_id is None:
                 step.parent_run_id = self._parent_run_id
-            await self._db.save_step(step)
+            await self._db.steps.save(step)
         except Exception as e:
             logger.error("save_step_failed", error=str(e))
 
@@ -887,7 +887,7 @@ class Harness:
         if self._db is None:
             return
         try:
-            await self._db.update_step(step_id, updates)
+            await self._db.steps.update(step_id, updates)
         except Exception as e:
             logger.error("update_step_failed", step_id=step_id, error=str(e))
 

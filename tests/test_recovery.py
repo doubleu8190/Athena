@@ -35,10 +35,10 @@ async def db():
 @pytest.mark.asyncio
 async def test_recovery_cleans_orphaned_running_steps(db: Database):
     """进程中断遗留的 running step / tool_call 恢复时应统一标记为 failed."""
-    await db.create_session("s-orphan", title="orphan")
+    await db.sessions.create("s-orphan", title="orphan")
     # 模拟进程中断现场：session running + running step + running tool_call
-    await db.update_session("s-orphan", status="running")
-    await db.save_step(Step(
+    await db.sessions.update("s-orphan", status="running")
+    await db.steps.save(Step(
         id="step-1",
         session_id="s-orphan",
         run_id="20260808",
@@ -47,7 +47,7 @@ async def test_recovery_cleans_orphaned_running_steps(db: Database):
         status=StepStatus.RUNNING,
         started_at=datetime.now(),
     ))
-    await db.save_step(Step(
+    await db.steps.save(Step(
         id="step-2",
         session_id="s-orphan",
         run_id="20260808",
@@ -57,7 +57,7 @@ async def test_recovery_cleans_orphaned_running_steps(db: Database):
         status=StepStatus.RUNNING,
         started_at=datetime.now(),
     ))
-    await db.save_tool_call(ToolCallRecord(
+    await db.tool_calls.save(ToolCallRecord(
         id="tc-1",
         session_id="s-orphan",
         step_id="step-2",
@@ -69,15 +69,15 @@ async def test_recovery_cleans_orphaned_running_steps(db: Database):
 
     await recover_interrupted_sessions(db)
 
-    session = await db.get_session("s-orphan")
+    session = await db.sessions.get("s-orphan")
     assert session.status.value == "idle"
 
-    steps = await db.get_steps("s-orphan")
+    steps = await db.steps.get_by_session("s-orphan")
     assert steps
     assert all(s.status.value == "failed" for s in steps)
     assert all("进程中断" in (s.error_message or "") for s in steps)
 
-    tool_calls = await db.query_tool_calls("s-orphan")
+    tool_calls = await db.tool_calls.query("s-orphan")
     assert tool_calls
     assert all(tc.status.value == "failed" for tc in tool_calls)
     assert all("进程中断" in (tc.error_message or "") for tc in tool_calls)
@@ -89,8 +89,8 @@ async def test_recovery_cleans_orphaned_running_steps(db: Database):
 @pytest.mark.asyncio
 async def test_recovery_ignores_idle_sessions(db: Database):
     """idle 会话不应被恢复逻辑触碰."""
-    await db.create_session("s-idle", title="idle")
-    await db.save_step(Step(
+    await db.sessions.create("s-idle", title="idle")
+    await db.steps.save(Step(
         id="step-1",
         session_id="s-idle",
         run_id="20260808",
@@ -102,8 +102,8 @@ async def test_recovery_ignores_idle_sessions(db: Database):
 
     await recover_interrupted_sessions(db)
 
-    session = await db.get_session("s-idle")
+    session = await db.sessions.get("s-idle")
     assert session.status.value == "idle"
-    steps = await db.get_steps("s-idle")
+    steps = await db.steps.get_by_session("s-idle")
     assert steps
     assert steps[0].status.value == "completed"  # 未被误改

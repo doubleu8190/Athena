@@ -407,12 +407,12 @@ class AgentWorkflow:
         # 优先使用压缩摘要 + 增量消息，避免随对话增长而全量加载。
         # 首次压缩由 ContextCompressor 在 Harness 循环中触发并持久化摘要；
         # 后续调用直接复用已有摘要，只加载压缩点之后的增量消息。
-        session = await self._db.get_session(session_id)
+        session = await self._db.sessions.get(session_id)
         compression_summary = session.compression_summary if session else None
         last_compressed_id = session.last_compressed_message_id if session else None
 
         if compression_summary and last_compressed_id:
-            history_after = await self._db.get_messages_after(
+            history_after = await self._db.messages.get_after_message(
                 session_id, last_compressed_id,
             )
             summary_msg = Message(
@@ -430,7 +430,7 @@ class AgentWorkflow:
                 incremental_count=len(history_after),
             )
         else:
-            history: list[Message] = await self._db.get_messages(session_id)
+            history: list[Message] = await self._db.messages.get_by_session(session_id)
 
         # ── Step 3: 构建系统提示 ──
         full_system_prompt = system_prompt or effective_prompt
@@ -454,7 +454,7 @@ class AgentWorkflow:
             metadata={},
             timestamp=datetime.now(),
         )
-        await self._db.save_message(user_msg)
+        await self._db.messages.save(user_msg)
         messages_for_harness = history + [user_msg]
 
         # ── Step 5: 调用 Harness 执行 LLM 交互与工具调用 ──

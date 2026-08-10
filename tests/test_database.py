@@ -36,12 +36,12 @@ async def db():
 
 @pytest.mark.asyncio
 async def test_create_and_get_session(db: Database):
-    session = await db.create_session("sess-1", title="Test")
+    session = await db.sessions.create("sess-1", title="Test")
     assert session.id == "sess-1"
     assert session.title == "Test"
     assert session.status == "idle"
 
-    fetched = await db.get_session("sess-1")
+    fetched = await db.sessions.get("sess-1")
     assert fetched is not None
     assert fetched.title == "Test"
     assert fetched.status == "idle"
@@ -49,17 +49,17 @@ async def test_create_and_get_session(db: Database):
 
 @pytest.mark.asyncio
 async def test_list_sessions(db: Database):
-    await db.create_session("s1")
-    await db.create_session("s2")
-    sessions = await db.list_sessions()
+    await db.sessions.create("s1")
+    await db.sessions.create("s2")
+    sessions = await db.sessions.list_all()
     assert len(sessions) == 2
 
 
 @pytest.mark.asyncio
 async def test_update_session_status(db: Database):
-    await db.create_session("s1")
-    await db.update_session("s1", status="running", run_id="20260730")
-    fetched = await db.get_session("s1")
+    await db.sessions.create("s1")
+    await db.sessions.update("s1", status="running", run_id="20260730")
+    fetched = await db.sessions.get("s1")
     assert fetched is not None
     assert fetched.status == "running"
     assert fetched.run_id == "20260730"
@@ -67,22 +67,22 @@ async def test_update_session_status(db: Database):
 
 @pytest.mark.asyncio
 async def test_save_and_get_messages(db: Database):
-    await db.create_session("s1")
-    await db.save_message(Message(
+    await db.sessions.create("s1")
+    await db.messages.save(Message(
         id="m1",
         session_id="s1",
         role=MessageRole.USER,
         content="hello",
         timestamp=datetime.now(),
     ))
-    await db.save_message(Message(
+    await db.messages.save(Message(
         id="m2",
         session_id="s1",
         role=MessageRole.ASSISTANT,
         content="hi",
         timestamp=datetime.now(),
     ))
-    msgs = await db.get_messages("s1")
+    msgs = await db.messages.get_by_session("s1")
     assert len(msgs) == 2
     assert msgs[0].role == "user"
     assert msgs[1].role == "assistant"
@@ -90,8 +90,8 @@ async def test_save_and_get_messages(db: Database):
 
 @pytest.mark.asyncio
 async def test_save_step_and_query(db: Database):
-    await db.create_session("s1")
-    await db.save_step(Step(
+    await db.sessions.create("s1")
+    await db.steps.save(Step(
         id="step-1",
         session_id="s1",
         run_id="r1",
@@ -100,11 +100,11 @@ async def test_save_step_and_query(db: Database):
         status=StepStatus.RUNNING,
         started_at=datetime.now(),
     ))
-    await db.update_step("step-1", {
+    await db.steps.update("step-1", {
         "status": "completed", "duration_ms": 100.0,
         "llm_input_tokens": 50, "llm_output_tokens": 30,
     })
-    steps = await db.get_steps("s1")
+    steps = await db.steps.get_by_session("s1")
     assert len(steps) == 1
     assert steps[0].status == "completed"
     assert steps[0].llm_input_tokens == 50
@@ -112,8 +112,8 @@ async def test_save_step_and_query(db: Database):
 
 @pytest.mark.asyncio
 async def test_save_tool_call(db: Database):
-    await db.create_session("s1")
-    await db.save_step(Step(
+    await db.sessions.create("s1")
+    await db.steps.save(Step(
         id="step-1",
         session_id="s1",
         run_id="r1",
@@ -122,7 +122,7 @@ async def test_save_tool_call(db: Database):
         status=StepStatus.RUNNING,
         started_at=datetime.now(),
     ))
-    await db.save_tool_call(ToolCallRecord(
+    await db.tool_calls.save(ToolCallRecord(
         id="tc-1",
         session_id="s1",
         step_id="step-1",
@@ -131,28 +131,28 @@ async def test_save_tool_call(db: Database):
         status=ToolCallStatus.RUNNING,
         started_at=datetime.now(),
     ))
-    await db.update_tool_call("tc-1", {
+    await db.tool_calls.update("tc-1", {
         "status": "success", "raw_output": "data",
         "duration_ms": 50.0, "completed_at": datetime.now().isoformat(),
     })
-    calls = await db.query_tool_calls("s1")
+    calls = await db.tool_calls.query("s1")
     assert len(calls) == 1
     assert calls[0].status == "success"
 
 
 @pytest.mark.asyncio
 async def test_delete_session_cascade(db: Database):
-    await db.create_session("s1")
-    await db.save_message(Message(
+    await db.sessions.create("s1")
+    await db.messages.save(Message(
         id="m1",
         session_id="s1",
         role=MessageRole.USER,
         content="x",
         timestamp=datetime.now(),
     ))
-    await db.delete_session("s1")
-    assert await db.get_session("s1") is None
-    assert await db.get_messages("s1") == []
+    await db.sessions.delete("s1")
+    assert await db.sessions.get("s1") is None
+    assert await db.messages.get_by_session("s1") == []
 
 
 @pytest.mark.asyncio

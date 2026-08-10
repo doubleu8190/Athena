@@ -24,9 +24,9 @@ async def recover_interrupted_sessions(db: Database) -> None:
         db: 数据库实例，需提供 query_sessions 和 update_session 方法
     """
     try:
-        interrupted = await db.query_sessions(status=["interrupted", "running"])
+        interrupted = await db.sessions.query_by_status(["interrupted", "running"])
         for session in interrupted:
-            await db.update_session(session.id, status="idle")
+            await db.sessions.update(session.id, status="idle")
             # 清理进程中断遗留的 running steps/tool_calls（否则永久卡 running）
             await db.cleanup_interrupted_session(session.id)
             logger.info(

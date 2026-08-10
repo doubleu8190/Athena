@@ -279,7 +279,7 @@ def test_assemble_response_merges_tool_calls(harness: Harness):
 @pytest.mark.asyncio
 async def test_empty_response_does_not_save_message(db: Database):
     """空响应不应向数据库落库任何空 assistant 消息."""
-    await db.create_session("s-empty-db")
+    await db.sessions.create("s-empty-db")
     model = _AlwaysEmptyModel()
     llm = LLMProvider(model)
     harness = Harness(
@@ -294,7 +294,7 @@ async def test_empty_response_does_not_save_message(db: Database):
         run_id="20260730",
     )
     assert result.error is not None
-    assert await db.get_messages("s-empty-db") == []
+    assert await db.messages.get_by_session("s-empty-db") == []
 
 
 @pytest.mark.asyncio
@@ -351,7 +351,7 @@ async def test_harness_emits_llm_call_end_failed_on_exception():
 @pytest.mark.asyncio
 async def test_harness_stop_signal_interrupts_run(db: Database):
     """stop_signal 置位后 run 应立即终止，且 session 状态为 interrupted."""
-    await db.create_session("s-stop")
+    await db.sessions.create("s-stop")
     stop_signal = asyncio.Event()
     stop_signal.set()
     model = _StreamingTextModel()
@@ -368,7 +368,7 @@ async def test_harness_stop_signal_interrupts_run(db: Database):
         stop_signal=stop_signal,
     )
     assert result.interrupted is True
-    session = await db.get_session("s-stop")
+    session = await db.sessions.get("s-stop")
     assert session.status.value == "interrupted"
 
 
@@ -401,7 +401,7 @@ class _StopMidStreamModel:
 async def test_harness_stop_mid_stream_finalizes_step(db: Database):
     """流式中途 stop：llm step 应被终态化（非 running）、补发 LLM_CALL_END，
     且不落库残缺 assistant 消息."""
-    await db.create_session("s-stopmid")
+    await db.sessions.create("s-stopmid")
     stop_signal = asyncio.Event()
     ws = _RecordingWs()
     harness = Harness(
@@ -421,7 +421,7 @@ async def test_harness_stop_mid_stream_finalizes_step(db: Database):
     )
     assert result.interrupted is True
     # 当前 llm step 被终态化，无遗留 running
-    steps = await db.get_steps("s-stopmid")
+    steps = await db.steps.get_by_session("s-stopmid")
     assert steps
     assert all(s.status.value != "running" for s in steps)
     assert any(s.status.value == "failed" for s in steps)
@@ -429,9 +429,9 @@ async def test_harness_stop_mid_stream_finalizes_step(db: Database):
     call_ends = [e for e in ws.events if e["type"] == EventType.LLM_CALL_END]
     assert call_ends and call_ends[-1]["data"]["status"] == "failed"
     # 不落库残缺 assistant 消息
-    msgs = await db.get_messages("s-stopmid")
+    msgs = await db.messages.get_by_session("s-stopmid")
     assert all(m.role.value != "assistant" for m in msgs)
-    session = await db.get_session("s-stopmid")
+    session = await db.sessions.get("s-stopmid")
     assert session.status.value == "interrupted"
 
 
@@ -465,7 +465,7 @@ class _HangingModel:
 @pytest.mark.asyncio
 async def test_harness_llm_stream_timeout_terminates_run(db: Database):
     """流式挂死时 llm_stream_timeout 应终态化 step，run 结束而非永久 running."""
-    await db.create_session("s-hang")
+    await db.sessions.create("s-hang")
     model = _HangingModel()
     harness = Harness(
         llm=LLMProvider(model),
@@ -481,7 +481,7 @@ async def test_harness_llm_stream_timeout_terminates_run(db: Database):
         run_id="20260808",
     )
     assert result.error is not None
-    steps = await db.get_steps("s-hang")
+    steps = await db.steps.get_by_session("s-hang")
     assert steps
     # 所有 llm_call step 都被终态化（failed），无遗留 running
     assert all(s.status.value != "running" for s in steps)
@@ -552,7 +552,7 @@ async def test_tool_failure_records_failure_not_success():
 @pytest.mark.asyncio
 async def test_tool_failure_persisted_as_failed(db: Database):
     """完整 run：工具失败应落库 tool_call.status=failed，且失败详情回传给 LLM."""
-    await db.create_session("s-toolfail")
+    await db.sessions.create("s-toolfail")
     harness = Harness(
         llm=LLMProvider(_ToolCallThenAnswerModel()),
         tool_manager=UnifiedToolManager(),
@@ -572,15 +572,15 @@ async def test_tool_failure_persisted_as_failed(db: Database):
     )
     assert result.error is None
     # tool_call 落库 failed
-    tool_calls = await db.query_tool_calls("s-toolfail")
+    tool_calls = await db.tool_calls.query("s-toolfail")
     assert tool_calls
     assert all(tc.status.value == "failed" for tc in tool_calls)
     # 失败详情进入 tool 消息，供 LLM 下一轮自愈
-    tool_msgs = [m for m in await db.get_messages("s-toolfail") if m.role.value == "tool"]
+    tool_msgs = [m for m in await db.messages.get_by_session("s-toolfail") if m.role.value == "tool"]
     assert tool_msgs
     assert "exit_code=2: command failed" in tool_msgs[0].content
     # 工具 step 落库 failed
-    tool_steps = [s for s in await db.get_steps("s-toolfail") if s.step_type.value == "tool_execution"]
+    tool_steps = [s for s in await db.steps.get_by_session("s-toolfail") if s.step_type.value == "tool_execution"]
     assert tool_steps
     assert all(s.status.value == "failed" for s in tool_steps)
 
@@ -588,7 +588,7 @@ async def test_tool_failure_persisted_as_failed(db: Database):
 @pytest.mark.asyncio
 async def test_steps_record_parent_run_id(db: Database):
     """主 run 步骤 parent_run_id 为 None；子 run（带父链）步骤指向父 run."""
-    await db.create_session("s-parent")
+    await db.sessions.create("s-parent")
     harness = Harness(
         llm=LLMProvider(_StreamingTextModel()),
         tool_manager=UnifiedToolManager(),
@@ -601,7 +601,7 @@ async def test_steps_record_parent_run_id(db: Database):
         session_id="s-parent",
         run_id="main_run",
     )
-    main_steps = await db.get_steps("s-parent")
+    main_steps = await db.steps.get_by_session("s-parent")
     assert main_steps
     assert all(s.parent_run_id is None for s in main_steps)
 
@@ -612,6 +612,6 @@ async def test_steps_record_parent_run_id(db: Database):
         run_id="main_run_1",
         parent_run_id="main_run",
     )
-    sub_steps = [s for s in await db.get_steps("s-parent") if s.run_id == "main_run_1"]
+    sub_steps = [s for s in await db.steps.get_by_session("s-parent") if s.run_id == "main_run_1"]
     assert sub_steps
     assert all(s.parent_run_id == "main_run" for s in sub_steps)

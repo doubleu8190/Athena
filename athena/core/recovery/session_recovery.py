@@ -62,7 +62,7 @@ class SessionRecovery:
 
     async def recover_on_startup(self) -> None:
         """启动时恢复中断的会话."""
-        interrupted = await self._db.query_sessions(status=["running", "interrupted"])
+        interrupted = await self._db.sessions.query_by_status(["running", "interrupted"])
         if not interrupted:
             logger.info("no_interrupted_sessions")
             return
@@ -76,7 +76,7 @@ class SessionRecovery:
                 logger.error(
                     "session_recovery_failed", session_id=session_id, error=str(e)
                 )
-                await self._db.update_session(session_id, status="idle")
+                await self._db.sessions.update(session_id, status="idle")
 
     async def _recover_session(self, session_id: str) -> None:
         """恢复单个会话."""
@@ -87,16 +87,16 @@ class SessionRecovery:
         await self._handle_interrupted_tools(session_id)
 
         # 3. 判断恢复起点
-        messages = await self._db.get_messages(session_id)
+        messages = await self._db.messages.get_by_session(session_id)
         resume_point = self._determine_resume_point(messages)
 
         if resume_point == ResumePoint.NONE:
-            await self._db.update_session(session_id, status="idle")
+            await self._db.sessions.update(session_id, status="idle")
             logger.info("session_recovery_not_needed", session_id=session_id)
             return
 
         # 4. 标记为恢复中
-        await self._db.update_session(session_id, status="recovering")
+        await self._db.sessions.update(session_id, status="recovering")
 
         # 5. 构造恢复系统消息
         recovery_prompt = self._build_recovery_prompt(resume_point, messages)
@@ -104,7 +104,7 @@ class SessionRecovery:
         # 6. 重新触发 Agent 运行（带重试）
         if self._workflow is None:
             logger.warning("no_workflow_for_recovery", session_id=session_id)
-            await self._db.update_session(session_id, status="idle")
+            await self._db.sessions.update(session_id, status="idle")
             return
 
         for attempt in range(self.MAX_RECOVERY_RETRIES):
@@ -114,7 +114,7 @@ class SessionRecovery:
                     user_message=recovery_prompt,
                     system_prompt="[系统] 正在恢复中断的会话，请从现有对话历史继续。",
                 )
-                await self._db.update_session(session_id, status="idle")
+                await self._db.sessions.update(session_id, status="idle")
                 logger.info(
                     "session_recovery_success",
                     session_id=session_id,
@@ -132,7 +132,7 @@ class SessionRecovery:
                     await asyncio.sleep(2**attempt)  # 指数退避
 
         # 恢复失败
-        await self._db.update_session(session_id, status="failed")
+        await self._db.sessions.update(session_id, status="failed")
         logger.error("session_recovery_failed_all_attempts", session_id=session_id)
 
     def _determine_resume_point(self, messages: list[Message]) -> ResumePoint:
@@ -168,15 +168,15 @@ class SessionRecovery:
 
     async def _check_pending_approvals(self, session_id: str) -> None:
         """检查中断时的待审批请求并通知用户."""
-        running_tools = await self._db.query_tool_calls(
+        running_tools = await self._db.tool_calls.query(
             session_id=session_id, status="running"
         )
 
         for tc in running_tools:
-            approval = await self._db.query_approval(tool_call_id=tc.id)
+            approval = await self._db.approval_logs.query_by_tool_call(tool_call_id=tc.id)
             if not approval:
                 # 审批中断，更新状态并通知用户
-                await self._db.update_tool_call(
+                await self._db.tool_calls.update(
                     tc.id,
                     {
                         "status": "interrupted",
@@ -207,7 +207,7 @@ class SessionRecovery:
 
     async def _handle_interrupted_tools(self, session_id: str) -> None:
         """处理中断的工具调用."""
-        running_tools = await self._db.query_tool_calls(
+        running_tools = await self._db.tool_calls.query(
             session_id=session_id, status="running"
         )
 
@@ -216,7 +216,7 @@ class SessionRecovery:
 
             if strategy == InterruptedToolStrategy.RETRY:
                 # 标记为待重试
-                await self._db.update_tool_call(
+                await self._db.tool_calls.update(
                     tc.id,
                     {
                         "status": "pending_retry",
@@ -225,7 +225,7 @@ class SessionRecovery:
                 )
             elif strategy == InterruptedToolStrategy.SKIP:
                 # 标记为已完成
-                await self._db.update_tool_call(
+                await self._db.tool_calls.update(
                     tc.id,
                     {
                         "status": "completed",
@@ -233,7 +233,7 @@ class SessionRecovery:
                     },
                 )
             else:  # NOTIFY_USER
-                await self._db.update_tool_call(
+                await self._db.tool_calls.update(
                     tc.id,
                     {
                         "status": "interrupted",
@@ -347,7 +347,7 @@ class GracefulShutdown:
 
         # 为活跃会话标记 interrupted
         for session_id in list(self._active_sessions.keys()):
-            await self._db.update_session(session_id, status="interrupted")
+            await self._db.sessions.update(session_id, status="interrupted")
 
         # 等待活跃任务完成
         deadline = asyncio.get_event_loop().time() + self.DRAINING_TIMEOUT

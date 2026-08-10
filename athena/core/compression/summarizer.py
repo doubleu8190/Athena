@@ -93,7 +93,7 @@ class IncrementalSummarizer:
     async def _load_buffer(self, session_id: str) -> None:
         """从 session 表懒加载摘要缓冲区."""
         try:
-            session = await self._db.get_session(session_id)
+            session = await self._db.sessions.get(session_id)
             if not session:
                 return
 
@@ -175,7 +175,7 @@ class IncrementalSummarizer:
     async def _persist_buffer(self, session_id: str) -> None:
         """持久化摘要缓冲区到 session 表 compression_summary 字段."""
         try:
-            await self._db.update_session(
+            await self._db.sessions.update(
                 session_id,
                 compression_summary=self._get_buffer_local(session_id),
             )

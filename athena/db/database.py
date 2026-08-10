@@ -97,9 +97,8 @@ class Database:
     # ------------------------------------------------------------------
 
     async def save_message(self, message: Message) -> str:
-        msg_id = await self._messages.save(message)
-        await self.update_session(message.session_id)  # refresh updated_at
-        return msg_id
+        # MessageRepository.save 已在同一事务内刷新 session.updated_at，无需额外调用
+        return await self._messages.save(message)
 
     async def get_messages(self, session_id: str, limit: int | None = None) -> list[Message]:
         return await self._messages.get_by_session(session_id, limit=limit)

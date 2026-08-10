@@ -299,7 +299,7 @@ class MessageRepository:
     """消息表 CRUD 操作."""
 
     async def save(self, message: Message) -> str:
-        """保存消息."""
+        """保存消息并同步刷新会话的 updated_at（同一事务）."""
         async with get_session() as session:
             async with session.begin():
                 model = MessageModel(
@@ -314,6 +314,12 @@ class MessageRepository:
                     timestamp=message.timestamp.isoformat(),
                 )
                 session.add(model)
+                # 在同一事务内刷新会话时间戳，避免额外的 DB 往返
+                await session.execute(
+                    update(SessionModel)
+                    .where(SessionModel.id == message.session_id, SessionModel.deleted_time.is_(None))
+                    .values(updated_at=_now_iso())
+                )
             return message.id
 
     async def get_by_session(

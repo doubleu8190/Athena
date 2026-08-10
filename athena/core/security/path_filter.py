@@ -111,7 +111,7 @@ class PathSecurityFilter:
         # 5. 路径遍历检查（resolve 后检查是否仍在预期目录）
         if self._strict_mode and self._allowed_dirs:
             is_allowed = any(
-                str(resolved).startswith(str(allowed_dir))
+                resolved.is_relative_to(allowed_dir)
                 for allowed_dir in self._allowed_dirs
             )
             if not is_allowed:
@@ -122,7 +122,7 @@ class PathSecurityFilter:
 
         # 6. 黑名单目录检查
         for blocked_dir in self._blocked_dirs:
-            if str(resolved).startswith(str(blocked_dir)):
+            if resolved.is_relative_to(blocked_dir):
                 raise PathSecurityError(path, f"Path in blocked directory: {blocked_dir}")
 
         # 7. 扩展名检查（可选）
@@ -148,7 +148,7 @@ class PathSecurityFilter:
 
         # 写入保护检查：使用统一常量，避免与 _DANGEROUS_PATTERNS / blocked_dirs 重复定义
         for protected_dir in _PROTECTED_SYSTEM_DIRS:
-            if str(resolved).startswith(str(protected_dir)):
+            if resolved.is_relative_to(protected_dir):
                 raise PathSecurityError(path, f"Cannot write to protected directory: {protected_dir}")
 
         return resolved

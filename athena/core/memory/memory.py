@@ -605,67 +605,62 @@ class MemoryManager:
     async def cleanup_expired(self) -> int:
         """清理过期且未固定的记忆.
 
-        先软删 SQLite，再删 ChromaDB；ChromaDB 失败时回滚 SQLite。
+        先从 SQLite 查询过期 ID（索引命中），再软删 SQLite，最后删 ChromaDB；
+        ChromaDB 失败时回滚 SQLite。
         """
         await self.initialize()
+        now = datetime.now()
+        now_iso = now.isoformat()
+
+        # 1. 从 SQLite 查询过期 ID（利用 expires_at 索引，避免全表 ChromaDB 扫描）
+        expired_ids: list[str] = []
         try:
-            all_data = self.collection.get(
-                include=["metadatas"],
-            )
-            ids = all_data.get("ids") if all_data else []
-            if not ids:
-                return 0
-            now = datetime.now()
-            expired_ids: list[str] = []
-            for mid, meta in zip(ids, all_data.get("metadatas") or []):
-                meta = meta or {}
-                if meta.get("pinned"):
-                    continue
-                expires_at = meta.get("expires_at", "")
-                if not expires_at or not isinstance(expires_at, str):
-                    continue
-                try:
-                    exp_time = datetime.fromisoformat(expires_at)
-                    if now > exp_time:
-                        expired_ids.append(mid)
-                except (ValueError, TypeError):
-                    continue
-            if not expired_ids:
-                return 0
-
-            now_iso = now.isoformat()
-
-            # 1. 先软删 SQLite
-            try:
-                async with get_session() as session:
-                    async with session.begin():
-                        for mid in expired_ids:
-                            await session.execute(
-                                update(MemoryModel)
-                                .where(MemoryModel.id == mid)
-                                .values(deleted_time=now_iso)
-                            )
-                            await session.execute(
-                                text("DELETE FROM memory_fts WHERE memory_id = :mid"),
-                                {"mid": mid},
-                            )
-            except Exception as e:
-                logger.error("memory_cleanup_sqlite_failed", error=str(e))
-                raise
-
-            # 2. 再删 ChromaDB；失败则回滚 SQLite 软删除
-            try:
-                self.collection.delete(ids=expired_ids)
-            except Exception as e:
-                logger.error("memory_cleanup_chromadb_failed", error=str(e))
-                await self._rollback_cleanup(expired_ids)
-                raise
-
-            logger.info("memory_cleanup", count=len(expired_ids))
-            return len(expired_ids)
+            async with get_session() as session:
+                rows = (
+                    await session.execute(
+                        select(MemoryModel.id).where(
+                            MemoryModel.expires_at.isnot(None),
+                            MemoryModel.expires_at < now_iso,
+                            MemoryModel.pinned == 0,
+                            MemoryModel.deleted_time.is_(None),
+                        )
+                    )
+                ).fetchall()
+                expired_ids = [r[0] for r in rows]
         except Exception as e:
-            logger.error("memory_cleanup_failed", error=str(e))
+            logger.error("memory_cleanup_query_failed", error=str(e))
+            raise
+
+        if not expired_ids:
             return 0
+
+        # 2. 软删 SQLite（单条批量 UPDATE + 批量 FTS 清理）
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(MemoryModel)
+                        .where(MemoryModel.id.in_(expired_ids))
+                        .values(deleted_time=now_iso)
+                    )
+                    await session.execute(
+                        text("DELETE FROM memory_fts WHERE memory_id IN :ids"),
+                        {"ids": tuple(expired_ids)},
+                    )
+        except Exception as e:
+            logger.error("memory_cleanup_sqlite_failed", error=str(e))
+            raise
+
+        # 3. 删 ChromaDB；失败则回滚 SQLite 软删除
+        try:
+            await asyncio.to_thread(self.collection.delete, expired_ids)
+        except Exception as e:
+            logger.error("memory_cleanup_chromadb_failed", error=str(e))
+            await self._rollback_cleanup(expired_ids)
+            raise
+
+        logger.info("memory_cleanup", count=len(expired_ids))
+        return len(expired_ids)
 
     # ------------------------------------------------------------------
     # 回滚补偿（ChromaDB 失败时撤销已提交的 SQLite 写入）

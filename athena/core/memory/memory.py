@@ -136,62 +136,62 @@ class MemoryManager:
             datetime.now() + timedelta(days=self._settings.memory_ttl_days)
         ).isoformat()
 
-        # 1. SQLite：增量计数 + 滑动 TTL（仅非 pinned），跳过软删除行
-        try:
-            async with get_session() as session:
-                async with session.begin():
-                    for mid, st in stats.items():
-                        await session.execute(
-                            update(MemoryModel)
-                            .where(
-                                MemoryModel.id == mid,
-                                MemoryModel.deleted_time.is_(None),
-                            )
-                            .values(
-                                last_accessed=st.last_accessed,
-                                access_count=MemoryModel.access_count + st.count,
-                                expires_at=case(
-                                    (MemoryModel.pinned == 0, new_expires),
-                                    else_=MemoryModel.expires_at,
-                                ),
-                            )
-                        )
-        except Exception as e:
-            logger.error("memory_flush_sqlite_failed", error=str(e))
-            raise
+        ids = list(stats.keys())
 
-        # 2. readback 取 fresh 值作为镜像 Chroma 的规范值
+        # 1. SQLite：单条批量 UPDATE + RETURNING 取回 fresh 值（省去 readback 事务）
         rows: Any = []
         try:
             async with get_session() as session:
-                rows = (
-                    await session.execute(
-                        select(
+                async with session.begin():
+                    # 用 CASE 表达式按 id 分支赋值，一条 SQL 搞定 N 条记录
+                    la_case = case(
+                        *[(MemoryModel.id == mid, st.last_accessed) for mid, st in stats.items()],
+                    )
+                    inc_case = case(
+                        *[(MemoryModel.id == mid, st.count) for mid, st in stats.items()],
+                    )
+                    result = await session.execute(
+                        update(MemoryModel)
+                        .where(
+                            MemoryModel.id.in_(ids),
+                            MemoryModel.deleted_time.is_(None),
+                        )
+                        .values(
+                            last_accessed=la_case,
+                            access_count=MemoryModel.access_count + inc_case,
+                            expires_at=case(
+                                (MemoryModel.pinned == 0, new_expires),
+                                else_=MemoryModel.expires_at,
+                            ),
+                        )
+                        .returning(
                             MemoryModel.id,
                             MemoryModel.pinned,
                             MemoryModel.expires_at,
                             MemoryModel.last_accessed,
                             MemoryModel.access_count,
-                        ).where(MemoryModel.id.in_(list(stats)))
+                        )
                     )
-                ).fetchall()
+                    rows = result.fetchall()
         except Exception as e:
-            logger.error("memory_flush_readback_failed", error=str(e))
+            logger.error("memory_flush_sqlite_failed", error=str(e))
             raise
 
-        # 3. Chroma 镜像（update 为逐 key 合并，仅改这 3 个字段）
+        # 2. Chroma 镜像（update 为逐 key 合并，仅改这 3 个字段）
+        #    用 asyncio.to_thread 避免同步 ChromaDB 调用阻塞事件循环
         if rows:
             try:
-                self.collection.update(
-                    ids=[r.id for r in rows],
-                    metadatas=[
-                        {
-                            "last_accessed": r.last_accessed,
-                            "access_count": r.access_count,
-                            "expires_at": "" if r.pinned else (r.expires_at or ""),
-                        }
-                        for r in rows
-                    ],
+                chroma_ids = [r.id for r in rows]
+                chroma_metas = [
+                    {
+                        "last_accessed": r.last_accessed,
+                        "access_count": r.access_count,
+                        "expires_at": "" if r.pinned else (r.expires_at or ""),
+                    }
+                    for r in rows
+                ]
+                await asyncio.to_thread(
+                    self.collection.update, chroma_ids, chroma_metas
                 )
             except Exception as e:
                 # SQLite 已提交，仅 Chroma 落后一个周期；下次访问自动补同步

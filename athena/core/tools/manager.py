@@ -165,11 +165,11 @@ class UnifiedToolManager:
                 logger.error("approval_failed", tool=name, error=str(e))
                 return ToolResult(status="failed", error=f"审批流程异常: {e}")
 
-        # 执行工具：把当前运行的 run_id 作为上下文透传给原生 handler
-        # （声明了 parent_run_id 的 handler 会收到；MCP 工具不注入，避免污染远程参数）
-        if isinstance(tool, NativeTool):
-            return await tool.execute(**params, _run_id=run_id)
-        return await tool.execute(**params)
+        # 执行工具；spawn_sub_agent 需要当前 run_id 作为父链上下文
+        extra: dict[str, Any] = {}
+        if isinstance(tool, NativeTool) and name == "spawn_sub_agent" and run_id:
+            extra["parent_run_id"] = run_id
+        return await tool.execute(**params, **extra)
 
     # ------------------------------------------------------------------
     # LangChain 集成

@@ -35,35 +35,12 @@ from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# ── 默认系统提示词 — 三层任务分类 ──
+# ── 默认系统提示词 — 从 prompt/system.md 加载 ──
 # 工具定义（含审批/风险治理信息）统一由 bind_tools 的函数 schema 注入，
 # 提示词内不再重复罗列工具列表。
-DEFAULT_SYSTEM_PROMPT = """\
-你是 Athena，一个采用三层任务分类系统的 AI 助手。
-请将每个用户请求划分到以下三个层级之一，并据此采取行动。
+from athena.utils.prompts import get_prompt
 
-## 第一层：直接回答
-对于仅凭已有知识即可回答的简单问题（定义、解释、代码片段、数学、翻译）——直接回答，不调用任何工具。
-
-## 第二层：工具调用
-当任务需要外部信息或文件系统操作时，使用已绑定到你的工具。每个工具的风险等级和审批要求会标注在工具描述中。
-
-工具错误处理：如果工具调用失败，使用修正后的参数重试一次。如果再次失败，向用户报告错误并建议替代方案——不要无限循环。
-
-## 第三层：子 Agent 委派
-对于适合拆解或并行执行的复杂任务（多步研究、多文件重构、包含相互独立子任务的任务），使用 spawn_sub_agent 工具创建专门的子 Agent。每个子 Agent 独立运行，拥有自己的工具访问权限，并返回你可以汇总的结果。
-
-子 Agent 使用指南：
-- 将任务拆解为相互独立、边界清晰的子任务
-- 每个子任务派生一个子 Agent（它们并行运行）
-- 汇总各子结果并综合成连贯的最终回答
-- 如果某个子 Agent 失败，重试一次或报告部分结果
-
-## 决策边界
-- 默认使用第一层。仅当任务确实需要时才升级到第二/三层。
-- 单个工具调用 = 第二层。多个可并行运行的独立工具调用 = 考虑第三层。
-- 绝不为需要顺序推理或步骤间强耦合的任务使用第三层——改用带多轮对话的第二层。
-"""
+DEFAULT_SYSTEM_PROMPT = get_prompt("system")
 
 
 class SubAgentResult(BaseModel):
@@ -191,10 +168,7 @@ class SubAgentManager:
             result = await sub_harness.run(
                 messages=[{"role": "user", "content": task}],
                 session_id=session_id,
-                system_prompt=(
-                    "你是一个子 Agent。完成分配给你的任务并返回结果。"
-                    "请保持简洁和专注。"
-                ),
+                system_prompt=get_prompt("sub_agent"),
                 run_id=sub_run_id,
                 parent_run_id=self._main_run_id,
                 tool_names=allowed_tools,

@@ -27,6 +27,7 @@ from athena.models import Message, MessageRole
 from athena.utils.llm import extract_json_from_llm_response, extract_message_text
 from athena.utils.message import format_messages_brief
 from athena.utils.logging import get_logger
+from athena.utils.prompts import get_prompt
 
 logger = get_logger(__name__)
 
@@ -85,138 +86,7 @@ class FactExtractor:
         重试管理器，容错性更强。
     """
 
-    EXTRACTION_PROMPT = """# 角色
-你是一个精确、保守的信息提取引擎。你的任务是从对话中提炼具有长期价值的信息，
-并严格避免与已有记忆重复。
-
-# 输入
-- `existing_memories`: 之前提取的原子事实与摘要列表。任何与已有记忆语义等价的内容
-  都不得再次提取。
-- `conversation_text`: 待提取的对话内容（用户与助手消息，格式为 `[用户]` / `[助手]`）。
-
-existing_memories:
-{existing_memories}
-
-conversation_text:
-{conversation_text}
-
-# 提取决策树
-1. 如果对话仅包含问候、闲聊或琐碎交流 → 输出空 JSON（{{"atomic_facts": []}}）。
-2. 如果对话未结束 → 只提取完全确认的事实（明确陈述且非假设），
-   跳过未决决策或未成型的提议。
-3. 否则 → 按下列规则正常提取。
-
-# 提取规则
-
-## A. 提取什么（长期价值）
-只提取对未来交互可能有用的信息，包括：
-- 用户偏好（如"偏好简洁回答"、"不喜欢 Python"）
-- 个人画像（如"住在北京"、"是后端工程师"）
-- 技术决策（如"选择 PostgreSQL 而非 MySQL"、"采用微服务架构"）
-- 项目背景（如"仓库名: my-app"、"截止时间: 2026 Q3"）
-- 问题解决方案（如"通过增大 keepalive 修复超时"）
-- 需要跟进而未解决的问题（如"需要决定云服务商"）
-
-不要提取：
-- 一次性问答，之后不会再被引用
-- 客套话或填充内容
-- 临时状态（如"现在感觉很累"）
-
-## B. 从助手回复中提取（决策闭环）
-当用户明确采纳、确认或执行了助手的建议时，将被采纳的具体方案作为事实提取。
-这捕获了"用户说好 → 具体是什么"的决策闭环。
-
-判定标准（同时满足）：
-1. 助手提出了具体方案、配置、命令或技术选型（非泛泛解释）。
-2. 用户通过明确确认词采纳（如"好的"、"就用这个"、"按你说的改"、"就这样"）。
-
-提取内容 = 助手方案的具体部分（如具体的工具名、配置值、命令），
-而非助手的通用解释或背景知识。
-
-不要从助手回复中提取：
-- 通用技术解释（如"REST 是一种架构风格……"）
-- 代码示例或教程性内容（除非用户明确采纳执行）
-- 助手的推测或不确定的建议（用户未确认）
-
-## C. 原子事实
-每条原子事实是独立、自包含、可验证的信息。
-示例：{{"key": "timezone", "value": "UTC+8", "category": "profile"}}。
-
-## D. 避免重复（关键）
-- 添加任何新条目前，先与所有 `existing_memories` 做语义比较。
-- 若已有记忆存在（即使措辞略有不同），跳过该提取。
-- 若新信息更新了已有记忆（如偏好从"Python"改为"Rust"），作为新事实提取，
-  并在 value 中标注更新来源，如 "Rust (was Python)"。
-
-## E. 置信度 (0-1)
-按证据强度评分：
-- 1.0: 用户明确清晰陈述
-- 0.8-0.9: 由多次表述强推定
-- 0.6-0.7: 从上下文推断但未明确确认
-- < 0.6: 丢弃，不输出
-
-从助手回复中提取的事实，置信度上限为 0.9（需用户确认才算完全确认）。
-
-## F. 类别
-- preference: 用户偏好或选择
-- profile: 个人信息或特征
-- project: 项目相关背景
-- technical_decision: 技术选型或架构决策
-- fact: 一般事实
-- solution: 问题解决方案或修复
-- unresolved: 待解决的问题或决策
-- other: 其他
-
-# 输出限制
-- 每次提取最多 20 条原子事实
-- 每条 key ≤ 30 字符（snake_case）
-- 每条 value ≤ 100 字符
-
-# 输出格式
-必须输出纯 JSON，不能有 markdown 代码围栏或额外文字。使用如下精确结构，
-所有字段必填，无内容时返回空数组。
-
-{{
-  "atomic_facts": [
-    {{
-      "key": "short_identifier",
-      "value": "fact content",
-      "category": "preference",
-      "confidence": 0.9
-    }}
-  ]
-}}
-
-# 示例
-
-## 示例 1：用户直接陈述
-输入:
-conversation_text:
-[用户] 我把新项目从 Python 换成了 Rust。
-[助手] 好选择！Rust 在内存安全方面很棒。
-[用户] 是的，我们目标 2026 Q3 发布。
-
-输出:
-{{
-  "atomic_facts": [
-    {{"key": "language", "value": "Rust (was Python)", "category": "preference", "confidence": 1.0}},
-    {{"key": "release_date", "value": "2026 Q3", "category": "project", "confidence": 1.0}}
-  ]
-}}
-
-## 示例 2：用户采纳助手方案（决策闭环）
-输入:
-conversation_text:
-[用户] 端口被占用了怎么办？
-[助手] 可以用 SO_REUSEADDR 选项，或者用 lsof -i :8080 找到占用进程后 kill 掉。
-[用户] 用 lsof 那个方案吧，帮我查一下。
-
-输出:
-{{
-  "atomic_facts": [
-    {{"key": "port_conflict_solution", "value": "lsof -i :<port> 查找占用进程后 kill", "category": "solution", "confidence": 0.9}}
-  ]
-}}"""
+    EXTRACTION_PROMPT = get_prompt("fact_extraction")
 
     def __init__(self, llm_provider: LLMProvider) -> None:
         """初始化事实提取器。
@@ -402,63 +272,7 @@ class ConversationSummarizer:
     对话记忆的"点 + 线"沉淀体系。
     """
 
-    SUMMARIES_PROMPT = """# 角色
-你是对话摘要引擎，把一段对话提炼为连贯的叙事摘要，保留关键上下文、决策与理由，
-仅保留具有长期价值的内容。
-
-# 输入
-{conversation}
-
-# 提取规则
-- 每条摘要对应一个讨论主线或问题解决过程，保留关键上下文、决策与理由。
-- 如果讨论明显未完成，不要当作"决策"总结，可标注为 open_discussion 并给出较低置信度。
-- 只总结有长期价值的内容，忽略客套与一次性问答。
-
-# 摘要类别
-- technical_discussion: 技术话题讨论
-- problem_solving: 问题分析与解决过程
-- planning: 规划或路线图讨论
-- decision: 决策过程
-- open_discussion: 未完成或进行中的讨论
-- other: 其他
-
-# 输出限制
-- 每次最多 5 条摘要
-- topic 为简短标签
-- content 为 2-3 句话，≤300 字符
-
-# 输出格式
-必须输出纯 JSON，不能有 markdown 代码围栏或额外文字。所有字段必填，
-无内容时返回空数组。
-
-{{
-  "summaries": [
-    {{
-      "topic": "discussion topic",
-      "content": "summary content",
-      "category": "technical_discussion",
-      "confidence": 0.85
-    }}
-  ]
-}}
-
-# 示例
-输入:
-[用户] 我们讨论一下数据库迁移，从 MySQL 换到 PostgreSQL，因为需要 JSONB 支持。
-[助手] 合理，JSONB 的查询性能和灵活性都更好。
-[用户] 决定下个 sprint 先跑试点。
-
-输出:
-{{
-  "summaries": [
-    {{
-      "topic": "数据库迁移",
-      "content": "讨论了从 MySQL 迁移到 PostgreSQL 的原因（JSONB 支持），决定下个 sprint 先跑试点。",
-      "category": "technical_discussion",
-      "confidence": 0.9
-    }}
-  ]
-}}"""
+    SUMMARIES_PROMPT = get_prompt("conversation_summary")
 
     def __init__(
         self,

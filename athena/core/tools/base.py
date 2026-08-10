@@ -98,22 +98,9 @@ class NativeTool:
             execution_mode=ToolExecutionMode.NATIVE,
         )
         self._handler = handler
-        # 预计算 handler 可接受的参数名，用于透传运行上下文（如 parent_run_id）
-        try:
-            self._accepted_params = frozenset(inspect.signature(handler).parameters)
-        except (TypeError, ValueError):
-            self._accepted_params = frozenset()
 
     async def execute(self, **params: Any) -> ToolResult:
-        """执行工具调用.
-
-        内部约定：调用方（UnifiedToolManager.call_tool）可注入 `_run_id`
-        （当前运行的 run_id）作为运行上下文。仅当 handler 声明了
-        `parent_run_id` 参数时才转发，避免污染其他原生工具的参数。
-        """
-        _run_id = params.pop("_run_id", None)
-        if _run_id is not None and "parent_run_id" in self._accepted_params:
-            params["parent_run_id"] = _run_id
+        """执行工具调用."""
         try:
             result = await self._handler(**params)
             output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)

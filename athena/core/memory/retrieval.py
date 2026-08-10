@@ -17,6 +17,7 @@ from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
 from athena.utils.llm import estimate_tokens, extract_message_text
 from athena.utils.logging import get_logger
+from athena.utils.prompts import get_prompt
 
 logger = get_logger(__name__)
 
@@ -121,16 +122,7 @@ class HybridRetrievalManager:
         扩展结果仅用于向量语义检索（关键词检索使用原始查询走 FTS5），
         因此提示词明确语义检索目标、约束输出为单行语句。
         """
-        prompt = (
-            "你是记忆检索查询优化器。请将用户查询改写为适合向量语义检索的"
-            "搜索语句，用于从用户的历史记忆中召回相关内容。\n"
-            "要求：\n"
-            "- 突出核心实体与意图（人名、项目名、技术名词、日期等）\n"
-            "- 补充近义词或同义改写以扩大语义召回\n"
-            "- 保持与原始查询相同的语言\n"
-            "- 只返回一行搜索语句，不要任何解释、前缀、引号或编号\n\n"
-            f"原始查询：{query}"
-        )
+        prompt = get_prompt("query_expansion").format(query=query)
         try:
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
             expanded = extract_message_text(response).strip()

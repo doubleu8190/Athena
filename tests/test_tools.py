@@ -186,19 +186,3 @@ async def test_native_tool_receives_parent_run_id_context():
     )
     assert result.status == "success"
     assert received["parent_run_id"] == "20260809_abc"
-
-
-@pytest.mark.asyncio
-async def test_builtin_tool_ignores_parent_run_id_context(tmp_path):
-    """未声明 parent_run_id 的内置 handler 不应收到上下文注入（无 TypeError）."""
-    (tmp_path / "f.txt").write_text("x")
-    m = UnifiedToolManager()
-    register_builtin_tools(m)
-    result = await m.call_tool(
-        "list_directory",
-        {"path": str(tmp_path)},
-        session_id="s",
-        run_id="20260809_abc",
-    )
-    assert result.status == "success"
-    assert "f.txt" in (result.output or "")

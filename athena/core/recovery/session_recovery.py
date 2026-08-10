@@ -21,6 +21,7 @@ from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, ToolCallRecord
 from athena.schemas.events import EventType, build_event
 from athena.utils.logging import get_logger
+from athena.utils.prompts import get_prompt
 
 if TYPE_CHECKING:
     from athena.core.agent.workflow import AgentWorkflow
@@ -112,7 +113,7 @@ class SessionRecovery:
                 await self._workflow.process_message(
                     session_id=session_id,
                     user_message=recovery_prompt,
-                    system_prompt="[系统] 正在恢复中断的会话，请从现有对话历史继续。",
+                    system_prompt=get_prompt("recovery_system"),
                 )
                 await self._db.sessions.update(session_id, status="idle")
                 logger.info(
@@ -296,26 +297,19 @@ class SessionRecovery:
     def _build_recovery_prompt(
         self, resume_point: ResumePoint, messages: list[Message]
     ) -> str:
-        """构造恢复提示词."""
+        """构造恢复提示词（从 prompt/ 目录加载）."""
         if resume_point == ResumePoint.RE_RUN_AGENT:
-            return (
-                "[系统] 你的上一轮执行被中断，用户消息未得到响应。"
-                "请从现有对话历史继续，回复用户的问题。"
-            )
+            return get_prompt("recovery_user")
         elif resume_point == ResumePoint.RE_EXECUTE_TOOLS:
             last_msg = messages[-1] if messages else None
             tool_calls = last_msg.tool_calls if last_msg else []
             tool_names = [tc.get("name", "unknown") for tc in tool_calls]
-            return (
-                f"[系统] 你的上一轮执行被中断，以下工具调用未完成：{', '.join(tool_names)}。"
-                "请重新执行这些工具调用。"
+            return get_prompt("recovery_user_tools").format(
+                tool_names=", ".join(tool_names)
             )
         elif resume_point == ResumePoint.RE_RUN_LLM:
-            return (
-                "[系统] 你的上一轮执行被中断，工具结果未被处理。"
-                "请根据现有对话历史继续推理。"
-            )
-        return "[系统] 会话恢复，请继续。"
+            return get_prompt("recovery_user_llm")
+        return get_prompt("recovery_user_default")
 
 
 class GracefulShutdown:

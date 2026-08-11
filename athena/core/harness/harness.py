@@ -157,7 +157,9 @@ class Harness:
             on_errors=["timeout", "timed out"],
             action="retry",
             max_retries=1,
-            param_transform={"timeout": lambda t: (t * 2) if isinstance(t, (int, float)) else t},
+            param_transform={
+                "timeout": lambda t: (t * 2) if isinstance(t, (int, float)) else t
+            },
         )
         self._error_handler.register_fallback(
             tool_name="exec_shell",
@@ -251,15 +253,17 @@ class Harness:
                 llm_step_id = generate_time_id()
                 budget.increment_turn()
 
-                await self._save_step(Step(
-                    id=llm_step_id,
-                    session_id=session_id,
-                    run_id=rid,
-                    step_number=step_counter,
-                    step_type=StepType.LLM_CALL,
-                    status=StepStatus.RUNNING,
-                    started_at=datetime.now(),
-                ))
+                await self._save_step(
+                    Step(
+                        id=llm_step_id,
+                        session_id=session_id,
+                        run_id=rid,
+                        step_number=step_counter,
+                        step_type=StepType.LLM_CALL,
+                        status=StepStatus.RUNNING,
+                        started_at=datetime.now(),
+                    )
+                )
 
                 await self._emit(
                     EventType.LLM_CALL_START,
@@ -274,7 +278,9 @@ class Harness:
                 try:
                     # 流式调用整体包超时兜底：流挂死时 stop 的 _should_stop() break
                     # 永远等不到 __anext__，只有超时能终态化当前 LLM step
-                    async with asyncio.timeout(self._harness_settings.llm_stream_timeout):
+                    async with asyncio.timeout(
+                        self._harness_settings.llm_stream_timeout
+                    ):
                         async for chunk in bound_llm.astream(lc_messages):
                             if self._should_stop():
                                 break
@@ -303,64 +309,89 @@ class Harness:
                     #   否则 step 遗留 running、前端气泡不结束）
                     if self._should_stop():
                         interrupted = True
-                        await self._update_step(llm_step_id, {
-                            "status": str(StepStatus.FAILED),
-                            "completed_at": datetime.now().isoformat(),
-                            "duration_ms": (time.time() - start_time) * 1000,
-                            "error_message": "运行被用户停止",
-                        })
+                        await self._update_step(
+                            llm_step_id,
+                            {
+                                "status": str(StepStatus.FAILED),
+                                "completed_at": datetime.now().isoformat(),
+                                "duration_ms": (time.time() - start_time) * 1000,
+                                "error_message": "运行被用户停止",
+                            },
+                        )
                         await self._emit_llm_call_end(
-                            llm_step_id, status="failed", session_id=session_id, run_id=rid
+                            llm_step_id,
+                            status="failed",
+                            session_id=session_id,
+                            run_id=rid,
                         )
                         break
 
                     # 空响应检测：无文本且无工具调用 → 不落库、有界重试
                     if not full_content.strip() and not final_tc:
                         error_msg = "LLM 返回空响应（无内容且无工具调用）"
-                        logger.warning("llm_empty_response", run_id=rid, error=error_msg)
-                        await self._update_step(llm_step_id, {
-                            "status": str(StepStatus.FAILED),
-                            "completed_at": datetime.now().isoformat(),
-                            "duration_ms": (time.time() - start_time) * 1000,
-                            "error_message": error_msg,
-                        })
+                        logger.warning(
+                            "llm_empty_response", run_id=rid, error=error_msg
+                        )
+                        await self._update_step(
+                            llm_step_id,
+                            {
+                                "status": str(StepStatus.FAILED),
+                                "completed_at": datetime.now().isoformat(),
+                                "duration_ms": (time.time() - start_time) * 1000,
+                                "error_message": error_msg,
+                            },
+                        )
                         await self._emit(
                             EventType.ERROR,
-                            {"step_id": llm_step_id, "error": error_msg, "phase": "llm_call"},
+                            {
+                                "step_id": llm_step_id,
+                                "error": error_msg,
+                                "phase": "llm_call",
+                            },
                             session_id,
                             rid,
                         )
                         # 失败路径同样需结束 LLM 调用生命周期：前端据此移除
                         # 本次调用创建的流式气泡，避免重试残留空气泡
                         await self._emit_llm_call_end(
-                            llm_step_id, status="failed", session_id=session_id, run_id=rid
+                            llm_step_id,
+                            status="failed",
+                            session_id=session_id,
+                            run_id=rid,
                         )
                         if budget.remaining_retries() > 0:
                             budget.increment_retry()
                             continue
                         break
 
-                    ai_message = AIMessage(
-                        content=full_content, tool_calls=final_tc
-                    ) if final_tc else AIMessage(content=full_content)
+                    ai_message = (
+                        AIMessage(content=full_content, tool_calls=final_tc)
+                        if final_tc
+                        else AIMessage(content=full_content)
+                    )
                     lc_messages.append(ai_message)
                     last_content = full_content
                     error_msg = None
 
                 except TimeoutError:
-                    error_msg = (
-                        f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）"
-                    )
+                    error_msg = f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）"
                     logger.warning("llm_stream_timeout", run_id=rid, error=error_msg)
-                    await self._update_step(llm_step_id, {
-                        "status": str(StepStatus.FAILED),
-                        "completed_at": datetime.now().isoformat(),
-                        "duration_ms": (time.time() - start_time) * 1000,
-                        "error_message": error_msg,
-                    })
+                    await self._update_step(
+                        llm_step_id,
+                        {
+                            "status": str(StepStatus.FAILED),
+                            "completed_at": datetime.now().isoformat(),
+                            "duration_ms": (time.time() - start_time) * 1000,
+                            "error_message": error_msg,
+                        },
+                    )
                     await self._emit(
                         EventType.ERROR,
-                        {"step_id": llm_step_id, "error": error_msg, "phase": "llm_call"},
+                        {
+                            "step_id": llm_step_id,
+                            "error": error_msg,
+                            "phase": "llm_call",
+                        },
                         session_id,
                         rid,
                     )
@@ -372,12 +403,15 @@ class Harness:
                 except Exception as e:
                     logger.error("llm_call_failed", error=str(e), run_id=rid)
                     error_msg = f"LLM 调用失败: {e}"
-                    await self._update_step(llm_step_id, {
-                        "status": str(StepStatus.FAILED),
-                        "completed_at": datetime.now().isoformat(),
-                        "duration_ms": (time.time() - start_time) * 1000,
-                        "error_message": str(e),
-                    })
+                    await self._update_step(
+                        llm_step_id,
+                        {
+                            "status": str(StepStatus.FAILED),
+                            "completed_at": datetime.now().isoformat(),
+                            "duration_ms": (time.time() - start_time) * 1000,
+                            "error_message": str(e),
+                        },
+                    )
                     await self._emit(
                         EventType.ERROR,
                         {"step_id": llm_step_id, "error": str(e), "phase": "llm_call"},
@@ -394,13 +428,16 @@ class Harness:
 
                 # 更新 LLM 步骤记录
                 duration_ms = (time.time() - start_time) * 1000
-                await self._update_step(llm_step_id, {
-                    "status": str(StepStatus.COMPLETED),
-                    "completed_at": datetime.now().isoformat(),
-                    "duration_ms": duration_ms,
-                    "llm_input_tokens": self._estimate_tokens(lc_messages[:-1]),
-                    "llm_output_tokens": self._estimate_tokens([ai_message]),
-                })
+                await self._update_step(
+                    llm_step_id,
+                    {
+                        "status": str(StepStatus.COMPLETED),
+                        "completed_at": datetime.now().isoformat(),
+                        "duration_ms": duration_ms,
+                        "llm_input_tokens": self._estimate_tokens(lc_messages[:-1]),
+                        "llm_output_tokens": self._estimate_tokens([ai_message]),
+                    },
+                )
 
                 await self._emit_llm_call_end(
                     llm_step_id,
@@ -415,16 +452,18 @@ class Harness:
                 # 持久化 assistant 消息（中断恢复关键）
                 # 守卫：仅在确实有输出（文本或工具调用）时落库，避免空消息污染对话
                 if self._db is not None and (full_content.strip() or final_tc):
-                    await self._db.messages.save(Message(
-                        id=generate_time_id(),
-                        session_id=session_id,
-                        role=MessageRole.ASSISTANT,
-                        content=full_content,
-                        tool_calls=final_tc,
-                        run_id=rid,
-                        metadata={"step_id": llm_step_id},
-                        timestamp=datetime.now(),
-                    ))
+                    await self._db.messages.save(
+                        Message(
+                            id=generate_time_id(),
+                            session_id=session_id,
+                            role=MessageRole.ASSISTANT,
+                            content=full_content,
+                            tool_calls=final_tc,
+                            run_id=rid,
+                            metadata={"step_id": llm_step_id},
+                            timestamp=datetime.now(),
+                        )
+                    )
 
                 # 没有工具调用 → 终止循环
                 if not final_tc:
@@ -488,7 +527,9 @@ class Harness:
         )
 
         if self._db is not None:
-            await self._db.sessions.update(session_id, status="idle" if not interrupted else "interrupted")
+            await self._db.sessions.update(
+                session_id, status="idle" if not interrupted else "interrupted"
+            )
 
         return HarnessRunResult(
             content=last_content,
@@ -542,29 +583,33 @@ class Harness:
 
             try:
                 # 创建 tool_execution step
-                await self._save_step(Step(
-                    id=step_id,
-                    session_id=session_id,
-                    run_id=run_id,
-                    step_number=step_number,
-                    step_type=StepType.TOOL_EXECUTION,
-                    parent_step_id=parent_step_id,
-                    status=StepStatus.RUNNING,
-                    started_at=datetime.now(),
-                ))
+                await self._save_step(
+                    Step(
+                        id=step_id,
+                        session_id=session_id,
+                        run_id=run_id,
+                        step_number=step_number,
+                        step_type=StepType.TOOL_EXECUTION,
+                        parent_step_id=parent_step_id,
+                        status=StepStatus.RUNNING,
+                        started_at=datetime.now(),
+                    )
+                )
 
                 # 创建 tool_call 记录
                 tc_record_id = generate_time_id()
                 if self._db is not None:
-                    await self._db.tool_calls.save(ToolCallRecord(
-                        id=tc_record_id,
-                        session_id=session_id,
-                        step_id=step_id,
-                        tool_name=tool_name,
-                        arguments=args,
-                        status=ToolCallStatus.RUNNING,
-                        started_at=datetime.now(),
-                    ))
+                    await self._db.tool_calls.save(
+                        ToolCallRecord(
+                            id=tc_record_id,
+                            session_id=session_id,
+                            step_id=step_id,
+                            tool_name=tool_name,
+                            arguments=args,
+                            status=ToolCallStatus.RUNNING,
+                            started_at=datetime.now(),
+                        )
+                    )
 
                 await self._emit(
                     EventType.TOOL_CALL_START,
@@ -579,33 +624,47 @@ class Harness:
                 )
 
                 start_time = time.time()
-                result_content, status, error_msg, error_stack = await self._execute_single_tool(
-                    tool_name=tool_name,
-                    args=args,
-                    session_id=session_id,
-                    run_id=run_id,
-                    tool_call_id=tc_record_id,
+                result_content, status, error_msg, error_stack = (
+                    await self._execute_single_tool(
+                        tool_name=tool_name,
+                        args=args,
+                        session_id=session_id,
+                        run_id=run_id,
+                        tool_call_id=tc_record_id,
+                    )
                 )
                 duration_ms = (time.time() - start_time) * 1000
 
                 # 更新 tool_call 记录
                 if self._db is not None:
-                    await self._db.tool_calls.update(tc_record_id, {
-                        "raw_output": result_content if status == "success" else None,
-                        "status": status,
+                    await self._db.tool_calls.update(
+                        tc_record_id,
+                        {
+                            "raw_output": (
+                                result_content if status == "success" else None
+                            ),
+                            "status": status,
+                            "completed_at": datetime.now().isoformat(),
+                            "duration_ms": duration_ms,
+                            "error_message": error_msg,
+                            "error_stack": error_stack,
+                        },
+                    )
+
+                # 更新 tool_execution step
+                await self._update_step(
+                    step_id,
+                    {
+                        "status": (
+                            str(StepStatus.COMPLETED)
+                            if status == "success"
+                            else str(StepStatus.FAILED)
+                        ),
                         "completed_at": datetime.now().isoformat(),
                         "duration_ms": duration_ms,
                         "error_message": error_msg,
-                        "error_stack": error_stack,
-                    })
-
-                # 更新 tool_execution step
-                await self._update_step(step_id, {
-                    "status": str(StepStatus.COMPLETED) if status == "success" else str(StepStatus.FAILED),
-                    "completed_at": datetime.now().isoformat(),
-                    "duration_ms": duration_ms,
-                    "error_message": error_msg,
-                })
+                    },
+                )
 
                 await self._emit(
                     EventType.TOOL_CALL_END,
@@ -621,14 +680,16 @@ class Harness:
                     run_id,
                 )
 
-                tool_results_all.append({
-                    "tool_name": tool_name,
-                    "arguments": args,
-                    "output": result_content,
-                    "status": status,
-                    "duration_ms": duration_ms,
-                    "error": error_msg,
-                })
+                tool_results_all.append(
+                    {
+                        "tool_name": tool_name,
+                        "arguments": args,
+                        "output": result_content,
+                        "status": status,
+                        "duration_ms": duration_ms,
+                        "error": error_msg,
+                    }
+                )
 
                 # 失败时把错误详情回传给 LLM，使其能据此自愈
                 # （_execute_single_tool 失败返回的 result_content 只有占位符，
@@ -639,21 +700,23 @@ class Harness:
 
                 # 持久化 tool 消息
                 if self._db is not None:
-                    await self._db.messages.save(Message(
-                        id=generate_time_id(),
-                        session_id=session_id,
-                        role=MessageRole.TOOL,
-                        content=tool_content,
-                        tool_call_id=tc_id,
-                        run_id=run_id,
-                        metadata={
-                            "step_id": step_id,
-                            "tool_call_record_id": tc_record_id,
-                            # 前端据此给工具气泡标名（避免跨表 join）
-                            "tool_name": tool_name,
-                        },
-                        timestamp=datetime.now(),
-                    ))
+                    await self._db.messages.save(
+                        Message(
+                            id=generate_time_id(),
+                            session_id=session_id,
+                            role=MessageRole.TOOL,
+                            content=tool_content,
+                            tool_call_id=tc_id,
+                            run_id=run_id,
+                            metadata={
+                                "step_id": step_id,
+                                "tool_call_record_id": tc_record_id,
+                                # 前端据此给工具气泡标名（避免跨表 join）
+                                "tool_name": tool_name,
+                            },
+                            timestamp=datetime.now(),
+                        )
+                    )
 
                 return ToolMessage(content=tool_content, tool_call_id=tc_id)
 
@@ -666,10 +729,7 @@ class Harness:
                 )
 
         # 并行执行
-        tasks = [
-            _execute_one(sn, sid, tc)
-            for (sn, sid, tc) in tool_step_starts
-        ]
+        tasks = [_execute_one(sn, sid, tc) for (sn, sid, tc) in tool_step_starts]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         tool_messages: list[ToolMessage] = []
@@ -678,10 +738,12 @@ class Harness:
                 # 理论上不应到达这里（_execute_one 已内部捕获），
                 # 但保留防御性处理以防 gather 本身出错（如 CancelledError）
                 logger.error("tool_task_failed", error=str(r))
-                tool_messages.append(ToolMessage(
-                    content=f"[工具任务异常] {r}",
-                    tool_call_id=generate_time_id(),
-                ))
+                tool_messages.append(
+                    ToolMessage(
+                        content=f"[工具任务异常] {r}",
+                        tool_call_id=generate_time_id(),
+                    )
+                )
             elif isinstance(r, ToolMessage):
                 tool_messages.append(r)
         return tool_messages
@@ -748,7 +810,10 @@ class Harness:
                     # 用户拒绝不是工具可靠性信号，不记入熔断器
                     return output, "denied", None, None
                 if result.status != "success":
-                    raise RuntimeError(result.error or f"工具 {tool_name} 返回失败状态: {result.status}")
+                    raise RuntimeError(
+                        result.error
+                        or f"工具 {tool_name} 返回失败状态: {result.status}"
+                    )
                 # 在确认 status 为 success 之后才记录，避免失败结果先被记成成功
                 self._error_handler.record_result(tool_name, success=True)
                 return output, "success", None, None
@@ -769,8 +834,12 @@ class Harness:
                 action = fallback.action
                 if action == "retry" and attempt < fallback.max_retries:
                     if fallback.param_transform:
-                        params = self._error_handler.apply_param_transform(params, fallback)
-                    logger.info("tool_retry_with_fallback", tool=tool_name, attempt=attempt + 1)
+                        params = self._error_handler.apply_param_transform(
+                            params, fallback
+                        )
+                    logger.info(
+                        "tool_retry_with_fallback", tool=tool_name, attempt=attempt + 1
+                    )
                     continue
                 elif action == "alternate" and fallback.alternate_tool:
                     try:
@@ -784,11 +853,15 @@ class Harness:
                             ),
                             timeout=self._harness_settings.tool_timeout,
                         )
-                        self._error_handler.record_result(fallback.alternate_tool, success=True)
+                        self._error_handler.record_result(
+                            fallback.alternate_tool, success=True
+                        )
                         output = alt_result.output or ""
                         return output, "success", None, None
                     except Exception as alt_err:
-                        self._error_handler.record_result(fallback.alternate_tool, success=False)
+                        self._error_handler.record_result(
+                            fallback.alternate_tool, success=False
+                        )
                         last_error = alt_err
                         break
                 elif action == "passthrough":
@@ -916,7 +989,9 @@ class Harness:
                 build_event(event_type, data, session_id=session_id, run_id=run_id),
             )
         except Exception as e:
-            logger.warning("emit_event_failed", event_type=str(event_type), error=str(e))
+            logger.warning(
+                "emit_event_failed", event_type=str(event_type), error=str(e)
+            )
 
     async def _emit_llm_call_end(
         self,

@@ -37,7 +37,10 @@ def _infer_parameters(handler: NativeHandler) -> dict[str, Any]:
     for name, param in sig.parameters.items():
         if name in ("self", "cls"):
             continue
-        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
             continue
 
         annotation = param.annotation
@@ -49,7 +52,9 @@ def _infer_parameters(handler: NativeHandler) -> dict[str, Any]:
             list: "array",
             dict: "object",
         }
-        json_type = type_map.get(annotation if annotation is not inspect.Parameter.empty else str, "string")
+        json_type = type_map.get(
+            annotation if annotation is not inspect.Parameter.empty else str, "string"
+        )
 
         prop: dict[str, Any] = {"type": json_type}
         if param.default is not inspect.Parameter.empty:
@@ -94,7 +99,9 @@ class NativeTool:
             description=description,
             parameters=parameters or _infer_parameters(handler),
             require_approval=require_approval,
-            risk_level=RiskLevel(risk_level) if isinstance(risk_level, str) else risk_level,
+            risk_level=(
+                RiskLevel(risk_level) if isinstance(risk_level, str) else risk_level
+            ),
             execution_mode=ToolExecutionMode.NATIVE,
         )
         self._handler = handler
@@ -103,7 +110,11 @@ class NativeTool:
         """执行工具调用."""
         try:
             result = await self._handler(**params)
-            output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+            output = (
+                result
+                if isinstance(result, str)
+                else json.dumps(result, ensure_ascii=False, default=str)
+            )
             return ToolResult(status="success", output=output)
         except Exception as e:
             logger.error("native_tool_failed", tool=self.schema.name, error=str(e))
@@ -129,7 +140,9 @@ class MCPTool:
             description=description,
             parameters=parameters,
             require_approval=require_approval,
-            risk_level=RiskLevel(risk_level) if isinstance(risk_level, str) else risk_level,
+            risk_level=(
+                RiskLevel(risk_level) if isinstance(risk_level, str) else risk_level
+            ),
             execution_mode=ToolExecutionMode.MCP,
         )
         self._mcp_client = mcp_client
@@ -164,7 +177,9 @@ class MCPTool:
                 output = extract_message_text(result)
 
             if is_error:
-                logger.warning("mcp_tool_error", tool=self.schema.name, server=self._server_name)
+                logger.warning(
+                    "mcp_tool_error", tool=self.schema.name, server=self._server_name
+                )
                 return ToolResult(status="failed", error=output)
 
             return ToolResult(status="success", output=output)

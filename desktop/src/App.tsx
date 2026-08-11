@@ -3,10 +3,12 @@ import Sidebar from "./components/Sidebar"
 import Chat from "./components/Chat"
 import StatusIndicator from "./components/StatusIndicator"
 import ErrorBoundary from "./components/ErrorBoundary"
+import NavRail from "./components/NavRail"
+import PageView from "./components/pages/PageView"
 import { useChatStore } from "./store/chatStore"
 import { useWebSocket } from "./hooks/useWebSocket"
 import { apiClient } from "./api/client"
-import type { Session } from "./types"
+import type { Session, AppView } from "./types"
 
 function AppContent() {
   const {
@@ -19,6 +21,7 @@ function AppContent() {
   } = useChatStore()
 
   const [apiBase, setApiBase] = useState<string>("http://127.0.0.1:8000")
+  const [activeView, setActiveView] = useState<AppView>("chat")
 
   useEffect(() => {
     const initApi = async () => {
@@ -56,7 +59,8 @@ function AppContent() {
   }, [setConnectionStatus])
 
   const { sendEvent } = useWebSocket({
-    sessionId: activeSessionId,
+    // 管理视图不连接 WebSocket
+    sessionId: activeView === "chat" ? activeSessionId : null,
     onOpen: handleOpen,
     onClose: handleClose,
     onError: handleError,
@@ -112,19 +116,30 @@ function AppContent() {
     [setActiveSession],
   )
 
+  const handleSelectView = useCallback((view: AppView) => {
+    setActiveView(view)
+  }, [])
+
   return (
     <div className="flex h-screen w-screen overflow-hidden">
-      <Sidebar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        onSelectSession={handleSelectSession}
-        onNewSession={handleNewSession}
-        onDeleteSession={handleDeleteSession}
-      />
-      <main className="flex-1 flex flex-col min-w-0">
-        <StatusIndicator />
-        <Chat sendEvent={sendEvent} />
-      </main>
+      <NavRail activeView={activeView} onSelectView={handleSelectView} />
+      {activeView === "chat" ? (
+        <>
+          <Sidebar
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            onSelectSession={handleSelectSession}
+            onNewSession={handleNewSession}
+            onDeleteSession={handleDeleteSession}
+          />
+          <main className="flex-1 flex flex-col min-w-0">
+            <StatusIndicator />
+            <Chat sendEvent={sendEvent} />
+          </main>
+        </>
+      ) : (
+        <PageView view={activeView} />
+      )}
     </div>
   )
 }

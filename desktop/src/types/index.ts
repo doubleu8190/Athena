@@ -162,3 +162,129 @@ export interface ListSessionsResponse {
 export interface GetMessagesResponse {
   messages: Message[]
 }
+
+// ─── 应用视图（导航栏）──────────────────────────────────────────
+
+export type AppView =
+  | "chat"
+  | "memory"
+  | "tools"
+  | "approvals"
+  | "providers"
+  | "session-detail"
+  | "settings"
+
+// ─── 工具管理 ────────────────────────────────────────────────────
+
+export interface ToolInfo {
+  name: string
+  description: string
+  risk_level: "low" | "medium" | "high"
+  execution_mode: "native" | "mcp"
+  require_approval: boolean
+  enabled: boolean
+  parameters: Record<string, unknown>
+  last_called_at: string | null
+}
+
+export interface ToolListResponse {
+  items: ToolInfo[]
+  total: number
+  enabled: number
+  high_risk: number
+  calls_today: number
+}
+
+// ─── 记忆管理 ────────────────────────────────────────────────────
+
+export interface MemoryEntry {
+  id: string
+  content: string
+  metadata: Record<string, unknown>
+  pinned: boolean
+  expires_at: string | null
+  created_at: string
+  last_accessed: string | null
+  access_count: number
+}
+
+export interface MemoryListResponse {
+  items: MemoryEntry[]
+  total: number
+  pinned: number
+  expired: number
+  recent_week: number
+}
+
+// ─── 审批日志 ────────────────────────────────────────────────────
+
+export type ApprovalDecision = "approved" | "denied" | "timeout"
+
+export interface ApprovalLog {
+  id: string
+  session_id: string
+  tool_call_id: string
+  tool_name: string
+  arguments: Record<string, unknown>
+  risk_level: "low" | "medium" | "high"
+  decision: ApprovalDecision
+  decision_time_ms: number
+  timestamp: string
+}
+
+export interface ApprovalStats {
+  today_total: number
+  today_approved: number
+  today_denied: number
+  today_timeout: number
+  approval_rate: number
+}
+
+// ─── LLM 提供商 ──────────────────────────────────────────────────
+
+export interface ProviderInfo {
+  name: string
+  provider: string
+  model: string
+  base_url: string
+  api_key_configured: boolean
+  api_key_masked: string
+  temperature: number
+  max_tokens: number
+}
+
+export interface TestProviderResult {
+  ok: boolean
+  latency_ms: number | null
+  error: string | null
+}
+
+// ─── 系统设置（只读）────────────────────────────────────────────
+
+export interface SettingsView {
+  host: string
+  port: number
+  debug: boolean
+  sqlite_db_path: string
+  chromadb_path: string
+  max_turns_per_run: number
+  retry_budget: number
+  tool_timeout: number
+  llm_stream_timeout: number
+  approval_timeout: number
+  llm_temperature: number
+  llm_max_tokens: number
+  memory_ttl_days: number
+  memory_min_score: number
+  summary_threshold: number
+  memory_sync_interval: number
+  max_context_tokens: number
+  compression_threshold: number
+  keep_recent_turns: number
+  max_summary_tokens: number
+  sandbox_enabled: boolean
+  sandbox_image: string
+  sandbox_network_disabled: boolean
+  approval_batch_mode: string
+  approval_keyboard_shortcuts: boolean
+}

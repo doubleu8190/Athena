@@ -16,7 +16,7 @@ from typing import Any, Iterable, TYPE_CHECKING
 
 from chromadb import Collection, QueryResult
 from chromadb.api import ClientAPI
-from sqlalchemy import case, insert, select, text, update
+from sqlalchemy import case, func, insert, select, text, update
 
 from athena.config.settings import Settings, get_settings
 from athena.db.engine import get_session
@@ -498,6 +498,156 @@ class MemoryManager:
             return None
 
     # ------------------------------------------------------------------
+    # 列表/统计/编辑（管理页；SQLite 侧，避免 Chroma where 语法差异）
+    # ------------------------------------------------------------------
+
+    async def list_memories(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        pinned_only: bool = False,
+        expired_only: bool = False,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """分页列出记忆条目（不含软删除），按创建时间倒序."""
+        stmt = select(MemoryModel).where(MemoryModel.deleted_time.is_(None))
+        if pinned_only:
+            stmt = stmt.where(MemoryModel.pinned == 1)
+        if expired_only:
+            now_iso = datetime.now().isoformat()
+            stmt = stmt.where(
+                MemoryModel.expires_at.is_not(None),
+                MemoryModel.expires_at < now_iso,
+                MemoryModel.pinned == 0,
+            )
+        if session_id:
+            stmt = stmt.where(MemoryModel.session_id == session_id)
+        stmt = (
+            stmt.order_by(MemoryModel.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        async with get_session() as session:
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+        return [
+            {
+                "id": row.id,
+                "content": row.content,
+                "metadata": _json_loads(row.metadata_json, {}) or {},
+                "pinned": bool(row.pinned),
+                "expires_at": row.expires_at,
+                "created_at": row.created_at,
+                "last_accessed": row.last_accessed,
+                "access_count": row.access_count,
+            }
+            for row in rows
+        ]
+
+    async def count_memories(self) -> dict[str, int]:
+        """返回记忆统计 {total, pinned, expired, recent_week}."""
+        now = datetime.now()
+        now_iso = now.isoformat()
+        week_ago_iso = (now - timedelta(days=7)).isoformat()
+        async with get_session() as session:
+            total = (
+                await session.execute(
+                    select(func.count(MemoryModel.id)).where(
+                        MemoryModel.deleted_time.is_(None)
+                    )
+                )
+            ).scalar_one()
+            pinned = (
+                await session.execute(
+                    select(func.count(MemoryModel.id)).where(
+                        MemoryModel.deleted_time.is_(None),
+                        MemoryModel.pinned == 1,
+                    )
+                )
+            ).scalar_one()
+            expired = (
+                await session.execute(
+                    select(func.count(MemoryModel.id)).where(
+                        MemoryModel.deleted_time.is_(None),
+                        MemoryModel.expires_at.is_not(None),
+                        MemoryModel.expires_at < now_iso,
+                        MemoryModel.pinned == 0,
+                    )
+                )
+            ).scalar_one()
+            recent_week = (
+                await session.execute(
+                    select(func.count(MemoryModel.id)).where(
+                        MemoryModel.deleted_time.is_(None),
+                        MemoryModel.created_at >= week_ago_iso,
+                    )
+                )
+            ).scalar_one()
+        return {
+            "total": int(total),
+            "pinned": int(pinned),
+            "expired": int(expired),
+            "recent_week": int(recent_week),
+        }
+
+    async def update_memory(self, memory_id: str, content: str) -> bool:
+        """更新记忆内容（双写 SQLite + ChromaDB）.
+
+        先更新 SQLite（含 FTS5 重建索引），再更新 ChromaDB；
+        ChromaDB 失败时回滚 SQLite。返回 False 表示记录不存在。
+        """
+        await self.initialize()
+        now = datetime.now().isoformat()
+
+        # 1. 先更新 SQLite（读回旧 content 用于回滚）
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    row = (
+                        await session.execute(
+                            text("SELECT content FROM memories WHERE id = :id AND deleted_time IS NULL"),
+                            {"id": memory_id},
+                        )
+                    ).fetchone()
+                    if row is None:
+                        return False
+                    old_content = row.content
+                    await session.execute(
+                        update(MemoryModel)
+                        .where(MemoryModel.id == memory_id)
+                        .values(content=content)
+                    )
+                    await session.execute(
+                        text("DELETE FROM memory_fts WHERE memory_id = :memory_id"),
+                        {"memory_id": memory_id},
+                    )
+                    await session.execute(
+                        text(
+                            "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :memory_id)"
+                        ),
+                        {"content": content, "memory_id": memory_id},
+                    )
+        except Exception as e:
+            logger.error("memory_update_sqlite_failed", memory_id=memory_id, error=str(e))
+            raise
+
+        # 2. 再更新 ChromaDB；失败则回滚 SQLite
+        try:
+            self.collection.update(
+                ids=[memory_id],
+                documents=[content],
+            )
+        except Exception as e:
+            logger.error(
+                "memory_update_chromadb_failed", memory_id=memory_id, error=str(e)
+            )
+            await self._rollback_update(memory_id, old_content)
+            raise
+
+        logger.info("memory_updated", memory_id=memory_id, len=len(content))
+        return True
+
+    # ------------------------------------------------------------------
     # 删除：双删 SQLite + ChromaDB
     # ------------------------------------------------------------------
 
@@ -734,6 +884,30 @@ class MemoryManager:
             logger.warning("rollback_pin_succeeded", memory_id=memory_id)
         except Exception as e:
             logger.error("rollback_pin_failed", memory_id=memory_id, error=str(e))
+
+    async def _rollback_update(self, memory_id: str, old_content: str) -> None:
+        """回滚 update_memory：恢复 SQLite content + 重建 FTS5 索引."""
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(MemoryModel)
+                        .where(MemoryModel.id == memory_id)
+                        .values(content=old_content)
+                    )
+                    await session.execute(
+                        text("DELETE FROM memory_fts WHERE memory_id = :memory_id"),
+                        {"memory_id": memory_id},
+                    )
+                    await session.execute(
+                        text(
+                            "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :memory_id)"
+                        ),
+                        {"content": old_content, "memory_id": memory_id},
+                    )
+            logger.warning("rollback_update_succeeded", memory_id=memory_id)
+        except Exception as e:
+            logger.error("rollback_update_failed", memory_id=memory_id, error=str(e))
 
     async def _rollback_cleanup(self, memory_ids: list[str]) -> None:
         """回滚 cleanup_expired：恢复 SQLite 软删除 + 重建 FTS5 索引."""

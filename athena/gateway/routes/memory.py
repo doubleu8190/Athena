@@ -30,16 +30,17 @@ class SearchMemoryRequest(BaseModel):
     n_results: int = 5
 
 
+class UpdateMemoryRequest(BaseModel):
+    content: str
+
+
 async def _get_memory_manager() -> MemoryManager | None:
     from athena.gateway.routes._runtime import get_workflow
     workflow = get_workflow()
     if workflow is None:
         return None
-    # 从记忆检索服务间接获取 memory_manager
-    retrieval = getattr(workflow, "_memory_retrieval", None)
-    if retrieval is None:
-        return None
-    return getattr(retrieval, "_memory", None)
+    # AgentWorkflow 直接持有 memory_manager（记忆检索服务上的 _memory 属主不同，不可用）
+    return getattr(workflow, "_memory_manager", None)
 
 
 @router.post("/save")
@@ -78,6 +79,29 @@ async def search_memory(req: SearchMemoryRequest) -> list[dict[str, Any]]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("")
+async def list_memories(
+    limit: int = 50,
+    offset: int = 0,
+    pinned: bool = False,
+    expired: bool = False,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """分页列出记忆条目，附带统计（total/pinned/expired/recent_week）."""
+    manager = await _get_memory_manager()
+    if manager is None:
+        raise HTTPException(status_code=503, detail="Memory manager not initialized")
+    items = await manager.list_memories(
+        limit=limit,
+        offset=offset,
+        pinned_only=pinned,
+        expired_only=expired,
+        session_id=session_id,
+    )
+    stats = await manager.count_memories()
+    return {"items": items, **stats}
+
+
 @router.get("/{memory_id}")
 async def get_memory(memory_id: str) -> dict[str, Any]:
     """根据 ID 获取记忆."""
@@ -98,6 +122,23 @@ async def delete_memory(memory_id: str) -> dict[str, str]:
         raise HTTPException(status_code=503, detail="Memory manager not initialized")
     await manager.delete(memory_id)
     return {"status": "deleted", "memory_id": memory_id}
+
+
+@router.patch("/{memory_id}")
+async def update_memory(
+    memory_id: str, req: UpdateMemoryRequest
+) -> dict[str, Any]:
+    """编辑记忆内容."""
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Content must not be empty")
+    manager = await _get_memory_manager()
+    if manager is None:
+        raise HTTPException(status_code=503, detail="Memory manager not initialized")
+    updated = await manager.update_memory(memory_id, content)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return {"status": "updated", "memory_id": memory_id}
 
 
 @router.post("/{memory_id}/pin")

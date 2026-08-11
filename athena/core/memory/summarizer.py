@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
@@ -45,7 +45,7 @@ class AtomicFact(BaseModel):
         confidence: 置信度 0-1，低于 0.6 的事实在提取时被过滤。
     """
 
-    CATEGORIES = (
+    CATEGORIES: ClassVar[str] = (
         "preference | profile | project | technical_decision | "
         "fact | solution | unresolved | other"
     )
@@ -238,7 +238,7 @@ class Summary(BaseModel):
         confidence: 置信度 0-1，反映摘要内容的确定程度。
     """
 
-    CATEGORIES = (
+    CATEGORIES: ClassVar[str] = (
         "technical_discussion | problem_solving | planning | "
         "decision | open_discussion | other"
     )

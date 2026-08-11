@@ -35,6 +35,7 @@ class UnifiedToolManager:
 
     def __init__(self, approval_manager: ApprovalManager | None = None) -> None:
         self._tools: dict[str, ToolProtocol] = {}
+        self._disabled: set[str] = set()
         self._approval_manager = approval_manager
 
     # ------------------------------------------------------------------
@@ -112,6 +113,21 @@ class UnifiedToolManager:
     def list_names(self) -> list[str]:
         return list(self._tools.keys())
 
+    def is_enabled(self, name: str) -> bool:
+        """工具是否启用（未注册视为不可用）."""
+        return name not in self._disabled
+
+    def set_enabled(self, name: str, enabled: bool) -> bool:
+        """启用/停用工具. 未注册返回 False."""
+        if name not in self._tools:
+            return False
+        if enabled:
+            self._disabled.discard(name)
+        else:
+            self._disabled.add(name)
+        logger.info("tool_enablement_changed", tool=name, enabled=enabled)
+        return True
+
     def require_approval(self, tool_name: str) -> bool:
         """检查工具是否需要审批."""
         tool = self._tools.get(tool_name)
@@ -130,18 +146,26 @@ class UnifiedToolManager:
         self,
         name: str,
         params: dict[str, Any],
-        session_id: str | None = None,
-        run_id: str | None = None,
-        tool_call_id: str | None = None,
+        session_id: str,
+        run_id: str,
+        tool_call_id: str,
     ) -> ToolResult:
         """统一工具调用入口，含审批检查.
 
         遵循 project_memory：审批通过 ApprovalManager.request_approval() 立即返回 Future，
         调用方 await future 等待结果，避免审批风暴。
+
+        session_id / run_id / tool_call_id 为必填：标识本次工具调用归属的会话、运行与
+        具体工具调用，用于审批留痕与子代理父链上下文。
         """
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(status="failed", error=f"Tool '{name}' not registered")
+
+        # 停用检查
+        if name in self._disabled:
+            logger.info("tool_call_disabled", tool=name, session_id=session_id)
+            return ToolResult(status="failed", error=f"Tool '{name}' is disabled")
 
         # 审批检查
         if tool.schema.require_approval and self._approval_manager is not None:
@@ -150,8 +174,8 @@ class UnifiedToolManager:
                     tool_name=name,
                     arguments=params,
                     risk_level=str(tool.schema.risk_level),
-                    session_id=session_id or "",
-                    run_id=run_id or "",
+                    session_id=session_id,
+                    run_id=run_id,
                     tool_call_id=tool_call_id,
                 )
                 approved = await request.future
@@ -165,11 +189,13 @@ class UnifiedToolManager:
                 logger.error("approval_failed", tool=name, error=str(e))
                 return ToolResult(status="failed", error=f"审批流程异常: {e}")
 
-        # 执行工具；spawn_sub_agent 需要当前 run_id 作为父链上下文
-        extra: dict[str, Any] = {}
-        if isinstance(tool, NativeTool) and name == "spawn_sub_agent" and run_id:
-            extra["parent_run_id"] = run_id
-        return await tool.execute(**params, **extra)
+        # 执行工具；spawn_sub_agent/spawn_parallel_agents 需要当前 run_id、session_id 作为父链上下文
+        if isinstance(tool, NativeTool) and (
+            name == "spawn_sub_agent" or name == "spawn_parallel_agents"
+        ):
+            params["parent_run_id"] = run_id
+            params["session_id"] = session_id
+        return await tool.execute(**params)
 
     # ------------------------------------------------------------------
     # LangChain 集成
@@ -185,6 +211,8 @@ class UnifiedToolManager:
         """
         result: list[StructuredTool] = []
         for name, tool in self._tools.items():
+            if name in self._disabled:
+                continue
             if names is not None and name not in names:
                 continue
             result.append(self._build_structured_tool(tool))
@@ -254,7 +282,7 @@ class UnifiedToolManager:
 
 
 # 全局单例
-_tool_manager: UnifiedToolManager 
+_tool_manager: UnifiedToolManager
 
 
 def get_tool_manager() -> UnifiedToolManager:
@@ -265,4 +293,3 @@ def get_tool_manager() -> UnifiedToolManager:
 def set_tool_manager(manager: UnifiedToolManager) -> None:
     global _tool_manager
     _tool_manager = manager
-

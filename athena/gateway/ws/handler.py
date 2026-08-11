@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -21,6 +21,10 @@ from athena.gateway.approval import get_approval_manager
 from athena.gateway.ws.manager import get_websocket_manager
 from athena.schemas.events import ClientEventType, EventType, build_event
 from athena.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from athena.core.recovery.session_recovery import SessionRecovery
+    from athena.gateway.ws.manager import WebSocketManager
 
 logger = get_logger(__name__)
 
@@ -68,6 +72,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
             elif msg_type == ClientEventType.SESSION_STOP:
                 from athena.gateway.routes._runtime import get_session_stop_event
                 get_session_stop_event(session_id).set()
+            elif msg_type == ClientEventType.SESSION_RESUME:
+                await _handle_session_resume(session_id, data)
             elif msg_type == ClientEventType.USER_COMMAND:
                 await _handle_user_command(session_id, data)
             elif msg_type == ClientEventType.MEMORY_SAVE:
@@ -152,4 +158,127 @@ async def _handle_memory_save(session_id: str, data: dict[str, Any]) -> None:
         await memory_manager.add_memory(
             content=content,
             metadata={"session_id": session_id, **metadata},
+        )
+
+
+async def _handle_session_resume(session_id: str, data: dict[str, Any]) -> None:
+    """处理用户主动恢复会话.
+
+    data 字段：
+      mode: "recover" | "abandon"（默认 "recover"）
+        - recover: 完整恢复流程（重触发 Agent）
+        - abandon: 仅重置状态，不触发恢复
+    """
+    from athena.core.recovery.session_recovery import SessionRecovery
+    from athena.db.database import get_database
+    from athena.config.settings import get_settings
+
+    ws_manager = get_websocket_manager()
+    mode = data.get("mode", "recover")
+
+    settings = get_settings()
+    db = await get_database(settings.sqlite_db_path)
+    session = await db.sessions.get(session_id)
+
+    if not session:
+        await ws_manager.send_to_session(
+            session_id,
+            build_event(
+                EventType.ERROR,
+                {"error": "session_not_found", "message": "会话不存在"},
+                session_id=session_id,
+            ),
+        )
+        return
+
+    current_status = str(session.status)
+    if current_status not in ("interrupted", "running", "failed"):
+        await ws_manager.send_to_session(
+            session_id,
+            build_event(
+                EventType.ERROR,
+                {
+                    "error": "invalid_session_status",
+                    "message": f"会话状态为 '{current_status}'，无需恢复",
+                },
+                session_id=session_id,
+            ),
+        )
+        return
+
+    if mode == "abandon":
+        # 仅重置状态
+        await db.sessions.update(session_id, status="idle")
+        await db.cleanup_interrupted_session(session_id)
+        await ws_manager.send_to_session(
+            session_id,
+            build_event(
+                EventType.SESSION_RECOVERED,
+                {"mode": "abandon", "message": "会话已重置"},
+                session_id=session_id,
+            ),
+        )
+        logger.info("session_abandoned_via_ws", session_id=session_id)
+        return
+
+    # 完整恢复
+    from athena.gateway.routes._runtime import get_workflow
+
+    workflow = get_workflow()
+    if workflow is None:
+        await ws_manager.send_to_session(
+            session_id,
+            build_event(
+                EventType.ERROR,
+                {"error": "workflow_not_ready", "message": "Agent 未就绪"},
+                session_id=session_id,
+            ),
+        )
+        return
+
+    recovery = SessionRecovery(db=db, ws_manager=ws_manager, agent_workflow=workflow)
+
+    # 通知客户端恢复已开始
+    await ws_manager.send_to_session(
+        session_id,
+        build_event(
+            EventType.RECOVERY_START,
+            {"session_id": session_id, "mode": "recover"},
+            session_id=session_id,
+        ),
+    )
+
+    # 异步执行恢复，不阻塞 WS 接收循环
+    asyncio.create_task(_execute_ws_recovery(recovery, session_id, ws_manager))
+    logger.info("session_recovery_triggered_via_ws", session_id=session_id)
+
+
+async def _execute_ws_recovery(
+    recovery: "SessionRecovery",
+    session_id: str,
+    ws_manager: "WebSocketManager",
+) -> None:
+    """异步执行恢复并通过 WS 推送结果."""
+    try:
+        await recovery._recover_session(session_id)
+        await ws_manager.send_to_session(
+            session_id,
+            build_event(
+                EventType.SESSION_RECOVERED,
+                {"session_id": session_id, "message": "会话恢复成功"},
+                session_id=session_id,
+            ),
+        )
+    except Exception as e:
+        logger.error("ws_recovery_failed", session_id=session_id, error=str(e))
+        await ws_manager.send_to_session(
+            session_id,
+            build_event(
+                EventType.ERROR,
+                {
+                    "error": "recovery_failed",
+                    "message": f"恢复失败: {e}",
+                },
+                session_id=session_id,
+            ),
         )

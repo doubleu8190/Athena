@@ -59,7 +59,9 @@ def test_native_tool_schema_inferred():
 @pytest.mark.asyncio
 async def test_call_unregistered_tool():
     m = UnifiedToolManager()
-    result = await m.call_tool("nonexistent", {})
+    result = await m.call_tool(
+        "nonexistent", {}, session_id="s", run_id="r", tool_call_id="tc"
+    )
     assert result.status == "failed"
     assert "not registered" in (result.error or "")
 
@@ -183,6 +185,7 @@ async def test_native_tool_receives_parent_run_id_context():
         {"task": "t", "session_id": "s"},
         session_id="s",
         run_id="20260809_abc",
+        tool_call_id="tc-parent",
     )
     assert result.status == "success"
     assert received["parent_run_id"] == "20260809_abc"

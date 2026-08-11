@@ -84,3 +84,30 @@ async def get_approval_logs(session_id: str) -> list[ApprovalLog]:
     from athena.db.database import get_database
     db = await get_database(get_settings().sqlite_db_path)
     return await db.approval_logs.get_by_session(session_id)
+
+
+@router.get("/logs")
+async def list_approval_logs(
+    session_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[ApprovalLog]:
+    """分页列出审批日志（新→旧），可选按会话过滤."""
+    from athena.config.settings import get_settings
+    from athena.db.database import get_database
+    db = await get_database(get_settings().sqlite_db_path)
+    return await db.approval_logs.list_all(
+        limit=limit, offset=offset, session_id=session_id
+    )
+
+
+@router.get("/stats")
+async def approval_stats() -> dict[str, Any]:
+    """今日审批统计，含审批通过率."""
+    from athena.config.settings import get_settings
+    from athena.db.database import get_database
+    db = await get_database(get_settings().sqlite_db_path)
+    stats = await db.approval_logs.stats()
+    decided = stats["today_approved"] + stats["today_denied"]
+    approval_rate = round(stats["today_approved"] / decided, 4) if decided else 0.0
+    return {**stats, "approval_rate": approval_rate}

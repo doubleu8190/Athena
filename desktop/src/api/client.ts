@@ -7,6 +7,14 @@ import type {
   Message,
   Step,
   ApprovalRequest,
+  ApprovalLog,
+  ApprovalStats,
+  MemoryEntry,
+  MemoryListResponse,
+  ProviderInfo,
+  SettingsView,
+  TestProviderResult,
+  ToolListResponse,
 } from "../types"
 
 class ApiClient {
@@ -117,6 +125,128 @@ class ApiClient {
 
   async getApprovalLogs(sessionId: string): Promise<unknown[]> {
     return this.request<unknown[]>(`/api/approvals/logs/${sessionId}`)
+  }
+
+  async updateSessionTitle(
+    sessionId: string,
+    title: string,
+  ): Promise<Session> {
+    return this.request<Session>(`/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    })
+  }
+
+  // ─── 工具管理 ─────────────────────────────────────────────────
+
+  async listTools(): Promise<ToolListResponse> {
+    return this.request<ToolListResponse>("/api/tools")
+  }
+
+  async setToolEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ status: string; name: string; enabled: boolean }> {
+    return this.request<{ status: string; name: string; enabled: boolean }>(
+      `/api/tools/${encodeURIComponent(name)}`,
+      { method: "PATCH", body: JSON.stringify({ enabled }) },
+    )
+  }
+
+  // ─── 记忆管理 ─────────────────────────────────────────────────
+
+  async listMemories(opts?: {
+    limit?: number
+    offset?: number
+    pinned?: boolean
+    expired?: boolean
+    session_id?: string
+  }): Promise<MemoryListResponse> {
+    const params = new URLSearchParams()
+    if (opts?.limit != null) params.set("limit", String(opts.limit))
+    if (opts?.offset != null) params.set("offset", String(opts.offset))
+    if (opts?.pinned) params.set("pinned", "true")
+    if (opts?.expired) params.set("expired", "true")
+    if (opts?.session_id) params.set("session_id", opts.session_id)
+    const qs = params.toString()
+    return this.request<MemoryListResponse>(
+      `/api/memory${qs ? `?${qs}` : ""}`,
+    )
+  }
+
+  async getMemory(memoryId: string): Promise<MemoryEntry> {
+    return this.request<MemoryEntry>(`/api/memory/${memoryId}`)
+  }
+
+  async deleteMemory(memoryId: string): Promise<{ status: string }> {
+    return this.request<{ status: string }>(`/api/memory/${memoryId}`, {
+      method: "DELETE",
+    })
+  }
+
+  async setMemoryPinned(
+    memoryId: string,
+    pinned: boolean,
+  ): Promise<{ status: string }> {
+    return this.request<{ status: string }>(
+      `/api/memory/${memoryId}/pin?pinned=${pinned}`,
+      { method: "POST" },
+    )
+  }
+
+  async updateMemory(
+    memoryId: string,
+    content: string,
+  ): Promise<{ status: string; memory_id: string }> {
+    return this.request<{ status: string; memory_id: string }>(
+      `/api/memory/${memoryId}`,
+      { method: "PATCH", body: JSON.stringify({ content }) },
+    )
+  }
+
+  // ─── 审批日志 ─────────────────────────────────────────────────
+
+  async listApprovalLogs(opts?: {
+    session_id?: string
+    limit?: number
+    offset?: number
+  }): Promise<ApprovalLog[]> {
+    const params = new URLSearchParams()
+    if (opts?.session_id) params.set("session_id", opts.session_id)
+    if (opts?.limit != null) params.set("limit", String(opts.limit))
+    if (opts?.offset != null) params.set("offset", String(opts.offset))
+    const qs = params.toString()
+    return this.request<ApprovalLog[]>(
+      `/api/approvals/logs${qs ? `?${qs}` : ""}`,
+    )
+  }
+
+  async getApprovalStats(): Promise<ApprovalStats> {
+    return this.request<ApprovalStats>("/api/approvals/stats")
+  }
+
+  // ─── LLM 提供商 ───────────────────────────────────────────────
+
+  async listProviders(): Promise<ProviderInfo[]> {
+    return this.request<ProviderInfo[]>("/api/providers")
+  }
+
+  async testProvider(body: {
+    provider: string
+    model: string
+    api_key?: string
+    base_url?: string
+  }): Promise<TestProviderResult> {
+    return this.request<TestProviderResult>("/api/providers/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
+  }
+
+  // ─── 系统设置 ─────────────────────────────────────────────────
+
+  async getSettings(): Promise<SettingsView> {
+    return this.request<SettingsView>("/api/settings")
   }
 }
 

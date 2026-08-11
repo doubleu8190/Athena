@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from athena.db.engine import get_session
@@ -601,6 +601,30 @@ class ToolCallRepository:
             rows = result.scalars().all()
             return [_row_to_tool_call(row) for row in rows]
 
+    async def last_called_by_tool(self) -> dict[str, str]:
+        """返回 工具名 -> 最近调用时间(ISO) 的映射，用于工具管理页「最近调用」列."""
+        async with get_session() as session:
+            stmt = (
+                select(ToolCallModel.tool_name, func.max(ToolCallModel.started_at))
+                .where(ToolCallModel.deleted_time.is_(None))
+                .group_by(ToolCallModel.tool_name)
+            )
+            result = await session.execute(stmt)
+            return {name: last for name, last in result.all()}
+
+    async def count_calls_since(self, since: datetime) -> int:
+        """统计指定时间点之后的工具调用次数（含所有状态）."""
+        async with get_session() as session:
+            stmt = (
+                select(func.count(ToolCallModel.id))
+                .where(
+                    ToolCallModel.started_at >= since.isoformat(),
+                    ToolCallModel.deleted_time.is_(None),
+                )
+            )
+            result = await session.execute(stmt)
+            return int(result.scalar_one())
+
 
 # ---------------------------------------------------------------------------
 # ApprovalLogRepository
@@ -659,3 +683,46 @@ class ApprovalLogRepository:
             if row is None:
                 return None
             return _row_to_approval_log(row)
+
+    async def list_all(
+        self, limit: int = 50, offset: int = 0, session_id: str | None = None
+    ) -> list[ApprovalLog]:
+        """分页列出审批日志，按时间倒序（新→旧），可选按会话过滤."""
+        async with get_session() as session:
+            stmt = select(ApprovalLogModel).where(
+                ApprovalLogModel.deleted_time.is_(None)
+            )
+            if session_id:
+                stmt = stmt.where(ApprovalLogModel.session_id == session_id)
+            stmt = (
+                stmt.order_by(ApprovalLogModel.timestamp.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [_row_to_approval_log(row) for row in rows]
+
+    async def stats(self) -> dict[str, int]:
+        """统计今日审批决策数，返回 {today_total, today_approved, today_denied, today_timeout}."""
+        today_start = datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        async with get_session() as session:
+            stmt = (
+                select(ApprovalLogModel.decision, func.count(ApprovalLogModel.id))
+                .where(
+                    ApprovalLogModel.deleted_time.is_(None),
+                    ApprovalLogModel.timestamp >= today_start.isoformat(),
+                )
+                .group_by(ApprovalLogModel.decision)
+            )
+            result = await session.execute(stmt)
+            counts = {decision: count for decision, count in result.all()}
+            total = sum(counts.values())
+            return {
+                "today_total": total,
+                "today_approved": counts.get("approved", 0),
+                "today_denied": counts.get("denied", 0),
+                "today_timeout": counts.get("timeout", 0),
+            }

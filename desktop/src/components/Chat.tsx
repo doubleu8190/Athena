@@ -515,7 +515,7 @@ function Chat({ sendEvent }: ChatProps) {
       {/* Input Area */}
       <div className="border-t border-athena-border bg-athena-surface p-4">
         <div className="max-w-3xl mx-auto">
-          <div className="flex items-end gap-2">
+          <div className="flex items-stretch gap-2">
             <div className="flex-1 relative">
               <textarea
                 ref={textareaRef}
@@ -529,14 +529,14 @@ function Chat({ sendEvent }: ChatProps) {
                 }
                 disabled={!activeSessionId}
                 rows={1}
-                className="w-full bg-athena-bg border border-athena-border rounded-lg px-4 py-3 pr-12 text-athena-text placeholder:text-athena-muted focus:outline-none focus:border-athena-accent transition-colors resize-none leading-5"
+                className="block w-full bg-athena-bg border border-athena-border rounded-lg px-4 py-3 pr-12 text-athena-text placeholder:text-athena-muted focus:outline-none focus:border-athena-accent transition-colors resize-none leading-5"
                 style={{ maxHeight: "200px", minHeight: "48px" }}
               />
             </div>
             {isAgentActive ? (
               <button
                 onClick={handleStop}
-                className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-danger text-white hover:opacity-90 flex-shrink-0 h-[48px] w-[48px]"
+                className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-danger text-white hover:opacity-90 flex-shrink-0 min-h-[48px] w-[48px]"
                 title="Stop"
               >
                 <Square className="w-4 h-4" />
@@ -545,7 +545,7 @@ function Chat({ sendEvent }: ChatProps) {
               <button
                 onClick={handleSend}
                 disabled={!input.trim() || !activeSessionId || isSending}
-                className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 h-[48px] w-[48px]"
+                className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
                 title="Send"
               >
                 <Send className="w-4 h-4" />

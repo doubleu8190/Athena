@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -37,7 +36,9 @@ class Step(BaseModel):
     step_number: int  # 步骤全局序号（从 1 开始递增）
     step_type: StepType
     parent_step_id: str | None = None  # 父步骤 ID（工具执行步骤引用 LLM 调用步骤）
-    parent_run_id: str | None = None  # 父 run ID（子 Agent 步骤指向其父 run；主 run 为 None）
+    parent_run_id: str | None = (
+        None  # 父 run ID（子 Agent 步骤指向其父 run；主 run 为 None）
+    )
     status: StepStatus = StepStatus.PENDING
     started_at: datetime
     completed_at: datetime | None = None
@@ -45,4 +46,3 @@ class Step(BaseModel):
     llm_input_tokens: int = 0  # 仅 llm_call 类型有效
     llm_output_tokens: int = 0  # 仅 llm_call 类型有效
     error_message: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)

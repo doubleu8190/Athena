@@ -22,6 +22,7 @@ interface ChatStore {
   // 会话列表
   sessions: Session[]
   addSession: (session: Session) => void
+  setSessions: (sessions: Session[]) => void
   removeSession: (sessionId: string) => void
   updateSession: (sessionId: string, updates: Partial<Session>) => void
 
@@ -49,6 +50,7 @@ interface ChatStore {
   addToolCall: (toolCall: ToolCall) => void
   updateToolCall: (id: string, updates: Partial<ToolCall>) => void
   clearToolCalls: () => void
+  setToolCalls: (toolCalls: ToolCall[]) => void
 
   // 审批
   pendingApprovals: ApprovalRequest[]
@@ -83,6 +85,7 @@ export const useChatStore = create<ChatStore>((set) => ({
       if (state.sessions.some((s) => s.id === session.id)) return {}
       return { sessions: [session, ...state.sessions] }
     }),
+  setSessions: (sessions) => set({ sessions }),
   removeSession: (sessionId) =>
     set((state) => ({
       sessions: state.sessions.filter((s) => s.id !== sessionId),
@@ -139,6 +142,7 @@ export const useChatStore = create<ChatStore>((set) => ({
       ),
     })),
   clearToolCalls: () => set({ toolCalls: [] }),
+  setToolCalls: (toolCalls) => set({ toolCalls }),
 
   // 审批
   pendingApprovals: [],

@@ -22,7 +22,6 @@ export interface Step {
   llm_input_tokens: number
   llm_output_tokens: number
   error_message?: string | null
-  metadata?: Record<string, unknown>
 }
 
 // ─── 消息相关 ───────────────────────────────────────────────────
@@ -41,13 +40,19 @@ export interface Message {
   content: string
   timestamp: string
   session_id?: string
+  /** 关联的步骤 ID（assistant 指向 llm_call 步骤，tool 指向工具步骤） */
+  step_id?: string
+  /** 关联的 tool_call 记录 ID（tool 消息） */
+  tool_call_record_id?: string
+  /** 工具名（tool 消息，工具气泡标名） */
   tool_name?: string
+  /** 消息类型标记（如 "conversation_summary"） */
+  type?: string
   tool_call_id?: string
   /** 所属运行 ID（一次用户请求 ≈ 一个 run），Activity 面板按此归组 */
   run_id?: string
   /** assistant 回合发起/已落库的工具调用（来自后端 Message.tool_calls） */
   tool_calls?: ToolCallInvocation[]
-  metadata?: Record<string, unknown>
 }
 
 export interface ThinkingState {

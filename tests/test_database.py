@@ -156,39 +156,32 @@ async def test_delete_session_cascade(db: Database):
 
 
 @pytest.mark.asyncio
-async def test_migration_v4_adds_parent_run_id(tmp_path):
-    """模拟 v3 库升级 v4：steps 表新增 parent_run_id 列，user_version 递增."""
-    import aiosqlite
+async def test_baseline_schema_flat(db: Database):
+    """验证 metadata_json 平铺后的新基线 schema.
 
+    - messages 表含 step_id/tool_call_record_id/tool_name/type 列，且无 metadata_json
+    - sessions/steps 表无 metadata_json
+    - memories 表含 type/category/confidence/source 列
+    - user_version 重置为 1（旧 v2-v5 迁移已废弃）
+    """
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
 
-    from athena.db.engine import _run_migrations
+    from athena.db.engine import get_session
 
-    db_file = tmp_path / "migrate.db"
-    # 手工构造 v3 库：steps 表不含 parent_run_id，user_version=3
-    async with aiosqlite.connect(str(db_file)) as conn:
-        await conn.execute("""
-            CREATE TABLE steps (
-                id VARCHAR PRIMARY KEY, session_id VARCHAR, run_id VARCHAR,
-                step_number INTEGER, step_type VARCHAR, parent_step_id VARCHAR,
-                status VARCHAR, started_at VARCHAR, completed_at VARCHAR,
-                duration_ms REAL, llm_input_tokens INTEGER, llm_output_tokens INTEGER,
-                error_message TEXT, metadata_json TEXT, deleted_time VARCHAR
-            )
-        """)
-        await conn.execute("PRAGMA user_version = 3;")
-        await conn.commit()
+    async with get_session() as session:
+        result = await session.execute(text("PRAGMA table_info(messages)"))
+        msg_cols = {row[1] for row in result.fetchall()}
+        assert {"step_id", "tool_call_record_id", "tool_name", "type"} <= msg_cols
+        assert "metadata_json" not in msg_cols
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    try:
-        async with engine.begin() as conn:
-            await _run_migrations(conn)
-        async with engine.connect() as conn:
-            result = await conn.execute(text("PRAGMA table_info(steps)"))
-            cols = [row[1] for row in result.fetchall()]
-            assert "parent_run_id" in cols
-            result = await conn.execute(text("PRAGMA user_version;"))
-            assert result.scalar() == 5
-    finally:
-        await engine.dispose()
+        for t in ("sessions", "steps"):
+            result = await session.execute(text(f"PRAGMA table_info({t})"))
+            cols = {row[1] for row in result.fetchall()}
+            assert "metadata_json" not in cols
+
+        result = await session.execute(text("PRAGMA table_info(memories)"))
+        mem_cols = {row[1] for row in result.fetchall()}
+        assert {"type", "category", "confidence", "source"} <= mem_cols
+
+        result = await session.execute(text("PRAGMA user_version;"))
+        assert result.scalar() == 1

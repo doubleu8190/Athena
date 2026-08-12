@@ -24,6 +24,7 @@ class ApprovalResponseRequest(BaseModel):
 
 async def _get_approval_manager() -> ApprovalManager | None:
     from athena.gateway.routes._runtime import get_workflow
+
     workflow = get_workflow()
     if workflow is None:
         return None
@@ -44,7 +45,9 @@ async def list_pending_approvals(session_id: str | None = None) -> list[dict[str
 
 
 @router.post("/{approval_id}/respond")
-async def respond_approval(approval_id: str, req: ApprovalResponseRequest) -> dict[str, Any]:
+async def respond_approval(
+    approval_id: str, req: ApprovalResponseRequest
+) -> dict[str, Any]:
     """响应审批请求."""
     manager = await _get_approval_manager()
     if manager is None:
@@ -53,7 +56,9 @@ async def respond_approval(approval_id: str, req: ApprovalResponseRequest) -> di
         raise HTTPException(status_code=400, detail="action must be 'allow' or 'deny'")
     ok = await manager.respond_approval(approval_id, req.action)
     if not ok:
-        raise HTTPException(status_code=404, detail="Approval not found or already resolved")
+        raise HTTPException(
+            status_code=404, detail="Approval not found or already resolved"
+        )
     return {"status": "responded", "approval_id": approval_id, "action": req.action}
 
 
@@ -82,6 +87,7 @@ async def get_approval_logs(session_id: str) -> list[ApprovalLog]:
     """获取会话审批日志."""
     from athena.config.settings import get_settings
     from athena.db.database import get_database
+
     db = await get_database(get_settings().sqlite_db_path)
     return await db.approval_logs.get_by_session(session_id)
 
@@ -95,6 +101,7 @@ async def list_approval_logs(
     """分页列出审批日志（新→旧），可选按会话过滤."""
     from athena.config.settings import get_settings
     from athena.db.database import get_database
+
     db = await get_database(get_settings().sqlite_db_path)
     return await db.approval_logs.list_all(
         limit=limit, offset=offset, session_id=session_id
@@ -106,6 +113,7 @@ async def approval_stats() -> dict[str, Any]:
     """今日审批统计，含审批通过率."""
     from athena.config.settings import get_settings
     from athena.db.database import get_database
+
     db = await get_database(get_settings().sqlite_db_path)
     stats = await db.approval_logs.stats()
     decided = stats["today_approved"] + stats["today_denied"]

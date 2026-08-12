@@ -442,7 +442,7 @@ class AgentWorkflow:
                 session_id=session_id,
                 role=MessageRole.SYSTEM,
                 content=f"[对话历史摘要]\n{compression_summary}",
-                metadata={"type": "conversation_summary"},
+                type="conversation_summary",
                 timestamp=datetime.now(),
             )
             history: list[Message] = [summary_msg] + history_after
@@ -473,7 +473,6 @@ class AgentWorkflow:
             role=MessageRole.USER,
             content=user_message,
             run_id=rid,
-            metadata={},
             timestamp=datetime.now(),
         )
         await self._db.messages.save(user_msg)

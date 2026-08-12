@@ -460,7 +460,7 @@ class Harness:
                             content=full_content,
                             tool_calls=final_tc,
                             run_id=rid,
-                            metadata={"step_id": llm_step_id},
+                            step_id=llm_step_id,
                             timestamp=datetime.now(),
                         )
                     )
@@ -670,6 +670,9 @@ class Harness:
                     EventType.TOOL_CALL_END,
                     {
                         "tool_call_id": tc_record_id,
+                        # step_id 必须带出：前端据 TOOL_CALL_START 合成 tool_execution
+                        # step，若 END 不带 step_id，该 step 永远停在 running。
+                        "step_id": step_id,
                         "tool_name": tool_name,
                         "status": status,
                         "output": result_content if status == "success" else None,
@@ -708,12 +711,10 @@ class Harness:
                             content=tool_content,
                             tool_call_id=tc_id,
                             run_id=run_id,
-                            metadata={
-                                "step_id": step_id,
-                                "tool_call_record_id": tc_record_id,
-                                # 前端据此给工具气泡标名（避免跨表 join）
-                                "tool_name": tool_name,
-                            },
+                            step_id=step_id,
+                            tool_call_record_id=tc_record_id,
+                            # 前端据此给工具气泡标名（避免跨表 join）
+                            tool_name=tool_name,
                             timestamp=datetime.now(),
                         )
                     )

@@ -26,7 +26,11 @@ def register_builtin_tools(manager: UnifiedToolManager) -> None:
     )
     manager.register_native(
         name="write_file",
-        description="将文本内容写入指定文件（默认覆盖，可选追加）",
+        description=(
+            "将文本内容写入指定文件。默认会完全覆盖（删除原有全部内容后写入新内容）。"
+            "要生成完整文件时，请在一次调用中写入完整内容，不要分片多次覆盖同一文件；"
+            "要保留原有内容并在末尾追加时，请显式设置 append=true。"
+        ),
         handler=write_file,
         risk_level=RiskLevel.MEDIUM,
         require_approval=True,

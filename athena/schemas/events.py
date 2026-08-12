@@ -88,6 +88,7 @@ class ClientEventType(StrEnum):
     SESSION_STOP = "session_stop"
     SESSION_RESUME = "session_resume"
     MEMORY_SAVE = "memory_save"
+    SUBSCRIBE = "subscribe"
     PING = "ping"
 
 

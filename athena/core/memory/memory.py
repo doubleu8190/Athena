@@ -30,6 +30,39 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# 语义字段：由 metadata_json 拆为 memories 独立列（支持 SQL 过滤）。
+# 其余用户传入的任意键仍写入 metadata_json 兜底（Chroma 侧保留完整 dict）。
+_SEMANTIC_KEYS = frozenset({"session_id", "type", "category", "confidence", "source"})
+
+
+def _meta_from_row(row) -> dict[str, Any]:
+    """从 memories 行重建完整 meta dict（live 列 + 任意用户字段 JSON 覆盖）.
+
+    metadata_json 仅存任意用户扩展字段；系统/语义字段一律取 live 列，
+    避免创建时的冻结快照与后续访问统计（last_accessed/access_count/expires_at）
+    产生双源真相。重建结果与 Chroma 侧存储的完整 dict 形状一致。
+    """
+    meta: dict[str, Any] = {
+        "created_at": row.created_at,
+        "last_accessed": row.last_accessed,
+        "access_count": row.access_count,
+        "pinned": bool(row.pinned),
+        "expires_at": row.expires_at or "",
+        "session_id": row.session_id,
+    }
+    if row.type is not None:
+        meta["type"] = row.type
+    if row.category is not None:
+        meta["category"] = row.category
+    if row.confidence is not None:
+        meta["confidence"] = row.confidence
+    if row.source is not None:
+        meta["source"] = row.source
+    user_meta = _json_loads(row.metadata_json, {})
+    if user_meta:
+        meta.update(user_meta)
+    return meta
+
 
 @dataclass
 class _AccessStat:
@@ -145,10 +178,16 @@ class MemoryManager:
                 async with session.begin():
                     # 用 CASE 表达式按 id 分支赋值，一条 SQL 搞定 N 条记录
                     la_case = case(
-                        *[(MemoryModel.id == mid, st.last_accessed) for mid, st in stats.items()],
+                        *[
+                            (MemoryModel.id == mid, st.last_accessed)
+                            for mid, st in stats.items()
+                        ],
                     )
                     inc_case = case(
-                        *[(MemoryModel.id == mid, st.count) for mid, st in stats.items()],
+                        *[
+                            (MemoryModel.id == mid, st.count)
+                            for mid, st in stats.items()
+                        ],
                     )
                     result = await session.execute(
                         update(MemoryModel)
@@ -257,7 +296,8 @@ class MemoryManager:
             else None
         )
 
-        meta = {
+        # Chroma 侧保留完整 meta（含系统/语义字段，供向量检索过滤与加权）
+        chroma_meta = {
             "created_at": now,
             "last_accessed": now,
             "access_count": 0,
@@ -265,6 +305,9 @@ class MemoryManager:
             "expires_at": expires_at or "",
             **metadata,
         }
+
+        # SQLite 侧：已知语义字段拆为独立列，其余任意用户字段落 metadata_json 兜底
+        user_extra = {k: v for k, v in metadata.items() if k not in _SEMANTIC_KEYS}
 
         # 1. 先写 SQLite（可事务回滚）
         try:
@@ -275,12 +318,16 @@ class MemoryManager:
                             id=memory_id,
                             session_id=session_id,
                             content=content,
-                            metadata_json=_json_dumps(meta),
+                            metadata_json=_json_dumps(user_extra),
                             pinned=1 if pinned else 0,
                             expires_at=expires_at,
                             created_at=now,
                             last_accessed=now,
                             access_count=0,
+                            type=metadata.get("type"),
+                            category=metadata.get("category"),
+                            confidence=metadata.get("confidence"),
+                            source=metadata.get("source"),
                         )
                     )
                     await session.execute(
@@ -298,7 +345,7 @@ class MemoryManager:
             self.collection.add(
                 ids=[memory_id],
                 documents=[content],
-                metadatas=[meta],
+                metadatas=[chroma_meta],
             )
         except Exception as e:
             logger.error("memory_add_chromadb_failed", error=str(e))
@@ -426,6 +473,7 @@ class MemoryManager:
                     SELECT m.id, m.content, m.metadata_json, m.session_id,
                            m.created_at, m.pinned, m.expires_at,
                            m.last_accessed, m.access_count,
+                           m.type, m.category, m.confidence, m.source,
                            bm25(memory_fts) AS rank
                     FROM memory_fts
                     JOIN memories m ON memory_fts.memory_id = m.id
@@ -455,10 +503,8 @@ class MemoryManager:
 
         out: list[dict[str, Any]] = []
         for row in rows:
-            meta = _json_loads(row.metadata_json, {})
-            # metadata_json 是创建时冻结的快照，访问字段以 live 列为准覆盖
-            meta["last_accessed"] = row.last_accessed
-            meta["access_count"] = row.access_count
+            # metadata_json 仅存任意用户字段；完整 dict 由 live 列 + JSON 重建
+            meta = _meta_from_row(row)
             # bm25 返回负值，越小（越负）越相关；abs/(1+abs) 映射为单调递增的
             # 0-1 相似度，与向量路径"score 越大越相似"的语义一致
             raw_rank = row.rank if row.rank is not None else 0.0
@@ -522,11 +568,7 @@ class MemoryManager:
             )
         if session_id:
             stmt = stmt.where(MemoryModel.session_id == session_id)
-        stmt = (
-            stmt.order_by(MemoryModel.created_at.desc())
-            .offset(offset)
-            .limit(limit)
-        )
+        stmt = stmt.order_by(MemoryModel.created_at.desc()).offset(offset).limit(limit)
         async with get_session() as session:
             result = await session.execute(stmt)
             rows = result.scalars().all()
@@ -534,7 +576,7 @@ class MemoryManager:
             {
                 "id": row.id,
                 "content": row.content,
-                "metadata": _json_loads(row.metadata_json, {}) or {},
+                "metadata": _meta_from_row(row),
                 "pinned": bool(row.pinned),
                 "expires_at": row.expires_at,
                 "created_at": row.created_at,
@@ -605,7 +647,9 @@ class MemoryManager:
                 async with session.begin():
                     row = (
                         await session.execute(
-                            text("SELECT content FROM memories WHERE id = :id AND deleted_time IS NULL"),
+                            text(
+                                "SELECT content FROM memories WHERE id = :id AND deleted_time IS NULL"
+                            ),
                             {"id": memory_id},
                         )
                     ).fetchone()
@@ -628,7 +672,9 @@ class MemoryManager:
                         {"content": content, "memory_id": memory_id},
                     )
         except Exception as e:
-            logger.error("memory_update_sqlite_failed", memory_id=memory_id, error=str(e))
+            logger.error(
+                "memory_update_sqlite_failed", memory_id=memory_id, error=str(e)
+            )
             raise
 
         # 2. 再更新 ChromaDB；失败则回滚 SQLite

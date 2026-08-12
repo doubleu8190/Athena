@@ -1,11 +1,13 @@
 """WebSocket 端点 — 双向事件流处理.
 
-从 main.py 剥离的业务逻辑：WebSocket 连接管理、消息路由、
-用户命令/审批/记忆等事件处理。
+负责:
+- WebSocket 连接建立/断开管理（委托 WebSocketManager）
+- 客户端消息路由分发（按 msg_type 分派到对应处理器）
+- 用户命令 / 审批响应 / 记忆保存 / 会话恢复等事件处理
 
-迁移理由：这些函数是 WebSocket 协议层的事件处理器，属于 gateway 层
-业务逻辑，不应驻留在应用启动文件中。放在 gateway/ws/ 下与
-WebSocketManager 同级，职责清晰。
+设计说明:
+- 单一全局连接，通过 SUBSCRIBE 消息切换订阅的会话，连接本身不复用重建
+- 各处理器以 ``_handle_*`` 命名，与 WebSocketManager 同级放置，职责清晰
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from athena.core.agent.workflow import AgentWorkflow
 from athena.gateway.approval import get_approval_manager
@@ -28,21 +30,55 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+router = APIRouter(tags=["ws"])
 
-async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
-    """WebSocket 端点 - 双向事件流.
+# 需要 session_id 的客户端消息类型。
+# SUBSCRIBE 是唯一允许空 session_id 的消息（空 = 退订）；
+# 其余会话级消息 session_id 必填，缺失/为空统一拒绝，避免 "" 与 None 两套折叠逻辑并存。
+_SESSION_SCOPED_TYPES = frozenset(
+    {
+        ClientEventType.SESSION_STOP,
+        ClientEventType.SESSION_RESUME,
+        ClientEventType.USER_COMMAND,
+        ClientEventType.MEMORY_SAVE,
+    }
+)
 
-    客户端可发送：USER_COMMAND / APPROVAL_RESPONSE / APPROVAL_CANCEL /
-                  SESSION_STOP / SESSION_RESUME / MEMORY_SAVE / PING
+
+async def _send_ws_error(websocket: WebSocket, error: str, message: str) -> None:
+    """向单个连接回推 ERROR 事件."""
+    await websocket.send_text(
+        json.dumps(
+            build_event(EventType.ERROR, {"error": error, "message": message}),
+            ensure_ascii=False,
+        )
+    )
+
+
+@router.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    """WebSocket 端点 — 单一全局连接，按订阅路由事件.
+
+    客户端支持的消息类型:
+        USER_COMMAND / APPROVAL_RESPONSE / APPROVAL_CANCEL / SESSION_STOP /
+        SESSION_RESUME / MEMORY_SAVE / SUBSCRIBE / PING
+
+    会话切换通过 SUBSCRIBE 消息（data.session_id）实现，连接本身不复用重建。
+    收到无效 JSON 时回推 ERROR 事件后继续接收，不中断连接。
+    除 SUBSCRIBE 外的会话级消息（USER_COMMAND 等）session_id 必填，
+    缺失/为空时回推 ERROR 事件并跳过该消息（不当作退订或空会话处理）。
+
+    Args:
+        websocket: FastAPI 传入的 WebSocket 连接实例。
+
+    Returns:
+        None。连接断开或异常时返回。
+
+    Raises:
+        WebSocketDisconnect: 客户端断开连接（在函数内部捕获处理）。
     """
     ws_manager = get_websocket_manager()
-    await ws_manager.connect(session_id, websocket)
-
-    # 推送会话开始事件
-    await ws_manager.send_to_session(
-        session_id,
-        build_event(EventType.SESSION_START, {"session_id": session_id}, session_id=session_id),
-    )
+    await ws_manager.connect(websocket)
 
     try:
         while True:
@@ -51,51 +87,104 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
                 msg = json.loads(raw)
                 logger.info("ws_message_received", msg=msg)
             except json.JSONDecodeError:
-                await ws_manager.send_to_session(
-                    session_id,
-                    build_event(EventType.ERROR, {"error": "invalid json"}, session_id=session_id),
+                # 无效 JSON：回推错误事件后继续，不中断连接
+                await websocket.send_text(
+                    json.dumps(
+                        build_event(EventType.ERROR, {"error": "invalid json"}),
+                        ensure_ascii=False,
+                    )
                 )
                 continue
 
             msg_type = msg.get("type", "")
             data = msg.get("data", {})
 
-            if msg_type == ClientEventType.PING:
-                await ws_manager.send_to_session(
-                    session_id,
-                    build_event(EventType.PONG, {"echo": data}, session_id=session_id),
+            if msg_type == ClientEventType.SUBSCRIBE:
+                session_id = data.get("session_id") or None
+                await ws_manager.subscribe(websocket, session_id)
+                # 与旧语义对齐：订阅成功后回推 SESSION_START
+                if session_id:
+                    await ws_manager.send_to_session(
+                        session_id,
+                        build_event(
+                            EventType.SESSION_START,
+                            {"session_id": session_id},
+                            session_id=session_id,
+                        ),
+                    )
+            elif msg_type == ClientEventType.PING:
+                await websocket.send_text(
+                    json.dumps(
+                        build_event(EventType.PONG, {"echo": data}),
+                        ensure_ascii=False,
+                    )
                 )
             elif msg_type == ClientEventType.APPROVAL_RESPONSE:
-                await _handle_approval_response(session_id, data)
+                await _handle_approval_response(data)
             elif msg_type == ClientEventType.APPROVAL_CANCEL:
-                await _handle_approval_cancel(session_id, data)
-            elif msg_type == ClientEventType.SESSION_STOP:
-                from athena.gateway.routes._runtime import get_session_stop_event
-                get_session_stop_event(session_id).set()
-            elif msg_type == ClientEventType.SESSION_RESUME:
-                await _handle_session_resume(session_id, data)
-            elif msg_type == ClientEventType.USER_COMMAND:
-                await _handle_user_command(session_id, data)
-            elif msg_type == ClientEventType.MEMORY_SAVE:
-                await _handle_memory_save(session_id, data)
+                await _handle_approval_cancel(data)
+            elif msg_type in _SESSION_SCOPED_TYPES:
+                # 会话级消息：session_id 必填。缺失/为空统一拒绝并回推 ERROR，
+                # 不再把 "" 折叠成退订（or None）或当成真会话（or ""）处理，
+                # 与 SUBSCRIBE 的"空 = 退订"语义区分。
+                session_id = data.get("session_id", "")
+                if not session_id:
+                    logger.warning(
+                        "ws_message_missing_session_id",
+                        msg_type=msg_type,
+                    )
+                    await _send_ws_error(
+                        websocket,
+                        "missing_session_id",
+                        f"消息 {msg_type} 缺少 session_id",
+                    )
+                elif msg_type == ClientEventType.USER_COMMAND:
+                    # 隐式订阅：防御"订阅命令未先到达"的竞态，
+                    # 保证命令触发的事件流能回到本连接
+                    await ws_manager.subscribe(websocket, session_id)
+                    await _handle_user_command(session_id, data)
+                elif msg_type == ClientEventType.SESSION_STOP:
+                    from athena.gateway.routes._runtime import (
+                        get_session_stop_event,
+                    )
+
+                    get_session_stop_event(session_id).set()
+                elif msg_type == ClientEventType.SESSION_RESUME:
+                    await _handle_session_resume(session_id, data)
+                elif msg_type == ClientEventType.MEMORY_SAVE:
+                    await _handle_memory_save(session_id, data)
             else:
                 logger.warning("unknown_ws_message", msg_type=msg_type)
     except WebSocketDisconnect:
-        logger.info("ws_client_disconnected", session_id=session_id)
+        logger.info("ws_client_disconnected")
     except Exception:
-        logger.exception("ws_endpoint_error", session_id=session_id)
+        logger.exception("ws_endpoint_error")
     finally:
-        await ws_manager.disconnect(session_id, websocket)
+        await ws_manager.disconnect(websocket)
+
+
+# ------------------------------------------------------------------
+# 消息处理器（按消息类型分派）
+# ------------------------------------------------------------------
 
 
 async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
-    """处理用户命令（异步执行，避免阻塞 WebSocket 接收）."""
+    """处理用户命令.
+
+    将消息提交给 AgentWorkflow.process_message() 异步执行，
+    不等待结果，避免阻塞 WebSocket 接收循环。
+
+    Args:
+        session_id: 会话 ID。
+        data: 命令数据，需包含 "message" 字段（用户消息内容）。
+    """
     from athena.gateway.routes._runtime import (
         clear_session_stop_event,
         get_workflow,
         get_session_stop_event,
         reset_session_stop_event,
     )
+
     workflow: AgentWorkflow = get_workflow()
     if workflow is None:
         logger.error("workflow_not_initialized", session_id=session_id)
@@ -121,8 +210,14 @@ async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
     task.add_done_callback(lambda _t: clear_session_stop_event(session_id))
 
 
-async def _handle_approval_response(session_id: str, data: dict[str, Any]) -> None:
-    """处理审批响应."""
+async def _handle_approval_response(data: dict[str, Any]) -> None:
+    """处理审批响应（允许/拒绝）.
+
+    Args:
+        data: 审批数据，需包含:
+            - approval_id: 审批请求 ID
+            - action: "allow"（允许）或 "deny"（拒绝）
+    """
     approval_id = data.get("approval_id", "")
     action = data.get("action", "")
     if not approval_id or action not in ("allow", "deny"):
@@ -131,8 +226,12 @@ async def _handle_approval_response(session_id: str, data: dict[str, Any]) -> No
     await manager.respond_approval(approval_id, action)
 
 
-async def _handle_approval_cancel(session_id: str, data: dict[str, Any]) -> None:
-    """处理审批取消."""
+async def _handle_approval_cancel(data: dict[str, Any]) -> None:
+    """处理审批取消（用户放弃审批，工具执行将被终止）.
+
+    Args:
+        data: 审批数据，需包含 approval_id（审批请求 ID）。
+    """
     approval_id = data.get("approval_id", "")
     if not approval_id:
         return
@@ -141,8 +240,19 @@ async def _handle_approval_cancel(session_id: str, data: dict[str, Any]) -> None
 
 
 async def _handle_memory_save(session_id: str, data: dict[str, Any]) -> None:
-    """处理主动记忆保存."""
+    """处理主动记忆保存（用户在前端手动保存记忆）.
+
+    通过 workflow 内部对象链 (_memory_retrieval._memory) 定位 MemoryManager，
+    写入内容时自动注入 session_id 元数据用于来源追踪。
+
+    Args:
+        session_id: 会话 ID。
+        data: 记忆数据，需包含:
+            - content: 记忆文本内容
+            - metadata: 可选附加元数据（dict）
+    """
     from athena.gateway.routes._runtime import get_workflow
+
     workflow = get_workflow()
     if workflow is None:
         return
@@ -164,10 +274,17 @@ async def _handle_memory_save(session_id: str, data: dict[str, Any]) -> None:
 async def _handle_session_resume(session_id: str, data: dict[str, Any]) -> None:
     """处理用户主动恢复会话.
 
-    data 字段：
-      mode: "recover" | "abandon"（默认 "recover"）
-        - recover: 完整恢复流程（重触发 Agent）
-        - abandon: 仅重置状态，不触发恢复
+    仅当会话状态为 interrupted / running / failed 时才允许恢复。
+    其他状态回推 ERROR 事件。
+
+    Args:
+        session_id: 会话 ID。
+        data: 恢复数据，可选 mode 字段:
+            - mode="recover"（默认）: 完整恢复流程，重新触发 Agent 执行
+            - mode="abandon": 仅重置状态为 idle，不触发恢复
+
+    Raises:
+        WebSocketDisconnect: 由异步恢复任务抛出时被捕获并记录日志。
     """
     from athena.core.recovery.session_recovery import SessionRecovery
     from athena.db.database import get_database
@@ -258,7 +375,16 @@ async def _execute_ws_recovery(
     session_id: str,
     ws_manager: "WebSocketManager",
 ) -> None:
-    """异步执行恢复并通过 WS 推送结果."""
+    """异步执行会话恢复并通过 WebSocket 推送结果.
+
+    作为独立任务运行（由 _handle_session_resume 创建），
+    成功后推送 SESSION_RECOVERED，失败推送 ERROR。
+
+    Args:
+        recovery: 会话恢复器实例。
+        session_id: 会话 ID。
+        ws_manager: WebSocket 管理器，用于推送事件。
+    """
     try:
         await recovery._recover_session(session_id)
         await ws_manager.send_to_session(

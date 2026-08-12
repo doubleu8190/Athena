@@ -6,10 +6,10 @@ import { ActivityPanel } from "./ActivityPanel"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { ApprovalRequest, Message } from "../types"
+import type { ApprovalRequest, Message, ToolCall } from "../types"
 
 interface ChatProps {
-  sendEvent: (type: string, data?: Record<string, unknown>) => void
+  sendEvent: (type: string, data?: Record<string, unknown>) => boolean
 }
 
 function Chat({ sendEvent }: ChatProps) {
@@ -23,8 +23,10 @@ function Chat({ sendEvent }: ChatProps) {
     thinking,
     error,
     addMessage,
+    removeMessage,
     setMessages,
     setSteps,
+    setToolCalls,
     clearMessages,
     clearSteps,
     clearToolCalls,
@@ -78,10 +80,12 @@ function Chat({ sendEvent }: ChatProps) {
 
   const loadHistory = async (sessionId: string, isCancelled?: () => boolean) => {
     try {
-      // 同时加载 messages 和 steps
-      const [history, sessionSteps] = await Promise.all([
+      // 同时加载 messages、steps 与 tool_calls，确保 Activity 面板完整
+      // （此前缺 tool_calls，历史会话的工具调用在面板上一片空白）
+      const [history, sessionSteps, sessionToolCalls] = await Promise.all([
         apiClient.getMessages(sessionId),
         apiClient.getSteps(sessionId),
+        apiClient.getToolCalls(sessionId) as Promise<RawToolCallRecord[]>,
       ])
       // StrictMode 双调用或快速切换 session 时取消应用结果
       if (isCancelled?.()) return
@@ -97,12 +101,18 @@ function Chat({ sendEvent }: ChatProps) {
         } else {
           clearSteps()
         }
+        if (sessionToolCalls.length > 0) {
+          setToolCalls(sessionToolCalls.map(normalizeToolCall))
+        } else {
+          clearToolCalls()
+        }
       }
     } catch {
       if (isCancelled?.()) return
       if (loadingSessionIdRef.current === sessionId) {
         clearMessages()
         clearSteps()
+        clearToolCalls()
         setError("Failed to load session history. Please try again.")
       }
     } finally {
@@ -142,18 +152,44 @@ function Chat({ sendEvent }: ChatProps) {
     }
     addMessage(userMsg)
 
+    // 乐观反馈：立即进入 running，不等后端首事件（STREAM_START / LLM_CALL_START）。
+    // 后端在 LLM 调用前有记忆检索、历史加载、提示词构建等处理窗口，若 UI 保持
+    // idle，用户会感觉"发送完消息后没有任何反应"。置为 running 后处理中指示器
+    // 与停止按钮立刻出现，消息送达的确定性也随即传达。
+    setAgentStatus("running")
+    clearThinking()
+
     // 通过 WebSocket 发送用户命令
-    sendEvent(ClientEventType.USER_COMMAND, {
+    const sent = sendEvent(ClientEventType.USER_COMMAND, {
       message: text,
       session_id: activeSessionId,
     })
 
+    if (!sent) {
+      // WebSocket 未连接：消息实际未送达，回滚 UI 并把输入文本还给用户
+      setAgentStatus("idle")
+      setError("Connection lost. Your message was not sent — please try again.")
+      removeMessage(userMsg.id)
+      setInput(text)
+    }
+
     setIsSending(false)
-  }, [input, activeSessionId, isSending, addMessage, sendEvent])
+  }, [
+    input,
+    activeSessionId,
+    isSending,
+    addMessage,
+    removeMessage,
+    setAgentStatus,
+    setError,
+    clearThinking,
+    sendEvent,
+  ])
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return
-    sendEvent(ClientEventType.SESSION_STOP, {})
+    // 单一全局连接下后端从 data.session_id 取会话，不再依赖 URL 路径
+    sendEvent(ClientEventType.SESSION_STOP, { session_id: activeSessionId })
   }, [activeSessionId, sendEvent])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -251,10 +287,10 @@ function Chat({ sendEvent }: ChatProps) {
   const hasProcessingPhase = phaseGroups.some((g) => g.phase === "processing")
 
   return (
-    <div className="flex-1 flex flex-row h-full min-w-0">
-      <div className="flex-1 flex flex-col min-w-0 relative">
+    <div className="flex-1 flex flex-row min-w-0 min-h-0">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto min-h-0">
         {/* Activity 面板开关(固定悬浮于消息区右上角) */}
         {(messages.length > 0 || isAgentActive) && (
           <div className="absolute top-3 right-4 z-10">
@@ -338,8 +374,30 @@ function Chat({ sendEvent }: ChatProps) {
                 const isFirstGroup = gi === 0
                 const isLastGroup = gi === phaseGroups.length - 1
 
+                // 跨天判断：本组首条消息与上组末条消息比较日期键。
+                // 首组恒显示日期，让会话起始的日期可见。
+                const prevLast =
+                  gi > 0
+                    ? phaseGroups[gi - 1].messages[
+                        phaseGroups[gi - 1].messages.length - 1
+                      ]
+                    : null
+                const showDateDivider =
+                  isFirstGroup ||
+                  (prevLast !== null &&
+                    dateKey(group.messages[0].timestamp) !==
+                      dateKey(prevLast.timestamp))
+
                 return (
                   <div key={gi}>
+                    {/* 跨天日期分隔条（今天/昨天/具体日期） */}
+                    {showDateDivider && (
+                      <div className="flex justify-center py-1">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-athena-surface/80 border border-athena-border text-xs text-athena-muted">
+                          {formatDateLabel(group.messages[0].timestamp)}
+                        </span>
+                      </div>
+                    )}
                     {/* Phase Divider */}
                     <div className="phase-divider">
                       <span className={`phase-label phase-${group.phase === "request" ? "request" : group.phase === "processing" ? "processing" : "response"}`}>
@@ -368,20 +426,6 @@ function Chat({ sendEvent }: ChatProps) {
                         {group.messages.map((message, mi) => (
                           <div key={message.id} className="timeline-node tool-node">
                             <MessageBubble message={message} />
-                            {/* Show step info inline for tool messages */}
-                            {message.role === "tool" && !!message.metadata?.step_number && (
-                              <div className="flex items-center gap-2 text-xs text-athena-muted ml-11 mb-2">
-                                <span className="font-mono">
-                                  Step {String(message.metadata.step_number)}
-                                  {!!message.metadata.duration_ms && (
-                                    <> · Tool Execution · {formatDuration(Number(message.metadata.duration_ms))}</>
-                                  )}
-                                </span>
-                                {isConversationCompleted && (
-                                  <span className="text-athena-success">→ completed</span>
-                                )}
-                              </div>
-                            )}
                             {mi < group.messages.length - 1 && <div className="mb-3" />}
                           </div>
                         ))}
@@ -553,6 +597,31 @@ function formatTime(isoString: string): string {
   }
 }
 
+/** 日期键（用于跨天判断），形如 "2026-8-12". */
+function dateKey(isoString: string): string {
+  const d = new Date(isoString)
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+}
+
+/** 日期分隔条文案：今天 / 昨天 / M月D日 / YYYY年M月D日（非当年带年份）. */
+function formatDateLabel(isoString: string): string {
+  try {
+    const date = new Date(isoString)
+    const today = new Date()
+    const yesterday = new Date()
+    yesterday.setDate(today.getDate() - 1)
+    if (dateKey(isoString) === dateKey(today.toISOString())) return "今天"
+    if (dateKey(isoString) === dateKey(yesterday.toISOString())) return "昨天"
+    const opts: Intl.DateTimeFormatOptions =
+      date.getFullYear() === today.getFullYear()
+        ? { month: "long", day: "numeric" }
+        : { year: "numeric", month: "long", day: "numeric" }
+    return date.toLocaleDateString("zh-CN", opts)
+  } catch {
+    return ""
+  }
+}
+
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
   return `${(ms / 1000).toFixed(1)}s`
@@ -561,4 +630,38 @@ function formatDuration(ms: number): string {
 function formatTotalDuration(steps: { duration_ms: number }[]): string {
   const total = steps.reduce((sum, s) => sum + (s.duration_ms || 0), 0)
   return formatDuration(total)
+}
+
+/** 后端 ToolCallRecord 的原始字段（与前端 ToolCall 命名不同） */
+interface RawToolCallRecord {
+  id: string
+  session_id: string
+  step_id: string
+  tool_name: string
+  arguments: Record<string, unknown>
+  raw_output?: string | null
+  status: ToolCall["status"]
+  started_at: string
+  completed_at?: string | null
+  duration_ms?: number
+  error_message?: string | null
+  error_stack?: string | null
+}
+
+/** ToolCallRecord → 前端 ToolCall：对齐字段名并补默认 risk_level.
+ *  run_id 未存于工具记录，Activity 面板通过 step_id → steps.run_id 归组。 */
+function normalizeToolCall(r: RawToolCallRecord): ToolCall {
+  return {
+    id: r.id,
+    tool_name: r.tool_name,
+    arguments: r.arguments ?? {},
+    status: r.status,
+    started_at: r.started_at,
+    completed_at: r.completed_at ?? undefined,
+    duration_ms: r.duration_ms,
+    output: r.raw_output ?? undefined,
+    error: r.error_message ?? undefined,
+    risk_level: "medium",
+    step_id: r.step_id,
+  }
 }

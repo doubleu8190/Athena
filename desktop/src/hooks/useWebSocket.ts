@@ -5,6 +5,7 @@ import type {
   ApprovalRequest,
   ToolCall,
   Message,
+  Step,
 } from "../types"
 import { useChatStore } from "../store/chatStore"
 
@@ -23,6 +24,8 @@ export function useWebSocket(options: UseWebSocketOptions) {
   const reconnectAttempts = useRef(0)
   const buildingMessageId = useRef<string | null>(null)
   const hasUserCommandRef = useRef(false)
+  // 记录当前应订阅的会话，供 onopen / 重连后补发 SUBSCRIBE
+  const sessionIdRef = useRef<string | null>(sessionId)
   const {
     setConnectionStatus,
     setAgentStatus,
@@ -31,6 +34,8 @@ export function useWebSocket(options: UseWebSocketOptions) {
     removeMessage,
     addToolCall,
     updateToolCall,
+    addStep,
+    updateStep,
     addApproval,
     resolveApproval,
     setThinking,
@@ -39,74 +44,86 @@ export function useWebSocket(options: UseWebSocketOptions) {
     clearError,
   } = useChatStore()
 
-  const buildWsUrl = useCallback(
-    (sid: string) => {
-      const wsBase = apiBase.replace("http://", "ws://").replace("https://", "wss://")
-      return `${wsBase}/ws/${sid}`
-    },
-    [apiBase],
-  )
+  const buildWsUrl = useCallback(() => {
+    const wsBase = apiBase.replace("http://", "ws://").replace("https://", "wss://")
+    // 单一全局连接：应用只建一条 /ws，会话切换靠 SUBSCRIBE 消息，
+    // 不再为每个会话单独建连（避免切换会话时的握手抖动与事件丢失窗口）
+    return `${wsBase}/ws`
+  }, [apiBase])
 
-  const connect = useCallback(
-    (sid: string) => {
-      // 清理旧连接
-      if (wsRef.current) {
-        wsRef.current.close()
-        wsRef.current = null
+  // 发送订阅/退订消息（socket 未就绪时静默，onopen 会补发）
+  const sendSubscribe = useCallback((sid: string | null) => {
+    const ws = wsRef.current
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: ClientEventType.SUBSCRIBE, data: { session_id: sid } }))
+    }
+  }, [])
+
+  const connect = useCallback(() => {
+    // 清理旧连接（仅在重连/换 apiBase 时发生）
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+
+    const url = buildWsUrl()
+    const ws = new WebSocket(url)
+    wsRef.current = ws
+
+    setConnectionStatus("connecting")
+
+    ws.onopen = () => {
+      // 旧 socket 的 onopen 晚到（被 disconnect()/新 connect() 替换后）：
+      // 忽略，避免误发订阅、误重置重连计数、误覆盖连接状态
+      if (wsRef.current !== ws) return
+      setConnectionStatus("connected")
+      reconnectAttempts.current = 0
+      onOpen?.()
+      // 连接建立/重连成功后恢复订阅（sessionIdRef 始终是最新目标）
+      sendSubscribe(sessionIdRef.current)
+    }
+
+    ws.onclose = () => {
+      // 仅在"被关闭的 socket 仍是当前 socket"时才视为真实断线：
+      // disconnect()/新 connect() 主动关闭的旧 socket，其 onclose 异步晚到，
+      // 若不拦截会错误地把状态置为 disconnected，并触发不必要的重连 →
+      // 重连又关掉新 socket → 无限重连循环（React StrictMode 双挂载
+      // 恰好制造这种旧 socket，是重复 subscribe 的根因）。
+      if (wsRef.current !== ws) return
+      wsRef.current = null
+      setConnectionStatus("disconnected")
+      onClose?.()
+
+      // 自动重连（最多 5 次）
+      if (reconnectAttempts.current < 5) {
+        reconnectAttempts.current++
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000)
+        reconnectTimer.current = setTimeout(() => {
+          connect()
+        }, delay)
+      } else {
+        // 重连彻底失败：发送后乐观置为 running 的 run 无法继续，
+        // 若保持 running，UI 会永远卡在"处理中"，这里重置回 idle
+        setAgentStatus("idle")
       }
+    }
 
-      const url = buildWsUrl(sid)
-      const ws = new WebSocket(url)
-      wsRef.current = ws
+    ws.onerror = () => {
+      setConnectionStatus("error")
+      onError?.()
+    }
 
-      setConnectionStatus("connecting")
-
-      ws.onopen = () => {
-        setConnectionStatus("connected")
-        reconnectAttempts.current = 0
-        onOpen?.()
+    ws.onmessage = (event) => {
+      try {
+        const msg: WebSocketEvent = JSON.parse(event.data)
+        handleEvent(msg)
+      } catch (e) {
+        console.error("Failed to parse WS message:", e)
       }
-
-      ws.onclose = () => {
-        setConnectionStatus("disconnected")
-        onClose?.()
-        // 只在当前 socket 仍是本 socket 时才清空引用。快速切换 session 时，
-        // 旧 socket 的 onclose 可能晚于新 socket 建立才触发，若无条件置 null
-        // 会清掉指向新 socket 的引用，导致后续 disconnect() 变 no-op，
-        // 旧连接一直挂在服务端 → 同一会话累积多条连接 → 事件重复推送。
-        if (wsRef.current === ws) {
-          wsRef.current = null
-        }
-
-        // 自动重连（最多 5 次）
-        if (reconnectAttempts.current < 5) {
-          reconnectAttempts.current++
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000)
-          reconnectTimer.current = setTimeout(() => {
-            if (sessionId === sid) {
-              connect(sid)
-            }
-          }, delay)
-        }
-      }
-
-      ws.onerror = () => {
-        setConnectionStatus("error")
-        onError?.()
-      }
-
-      ws.onmessage = (event) => {
-        try {
-          const msg: WebSocketEvent = JSON.parse(event.data)
-          handleEvent(msg)
-        } catch (e) {
-          console.error("Failed to parse WS message:", e)
-        }
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [buildWsUrl, onOpen, onClose, onError],
-  )
+    }
+  },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [buildWsUrl, onOpen, onClose, onError, sendSubscribe])
 
   const disconnect = useCallback(() => {
     if (reconnectTimer.current) {
@@ -119,24 +136,24 @@ export function useWebSocket(options: UseWebSocketOptions) {
     }
   }, [])
 
-  // 监听 sessionId 变化
+  // 挂载/卸载 effect：连接生命周期 = 应用生命周期，只建一次
   useEffect(() => {
+    connect()
+    return () => {
+      disconnect()
+    }
+  }, [connect, disconnect])
+
+  // 订阅 effect：切换会话只发 SUBSCRIBE，不再重建连接
+  useEffect(() => {
+    sessionIdRef.current = sessionId
     // 切换 session 时重置所有会话相关状态
     buildingMessageId.current = null
     hasUserCommandRef.current = false
     setAgentStatus("idle")
     clearThinking()
-
-    if (sessionId) {
-      connect(sessionId)
-    } else {
-      disconnect()
-      setConnectionStatus("disconnected")
-    }
-    return () => {
-      disconnect()
-    }
-  }, [sessionId, connect, disconnect, setConnectionStatus, setAgentStatus, clearThinking])
+    sendSubscribe(sessionId)
+  }, [sessionId, sendSubscribe, setAgentStatus, clearThinking])
 
   // 心跳
   useEffect(() => {
@@ -151,14 +168,16 @@ export function useWebSocket(options: UseWebSocketOptions) {
   }, [])
 
   const sendEvent = useCallback(
-    (type: string, data: Record<string, unknown> = {}) => {
+    (type: string, data: Record<string, unknown> = {}): boolean => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         // 标记用户已发送命令，允许 agent 状态转为 running
         if (type === ClientEventType.USER_COMMAND) {
           hasUserCommandRef.current = true
         }
         wsRef.current.send(JSON.stringify({ type, data }))
+        return true
       }
+      return false
     },
     [],
   )
@@ -201,6 +220,14 @@ export function useWebSocket(options: UseWebSocketOptions) {
             timestamp: new Date().toISOString(),
             session_id: sessionId ?? undefined,
           })
+          // 实时步骤流：后端只把 step 落库、不推送 STEP 事件，
+          // 前端从 LLM/TOOL 事件还原 step，使 Activity 面板随执行推进更新
+          const stepId = data.step_id as string | undefined
+          if (stepId) {
+            addStep(
+              makeLiveStep(stepId, "llm_call", event.run_id, sessionId),
+            )
+          }
           break
         }
 
@@ -230,6 +257,14 @@ export function useWebSocket(options: UseWebSocketOptions) {
         case EventType.LLM_CALL_END: {
           if (hasUserCommandRef.current) {
             setAgentStatus("running")
+          }
+          const stepId = data.step_id as string | undefined
+          if (stepId) {
+            updateStep(stepId, {
+              status: data.status === "failed" ? "failed" : "completed",
+              duration_ms: (data.duration_ms as number) ?? 0,
+              completed_at: new Date().toISOString(),
+            })
           }
           const buildingId = buildingMessageId.current
           // 纯工具调用回合（无文本）结束时把工具调用挂到气泡上，
@@ -261,6 +296,13 @@ export function useWebSocket(options: UseWebSocketOptions) {
             run_id: event.run_id as string | undefined,
           }
           addToolCall(tc)
+          // 与 TOOL_CALL_END 配对：为同一 step_id 补一条 tool_execution step
+          const stepId = data.step_id as string | undefined
+          if (stepId) {
+            addStep(
+              makeLiveStep(stepId, "tool_execution", event.run_id, sessionId),
+            )
+          }
           break
         }
 
@@ -272,6 +314,23 @@ export function useWebSocket(options: UseWebSocketOptions) {
             error: data.error as string | undefined,
             duration_ms: data.duration_ms as number | undefined,
           })
+          // 终态化 tool_execution step：优先用事件自带的 step_id；
+          // 兜底：后端旧版本 TOOL_CALL_END 不含 step_id 时，从已记录的
+          // ToolCall.step_id（TOOL_CALL_START 时存入）匹配，避免 step 永久 running
+          let stepId = data.step_id as string | undefined
+          if (!stepId) {
+            stepId = useChatStore
+              .getState()
+              .toolCalls.find((tc) => tc.id === tcId)?.step_id
+          }
+          if (stepId) {
+            updateStep(stepId, {
+              status: data.status === "success" ? "completed" : "failed",
+              duration_ms: (data.duration_ms as number) ?? 0,
+              completed_at: new Date().toISOString(),
+              error_message: (data.error as string) ?? undefined,
+            })
+          }
           break
         }
 
@@ -351,6 +410,8 @@ export function useWebSocket(options: UseWebSocketOptions) {
       removeMessage,
       addToolCall,
       updateToolCall,
+      addStep,
+      updateStep,
       addApproval,
       resolveApproval,
       setError,
@@ -362,5 +423,27 @@ export function useWebSocket(options: UseWebSocketOptions) {
   return {
     sendEvent,
     connectionStatus: useChatStore((s) => s.connectionStatus),
+  }
+}
+
+/** 从 LLM/TOOL 事件构造一条实时 step（后端只落库不推送 STEP 事件）.
+ *  step_number 用当前 store 计数近似；历史重载后以数据库中的真实值替换。 */
+function makeLiveStep(
+  id: string,
+  stepType: Step["step_type"],
+  runId: string | undefined,
+  sessionId: string | null,
+): Step {
+  return {
+    id,
+    session_id: sessionId ?? "",
+    run_id: runId ?? "",
+    step_number: useChatStore.getState().steps.length + 1,
+    step_type: stepType,
+    status: "running",
+    started_at: new Date().toISOString(),
+    duration_ms: 0,
+    llm_input_tokens: 0,
+    llm_output_tokens: 0,
   }
 }

@@ -179,30 +179,40 @@ async def test_transaction_rollback_on_error(db: Database):
 
 
 @pytest.mark.asyncio
-async def test_json_field_serialization(db: Database):
-    """验证 JSON 字段的序列化/反序列化."""
-    # 创建带有复杂 metadata 的会话
+async def test_flattened_message_fields(db: Database):
+    """验证 messages 平铺字段（step_id/tool_call_record_id/tool_name/type）的落库/读取.
+
+    这些字段原存于 metadata_json，现为独立列；本测试验证双向往返.
+    """
     await db.sessions.create("s1")
 
-    # 保存带有复杂数据的消息
-    complex_metadata = {
-        "nested": {"key": "value"},
-        "list": [1, 2, 3],
-        "unicode": "中文测试",
-    }
     await db.messages.save(Message(
         id="m1",
         session_id="s1",
-        role=MessageRole.USER,
-        content="test",
-        metadata=complex_metadata,
+        role=MessageRole.ASSISTANT,
+        content="assistant reply",
+        step_id="step-1",
+        timestamp=datetime.now(),
+    ))
+    await db.messages.save(Message(
+        id="m2",
+        session_id="s1",
+        role=MessageRole.TOOL,
+        content="tool output",
+        tool_call_id="tc-1",
+        step_id="step-2",
+        tool_call_record_id="tc-record-1",
+        tool_name="read_file",
         timestamp=datetime.now(),
     ))
 
-    # 获取消息并验证 JSON 反序列化
     messages = await db.messages.get_by_session("s1")
-    assert len(messages) == 1
-    assert messages[0].metadata == complex_metadata
+    assert len(messages) == 2
+    assert messages[0].step_id == "step-1"
+    assert messages[0].tool_call_record_id is None
+    assert messages[1].step_id == "step-2"
+    assert messages[1].tool_call_record_id == "tc-record-1"
+    assert messages[1].tool_name == "read_file"
 
 
 @pytest.mark.asyncio

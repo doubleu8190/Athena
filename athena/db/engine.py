@@ -29,50 +29,14 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 # ---------------------------------------------------------------------------
 
 # 当前 schema 版本号（每次表结构变更时递增）
-SCHEMA_VERSION = 5
+# v1: 基线 schema（metadata_json 平铺后的全新表结构，见 athena/db/schema.sql）
+#     删除了 sessions/steps/messages 的 metadata_json 列；messages 新增
+#     step_id / tool_call_record_id / tool_name / type 列；memories 新增
+#     type / category / confidence / source 列（metadata_json 仅存任意用户字段）。
+# 后续表结构变更在此追加增量迁移（key 为目标版本号）。
+SCHEMA_VERSION = 1
 
-# 按版本号排列的迁移 SQL，key 为目标版本号（执行后达到的版本）
-# v1: 初始版本（旧字段名 metadata / tool_calls / arguments，无 deleted_time）
-# v2: 重命名 *_json 列 + 所有表新增 deleted_time + 新增 memories/memory_fts 表
-# v3: messages 表新增 run_id 列（按用户请求/run 归组的前端 join 键）
-# v4: steps 表新增 parent_run_id 列（子 Agent 步骤显式指向其父 run）
-# v5: sessions 表新增 last_summarized_message_id 列（阈值摘要增量指针）
-_MIGRATIONS: dict[int, str] = {
-    2: """
-    -- ===== sessions 表：重命名 metadata → metadata_json，新增 deleted_time =====
-    ALTER TABLE sessions RENAME COLUMN metadata TO metadata_json;
-    ALTER TABLE sessions ADD COLUMN deleted_time TEXT;
-
-    -- ===== messages 表：重命名 tool_calls / metadata，新增 deleted_time =====
-    ALTER TABLE messages RENAME COLUMN tool_calls TO tool_calls_json;
-    ALTER TABLE messages RENAME COLUMN metadata TO metadata_json;
-    ALTER TABLE messages ADD COLUMN deleted_time TEXT;
-
-    -- ===== steps 表：重命名 metadata，新增 deleted_time =====
-    ALTER TABLE steps RENAME COLUMN metadata TO metadata_json;
-    ALTER TABLE steps ADD COLUMN deleted_time TEXT;
-
-    -- ===== tool_call 表：重命名 arguments，新增 deleted_time =====
-    ALTER TABLE tool_call RENAME COLUMN arguments TO arguments_json;
-    ALTER TABLE tool_call ADD COLUMN deleted_time TEXT;
-
-    -- ===== approval_logs 表：重命名 arguments，新增 deleted_time =====
-    ALTER TABLE approval_logs RENAME COLUMN arguments TO arguments_json;
-    ALTER TABLE approval_logs ADD COLUMN deleted_time TEXT;
-    """,
-    3: """
-    -- ===== messages 表：新增 run_id 列（按用户请求/run 归组） =====
-    ALTER TABLE messages ADD COLUMN run_id TEXT;
-    """,
-    4: """
-    -- ===== steps 表：新增 parent_run_id 列（子 Agent 步骤指向父 run） =====
-    ALTER TABLE steps ADD COLUMN parent_run_id TEXT;
-    """,
-    5: """
-    -- ===== sessions 表：新增 last_summarized_message_id 列（阈值摘要增量指针） =====
-    ALTER TABLE sessions ADD COLUMN last_summarized_message_id TEXT;
-    """,
-}
+_MIGRATIONS: dict[int, str] = {}
 
 
 async def _run_migrations(conn) -> None:
@@ -91,24 +55,19 @@ async def _run_migrations(conn) -> None:
 
     for target_version in range(current_version + 1, SCHEMA_VERSION + 1):
         migration_sql = _MIGRATIONS.get(target_version)
-        if migration_sql is None:
-            continue
         try:
-            # SQLite 不支持单次 execute 多条语句，需逐条执行
-            for stmt in migration_sql.split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    await conn.execute(text(stmt))
-            await conn.execute(text(f"PRAGMA user_version = {target_version};"))
-            logger.info(
-                "database_migration_applied",
-                version=target_version,
-            )
+            if migration_sql is not None:
+                # SQLite 不支持单次 execute 多条语句，需逐条执行
+                for stmt in migration_sql.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        await conn.execute(text(stmt))
+                logger.info("database_migration_applied", version=target_version)
         except Exception as e:
             # 迁移失败可能是列已存在（如全新建库后再跑迁移），记录警告但不中断
             logger.warning("database_migration_skipped", version=target_version, error=str(e))
-            # 仍然更新 version 以避免反复尝试
-            await conn.execute(text(f"PRAGMA user_version = {target_version};"))
+        # 无论是否有该版本的迁移 SQL，都推进版本号（避免空迁移表时版本卡在 0）
+        await conn.execute(text(f"PRAGMA user_version = {target_version};"))
 
     logger.info("database_migration_done", target=SCHEMA_VERSION)
 

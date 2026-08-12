@@ -77,7 +77,6 @@ def _row_to_session(row: SessionModel) -> Session:
         run_id=row.run_id,
         created_at=datetime.fromisoformat(row.created_at),
         updated_at=datetime.fromisoformat(row.updated_at),
-        metadata=_json_loads(row.metadata_json, {}),
         compression_summary=row.compression_summary,
         last_compressed_message_id=row.last_compressed_message_id,
         last_summarized_message_id=row.last_summarized_message_id,
@@ -93,7 +92,10 @@ def _row_to_message(row: MessageModel) -> Message:
         tool_calls=_json_loads(row.tool_calls_json, []),
         tool_call_id=row.tool_call_id,
         run_id=row.run_id,
-        metadata=_json_loads(row.metadata_json, {}),
+        step_id=row.step_id,
+        tool_call_record_id=row.tool_call_record_id,
+        tool_name=row.tool_name,
+        type=row.type,
         timestamp=datetime.fromisoformat(row.timestamp),
     )
 
@@ -109,12 +111,13 @@ def _row_to_step(row: StepModel) -> Step:
         parent_run_id=row.parent_run_id,
         status=StepStatus(row.status),
         started_at=datetime.fromisoformat(row.started_at),
-        completed_at=datetime.fromisoformat(row.completed_at) if row.completed_at else None,
+        completed_at=(
+            datetime.fromisoformat(row.completed_at) if row.completed_at else None
+        ),
         duration_ms=row.duration_ms,
         llm_input_tokens=row.llm_input_tokens,
         llm_output_tokens=row.llm_output_tokens,
         error_message=row.error_message,
-        metadata=_json_loads(row.metadata_json, {}),
     )
 
 
@@ -128,7 +131,9 @@ def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
         raw_output=row.raw_output,
         status=ToolCallStatus(row.status),
         started_at=datetime.fromisoformat(row.started_at),
-        completed_at=datetime.fromisoformat(row.completed_at) if row.completed_at else None,
+        completed_at=(
+            datetime.fromisoformat(row.completed_at) if row.completed_at else None
+        ),
         duration_ms=row.duration_ms,
         error_message=row.error_message,
         error_stack=row.error_stack,
@@ -168,7 +173,6 @@ class SessionRepository:
                     status=SessionStatus.IDLE.value,
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),
-                    metadata_json="{}",
                 )
                 session.add(model)
             return Session(
@@ -177,10 +181,11 @@ class SessionRepository:
                 status=SessionStatus.IDLE,
                 created_at=now,
                 updated_at=now,
-                metadata={},
             )
 
-    async def get(self, session_id: str, include_deleted: bool = False) -> Session | None:
+    async def get(
+        self, session_id: str, include_deleted: bool = False
+    ) -> Session | None:
         """获取单个会话."""
         async with get_session() as session:
             stmt = select(SessionModel).where(SessionModel.id == session_id)
@@ -238,19 +243,19 @@ class SessionRepository:
             async with session.begin():
                 await session.execute(
                     update(SessionModel)
-                    .where(SessionModel.id == session_id, SessionModel.deleted_time.is_(None))
+                    .where(
+                        SessionModel.id == session_id,
+                        SessionModel.deleted_time.is_(None),
+                    )
                     .values(**values)
                 )
 
     async def query_by_status(self, status_list: list[str]) -> list[Session]:
         """按状态查询会话."""
         async with get_session() as session:
-            stmt = (
-                select(SessionModel)
-                .where(
-                    SessionModel.status.in_(status_list),
-                    SessionModel.deleted_time.is_(None),
-                )
+            stmt = select(SessionModel).where(
+                SessionModel.status.in_(status_list),
+                SessionModel.deleted_time.is_(None),
             )
             result = await session.execute(stmt)
             rows = result.scalars().all()
@@ -264,28 +269,43 @@ class SessionRepository:
                 # 软删除 session 本身
                 await session.execute(
                     update(SessionModel)
-                    .where(SessionModel.id == session_id, SessionModel.deleted_time.is_(None))
+                    .where(
+                        SessionModel.id == session_id,
+                        SessionModel.deleted_time.is_(None),
+                    )
                     .values(deleted_time=now)
                 )
                 # 级联软删除关联数据
                 await session.execute(
                     update(MessageModel)
-                    .where(MessageModel.session_id == session_id, MessageModel.deleted_time.is_(None))
+                    .where(
+                        MessageModel.session_id == session_id,
+                        MessageModel.deleted_time.is_(None),
+                    )
                     .values(deleted_time=now)
                 )
                 await session.execute(
                     update(StepModel)
-                    .where(StepModel.session_id == session_id, StepModel.deleted_time.is_(None))
+                    .where(
+                        StepModel.session_id == session_id,
+                        StepModel.deleted_time.is_(None),
+                    )
                     .values(deleted_time=now)
                 )
                 await session.execute(
                     update(ToolCallModel)
-                    .where(ToolCallModel.session_id == session_id, ToolCallModel.deleted_time.is_(None))
+                    .where(
+                        ToolCallModel.session_id == session_id,
+                        ToolCallModel.deleted_time.is_(None),
+                    )
                     .values(deleted_time=now)
                 )
                 await session.execute(
                     update(ApprovalLogModel)
-                    .where(ApprovalLogModel.session_id == session_id, ApprovalLogModel.deleted_time.is_(None))
+                    .where(
+                        ApprovalLogModel.session_id == session_id,
+                        ApprovalLogModel.deleted_time.is_(None),
+                    )
                     .values(deleted_time=now)
                 )
 
@@ -310,14 +330,20 @@ class MessageRepository:
                     tool_calls_json=_json_dumps(message.tool_calls),
                     tool_call_id=message.tool_call_id,
                     run_id=message.run_id,
-                    metadata_json=_json_dumps(message.metadata),
+                    step_id=message.step_id,
+                    tool_call_record_id=message.tool_call_record_id,
+                    tool_name=message.tool_name,
+                    type=message.type,
                     timestamp=message.timestamp.isoformat(),
                 )
                 session.add(model)
                 # 在同一事务内刷新会话时间戳，避免额外的 DB 往返
                 await session.execute(
                     update(SessionModel)
-                    .where(SessionModel.id == message.session_id, SessionModel.deleted_time.is_(None))
+                    .where(
+                        SessionModel.id == message.session_id,
+                        SessionModel.deleted_time.is_(None),
+                    )
                     .values(updated_at=_now_iso())
                 )
             return message.id
@@ -386,12 +412,13 @@ class StepRepository:
                     parent_run_id=step.parent_run_id,
                     status=step.status.value,
                     started_at=step.started_at.isoformat(),
-                    completed_at=step.completed_at.isoformat() if step.completed_at else None,
+                    completed_at=(
+                        step.completed_at.isoformat() if step.completed_at else None
+                    ),
                     duration_ms=step.duration_ms,
                     llm_input_tokens=step.llm_input_tokens,
                     llm_output_tokens=step.llm_output_tokens,
                     error_message=step.error_message,
-                    metadata_json=_json_dumps(step.metadata),
                 )
                 session.add(model)
 
@@ -400,19 +427,18 @@ class StepRepository:
         if not updates:
             return
         allowed = {
-            "status", "completed_at", "duration_ms", "llm_input_tokens",
-            "llm_output_tokens", "error_message", "metadata",
+            "status",
+            "completed_at",
+            "duration_ms",
+            "llm_input_tokens",
+            "llm_output_tokens",
+            "error_message",
         }
         values: dict[str, Any] = {}
         for key, value in updates.items():
             if key not in allowed:
                 continue
-            # ORM 列名为 metadata_json，外部 API 使用 "metadata"
-            if key == "metadata":
-                value = _json_dumps(value)
-                values["metadata_json"] = value
-            else:
-                values[key] = value
+            values[key] = value
         if not values:
             return
 
@@ -431,19 +457,18 @@ class StepRepository:
         if not updates:
             return
         allowed = {
-            "status", "completed_at", "duration_ms", "llm_input_tokens",
-            "llm_output_tokens", "error_message", "metadata",
+            "status",
+            "completed_at",
+            "duration_ms",
+            "llm_input_tokens",
+            "llm_output_tokens",
+            "error_message",
         }
         values: dict[str, Any] = {}
         for key, value in updates.items():
             if key not in allowed:
                 continue
-            # ORM 列名为 metadata_json，外部 API 使用 "metadata"
-            if key == "metadata":
-                value = _json_dumps(value)
-                values["metadata_json"] = value
-            else:
-                values[key] = value
+            values[key] = value
         if not values:
             return
 
@@ -459,7 +484,9 @@ class StepRepository:
                     .values(**values)
                 )
 
-    async def get_by_session(self, session_id: str, include_deleted: bool = False) -> list[Step]:
+    async def get_by_session(
+        self, session_id: str, include_deleted: bool = False
+    ) -> list[Step]:
         """获取会话的执行步骤."""
         async with get_session() as session:
             stmt = (
@@ -473,7 +500,9 @@ class StepRepository:
             rows = result.scalars().all()
             return [_row_to_step(row) for row in rows]
 
-    async def get_by_run(self, run_id: str, include_deleted: bool = False) -> list[Step]:
+    async def get_by_run(
+        self, run_id: str, include_deleted: bool = False
+    ) -> list[Step]:
         """按 run_id 获取执行步骤."""
         async with get_session() as session:
             stmt = (
@@ -492,9 +521,8 @@ class StepRepository:
         from sqlalchemy import func
 
         async with get_session() as session:
-            stmt = (
-                select(func.max(StepModel.step_number))
-                .where(StepModel.run_id == run_id, StepModel.deleted_time.is_(None))
+            stmt = select(func.max(StepModel.step_number)).where(
+                StepModel.run_id == run_id, StepModel.deleted_time.is_(None)
             )
             result = await session.execute(stmt)
             max_num = result.scalar()
@@ -522,7 +550,11 @@ class ToolCallRepository:
                     raw_output=tool_call.raw_output,
                     status=tool_call.status.value,
                     started_at=tool_call.started_at.isoformat(),
-                    completed_at=tool_call.completed_at.isoformat() if tool_call.completed_at else None,
+                    completed_at=(
+                        tool_call.completed_at.isoformat()
+                        if tool_call.completed_at
+                        else None
+                    ),
                     duration_ms=tool_call.duration_ms,
                     error_message=tool_call.error_message,
                     error_stack=tool_call.error_stack,
@@ -534,8 +566,12 @@ class ToolCallRepository:
         if not updates:
             return
         allowed = {
-            "raw_output", "status", "completed_at", "duration_ms",
-            "error_message", "error_stack",
+            "raw_output",
+            "status",
+            "completed_at",
+            "duration_ms",
+            "error_message",
+            "error_stack",
         }
         values: dict[str, Any] = {}
         for key, value in updates.items():
@@ -549,7 +585,10 @@ class ToolCallRepository:
             async with session.begin():
                 await session.execute(
                     update(ToolCallModel)
-                    .where(ToolCallModel.id == tool_call_id, ToolCallModel.deleted_time.is_(None))
+                    .where(
+                        ToolCallModel.id == tool_call_id,
+                        ToolCallModel.deleted_time.is_(None),
+                    )
                     .values(**values)
                 )
 
@@ -560,8 +599,12 @@ class ToolCallRepository:
         if not updates:
             return
         allowed = {
-            "raw_output", "status", "completed_at", "duration_ms",
-            "error_message", "error_stack",
+            "raw_output",
+            "status",
+            "completed_at",
+            "duration_ms",
+            "error_message",
+            "error_stack",
         }
         values: dict[str, Any] = {}
         for key, value in updates.items():
@@ -615,12 +658,9 @@ class ToolCallRepository:
     async def count_calls_since(self, since: datetime) -> int:
         """统计指定时间点之后的工具调用次数（含所有状态）."""
         async with get_session() as session:
-            stmt = (
-                select(func.count(ToolCallModel.id))
-                .where(
-                    ToolCallModel.started_at >= since.isoformat(),
-                    ToolCallModel.deleted_time.is_(None),
-                )
+            stmt = select(func.count(ToolCallModel.id)).where(
+                ToolCallModel.started_at >= since.isoformat(),
+                ToolCallModel.deleted_time.is_(None),
             )
             result = await session.execute(stmt)
             return int(result.scalar_one())
@@ -705,9 +745,7 @@ class ApprovalLogRepository:
 
     async def stats(self) -> dict[str, int]:
         """统计今日审批决策数，返回 {today_total, today_approved, today_denied, today_timeout}."""
-        today_start = datetime.now().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         async with get_session() as session:
             stmt = (
                 select(ApprovalLogModel.decision, func.count(ApprovalLogModel.id))

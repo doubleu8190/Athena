@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -37,7 +36,6 @@ class Session(BaseModel):
     run_id: str | None = None  # 当前运行 ID，关联 steps 表
     created_at: datetime
     updated_at: datetime
-    metadata: dict[str, Any] = Field(default_factory=dict)
     # 压缩相关字段
     compression_summary: str | None = None
     last_compressed_message_id: str | None = None

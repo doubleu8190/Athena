@@ -12,6 +12,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
     """ORM 模型基类."""
+
     pass
 
 
@@ -26,11 +27,14 @@ class SessionModel(Base):
     run_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
-    # 压缩相关字段（从 metadata_json 拆出）
+    # 压缩相关字段
     compression_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_compressed_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_summarized_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_compressed_message_id: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
+    last_summarized_message_id: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
@@ -50,7 +54,11 @@ class MessageModel(Base):
     tool_calls_json: Mapped[str] = mapped_column(Text, default="[]")
     tool_call_id: Mapped[str | None] = mapped_column(String, nullable=True)
     run_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    # 平铺自 metadata_json 的字段
+    step_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    tool_call_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    type: Mapped[str | None] = mapped_column(String, nullable=True)
     timestamp: Mapped[str] = mapped_column(String)
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -80,7 +88,6 @@ class StepModel(Base):
     llm_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     llm_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
@@ -113,9 +120,7 @@ class ApprovalLogModel(Base):
     """审批日志表模型."""
 
     __tablename__ = "approval_logs"
-    __table_args__ = (
-        Index("idx_approval_logs_session", "session_id"),
-    )
+    __table_args__ = (Index("idx_approval_logs_session", "session_id"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
@@ -137,19 +142,25 @@ class MemoryModel(Base):
     """
 
     __tablename__ = "memories"
-    __table_args__ = (
-        Index("idx_memories_session", "session_id"),
-    )
+    __table_args__ = (Index("idx_memories_session", "session_id"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)
+    # 仅存任意用户扩展字段（系统/语义字段一律拆为独立列，避免双源真相）
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     pinned: Mapped[int] = mapped_column(Integer, default=0)  # 0=未固定, 1=固定
     expires_at: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     last_accessed: Mapped[str | None] = mapped_column(String, nullable=True)
     access_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 语义字段（平铺自 metadata_json，支持 SQL 过滤）
+    type: Mapped[str | None] = mapped_column(String, nullable=True)  # fact / summary
+    category: Mapped[str | None] = mapped_column(String, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # extraction / threshold / api
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 

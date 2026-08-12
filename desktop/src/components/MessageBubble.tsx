@@ -112,10 +112,7 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             {isTool ? (
               <ToolMessageContent
                 content={message.content}
-                toolName={
-                  (message.metadata?.tool_name as string | undefined) ??
-                  message.tool_name
-                }
+                toolName={message.tool_name}
               />
             ) : (
               <div

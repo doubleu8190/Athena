@@ -16,6 +16,7 @@ function AppContent() {
     activeSessionId,
     setActiveSession,
     addSession,
+    setSessions,
     removeSession,
     setConnectionStatus,
   } = useChatStore()
@@ -38,13 +39,15 @@ function AppContent() {
     const loadSessions = async () => {
       try {
         const list = await apiClient.listSessions()
-        list.forEach((s: Session) => addSession(s))
+        // 整体替换而非逐条前插：后端已按 updated_at desc（最近活跃在前）排序，
+        // 逐条 addSession 会前插倒转顺序，导致侧栏最旧会话排在最上
+        setSessions(list)
       } catch {
         // backend not running — silent
       }
     }
     loadSessions()
-  }, [addSession])
+  }, [setSessions])
 
   const handleOpen = useCallback(() => {
     setConnectionStatus("connected")
@@ -59,8 +62,9 @@ function AppContent() {
   }, [setConnectionStatus])
 
   const { sendEvent } = useWebSocket({
-    // 管理视图不连接 WebSocket
-    sessionId: activeView === "chat" ? activeSessionId : null,
+    // 单一全局连接：管理视图也保持订阅活跃会话，
+    // 后台 run 事件在浏览管理页时不丢失，切回聊天数据已是最新
+    sessionId: activeSessionId,
     onOpen: handleOpen,
     onClose: handleClose,
     onError: handleError,
@@ -112,6 +116,16 @@ function AppContent() {
   const handleSelectSession = useCallback(
     (sessionId: string) => {
       setActiveSession(sessionId)
+      // 选中即视为最近活跃：把会话浮到列表顶部，
+      // 后端 updated_at 只在消息落库时刷新，选中到下一次落库之间需要即时反映
+      useChatStore.setState((state) => {
+        if (state.sessions[0]?.id === sessionId) return {}
+        const idx = state.sessions.findIndex((s) => s.id === sessionId)
+        if (idx === -1) return {}
+        const sessions = [...state.sessions]
+        const [s] = sessions.splice(idx, 1)
+        return { sessions: [s, ...sessions] }
+      })
     },
     [setActiveSession],
   )
@@ -132,7 +146,7 @@ function AppContent() {
             onNewSession={handleNewSession}
             onDeleteSession={handleDeleteSession}
           />
-          <main className="flex-1 flex flex-col min-w-0">
+          <main className="flex-1 flex flex-col min-w-0 min-h-0">
             <StatusIndicator />
             <Chat sendEvent={sendEvent} />
           </main>

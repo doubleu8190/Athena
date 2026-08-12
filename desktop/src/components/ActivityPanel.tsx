@@ -81,6 +81,14 @@ export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityP
       return g
     }
 
+    // 用户请求 → 归组键，与 placeStep/placeTc 的键保持一致：
+    // 有 run_id 用 run（子 run 归一到主 run）；实时本地消息无 run_id 时
+    // 用时间回退的 pos 键，保证后来的工具调用/步骤能挂到同一小节。
+    const userGroupKey = (m: Message): string => {
+      const mr = mainRunId(m.run_id)
+      return mr ? `run:${mr}` : `pos:${m.id}`
+    }
+
     const placeStep = (s: Step) => {
       const mr = mainRunId(s.run_id)
       const header = mr ? userByRun.get(mr) : undefined
@@ -104,7 +112,24 @@ export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityP
     const sortedTc = toolCalls.slice().sort((a, b) => toTime(a.started_at) - toTime(b.started_at))
     for (const tc of sortedTc) placeTc(tc)
 
-    return [...groupMap.values()]
+    // 核心修复：每条用户请求都成为一个小节，即使该轮没有工具调用 / 步骤记录。
+    // 修复"对话记录变多但 Activity 面板不变"——纯文本问答或实时阶段
+    // 工具/步骤尚未到达时，请求本身也必须在面板上出现。
+    for (const m of userMsgs) ensure(userGroupKey(m), m)
+
+    // 按用户请求的时间排序；没有用户消息的孤儿分组（早于首个请求的
+    // 背景步骤/工具）追加到末尾
+    const ordered: ActivityGroup[] = []
+    for (const m of userMsgs) {
+      const key = userGroupKey(m)
+      const g = groupMap.get(key)
+      if (g) {
+        ordered.push(g)
+        groupMap.delete(key)
+      }
+    }
+    for (const g of groupMap.values()) ordered.push(g)
+    return ordered
   }, [messages, steps, toolCalls])
 
   // 出现新分组时自动展开最新一组（正在进行的任务）

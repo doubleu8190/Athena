@@ -30,8 +30,7 @@ from athena.db.database import close_database, get_database
 from athena.gateway.approval import ApprovalManager
 from athena.gateway.routes import api_router
 
-from athena.gateway.ws.handler import websocket_endpoint
-
+from athena.gateway.ws.handler import router as websocket_router
 from athena.gateway.ws.manager import WebSocketManager
 from athena.utils.logging import configure_logging, get_logger
 
@@ -116,9 +115,7 @@ async def lifespan(app: FastAPI):
 
     from athena.core.compression.compressor import ContextCompressor
 
-    compressor = ContextCompressor(
-        llm=llm_secondary, db=db, settings=settings
-    )
+    compressor = ContextCompressor(llm=llm_secondary, db=db, settings=settings)
 
     # 6. AgentWorkflow
     from athena.core.agent.workflow import AgentWorkflow
@@ -186,7 +183,8 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
-app.websocket("/ws/{session_id}")(websocket_endpoint)
+# WebSocket 端点（/ws）— 路由在 gateway/ws/handler.py 中定义
+app.include_router(websocket_router)
 
 
 def run() -> None:

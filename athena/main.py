@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
     from athena.core.tools.builtin.registry import register_builtin_tools
 
     tool_manager = UnifiedToolManager(approval_manager=approval_manager)
-    register_builtin_tools(tool_manager)
+    await register_builtin_tools(tool_manager, db)
     set_tool_manager(tool_manager)
 
     # 4.5 MCP 服务器管理器（恢复已持久化的 MCP Server）

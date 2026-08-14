@@ -12,11 +12,12 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from athena.core.tools.mcp.client import MCPClient
-from athena.models.tool import RiskLevel
+from athena.models.tool import RiskLevel, ToolExecutionMode
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from athena.core.tools.manager import UnifiedToolManager
+    from athena.db.database import Database
 
 logger = get_logger(__name__)
 
@@ -41,8 +42,11 @@ class MCPToolAdapter:
         )
     """
 
-    def __init__(self, tool_manager: UnifiedToolManager) -> None:
+    def __init__(
+        self, tool_manager: UnifiedToolManager, db: Database | None = None
+    ) -> None:
         self._tool_manager = tool_manager
+        self._db = db
         self._clients: dict[str, MCPClient] = {}
 
     async def register_server(
@@ -55,6 +59,9 @@ class MCPToolAdapter:
         connect_timeout: float = 60.0,
     ) -> list[str]:
         """注册 MCP Server 的所有工具.
+
+        注册时集成 DB：已存在的工具以 DB 治理参数为准，不存在则写入 DB。
+        description / parameters 以远端最新为准（MCP Server 可能升级）。
 
         Args:
             server_name: 服务器名称（原始名，含 @ / 等字符也保留）
@@ -103,17 +110,60 @@ class MCPToolAdapter:
             # remote_name 保留原始工具名供远程调用（客户端用原名调用远端）
             full_name = f"mcp_{_sanitize(server_name)}_{_sanitize(tool_name)}"
 
+            description = tool_def.get("description", "")
+            parameters = tool_def.get("inputSchema", {})
+
+            # DB 合并：已存在以治理参数为准，不存在用默认值并写入
+            risk_level = RiskLevel.MEDIUM
+            require_approval = True
+            enabled = True
+
+            if self._db is not None:
+                existing = await self._db.tools.get(full_name)
+                if existing is not None:
+                    risk_level = existing.risk_level
+                    require_approval = existing.require_approval
+                    enabled = existing.enabled
+                    # 更新 description / parameters（以远端最新为准）
+                    await self._db.tools.upsert(
+                        tool_name=full_name,
+                        execution_mode=ToolExecutionMode.MCP.value,
+                        server_name=server_name,
+                        remote_name=tool_name,
+                        description=description,
+                        parameters=parameters,
+                        risk_level=str(risk_level.value),
+                        require_approval=require_approval,
+                        enabled=enabled,
+                    )
+                else:
+                    await self._db.tools.upsert(
+                        tool_name=full_name,
+                        execution_mode=ToolExecutionMode.MCP.value,
+                        server_name=server_name,
+                        remote_name=tool_name,
+                        description=description,
+                        parameters=parameters,
+                        risk_level=str(risk_level.value),
+                        require_approval=require_approval,
+                        enabled=True,
+                    )
+
             tool_defs.append(
                 {
                     "name": full_name,
-                    "description": tool_def.get("description", ""),
-                    "parameters": tool_def.get("inputSchema", {}),
+                    "description": description,
+                    "parameters": parameters,
                     "remote_name": tool_name,
-                    "risk_level": RiskLevel.MEDIUM,
-                    "require_approval": True,  # MCP 工具默认需要审批
+                    "risk_level": risk_level,
+                    "require_approval": require_approval,
                 }
             )
             registered_names.append(full_name)
+
+            # 停用的工具加入 _disabled（注册后生效）
+            if not enabled:
+                self._tool_manager._disabled.add(full_name)
 
             logger.info("mcp_tool_registered", server=server_name, tool=full_name)
 

@@ -1,4 +1,4 @@
-"""工具管理路由 — 列出工具、启用/停用工具."""
+"""工具管理路由 — 列出工具、修改治理参数（enabled / risk_level / require_approval）."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from athena.core.tools.manager import UnifiedToolManager, get_tool_manager
 from athena.db.database import Database, get_database
+from athena.models.tool import RiskLevel
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,11 +32,16 @@ class ToolInfoView(BaseModel):
 
 
 class UpdateToolRequest(BaseModel):
-    enabled: bool
+    """工具治理参数更新请求 — 仅传入需要修改的字段."""
+
+    enabled: bool | None = None
+    risk_level: str | None = None
+    require_approval: bool | None = None
 
 
 async def _get_db() -> Database:
     from athena.config.settings import get_settings
+
     return await get_database(get_settings().sqlite_db_path)
 
 
@@ -89,9 +95,48 @@ async def list_tools() -> dict[str, Any]:
 
 @router.patch("/{name}")
 async def update_tool(name: str, req: UpdateToolRequest) -> dict[str, Any]:
-    """启用/停用工具. 未注册返回 404."""
+    """修改工具治理参数（enabled / risk_level / require_approval）.
+
+    仅传入需要修改的字段，未传入的字段保持不变。
+    同步更新内存和 DB。
+    """
     manager = _manager_or_503()
     if manager.get_tool(name) is None:
         raise HTTPException(status_code=404, detail=f"Tool '{name}' not registered")
-    manager.set_enabled(name, req.enabled)
-    return {"status": "updated", "name": name, "enabled": req.enabled}
+
+    # 验证 risk_level 枚举值
+    if req.risk_level is not None:
+        try:
+            RiskLevel(req.risk_level)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid risk_level: '{req.risk_level}'. Must be one of: low, medium, high",
+            )
+
+    # 更新内存
+    manager.update_tool_config(
+        name,
+        risk_level=req.risk_level,
+        require_approval=req.require_approval,
+        enabled=req.enabled,
+    )
+
+    # 更新 DB
+    db = await _get_db()
+    await db.tools.update(
+        name,
+        risk_level=req.risk_level,
+        require_approval=req.require_approval,
+        enabled=req.enabled,
+    )
+
+    # 返回更新后的状态
+    tool = manager.get_tool(name)
+    return {
+        "status": "updated",
+        "name": name,
+        "enabled": manager.is_enabled(name),
+        "risk_level": str(tool.schema.risk_level.value) if tool else None,
+        "require_approval": tool.schema.require_approval if tool else None,
+    }

@@ -24,6 +24,7 @@ from athena.db.models import (
     SessionModel,
     StepModel,
     ToolCallModel,
+    ToolModel,
 )
 from athena.models import (
     ApprovalDecision,
@@ -39,6 +40,9 @@ from athena.models import (
     StepType,
     ToolCallRecord,
     ToolCallStatus,
+    ToolConfig,
+    ToolExecutionMode,
+    RiskLevel,
 )
 from athena.utils.logging import get_logger
 
@@ -848,4 +852,156 @@ class McpServerRepository:
                         McpServerModel.deleted_time.is_(None),
                     )
                     .values(deleted_time=_now_iso())
+                )
+
+
+# ---------------------------------------------------------------------------
+# _row_to_tool_config
+# ---------------------------------------------------------------------------
+
+
+def _row_to_tool_config(row: ToolModel) -> ToolConfig:
+    return ToolConfig(
+        tool_name=row.tool_name,
+        execution_mode=ToolExecutionMode(row.execution_mode),
+        server_name=row.server_name,
+        remote_name=row.remote_name,
+        description=row.description,
+        parameters=_json_loads(row.parameters_json, {}),
+        risk_level=RiskLevel(row.risk_level),
+        require_approval=bool(row.require_approval),
+        enabled=bool(row.enabled),
+        created_at=datetime.fromisoformat(row.created_at),
+        updated_at=datetime.fromisoformat(row.updated_at),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ToolRepository
+# ---------------------------------------------------------------------------
+
+
+class ToolRepository:
+    """工具治理配置表 CRUD 操作.
+
+    工具记录由注册流程自动创建（upsert），用户通过 update 修改治理参数。
+    无软删除：工具记录跟随 MCP Server 生命周期，Server 注销时可选清理。
+    """
+
+    async def upsert(
+        self,
+        tool_name: str,
+        execution_mode: str,
+        server_name: str | None = None,
+        remote_name: str | None = None,
+        description: str = "",
+        parameters: dict[str, Any] | None = None,
+        risk_level: str = "medium",
+        require_approval: bool = True,
+        enabled: bool = True,
+    ) -> None:
+        """插入或更新工具配置.
+
+        注册时调用：已存在则更新 description / parameters（远端可能升级），
+        保留用户设定的 risk_level / require_approval / enabled；
+        不存在则插入新行。
+        """
+        now = _now_iso()
+        params_json = _json_dumps(parameters or {})
+        async with get_session() as session:
+            async with session.begin():
+                # 先尝试获取已有记录
+                existing = await session.get(ToolModel, tool_name)
+                if existing is not None:
+                    # 已存在：仅更新 description / parameters，保留用户治理参数
+                    existing.description = description
+                    existing.parameters_json = params_json
+                    existing.execution_mode = execution_mode
+                    existing.server_name = server_name
+                    existing.remote_name = remote_name
+                    existing.updated_at = now
+                else:
+                    # 不存在：插入新行
+                    session.add(
+                        ToolModel(
+                            tool_name=tool_name,
+                            execution_mode=execution_mode,
+                            server_name=server_name,
+                            remote_name=remote_name,
+                            description=description,
+                            parameters_json=params_json,
+                            risk_level=risk_level,
+                            require_approval=int(require_approval),
+                            enabled=int(enabled),
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+
+    async def get(self, tool_name: str) -> ToolConfig | None:
+        """获取单个工具配置."""
+        async with get_session() as session:
+            row = await session.get(ToolModel, tool_name)
+            if row is None:
+                return None
+            return _row_to_tool_config(row)
+
+    async def list_all(self) -> list[ToolConfig]:
+        """列出所有工具配置."""
+        async with get_session() as session:
+            stmt = select(ToolModel).order_by(ToolModel.created_at.asc())
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [_row_to_tool_config(row) for row in rows]
+
+    async def list_by_server(self, server_name: str) -> list[ToolConfig]:
+        """按 MCP Server 名称查询其关联的工具配置."""
+        async with get_session() as session:
+            stmt = (
+                select(ToolModel)
+                .where(ToolModel.server_name == server_name)
+                .order_by(ToolModel.created_at.asc())
+            )
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [_row_to_tool_config(row) for row in rows]
+
+    async def update(
+        self,
+        tool_name: str,
+        risk_level: str | None = None,
+        require_approval: bool | None = None,
+        enabled: bool | None = None,
+    ) -> None:
+        """更新工具治理参数（用户修改时调用）.
+
+        仅更新传入的字段，未传入的字段保持不变。
+        """
+        values: dict[str, Any] = {"updated_at": _now_iso()}
+        if risk_level is not None:
+            values["risk_level"] = risk_level
+        if require_approval is not None:
+            values["require_approval"] = int(require_approval)
+        if enabled is not None:
+            values["enabled"] = int(enabled)
+
+        if len(values) <= 1:
+            return  # 仅 updated_at，无实际变更
+
+        async with get_session() as session:
+            async with session.begin():
+                await session.execute(
+                    update(ToolModel)
+                    .where(ToolModel.tool_name == tool_name)
+                    .values(**values)
+                )
+
+    async def delete_by_server(self, server_name: str) -> None:
+        """删除指定 MCP Server 关联的所有工具配置（Server 注销时调用）."""
+        async with get_session() as session:
+            async with session.begin():
+                await session.execute(
+                    update(ToolModel)
+                    .where(ToolModel.server_name == server_name)
+                    .values(enabled=0)  # 禁用而非删除，保留治理配置
                 )

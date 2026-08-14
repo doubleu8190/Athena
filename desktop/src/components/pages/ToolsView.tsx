@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useState, useRef } from "react"
 import { Cpu, CheckCircle2, ShieldAlert, Activity, Loader2 } from "lucide-react"
 import { apiClient } from "../../api/client"
 import type { ToolInfo, ToolListResponse } from "../../types"
@@ -18,6 +18,64 @@ const RISK_TONE = {
   medium: "warning",
   high: "danger",
 } as const
+
+const RISK_OPTIONS: Array<"low" | "medium" | "high"> = ["low", "medium", "high"]
+
+/** 行内风险等级下拉选择器 */
+function RiskLevelSelect({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: "low" | "medium" | "high"
+  onChange: (v: "low" | "medium" | "high") => void
+  disabled?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  // 点击外部关闭
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener("mousedown", handler)
+    return () => document.removeEventListener("mousedown", handler)
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative inline-block">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        className="cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Badge tone={RISK_TONE[value]}>{value}</Badge>
+      </button>
+      {open && (
+        <div className="absolute z-50 mt-1 left-0 min-w-[80px] rounded-md border border-athena-border bg-athena-surface shadow-lg py-0.5">
+          {RISK_OPTIONS.map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              className={`w-full text-left px-3 py-1 text-xs hover:bg-athena-hover ${
+                opt === value ? "text-athena-accent font-medium" : "text-athena-text"
+              }`}
+              onClick={() => {
+                onChange(opt)
+                setOpen(false)
+              }}
+            >
+              <Badge tone={RISK_TONE[opt]}>{opt}</Badge>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function ToolsView() {
   const [data, setData] = useState<ToolListResponse | null>(null)
@@ -45,41 +103,109 @@ function ToolsView() {
 
   const [busy, setBusy] = useState<string | null>(null)
 
-  const handleToggle = async (tool: ToolInfo) => {
-    const target = !tool.enabled
-    // 乐观更新
-    setData((d) =>
-      d
-        ? {
-            ...d,
-            items: d.items.map((i) =>
-              i.name === tool.name ? { ...i, enabled: target } : i,
-            ),
-            enabled: d.enabled + (target ? 1 : -1),
-          }
-        : d,
-    )
-    setBusy(tool.name)
-    try {
-      await apiClient.setToolEnabled(tool.name, target)
-    } catch (e) {
-      // 失败回滚
+  /** 乐观更新通用方法 */
+  const optimisticUpdate = useCallback(
+    (toolName: string, patch: Partial<ToolInfo>, apiCall: Promise<unknown>) => {
       setData((d) =>
         d
           ? {
               ...d,
               items: d.items.map((i) =>
-                i.name === tool.name ? { ...i, enabled: !target } : i,
+                i.name === toolName ? { ...i, ...patch } : i,
               ),
-              enabled: d.enabled - (target ? 1 : -1),
             }
           : d,
       )
-      console.error("toggle failed", e)
-    } finally {
-      setBusy(null)
-    }
-  }
+      setBusy(toolName)
+      apiCall
+        .then(() => {
+          // 成功后刷新以获取准确的统计值（如 high_risk 计数）
+          reload()
+        })
+        .catch((e) => {
+          // 失败回滚：重新加载
+          console.error("update failed", e)
+          reload()
+        })
+        .finally(() => setBusy(null))
+    },
+    [reload],
+  )
+
+  const handleToggle = useCallback(
+    (tool: ToolInfo) => {
+      const target = !tool.enabled
+      // 乐观更新 enabled 计数
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              items: d.items.map((i) =>
+                i.name === tool.name ? { ...i, enabled: target } : i,
+              ),
+              enabled: d.enabled + (target ? 1 : -1),
+            }
+          : d,
+      )
+      setBusy(tool.name)
+      apiClient
+        .setToolEnabled(tool.name, target)
+        .then(() => reload())
+        .catch((e) => {
+          console.error("toggle failed", e)
+          reload()
+        })
+        .finally(() => setBusy(null))
+    },
+    [reload],
+  )
+
+  const handleRiskChange = useCallback(
+    (tool: ToolInfo, newRisk: "low" | "medium" | "high") => {
+      if (newRisk === tool.risk_level) return
+      const oldRisk = tool.risk_level
+      // 乐观更新 + high_risk 计数
+      setData((d) => {
+        if (!d) return d
+        const oldHigh = d.items.filter((i) => i.risk_level === "high").length
+        const newItems = d.items.map((i) =>
+          i.name === tool.name ? { ...i, risk_level: newRisk } : i,
+        )
+        const newHigh = newItems.filter((i) => i.risk_level === "high").length
+        return { ...d, items: newItems, high_risk: d.high_risk - oldHigh + newHigh }
+      })
+      setBusy(tool.name)
+      apiClient
+        .updateTool(tool.name, { risk_level: newRisk })
+        .then(() => reload())
+        .catch((e) => {
+          console.error("risk update failed", e)
+          // 回滚
+          setData((d) => {
+            if (!d) return d
+            const rolled = d.items.map((i) =>
+              i.name === tool.name ? { ...i, risk_level: oldRisk } : i,
+            )
+            const oldHigh = rolled.filter((i) => i.risk_level === "high").length
+            return { ...d, items: rolled, high_risk: oldHigh }
+          })
+        })
+        .finally(() => setBusy(null))
+    },
+    [reload],
+  )
+
+  const handleApprovalToggle = useCallback(
+    (tool: ToolInfo) => {
+      const target = !tool.require_approval
+      optimisticUpdate(
+        tool.name,
+        { require_approval: target },
+        apiClient.updateTool(tool.name, { require_approval: target }),
+      )
+    },
+    [optimisticUpdate],
+  )
 
   const filtered = (data?.items ?? []).filter((t) => {
     if (enabledFilter === "enabled" && !t.enabled) return false
@@ -112,13 +238,30 @@ function ToolsView() {
     {
       key: "risk",
       header: "风险",
-      render: (t) => <Badge tone={RISK_TONE[t.risk_level]}>{t.risk_level}</Badge>,
+      render: (t) =>
+        busy === t.name ? (
+          <Loader2 className="w-4 h-4 animate-spin text-athena-muted" />
+        ) : (
+          <RiskLevelSelect
+            value={t.risk_level}
+            onChange={(v) => handleRiskChange(t, v)}
+            disabled={busy === t.name}
+          />
+        ),
     },
     {
       key: "approval",
       header: "审批",
       render: (t) =>
-        t.require_approval ? <Badge tone="warning">需审批</Badge> : <span className="text-xs text-athena-muted">—</span>,
+        busy === t.name ? (
+          <Loader2 className="w-4 h-4 animate-spin text-athena-muted" />
+        ) : (
+          <Toggle
+            checked={t.require_approval}
+            onChange={() => handleApprovalToggle(t)}
+            label={`${t.require_approval ? "取消" : "启用"} ${t.name} 审批`}
+          />
+        ),
     },
     {
       key: "last_called",

@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, TYPE_CHECKING
 
 from athena.core.tools.mcp.adapter import MCPToolAdapter
@@ -50,7 +49,7 @@ class MCPManager:
     ) -> None:
         self._tool_manager = tool_manager
         self._db = db
-        self._adapter = adapter or MCPToolAdapter(tool_manager)
+        self._adapter = adapter or MCPToolAdapter(tool_manager, db=db)
         self._servers: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------

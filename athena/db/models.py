@@ -179,6 +179,29 @@ class McpServerModel(Base):
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class ToolModel(Base):
+    """工具治理配置表 — 持久化用户对工具的治理参数调优.
+
+    MCP 工具和 Native 工具统一存储，通过 execution_mode 区分。
+    description / parameters_json 以注册时的最新值为准（MCP 工具可能随 Server 升级而变化），
+    risk_level / require_approval / enabled 以用户修改为准。
+    """
+
+    __tablename__ = "tools"
+
+    tool_name: Mapped[str] = mapped_column(String, primary_key=True)
+    execution_mode: Mapped[str] = mapped_column(String)  # "native" / "mcp"
+    server_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    remote_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    parameters_json: Mapped[str] = mapped_column(Text, default="{}")
+    risk_level: Mapped[str] = mapped_column(String, default="medium")
+    require_approval: Mapped[int] = mapped_column(Integer, default=1)
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+
+
 # FTS5 虚拟表 DDL（SQLAlchemy ORM 不支持 FTS5，需通过原生 SQL 创建）
 MEMORY_FTS_DDL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(

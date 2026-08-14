@@ -17,6 +17,7 @@ from athena.db.repository import (
     SessionRepository,
     StepRepository,
     ToolCallRepository,
+    ToolRepository,
 )
 from athena.models.step import StepStatus
 from athena.models.tool import ToolCallStatus
@@ -40,6 +41,7 @@ class Database:
         self.tool_calls = ToolCallRepository()
         self.approval_logs = ApprovalLogRepository()
         self.mcp_servers = McpServerRepository()
+        self.tools = ToolRepository()
 
     async def connect(self) -> None:
         """建立连接并初始化表结构."""

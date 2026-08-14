@@ -138,6 +138,44 @@ class UnifiedToolManager:
         tool = self._tools.get(tool_name)
         return str(tool.schema.risk_level) if tool else "low"
 
+    def update_tool_config(
+        self,
+        name: str,
+        risk_level: str | None = None,
+        require_approval: bool | None = None,
+        enabled: bool | None = None,
+    ) -> bool:
+        """更新工具治理参数（内存）.
+
+        同步更新 ToolSchema 字段和 _disabled 集合。
+        DB 写入由调用方负责，保持职责分离。
+
+        Returns:
+            是否成功（工具必须已注册）
+        """
+        tool = self._tools.get(name)
+        if tool is None:
+            return False
+
+        if risk_level is not None:
+            tool.schema.risk_level = RiskLevel(risk_level)
+        if require_approval is not None:
+            tool.schema.require_approval = require_approval
+        if enabled is not None:
+            if enabled:
+                self._disabled.discard(name)
+            else:
+                self._disabled.add(name)
+
+        logger.info(
+            "tool_config_updated",
+            tool=name,
+            risk_level=risk_level,
+            require_approval=require_approval,
+            enabled=enabled,
+        )
+        return True
+
     # ------------------------------------------------------------------
     # 调用接口
     # ------------------------------------------------------------------

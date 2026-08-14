@@ -156,6 +156,26 @@ class ApiClient {
     )
   }
 
+  async updateTool(
+    name: string,
+    config: {
+      enabled?: boolean
+      risk_level?: string
+      require_approval?: boolean
+    },
+  ): Promise<{
+    status: string
+    name: string
+    enabled: boolean
+    risk_level: string
+    require_approval: boolean
+  }> {
+    return this.request(
+      `/api/tools/${encodeURIComponent(name)}`,
+      { method: "PATCH", body: JSON.stringify(config) },
+    )
+  }
+
   // ─── 记忆管理 ─────────────────────────────────────────────────
 
   async listMemories(opts?: {

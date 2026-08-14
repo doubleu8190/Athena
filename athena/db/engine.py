@@ -35,8 +35,10 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 #     type / category / confidence / source 列（metadata_json 仅存任意用户字段）。
 # v2: 新增 mcp_servers 表 — 持久化用户注册的 MCP Server 配置（command/args/env）。
 #     全新建库由 Base.metadata.create_all 自动建表，迁移 SQL 为已有库兜底。
+# v3: 新增 tools 表 — 持久化工具治理配置（risk_level/require_approval/enabled）。
+#     MCP 工具和 Native 工具统一存储，支持用户在前端管理页面调优。
 # 后续表结构变更在此追加增量迁移（key 为目标版本号）。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _MIGRATIONS: dict[int, str] = {
     2: """
@@ -46,6 +48,22 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     created_at VARCHAR NOT NULL,
     deleted_time VARCHAR,
     PRIMARY KEY (name)
+)
+""",
+    3: """
+CREATE TABLE IF NOT EXISTS tools (
+    tool_name VARCHAR NOT NULL,
+    execution_mode VARCHAR NOT NULL,
+    server_name VARCHAR,
+    remote_name VARCHAR,
+    description TEXT NOT NULL DEFAULT '',
+    parameters_json TEXT NOT NULL DEFAULT '{}',
+    risk_level VARCHAR NOT NULL DEFAULT 'medium',
+    require_approval INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at VARCHAR NOT NULL,
+    updated_at VARCHAR NOT NULL,
+    PRIMARY KEY (tool_name)
 )
 """,
 }

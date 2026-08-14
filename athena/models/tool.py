@@ -68,3 +68,22 @@ class ToolCallRecord(BaseModel):
     duration_ms: float = 0
     error_message: str | None = None
     error_stack: str | None = None
+
+
+class ToolConfig(BaseModel):
+    """工具治理配置（持久化）.
+
+    用户对工具的治理参数调优记录，跨重启持久化。
+    """
+
+    tool_name: str
+    execution_mode: ToolExecutionMode
+    server_name: str | None = None
+    remote_name: str | None = None
+    description: str = ""
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    risk_level: RiskLevel = RiskLevel.MEDIUM
+    require_approval: bool = True
+    enabled: bool = True
+    created_at: datetime
+    updated_at: datetime

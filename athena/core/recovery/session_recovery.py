@@ -19,7 +19,7 @@ from typing import Any, TYPE_CHECKING
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, ToolCallRecord
-from athena.schemas.events import EventType, build_event
+from athena.gateway.ws.events import EventType, build_event
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
 

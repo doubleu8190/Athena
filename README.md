@@ -145,9 +145,8 @@ Athena/
 │   ├── db/                  # 数据库层
 │   ├── gateway/             # API 网关
 │   │   ├── routes/          # REST API 路由
-│   │   └── ws/              # WebSocket 处理
+│   │   └── ws/              # WebSocket 处理（handler、连接管理、事件协议）
 │   ├── models/              # 数据模型
-│   ├── schemas/             # Pydantic Schema
 │   └── utils/               # 工具函数
 ├── desktop/                  # Electron 前端
 │   ├── electron/           # Electron 主进程 (main.ts, preload.ts)

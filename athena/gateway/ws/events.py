@@ -1,4 +1,4 @@
-"""WebSocket 事件 Schema — 事件类型定义与消息构建工具.
+"""WebSocket 事件协议 — 事件类型定义与消息构建工具.
 
 事件类型按功能分类，对应文档 6.1.2 节。
 所有事件统一格式：{type, session_id, run_id, timestamp, data}

@@ -21,7 +21,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from athena.core.agent.workflow import AgentWorkflow
 from athena.gateway.approval import get_approval_manager
 from athena.gateway.ws.manager import get_websocket_manager
-from athena.schemas.events import ClientEventType, EventType, build_event
+from athena.gateway.ws.events import ClientEventType, EventType, build_event
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:

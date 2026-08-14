@@ -44,7 +44,7 @@ from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, MessageRole, Step, ToolCallRecord
 from athena.models.step import StepStatus, StepType
 from athena.models.tool import ToolCallStatus
-from athena.schemas.events import EventType, build_event
+from athena.gateway.ws.events import EventType, build_event
 from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger

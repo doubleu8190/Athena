@@ -30,7 +30,7 @@ from athena.core.tools.manager import UnifiedToolManager
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, MessageRole
-from athena.schemas.events import EventType, build_event
+from athena.gateway.ws.events import EventType, build_event
 from athena.utils.ids import generate_sub_run_id, generate_time_id
 from athena.utils.logging import get_logger
 

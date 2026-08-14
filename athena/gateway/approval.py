@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 from athena.models.approval import ApprovalDecision, ApprovalLog, ApprovalRequest
-from athena.schemas.events import EventType, build_event
+from athena.gateway.ws.events import EventType, build_event
 from athena.utils.ids import generate_time_id
 from athena.utils.logging import get_logger
 

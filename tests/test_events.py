@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from athena.schemas.events import EventType, build_event
+from athena.gateway.ws.events import EventType, build_event
 
 
 def test_build_event_basic():

@@ -8,6 +8,7 @@ import type {
   ConnectionStatus,
   AgentStatus,
   ThinkingState,
+  AppView,
 } from "../types"
 
 interface ChatStore {
@@ -29,6 +30,10 @@ interface ChatStore {
   // 活跃会话
   activeSessionId: string | null
   setActiveSession: (sessionId: string | null) => void
+
+  // 当前视图（从 localStorage 持久化，避免休眠/重挂载后丢失）
+  activeView: AppView
+  setActiveView: (view: AppView) => void
 
   // 消息
   messages: Message[]
@@ -100,6 +105,21 @@ export const useChatStore = create<ChatStore>((set) => ({
   // 活跃会话
   activeSessionId: null,
   setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
+
+  // 当前视图：优先从 localStorage 恢复，默认 "chat"
+  activeView: ((): AppView => {
+    try {
+      const saved = localStorage.getItem("athena:activeView")
+      if (saved && ["chat", "memory", "tools", "approvals", "providers", "session-detail"].includes(saved)) {
+        return saved as AppView
+      }
+    } catch { /* ignore */ }
+    return "chat"
+  })(),
+  setActiveView: (view) => {
+    try { localStorage.setItem("athena:activeView", view) } catch { /* ignore */ }
+    set({ activeView: view })
+  },
 
   // 消息
   messages: [],

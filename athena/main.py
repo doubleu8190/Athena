@@ -71,6 +71,13 @@ async def lifespan(app: FastAPI):
     register_builtin_tools(tool_manager)
     set_tool_manager(tool_manager)
 
+    # 4.5 MCP 服务器管理器（恢复已持久化的 MCP Server）
+    from athena.core.tools.mcp.manager import MCPManager, set_mcp_manager
+
+    mcp_manager = MCPManager(tool_manager=tool_manager, db=db)
+    set_mcp_manager(mcp_manager)
+    await mcp_manager.load_persisted()
+
     # 5. LLM / 记忆 / 压缩
     from athena.core.llm.provider import set_llm_provider
 
@@ -159,6 +166,11 @@ async def lifespan(app: FastAPI):
         await memory_manager.flush_access_stats()
     except Exception as e:
         logger.warning("memory_final_flush_failed", error=str(e))
+    # 断开所有 MCP Server 连接，防子进程泄漏
+    try:
+        await mcp_manager.shutdown()
+    except Exception as e:
+        logger.warning("mcp_shutdown_failed", error=str(e))
     await close_database()
     logger.info("athena_stopped")
 

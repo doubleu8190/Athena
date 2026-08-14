@@ -144,6 +144,24 @@ export function useWebSocket(options: UseWebSocketOptions) {
     }
   }, [connect, disconnect])
 
+  // 页面重新可见时（从休眠/最小化恢复），若连接已断开则自动重连
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        const ws = wsRef.current
+        // 连接不存在或已关闭 → 重置重连计数并重新连接
+        if (!ws || ws.readyState === WebSocket.CLOSED) {
+          reconnectAttempts.current = 0
+          connect()
+        }
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+    }
+  }, [connect])
+
   // 订阅 effect：切换会话只发 SUBSCRIBE，不再重建连接
   useEffect(() => {
     sessionIdRef.current = sessionId

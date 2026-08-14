@@ -19,10 +19,11 @@ function AppContent() {
     setSessions,
     removeSession,
     setConnectionStatus,
+    activeView,
+    setActiveView,
   } = useChatStore()
 
   const [apiBase, setApiBase] = useState<string>("http://127.0.0.1:8000")
-  const [activeView, setActiveView] = useState<AppView>("chat")
 
   useEffect(() => {
     const initApi = async () => {

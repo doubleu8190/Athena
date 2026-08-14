@@ -164,6 +164,21 @@ class MemoryModel(Base):
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class McpServerModel(Base):
+    """MCP 服务器注册表 — 持久化用户注册的 MCP Server 配置.
+
+    config_json 存完整配置 {command, args, env}，env 含密钥（如 SERVER_KEY），
+    仅在启动子进程时使用，REST 列表接口只返回掩码。
+    """
+
+    __tablename__ = "mcp_servers"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[str] = mapped_column(String)
+    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 # FTS5 虚拟表 DDL（SQLAlchemy ORM 不支持 FTS5，需通过原生 SQL 创建）
 MEMORY_FTS_DDL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(

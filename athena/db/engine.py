@@ -33,10 +33,22 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 #     删除了 sessions/steps/messages 的 metadata_json 列；messages 新增
 #     step_id / tool_call_record_id / tool_name / type 列；memories 新增
 #     type / category / confidence / source 列（metadata_json 仅存任意用户字段）。
+# v2: 新增 mcp_servers 表 — 持久化用户注册的 MCP Server 配置（command/args/env）。
+#     全新建库由 Base.metadata.create_all 自动建表，迁移 SQL 为已有库兜底。
 # 后续表结构变更在此追加增量迁移（key 为目标版本号）。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-_MIGRATIONS: dict[int, str] = {}
+_MIGRATIONS: dict[int, str] = {
+    2: """
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    name VARCHAR NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_at VARCHAR NOT NULL,
+    deleted_time VARCHAR,
+    PRIMARY KEY (name)
+)
+""",
+}
 
 
 async def _run_migrations(conn) -> None:

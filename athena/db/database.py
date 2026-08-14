@@ -12,6 +12,7 @@ from datetime import datetime
 from athena.db.engine import close_engine, init_engine
 from athena.db.repository import (
     ApprovalLogRepository,
+    McpServerRepository,
     MessageRepository,
     SessionRepository,
     StepRepository,
@@ -38,6 +39,7 @@ class Database:
         self.steps = StepRepository()
         self.tool_calls = ToolCallRepository()
         self.approval_logs = ApprovalLogRepository()
+        self.mcp_servers = McpServerRepository()
 
     async def connect(self) -> None:
         """建立连接并初始化表结构."""
@@ -58,16 +60,22 @@ class Database:
         """
         now = datetime.now().isoformat()
         err = "进程中断(服务重启)"
-        await self.steps.update_running_by_session(session_id, {
-            "status": str(StepStatus.FAILED),
-            "completed_at": now,
-            "error_message": err,
-        })
-        await self.tool_calls.update_running_by_session(session_id, {
-            "status": str(ToolCallStatus.FAILED),
-            "completed_at": now,
-            "error_message": err,
-        })
+        await self.steps.update_running_by_session(
+            session_id,
+            {
+                "status": str(StepStatus.FAILED),
+                "completed_at": now,
+                "error_message": err,
+            },
+        )
+        await self.tool_calls.update_running_by_session(
+            session_id,
+            {
+                "status": str(ToolCallStatus.FAILED),
+                "completed_at": now,
+                "error_message": err,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

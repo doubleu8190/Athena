@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from athena.gateway.routes.approval import router as approval_router
 from athena.gateway.routes.health import router as health_router
+from athena.gateway.routes.mcp import router as mcp_router
 from athena.gateway.routes.memory import router as memory_router
 from athena.gateway.routes.providers import router as providers_router
 from athena.gateway.routes.sessions import router as sessions_router
@@ -20,5 +21,6 @@ api_router.include_router(memory_router)
 api_router.include_router(tools_router)
 api_router.include_router(settings_router)
 api_router.include_router(providers_router)
+api_router.include_router(mcp_router)
 
 __all__ = ["api_router"]

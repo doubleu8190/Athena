@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, TYPE_CHECKING
 
 from athena.core.tools.mcp.client import MCPClient
@@ -18,6 +19,15 @@ if TYPE_CHECKING:
     from athena.core.tools.manager import UnifiedToolManager
 
 logger = get_logger(__name__)
+
+# 本地注册名只允许 [a-zA-Z0-9_-]：服务器名/工具名可能含 @ / 等字符
+# （如 "@mendableai/firecrawl-mcp-server"），会生成 bind_tools 无法接受的工具名。
+_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+
+
+def _sanitize(name: str) -> str:
+    """将名称中的非法字符替换为下划线，用于本地工具名前缀."""
+    return _NAME_RE.sub("_", name)
 
 
 class MCPToolAdapter:
@@ -42,15 +52,17 @@ class MCPToolAdapter:
         server_url: str | None = None,
         env: dict[str, str] | None = None,
         timeout: float = 30.0,
+        connect_timeout: float = 60.0,
     ) -> list[str]:
         """注册 MCP Server 的所有工具.
 
         Args:
-            server_name: 服务器名称
+            server_name: 服务器名称（原始名，含 @ / 等字符也保留）
             server_command: 启动命令（stdio 传输）
             server_url: 服务器 URL（SSE 传输）
-            env: 环境变量
+            env: 环境变量（增量注入，client 会与 os.environ 合并）
             timeout: 工具调用超时
+            connect_timeout: 握手阶段超时（npx -y 冷启动可能较慢）
 
         Returns:
             注册的工具名称列表
@@ -61,11 +73,17 @@ class MCPToolAdapter:
             server_url=server_url,
             env=env,
             timeout=timeout,
+            connect_timeout=connect_timeout,
         )
 
         try:
             await client.connect()
         except Exception as e:
+            # 连接失败时 client 可能已拉起子进程但未置 _connected，显式断开防泄漏
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
             logger.error("mcp_server_connect_failed", server=server_name, error=str(e))
             raise
 
@@ -81,8 +99,9 @@ class MCPToolAdapter:
             if not tool_name:
                 continue
 
-            # 添加服务器名称前缀避免冲突，同时保留原始工具名供远程调用
-            full_name = f"mcp_{server_name}_{tool_name}"
+            # 本地注册名加服务器前缀避免冲突，并对非法字符清洗；
+            # remote_name 保留原始工具名供远程调用（客户端用原名调用远端）
+            full_name = f"mcp_{_sanitize(server_name)}_{_sanitize(tool_name)}"
 
             tool_defs.append(
                 {
@@ -102,6 +121,16 @@ class MCPToolAdapter:
         self._tool_manager.register_mcp_tools(server_name, tool_defs, client)
 
         return registered_names
+
+    async def unregister_server(self, server_name: str) -> None:
+        """断开指定服务器的连接并从连接池移除."""
+        client = self._clients.pop(server_name, None)
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except Exception as e:
+            logger.warning("mcp_disconnect_failed", server=server_name, error=str(e))
 
     async def disconnect_all(self) -> None:
         """断开所有 MCP Server 连接."""

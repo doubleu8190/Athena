@@ -23,6 +23,9 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "structlog>=24.0.0",
     "docker>=7.0.0",
+    # MCP 客户端基于官方 SDK（client.py 直接导入 mcp）。
+    # 此前仅作为 langchain-mcp-adapters 的传递依赖存在，需显式声明以防移除。
+    "mcp>=1.27.0",
 ]
 
 [project.optional-dependencies]

@@ -15,6 +15,9 @@ import type {
   SettingsView,
   TestProviderResult,
   ToolListResponse,
+  McpRegisterPayload,
+  McpRegisterResponse,
+  McpServerListResponse,
 } from "../types"
 
 class ApiClient {
@@ -247,6 +250,26 @@ class ApiClient {
 
   async getSettings(): Promise<SettingsView> {
     return this.request<SettingsView>("/api/settings")
+  }
+
+  // ─── MCP 服务器 ───────────────────────────────────────────────
+
+  async listMcpServers(): Promise<McpServerListResponse> {
+    return this.request<McpServerListResponse>("/api/mcp/servers")
+  }
+
+  async registerMcpServers(payload: McpRegisterPayload): Promise<McpRegisterResponse> {
+    return this.request<McpRegisterResponse>("/api/mcp/servers", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+  }
+
+  async deleteMcpServer(name: string): Promise<{ status: string; name: string }> {
+    return this.request<{ status: string; name: string }>(
+      `/api/mcp/servers/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    )
   }
 }
 

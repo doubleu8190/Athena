@@ -10,6 +10,7 @@ from athena.models.approval import (
     ApprovalLog,
     ApprovalRequest,
 )
+from athena.models.mcp import McpServer, McpServerConfig
 from athena.models.message import Message, MessageRole
 from athena.models.session import Session, SessionStatus
 from athena.models.step import Step, StepStatus, StepType
@@ -44,4 +45,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalLog",
     "ApprovalRequest",
+    # MCP
+    "McpServer",
+    "McpServerConfig",
 ]

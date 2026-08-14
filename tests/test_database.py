@@ -157,12 +157,13 @@ async def test_delete_session_cascade(db: Database):
 
 @pytest.mark.asyncio
 async def test_baseline_schema_flat(db: Database):
-    """验证 metadata_json 平铺后的新基线 schema.
+    """验证 metadata_json 平铺后的基线 schema + v2 mcp_servers 表.
 
     - messages 表含 step_id/tool_call_record_id/tool_name/type 列，且无 metadata_json
     - sessions/steps 表无 metadata_json
     - memories 表含 type/category/confidence/source 列
-    - user_version 重置为 1（旧 v2-v5 迁移已废弃）
+    - v2 新增 mcp_servers 表（name/config_json/created_at/deleted_time）
+    - user_version == 2
     """
     from sqlalchemy import text
 
@@ -183,5 +184,48 @@ async def test_baseline_schema_flat(db: Database):
         mem_cols = {row[1] for row in result.fetchall()}
         assert {"type", "category", "confidence", "source"} <= mem_cols
 
+        result = await session.execute(text("PRAGMA table_info(mcp_servers)"))
+        mcp_cols = {row[1] for row in result.fetchall()}
+        assert {"name", "config_json", "created_at", "deleted_time"} <= mcp_cols
+
         result = await session.execute(text("PRAGMA user_version;"))
-        assert result.scalar() == 1
+        assert result.scalar() == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_repository(db: Database):
+    """mcp_servers 表 CRUD：upsert 插入/覆盖 + 软删除."""
+    from athena.models.mcp import McpServerConfig
+
+    # 插入
+    await db.mcp_servers.upsert(
+        "srv-1",
+        McpServerConfig(command="npx", args=["-y", "mcprouter"], env={"SERVER_KEY": "abc123"}),
+    )
+    rows = await db.mcp_servers.list_all()
+    assert len(rows) == 1
+    assert rows[0].name == "srv-1"
+    assert rows[0].config.command == "npx"
+    assert rows[0].config.args == ["-y", "mcprouter"]
+    assert rows[0].config.env == {"SERVER_KEY": "abc123"}
+
+    # 覆盖重注册（同名更新配置，created_at 保留）
+    await db.mcp_servers.upsert("srv-1", McpServerConfig(command="python", args=["-m", "server"]))
+    rows = await db.mcp_servers.list_all()
+    assert len(rows) == 1
+    assert rows[0].config.command == "python"
+    assert rows[0].config.env == {}
+
+    # 软删除：list 为空，include_deleted 仍可取到
+    await db.mcp_servers.soft_delete("srv-1")
+    assert await db.mcp_servers.list_all() == []
+    fetched = await db.mcp_servers.get("srv-1", include_deleted=True)
+    assert fetched is not None
+    assert fetched.deleted_time is not None
+
+    # 软删后重新 upsert 会复活（deleted_time 清空）
+    await db.mcp_servers.upsert("srv-1", McpServerConfig(command="node", args=["server.js"]))
+    rows = await db.mcp_servers.list_all()
+    assert len(rows) == 1
+    assert rows[0].config.command == "node"
+    assert await db.mcp_servers.get("srv-1") is not None

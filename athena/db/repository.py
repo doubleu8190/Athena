@@ -12,12 +12,14 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from athena.db.engine import get_session
 from athena.db.models import (
     ApprovalLogModel,
     Base,
+    McpServerModel,
     MessageModel,
     SessionModel,
     StepModel,
@@ -26,6 +28,8 @@ from athena.db.models import (
 from athena.models import (
     ApprovalDecision,
     ApprovalLog,
+    McpServer,
+    McpServerConfig,
     Message,
     MessageRole,
     Session,
@@ -151,6 +155,18 @@ def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
         decision=ApprovalDecision(row.decision),
         decision_time_ms=row.decision_time_ms,
         timestamp=datetime.fromisoformat(row.timestamp),
+    )
+
+
+def _row_to_mcp_server(row: McpServerModel) -> McpServer:
+    config = _json_loads(row.config_json, {})
+    return McpServer(
+        name=row.name,
+        config=McpServerConfig.model_validate(config),
+        created_at=datetime.fromisoformat(row.created_at),
+        deleted_time=(
+            datetime.fromisoformat(row.deleted_time) if row.deleted_time else None
+        ),
     )
 
 
@@ -764,3 +780,72 @@ class ApprovalLogRepository:
                 "today_denied": counts.get("denied", 0),
                 "today_timeout": counts.get("timeout", 0),
             }
+
+
+# ---------------------------------------------------------------------------
+# McpServerRepository
+# ---------------------------------------------------------------------------
+
+
+class McpServerRepository:
+    """MCP 服务器配置表 CRUD 操作（软删除）."""
+
+    async def upsert(self, name: str, config: McpServerConfig) -> None:
+        """插入或覆盖 MCP 服务器配置.
+
+        用 INSERT ... ON CONFLICT DO UPDATE 实现：
+        - 已存在则覆盖 config_json 并复活（deleted_time 置空）软删记录
+        - 不存在则插入新行（created_at 取当前时间）
+        """
+        now = _now_iso()
+        config_json = _json_dumps(config.model_dump())
+        async with get_session() as session:
+            async with session.begin():
+                stmt = sqlite_insert(McpServerModel).values(
+                    name=name,
+                    config_json=config_json,
+                    created_at=now,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[McpServerModel.name],
+                    set_={
+                        "config_json": stmt.excluded.config_json,
+                        "deleted_time": None,
+                    },
+                )
+                await session.execute(stmt)
+
+    async def get(self, name: str, include_deleted: bool = False) -> McpServer | None:
+        """获取单个 MCP 服务器配置."""
+        async with get_session() as session:
+            stmt = select(McpServerModel).where(McpServerModel.name == name)
+            if not include_deleted:
+                stmt = stmt.where(McpServerModel.deleted_time.is_(None))
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            return _row_to_mcp_server(row)
+
+    async def list_all(self, include_deleted: bool = False) -> list[McpServer]:
+        """列出所有 MCP 服务器配置."""
+        async with get_session() as session:
+            stmt = select(McpServerModel).order_by(McpServerModel.created_at.asc())
+            if not include_deleted:
+                stmt = stmt.where(McpServerModel.deleted_time.is_(None))
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [_row_to_mcp_server(row) for row in rows]
+
+    async def soft_delete(self, name: str) -> None:
+        """软删除 MCP 服务器配置."""
+        async with get_session() as session:
+            async with session.begin():
+                await session.execute(
+                    update(McpServerModel)
+                    .where(
+                        McpServerModel.name == name,
+                        McpServerModel.deleted_time.is_(None),
+                    )
+                    .values(deleted_time=_now_iso())
+                )

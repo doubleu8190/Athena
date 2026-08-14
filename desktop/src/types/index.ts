@@ -178,6 +178,7 @@ export type AppView =
   | "providers"
   | "session-detail"
   | "settings"
+  | "mcp"
 
 // ─── 工具管理 ────────────────────────────────────────────────────
 
@@ -262,6 +263,50 @@ export interface TestProviderResult {
   ok: boolean
   latency_ms: number | null
   error: string | null
+}
+
+// ─── MCP 服务器 ─────────────────────────────────────────────────
+
+export interface McpServerConfig {
+  command: string
+  args: string[]
+  env: Record<string, string>
+}
+
+export interface McpRegisterPayload {
+  /** 与用户输入的 mcpServers 格式一致 */
+  mcpServers: Record<string, McpServerConfig>
+}
+
+export interface McpServerInfo {
+  name: string
+  command: string
+  args: string[]
+  /** env 值仅返回掩码（如 ••••xxxx），不返回原文 */
+  env_masked: Record<string, string>
+  status: "connected" | "failed"
+  tool_count: number
+  error: string | null
+  created_at: string
+}
+
+export interface McpServerListResponse {
+  items: McpServerInfo[]
+  total: number
+}
+
+export interface McpRegisterResult {
+  name: string
+  status: "connected" | "failed"
+  tool_count: number
+  error: string | null
+}
+
+export interface McpRegisterResponse {
+  total: number
+  registered: number
+  failed: number
+  results: McpRegisterResult[]
 }
 
 // ─── 系统设置（只读）────────────────────────────────────────────

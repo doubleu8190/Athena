@@ -5,6 +5,7 @@ import ApprovalsView from "./ApprovalsView"
 import ProvidersView from "./ProvidersView"
 import SessionDetailView from "./SessionDetailView"
 import SettingsView from "./SettingsView"
+import McpView from "./McpView"
 
 interface PageViewProps {
   view: AppView
@@ -24,6 +25,8 @@ function PageView({ view }: PageViewProps) {
       return <ApprovalsView />
     case "providers":
       return <ProvidersView />
+    case "mcp":
+      return <McpView />
     case "session-detail":
       return <SessionDetailView />
     case "settings":

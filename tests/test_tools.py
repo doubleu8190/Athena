@@ -293,3 +293,176 @@ async def test_parallel_handler_reports_partial_failures():
     assert output[0]["status"] == "success"
     assert output[1]["status"] == "error"
     assert output[1]["error"] == "LLM timeout"
+
+
+# ---------------------------------------------------------------------------
+# 文件分析工具测试
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_file_info_text(tmp_path):
+    """get_file_info 应返回文本文件的元数据。"""
+    from athena.core.tools.builtin.file_tools import get_file_info
+
+    file_path = tmp_path / "test.py"
+    file_path.write_text("line1\nline2\nline3\n")
+
+    info = await get_file_info(path=str(file_path))
+    assert info["size_kb"] < 1
+    assert info["line_count"] == 3
+    assert info["is_binary"] is False
+    assert info["file_type"] == ".py"
+
+
+@pytest.mark.asyncio
+async def test_get_file_info_binary(tmp_path):
+    """get_file_info 应检测二进制文件。"""
+    from athena.core.tools.builtin.file_tools import get_file_info
+
+    file_path = tmp_path / "test.bin"
+    file_path.write_bytes(b"\x00\x01\x02\x03")
+
+    info = await get_file_info(path=str(file_path))
+    assert info["is_binary"] is True
+    # 二进制文件不计算行数，返回 0
+    assert info["line_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_file_info_not_found(tmp_path):
+    """get_file_info 文件不存在时应抛出异常。"""
+    from athena.core.tools.builtin.file_tools import get_file_info
+
+    with pytest.raises(FileNotFoundError):
+        await get_file_info(path=str(tmp_path / "nonexistent.txt"))
+
+
+@pytest.mark.asyncio
+async def test_read_file_section(tmp_path):
+    """read_file_section 应读取指定行范围。"""
+    from athena.core.tools.builtin.file_tools import read_file_section
+
+    file_path = tmp_path / "test.txt"
+    file_path.write_text("line1\nline2\nline3\nline4\nline5\n")
+
+    content = await read_file_section(path=str(file_path), start_line=2, limit=3)
+    assert "2: line2" in content
+    assert "3: line3" in content
+    assert "4: line4" in content
+    assert "line1" not in content
+    assert "line5" not in content
+
+
+@pytest.mark.asyncio
+async def test_read_file_section_invalid_params(tmp_path):
+    """read_file_section 参数无效时应抛出异常。"""
+    from athena.core.tools.builtin.file_tools import read_file_section
+
+    file_path = tmp_path / "test.txt"
+    file_path.write_text("line1\nline2\n")
+
+    with pytest.raises(ValueError, match="start_line"):
+        await read_file_section(path=str(file_path), start_line=0)
+
+    with pytest.raises(ValueError, match="limit"):
+        await read_file_section(path=str(file_path), start_line=1, limit=0)
+
+    with pytest.raises(ValueError, match="不能超过"):
+        await read_file_section(path=str(file_path), start_line=1, limit=300)
+
+
+@pytest.mark.asyncio
+async def test_read_file_section_out_of_range(tmp_path):
+    """read_file_section 起始行超出文件范围时应返回提示。"""
+    from athena.core.tools.builtin.file_tools import read_file_section
+
+    file_path = tmp_path / "test.txt"
+    file_path.write_text("line1\nline2\n")
+
+    content = await read_file_section(path=str(file_path), start_line=10, limit=5)
+    assert "无内容" in content
+
+
+@pytest.mark.asyncio
+async def test_search_in_file(tmp_path):
+    """search_in_file 应返回匹配的行及其行号。"""
+    import json as json_mod
+
+    from athena.core.tools.builtin.file_tools import search_in_file
+
+    file_path = tmp_path / "test.py"
+    file_path.write_text("def foo():\n    pass\n\ndef bar():\n    pass\n")
+
+    result = await search_in_file(path=str(file_path), pattern=r"def \w+")
+    matches = json_mod.loads(result)
+    assert len(matches) == 2
+    assert matches[0]["line"] == 1
+    assert "def foo()" in matches[0]["content"]
+    assert matches[1]["line"] == 4
+    assert "def bar()" in matches[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_search_in_file_no_match(tmp_path):
+    """search_in_file 无匹配时应返回空列表。"""
+    import json as json_mod
+
+    from athena.core.tools.builtin.file_tools import search_in_file
+
+    file_path = tmp_path / "test.txt"
+    file_path.write_text("hello world\n")
+
+    result = await search_in_file(path=str(file_path), pattern=r"nonexistent")
+    matches = json_mod.loads(result)
+    assert matches == []
+
+
+@pytest.mark.asyncio
+async def test_search_in_file_invalid_regex(tmp_path):
+    """search_in_file 无效正则时应抛出异常。"""
+    from athena.core.tools.builtin.file_tools import search_in_file
+
+    file_path = tmp_path / "test.txt"
+    file_path.write_text("hello\n")
+
+    with pytest.raises(ValueError, match="无效的正则表达式"):
+        await search_in_file(path=str(file_path), pattern=r"[invalid")
+
+
+@pytest.mark.asyncio
+async def test_read_full_file_small(tmp_path):
+    """read_full_file 应返回小文件的全量内容。"""
+    from athena.core.tools.builtin.file_tools import read_full_file
+
+    file_path = tmp_path / "small.txt"
+    content = "hello\nworld\n"
+    file_path.write_text(content)
+
+    result = await read_full_file(path=str(file_path))
+    assert result == content
+
+
+@pytest.mark.asyncio
+async def test_read_full_file_too_large(tmp_path):
+    """read_full_file 文件超过 50KB 时应抛出异常。"""
+    from athena.core.tools.builtin.file_tools import read_full_file
+
+    file_path = tmp_path / "large.txt"
+    # 创建一个超过 50KB 的文件
+    file_path.write_text("x" * (50 * 1024 + 1))
+
+    with pytest.raises(ValueError, match="文件过大"):
+        await read_full_file(path=str(file_path))
+
+
+@pytest.mark.asyncio
+async def test_read_full_file_binary(tmp_path):
+    """read_full_file 二进制文件时应抛出异常。"""
+    from athena.core.tools.builtin.file_tools import read_full_file
+
+    file_path = tmp_path / "binary.bin"
+    file_path.write_bytes(b"\x00\x01\x02\x03")
+
+    with pytest.raises(ValueError, match="二进制文件"):
+        await read_full_file(path=str(file_path))

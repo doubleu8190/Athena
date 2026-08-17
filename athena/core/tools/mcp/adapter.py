@@ -89,8 +89,8 @@ class MCPToolAdapter:
             # 连接失败时 client 可能已拉起子进程但未置 _connected，显式断开防泄漏
             try:
                 await client.disconnect()
-            except Exception:
-                pass
+            except Exception as disconnect_error:
+                logger.warning("mcp_disconnect_after_connect_failed", server=server_name, error=str(disconnect_error))
             logger.error("mcp_server_connect_failed", server=server_name, error=str(e))
             raise
 

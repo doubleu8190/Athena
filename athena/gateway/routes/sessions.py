@@ -27,6 +27,7 @@ class CreateSessionRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     message: str
     system_prompt: str = ""
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class InterruptedToolInfo(BaseModel):
@@ -169,6 +170,15 @@ async def update_session(session_id: str, req: UpdateSessionRequest) -> Session:
 async def delete_session(session_id: str) -> dict[str, str]:
     """删除会话及其所有关联数据."""
     db = await _get_db()
+    await db.files.delete_session(session_id)
+    runtime = None
+    try:
+        from athena.gateway.routes._runtime import get_file_runtime
+        runtime = get_file_runtime()
+    except (RuntimeError, AttributeError, NameError):
+        pass
+    if runtime is not None:
+        await runtime.cleanup_unreferenced_blobs()
     await db.sessions.delete(session_id)
     return {"status": "deleted", "session_id": session_id}
 
@@ -197,6 +207,7 @@ async def send_message(session_id: str, req: SendMessageRequest) -> dict[str, An
         result = await workflow.process_message(
             session_id=session_id,
             user_message=req.message,
+            attachment_ids=req.attachment_ids,
         )
         return result
     except Exception as e:

@@ -190,6 +190,12 @@ async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
         logger.error("workflow_not_initialized", session_id=session_id)
         return
     message = data.get("message", "")
+    raw_attachment_ids: object = data.get("attachment_ids", [])
+    attachment_ids: list[str] = []
+    if isinstance(raw_attachment_ids, list):
+        for item in raw_attachment_ids:
+            if isinstance(item, str):
+                attachment_ids.append(item)
     logger.info(
         "user_command_received",
         session_id=session_id,
@@ -203,6 +209,7 @@ async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
         workflow.process_message(
             session_id=session_id,
             user_message=message,
+            attachment_ids=attachment_ids,
             stop_signal=stop_signal,
         )
     )

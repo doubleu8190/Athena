@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight } from "lucide-react"
+import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, Paperclip, Files, X, RotateCw, Trash2 } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ApprovalDialog } from "./ApprovalDialog"
 import { ActivityPanel } from "./ActivityPanel"
@@ -35,15 +35,26 @@ function Chat({ sendEvent }: ChatProps) {
     clearThinking,
     setError,
     clearError,
+    attachments,
+    fileTasks,
+    setAttachments,
+    upsertAttachment,
+    upsertFileTask,
+    removeAttachment,
   } = useChatStore()
 
   const [input, setInput] = useState("")
   const [isSending, setIsSending] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [showActivity, setShowActivity] = useState(false)
+  const [showFiles, setShowFiles] = useState(false)
+  const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([])
+  const [isUploading, setIsUploading] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const loadingSessionIdRef = useRef<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // 加载会话历史消息 — 切换 session 时完全重置状态
   useEffect(() => {
@@ -62,6 +73,10 @@ function Chat({ sendEvent }: ChatProps) {
       loadingSessionIdRef.current = activeSessionId
       setIsLoadingHistory(true)
       loadHistory(activeSessionId, () => cancelled)
+      setSelectedAttachmentIds([])
+      apiClient.listAttachments(activeSessionId)
+        .then((items) => { if (!cancelled) setAttachments(items) })
+        .catch(() => { if (!cancelled) setAttachments([]) })
     } else {
       clearMessages()
       clearSteps()
@@ -70,6 +85,8 @@ function Chat({ sendEvent }: ChatProps) {
       clearThinking()
       setAgentStatus("idle")
       clearError()
+      setAttachments([])
+      setSelectedAttachmentIds([])
     }
 
     return () => {
@@ -137,7 +154,13 @@ function Chat({ sendEvent }: ChatProps) {
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
-    if (!text || !activeSessionId || isSending) return
+    if ((!text && selectedAttachmentIds.length === 0) || !activeSessionId || isSending || isUploading) return
+
+    const selectedAttachments = attachments.filter((item) => selectedAttachmentIds.includes(item.id))
+    if (selectedAttachments.some((item) => item.status === "failed")) {
+      setError("Failed attachments must be retried or removed before sending.")
+      return
+    }
 
     setIsSending(true)
     setInput("")
@@ -146,9 +169,10 @@ function Chat({ sendEvent }: ChatProps) {
     const userMsg = {
       id: crypto.randomUUID(),
       role: "user" as const,
-      content: text,
+      content: text || "Please process the attached files.",
       timestamp: new Date().toISOString(),
       session_id: activeSessionId,
+      attachments: selectedAttachments,
     }
     addMessage(userMsg)
 
@@ -161,8 +185,9 @@ function Chat({ sendEvent }: ChatProps) {
 
     // 通过 WebSocket 发送用户命令
     const sent = sendEvent(ClientEventType.USER_COMMAND, {
-      message: text,
+      message: text || "Please process the attached files.",
       session_id: activeSessionId,
+      attachment_ids: selectedAttachmentIds,
     })
 
     if (!sent) {
@@ -171,6 +196,8 @@ function Chat({ sendEvent }: ChatProps) {
       setError("Connection lost. Your message was not sent — please try again.")
       removeMessage(userMsg.id)
       setInput(text)
+    } else {
+      setSelectedAttachmentIds([])
     }
 
     setIsSending(false)
@@ -184,7 +211,93 @@ function Chat({ sendEvent }: ChatProps) {
     setError,
     clearThinking,
     sendEvent,
+    selectedAttachmentIds,
+    attachments,
+    isUploading,
   ])
+
+  const uploadFiles = useCallback(async (files: File[]) => {
+    if (!activeSessionId || files.length === 0 || isUploading) return
+    setIsUploading(true)
+    clearError()
+    try {
+      const items = await apiClient.uploadAttachments(activeSessionId, files)
+      items.forEach(({ attachment, task }) => {
+        upsertAttachment(attachment)
+        upsertFileTask(task)
+      })
+      setSelectedAttachmentIds((current) => [
+        ...current,
+        ...items.map((item) => item.attachment.id).filter((id) => !current.includes(id)),
+      ])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Attachment upload failed")
+    } finally {
+      setIsUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ""
+    }
+  }, [activeSessionId, clearError, isUploading, setError, upsertAttachment, upsertFileTask])
+
+  const filesFromClipboard = useCallback((clipboardData: DataTransfer): File[] => {
+    const fromItems = Array.from(clipboardData.items ?? [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+
+    const source = fromItems.length > 0
+      ? fromItems
+      : Array.from(clipboardData.files ?? []).filter((file) => file.type.startsWith("image/"))
+
+    return source.map((file, index) => {
+      const extension = file.type.split("/")[1]?.replace("jpeg", "jpg") || "png"
+      const hasUsableName = file.name && file.name !== "image.png"
+      if (hasUsableName) return file
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "")
+      return new File([file], `screenshot-${stamp}${index ? `-${index + 1}` : ""}.${extension}`, {
+        type: file.type || "image/png",
+        lastModified: file.lastModified || Date.now(),
+      })
+    })
+  }, [])
+
+  const handlePasteUpload = useCallback((clipboardData: DataTransfer): boolean => {
+    const files = filesFromClipboard(clipboardData)
+    if (files.length === 0) return false
+    void uploadFiles(files)
+    return true
+  }, [filesFromClipboard, uploadFiles])
+
+  useEffect(() => {
+    const handleDocumentPaste = (event: ClipboardEvent) => {
+      if (!activeSessionId || isUploading || !event.clipboardData) return
+      const target = event.target
+      const targetNode = target instanceof Node ? target : null
+      const pastedInsideChat = targetNode !== null && rootRef.current?.contains(targetNode)
+      const activeElement = document.activeElement
+      const noFocusedElement = activeElement === null || activeElement === document.body
+      if (!pastedInsideChat && !noFocusedElement) return
+      if (handlePasteUpload(event.clipboardData)) {
+        event.preventDefault()
+      }
+    }
+
+    document.addEventListener("paste", handleDocumentPaste)
+    return () => document.removeEventListener("paste", handleDocumentPaste)
+  }, [activeSessionId, handlePasteUpload, isUploading])
+
+  const handleDeleteAttachment = useCallback(async (fileId: string) => {
+    if (!activeSessionId) return
+    await apiClient.deleteAttachment(activeSessionId, fileId)
+    removeAttachment(fileId)
+    setSelectedAttachmentIds((items) => items.filter((id) => id !== fileId))
+  }, [activeSessionId, removeAttachment])
+
+  const handleRetryAttachment = useCallback(async (fileId: string) => {
+    if (!activeSessionId) return
+    const item = await apiClient.retryAttachment(activeSessionId, fileId)
+    upsertAttachment(item.attachment)
+    upsertFileTask(item.task)
+  }, [activeSessionId, upsertAttachment, upsertFileTask])
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return
@@ -287,7 +400,7 @@ function Chat({ sendEvent }: ChatProps) {
   const hasProcessingPhase = phaseGroups.some((g) => g.phase === "processing")
 
   return (
-    <div className="flex-1 flex flex-row min-w-0 min-h-0">
+    <div ref={rootRef} className="flex-1 flex flex-row min-w-0 min-h-0">
       <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto min-h-0">
@@ -513,9 +626,51 @@ function Chat({ sendEvent }: ChatProps) {
       </div>
 
       {/* Input Area */}
-      <div className="border-t border-athena-border bg-athena-surface p-4">
+      <div
+        className="border-t border-athena-border bg-athena-surface p-4"
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault()
+          void uploadFiles(Array.from(event.dataTransfer.files))
+        }}
+      >
         <div className="max-w-3xl mx-auto">
+          {selectedAttachmentIds.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-2">
+              {attachments.filter((item) => selectedAttachmentIds.includes(item.id)).map((item) => (
+                <div key={item.id} className="flex items-center gap-2 max-w-full rounded-md border border-athena-border bg-athena-bg px-2 py-1.5 text-xs">
+                  <Paperclip className="w-3.5 h-3.5 text-athena-accent flex-shrink-0" />
+                  <span className="truncate max-w-[220px]">{item.filename}</span>
+                  <span className="text-athena-muted">{item.status}</span>
+                  <button
+                    type="button"
+                    title="Remove from message"
+                    onClick={() => setSelectedAttachmentIds((ids) => ids.filter((id) => id !== item.id))}
+                    className="text-athena-muted hover:text-athena-text"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="flex items-stretch gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => void uploadFiles(Array.from(event.target.files ?? []))}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!activeSessionId || isUploading}
+              title="Attach files"
+              className="inline-flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg border border-athena-border bg-athena-bg text-athena-muted hover:text-athena-text disabled:opacity-50"
+            >
+              {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />}
+            </button>
             <div className="flex-1 relative">
               <textarea
                 ref={textareaRef}
@@ -544,7 +699,7 @@ function Chat({ sendEvent }: ChatProps) {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || !activeSessionId || isSending}
+                disabled={(!input.trim() && selectedAttachmentIds.length === 0) || !activeSessionId || isSending || isUploading}
                 className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
                 title="Send"
               >
@@ -555,6 +710,49 @@ function Chat({ sendEvent }: ChatProps) {
           <p className="text-xs text-athena-muted mt-2 text-center">
             Athena may produce incorrect information. Verify important details.
           </p>
+          {activeSessionId && (
+            <button
+              type="button"
+              onClick={() => setShowFiles((value) => !value)}
+              className="mt-2 inline-flex items-center gap-1.5 text-xs text-athena-muted hover:text-athena-text"
+            >
+              <Files className="w-3.5 h-3.5" />
+              {attachments.length} file{attachments.length === 1 ? "" : "s"}
+            </button>
+          )}
+          {showFiles && activeSessionId && (
+            <div className="mt-2 max-h-56 overflow-y-auto border-t border-athena-border pt-2">
+              {attachments.length === 0 ? (
+                <div className="py-3 text-center text-xs text-athena-muted">No files in this session</div>
+              ) : attachments.map((item) => {
+                const attachmentTasks = fileTasks.filter((entry) => entry.attachment_id === item.id)
+                const task = attachmentTasks[attachmentTasks.length - 1]
+                return (
+                  <div key={item.id} className="flex items-center gap-3 py-2 border-b border-athena-border/60 last:border-0">
+                    <Files className="w-4 h-4 text-athena-accent flex-shrink-0" />
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 text-left"
+                      onClick={() => item.status !== "failed" && setSelectedAttachmentIds((ids) => ids.includes(item.id) ? ids : [...ids, item.id])}
+                    >
+                      <div className="truncate text-xs text-athena-text">{item.filename}</div>
+                      <div className="text-[11px] text-athena-muted">
+                        {item.status}{task ? ` · ${Math.round(task.progress * 100)}% ${task.stage}` : ""}
+                      </div>
+                    </button>
+                    {item.status === "failed" && (
+                      <button type="button" title="Retry" onClick={() => void handleRetryAttachment(item.id)} className="text-athena-muted hover:text-athena-text">
+                        <RotateCw className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button type="button" title="Delete" onClick={() => void handleDeleteAttachment(item.id)} className="text-athena-muted hover:text-athena-danger">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       </div>
       </div>

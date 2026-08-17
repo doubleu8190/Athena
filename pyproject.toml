@@ -26,6 +26,16 @@ dependencies = [
     # MCP 客户端基于官方 SDK（client.py 直接导入 mcp）。
     # 此前仅作为 langchain-mcp-adapters 的传递依赖存在，需显式声明以防移除。
     "mcp>=1.27.0",
+    "python-multipart>=0.0.9",
+    "pypdf>=5.0.0",
+    "pypdfium2>=4.30.0",
+    "pdfplumber>=0.11.0",
+    "python-docx>=1.1.0",
+    "openpyxl>=3.1.0",
+    "Pillow>=10.0.0",
+    "rapidocr_onnxruntime>=1.2.0",
+    "tree-sitter-language-pack>=0.8.0",
+    "pandas>=2.2.0",
 ]
 
 [project.optional-dependencies]

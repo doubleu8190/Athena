@@ -283,8 +283,8 @@ class SessionRecovery:
                     actual_content = file_path.read_text()
                     if actual_content == expected_content:
                         return InterruptedToolStrategy.SKIP
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("interrupted_write_file_compare_failed", path=str(file_path), error=str(e))
             return InterruptedToolStrategy.RETRY
 
         # Shell 命令，状态不确定

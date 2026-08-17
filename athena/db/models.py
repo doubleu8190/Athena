@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -202,11 +202,181 @@ class ToolModel(Base):
     updated_at: Mapped[str] = mapped_column(String)
 
 
+class AttachmentModel(Base):
+    """Session-scoped file asset metadata. Raw bytes live in Storage Layer."""
+
+    __tablename__ = "attachments"
+    __table_args__ = (
+        Index("idx_attachments_session", "session_id"),
+        Index("idx_attachments_hash", "sha256"),
+        Index("idx_attachments_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
+    message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    filename: Mapped[str] = mapped_column(String)
+    mime_type: Mapped[str] = mapped_column(String)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String)
+    storage_key: Mapped[str] = mapped_column(String)
+    adapter_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    adapter_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="uploaded")
+    capabilities_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ProcessingTaskModel(Base):
+    __tablename__ = "processing_tasks"
+    __table_args__ = (
+        Index("idx_file_tasks_status", "status", "available_at"),
+        Index("idx_file_tasks_attachment", "attachment_id"),
+        Index("idx_file_tasks_session", "session_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
+    task_type: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="queued")
+    progress: Mapped[float] = mapped_column(Float, default=0)
+    stage: Mapped[str] = mapped_column(String, default="queued")
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    available_at: Mapped[str] = mapped_column(String)
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+    started_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class FileChunkModel(Base):
+    __tablename__ = "file_chunks"
+    __table_args__ = (
+        UniqueConstraint("attachment_id", "ordinal", name="uq_file_chunk_ordinal"),
+        Index("idx_file_chunks_attachment", "attachment_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    locator_json: Mapped[str] = mapped_column(Text, default="{}")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class FileArtifactModel(Base):
+    __tablename__ = "file_artifacts"
+    __table_args__ = (
+        UniqueConstraint("cache_key", name="uq_file_artifact_cache_key"),
+        Index("idx_file_artifacts_attachment", "attachment_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
+    kind: Mapped[str] = mapped_column(String)
+    cache_key: Mapped[str] = mapped_column(String)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[str] = mapped_column(String)
+
+
+class AdapterRegistryModel(Base):
+    __tablename__ = "adapter_registry"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    version: Mapped[str] = mapped_column(String)
+    mime_types_json: Mapped[str] = mapped_column(Text, default="[]")
+    extensions_json: Mapped[str] = mapped_column(Text, default="[]")
+    capabilities_json: Mapped[str] = mapped_column(Text, default="[]")
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[str] = mapped_column(String)
+
+
+class MessageAttachmentModel(Base):
+    __tablename__ = "message_attachments"
+
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id"), primary_key=True
+    )
+    attachment_id: Mapped[str] = mapped_column(
+        ForeignKey("attachments.id"), primary_key=True
+    )
+
+
+class CodeSymbolModel(Base):
+    __tablename__ = "code_symbols"
+    __table_args__ = (
+        Index("idx_code_symbols_attachment", "attachment_id"),
+        Index("idx_code_symbols_name", "name"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
+    path: Mapped[str] = mapped_column(String)
+    language: Mapped[str] = mapped_column(String)
+    name: Mapped[str] = mapped_column(String)
+    qualified_name: Mapped[str] = mapped_column(String)
+    kind: Mapped[str] = mapped_column(String)
+    start_line: Mapped[int] = mapped_column(Integer)
+    end_line: Mapped[int] = mapped_column(Integer)
+    signature: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CodeDependencyModel(Base):
+    __tablename__ = "code_dependencies"
+    __table_args__ = (Index("idx_code_deps_attachment", "attachment_id"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
+    source: Mapped[str] = mapped_column(String)
+    target: Mapped[str] = mapped_column(String)
+    kind: Mapped[str] = mapped_column(String, default="reference")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class AgentContinuationModel(Base):
+    __tablename__ = "agent_continuations"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_agent_continuation_run"),
+        Index("idx_agent_continuations_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
+    run_id: Mapped[str] = mapped_column(String)
+    task_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    tool_calls_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String, default="waiting")
+    created_at: Mapped[str] = mapped_column(String)
+    resumed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 # FTS5 虚拟表 DDL（SQLAlchemy ORM 不支持 FTS5，需通过原生 SQL 创建）
 MEMORY_FTS_DDL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     content,
     memory_id UNINDEXED,
+    tokenize='unicode61'
+)
+"""
+
+FILE_CHUNK_FTS_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS file_chunk_fts USING fts5(
+    content,
+    chunk_id UNINDEXED,
+    attachment_id UNINDEXED,
     tokenize='unicode61'
 )
 """

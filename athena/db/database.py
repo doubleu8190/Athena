@@ -42,6 +42,9 @@ class Database:
         self.approval_logs = ApprovalLogRepository()
         self.mcp_servers = McpServerRepository()
         self.tools = ToolRepository()
+        from athena.core.files.repository import FileRepository
+
+        self.files = FileRepository()
 
     async def connect(self) -> None:
         """建立连接并初始化表结构."""

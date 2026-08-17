@@ -29,6 +29,7 @@ class LLMProviderConfig(BaseModel):
     base_url: str = ""
     temperature: float = -1
     max_tokens: int = -1
+    supports_vision: bool = False
 
 
 class Settings(BaseSettings):
@@ -60,6 +61,22 @@ class Settings(BaseSettings):
     # --- Database ---
     sqlite_db_path: str = "./data/athena.db"
     chromadb_path: str = "./data/chromadb"
+
+    # --- File Intelligence ---
+    file_storage_path: str = "./data/files"
+    file_max_upload_bytes: int = 512 * 1024 * 1024
+    file_chunk_tokens: int = 800
+    file_chunk_overlap_tokens: int = 80
+    file_task_max_attempts: int = 3
+    file_task_timeout: int = 900
+    file_task_poll_interval: float = 0.25
+    file_parse_concurrency: int = 2
+    file_code_concurrency: int = 1
+    file_summary_concurrency: int = 4
+    file_embedding_concurrency: int = 2
+    file_archive_max_entries: int = 10_000
+    file_archive_max_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
+    file_archive_max_ratio: float = 100.0
 
     # --- Harness ---
     max_turns_per_run: int = 20
@@ -127,6 +144,10 @@ class Settings(BaseSettings):
     @property
     def chroma_path(self) -> Path:
         return Path(self.chromadb_path)
+
+    @property
+    def files_path(self) -> Path:
+        return Path(self.file_storage_path)
 
     @property
     def allowed_paths_list(self) -> list[str]:

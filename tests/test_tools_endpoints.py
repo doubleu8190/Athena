@@ -93,7 +93,13 @@ def test_patch_toggle_disables(client):
     resp = client.patch("/tools/read_file", json={"enabled": False})
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"status": "updated", "name": "read_file", "enabled": False}
+    assert body == {
+        "status": "updated",
+        "name": "read_file",
+        "enabled": False,
+        "risk_level": "low",
+        "require_approval": False,
+    }
 
     data = client.get("/tools").json()
     item = next(i for i in data["items"] if i["name"] == "read_file")

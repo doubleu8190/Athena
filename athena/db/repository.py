@@ -368,6 +368,17 @@ class MessageRepository:
                 )
             return message.id
 
+    async def _attach_refs(self, messages: list[Message]) -> list[Message]:
+        """Populate lightweight attachment references without exposing storage keys."""
+        if not messages:
+            return messages
+        from athena.core.files.repository import FileRepository
+
+        refs = await FileRepository().attachments_for_messages([item.id for item in messages])
+        for item in messages:
+            item.attachments = [attachment.to_ref() for attachment in refs.get(item.id, [])]
+        return messages
+
     async def get_by_session(
         self, session_id: str, limit: int | None = None, include_deleted: bool = False
     ) -> list[Message]:
@@ -384,7 +395,7 @@ class MessageRepository:
                 stmt = stmt.limit(limit)
             result = await session.execute(stmt)
             rows = result.scalars().all()
-            return [_row_to_message(row) for row in rows]
+            return await self._attach_refs([_row_to_message(row) for row in rows])
 
     async def get_after_message(
         self, session_id: str, after_id: str, include_deleted: bool = False
@@ -407,7 +418,7 @@ class MessageRepository:
                 stmt = stmt.where(MessageModel.deleted_time.is_(None))
             result = await session.execute(stmt)
             rows = result.scalars().all()
-            return [_row_to_message(row) for row in rows]
+            return await self._attach_refs([_row_to_message(row) for row in rows])
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +948,42 @@ class ToolRepository:
                             updated_at=now,
                         )
                     )
+
+    async def migrate_legacy_builtin_names(self) -> None:
+        """Move pre-V2 path-tool governance rows to their explicit local names."""
+        mapping = {
+            "read_file": "read_local_file",
+            "get_file_info": "get_local_file_info",
+            "read_file_section": "read_local_file_section",
+            "search_in_file": "search_local_file",
+            "read_full_file": "read_local_file_full",
+        }
+        async with get_session() as session:
+            async with session.begin():
+                for old_name, new_name in mapping.items():
+                    old = await session.get(ToolModel, old_name)
+                    if old is None:
+                        continue
+                    parameters = _json_loads(old.parameters_json, {})
+                    properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+                    is_path_tool = "path" in properties or "路径" in old.description
+                    if not is_path_tool:
+                        continue
+                    if await session.get(ToolModel, new_name) is None:
+                        session.add(ToolModel(
+                            tool_name=new_name,
+                            execution_mode=old.execution_mode,
+                            server_name=old.server_name,
+                            remote_name=old.remote_name,
+                            description=old.description,
+                            parameters_json=old.parameters_json,
+                            risk_level=old.risk_level,
+                            require_approval=old.require_approval,
+                            enabled=old.enabled,
+                            created_at=old.created_at,
+                            updated_at=_now_iso(),
+                        ))
+                    await session.delete(old)
 
     async def get(self, tool_name: str) -> ToolConfig | None:
         """获取单个工具配置."""

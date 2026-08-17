@@ -18,6 +18,9 @@ import type {
   McpRegisterPayload,
   McpRegisterResponse,
   McpServerListResponse,
+  Attachment,
+  AttachmentUploadItem,
+  FileTask,
 } from "../types"
 
 class ApiClient {
@@ -98,6 +101,34 @@ class ApiClient {
     return this.request<{ status: string }>(`/api/sessions/${sessionId}/stop`, {
       method: "POST",
     })
+  }
+
+  async uploadAttachments(sessionId: string, files: File[]): Promise<AttachmentUploadItem[]> {
+    const form = new FormData()
+    files.forEach((file) => form.append("files", file))
+    const response = await fetch(`${this.baseUrl}/api/sessions/${sessionId}/attachments`, {
+      method: "POST",
+      body: form,
+    })
+    if (!response.ok) throw new Error(`Upload failed: ${response.status} ${await response.text()}`)
+    const data = await response.json() as { items: AttachmentUploadItem[] }
+    return data.items
+  }
+
+  async listAttachments(sessionId: string): Promise<Attachment[]> {
+    return this.request<Attachment[]>(`/api/sessions/${sessionId}/attachments`)
+  }
+
+  async deleteAttachment(sessionId: string, fileId: string): Promise<void> {
+    await this.request(`/api/sessions/${sessionId}/attachments/${fileId}`, { method: "DELETE" })
+  }
+
+  async retryAttachment(sessionId: string, fileId: string): Promise<AttachmentUploadItem> {
+    return this.request<AttachmentUploadItem>(`/api/sessions/${sessionId}/attachments/${fileId}/retry`, { method: "POST" })
+  }
+
+  async getFileTask(sessionId: string, taskId: string): Promise<FileTask> {
+    return this.request<FileTask>(`/api/sessions/${sessionId}/file-tasks/${taskId}`)
   }
 
   // ─── 审批管理 ─────────────────────────────────────────────────

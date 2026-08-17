@@ -9,6 +9,8 @@ import type {
   AgentStatus,
   ThinkingState,
   AppView,
+  Attachment,
+  FileTask,
 } from "../types"
 
 interface ChatStore {
@@ -72,6 +74,14 @@ interface ChatStore {
   error: string | null
   setError: (error: string | null) => void
   clearError: () => void
+
+  attachments: Attachment[]
+  fileTasks: FileTask[]
+  setAttachments: (items: Attachment[]) => void
+  upsertAttachment: (item: Attachment) => void
+  removeAttachment: (id: string) => void
+  setFileTasks: (items: FileTask[]) => void
+  upsertFileTask: (item: FileTask) => void
 }
 
 export const useChatStore = create<ChatStore>((set) => ({
@@ -187,4 +197,23 @@ export const useChatStore = create<ChatStore>((set) => ({
   error: null,
   setError: (error) => set({ error }),
   clearError: () => set({ error: null }),
+
+  attachments: [],
+  fileTasks: [],
+  setAttachments: (attachments) => set({ attachments }),
+  upsertAttachment: (item) => set((state) => ({
+    attachments: state.attachments.some((entry) => entry.id === item.id)
+      ? state.attachments.map((entry) => entry.id === item.id ? item : entry)
+      : [...state.attachments, item],
+  })),
+  removeAttachment: (id) => set((state) => ({
+    attachments: state.attachments.filter((entry) => entry.id !== id),
+    fileTasks: state.fileTasks.filter((entry) => entry.attachment_id !== id),
+  })),
+  setFileTasks: (fileTasks) => set({ fileTasks }),
+  upsertFileTask: (item) => set((state) => ({
+    fileTasks: state.fileTasks.some((entry) => entry.id === item.id)
+      ? state.fileTasks.map((entry) => entry.id === item.id ? item : entry)
+      : [...state.fileTasks, item],
+  })),
 }))

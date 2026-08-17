@@ -11,6 +11,16 @@ from athena.models.approval import (
     ApprovalRequest,
 )
 from athena.models.mcp import McpServer, McpServerConfig
+from athena.models.file import (
+    AdapterInfo,
+    Attachment,
+    AttachmentRef,
+    AttachmentStatus,
+    FileChunk,
+    FileTask,
+    FileTaskStatus,
+    FileTaskType,
+)
 from athena.models.message import Message, MessageRole
 from athena.models.session import Session, SessionStatus
 from athena.models.step import Step, StepStatus, StepType
@@ -50,4 +60,12 @@ __all__ = [
     # MCP
     "McpServer",
     "McpServerConfig",
+    "AdapterInfo",
+    "Attachment",
+    "AttachmentRef",
+    "AttachmentStatus",
+    "FileChunk",
+    "FileTask",
+    "FileTaskStatus",
+    "FileTaskType",
 ]

@@ -104,8 +104,8 @@ class WebSocketManager:
         for ws in conns:
             try:
                 await ws.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("ws_close_failed", session_id=session_id, error=str(e))
 
 
 # 全局单例

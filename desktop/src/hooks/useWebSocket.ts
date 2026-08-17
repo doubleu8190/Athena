@@ -6,6 +6,8 @@ import type {
   ToolCall,
   Message,
   Step,
+  Attachment,
+  FileTask,
 } from "../types"
 import { useChatStore } from "../store/chatStore"
 
@@ -42,6 +44,8 @@ export function useWebSocket(options: UseWebSocketOptions) {
     clearThinking,
     setError,
     clearError,
+    upsertAttachment,
+    upsertFileTask,
   } = useChatStore()
 
   const buildWsUrl = useCallback(() => {
@@ -413,6 +417,21 @@ export function useWebSocket(options: UseWebSocketOptions) {
           setAgentStatus("running")
           break
 
+        case EventType.ATTACHMENT_UPDATED:
+          upsertAttachment(data as unknown as Attachment)
+          break
+
+        case EventType.FILE_TASK_CREATED:
+        case EventType.FILE_TASK_PROGRESS:
+        case EventType.FILE_TASK_COMPLETED:
+        case EventType.FILE_TASK_FAILED:
+          upsertFileTask(data as unknown as FileTask)
+          break
+
+        case EventType.AGENT_WAITING_FILE:
+          setAgentStatus("running")
+          break
+
         default:
           // 未处理的事件类型暂不处理
           break
@@ -434,6 +453,8 @@ export function useWebSocket(options: UseWebSocketOptions) {
       resolveApproval,
       setError,
       clearError,
+      upsertAttachment,
+      upsertFileTask,
       sessionId,
     ],
   )

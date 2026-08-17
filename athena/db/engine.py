@@ -15,7 +15,7 @@ import os
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from athena.db.models import MEMORY_FTS_DDL, Base
+from athena.db.models import FILE_CHUNK_FTS_DDL, MEMORY_FTS_DDL, Base
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -36,9 +36,10 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 # v2: 新增 mcp_servers 表 — 持久化用户注册的 MCP Server 配置（command/args/env）。
 #     全新建库由 Base.metadata.create_all 自动建表，迁移 SQL 为已有库兜底。
 # v3: 新增 tools 表 — 持久化工具治理配置（risk_level/require_approval/enabled）。
+# v4: 新增 File Intelligence 附件、任务、分块、产物、Adapter、代码索引和续跑表。
 #     MCP 工具和 Native 工具统一存储，支持用户在前端管理页面调优。
 # 后续表结构变更在此追加增量迁移（key 为目标版本号）。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _MIGRATIONS: dict[int, str] = {
     2: """
@@ -66,6 +67,8 @@ CREATE TABLE IF NOT EXISTS tools (
     PRIMARY KEY (tool_name)
 )
 """,
+    # 新表由 Base.metadata.create_all 创建；此版本记录用于已有数据库升级标记。
+    4: "",
 }
 
 
@@ -131,6 +134,7 @@ async def init_engine(db_path: str) -> None:
         await _run_migrations(conn)
         # 创建 FTS5 虚拟表（ORM 不支持 FTS5，需原生 DDL）
         await conn.execute(text(MEMORY_FTS_DDL))
+        await conn.execute(text(FILE_CHUNK_FTS_DDL))
 
     logger.info("database_engine_initialized", db_path=db_path)
 

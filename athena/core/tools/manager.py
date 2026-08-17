@@ -18,7 +18,6 @@ from athena.core.tools.base import (
     NativeHandler,
     NativeTool,
     ToolProtocol,
-    _infer_parameters,
 )
 from athena.models.tool import RiskLevel, ToolResult, ToolSchema
 from athena.utils.logging import get_logger
@@ -196,6 +195,9 @@ class UnifiedToolManager:
         session_id / run_id / tool_call_id 为必填：标识本次工具调用归属的会话、运行与
         具体工具调用，用于审批留痕与子代理父链上下文。
         """
+        # Each invocation owns its parameter mapping.  Concurrent sessions may
+        # call the same NativeTool, so context fields must never leak between them.
+        params = dict(params)
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(status="failed", error=f"Tool '{name}' not registered")
@@ -227,13 +229,23 @@ class UnifiedToolManager:
                 logger.error("approval_failed", tool=name, error=str(e))
                 return ToolResult(status="failed", error=f"审批流程异常: {e}")
 
-        # 执行工具；spawn_sub_agent/spawn_parallel_agents 需要当前 run_id、session_id 作为父链上下文
-        if isinstance(tool, NativeTool) and (
-            name == "spawn_sub_agent" or name == "spawn_parallel_agents"
-        ):
-            params["parent_run_id"] = run_id
-            params["session_id"] = session_id
-        return await tool.execute(**params)
+        # 所有 Native 工具共享当前调用上下文；文件能力通过 ContextVar 读取，
+        # 不把 session_id/run_id 暴露给模型，也避免参数伪造。
+        token = None
+        if isinstance(tool, NativeTool):
+            from athena.core.files.context import ToolExecutionContext, reset_context, set_context
+
+            token = set_context(ToolExecutionContext(session_id, run_id, tool_call_id))
+            if name in ("spawn_sub_agent", "spawn_parallel_agents"):
+                params["parent_run_id"] = run_id
+                params["session_id"] = session_id
+        try:
+            return await tool.execute(**params)
+        finally:
+            if token is not None:
+                from athena.core.files.context import reset_context
+
+                reset_context(token)
 
     # ------------------------------------------------------------------
     # LangChain 集成

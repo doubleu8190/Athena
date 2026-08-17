@@ -53,6 +53,48 @@ export interface Message {
   run_id?: string
   /** assistant 回合发起/已落库的工具调用（来自后端 Message.tool_calls） */
   tool_calls?: ToolCallInvocation[]
+  attachments?: AttachmentRef[]
+}
+
+export type AttachmentStatus = "uploaded" | "queued" | "processing" | "ready" | "failed" | "deleted"
+
+export interface AttachmentRef {
+  id: string
+  filename: string
+  mime_type: string
+  size_bytes: number
+  status: AttachmentStatus
+}
+
+export interface Attachment extends AttachmentRef {
+  session_id: string
+  message_id?: string | null
+  sha256: string
+  adapter_name?: string | null
+  adapter_version?: string | null
+  capabilities: string[]
+  error_message?: string | null
+  created_at: string
+  updated_at: string
+  metadata?: Record<string, unknown>
+}
+
+export type FileTaskStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"
+
+export interface FileTask {
+  id: string
+  session_id: string
+  attachment_id: string
+  task_type: string
+  status: FileTaskStatus
+  progress: number
+  stage: string
+  error_message?: string | null
+}
+
+export interface AttachmentUploadItem {
+  attachment: Attachment
+  task: FileTask
 }
 
 export interface ThinkingState {

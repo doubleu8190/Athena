@@ -37,6 +37,29 @@ from athena.utils.logging import configure_logging, get_logger
 logger = get_logger(__name__)
 
 
+async def _persist_registered_tool_configs(tool_manager, db) -> None:
+    """Persist schemas and apply stored governance settings to runtime tools."""
+    for tool in tool_manager.list_tools():
+        schema = tool.schema
+        await db.tools.upsert(
+            tool_name=schema.name,
+            execution_mode=str(schema.execution_mode.value),
+            description=schema.description,
+            parameters=schema.parameters,
+            risk_level=str(schema.risk_level.value),
+            require_approval=schema.require_approval,
+            enabled=True,
+        )
+        persisted = await db.tools.get(schema.name)
+        if persisted is not None:
+            tool_manager.update_tool_config(
+                schema.name,
+                risk_level=persisted.risk_level.value,
+                require_approval=persisted.require_approval,
+                enabled=persisted.enabled,
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理 - 启动初始化与关闭清理."""
@@ -68,6 +91,7 @@ async def lifespan(app: FastAPI):
     from athena.core.tools.builtin.registry import register_builtin_tools
 
     tool_manager = UnifiedToolManager(approval_manager=approval_manager)
+    await db.tools.migrate_legacy_builtin_names()
     await register_builtin_tools(tool_manager, db)
     set_tool_manager(tool_manager)
 
@@ -86,6 +110,23 @@ async def lifespan(app: FastAPI):
 
     # 副 Provider：用于检索、摘要、事实提取、压缩等轻量任务
     llm_secondary = LLMProvider.from_secondary_settings(settings=settings) or llm
+
+    from athena.core.files.capabilities import register_file_capabilities
+    from athena.core.files.runtime import FileIntelligenceRuntime
+    from athena.core.files.tasks import FileTaskWorker
+    from athena.gateway.routes._runtime import set_file_runtime, set_file_worker
+
+    file_runtime = FileIntelligenceRuntime(
+        db.files, llm, llm_secondary, settings=settings, ws_manager=ws_manager
+    )
+    await file_runtime.initialize()
+    register_file_capabilities(tool_manager, file_runtime)
+    # Capability schema is persisted using the same governance mechanism as built-ins.
+    await _persist_registered_tool_configs(tool_manager, db)
+    file_worker = FileTaskWorker(file_runtime)
+    file_runtime.set_task_enqueuer(file_worker.enqueue_task)
+    set_file_runtime(file_runtime)
+    set_file_worker(file_worker)
 
     from athena.core.memory.memory import MemoryManager
 
@@ -140,6 +181,8 @@ async def lifespan(app: FastAPI):
         memory_manager=memory_manager,
         settings=settings,
     )
+    file_worker.set_continuation_callback(workflow.resume_file_continuation)
+    await file_worker.start()
     set_workflow(workflow)
 
     # 7. 被动会话恢复（project_memory 约束：通知用户 → 等待确认 → 执行恢复）
@@ -153,9 +196,13 @@ async def lifespan(app: FastAPI):
     # 关闭清理
     logger.info("athena_shutting_down")
     try:
+        await file_worker.stop()
+    except Exception as e:
+        logger.warning("file_worker_shutdown_failed", error=str(e))
+    try:
         await approval_manager.cancel_all_pending("")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("approval_cancel_pending_failed", error=str(e))
     # 停掉后台看门狗，并落盘内存中未同步的访问统计
     memory_flush_task.cancel()
     try:

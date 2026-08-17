@@ -1,4 +1,4 @@
-import { Bot, User, Wrench, Clock } from "lucide-react"
+import { Bot, User, Wrench, Clock, Paperclip } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import type { Message } from "../types"
 import { ToolCard } from "./ToolCard"
@@ -94,6 +94,18 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           <div className="flex flex-col gap-2 w-full">
             {relatedToolCalls.map((tc) => (
               <ToolCard key={tc.id} toolCall={tc} />
+            ))}
+          </div>
+        )}
+
+        {(message.attachments?.length ?? 0) > 0 && (
+          <div className={`flex flex-wrap gap-1.5 ${isUser ? "justify-end" : "justify-start"}`}>
+            {message.attachments?.map((attachment) => (
+              <div key={attachment.id} className="inline-flex max-w-[260px] items-center gap-1.5 rounded-md border border-athena-border bg-athena-bg px-2 py-1 text-xs text-athena-muted">
+                <Paperclip className="w-3 h-3 flex-shrink-0" />
+                <span className="truncate">{attachment.filename}</span>
+                <span className="flex-shrink-0">{attachment.status}</span>
+              </div>
             ))}
           </div>
         )}

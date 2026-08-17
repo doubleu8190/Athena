@@ -157,13 +157,13 @@ async def test_delete_session_cascade(db: Database):
 
 @pytest.mark.asyncio
 async def test_baseline_schema_flat(db: Database):
-    """验证 metadata_json 平铺后的基线 schema + v2 mcp_servers 表.
+    """验证 metadata_json 平铺后的基线 schema + v4 File Intelligence 表.
 
     - messages 表含 step_id/tool_call_record_id/tool_name/type 列，且无 metadata_json
     - sessions/steps 表无 metadata_json
     - memories 表含 type/category/confidence/source 列
     - v2 新增 mcp_servers 表（name/config_json/created_at/deleted_time）
-    - user_version == 2
+    - user_version == 4
     """
     from sqlalchemy import text
 
@@ -189,7 +189,7 @@ async def test_baseline_schema_flat(db: Database):
         assert {"name", "config_json", "created_at", "deleted_time"} <= mcp_cols
 
         result = await session.execute(text("PRAGMA user_version;"))
-        assert result.scalar() == 2
+        assert result.scalar() == 4
 
 
 @pytest.mark.asyncio

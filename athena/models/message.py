@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from athena.models.file import AttachmentRef
+
 
 class MessageRole(StrEnum):
     USER = "user"
@@ -33,4 +35,5 @@ class Message(BaseModel):
     tool_call_record_id: str | None = None  # 关联的 tool_call 记录 ID（tool 消息）
     tool_name: str | None = None  # 工具名（tool 消息，前端据此标名避免跨表 join）
     type: str | None = None  # 消息类型标记（如 "conversation_summary"）
+    attachments: list[AttachmentRef] = Field(default_factory=list)
     timestamp: datetime

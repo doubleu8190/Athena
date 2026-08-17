@@ -138,8 +138,9 @@ class DockerSandboxManager:
                 if container.status != "running":
                     container.start()
                 return container
-            except Exception:
+            except Exception as e:
                 # 容器不存在，移除并创建新的
+                logger.warning("sandbox_existing_container_unavailable", scope_key=scope_key, container_id=container_id, error=str(e))
                 self._containers.pop(scope_key, None)
 
         # 构建容器配置
@@ -291,8 +292,8 @@ class DockerSandboxManager:
                 client = self._get_client()
                 container = client.containers.get(container_id)
                 container.remove(force=True)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("sandbox_session_container_cleanup_failed", session_id=session_id, container_id=container_id, error=str(e))
         if keys_to_remove:
             logger.info(
                 "sandbox_session_cleaned",
@@ -308,8 +309,8 @@ class DockerSandboxManager:
                 client = self._get_client()
                 container = client.containers.get(container_id)
                 container.remove(force=True)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("sandbox_container_cleanup_failed", scope_key=scope_key, container_id=container_id, error=str(e))
         logger.info("sandbox_all_containers_cleaned")
 
 

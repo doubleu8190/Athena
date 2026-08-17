@@ -30,6 +30,7 @@ from athena.core.tools.manager import UnifiedToolManager
 from athena.db.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, MessageRole
+from athena.models.file import Attachment, AttachmentRef, AttachmentStatus, FileTask
 from athena.gateway.ws.events import EventType, build_event
 from athena.utils.ids import generate_sub_run_id, generate_time_id
 from athena.utils.logging import get_logger
@@ -372,7 +373,9 @@ class AgentWorkflow:
         session_id: str,
         user_message: str,
         system_prompt: str | None = None,
+        attachment_ids: list[str] | None = None,
         stop_signal: asyncio.Event | None = None,
+        continuation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """处理用户消息的编排入口。
 
@@ -401,7 +404,24 @@ class AgentWorkflow:
             - ``error`` (str | None): 错误信息；成功时为 ``None``。
             - ``interrupted`` (bool): 是否因停止信号而中断。
         """
+        if continuation is not None:
+            user_message = str(continuation.get("user_message", user_message))
+            attachment_ids = list(continuation.get("attachment_ids", attachment_ids or []))
         effective_prompt = DEFAULT_SYSTEM_PROMPT
+        attachment_ids = list(dict.fromkeys(attachment_ids or []))
+        requested_attachments: list[Attachment] = []
+        if attachment_ids:
+            loaded_attachments = await self._db.files.get_attachments(session_id, attachment_ids)
+            attachments_by_id = {item.id: item for item in loaded_attachments}
+            for file_id in attachment_ids:
+                attachment = attachments_by_id.get(file_id)
+                if attachment is None:
+                    if continuation is not None and continuation.get("file_outcomes", {}).get(file_id) == "deleted":
+                        continue
+                    raise ValueError("附件不存在或不属于当前会话")
+                if continuation is None and attachment.status == AttachmentStatus.FAILED:
+                    raise ValueError(f"附件 {attachment.filename} 处理失败，不能随消息提交")
+                requested_attachments.append(attachment)
         self._session_stop_signals[session_id] = stop_signal
         logger.info(
             "task_classification_start",
@@ -463,20 +483,94 @@ class AgentWorkflow:
         # run_id 在持久化之前生成，使用户消息与 steps 共享同一分组键：
         # 前端据此把工具/步骤按"用户请求"归组；同时避免旧 run_id
         # 按日期+计数方案在进程重启后同一天重号的问题。
-        rid = generate_time_id()
+        rid = str(continuation.get("run_id")) if continuation is not None else generate_time_id()
 
         # 中断恢复保障：run 中途崩溃时用户消息已在库中，
         # 避免出现没有对应用户消息的孤儿 assistant 消息。
-        user_msg = Message(
-            id=generate_time_id(),
-            session_id=session_id,
-            role=MessageRole.USER,
-            content=user_message,
-            run_id=rid,
-            timestamp=datetime.now(),
-        )
-        await self._db.messages.save(user_msg)
-        messages_for_harness = history + [user_msg]
+        user_msg: Message
+        if continuation is not None:
+            user_msg = next(
+                (item for item in history if item.id == continuation.get("message_id")),
+                Message(
+                    id=str(continuation.get("message_id", generate_time_id())),
+                    session_id=session_id, role=MessageRole.USER, content=user_message,
+                    run_id=rid, timestamp=datetime.now(),
+                ),
+            )
+        else:
+            user_msg = Message(
+                id=generate_time_id(), session_id=session_id, role=MessageRole.USER,
+                content=user_message, run_id=rid, timestamp=datetime.now(),
+            )
+            await self._db.messages.save(user_msg)
+        message_attachment_refs: list[AttachmentRef] = []
+        if attachment_ids and continuation is None:
+            bound_attachments = await self._db.files.bind_message(session_id, user_msg.id, attachment_ids)
+            message_attachment_refs = [item.to_ref() for item in bound_attachments]
+            user_msg.attachments = message_attachment_refs
+        elif continuation is not None:
+            message_attachment_refs = user_msg.attachments
+            if not message_attachment_refs:
+                continuation_attachments = (
+                    await self._db.files.attachments_for_messages([user_msg.id])
+                ).get(user_msg.id, [])
+                message_attachment_refs = [item.to_ref() for item in continuation_attachments]
+                user_msg.attachments = message_attachment_refs
+
+        # Keep each message's file context attached to that message.  This avoids
+        # losing older uploads when a later turn adds another attachment, while
+        # leaving the persisted user-visible message text unchanged.
+        messages_for_harness: list[Message] = []
+        if continuation is not None:
+            base_messages = [*history]
+            if not any(item.id == user_msg.id for item in base_messages):
+                base_messages.append(user_msg)
+        else:
+            base_messages = [*history, user_msg]
+        for message in base_messages:
+            if message.role != MessageRole.USER or not message.attachments:
+                messages_for_harness.append(message)
+                continue
+            refs = "\n".join(
+                f"- file_id={ref.id}; name={ref.filename}; status={ref.status.value}; "
+                f"mime={ref.mime_type}; size={ref.size_bytes}"
+                for ref in message.attachments
+            )
+            context = (
+                "\n\n[该用户消息关联的文件资产]\n"
+                f"{refs}\n文件正文不会自动注入上下文。需要内容时，必须使用正式文件能力工具并传入上述 file_id。"
+            )
+            messages_for_harness.append(message.model_copy(update={"content": message.content + context}))
+
+        if continuation is None and attachment_ids:
+            tasks_by_attachment = await self._db.files.list_tasks_for_attachments(session_id, attachment_ids)
+            pending_tasks: list[FileTask] = []
+            for file_id in attachment_ids:
+                for task in tasks_by_attachment.get(file_id, []):
+                    if task.status.value in ("queued", "running", "waiting"):
+                        pending_tasks.append(task)
+            pending_attachments = [
+                attachment.id for attachment in requested_attachments
+                if attachment.status.value != "ready"
+            ]
+            if pending_attachments:
+                await self._db.files.create_continuation(
+                    session_id, rid,
+                    task_ids=[task.id for task in pending_tasks],
+                    request={"message_id": user_msg.id, "user_message": user_message,
+                             "attachment_ids": attachment_ids},
+                )
+                await self._db.sessions.update(session_id, status="waiting", run_id=rid)
+                await self._ws.send_to_session(
+                    session_id,
+                    build_event(EventType.AGENT_WAITING_FILE,
+                                {"file_ids": pending_attachments, "task_ids": [task.id for task in pending_tasks]},
+                                session_id=session_id, run_id=rid),
+                )
+                return {"content": "附件正在处理中，完成后将自动继续。", "run_id": rid,
+                        "turn_count": 0, "tool_results": [], "error": None,
+                        "interrupted": False, "waiting": True,
+                        "attachments": [item.model_dump(mode="json") for item in message_attachment_refs]}
 
         # ── Step 5: 调用 Harness 执行 LLM 交互与工具调用 ──
         harness = Harness(
@@ -529,7 +623,65 @@ class AgentWorkflow:
             "tool_results": result.tool_results,
             "error": result.error,
             "interrupted": result.interrupted,
+            "attachments": [item.model_dump(mode="json") for item in message_attachment_refs],
         }
+
+    async def resume_file_continuation(self, continuation: dict[str, Any]) -> None:
+        """Resume a file-waiting run exactly once after its index task completes."""
+        try:
+            outcomes = continuation.get("file_outcomes", {})
+            unavailable = {
+                file_id: status for file_id, status in outcomes.items()
+                if status in {AttachmentStatus.FAILED.value, AttachmentStatus.DELETED.value}
+            }
+            if unavailable:
+                attachments = await self._db.files.get_attachments(
+                    continuation["session_id"],
+                    continuation.get("attachment_ids", []),
+                    include_deleted=True,
+                )
+                names = {item.id: item.filename for item in attachments}
+                details = "\n".join(
+                    f"- {names.get(file_id, file_id)}: "
+                    f"{'已删除' if status == AttachmentStatus.DELETED.value else '处理失败'}"
+                    for file_id, status in unavailable.items()
+                )
+                content = (
+                    "附件处理未完成，无法自动继续本次请求。\n"
+                    f"{details}\n请重新上传文件或重试处理后再发送消息。"
+                )
+                await self._db.messages.save(
+                    Message(
+                        id=generate_time_id(),
+                        session_id=continuation["session_id"],
+                        role=MessageRole.ASSISTANT,
+                        content=content,
+                        run_id=str(continuation.get("run_id", "")),
+                        timestamp=datetime.now(),
+                    )
+                )
+                await self._db.sessions.update(continuation["session_id"], status="idle")
+                await self._ws.send_to_session(
+                    continuation["session_id"],
+                    build_event(
+                        EventType.SYSTEM_MESSAGE,
+                        {"content": content, "attachment_ids": list(unavailable.keys())},
+                        session_id=continuation["session_id"],
+                        run_id=str(continuation.get("run_id", "")),
+                    ),
+                )
+                await self._db.files.finish_continuation(continuation["id"], failed=True)
+                return
+            await self.process_message(
+                session_id=continuation["session_id"],
+                user_message=continuation.get("user_message", ""),
+                attachment_ids=continuation.get("attachment_ids", []),
+                continuation=continuation,
+            )
+            await self._db.files.finish_continuation(continuation["id"])
+        except Exception:
+            await self._db.files.finish_continuation(continuation["id"], failed=True)
+            logger.exception("file_continuation_resume_failed", continuation_id=continuation.get("id"))
 
     async def _extract_facts_async(
         self,

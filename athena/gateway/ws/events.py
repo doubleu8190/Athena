@@ -77,6 +77,12 @@ class EventType(StrEnum):
     PONG = "pong"
     SYSTEM_NOTICE = "system_notice"
     SYSTEM_MESSAGE = "system_message"
+    FILE_TASK_CREATED = "file_task_created"
+    FILE_TASK_PROGRESS = "file_task_progress"
+    FILE_TASK_COMPLETED = "file_task_completed"
+    FILE_TASK_FAILED = "file_task_failed"
+    ATTACHMENT_UPDATED = "attachment_updated"
+    AGENT_WAITING_FILE = "agent_waiting_file"
 
 
 class ClientEventType(StrEnum):

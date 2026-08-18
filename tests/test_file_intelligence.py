@@ -9,6 +9,7 @@ import pytest
 
 from athena.config.settings import Settings
 from athena.core.files.adapters import ExcelAdapter, ImageAdapter, PdfAdapter, WordAdapter, ArchiveAdapter
+from athena.core.files.base import ExtractionContext
 from athena.core.files.capabilities import register_file_capabilities
 from athena.core.files.runtime import FileAccessError, FileIntelligenceRuntime
 from athena.core.files.storage import FileTooLargeError, StorageLayer
@@ -31,6 +32,10 @@ class _FakeLLM:
 async def _chunks(*values: bytes):
     for value in values:
         yield value
+
+
+def _context(path, workspace, filename: str | None = None, mime_type: str = "") -> ExtractionContext:
+    return ExtractionContext(path=path, workspace=workspace, filename=filename or path.name, mime_type=mime_type)
 
 
 @pytest.mark.asyncio
@@ -72,6 +77,42 @@ async def test_parse_search_message_binding_and_session_isolation(tmp_path):
 
         with pytest.raises(FileAccessError):
             await runtime.read_file("two", attachment.id)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_parse_csv_preserves_suffix_for_table_artifact(tmp_path):
+    db = Database(str(tmp_path / "csv-artifacts.db"))
+    await db.connect()
+    try:
+        await db.sessions.create("session")
+        settings = Settings(
+            _env_file=None,
+            sqlite_db_path=str(tmp_path / "csv-artifacts.db"),
+            chromadb_path=str(tmp_path / "chroma"),
+            file_storage_path=str(tmp_path / "storage"),
+        )
+        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
+        blob = await runtime.storage.save_stream(_chunks(b"name,value\nalpha,1\nbeta,2\n"))
+        attachment = await db.files.create_attachment(
+            session_id="session", filename="data.csv", mime_type="text/csv",
+            size_bytes=blob.size_bytes, sha256=blob.sha256, storage_key=blob.storage_key,
+        )
+
+        parsed = await runtime.parse_attachment(attachment.id)
+        key = FileIntelligenceRuntime.cache_key(
+            attachment, "tables", {}, "2.0", settings.primary_llm.model
+        )
+        artifact = await db.files.get_artifact(key)
+
+        assert parsed["row_count"] == 2
+        assert parsed["columns"] == ["name", "value"]
+        assert artifact is not None
+        assert artifact["metadata"]["count"] == 1
+
+        tables = await runtime.extract_table("session", attachment.id)
+        assert tables["tables"][0]["headers"] == ["name", "value"]
     finally:
         await db.close()
 
@@ -216,7 +257,7 @@ async def test_image_adapter_passes_path_to_rapidocr(tmp_path, monkeypatch):
     image_path = tmp_path / "sample.png"
     Image.new("RGB", (12, 8), "white").save(image_path)
 
-    result = await ImageAdapter().extract(image_path, Settings(_env_file=None), tmp_path)
+    result = await ImageAdapter().extract(_context(image_path, tmp_path), Settings(_env_file=None))
 
     assert seen["img_content"] == image_path
     assert result.units[0].text == "hello"
@@ -361,9 +402,8 @@ async def test_archive_rejects_path_traversal(tmp_path):
 
     with pytest.raises(ValueError, match="路径穿越"):
         await ArchiveAdapter().extract(
-            archive_path,
+            _context(archive_path, tmp_path / "workspace"),
             Settings(_env_file=None),
-            tmp_path / "workspace",
         )
 
 
@@ -396,7 +436,7 @@ async def test_office_pdf_and_image_adapters_preserve_structure(tmp_path):
     document.add_paragraph("Body")
     docx_path = tmp_path / "sample.docx"
     document.save(docx_path)
-    word = await WordAdapter().extract(docx_path, settings, tmp_path)
+    word = await WordAdapter().extract(_context(docx_path, tmp_path), settings)
     assert word.units[0].metadata["style"] == "Heading 1"
 
     workbook = Workbook()
@@ -406,12 +446,12 @@ async def test_office_pdf_and_image_adapters_preserve_structure(tmp_path):
     xlsx_path = tmp_path / "sample.xlsx"
     workbook.save(xlsx_path)
     workbook.close()
-    excel = await ExcelAdapter().extract(xlsx_path, settings, tmp_path)
+    excel = await ExcelAdapter().extract(_context(xlsx_path, tmp_path), settings)
     assert excel.metadata["sheets"][0]["formulas"] == [{"cell": "A2", "formula": "=A1*2"}]
 
     image_path = tmp_path / "sample.png"
     Image.new("RGB", (12, 8), "white").save(image_path)
-    image = await ImageAdapter().extract(image_path, settings, tmp_path)
+    image = await ImageAdapter().extract(_context(image_path, tmp_path), settings)
     assert (image.metadata["width"], image.metadata["height"]) == (12, 8)
 
     pdf_path = tmp_path / "sample.pdf"
@@ -419,5 +459,5 @@ async def test_office_pdf_and_image_adapters_preserve_structure(tmp_path):
     writer.add_blank_page(width=100, height=100)
     with pdf_path.open("wb") as output:
         writer.write(output)
-    pdf = await PdfAdapter().extract(pdf_path, settings, tmp_path)
+    pdf = await PdfAdapter().extract(_context(pdf_path, tmp_path), settings)
     assert pdf.metadata["pages"] == 1

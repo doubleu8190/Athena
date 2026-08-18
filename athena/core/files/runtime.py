@@ -26,7 +26,7 @@ from typing import Any, Awaitable, Callable
 from langchain_core.messages import HumanMessage
 
 from athena.config.settings import Settings, get_settings
-from athena.core.files.base import ExtractedUnit
+from athena.core.files.base import ExtractedUnit, ExtractionContext
 from athena.core.files.registry import AdapterRegistry
 from athena.core.files.repository import FileRepository
 from athena.core.files.storage import StorageLayer
@@ -170,7 +170,13 @@ class FileIntelligenceRuntime:
         path = self.storage.resolve(attachment.storage_key)
         workspace = self.storage.create_workspace(attachment.id)
         try:
-            result = await adapter.extract(path, self.settings, workspace)
+            context = ExtractionContext(
+                path=path,
+                workspace=workspace,
+                filename=attachment.filename,
+                mime_type=attachment.mime_type,
+            )
+            result = await adapter.extract(context, self.settings)
             # Adapters receive the content-addressed blob path. Replace that
             # implementation detail with the user-visible asset name in all
             # locators and code indexes before persistence.

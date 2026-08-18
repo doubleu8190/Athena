@@ -29,7 +29,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from athena.config.settings import Settings
-from athena.core.files.base import ExtractedUnit, ExtractionResult
+from athena.core.files.base import ExtractedUnit, ExtractionContext, ExtractionResult
 from athena.models.file import AdapterInfo
 from athena.utils.logging import get_logger
 
@@ -104,21 +104,28 @@ class TextAdapter:
         extensions=sorted(TEXT_EXTENSIONS | {".csv"}), capabilities=["read", "search", "summarize", "analyze"],
     )
 
-    async def extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    async def extract(
+        self,
+        context: ExtractionContext,
+        settings: Settings,
+    ) -> ExtractionResult:
         """提取文本文件内容（在线程池中执行 I/O）。"""
-        return await asyncio.to_thread(self._extract, path)
+        return await asyncio.to_thread(self._extract, context)
 
-    def _extract(self, path: Path) -> ExtractionResult:
+    def _extract(self, context: ExtractionContext) -> ExtractionResult:
         """同步提取文本内容和 CSV 表格数据。"""
+        path = context.path
+        filename = Path(context.filename).name
+        suffix = Path(filename).suffix.lower()
         text = _decode(path.read_bytes())
         metadata: dict[str, Any] = {"line_count": len(text.splitlines())}
         tables: list[dict[str, Any]] = []
         # CSV 文件额外解析表格结构
-        if path.suffix.lower() == ".csv":
+        if suffix == ".csv":
             rows = list(csv.reader(io.StringIO(text)))
             if rows:
                 metadata.update({"row_count": max(0, len(rows) - 1), "columns": rows[0]})
-                tables.append({"name": path.name, "headers": rows[0], "rows": rows[1:201]})
+                tables.append({"name": filename, "headers": rows[0], "rows": rows[1:201]})
         return ExtractionResult(
             units=[ExtractedUnit(text, {"path": path.name, "start_line": 1}, {"kind": "text"})],
             metadata=metadata, tables=tables,
@@ -152,9 +159,13 @@ class PdfAdapter:
         capabilities=["read", "search", "summarize", "analyze", "extract_table"],
     )
 
-    async def extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    async def extract(
+        self,
+        context: ExtractionContext,
+        settings: Settings,
+    ) -> ExtractionResult:
         """提取 PDF 内容（在线程池中执行 I/O）。"""
-        return await asyncio.to_thread(self._extract, path)
+        return await asyncio.to_thread(self._extract, context.path)
 
     def _extract(self, path: Path) -> ExtractionResult:
         """同步提取 PDF 文本、OCR 和表格数据。"""
@@ -232,9 +243,13 @@ class WordAdapter:
         extensions=[".docx"], capabilities=["read", "search", "summarize", "analyze", "extract_table"],
     )
 
-    async def extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    async def extract(
+        self,
+        context: ExtractionContext,
+        settings: Settings,
+    ) -> ExtractionResult:
         """提取 Word 文档内容（在线程池中执行 I/O）。"""
-        return await asyncio.to_thread(self._extract, path)
+        return await asyncio.to_thread(self._extract, context.path)
 
     def _extract(self, path: Path) -> ExtractionResult:
         """同步提取段落文本和嵌入表格。"""
@@ -273,9 +288,13 @@ class ExcelAdapter:
         extensions=[".xlsx", ".xlsm"], capabilities=["read", "search", "summarize", "analyze", "extract_table"],
     )
 
-    async def extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    async def extract(
+        self,
+        context: ExtractionContext,
+        settings: Settings,
+    ) -> ExtractionResult:
         """提取 Excel 内容（在线程池中执行 I/O）。"""
-        return await asyncio.to_thread(self._extract, path)
+        return await asyncio.to_thread(self._extract, context.path)
 
     def _extract(self, path: Path) -> ExtractionResult:
         """同步提取所有工作表的数据和公式。"""
@@ -336,9 +355,13 @@ class ImageAdapter:
         capabilities=["read", "search", "summarize", "analyze"],
     )
 
-    async def extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    async def extract(
+        self,
+        context: ExtractionContext,
+        settings: Settings,
+    ) -> ExtractionResult:
         """提取图片 OCR 文本（在线程池中执行 I/O）。"""
-        return await asyncio.to_thread(self._extract, path)
+        return await asyncio.to_thread(self._extract, context.path)
 
     def _extract(self, path: Path) -> ExtractionResult:
         """同步提取图片元数据和 OCR 文本。"""
@@ -378,14 +401,19 @@ class CodeAdapter:
         capabilities=["read", "search", "summarize", "analyze", "symbols", "references", "call_graph"],
     )
 
-    async def extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    async def extract(
+        self,
+        context: ExtractionContext,
+        settings: Settings,
+    ) -> ExtractionResult:
         """提取代码文件内容和符号索引（在线程池中执行 I/O）。"""
-        return await asyncio.to_thread(self._extract_one, path, path.name)
+        relative_path = Path(context.filename).name
+        return await asyncio.to_thread(self._extract_one, context.path, relative_path)
 
     def _extract_one(self, path: Path, relative_path: str) -> ExtractionResult:
         """同步提取源码、符号表和依赖关系。"""
         text = _decode(path.read_bytes())
-        language = CODE_EXTENSIONS.get(path.suffix.lower(), "text")
+        language = CODE_EXTENSIONS.get(Path(relative_path).suffix.lower(), "text")
         symbols, dependencies = _code_index(text, language, relative_path)
         return ExtractionResult(
             units=[ExtractedUnit(text, {"path": relative_path, "start_line": 1}, {"language": language, "kind": "source"})],
@@ -414,12 +442,18 @@ class ArchiveAdapter:
         capabilities=["read", "search", "summarize", "analyze", "symbols", "references", "call_graph"],
     )
 
-    async def extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    async def extract(
+        self,
+        context: ExtractionContext,
+        settings: Settings,
+    ) -> ExtractionResult:
         """提取压缩包内容（在线程池中执行 I/O）。"""
-        return await asyncio.to_thread(self._extract, path, settings, workspace)
+        return await asyncio.to_thread(self._extract, context, settings)
 
-    def _extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    def _extract(self, context: ExtractionContext, settings: Settings) -> ExtractionResult:
         """安全解压并递归提取内部文件的代码符号和文本内容。"""
+        path = context.path
+        workspace = context.workspace
         extracted = workspace / "archive"
         extracted.mkdir(parents=True, exist_ok=True)
         members = self._safe_extract(path, extracted, settings)
@@ -440,7 +474,7 @@ class ArchiveAdapter:
                 dependencies.extend(result.dependencies)
                 languages[result.metadata["language"]] += 1
             elif suffix in TEXT_EXTENSIONS or suffix == ".csv":
-                result = text_adapter._extract(item)
+                result = text_adapter._extract(ExtractionContext(path=item, workspace=workspace, filename=relative))
                 for unit in result.units:
                     unit.locator["path"] = relative
                 units.extend(result.units)

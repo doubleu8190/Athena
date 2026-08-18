@@ -7,7 +7,8 @@
 Typical usage example::
 
     adapter: FileAdapter = TextAdapter()
-    result = await adapter.extract(path, settings, workspace)
+    context = ExtractionContext(path=path, workspace=workspace, filename=path.name)
+    result = await adapter.extract(context, settings)
     for unit in result.units:
         print(unit.content[:100])
 """
@@ -20,6 +21,23 @@ from typing import Any, Protocol
 
 from athena.config.settings import Settings
 from athena.models.file import AdapterInfo
+
+
+@dataclass
+class ExtractionContext:
+    """文件提取上下文。
+
+    Attributes:
+        path: 文件的绝对路径。
+        workspace: 临时工作目录路径，适配器可在此解压或生成中间文件。
+        filename: 用户上传时的可见文件名。
+        mime_type: 上传或检测得到的 MIME 类型。
+    """
+
+    path: Path
+    workspace: Path
+    filename: str
+    mime_type: str = ""
 
 
 @dataclass
@@ -80,13 +98,16 @@ class FileAdapter(Protocol):
 
     info: AdapterInfo
 
-    async def extract(self, path: Path, settings: Settings, workspace: Path) -> ExtractionResult:
+    async def extract(
+        self,
+        context: ExtractionContext,
+        settings: Settings,
+    ) -> ExtractionResult:
         """从文件中提取内容、符号和表格数据。
 
         Args:
-            path: 文件的绝对路径。
+            context: 文件路径、临时目录、原始文件名和 MIME 类型。
             settings: 全局配置，包含 chunk 大小、压缩参数等。
-            workspace: 临时工作目录路径，适配器可在此解压或生成中间文件。
 
         Returns:
             ``ExtractionResult``：包含提取的内容单元、元数据和结构化信息。

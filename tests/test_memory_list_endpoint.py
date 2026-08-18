@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import os
 import tempfile
-from unittest.mock import AsyncMock
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from athena.config.settings import Settings
 from athena.core.memory.memory import MemoryManager
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
+from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
+from tests.fakes import install_runtime
 
 
 class _FakeCollection:
@@ -74,24 +76,27 @@ async def db(db_path):
 
 @pytest.fixture
 def manager(db):
-    """MemoryManager 指向同一全局 SQLite 引擎；Chroma 用假 collection 规避."""
-    return MemoryManager(chroma_client=_FakeClient())
+    """为端点测试显式注入 SQLite 和 Chroma 存储端口."""
+    settings = Settings(_env_file=None)
+    return MemoryManager(
+        settings=settings,
+        repository=SqliteMemoryRepository(),
+        vector_store=ChromaMemoryStore.with_client(
+            path=str(settings.chroma_path),
+            client=_FakeClient(),
+        ),
+    )
 
 
 @pytest.fixture
 def client(manager):
     from athena.gateway.routes.memory import router
-    import athena.gateway.routes.memory as memory_mod
 
     app = FastAPI()
     app.include_router(router)
-
-    original = memory_mod._get_memory_manager
-    memory_mod._get_memory_manager = AsyncMock(return_value=manager)
+    install_runtime(app, memory_manager=manager)
 
     yield TestClient(app)
-
-    memory_mod._get_memory_manager = original
 
 
 @pytest.mark.asyncio

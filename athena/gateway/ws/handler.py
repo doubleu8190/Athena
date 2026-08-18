@@ -18,11 +18,9 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from athena.core.agent.workflow import AgentWorkflow
-from athena.gateway.approval import get_approval_manager
-from athena.gateway.ws.manager import get_websocket_manager
 from athena.gateway.ws.events import ClientEventType, EventType, build_event
 from athena.utils.logging import get_logger
+from athena.runtime import RuntimeContainer, runtime_from
 
 if TYPE_CHECKING:
     from athena.core.recovery.session_recovery import SessionRecovery
@@ -77,7 +75,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     Raises:
         WebSocketDisconnect: 客户端断开连接（在函数内部捕获处理）。
     """
-    ws_manager = get_websocket_manager()
+    runtime = runtime_from(websocket)
+    ws_manager = runtime.websocket_manager
     await ws_manager.connect(websocket)
 
     try:
@@ -120,9 +119,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     )
                 )
             elif msg_type == ClientEventType.APPROVAL_RESPONSE:
-                await _handle_approval_response(data)
+                await _handle_approval_response(data, runtime)
             elif msg_type == ClientEventType.APPROVAL_CANCEL:
-                await _handle_approval_cancel(data)
+                await _handle_approval_cancel(data, runtime)
             elif msg_type in _SESSION_SCOPED_TYPES:
                 # 会话级消息：session_id 必填。缺失/为空统一拒绝并回推 ERROR，
                 # 不再把 "" 折叠成退订（or None）或当成真会话（or ""）处理，
@@ -142,7 +141,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     # 隐式订阅：防御"订阅命令未先到达"的竞态，
                     # 保证命令触发的事件流能回到本连接
                     await ws_manager.subscribe(websocket, session_id)
-                    await _handle_user_command(session_id, data)
+                    await _handle_user_command(session_id, data, runtime)
                 elif msg_type == ClientEventType.SESSION_STOP:
                     from athena.gateway.routes._runtime import (
                         get_session_stop_event,
@@ -150,9 +149,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
                     get_session_stop_event(session_id).set()
                 elif msg_type == ClientEventType.SESSION_RESUME:
-                    await _handle_session_resume(session_id, data)
+                    await _handle_session_resume(session_id, data, runtime)
                 elif msg_type == ClientEventType.MEMORY_SAVE:
-                    await _handle_memory_save(session_id, data)
+                    await _handle_memory_save(session_id, data, runtime)
             else:
                 logger.warning("unknown_ws_message", msg_type=msg_type)
     except WebSocketDisconnect:
@@ -168,7 +167,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 # ------------------------------------------------------------------
 
 
-async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
+async def _handle_user_command(
+    session_id: str, data: dict[str, Any], runtime: RuntimeContainer
+) -> None:
     """处理用户命令.
 
     将消息提交给 AgentWorkflow.process_message() 异步执行，
@@ -180,15 +181,11 @@ async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
     """
     from athena.gateway.routes._runtime import (
         clear_session_stop_event,
-        get_workflow,
         get_session_stop_event,
         reset_session_stop_event,
     )
 
-    workflow: AgentWorkflow = get_workflow()
-    if workflow is None:
-        logger.error("workflow_not_initialized", session_id=session_id)
-        return
+    workflow = runtime.workflow
     message = data.get("message", "")
     raw_attachment_ids: object = data.get("attachment_ids", [])
     attachment_ids: list[str] = []
@@ -217,7 +214,9 @@ async def _handle_user_command(session_id: str, data: dict[str, Any]) -> None:
     task.add_done_callback(lambda _t: clear_session_stop_event(session_id))
 
 
-async def _handle_approval_response(data: dict[str, Any]) -> None:
+async def _handle_approval_response(
+    data: dict[str, Any], runtime: RuntimeContainer
+) -> None:
     """处理审批响应（允许/拒绝）.
 
     Args:
@@ -229,11 +228,12 @@ async def _handle_approval_response(data: dict[str, Any]) -> None:
     action = data.get("action", "")
     if not approval_id or action not in ("allow", "deny"):
         return
-    manager = get_approval_manager()
-    await manager.respond_approval(approval_id, action)
+    await runtime.approval_manager.respond_approval(approval_id, action)
 
 
-async def _handle_approval_cancel(data: dict[str, Any]) -> None:
+async def _handle_approval_cancel(
+    data: dict[str, Any], runtime: RuntimeContainer
+) -> None:
     """处理审批取消（用户放弃审批，工具执行将被终止）.
 
     Args:
@@ -242,11 +242,12 @@ async def _handle_approval_cancel(data: dict[str, Any]) -> None:
     approval_id = data.get("approval_id", "")
     if not approval_id:
         return
-    manager = get_approval_manager()
-    await manager.cancel_approval(approval_id)
+    await runtime.approval_manager.cancel_approval(approval_id)
 
 
-async def _handle_memory_save(session_id: str, data: dict[str, Any]) -> None:
+async def _handle_memory_save(
+    session_id: str, data: dict[str, Any], runtime: RuntimeContainer
+) -> None:
     """处理主动记忆保存（用户在前端手动保存记忆）.
 
     通过 workflow 内部对象链 (_memory_retrieval._memory) 定位 MemoryManager，
@@ -258,27 +259,18 @@ async def _handle_memory_save(session_id: str, data: dict[str, Any]) -> None:
             - content: 记忆文本内容
             - metadata: 可选附加元数据（dict）
     """
-    from athena.gateway.routes._runtime import get_workflow
-
-    workflow = get_workflow()
-    if workflow is None:
-        return
-    memory_retrieval = getattr(workflow, "_memory_retrieval", None)
-    if memory_retrieval is None:
-        return
-    memory_manager = getattr(memory_retrieval, "_memory", None)
-    if memory_manager is None:
-        return
     content = data.get("content", "")
     metadata = data.get("metadata", {})
     if content:
-        await memory_manager.add_memory(
+        await runtime.memory_manager.add_memory(
             content=content,
             metadata={"session_id": session_id, **metadata},
         )
 
 
-async def _handle_session_resume(session_id: str, data: dict[str, Any]) -> None:
+async def _handle_session_resume(
+    session_id: str, data: dict[str, Any], runtime: RuntimeContainer
+) -> None:
     """处理用户主动恢复会话.
 
     仅当会话状态为 interrupted / running / failed 时才允许恢复。
@@ -294,14 +286,11 @@ async def _handle_session_resume(session_id: str, data: dict[str, Any]) -> None:
         WebSocketDisconnect: 由异步恢复任务抛出时被捕获并记录日志。
     """
     from athena.core.recovery.session_recovery import SessionRecovery
-    from athena.db.database import get_database
-    from athena.config.settings import get_settings
 
-    ws_manager = get_websocket_manager()
+    ws_manager = runtime.websocket_manager
     mode = data.get("mode", "recover")
 
-    settings = get_settings()
-    db = await get_database(settings.sqlite_db_path)
+    db = runtime.db
     session = await db.sessions.get(session_id)
 
     if not session:
@@ -346,21 +335,11 @@ async def _handle_session_resume(session_id: str, data: dict[str, Any]) -> None:
         return
 
     # 完整恢复
-    from athena.gateway.routes._runtime import get_workflow
-
-    workflow = get_workflow()
-    if workflow is None:
-        await ws_manager.send_to_session(
-            session_id,
-            build_event(
-                EventType.ERROR,
-                {"error": "workflow_not_ready", "message": "Agent 未就绪"},
-                session_id=session_id,
-            ),
-        )
-        return
-
-    recovery = SessionRecovery(db=db, ws_manager=ws_manager, agent_workflow=workflow)
+    recovery = SessionRecovery(
+        db=db,
+        ws_manager=ws_manager,
+        agent_workflow=runtime.workflow,
+    )
 
     # 通知客户端恢复已开始
     await ws_manager.send_to_session(

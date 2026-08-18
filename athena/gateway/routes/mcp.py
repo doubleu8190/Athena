@@ -8,12 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from athena.core.tools.mcp.manager import MCPManager, get_mcp_manager
-from athena.db.database import Database, get_database
 from athena.models.mcp import McpServerConfig
+from athena.runtime import runtime_from
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
@@ -47,20 +46,20 @@ class McpRegisterResult(BaseModel):
 
 
 @router.get("/servers")
-async def list_mcp_servers() -> dict[str, Any]:
+async def list_mcp_servers(request: Request) -> dict[str, Any]:
     """列出所有已持久化的 MCP 服务器，附实时连接状态."""
-    manager = get_mcp_manager()
+    manager = runtime_from(request).mcp_manager
     items = await manager.list_servers()
     return {"items": items, "total": len(items)}
 
 
 @router.post("/servers")
-async def register_mcp_servers(payload: McpServersPayload) -> dict[str, Any]:
+async def register_mcp_servers(payload: McpServersPayload, request: Request) -> dict[str, Any]:
     """注册 MCP 服务器（可一次注册多个）.
 
     逐台注册，单台失败不影响其它；始终返回 HTTP 200，状态在 results 中逐台体现。
     """
-    manager = get_mcp_manager()
+    manager = runtime_from(request).mcp_manager
     results: list[McpRegisterResult] = []
     for name, config in payload.mcpServers.items():
         result = await manager.register_server(name, config)
@@ -76,15 +75,14 @@ async def register_mcp_servers(payload: McpServersPayload) -> dict[str, Any]:
 
 
 @router.delete("/servers/{name:path}")
-async def unregister_mcp_server(name: str) -> dict[str, Any]:
+async def unregister_mcp_server(name: str, request: Request) -> dict[str, Any]:
     """注销 MCP 服务器：移除工具 + 断开连接 + DB 软删除.
 
     {name:path} 用于处理含 / 或 @ 的服务器名（客户端需 URL 编码）。
     """
-    manager = get_mcp_manager()
-    from athena.config.settings import get_settings
-
-    db = await get_database(get_settings().sqlite_db_path)
+    runtime = runtime_from(request)
+    manager = runtime.mcp_manager
+    db = runtime.db
     if await db.mcp_servers.get(name) is None:
         raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
     await manager.unregister_server(name)

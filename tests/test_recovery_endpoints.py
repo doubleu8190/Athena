@@ -12,14 +12,15 @@ from __future__ import annotations
 import os
 import tempfile
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.models.step import Step, StepStatus, StepType
 from athena.models.tool import ToolCallRecord, ToolCallStatus
+from tests.fakes import install_runtime
 
 
 @pytest.fixture
@@ -45,32 +46,20 @@ async def db(db_path):
 def app(db, db_path):
     """创建测试用 FastAPI 应用."""
     from athena.gateway.routes.sessions import router
-
-    # Mock get_database to return our test db
-    async def mock_get_db():
-        return db
-
-    # Mock get_workflow
     mock_workflow = AsyncMock()
 
     from fastapi import FastAPI
 
     application = FastAPI()
     application.include_router(router)
-
-    # Patch dependencies
-    import athena.gateway.routes.sessions as sessions_mod
-
-    original_get_db = sessions_mod._get_db
-    original_get_workflow = sessions_mod._get_workflow
-
-    sessions_mod._get_db = mock_get_db
-    sessions_mod._get_workflow = AsyncMock(return_value=mock_workflow)
+    install_runtime(
+        application,
+        db=db,
+        workflow=mock_workflow,
+        websocket_manager=AsyncMock(),
+    )
 
     yield application
-
-    sessions_mod._get_db = original_get_db
-    sessions_mod._get_workflow = original_get_workflow
 
 
 @pytest.fixture

@@ -21,7 +21,7 @@ from athena.utils.ids import generate_time_id
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from athena.db.database import Database
+    from athena.infrastructure.sqlite.database import Database
     from athena.gateway.ws.manager import WebSocketManager
 
 logger = get_logger(__name__)
@@ -32,9 +32,9 @@ class ApprovalManager:
 
     def __init__(
         self,
+        websocket_manager: WebSocketManager,
+        db: Database,
         approval_timeout: int = 120,
-        websocket_manager: WebSocketManager | None = None,
-        db: Database | None = None,
     ) -> None:
         self._queue: deque[ApprovalRequest] = deque()
         self._pending: dict[str, ApprovalRequest] = {}  # approval_id → request
@@ -44,12 +44,6 @@ class ApprovalManager:
         self._websocket_manager = websocket_manager
         self._db = db
         self._lock = asyncio.Lock()
-
-    def set_websocket_manager(self, ws_manager: WebSocketManager) -> None:
-        self._websocket_manager = ws_manager
-
-    def set_db(self, db: Database) -> None:
-        self._db = db
 
     @property
     def queue_length(self) -> int:
@@ -66,7 +60,7 @@ class ApprovalManager:
         risk_level: str,
         session_id: str,
         run_id: str,
-        tool_call_id: str | None = None,
+        tool_call_id: str,
     ) -> ApprovalRequest:
         """请求审批 — 立即返回 ApprovalRequest（含 Future）.
 
@@ -214,8 +208,6 @@ class ApprovalManager:
 
     async def _push_request(self, request: ApprovalRequest) -> None:
         """推送审批请求事件到前端."""
-        if self._websocket_manager is None:
-            return
         await self._websocket_manager.send_to_session(
             request.session_id,
             build_event(
@@ -247,8 +239,6 @@ class ApprovalManager:
 
     async def _push_result(self, request: ApprovalRequest) -> None:
         """推送审批结果事件到前端."""
-        if self._websocket_manager is None:
-            return
         event_type = (
             EventType.APPROVAL_RESULT
             if request.resolution in ("approved", "denied")
@@ -270,11 +260,11 @@ class ApprovalManager:
 
     async def _log_approval(self, request: ApprovalRequest) -> None:
         """记录审批日志到数据库."""
-        if self._db is None:
-            return
         decision_time_ms = 0.0
         if request.decided_at and request.created_at:
-            decision_time_ms = (request.decided_at - request.created_at).total_seconds() * 1000
+            decision_time_ms = (
+                request.decided_at - request.created_at
+            ).total_seconds() * 1000
 
         try:
             decision_map = {
@@ -285,17 +275,21 @@ class ApprovalManager:
             }
             from datetime import datetime
 
-            await self._db.approval_logs.save(ApprovalLog(
-                id=generate_time_id(),
-                session_id=request.session_id,
-                tool_call_id=request.tool_call_id or request.id,
-                tool_name=request.tool_name,
-                arguments=request.arguments,
-                risk_level=request.risk_level,
-                decision=decision_map.get(request.resolution, ApprovalDecision.DENIED),
-                decision_time_ms=decision_time_ms,
-                timestamp=datetime.now(),
-            ))
+            await self._db.approval_logs.save(
+                ApprovalLog(
+                    id=generate_time_id(),
+                    session_id=request.session_id,
+                    tool_call_id=request.tool_call_id,
+                    tool_name=request.tool_name,
+                    arguments=request.arguments,
+                    risk_level=request.risk_level,
+                    decision=decision_map.get(
+                        request.resolution, ApprovalDecision.DENIED
+                    ),
+                    decision_time_ms=decision_time_ms,
+                    timestamp=datetime.now(),
+                )
+            )
         except Exception as e:
             logger.error("approval_log_failed", approval_id=request.id, error=str(e))
 
@@ -353,16 +347,3 @@ class ApprovalManager:
             }
             for r in requests
         ]
-
-
-# 全局单例
-_approval_manager: ApprovalManager
-
-def get_approval_manager() -> ApprovalManager:
-    """获取审批管理器单例."""
-    return _approval_manager
-
-def set_approval_manager(manager: ApprovalManager) -> None:
-    global _approval_manager
-    _approval_manager = manager
-

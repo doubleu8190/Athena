@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import langchain_ollama
 
-from athena.config.settings import LLMProviderConfig, Settings
-from athena.core.llm.provider import _create_chat_model
+from athena.config.settings import LLMProviderConfig, LLMRetrySettings, Settings
+from athena.core.llm.provider import _create_chat_model, _to_retry_config
 
 
 def test_ollama_maps_max_tokens_to_num_predict() -> None:
@@ -37,6 +37,7 @@ def test_openai_uses_max_tokens_and_streaming() -> None:
     kwargs = mock_cls.call_args.kwargs
     assert kwargs["max_tokens"] == 2048
     assert kwargs["streaming"] is True
+    assert kwargs["stream_usage"] is True
 
 
 def test_provider_level_max_tokens_falls_back_to_global() -> None:
@@ -50,3 +51,32 @@ def test_provider_level_max_tokens_falls_back_to_global() -> None:
         _create_chat_model(config, settings)
     kwargs = mock_cls.call_args.kwargs
     assert kwargs["max_tokens"] == 8192
+
+
+def test_retry_settings_map_to_retry_config() -> None:
+    """Settings 中的全部重试参数应无损映射到领域配置."""
+    settings = LLMRetrySettings(
+        max_attempts=7,
+        min_delay_ms=123,
+        max_delay_ms=456,
+        jitter=0.25,
+        timeout_ms=789,
+    )
+
+    retry_config = _to_retry_config(settings)
+
+    assert retry_config.max_attempts == 7
+    assert retry_config.min_delay_ms == 123
+    assert retry_config.max_delay_ms == 456
+    assert retry_config.jitter == 0.25
+    assert retry_config.timeout_ms == 789
+
+
+def test_retry_settings_support_nested_environment_variables(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_RETRY__MAX_ATTEMPTS", "6")
+    monkeypatch.setenv("LLM_SECONDARY_RETRY__TIMEOUT_MS", "45000")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_retry.max_attempts == 6
+    assert settings.llm_secondary_retry.timeout_ms == 45000

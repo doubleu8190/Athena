@@ -9,32 +9,34 @@ import pytest
 from athena.core.tools.base import MCPTool, NativeTool
 from athena.core.tools.builtin.registry import register_builtin_tools
 from athena.core.tools.manager import UnifiedToolManager
+from athena.core.tools.spec import ToolSpec, get_tool_context
 from athena.models.tool import RiskLevel, ToolExecutionMode
+from tests.fakes import make_tool_manager
 
 
 @pytest.fixture
 def manager() -> UnifiedToolManager:
-    m = UnifiedToolManager()
+    m = make_tool_manager()
     register_builtin_tools(m)
     return m
 
 
 def test_builtin_tools_registered(manager: UnifiedToolManager):
     names = manager.list_names()
-    assert "read_file" in names
+    assert "read_local_file" in names
     assert "write_file" in names
     assert "list_directory" in names
     assert "exec_shell" in names
 
 
 def test_tool_risk_levels(manager: UnifiedToolManager):
-    assert manager.get_risk_level("read_file") == "low"
+    assert manager.get_risk_level("read_local_file") == "low"
     assert manager.get_risk_level("write_file") == "medium"
     assert manager.get_risk_level("exec_shell") == "high"
 
 
 def test_require_approval_flags(manager: UnifiedToolManager):
-    assert manager.require_approval("read_file") is False
+    assert manager.require_approval("read_local_file") is False
     assert manager.require_approval("write_file") is True
     assert manager.require_approval("exec_shell") is True
 
@@ -58,7 +60,7 @@ def test_native_tool_schema_inferred():
 
 @pytest.mark.asyncio
 async def test_call_unregistered_tool():
-    m = UnifiedToolManager()
+    m = make_tool_manager()
     result = await m.call_tool(
         "nonexistent", {}, session_id="s", run_id="r", tool_call_id="tc"
     )
@@ -91,9 +93,18 @@ async def test_list_directory_tool(tmp_path):
 
 def test_langchain_tools_conversion(manager: UnifiedToolManager):
     tools = manager.get_langchain_tools()
-    assert len(tools) == 4
+    assert len(tools) == 8
     names = {t.name for t in tools}
-    assert names == {"read_file", "write_file", "list_directory", "exec_shell"}
+    assert names == {
+        "read_local_file",
+        "write_file",
+        "list_directory",
+        "exec_shell",
+        "get_local_file_info",
+        "read_local_file_section",
+        "search_local_file",
+        "read_local_file_full",
+    }
 
 
 class _ObjResponse:
@@ -153,42 +164,50 @@ async def test_mcp_tool_object_response_error():
 
 
 # ---------------------------------------------------------------------------
-# parent_run_id 运行上下文透传
+# 工具运行上下文透传
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_native_tool_receives_parent_run_id_context():
-    """call_tool 应把当前 run_id 作为 parent_run_id 透传给声明该参数的 handler."""
+async def test_native_tool_receives_coroutine_local_context():
+    """原生工具通过 ToolContext 读取可信上下文，不污染模型参数。"""
     received: dict[str, Any] = {}
 
-    async def spawn_handler(task: str, session_id: str, parent_run_id: str) -> str:
-        received["parent_run_id"] = parent_run_id
+    async def spawn_handler(task: str) -> str:
+        context = get_tool_context()
+        received["session_id"] = context.session_id
+        received["run_id"] = context.run_id
+        received["tool_call_id"] = context.tool_call_id
         return f"done:{task}"
 
-    m = UnifiedToolManager()
-    m.register_native(
-        name="spawn_sub_agent",
-        description="spawn sub agent",
-        handler=spawn_handler,
-        parameters={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string"},
-                "session_id": {"type": "string"},
+    m = make_tool_manager()
+    m.register(
+        ToolSpec(
+            name="spawn_sub_agent",
+            description="spawn sub agent",
+            handler=spawn_handler,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                },
+                "required": ["task"],
             },
-            "required": ["task", "session_id"],
-        },
+        )
     )
     result = await m.call_tool(
         "spawn_sub_agent",
-        {"task": "t", "session_id": "s"},
+        {"task": "t"},
         session_id="s",
         run_id="20260809_abc",
         tool_call_id="tc-parent",
     )
     assert result.status == "success"
-    assert received["parent_run_id"] == "20260809_abc"
+    assert received == {
+        "session_id": "s",
+        "run_id": "20260809_abc",
+        "tool_call_id": "tc-parent",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +285,6 @@ async def test_parallel_handler_aggregates_results():
 @pytest.mark.asyncio
 async def test_parallel_handler_reports_partial_failures():
     """部分子任务失败时，成功的任务结果仍然应被返回。"""
-    import json as json_mod
-
     class FakeResult:
         def __init__(self, task: str, content: str, error: str | None = None, turn_count: int = 1):
             self.task = task

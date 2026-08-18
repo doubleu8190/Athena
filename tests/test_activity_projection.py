@@ -5,13 +5,15 @@ from __future__ import annotations
 import os
 import tempfile
 from datetime import datetime
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.models import Step, StepStatus, StepType, ToolCallRecord, ToolCallStatus
+from tests.fakes import install_runtime
 
 
 @pytest.fixture
@@ -34,17 +36,14 @@ async def db(db_path):
 
 
 @pytest.fixture
-def client(db, monkeypatch):
+def client(db):
     from athena.gateway.routes.sessions import router
-    import athena.gateway.routes.sessions as sessions_mod
-
-    async def mock_get_db():
-        return db
 
     app = FastAPI()
     app.include_router(router)
-    monkeypatch.setattr(sessions_mod, "_get_db", mock_get_db)
-    monkeypatch.setattr(sessions_mod, "_tool_risk_level", lambda _name: "high")
+    tool_manager = MagicMock()
+    tool_manager.get_risk_level.return_value = "high"
+    install_runtime(app, db=db, tool_manager=tool_manager)
 
     return TestClient(app)
 

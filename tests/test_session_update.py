@@ -9,8 +9,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.utils.ids import generate_session_id
+from tests.fakes import install_runtime
 
 
 @pytest.fixture
@@ -35,20 +36,12 @@ async def db(db_path):
 @pytest.fixture
 def client(db):
     from athena.gateway.routes.sessions import router
-    import athena.gateway.routes.sessions as sessions_mod
-
-    async def mock_get_db():
-        return db
 
     app = FastAPI()
     app.include_router(router)
-
-    original_get_db = sessions_mod._get_db
-    sessions_mod._get_db = mock_get_db
+    install_runtime(app, db=db)
 
     yield TestClient(app)
-
-    sessions_mod._get_db = original_get_db
 
 
 @pytest.mark.asyncio

@@ -31,15 +31,6 @@ def extract_message_text(response: Any) -> str:
     return ""
 
 
-def estimate_tokens(text: str) -> int:
-    """粗略估算 token 数（4 字符 ≈ 1 token）.
-
-    project_memory 约束：使用 model.get_num_tokens()，缺失时回退到 len/4。
-    此处采用回退方案，因为底层模型实例不一定暴露 get_num_tokens。
-    """
-    return len(text) // 4
-
-
 def extract_json_from_llm_response(text: str) -> dict[str, Any] | None:
     """从 LLM 自由文本响应中提取第一个 JSON 对象.
 

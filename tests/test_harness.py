@@ -6,17 +6,29 @@ import asyncio
 import os
 import tempfile
 from typing import Any, AsyncIterator
+from unittest.mock import AsyncMock
 
 import pytest
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
+from athena.config.settings import Settings
 from athena.core.harness.harness import Harness, HarnessSettings
 from athena.core.llm.provider import LLMProvider
-from athena.core.tools.manager import UnifiedToolManager
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.models.tool import ToolResult
 from athena.gateway.ws.events import EventType
+from tests.fakes import make_tool_manager
+
+
+def _make_harness(**kwargs: Any) -> Harness:
+    compressor = AsyncMock()
+    compressor.compress.side_effect = lambda messages, **_kwargs: list(messages)
+    kwargs.setdefault("settings", Settings(_env_file=None))
+    kwargs.setdefault("db", AsyncMock())
+    kwargs.setdefault("ws_manager", AsyncMock())
+    kwargs.setdefault("compressor", compressor)
+    return Harness(**kwargs)
 
 
 class _AsyncIterator:
@@ -81,8 +93,8 @@ class _FailAlwaysModel:
 def harness():
     model = _FakeModel()
     llm = LLMProvider(model)
-    tool_manager = UnifiedToolManager()
-    return Harness(
+    tool_manager = make_tool_manager()
+    return _make_harness(
         llm=llm,
         tool_manager=tool_manager,
         harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=3, tool_timeout=5),
@@ -106,9 +118,9 @@ async def test_harness_recovers_from_llm_error(harness: Harness):
 async def test_harness_budget_exceeded_raises():
     model = _FailAlwaysModel()
     llm = LLMProvider(model)
-    harness = Harness(
+    harness = _make_harness(
         llm=llm,
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         harness_settings=HarnessSettings(max_turns_per_run=10, retry_budget=1, tool_timeout=5),
     )
     result = await harness.run(
@@ -187,6 +199,24 @@ class _StreamingTextModel:
         return self
 
 
+class _UsageStreamingModel(_StreamingTextModel):
+    """Return provider-reported usage in the stream's final chunk."""
+
+    def astream(self, messages: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        return _AsyncIterator(
+            [
+                AIMessageChunk(
+                    content="answer",
+                    usage_metadata={
+                        "input_tokens": 17,
+                        "output_tokens": 5,
+                        "total_tokens": 22,
+                    },
+                )
+            ]
+        )
+
+
 @pytest.fixture
 async def db():
     fd, path = tempfile.mkstemp(suffix=".db")
@@ -206,9 +236,9 @@ async def test_harness_retries_empty_response():
     """空响应应触发有界重试，而非静默保存空消息."""
     model = _EmptyThenAnswerModel()
     llm = LLMProvider(model)
-    harness = Harness(
+    harness = _make_harness(
         llm=llm,
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=2, tool_timeout=5),
     )
     result = await harness.run(
@@ -226,9 +256,9 @@ async def test_harness_empty_response_exhausted_returns_error():
     """重试耗尽后应返回可见错误，而非当作成功的空回答."""
     model = _AlwaysEmptyModel()
     llm = LLMProvider(model)
-    harness = Harness(
+    harness = _make_harness(
         llm=llm,
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         harness_settings=HarnessSettings(max_turns_per_run=10, retry_budget=2, tool_timeout=5),
     )
     result = await harness.run(
@@ -245,9 +275,9 @@ async def test_harness_streams_text_content():
     """流式文本分片应被正确合并为完整 content."""
     model = _StreamingTextModel()
     llm = LLMProvider(model)
-    harness = Harness(
+    harness = _make_harness(
         llm=llm,
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=2, tool_timeout=5),
     )
     result = await harness.run(
@@ -257,6 +287,28 @@ async def test_harness_streams_text_content():
     )
     assert result.error is None
     assert result.content == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_harness_persists_provider_reported_token_usage(db: Database):
+    await db.sessions.create("s-usage")
+    harness = _make_harness(
+        llm=LLMProvider(_UsageStreamingModel()),
+        tool_manager=make_tool_manager(),
+        db=db,
+    )
+
+    result = await harness.run(
+        messages=[{"role": "user", "content": "hi"}],
+        session_id="s-usage",
+        run_id="usage-run",
+    )
+
+    assert result.error is None
+    steps = await db.steps.get_by_session("s-usage")
+    assert len(steps) == 1
+    assert steps[0].llm_input_tokens == 17
+    assert steps[0].llm_output_tokens == 5
 
 
 def test_assemble_response_merges_tool_calls(harness: Harness):
@@ -282,9 +334,9 @@ async def test_empty_response_does_not_save_message(db: Database):
     await db.sessions.create("s-empty-db")
     model = _AlwaysEmptyModel()
     llm = LLMProvider(model)
-    harness = Harness(
+    harness = _make_harness(
         llm=llm,
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         db=db,
         harness_settings=HarnessSettings(max_turns_per_run=10, retry_budget=2, tool_timeout=5),
     )
@@ -302,9 +354,9 @@ async def test_harness_emits_llm_call_end_failed_on_empty_response():
     """空响应重试路径应补发 status=failed 的 LLM_CALL_END，供前端清理空气泡."""
     model = _EmptyThenAnswerModel()
     ws = _RecordingWs()
-    harness = Harness(
+    harness = _make_harness(
         llm=LLMProvider(model),
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         ws_manager=ws,
         harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=2, tool_timeout=5),
     )
@@ -325,9 +377,9 @@ async def test_harness_emits_llm_call_end_failed_on_exception():
     """LLM 异常重试路径应补发 status=failed 的 LLM_CALL_END."""
     model = _FakeModel()  # 第一次 astream 抛异常
     ws = _RecordingWs()
-    harness = Harness(
+    harness = _make_harness(
         llm=LLMProvider(model),
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         ws_manager=ws,
         harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=2, tool_timeout=5),
     )
@@ -355,9 +407,9 @@ async def test_harness_stop_signal_interrupts_run(db: Database):
     stop_signal = asyncio.Event()
     stop_signal.set()
     model = _StreamingTextModel()
-    harness = Harness(
+    harness = _make_harness(
         llm=LLMProvider(model),
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         db=db,
         harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=2, tool_timeout=5),
     )
@@ -404,9 +456,9 @@ async def test_harness_stop_mid_stream_finalizes_step(db: Database):
     await db.sessions.create("s-stopmid")
     stop_signal = asyncio.Event()
     ws = _RecordingWs()
-    harness = Harness(
+    harness = _make_harness(
         llm=LLMProvider(_StopMidStreamModel(stop_signal)),
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         db=db,
         ws_manager=ws,
         harness_settings=HarnessSettings(
@@ -467,9 +519,9 @@ async def test_harness_llm_stream_timeout_terminates_run(db: Database):
     """流式挂死时 llm_stream_timeout 应终态化 step，run 结束而非永久 running."""
     await db.sessions.create("s-hang")
     model = _HangingModel()
-    harness = Harness(
+    harness = _make_harness(
         llm=LLMProvider(model),
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         db=db,
         harness_settings=HarnessSettings(
             max_turns_per_run=5, retry_budget=1, tool_timeout=5, llm_stream_timeout=1
@@ -523,9 +575,9 @@ class _ToolCallThenAnswerModel:
 @pytest.mark.asyncio
 async def test_tool_failure_records_failure_not_success():
     """工具返回 failed 时熔断器应记失败而非 success（修复 record_result 顺序）."""
-    harness = Harness(
+    harness = _make_harness(
         llm=LLMProvider(_FakeModel()),
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         harness_settings=HarnessSettings(max_turns_per_run=3, retry_budget=1, tool_timeout=5),
     )
 
@@ -553,9 +605,9 @@ async def test_tool_failure_records_failure_not_success():
 async def test_tool_failure_persisted_as_failed(db: Database):
     """完整 run：工具失败应落库 tool_call.status=failed，且失败详情回传给 LLM."""
     await db.sessions.create("s-toolfail")
-    harness = Harness(
+    harness = _make_harness(
         llm=LLMProvider(_ToolCallThenAnswerModel()),
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         db=db,
         harness_settings=HarnessSettings(max_turns_per_run=3, retry_budget=1, tool_timeout=5),
     )
@@ -589,9 +641,9 @@ async def test_tool_failure_persisted_as_failed(db: Database):
 async def test_steps_record_parent_run_id(db: Database):
     """主 run 步骤 parent_run_id 为 None；子 run（带父链）步骤指向父 run."""
     await db.sessions.create("s-parent")
-    harness = Harness(
+    harness = _make_harness(
         llm=LLMProvider(_StreamingTextModel()),
-        tool_manager=UnifiedToolManager(),
+        tool_manager=make_tool_manager(),
         db=db,
         harness_settings=HarnessSettings(max_turns_per_run=5, retry_budget=2, tool_timeout=5),
     )

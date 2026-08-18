@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pytest
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.gateway.recovery import recover_interrupted_sessions
 from athena.models.step import Step, StepStatus, StepType
 from athena.models.tool import ToolCallRecord, ToolCallStatus

@@ -46,7 +46,11 @@ class TestDetermineResumePoint:
     def setup_method(self):
         self.db = AsyncMock()
         self.ws = AsyncMock()
-        self.recovery = SessionRecovery(db=self.db, ws_manager=self.ws)
+        self.recovery = SessionRecovery(
+            db=self.db,
+            ws_manager=self.ws,
+            agent_workflow=AsyncMock(),
+        )
 
     def test_empty_messages(self):
         result = self.recovery._determine_resume_point([])
@@ -99,10 +103,14 @@ class TestInterruptedToolStrategy:
     def setup_method(self):
         self.db = AsyncMock()
         self.ws = AsyncMock()
-        self.recovery = SessionRecovery(db=self.db, ws_manager=self.ws)
+        self.recovery = SessionRecovery(
+            db=self.db,
+            ws_manager=self.ws,
+            agent_workflow=AsyncMock(),
+        )
 
     def test_read_file_is_retryable(self):
-        tool_call = _tool_call("read_file", {"path": "/workspace/file.txt"})
+        tool_call = _tool_call("read_local_file", {"path": "/workspace/file.txt"})
         strategy = self.recovery._get_interrupted_tool_strategy(tool_call)
         from athena.core.recovery.session_recovery import InterruptedToolStrategy
         assert strategy == InterruptedToolStrategy.RETRY
@@ -126,7 +134,11 @@ class TestBuildRecoveryPrompt:
     def setup_method(self):
         self.db = AsyncMock()
         self.ws = AsyncMock()
-        self.recovery = SessionRecovery(db=self.db, ws_manager=self.ws)
+        self.recovery = SessionRecovery(
+            db=self.db,
+            ws_manager=self.ws,
+            agent_workflow=AsyncMock(),
+        )
 
     def test_re_run_agent_prompt(self):
         prompt = self.recovery._build_recovery_prompt(ResumePoint.RE_RUN_AGENT, [])

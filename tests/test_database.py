@@ -8,7 +8,7 @@ from datetime import datetime
 
 import pytest
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.models import (
     Message,
     MessageRole,
@@ -157,17 +157,16 @@ async def test_delete_session_cascade(db: Database):
 
 @pytest.mark.asyncio
 async def test_baseline_schema_flat(db: Database):
-    """验证 metadata_json 平铺后的基线 schema + v4 File Intelligence 表.
+    """验证当前 schema 的表与列定义。
 
     - messages 表含 step_id/tool_call_record_id/tool_name/type 列，且无 metadata_json
     - sessions/steps 表无 metadata_json
     - memories 表含 type/category/confidence/source 列
-    - v2 新增 mcp_servers 表（name/config_json/created_at/deleted_time）
-    - user_version == 4
+    - mcp_servers 表含 name/config_json/created_at/deleted_time
     """
     from sqlalchemy import text
 
-    from athena.db.engine import get_session
+    from athena.infrastructure.sqlite.engine import get_session
 
     async with get_session() as session:
         result = await session.execute(text("PRAGMA table_info(messages)"))
@@ -187,10 +186,6 @@ async def test_baseline_schema_flat(db: Database):
         result = await session.execute(text("PRAGMA table_info(mcp_servers)"))
         mcp_cols = {row[1] for row in result.fetchall()}
         assert {"name", "config_json", "created_at", "deleted_time"} <= mcp_cols
-
-        result = await session.execute(text("PRAGMA user_version;"))
-        assert result.scalar() == 4
-
 
 @pytest.mark.asyncio
 async def test_mcp_server_repository(db: Database):

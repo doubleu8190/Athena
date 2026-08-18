@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from athena.config.settings import LLMRetrySettings
+
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
@@ -30,6 +32,8 @@ class SettingsView(BaseModel):
     # LLM 全局参数
     llm_temperature: float
     llm_max_tokens: int
+    llm_retry: LLMRetrySettings
+    llm_secondary_retry: LLMRetrySettings
 
     # Memory
     memory_ttl_days: int
@@ -71,6 +75,8 @@ async def get_settings_view() -> SettingsView:
         approval_timeout=s.approval_timeout,
         llm_temperature=s.llm_temperature,
         llm_max_tokens=s.llm_max_tokens,
+        llm_retry=s.llm_retry,
+        llm_secondary_retry=s.llm_secondary_retry,
         memory_ttl_days=s.memory_ttl_days,
         memory_min_score=s.memory_min_score,
         summary_threshold=s.summary_threshold,

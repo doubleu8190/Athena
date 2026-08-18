@@ -177,4 +177,8 @@ class StorageLayer:
         """
         if not self.blob_root.exists():
             return []
-        return [str(path.relative_to(self.root)) for path in self.blob_root.glob("*/*") if path.is_file()]
+        return [
+            str(path.relative_to(self.root))
+            for path in self.blob_root.glob("*/*")
+            if path.is_file()
+        ]

@@ -32,16 +32,38 @@ logger = get_logger(__name__)
 
 # 支持的文本文件扩展名集合
 TEXT_EXTENSIONS = {
-    ".txt", ".md", ".rst", ".json", ".yaml", ".yml", ".toml", ".xml", ".html",
-    ".css", ".sql", ".log", ".ini", ".cfg",
+    ".txt",
+    ".md",
+    ".rst",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".html",
+    ".css",
+    ".sql",
+    ".log",
+    ".ini",
+    ".cfg",
 }
 
 # 支持的源代码扩展名 → 语言名称映射
 CODE_EXTENSIONS = {
-    ".py": "python", ".js": "javascript", ".jsx": "javascript",
-    ".ts": "typescript", ".tsx": "typescript", ".java": "java",
-    ".go": "go", ".rs": "rust", ".c": "c", ".h": "c",
-    ".cc": "cpp", ".cpp": "cpp", ".hpp": "cpp", ".cs": "c_sharp",
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".cs": "c_sharp",
 }
 
 
@@ -95,8 +117,11 @@ class TextAdapter:
     """
 
     info = AdapterInfo(
-        name="text", version="2.0", mime_types=["text/plain", "text/markdown", "application/json"],
-        extensions=sorted(TEXT_EXTENSIONS | {".csv"}), capabilities=["read", "search", "summarize", "analyze"],
+        name="text",
+        version="2.0",
+        mime_types=["text/plain", "text/markdown", "application/json"],
+        extensions=sorted(TEXT_EXTENSIONS | {".csv"}),
+        capabilities=["read", "search", "summarize", "analyze"],
     )
 
     async def extract(
@@ -119,11 +144,20 @@ class TextAdapter:
         if suffix == ".csv":
             rows = list(csv.reader(io.StringIO(text)))
             if rows:
-                metadata.update({"row_count": max(0, len(rows) - 1), "columns": rows[0]})
-                tables.append({"name": filename, "headers": rows[0], "rows": rows[1:201]})
+                metadata.update(
+                    {"row_count": max(0, len(rows) - 1), "columns": rows[0]}
+                )
+                tables.append(
+                    {"name": filename, "headers": rows[0], "rows": rows[1:201]}
+                )
         return ExtractionResult(
-            units=[ExtractedUnit(text, {"path": path.name, "start_line": 1}, {"kind": "text"})],
-            metadata=metadata, tables=tables,
+            units=[
+                ExtractedUnit(
+                    text, {"path": path.name, "start_line": 1}, {"kind": "text"}
+                )
+            ],
+            metadata=metadata,
+            tables=tables,
         )
 
     async def analyze(self, path: Path, task: str) -> dict[str, Any]:
@@ -150,7 +184,10 @@ class PdfAdapter:
     """
 
     info = AdapterInfo(
-        name="pdf", version="2.0", mime_types=["application/pdf"], extensions=[".pdf"],
+        name="pdf",
+        version="2.0",
+        mime_types=["application/pdf"],
+        extensions=[".pdf"],
         capabilities=["read", "search", "summarize", "analyze", "extract_table"],
     )
 
@@ -176,7 +213,13 @@ class PdfAdapter:
                 empty_pages.append(index)
                 content = self._ocr_page(path, index - 1)
             if content:
-                units.append(ExtractedUnit(content, {"page": index}, {"kind": "page", "ocr": index in empty_pages}))
+                units.append(
+                    ExtractedUnit(
+                        content,
+                        {"page": index},
+                        {"kind": "page", "ocr": index in empty_pages},
+                    )
+                )
         # 使用 pdfplumber 提取结构化表格
         tables: list[dict[str, Any]] = []
         try:
@@ -185,12 +228,18 @@ class PdfAdapter:
             with pdfplumber.open(path) as pdf:
                 for page_no, page in enumerate(pdf.pages, 1):
                     for table_no, table in enumerate(page.extract_tables(), 1):
-                        tables.append({"page": page_no, "table": table_no, "rows": table})
+                        tables.append(
+                            {"page": page_no, "table": table_no, "rows": table}
+                        )
         except Exception as exc:
             logger.warning("pdf_table_extract_failed", path=str(path), error=str(exc))
         return ExtractionResult(
             units=units,
-            metadata={"pages": len(reader.pages), "ocr_pages": empty_pages, "table_count": len(tables)},
+            metadata={
+                "pages": len(reader.pages),
+                "ocr_pages": empty_pages,
+                "table_count": len(tables),
+            },
             tables=tables,
         )
 
@@ -215,7 +264,9 @@ class PdfAdapter:
             image = document[page_index].render(scale=2).to_pil()
             return _rapidocr_text(_pil_image_png_bytes(image))
         except Exception as exc:
-            logger.warning("pdf_ocr_failed", path=str(path), page_index=page_index, error=str(exc))
+            logger.warning(
+                "pdf_ocr_failed", path=str(path), page_index=page_index, error=str(exc)
+            )
             return ""
 
     async def analyze(self, path: Path, task: str) -> dict[str, Any]:
@@ -234,8 +285,13 @@ class WordAdapter:
     """
 
     info = AdapterInfo(
-        name="word", version="2.0", mime_types=["application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
-        extensions=[".docx"], capabilities=["read", "search", "summarize", "analyze", "extract_table"],
+        name="word",
+        version="2.0",
+        mime_types=[
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ],
+        extensions=[".docx"],
+        capabilities=["read", "search", "summarize", "analyze", "extract_table"],
     )
 
     async def extract(
@@ -253,14 +309,26 @@ class WordAdapter:
         doc = Document(str(path))
         # 按段落提取文本，附带段落号和样式信息
         units = [
-            ExtractedUnit(p.text, {"paragraph": i + 1}, {"style": p.style.name if p.style else ""})
-            for i, p in enumerate(doc.paragraphs) if p.text.strip()
+            ExtractedUnit(
+                p.text, {"paragraph": i + 1}, {"style": p.style.name if p.style else ""}
+            )
+            for i, p in enumerate(doc.paragraphs)
+            if p.text.strip()
         ]
         # 提取嵌入表格
         tables = []
         for index, table in enumerate(doc.tables, 1):
-            tables.append({"table": index, "rows": [[cell.text for cell in row.cells] for row in table.rows]})
-        return ExtractionResult(units=units, metadata={"paragraphs": len(doc.paragraphs), "tables": len(tables)}, tables=tables)
+            tables.append(
+                {
+                    "table": index,
+                    "rows": [[cell.text for cell in row.cells] for row in table.rows],
+                }
+            )
+        return ExtractionResult(
+            units=units,
+            metadata={"paragraphs": len(doc.paragraphs), "tables": len(tables)},
+            tables=tables,
+        )
 
     async def analyze(self, path: Path, task: str) -> dict[str, Any]:
         """分析 Word 文档：返回段落数和表格数量等元数据。"""
@@ -278,9 +346,14 @@ class ExcelAdapter:
     """
 
     info = AdapterInfo(
-        name="excel", version="2.0",
-        mime_types=["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel.sheet.macroEnabled.12"],
-        extensions=[".xlsx", ".xlsm"], capabilities=["read", "search", "summarize", "analyze", "extract_table"],
+        name="excel",
+        version="2.0",
+        mime_types=[
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+        ],
+        extensions=[".xlsx", ".xlsm"],
+        capabilities=["read", "search", "summarize", "analyze", "extract_table"],
     )
 
     async def extract(
@@ -295,7 +368,9 @@ class ExcelAdapter:
         """同步提取所有工作表的数据和公式。"""
         from openpyxl import load_workbook
 
-        workbook = load_workbook(path, read_only=True, data_only=False, keep_links=False)
+        workbook = load_workbook(
+            path, read_only=True, data_only=False, keep_links=False
+        )
         units: list[ExtractedUnit] = []
         tables: list[dict[str, Any]] = []
         sheet_meta: list[dict[str, Any]] = []
@@ -308,20 +383,36 @@ class ExcelAdapter:
                 # 收集公式单元格
                 formulas.extend(
                     {"cell": cell.coordinate, "formula": cell.value}
-                    for cell in row if cell.data_type == "f"
+                    for cell in row
+                    if cell.data_type == "f"
                 )
                 if any(value is not None for value in values):
                     rows.append(values)
-                    lines.append("\t".join("" if value is None else str(value) for value in values))
-            units.append(ExtractedUnit(
-                "\n".join(lines),
-                {"sheet": sheet.title, "start_row": 1, "end_row": sheet.max_row},
-                {"kind": "sheet", "formulas": formulas},
-            ))
+                    lines.append(
+                        "\t".join(
+                            "" if value is None else str(value) for value in values
+                        )
+                    )
+            units.append(
+                ExtractedUnit(
+                    "\n".join(lines),
+                    {"sheet": sheet.title, "start_row": 1, "end_row": sheet.max_row},
+                    {"kind": "sheet", "formulas": formulas},
+                )
+            )
             tables.append({"sheet": sheet.title, "rows": rows[:201]})
-            sheet_meta.append({"name": sheet.title, "rows": sheet.max_row, "columns": sheet.max_column, "formulas": formulas})
+            sheet_meta.append(
+                {
+                    "name": sheet.title,
+                    "rows": sheet.max_row,
+                    "columns": sheet.max_column,
+                    "formulas": formulas,
+                }
+            )
         workbook.close()
-        return ExtractionResult(units=units, metadata={"sheets": sheet_meta}, tables=tables)
+        return ExtractionResult(
+            units=units, metadata={"sheets": sheet_meta}, tables=tables
+        )
 
     async def analyze(self, path: Path, task: str) -> dict[str, Any]:
         """分析 Excel：使用 pandas 对每个工作表进行列级统计分析。"""
@@ -345,7 +436,9 @@ class ImageAdapter:
     """
 
     info = AdapterInfo(
-        name="image", version="2.0", mime_types=["image/png", "image/jpeg", "image/webp", "image/tiff"],
+        name="image",
+        version="2.0",
+        mime_types=["image/png", "image/jpeg", "image/webp", "image/tiff"],
         extensions=[".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"],
         capabilities=["read", "search", "summarize", "analyze"],
     )
@@ -370,8 +463,17 @@ class ImageAdapter:
         except Exception as exc:
             logger.warning("image_ocr_failed", path=str(path), error=str(exc))
         return ExtractionResult(
-            units=[ExtractedUnit(text, {"image": path.name}, {"kind": "ocr"})] if text else [],
-            metadata={"width": width, "height": height, "mode": mode, "ocr_available": bool(text)},
+            units=(
+                [ExtractedUnit(text, {"image": path.name}, {"kind": "ocr"})]
+                if text
+                else []
+            ),
+            metadata={
+                "width": width,
+                "height": height,
+                "mode": mode,
+                "ocr_available": bool(text),
+            },
         )
 
     async def analyze(self, path: Path, task: str) -> dict[str, Any]:
@@ -398,9 +500,19 @@ class CodeAdapter:
     """
 
     info = AdapterInfo(
-        name="code", version="2.0", mime_types=["text/x-python", "application/javascript", "text/x-java-source"],
+        name="code",
+        version="2.0",
+        mime_types=["text/x-python", "application/javascript", "text/x-java-source"],
         extensions=sorted(CODE_EXTENSIONS),
-        capabilities=["read", "search", "summarize", "analyze", "symbols", "references", "call_graph"],
+        capabilities=[
+            "read",
+            "search",
+            "summarize",
+            "analyze",
+            "symbols",
+            "references",
+            "call_graph",
+        ],
     )
 
     async def extract(
@@ -418,14 +530,25 @@ class CodeAdapter:
         language = CODE_EXTENSIONS.get(Path(relative_path).suffix.lower(), "text")
         symbols, dependencies = _code_index(text, language, relative_path)
         return ExtractionResult(
-            units=[ExtractedUnit(text, {"path": relative_path, "start_line": 1}, {"language": language, "kind": "source"})],
-            metadata={"language": language, "lines": len(text.splitlines())}, symbols=symbols, dependencies=dependencies,
+            units=[
+                ExtractedUnit(
+                    text,
+                    {"path": relative_path, "start_line": 1},
+                    {"language": language, "kind": "source"},
+                )
+            ],
+            metadata={"language": language, "lines": len(text.splitlines())},
+            symbols=symbols,
+            dependencies=dependencies,
         )
 
     async def analyze(self, path: Path, task: str) -> dict[str, Any]:
         """分析代码文件：返回语言分布和符号数量。"""
         result = await asyncio.to_thread(self._extract_one, path, path.name)
-        return {"languages": {result.metadata.get("language", "text"): 1}, "symbols": len(result.symbols)}
+        return {
+            "languages": {result.metadata.get("language", "text"): 1},
+            "symbols": len(result.symbols),
+        }
 
 
 def _frame_analysis(frame: Any) -> dict[str, Any]:
@@ -440,16 +563,23 @@ def _frame_analysis(frame: Any) -> dict[str, Any]:
         包含 rows/columns/dtypes/missing/description 字段的分析结果字典。
     """
     numeric = frame.select_dtypes(include="number")
-    description = numeric.describe().replace({float("nan"): None}).to_dict() if not numeric.empty else {}
+    description = (
+        numeric.describe().replace({float("nan"): None}).to_dict()
+        if not numeric.empty
+        else {}
+    )
     return {
-        "rows": int(len(frame)), "columns": [str(column) for column in frame.columns],
+        "rows": int(len(frame)),
+        "columns": [str(column) for column in frame.columns],
         "dtypes": {str(k): str(v) for k, v in frame.dtypes.items()},
         "missing": {str(k): int(v) for k, v in frame.isna().sum().items()},
         "description": description,
     }
 
 
-def _code_index(text: str, language: str, path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _code_index(
+    text: str, language: str, path: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """构建代码文件的符号索引和依赖关系图。
 
     解析策略优先级：
@@ -469,7 +599,9 @@ def _code_index(text: str, language: str, path: str) -> tuple[list[dict[str, Any
         try:
             return _python_index(text, path)
         except SyntaxError as exc:
-            logger.warning("python_ast_index_failed", path=path, error=str(exc), fallback="regex")
+            logger.warning(
+                "python_ast_index_failed", path=path, error=str(exc), fallback="regex"
+            )
     if language != "python":
         parsed = _tree_sitter_index(text, language, path)
         if parsed is not None:
@@ -477,19 +609,43 @@ def _code_index(text: str, language: str, path: str) -> tuple[list[dict[str, Any
     # 正则回退：匹配类/函数/结构体等定义
     symbols: list[dict[str, Any]] = []
     dependencies: list[dict[str, Any]] = []
-    pattern = re.compile(r"^\s*(?:class|interface|struct|enum|def|function|func|fn)\s+([A-Za-z_$][\w$]*)", re.MULTILINE)
+    pattern = re.compile(
+        r"^\s*(?:class|interface|struct|enum|def|function|func|fn)\s+([A-Za-z_$][\w$]*)",
+        re.MULTILINE,
+    )
     lines = text.splitlines()
     for match in pattern.finditer(text):
         line = text.count("\n", 0, match.start()) + 1
-        symbols.append({"path": path, "language": language, "name": match.group(1), "qualified_name": match.group(1),
-                        "kind": "symbol", "start_line": line, "end_line": line, "signature": lines[line - 1][:500]})
+        symbols.append(
+            {
+                "path": path,
+                "language": language,
+                "name": match.group(1),
+                "qualified_name": match.group(1),
+                "kind": "symbol",
+                "start_line": line,
+                "end_line": line,
+                "signature": lines[line - 1][:500],
+            }
+        )
     # 匹配 import/require/include 语句
-    for match in re.finditer(r"(?:import|from|require\s*\(|#include\s*[<\"])([^\n;\)\">]+)", text):
-        dependencies.append({"source": path, "target": match.group(1).strip(), "kind": "import", "metadata": {}})
+    for match in re.finditer(
+        r"(?:import|from|require\s*\(|#include\s*[<\"])([^\n;\)\">]+)", text
+    ):
+        dependencies.append(
+            {
+                "source": path,
+                "target": match.group(1).strip(),
+                "kind": "import",
+                "metadata": {},
+            }
+        )
     return symbols, dependencies
 
 
-def _tree_sitter_index(text: str, language: str, path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+def _tree_sitter_index(
+    text: str, language: str, path: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
     """Use tree-sitter when the optional grammar pack is available.
 
     Grammar downloads or parser changes must never make uploads fail, so all
@@ -503,9 +659,15 @@ def _tree_sitter_index(text: str, language: str, path: str) -> tuple[list[dict[s
         symbols: list[dict[str, Any]] = []
         dependencies: list[dict[str, Any]] = []
         interesting = {
-            "function_definition", "function_declaration", "method_definition",
-            "class_definition", "class_declaration", "struct_declaration",
-            "interface_declaration", "enum_declaration", "function_item",
+            "function_definition",
+            "function_declaration",
+            "method_definition",
+            "class_definition",
+            "class_declaration",
+            "struct_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "function_item",
         }
         stack = [tree.root_node]
         while stack:
@@ -513,24 +675,46 @@ def _tree_sitter_index(text: str, language: str, path: str) -> tuple[list[dict[s
             if node.type in interesting:
                 name_node = node.child_by_field_name("name")
                 if name_node is not None:
-                    name = text[name_node.start_byte:name_node.end_byte]
-                    symbols.append({
-                        "path": path, "language": language, "name": name,
-                        "qualified_name": name, "kind": node.type,
-                        "start_line": node.start_point[0] + 1,
-                        "end_line": node.end_point[0] + 1,
-                        "signature": text.splitlines()[node.start_point[0]][:500],
-                    })
+                    name = text[name_node.start_byte : name_node.end_byte]
+                    symbols.append(
+                        {
+                            "path": path,
+                            "language": language,
+                            "name": name,
+                            "qualified_name": name,
+                            "kind": node.type,
+                            "start_line": node.start_point[0] + 1,
+                            "end_line": node.end_point[0] + 1,
+                            "signature": text.splitlines()[node.start_point[0]][:500],
+                        }
+                    )
             stack.extend(reversed(node.children))
-        for match in re.finditer(r"(?:import|from|require\s*\(|#include\s*[<\"])([^\n;\)\">]+)", text):
-            dependencies.append({"source": path, "target": match.group(1).strip(), "kind": "import", "metadata": {}})
+        for match in re.finditer(
+            r"(?:import|from|require\s*\(|#include\s*[<\"])([^\n;\)\">]+)", text
+        ):
+            dependencies.append(
+                {
+                    "source": path,
+                    "target": match.group(1).strip(),
+                    "kind": "import",
+                    "metadata": {},
+                }
+            )
         return symbols, dependencies
     except Exception as exc:
-        logger.warning("tree_sitter_index_failed", path=path, language=language, error=str(exc), fallback="regex")
+        logger.warning(
+            "tree_sitter_index_failed",
+            path=path,
+            language=language,
+            error=str(exc),
+            fallback="regex",
+        )
         return None
 
 
-def _python_index(text: str, path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _python_index(
+    text: str, path: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """使用 Python AST 构建符号索引和依赖关系图。
 
     遍历 AST 节点提取类定义、函数定义（含异步函数）、import 语句
@@ -555,9 +739,18 @@ def _python_index(text: str, path: str) -> tuple[list[dict[str, Any]], list[dict
     class Visitor(ast.NodeVisitor):
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
             qualified = ".".join([*parents, node.name])
-            symbols.append({"path": path, "language": "python", "name": node.name, "qualified_name": qualified,
-                            "kind": "class", "start_line": node.lineno, "end_line": getattr(node, "end_lineno", node.lineno),
-                            "signature": f"class {node.name}"})
+            symbols.append(
+                {
+                    "path": path,
+                    "language": "python",
+                    "name": node.name,
+                    "qualified_name": qualified,
+                    "kind": "class",
+                    "start_line": node.lineno,
+                    "end_line": getattr(node, "end_lineno", node.lineno),
+                    "signature": f"class {node.name}",
+                }
+            )
             parents.append(node.name)
             self.generic_visit(node)
             parents.pop()
@@ -571,19 +764,42 @@ def _python_index(text: str, path: str) -> tuple[list[dict[str, Any]], list[dict
         def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
             qualified = ".".join([*parents, node.name])
             args = ", ".join(arg.arg for arg in node.args.args)
-            symbols.append({"path": path, "language": "python", "name": node.name, "qualified_name": qualified,
-                            "kind": "function", "start_line": node.lineno, "end_line": getattr(node, "end_lineno", node.lineno),
-                            "signature": f"def {node.name}({args})"})
+            symbols.append(
+                {
+                    "path": path,
+                    "language": "python",
+                    "name": node.name,
+                    "qualified_name": qualified,
+                    "kind": "function",
+                    "start_line": node.lineno,
+                    "end_line": getattr(node, "end_lineno", node.lineno),
+                    "signature": f"def {node.name}({args})",
+                }
+            )
             parents.append(node.name)
             self.generic_visit(node)
             parents.pop()
 
         def visit_Import(self, node: ast.Import) -> None:
             for name in node.names:
-                dependencies.append({"source": path, "target": name.name, "kind": "import", "metadata": {"line": node.lineno}})
+                dependencies.append(
+                    {
+                        "source": path,
+                        "target": name.name,
+                        "kind": "import",
+                        "metadata": {"line": node.lineno},
+                    }
+                )
 
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-            dependencies.append({"source": path, "target": node.module or "", "kind": "import", "metadata": {"line": node.lineno}})
+            dependencies.append(
+                {
+                    "source": path,
+                    "target": node.module or "",
+                    "kind": "import",
+                    "metadata": {"line": node.lineno},
+                }
+            )
 
         def visit_Call(self, node: ast.Call) -> None:
             target = ""
@@ -592,7 +808,14 @@ def _python_index(text: str, path: str) -> tuple[list[dict[str, Any]], list[dict
             elif isinstance(node.func, ast.Attribute):
                 target = node.func.attr
             if target:
-                dependencies.append({"source": ".".join(parents) or path, "target": target, "kind": "call", "metadata": {"line": node.lineno}})
+                dependencies.append(
+                    {
+                        "source": ".".join(parents) or path,
+                        "target": target,
+                        "kind": "call",
+                        "metadata": {"line": node.lineno},
+                    }
+                )
             self.generic_visit(node)
 
     Visitor().visit(tree)

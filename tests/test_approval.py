@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,7 +12,11 @@ from athena.gateway.approval import ApprovalManager
 
 @pytest.fixture
 def manager() -> ApprovalManager:
-    return ApprovalManager(approval_timeout=2)
+    return ApprovalManager(
+        websocket_manager=AsyncMock(),
+        db=AsyncMock(),
+        approval_timeout=2,
+    )
 
 
 @pytest.mark.asyncio
@@ -22,6 +27,7 @@ async def test_request_approval_returns_future(manager: ApprovalManager):
         risk_level="high",
         session_id="sess-1",
         run_id="run-1",
+        tool_call_id="tc-1",
     )
     assert req.id is not None
     assert req.tool_name == "exec_shell"
@@ -36,6 +42,7 @@ async def test_respond_approval_allow(manager: ApprovalManager):
         risk_level="medium",
         session_id="sess-1",
         run_id="run-1",
+        tool_call_id="tc-2",
     )
     ok = await manager.respond_approval(req.id, "allow")
     assert ok is True
@@ -52,6 +59,7 @@ async def test_respond_approval_deny(manager: ApprovalManager):
         risk_level="high",
         session_id="sess-1",
         run_id="run-1",
+        tool_call_id="tc-3",
     )
     await manager.respond_approval(req.id, "deny")
     approved = await req.future
@@ -67,6 +75,7 @@ async def test_approval_timeout(manager: ApprovalManager):
         risk_level="high",
         session_id="sess-1",
         run_id="run-1",
+        tool_call_id="tc-4",
     )
     # 等待超时（2s）
     approved = await req.future
@@ -79,11 +88,11 @@ async def test_queue_processes_sequentially(manager: ApprovalManager):
     """多个请求应顺序处理，同一时刻只处理一个."""
     req1 = await manager.request_approval(
         tool_name="t1", arguments={}, risk_level="low",
-        session_id="s1", run_id="r1",
+        session_id="s1", run_id="r1", tool_call_id="tc-5",
     )
     req2 = await manager.request_approval(
         tool_name="t2", arguments={}, risk_level="low",
-        session_id="s1", run_id="r1",
+        session_id="s1", run_id="r1", tool_call_id="tc-6",
     )
     # 处理 req1 时，req2 仍在队列中
     await asyncio.sleep(0.05)
@@ -104,11 +113,11 @@ async def test_queue_processes_sequentially(manager: ApprovalManager):
 async def test_cancel_all_pending_for_session(manager: ApprovalManager):
     await manager.request_approval(
         tool_name="t1", arguments={}, risk_level="low",
-        session_id="s1", run_id="r1",
+        session_id="s1", run_id="r1", tool_call_id="tc-7",
     )
     await manager.request_approval(
         tool_name="t2", arguments={}, risk_level="low",
-        session_id="s2", run_id="r2",
+        session_id="s2", run_id="r2", tool_call_id="tc-8",
     )
     await manager.cancel_all_pending("s1")
     pending = manager.get_pending()

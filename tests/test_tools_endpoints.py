@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 
 from athena.core.tools.builtin.registry import register_builtin_tools
 from athena.core.tools.manager import UnifiedToolManager
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
+from tests.fakes import install_runtime, make_tool_manager
 
 
 @pytest.fixture
@@ -35,32 +36,27 @@ async def db(db_path):
 
 @pytest.fixture
 def manager() -> UnifiedToolManager:
-    m = UnifiedToolManager()
+    m = make_tool_manager()
     register_builtin_tools(m)
     return m
 
 
 @pytest.fixture
 def client(db, manager):
-    """构造只含 tools 路由的测试应用，patch _get_db 与 get_tool_manager."""
+    """构造通过 RuntimeContainer 注入依赖的 tools 测试应用."""
+    from athena.core.tools.catalog import ToolCatalogService
     from athena.gateway.routes.tools import router
-    import athena.gateway.routes.tools as tools_mod
-
-    async def mock_get_db():
-        return db
 
     app = FastAPI()
     app.include_router(router)
-
-    original_get_db = tools_mod._get_db
-    original_get_tool_manager = tools_mod.get_tool_manager
-    tools_mod._get_db = mock_get_db
-    tools_mod.get_tool_manager = lambda: manager
+    install_runtime(
+        app,
+        db=db,
+        tool_manager=manager,
+        tool_catalog=ToolCatalogService(db.tools),
+    )
 
     yield TestClient(app)
-
-    tools_mod._get_db = original_get_db
-    tools_mod.get_tool_manager = original_get_tool_manager
 
 
 def test_list_tools_includes_enabled_and_stats(client):
@@ -72,7 +68,7 @@ def test_list_tools_includes_enabled_and_stats(client):
     assert isinstance(data["high_risk"], int)
     assert isinstance(data["calls_today"], int)
     names = {item["name"] for item in data["items"]}
-    assert "read_file" in names
+    assert "read_local_file" in names
     assert all(item["enabled"] is True for item in data["items"])
     # 每条含治理字段
     first = data["items"][0]
@@ -90,30 +86,30 @@ def test_list_tools_includes_enabled_and_stats(client):
 
 
 def test_patch_toggle_disables(client):
-    resp = client.patch("/tools/read_file", json={"enabled": False})
+    resp = client.patch("/tools/read_local_file", json={"enabled": False})
     assert resp.status_code == 200
     body = resp.json()
     assert body == {
         "status": "updated",
-        "name": "read_file",
+        "name": "read_local_file",
         "enabled": False,
         "risk_level": "low",
         "require_approval": False,
     }
 
     data = client.get("/tools").json()
-    item = next(i for i in data["items"] if i["name"] == "read_file")
+    item = next(i for i in data["items"] if i["name"] == "read_local_file")
     assert item["enabled"] is False
     assert data["enabled"] == data["total"] - 1
 
 
 def test_patch_reenable(client):
-    client.patch("/tools/read_file", json={"enabled": False})
-    resp = client.patch("/tools/read_file", json={"enabled": True})
+    client.patch("/tools/read_local_file", json={"enabled": False})
+    resp = client.patch("/tools/read_local_file", json={"enabled": True})
     assert resp.status_code == 200
     assert resp.json()["enabled"] is True
     data = client.get("/tools").json()
-    item = next(i for i in data["items"] if i["name"] == "read_file")
+    item = next(i for i in data["items"] if i["name"] == "read_local_file")
     assert item["enabled"] is True
 
 
@@ -122,25 +118,11 @@ def test_patch_unknown_tool_404(client):
     assert resp.status_code == 404
 
 
-def test_list_tools_manager_none_503(db):
-    """未初始化工具管理器时返回 503."""
+def test_list_tools_requires_runtime_container():
+    """缺少应用运行时容器时应立即暴露配置错误."""
     from athena.gateway.routes.tools import router
-    import athena.gateway.routes.tools as tools_mod
-
-    async def mock_get_db():
-        return db
 
     app = FastAPI()
     app.include_router(router)
-
-    original_get_db = tools_mod._get_db
-    original_get_tool_manager = tools_mod.get_tool_manager
-    tools_mod._get_db = mock_get_db
-    tools_mod.get_tool_manager = lambda: None
-
-    try:
-        resp = TestClient(app).get("/tools")
-        assert resp.status_code == 503
-    finally:
-        tools_mod._get_db = original_get_db
-        tools_mod.get_tool_manager = original_get_tool_manager
+    with pytest.raises(RuntimeError, match="runtime is not initialized"):
+        TestClient(app).get("/tools")

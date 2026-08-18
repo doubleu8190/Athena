@@ -54,6 +54,8 @@ def test_get_settings_readonly(client):
     assert body["host"] == "0.0.0.0"
     assert body["port"] == 8000
     assert body["sandbox_enabled"] is True
+    assert body["llm_retry"]["max_attempts"] == 3
+    assert body["llm_secondary_retry"]["max_attempts"] == 2
     # 绝不泄露 api_key
     assert "api_key" not in body
     assert "llm_providers" not in body

@@ -5,13 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from athena.core.tools.manager import UnifiedToolManager, get_tool_manager
-from athena.db.database import Database, get_database
+from athena.core.tools.manager import UnifiedToolManager
 from athena.models.tool import RiskLevel
 from athena.utils.logging import get_logger
+from athena.runtime import runtime_from
 
 logger = get_logger(__name__)
 
@@ -39,26 +39,17 @@ class UpdateToolRequest(BaseModel):
     require_approval: bool | None = None
 
 
-async def _get_db() -> Database:
-    from athena.config.settings import get_settings
-
-    return await get_database(get_settings().sqlite_db_path)
-
-
-def _manager_or_503() -> UnifiedToolManager:
-    """获取工具管理器，未初始化时抛出 503."""
-    manager = get_tool_manager()
-    if manager is None:
-        raise HTTPException(status_code=503, detail="Tool manager not initialized")
-    return manager
+def _manager_or_503(request: Request) -> UnifiedToolManager:
+    """获取应用启动时注入的工具管理器."""
+    return runtime_from(request).tool_manager
 
 
 @router.get("")
-async def list_tools() -> dict[str, Any]:
+async def list_tools(request: Request) -> dict[str, Any]:
     """列出全部工具（含停用），附带治理信息与最近调用时间、今日调用统计."""
-    manager = _manager_or_503()
+    manager = _manager_or_503(request)
 
-    db = await _get_db()
+    db = runtime_from(request).db
     last_called = await db.tool_calls.last_called_by_tool()
     calls_today = await db.tool_calls.count_calls_since(
         datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -94,13 +85,13 @@ async def list_tools() -> dict[str, Any]:
 
 
 @router.patch("/{name}")
-async def update_tool(name: str, req: UpdateToolRequest) -> dict[str, Any]:
+async def update_tool(name: str, req: UpdateToolRequest, request: Request) -> dict[str, Any]:
     """修改工具治理参数（enabled / risk_level / require_approval）.
 
     仅传入需要修改的字段，未传入的字段保持不变。
     同步更新内存和 DB。
     """
-    manager = _manager_or_503()
+    manager = _manager_or_503(request)
     if manager.get_tool(name) is None:
         raise HTTPException(status_code=404, detail=f"Tool '{name}' not registered")
 
@@ -114,17 +105,10 @@ async def update_tool(name: str, req: UpdateToolRequest) -> dict[str, Any]:
                 detail=f"Invalid risk_level: '{req.risk_level}'. Must be one of: low, medium, high",
             )
 
-    # 更新内存
-    manager.update_tool_config(
-        name,
-        risk_level=req.risk_level,
-        require_approval=req.require_approval,
-        enabled=req.enabled,
-    )
-
-    # 更新 DB
-    db = await _get_db()
-    await db.tools.update(
+    runtime = runtime_from(request)
+    catalog = runtime.tool_catalog
+    await catalog.update_governance(
+        manager,
         name,
         risk_level=req.risk_level,
         require_approval=req.require_approval,

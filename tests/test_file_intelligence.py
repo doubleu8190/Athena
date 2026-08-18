@@ -3,22 +3,24 @@ from __future__ import annotations
 from datetime import datetime
 import sys
 import types
+from unittest.mock import AsyncMock
 
 import pytest
 
 from athena.config.settings import Settings
 from athena.core.files.adapters import ExcelAdapter, ImageAdapter, PdfAdapter, WordAdapter
-from athena.core.files.base import ExtractionContext
-from athena.core.files.capabilities import register_file_capabilities
+from athena.core.files.base import ExtractedUnit, ExtractionContext
 from athena.core.files.registry import AdapterRegistry
 from athena.core.files.runtime import FileAccessError, FileIntelligenceRuntime
 from athena.core.files.storage import FileTooLargeError, StorageLayer
 from athena.core.files.tasks import FileTaskWorker
-from athena.core.tools.manager import UnifiedToolManager
-from athena.db.database import Database
-from athena.main import _persist_registered_tool_configs
+from athena.core.tools.catalog import ToolCatalogService, ToolRegistry
+from athena.core.tools.providers.files import build_file_tool_specs
+from athena.core.llm.tokens import conservative_text_token_count
+from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
 from athena.models.file import FileChunk, FileTaskStatus, FileTaskType
+from tests.fakes import make_tool_manager
 
 
 class _FakeLLM:
@@ -27,6 +29,19 @@ class _FakeLLM:
             content = "summary"
 
         return Response()
+
+    def count_text_tokens(self, text: str) -> int:
+        return conservative_text_token_count(text)
+
+
+def _make_runtime(repository, settings: Settings) -> FileIntelligenceRuntime:
+    return FileIntelligenceRuntime(
+        repository,
+        _FakeLLM(),
+        _FakeLLM(),
+        settings=settings,
+        ws_manager=AsyncMock(),
+    )
 
 
 async def _chunks(*values: bytes):
@@ -63,7 +78,7 @@ async def test_parse_search_message_binding_and_session_isolation(tmp_path):
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
-        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
+        runtime = _make_runtime(db.files, settings)
         blob = await runtime.storage.save_stream(_chunks(b"alpha beta\nsecond line\n"))
         attachment = await db.files.create_attachment(
             session_id="one", filename="notes.txt", mime_type="text/plain",
@@ -93,7 +108,7 @@ async def test_parse_csv_preserves_suffix_for_table_artifact(tmp_path):
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
-        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
+        runtime = _make_runtime(db.files, settings)
         blob = await runtime.storage.save_stream(_chunks(b"name,value\nalpha,1\nbeta,2\n"))
         attachment = await db.files.create_attachment(
             session_id="session", filename="data.csv", mime_type="text/csv",
@@ -196,7 +211,7 @@ async def test_read_failed_attachment_is_not_reported_as_waiting(tmp_path):
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
-        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
+        runtime = _make_runtime(db.files, settings)
         attachment = await db.files.create_attachment(
             session_id="session", filename="a.txt", mime_type="text/plain",
             size_bytes=1, sha256="3" * 64, storage_key="blobs/33/placeholder",
@@ -223,7 +238,7 @@ async def test_empty_ocr_image_summary_does_not_fail_attachment(tmp_path):
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
-        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
+        runtime = _make_runtime(db.files, settings)
         attachment = await db.files.create_attachment(
             session_id="session", filename="shot.png", mime_type="image/png",
             size_bytes=1, sha256="4" * 64, storage_key="blobs/44/placeholder",
@@ -286,7 +301,7 @@ async def test_image_analysis_uses_ocr_fallback_without_vision(tmp_path, monkeyp
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
-        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
+        runtime = _make_runtime(db.files, settings)
         image_path = tmp_path / "sample.png"
         Image.new("RGB", (12, 8), "white").save(image_path)
         blob = await runtime.storage.save_stream(_chunks(image_path.read_bytes()))
@@ -363,7 +378,7 @@ async def test_summary_task_failure_does_not_mark_attachment_failed(tmp_path):
             file_storage_path=str(tmp_path / "storage"),
             file_task_max_attempts=1,
         )
-        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
+        runtime = _make_runtime(db.files, settings)
         worker = FileTaskWorker(runtime)
         attachment = await db.files.create_attachment(
             session_id="session", filename="empty.txt", mime_type="text/plain",
@@ -395,15 +410,14 @@ async def test_file_capability_governance_is_applied_to_runtime_manager(tmp_path
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
-        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
-        manager = UnifiedToolManager()
-        register_file_capabilities(manager, runtime)
-        await _persist_registered_tool_configs(manager, db)
+        runtime = _make_runtime(db.files, settings)
+        manager = make_tool_manager()
+        catalog = ToolCatalogService(db.tools)
+        await ToolRegistry(manager, catalog).install(build_file_tool_specs(runtime))
         await db.tools.update("read_file", enabled=False, risk_level="high", require_approval=True)
 
-        restarted = UnifiedToolManager()
-        register_file_capabilities(restarted, runtime)
-        await _persist_registered_tool_configs(restarted, db)
+        restarted = make_tool_manager()
+        await ToolRegistry(restarted, catalog).install(build_file_tool_specs(runtime))
 
         assert restarted.is_enabled("read_file") is False
         assert restarted.get_risk_level("read_file") == "high"
@@ -442,6 +456,27 @@ def test_adapter_registry_excludes_archive_formats():
     assert not {".zip", ".tar", ".tgz", ".tar.gz"} & set(registry.supported_extensions())
     with pytest.raises(ValueError, match="不支持的文件类型"):
         registry.select("project.zip", "application/zip")
+
+
+def test_file_chunks_respect_token_limit(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        file_storage_path=str(tmp_path / "storage"),
+        file_chunk_tokens=8,
+        file_chunk_overlap_tokens=2,
+    )
+    runtime = _make_runtime(AsyncMock(), settings)
+    units = [
+        ExtractedUnit(
+            content="这是一段用于验证中文分块边界的长文本内容",
+            locator={"path": "notes.txt"},
+        )
+    ]
+
+    chunks = runtime._chunk_units("file-1", units)
+
+    assert len(chunks) > 1
+    assert all(0 < chunk.token_count <= settings.file_chunk_tokens for chunk in chunks)
 
 
 def test_cache_key_changes_with_every_version_dimension(tmp_path):

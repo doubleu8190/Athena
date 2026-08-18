@@ -10,12 +10,12 @@
 - search_local_file (low / 无审批) — 正则搜索定位
 - read_local_file_full (low / 无审批) — 安全全量读取（带 50KB 阀门）
 
-注册时集成 DB：已存在的工具以 DB 治理参数为准，不存在则写入 DB。
+注册函数只负责写入运行时管理器，持久化治理由 ToolCatalogService 统一处理。
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TypedDict
 
 from athena.core.tools.builtin.file_tools import (
     get_file_info,
@@ -27,14 +27,21 @@ from athena.core.tools.builtin.file_tools import (
     write_file,
 )
 from athena.core.tools.builtin.shell_tools import exec_shell
+from athena.core.tools.base import NativeHandler
 from athena.core.tools.manager import UnifiedToolManager
-from athena.models.tool import RiskLevel, ToolExecutionMode
+from athena.core.tools.spec import ToolSpec
+from athena.models.tool import RiskLevel
 
-if TYPE_CHECKING:
-    from athena.db.database import Database
+class BuiltinToolDefinition(TypedDict):
+    name: str
+    description: str
+    handler: NativeHandler
+    risk_level: RiskLevel
+    require_approval: bool
+
 
 # 内置工具的默认定义（注册名 / 描述 / handler / 默认治理参数）
-_BUILTIN_TOOLS = [
+_BUILTIN_TOOLS: list[BuiltinToolDefinition] = [
     {
         "name": "read_local_file",
         "description": "读取指定路径的文件文本内容",
@@ -111,72 +118,18 @@ _BUILTIN_TOOLS = [
 
 
 def register_builtin_tools(
-    manager: UnifiedToolManager, db: Database | None = None
-):
-    """注册所有内置 Native 工具到管理器，集成 DB 持久化.
-
-    对每个内置工具：
-    1. 查 DB 是否已存在
-    2. 已存在 → 用 DB 的 risk_level / require_approval / enabled
-    3. 不存在 → 用代码默认值，并写入 DB
-    4. 注册到 manager，disabled 的加入 _disabled
-    """
-    # Registration itself is synchronous so lightweight unit tests and callers
-    # that do not have a database can still construct a manager. Persistence is
-    # returned as an awaitable when a database is supplied.
-    definitions = _BUILTIN_TOOLS if db is not None else [
-        {**item, "name": {
-            "read_local_file": "read_file",
-            "get_local_file_info": "get_file_info",
-            "read_local_file_section": "read_file_section",
-            "search_local_file": "search_in_file",
-            "read_local_file_full": "read_full_file",
-        }.get(item["name"], item["name"])} for item in _BUILTIN_TOOLS[:4]
-    ]
-    pending: list[dict] = []
-    for tool_def in definitions:
-        name = tool_def["name"]
-        default_risk = tool_def["risk_level"]
-        default_approval = tool_def["require_approval"]
-
-        risk_level = default_risk
-        require_approval = default_approval
-        enabled = True
-
-        # 注册到 manager
-        manager.register_native(
-            name=name,
-            description=tool_def["description"],
-            handler=tool_def["handler"],
-            risk_level=risk_level,
-            require_approval=require_approval,
+    manager: UnifiedToolManager,
+) -> list[str]:
+    """Register built-ins and return the names installed into the manager."""
+    for tool_def in _BUILTIN_TOOLS:
+        manager.register(
+            ToolSpec(
+                name=tool_def["name"],
+                description=tool_def["description"],
+                handler=tool_def["handler"],
+                risk_level=tool_def["risk_level"],
+                require_approval=tool_def["require_approval"],
+            )
         )
 
-        # 停用处理
-        if not enabled:
-            manager._disabled.add(name)
-
-        if db is not None:
-            pending.append(tool_def)
-
-    async def persist() -> None:
-        assert db is not None
-        for tool_def in pending:
-            name = tool_def["name"]
-            existing = await db.tools.get(name)
-            if existing is not None:
-                manager._tools[name].schema.risk_level = existing.risk_level
-                manager._tools[name].schema.require_approval = existing.require_approval
-                if not existing.enabled:
-                    manager._disabled.add(name)
-            else:
-                await db.tools.upsert(
-                    tool_name=name,
-                    execution_mode=ToolExecutionMode.NATIVE.value,
-                    description=tool_def["description"],
-                    risk_level=str(tool_def["risk_level"].value),
-                    require_approval=tool_def["require_approval"],
-                    enabled=True,
-                )
-
-    return persist() if db is not None else None
+    return [item["name"] for item in _BUILTIN_TOOLS]

@@ -6,25 +6,26 @@ import pytest
 
 from athena.core.tools.builtin.registry import register_builtin_tools
 from athena.core.tools.manager import UnifiedToolManager
+from tests.fakes import make_tool_manager
 
 
 @pytest.fixture
 def manager() -> UnifiedToolManager:
-    m = UnifiedToolManager()
+    m = make_tool_manager()
     register_builtin_tools(m)
     return m
 
 
 def test_tools_enabled_by_default(manager: UnifiedToolManager):
-    assert manager.is_enabled("read_file") is True
+    assert manager.is_enabled("read_local_file") is True
     assert manager.is_enabled("exec_shell") is True
 
 
 def test_set_enabled_disable_enable(manager: UnifiedToolManager):
-    assert manager.set_enabled("read_file", False) is True
-    assert manager.is_enabled("read_file") is False
-    assert manager.set_enabled("read_file", True) is True
-    assert manager.is_enabled("read_file") is True
+    assert manager.set_enabled("read_local_file", False) is True
+    assert manager.is_enabled("read_local_file") is False
+    assert manager.set_enabled("read_local_file", True) is True
+    assert manager.is_enabled("read_local_file") is True
 
 
 def test_set_enabled_unknown_tool(manager: UnifiedToolManager):
@@ -45,7 +46,7 @@ def test_get_langchain_tools_excludes_disabled(manager: UnifiedToolManager):
     lc = manager.get_langchain_tools()
     lc_names = {t.name for t in lc}
     assert "write_file" not in lc_names
-    assert "read_file" in lc_names
+    assert "read_local_file" in lc_names
     assert "exec_shell" in lc_names
 
 

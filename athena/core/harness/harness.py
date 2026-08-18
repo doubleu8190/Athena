@@ -33,13 +33,14 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from athena.config.settings import Settings, get_settings
+from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.budget import Budget, BudgetExceeded
 from athena.core.harness.error_handler import ToolErrorHandler
 from athena.core.llm.provider import LLMProvider
+from athena.core.llm.tokens import token_usage_from_chunks
 from athena.core.tools.manager import UnifiedToolManager
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, MessageRole, Step, ToolCallRecord
 from athena.models.step import StepStatus, StepType
@@ -98,7 +99,14 @@ class Harness:
 
     典型用法::
 
-        harness = Harness(llm=provider, tool_manager=manager)
+        harness = Harness(
+            llm=provider,
+            tool_manager=manager,
+            settings=settings,
+            db=db,
+            ws_manager=ws_manager,
+            compressor=compressor,
+        )
         result = await harness.run(messages=msgs, session_id="s1")
     """
 
@@ -106,10 +114,10 @@ class Harness:
         self,
         llm: LLMProvider,
         tool_manager: UnifiedToolManager,
-        settings: Settings | None = None,
-        db: Database | None = None,
-        ws_manager: WebSocketManager | None = None,
-        compressor: ContextCompressor | None = None,
+        settings: Settings,
+        db: Database,
+        ws_manager: WebSocketManager,
+        compressor: ContextCompressor,
         error_handler: ToolErrorHandler | None = None,
         harness_settings: HarnessSettings | None = None,
     ) -> None:
@@ -118,17 +126,16 @@ class Harness:
         Args:
             llm: LLM Provider，负责模型调用（流式/非流式）。
             tool_manager: 统一工具管理器，负责工具注册与调用。
-            settings: 全局配置（未提供时从 get_settings() 获取）。
+            settings: 全局配置。
             db: 数据库实例，用于持久化 Step / Message / ToolCallRecord。
-                None 时跳过所有持久化操作。
-            ws_manager: WebSocket 管理器，用于向前端推送事件。None 时跳过推送。
-            compressor: 上下文压缩器，在每轮 LLM 调用前压缩消息列表。None 时不压缩。
+            ws_manager: WebSocket 管理器，用于向前端推送事件。
+            compressor: 上下文压缩器，在每轮 LLM 调用前压缩消息列表。
             error_handler: 工具错误自愈路由器（含熔断器）。未提供时使用默认实例。
             harness_settings: Harness 运行时配置。未提供时从全局 Settings 派生。
         """
         self._llm = llm
         self._tool_manager = tool_manager
-        self._settings = settings or get_settings()
+        self._settings = settings
         self._db = db
         self._ws = ws_manager
         self._compressor = compressor
@@ -214,8 +221,7 @@ class Harness:
         self._stop_signal = stop_signal
 
         # 更新会话状态为 running
-        if self._db is not None:
-            await self._db.sessions.update(session_id, status="running", run_id=rid)
+        await self._db.sessions.update(session_id, status="running", run_id=rid)
 
         await self._emit(EventType.STREAM_START, {"run_id": rid}, session_id, rid)
 
@@ -240,13 +246,12 @@ class Harness:
         try:
             while not self._should_stop():
                 # 上下文压缩
-                if self._compressor is not None:
-                    compressed = await self._compressor.compress(
-                        lc_messages,
-                        session_id=session_id,
-                    )
-                    if len(compressed) < len(lc_messages):
-                        lc_messages = compressed
+                compressed = await self._compressor.compress(
+                    lc_messages,
+                    session_id=session_id,
+                )
+                if len(compressed) < len(lc_messages):
+                    lc_messages = compressed
 
                 # Step: LLM 调用
                 step_counter += 1
@@ -300,6 +305,7 @@ class Harness:
                         merged_content, final_tc = self._assemble_response(
                             stream_chunks, full_content
                         )
+                        token_usage = token_usage_from_chunks(stream_chunks)
                     if merged_content:
                         full_content = merged_content
 
@@ -434,8 +440,16 @@ class Harness:
                         "status": str(StepStatus.COMPLETED),
                         "completed_at": datetime.now().isoformat(),
                         "duration_ms": duration_ms,
-                        "llm_input_tokens": self._estimate_tokens(lc_messages[:-1]),
-                        "llm_output_tokens": self._estimate_tokens([ai_message]),
+                        "llm_input_tokens": (
+                            token_usage.input_tokens
+                            if token_usage is not None
+                            else bound_llm.count_message_tokens(lc_messages[:-1])
+                        ),
+                        "llm_output_tokens": (
+                            token_usage.output_tokens
+                            if token_usage is not None
+                            else bound_llm.count_message_tokens([ai_message])
+                        ),
                     },
                 )
 
@@ -451,7 +465,7 @@ class Harness:
 
                 # 持久化 assistant 消息（中断恢复关键）
                 # 守卫：仅在确实有输出（文本或工具调用）时落库，避免空消息污染对话
-                if self._db is not None and (full_content.strip() or final_tc):
+                if full_content.strip() or final_tc:
                     await self._db.messages.save(
                         Message(
                             id=generate_time_id(),
@@ -526,10 +540,9 @@ class Harness:
             rid,
         )
 
-        if self._db is not None:
-            await self._db.sessions.update(
-                session_id, status="idle" if not interrupted else "interrupted"
-            )
+        await self._db.sessions.update(
+            session_id, status="idle" if not interrupted else "interrupted"
+        )
 
         return HarnessRunResult(
             content=last_content,
@@ -598,18 +611,17 @@ class Harness:
 
                 # 创建 tool_call 记录
                 tc_record_id = generate_time_id()
-                if self._db is not None:
-                    await self._db.tool_calls.save(
-                        ToolCallRecord(
-                            id=tc_record_id,
-                            session_id=session_id,
-                            step_id=step_id,
-                            tool_name=tool_name,
-                            arguments=args,
-                            status=ToolCallStatus.RUNNING,
-                            started_at=datetime.now(),
-                        )
+                await self._db.tool_calls.save(
+                    ToolCallRecord(
+                        id=tc_record_id,
+                        session_id=session_id,
+                        step_id=step_id,
+                        tool_name=tool_name,
+                        arguments=args,
+                        status=ToolCallStatus.RUNNING,
+                        started_at=datetime.now(),
                     )
+                )
 
                 await self._emit(
                     EventType.TOOL_CALL_START,
@@ -637,20 +649,19 @@ class Harness:
                 duration_ms = (time.time() - start_time) * 1000
 
                 # 更新 tool_call 记录
-                if self._db is not None:
-                    await self._db.tool_calls.update(
-                        tc_record_id,
-                        {
-                            "raw_output": (
-                                result_content if status == "success" else None
-                            ),
-                            "status": status,
-                            "completed_at": datetime.now().isoformat(),
-                            "duration_ms": duration_ms,
-                            "error_message": error_msg,
-                            "error_stack": error_stack,
-                        },
-                    )
+                await self._db.tool_calls.update(
+                    tc_record_id,
+                    {
+                        "raw_output": (
+                            result_content if status == "success" else None
+                        ),
+                        "status": status,
+                        "completed_at": datetime.now().isoformat(),
+                        "duration_ms": duration_ms,
+                        "error_message": error_msg,
+                        "error_stack": error_stack,
+                    },
+                )
 
                 # 更新 tool_execution step
                 await self._update_step(
@@ -703,22 +714,21 @@ class Harness:
                     tool_content = f"[工具 {tool_name} 失败]: {error_msg}"
 
                 # 持久化 tool 消息
-                if self._db is not None:
-                    await self._db.messages.save(
-                        Message(
-                            id=generate_time_id(),
-                            session_id=session_id,
-                            role=MessageRole.TOOL,
-                            content=tool_content,
-                            tool_call_id=tc_id,
-                            run_id=run_id,
-                            step_id=step_id,
-                            tool_call_record_id=tc_record_id,
-                            # 前端据此给工具气泡标名（避免跨表 join）
-                            tool_name=tool_name,
-                            timestamp=datetime.now(),
-                        )
+                await self._db.messages.save(
+                    Message(
+                        id=generate_time_id(),
+                        session_id=session_id,
+                        role=MessageRole.TOOL,
+                        content=tool_content,
+                        tool_call_id=tc_id,
+                        run_id=run_id,
+                        step_id=step_id,
+                        tool_call_record_id=tc_record_id,
+                        # 前端据此给工具气泡标名（避免跨表 join）
+                        tool_name=tool_name,
+                        timestamp=datetime.now(),
                     )
+                )
 
                 return ToolMessage(content=tool_content, tool_call_id=tc_id)
 
@@ -937,13 +947,11 @@ class Harness:
         """持久化步骤记录到数据库.
 
         自动注入 parent_run_id（子 Agent 运行时由 run() 设置）。
-        db 为 None 时静默跳过；异常仅记录日志，不向上抛出。
+        持久化异常仅记录日志，不向上抛出。
 
         Args:
             step: 待持久化的 Step 实例。
         """
-        if self._db is None:
-            return
         try:
             # 步骤显式记录父 run（子 Agent 运行时由 run() 注入）
             if step.parent_run_id is None:
@@ -959,8 +967,6 @@ class Harness:
             step_id: 步骤 ID。
             updates: 待更新的字段字典，键为字段名，值为新值。
         """
-        if self._db is None:
-            return
         try:
             await self._db.steps.update(step_id, updates)
         except Exception as e:
@@ -975,7 +981,7 @@ class Harness:
     ) -> None:
         """向前端推送事件（WebSocket）.
 
-        ws_manager 为 None 时静默跳过；异常仅记录警告日志，不向上抛出。
+        推送异常仅记录警告日志，不向上抛出。
 
         Args:
             event_type: 事件类型枚举。
@@ -983,8 +989,6 @@ class Harness:
             session_id: 会话 ID。
             run_id: 运行 ID。
         """
-        if self._ws is None:
-            return
         try:
             await self._ws.send_to_session(
                 session_id,
@@ -1034,23 +1038,3 @@ class Harness:
             session_id,
             run_id,
         )
-
-    def _estimate_tokens(self, messages: list[BaseMessage]) -> int:
-        """粗略估算消息列表的 token 数.
-
-        使用 ``len(content) // 4`` 作为近似值（中文约 1 字 ≈ 2~3 token，
-        英文约 4 字符 ≈ 1 token，取折中值）。不使用 tiktoken 以避免额外依赖。
-
-        Args:
-            messages: 消息列表，支持 BaseMessage 和 dict 两种格式。
-
-        Returns:
-            估算的总 token 数。
-        """
-        total = 0
-        for m in messages:
-            if isinstance(m, BaseMessage):
-                total += len(getattr(m, "content", "") or "") // 4
-            elif isinstance(m, dict):
-                total += len(str(m.get("content", ""))) // 4
-        return total

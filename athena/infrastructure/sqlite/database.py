@@ -1,4 +1,4 @@
-"""SQLite 数据库管理 — 基于 SQLAlchemy ORM 的异步访问层.
+"""SQLite database facade.
 
 Database 持有各 Repository 实例并提供 connect/close 生命周期管理。
 调用者通过公开属性直接访问 Repository（如 db.messages.save(msg)）。
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from athena.db.engine import close_engine, init_engine
-from athena.db.repository import (
+from athena.infrastructure.sqlite.engine import close_engine, init_engine
+from athena.infrastructure.sqlite.repositories import (
     ApprovalLogRepository,
     McpServerRepository,
     MessageRepository,
@@ -42,7 +42,7 @@ class Database:
         self.approval_logs = ApprovalLogRepository()
         self.mcp_servers = McpServerRepository()
         self.tools = ToolRepository()
-        from athena.core.files.repository import FileRepository
+        from athena.infrastructure.sqlite.file_repository import FileRepository
 
         self.files = FileRepository()
 
@@ -81,26 +81,3 @@ class Database:
                 "error_message": err,
             },
         )
-
-
-# ---------------------------------------------------------------------------
-# 全局单例
-# ---------------------------------------------------------------------------
-
-_db_instance: Database | None = None
-
-
-async def get_database(db_path: str) -> Database:
-    """获取数据库单例."""
-    global _db_instance
-    if _db_instance is None:
-        _db_instance = Database(db_path)
-        await _db_instance.connect()
-    return _db_instance
-
-
-async def close_database() -> None:
-    global _db_instance
-    if _db_instance is not None:
-        await _db_instance.close()
-        _db_instance = None

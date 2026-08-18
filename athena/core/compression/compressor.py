@@ -12,17 +12,15 @@ from __future__ import annotations
 
 from langchain_core.messages import BaseMessage, SystemMessage
 
-from athena.config.settings import Settings, get_settings
+from athena.config.settings import Settings
 from athena.core.compression.pairer import MessagePairer
 from athena.core.compression.summarizer import IncrementalSummarizer
 from athena.core.llm.provider import LLMProvider
-from athena.db.database import Database
+from athena.core.llm.tokens import TokenCounter
+from athena.infrastructure.sqlite.database import Database
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-from athena.utils.llm import estimate_tokens
 
 
 def _get_message_id(msg: BaseMessage) -> str | None:
@@ -37,11 +35,13 @@ class ContextCompressor:
     def __init__(
         self,
         llm: LLMProvider,
+        token_counter: TokenCounter,
         db: Database,
-        settings: Settings | None = None,
+        settings: Settings,
     ) -> None:
         self._llm = llm
-        self._settings = settings or get_settings()
+        self._token_counter = token_counter
+        self._settings = settings
         self._db = db
         self._max_tokens = self._settings.max_context_tokens
         self._threshold = self._settings.compression_threshold
@@ -59,16 +59,12 @@ class ContextCompressor:
 
     def _should_compress(self, messages: list[BaseMessage]) -> bool:
         """检查是否需要压缩（超过阈值时触发）."""
-        total = 0
-        for m in messages:
-            total += estimate_tokens(getattr(m, "content", "") or "")
-            for tc in getattr(m, "tool_calls", None) or []:
-                total += estimate_tokens(str(tc.get("args", {})))
+        total = self._token_counter.count_message_tokens(messages)
         return total > self._max_tokens * self._threshold
 
     def _estimate_total(self, messages: list[BaseMessage]) -> int:
         """估算消息列表总 token 数."""
-        return sum(estimate_tokens(getattr(m, "content", "") or "") for m in messages)
+        return self._token_counter.count_message_tokens(messages)
 
     async def compress(
         self,
@@ -94,7 +90,9 @@ class ContextCompressor:
         sid = session_id or "_default"
 
         # 2. 增量模式：获取上次压缩后的增量消息
-        incremental_messages = await self._get_incremental_messages(messages, session_id)
+        incremental_messages = await self._get_incremental_messages(
+            messages, session_id
+        )
 
         # 3. 识别完整对话轮次
         turns = self._pairer.identify_turns(incremental_messages)
@@ -103,7 +101,9 @@ class ContextCompressor:
             return messages
 
         # 4. 分离旧轮次和最近轮次
-        old_turns, recent_turns = self._pairer.get_recent_turns(turns, self._keep_recent_turns)
+        old_turns, recent_turns = self._pairer.get_recent_turns(
+            turns, self._keep_recent_turns
+        )
         if not old_turns:
             return messages
 
@@ -147,9 +147,12 @@ class ContextCompressor:
                 return all_messages
 
             # 从数据库查询增量消息，转换为 BaseMessage
-            incremental_messages = await self._db.messages.get_after_message(session_id, last_compressed_id)
+            incremental_messages = await self._db.messages.get_after_message(
+                session_id, last_compressed_id
+            )
             if incremental_messages:
                 from athena.utils.message import dicts_to_messages
+
                 incremental = dicts_to_messages(incremental_messages)
                 logger.info(
                     "incremental_messages_loaded",
@@ -159,7 +162,9 @@ class ContextCompressor:
                 )
                 return incremental
         except Exception as e:
-            logger.warning("incremental_load_failed", error=str(e), session_id=session_id)
+            logger.warning(
+                "incremental_load_failed", error=str(e), session_id=session_id
+            )
 
         return all_messages
 
@@ -186,7 +191,11 @@ class ContextCompressor:
                     last_compressed_message_id=last_id,
                 )
             except Exception as e:
-                logger.warning("update_last_compressed_id_failed", error=str(e), session_id=session_id)
+                logger.warning(
+                    "update_last_compressed_id_failed",
+                    error=str(e),
+                    session_id=session_id,
+                )
 
     def _rebuild_messages(
         self,

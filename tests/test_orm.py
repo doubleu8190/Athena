@@ -8,7 +8,7 @@ from datetime import datetime
 
 import pytest
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.models import (
     ApprovalDecision,
     ApprovalLog,
@@ -128,8 +128,8 @@ async def test_soft_delete_cascade(db: Database):
 @pytest.mark.asyncio
 async def test_soft_delete_preserves_data(db: Database):
     """验证软删除后数据仍然存在于数据库中（通过 Repository 直接查询）."""
-    from athena.db.engine import get_session
-    from athena.db.models import SessionModel
+    from athena.infrastructure.sqlite.engine import get_session
+    from athena.infrastructure.sqlite.models import SessionModel
     from sqlalchemy import select
 
     # 创建会话
@@ -157,8 +157,8 @@ async def test_soft_delete_preserves_data(db: Database):
 @pytest.mark.asyncio
 async def test_transaction_rollback_on_error(db: Database):
     """验证事务异常时能正确回滚."""
-    from athena.db.engine import get_session
-    from athena.db.models import SessionModel
+    from athena.infrastructure.sqlite.engine import get_session
+    from athena.infrastructure.sqlite.models import SessionModel
     from sqlalchemy import select
 
     # 创建会话

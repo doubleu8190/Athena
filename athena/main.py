@@ -10,7 +10,7 @@
 
 业务逻辑已剥离至：
 - gateway/ws/handler.py — WebSocket 端点与消息处理
-- services/recovery.py — 会话恢复
+- gateway/recovery.py — 会话恢复
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from athena.config.settings import get_settings
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.memory import set_memory_manager
-from athena.db.database import close_database, get_database
+from athena.infrastructure.sqlite.database import Database
+from athena.runtime import RuntimeContainer
 
 from athena.gateway.approval import ApprovalManager
 from athena.gateway.routes import api_router
@@ -37,106 +37,98 @@ from athena.utils.logging import configure_logging, get_logger
 logger = get_logger(__name__)
 
 
-async def _persist_registered_tool_configs(tool_manager, db) -> None:
-    """Persist schemas and apply stored governance settings to runtime tools."""
-    for tool in tool_manager.list_tools():
-        schema = tool.schema
-        await db.tools.upsert(
-            tool_name=schema.name,
-            execution_mode=str(schema.execution_mode.value),
-            description=schema.description,
-            parameters=schema.parameters,
-            risk_level=str(schema.risk_level.value),
-            require_approval=schema.require_approval,
-            enabled=True,
-        )
-        persisted = await db.tools.get(schema.name)
-        if persisted is not None:
-            tool_manager.update_tool_config(
-                schema.name,
-                risk_level=persisted.risk_level.value,
-                require_approval=persisted.require_approval,
-                enabled=persisted.enabled,
-            )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理 - 启动初始化与关闭清理."""
+    """应用生命周期管理 — 启动初始化与关闭清理。
+
+    启动阶段按依赖顺序初始化所有子系统，关闭阶段按逆序释放资源。
+    所有子系统通过 ``app.state.runtime`` 注入到路由层。
+
+    Yields:
+        None。yield 前完成初始化，yield 后执行清理。
+
+    Raises:
+        Exception: 任何子系统初始化失败时向上抛出，阻止应用启动。
+    """
     settings = get_settings()
     configure_logging(debug=settings.debug)
     logger.info("athena_starting", host=settings.host, port=settings.port)
 
-    # 1. 数据库
-    db = await get_database(settings.sqlite_db_path)
+    # ── 1. 数据库 ──
+    db = Database(settings.sqlite_db_path)
+    await db.connect()
 
-    # 2. WebSocket 管理器
-    from athena.gateway.ws.manager import set_websocket_manager
-
+    # ── 2. WebSocket 管理器 ──
     ws_manager = WebSocketManager()
-    set_websocket_manager(ws_manager)
 
-    # 3. 审批管理器（绑定 ws + db）
-    from athena.gateway.approval import set_approval_manager
-
+    # ── 3. 审批管理器（绑定 ws + db） ──
     approval_manager = ApprovalManager(
         approval_timeout=settings.approval_timeout,
         websocket_manager=ws_manager,
         db=db,
     )
-    set_approval_manager(approval_manager)
 
-    # 4. 工具管理器（注册内置工具）
-    from athena.core.tools.manager import UnifiedToolManager, set_tool_manager
+    # ── 4. 工具管理器（注册内置工具 + MCP 工具） ──
+    from athena.core.tools.catalog import ToolCatalogService
+    from athena.core.tools.manager import UnifiedToolManager
     from athena.core.tools.builtin.registry import register_builtin_tools
 
     tool_manager = UnifiedToolManager(approval_manager=approval_manager)
-    await db.tools.migrate_legacy_builtin_names()
-    await register_builtin_tools(tool_manager, db)
-    set_tool_manager(tool_manager)
+    tool_catalog = ToolCatalogService(db.tools)
+    builtin_tool_names = register_builtin_tools(tool_manager)
+    await tool_catalog.reconcile(tool_manager, names=builtin_tool_names)
 
-    # 4.5 MCP 服务器管理器（恢复已持久化的 MCP Server）
-    from athena.core.tools.mcp.manager import MCPManager, set_mcp_manager
+    # MCP 服务器管理器（恢复已持久化的 MCP Server 配置）
+    from athena.core.tools.mcp.adapter import MCPToolAdapter
+    from athena.core.tools.mcp.manager import MCPManager
 
-    mcp_manager = MCPManager(tool_manager=tool_manager, db=db)
-    set_mcp_manager(mcp_manager)
+    mcp_adapter = MCPToolAdapter(tool_manager, tool_catalog)
+    mcp_manager = MCPManager(tool_manager=tool_manager, db=db, adapter=mcp_adapter)
     await mcp_manager.load_persisted()
 
-    # 5. LLM / 记忆 / 压缩
-    from athena.core.llm.provider import set_llm_provider
-
-    llm = LLMProvider.from_settings(settings=settings)
-    set_llm_provider(llm)
-
+    # ── 5. LLM / 记忆 / 压缩 ──
+    llm_primary = LLMProvider.from_primary_settings(settings=settings)
     # 副 Provider：用于检索、摘要、事实提取、压缩等轻量任务
-    llm_secondary = LLMProvider.from_secondary_settings(settings=settings) or llm
+    llm_secondary = (
+        LLMProvider.from_secondary_settings(settings=settings) or llm_primary
+    )
 
-    from athena.core.files.capabilities import register_file_capabilities
+    # ── 5.1 File Intelligence ──
     from athena.core.files.runtime import FileIntelligenceRuntime
     from athena.core.files.tasks import FileTaskWorker
-    from athena.gateway.routes._runtime import set_file_runtime, set_file_worker
+    from athena.core.tools.catalog import ToolRegistry
+    from athena.core.tools.providers.files import build_file_tool_specs
 
     file_runtime = FileIntelligenceRuntime(
-        db.files, llm, llm_secondary, settings=settings, ws_manager=ws_manager
+        db.files, llm_primary, llm_secondary, settings=settings, ws_manager=ws_manager
     )
     await file_runtime.initialize()
-    register_file_capabilities(tool_manager, file_runtime)
-    # Capability schema is persisted using the same governance mechanism as built-ins.
-    await _persist_registered_tool_configs(tool_manager, db)
+
+    # 注册文件能力工具到工具管理器
+    tool_registry = ToolRegistry(tool_manager, tool_catalog)
+    toolSpecList: list = build_file_tool_specs(file_runtime)
+    await tool_registry.install(toolSpecList)
+
+    # 启动文件任务 Worker（后台消费解析/索引/摘要任务队列）
     file_worker = FileTaskWorker(file_runtime)
     file_runtime.set_task_enqueuer(file_worker.enqueue_task)
-    set_file_runtime(file_runtime)
-    set_file_worker(file_worker)
 
+    # ── 5.2 记忆系统 ──
     from athena.core.memory.memory import MemoryManager
 
-    memory_manager = MemoryManager(settings=settings)
+    from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
+    from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
+
+    memory_manager = MemoryManager(
+        settings=settings,
+        repository=SqliteMemoryRepository(),
+        vector_store=ChromaMemoryStore(path=str(settings.chroma_path)),
+    )
     try:
         await memory_manager.initialize()
     except Exception as e:
         logger.warning("memory_init_skipped", error=str(e))
         raise e
-    set_memory_manager(memory_manager)
 
     # 后台看门狗：周期 flush 访问统计 + 清理过期记忆
     memory_flush_task = asyncio.create_task(memory_manager.run_periodic_flush())
@@ -149,7 +141,9 @@ async def lifespan(app: FastAPI):
     retrieval_manager = HybridRetrievalManager(
         llm_secondary, memory_manager, settings=settings
     )
-    memory_retrieval = MemoryRetrievalService(retrieval_manager)
+    memory_retrieval = MemoryRetrievalService(
+        retrieval_manager, llm_primary, settings
+    )
 
     from athena.core.memory.summarizer import ConversationSummarizer
 
@@ -161,16 +155,21 @@ async def lifespan(app: FastAPI):
 
     fact_extractor = FactExtractor(llm_secondary)
 
+    # ── 5.3 上下文压缩 ──
     from athena.core.compression.compressor import ContextCompressor
 
-    compressor = ContextCompressor(llm=llm_secondary, db=db, settings=settings)
+    compressor = ContextCompressor(
+        llm=llm_secondary,
+        token_counter=llm_primary,
+        db=db,
+        settings=settings,
+    )
 
-    # 6. AgentWorkflow
+    # ── 6. AgentWorkflow（核心编排入口） ──
     from athena.core.agent.workflow import AgentWorkflow
-    from athena.gateway.routes._runtime import set_workflow
 
     workflow = AgentWorkflow(
-        llm=llm,
+        llm=llm_primary,
         tool_manager=tool_manager,
         db=db,
         ws_manager=ws_manager,
@@ -181,11 +180,27 @@ async def lifespan(app: FastAPI):
         memory_manager=memory_manager,
         settings=settings,
     )
+    # 注册子 Agent 派生工具到工具管理器
+    await tool_registry.install(workflow.delegation_tool_specs())
     file_worker.set_continuation_callback(workflow.resume_file_continuation)
     await file_worker.start()
-    set_workflow(workflow)
 
-    # 7. 被动会话恢复（project_memory 约束：通知用户 → 等待确认 → 执行恢复）
+    # ── 6.1 RuntimeContainer（路由层依赖注入容器） ──
+    app.state.runtime = RuntimeContainer(
+        db=db,
+        websocket_manager=ws_manager,
+        approval_manager=approval_manager,
+        tool_manager=tool_manager,
+        tool_catalog=tool_catalog,
+        mcp_manager=mcp_manager,
+        llm=llm_primary,
+        file_runtime=file_runtime,
+        file_worker=file_worker,
+        memory_manager=memory_manager,
+        workflow=workflow,
+    )
+
+    # ── 7. 被动会话恢复 ──
     from athena.gateway.recovery import recover_interrupted_sessions
 
     await recover_interrupted_sessions(db)
@@ -193,7 +208,7 @@ async def lifespan(app: FastAPI):
     logger.info("athena_started")
     yield
 
-    # 关闭清理
+    # ── 关闭清理（按初始化逆序释放资源） ──
     logger.info("athena_shutting_down")
     try:
         await file_worker.stop()
@@ -218,7 +233,7 @@ async def lifespan(app: FastAPI):
         await mcp_manager.shutdown()
     except Exception as e:
         logger.warning("mcp_shutdown_failed", error=str(e))
-    await close_database()
+    await db.close()
     logger.info("athena_stopped")
 
 
@@ -233,6 +248,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 允许所有来源的 CORS 请求（开发环境）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -241,13 +257,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 注册 REST API 路由（/api/*）和 WebSocket 端点（/ws）
 app.include_router(api_router)
-# WebSocket 端点（/ws）— 路由在 gateway/ws/handler.py 中定义
 app.include_router(websocket_router)
 
 
 def run() -> None:
-    """启动 uvicorn 服务器（命令行入口）."""
+    """启动 uvicorn 服务器（命令行入口）。
+
+    debug 模式下启用热重载，但只监听 athena 源码目录，
+    避免内置工具写入项目文件或 pip install 触发误重启。
+    """
     import uvicorn
 
     settings = get_settings()

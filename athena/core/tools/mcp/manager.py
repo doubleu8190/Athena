@@ -16,7 +16,7 @@ from athena.models.mcp import McpServerConfig
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from athena.db.database import Database
+    from athena.infrastructure.sqlite.database import Database
     from athena.core.tools.manager import UnifiedToolManager
 
 logger = get_logger(__name__)
@@ -45,11 +45,11 @@ class MCPManager:
         self,
         tool_manager: UnifiedToolManager,
         db: Database,
-        adapter: MCPToolAdapter | None = None,
+        adapter: MCPToolAdapter,
     ) -> None:
         self._tool_manager = tool_manager
         self._db = db
-        self._adapter = adapter or MCPToolAdapter(tool_manager, db=db)
+        self._adapter = adapter
         self._servers: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -177,21 +177,3 @@ class MCPManager:
         """关闭所有 MCP 连接（应用退出清理，防子进程泄漏）."""
         self._servers.clear()
         await self._adapter.disconnect_all()
-
-
-# ---------------------------------------------------------------------------
-# 全局单例
-# ---------------------------------------------------------------------------
-
-_mcp_manager: MCPManager
-
-
-def get_mcp_manager() -> MCPManager:
-    """获取 MCP 管理器单例."""
-    return _mcp_manager
-
-
-def set_mcp_manager(manager: MCPManager) -> None:
-    """设置 MCP 管理器单例（main.py 启动时注入）."""
-    global _mcp_manager
-    _mcp_manager = manager

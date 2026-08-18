@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM 模型定义.
+"""SQLite SQLAlchemy ORM models.
 
 所有模型采用软删除策略，包含 deleted_time 字段。
 不使用 relationship()，级联操作在 Repository 层手动处理。

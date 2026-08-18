@@ -264,6 +264,10 @@ last_run = await db.get_last_run(session_id="session-uuid")
 
 ### 3.4 项目目录结构
 
+> 当前实现已将工具声明统一到 `athena/core/tools/providers`，并将 SQLite、
+> ChromaDB 实现统一下沉到 `athena/infrastructure`。`athena/db` 仅保留旧导入
+> 兼容层。最新依赖规则和目录说明见 [architecture.md](architecture.md)。
+
 ```
 athena/
 ├── __init__.py

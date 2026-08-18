@@ -14,33 +14,34 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from athena.config.settings import Settings, get_settings
+from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
-from athena.core.harness.harness import Harness, HarnessSettings
+from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
 from athena.core.memory.retrieval import MemoryRetrievalService
 from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
 from athena.core.tools.manager import UnifiedToolManager
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, MessageRole
-from athena.models.file import Attachment, AttachmentRef, AttachmentStatus, FileTask
+from athena.models.file import Attachment, AttachmentRef, AttachmentStatus
 from athena.gateway.ws.events import EventType, build_event
 from athena.utils.ids import generate_sub_run_id, generate_time_id
 from athena.utils.logging import get_logger
+from athena.utils.prompts import get_prompt
 
 logger = get_logger(__name__)
 
 # ── 默认系统提示词 — 从 prompt/system.md 加载 ──
 # 工具定义（含审批/风险治理信息）统一由 bind_tools 的函数 schema 注入，
 # 提示词内不再重复罗列工具列表。
-from athena.utils.prompts import get_prompt
 
 DEFAULT_SYSTEM_PROMPT = get_prompt("system")
 
@@ -63,6 +64,14 @@ class SubAgentResult(BaseModel):
     tool_results: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _PreparedRun:
+    run_id: str
+    user_message: Message
+    attachment_refs: list[AttachmentRef]
+    messages: list[Message]
 
 
 class SubAgentManager:
@@ -104,7 +113,7 @@ class SubAgentManager:
         self._ws = ws_manager
         self._compressor = compressor
         self._memory_manager = memory_manager
-        self._settings = settings or get_settings()
+        self._settings = settings
         self._main_run_id = main_run_id
         self._sub_counter = 0
         self._lock = asyncio.Lock()
@@ -300,73 +309,19 @@ class AgentWorkflow:
         self._conversation_summarizer = conversation_summarizer
         self._fact_extractor = fact_extractor
         self._memory_manager = memory_manager
-        self._settings = settings or get_settings()
+        self._settings = settings
         # 会话级停止事件，由 gateway 层注入，透传给 Harness 及子 Agent。
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
 
-        # 注册 spawn_sub_agent native 工具，使 LLM 可通过 tool call 派生子 Agent。
-        if "spawn_sub_agent" not in self._tool_manager._tools:
-            self._tool_manager.register_native(
-                name="spawn_sub_agent",
-                description=(
-                    "Create a single sub-agent to handle one independent subtask. "
-                    "Use this for a single delegation that does not need parallelism. "
-                    "For multiple independent subtasks that can run concurrently, "
-                    "use spawn_parallel_agents instead."
-                ),
-                handler=self._spawn_sub_agent_handler,
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task": {
-                            "type": "string",
-                            "description": "The independent subtask to delegate to the sub-agent.",
-                        },
-                        "session_id": {
-                            "type": "string",
-                            "description": "The current session ID.",
-                        },
-                    },
-                    "required": ["task", "session_id"],
-                },
-                risk_level="medium",
-                require_approval=False,
-            )
+    def delegation_tool_specs(self):
+        """Return agent delegation declarations for composition-root registration."""
+        from athena.core.tools.providers.agents import build_agent_tool_specs
 
-        # 注册 spawn_parallel_agents native 工具，使 LLM 可并行派生多个子 Agent。
-        if "spawn_parallel_agents" not in self._tool_manager._tools:
-            self._tool_manager.register_native(
-                name="spawn_parallel_agents",
-                description=self._build_parallel_spawn_description(),
-                handler=self._spawn_parallel_handler,
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "tasks": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 6,
-                            "description": (
-                                "List of 2-6 independent subtask descriptions. "
-                                "Each task runs in its own sub-agent concurrently."
-                            ),
-                        },
-                        "session_id": {
-                            "type": "string",
-                            "description": "The current session ID.",
-                        },
-                        "max_turns": {
-                            "type": "integer",
-                            "description": "Max LLM interaction turns per sub-agent. Default: 5.",
-                            "default": 5,
-                        },
-                    },
-                    "required": ["tasks", "session_id"],
-                },
-                risk_level="medium",
-                require_approval=False,
-            )
+        return build_agent_tool_specs(
+            self._spawn_sub_agent_handler,
+            self._spawn_parallel_handler,
+            self._build_parallel_spawn_description(),
+        )
 
     async def process_message(
         self,
@@ -377,159 +332,232 @@ class AgentWorkflow:
         stop_signal: asyncio.Event | None = None,
         continuation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """处理用户消息的编排入口。
-
-        完整流水线：
-        1. 注入相关长期记忆到系统提示。
-        2. 加载历史消息（优先使用摘要 + 增量消息，避免全量加载）。
-        3. 构建系统提示（含记忆上下文）。
-        4. 持久化用户消息（中断恢复保障）。
-        5. 调用 Harness 执行 LLM 交互与工具调用。
-        6. 异步提取事实（不阻塞主流程）。
-        7. 触发阈值摘要（每 N 轮对话自动生成摘要）。
-
-        Args:
-            session_id: 会话唯一标识。
-            user_message: 用户输入的原始文本。
-            system_prompt: 自定义系统提示；为 ``None`` 时使用默认三层分类提示。
-            stop_signal: 会话级停止事件，由 gateway 层注入，透传给 Harness
-                及子 Agent（任一置位即终止运行）。
-
-        Returns:
-            包含以下字段的字典：
-            - ``content`` (str): 助手回复的最终文本内容。
-            - ``run_id`` (str): 本次运行的唯一标识。
-            - ``turn_count`` (int): LLM 交互轮次。
-            - ``tool_results`` (list[dict]): 工具调用结果列表。
-            - ``error`` (str | None): 错误信息；成功时为 ``None``。
-            - ``interrupted`` (bool): 是否因停止信号而中断。
-        """
-        if continuation is not None:
-            user_message = str(continuation.get("user_message", user_message))
-            attachment_ids = list(continuation.get("attachment_ids", attachment_ids or []))
-        effective_prompt = DEFAULT_SYSTEM_PROMPT
-        attachment_ids = list(dict.fromkeys(attachment_ids or []))
-        requested_attachments: list[Attachment] = []
-        if attachment_ids:
-            loaded_attachments = await self._db.files.get_attachments(session_id, attachment_ids)
-            attachments_by_id = {item.id: item for item in loaded_attachments}
-            for file_id in attachment_ids:
-                attachment = attachments_by_id.get(file_id)
-                if attachment is None:
-                    if continuation is not None and continuation.get("file_outcomes", {}).get(file_id) == "deleted":
-                        continue
-                    raise ValueError("附件不存在或不属于当前会话")
-                if continuation is None and attachment.status == AttachmentStatus.FAILED:
-                    raise ValueError(f"附件 {attachment.filename} 处理失败，不能随消息提交")
-                requested_attachments.append(attachment)
+        """执行消息处理流水线，并返回 Harness 结果或文件等待状态。"""
+        user_message, attachment_ids = self._normalize_request(
+            user_message, attachment_ids, continuation
+        )
+        requested_attachments = await self._load_requested_attachments(
+            session_id, attachment_ids, continuation
+        )
         self._session_stop_signals[session_id] = stop_signal
         logger.info(
             "task_classification_start",
             session_id=session_id,
             available_tools=self._tool_manager.list_names(),
         )
+        memory_context = await self._retrieve_memory_context(session_id, user_message)
+        history = await self._load_history(session_id)
+        prepared = await self._prepare_run(
+            session_id,
+            user_message,
+            attachment_ids,
+            history,
+            continuation,
+        )
+        waiting_result = await self._defer_for_pending_attachments(
+            session_id,
+            user_message,
+            attachment_ids,
+            requested_attachments,
+            prepared,
+            continuation,
+        )
+        if waiting_result is not None:
+            return waiting_result
 
-        # ── Step 1: 记忆检索 ──
-        # 从长期记忆中召回与当前消息相关的上下文，注入系统提示。
-        memory_context = ""
+        result = await self._run_harness(
+            prepared,
+            session_id,
+            self._build_system_prompt(system_prompt, memory_context),
+            stop_signal,
+        )
+        await self._post_process(session_id, user_message, result)
+        return self._result_payload(result, prepared.attachment_refs)
+
+    @staticmethod
+    def _normalize_request(
+        user_message: str,
+        attachment_ids: list[str] | None,
+        continuation: dict[str, Any] | None,
+    ) -> tuple[str, list[str]]:
+        if continuation is not None:
+            user_message = str(continuation.get("user_message", user_message))
+            attachment_ids = list(
+                continuation.get("attachment_ids", attachment_ids or [])
+            )
+        return user_message, list(dict.fromkeys(attachment_ids or []))
+
+    async def _load_requested_attachments(
+        self,
+        session_id: str,
+        attachment_ids: list[str],
+        continuation: dict[str, Any] | None,
+    ) -> list[Attachment]:
+        if not attachment_ids:
+            return []
+        loaded = await self._db.files.get_attachments(session_id, attachment_ids)
+        attachments_by_id = {item.id: item for item in loaded}
+        requested: list[Attachment] = []
+        for file_id in attachment_ids:
+            attachment = attachments_by_id.get(file_id)
+            if attachment is None:
+                deleted_during_wait = (
+                    continuation is not None
+                    and continuation.get("file_outcomes", {}).get(file_id)
+                    == AttachmentStatus.DELETED.value
+                )
+                if deleted_during_wait:
+                    continue
+                raise ValueError("附件不存在或不属于当前会话")
+            if continuation is None and attachment.status == AttachmentStatus.FAILED:
+                raise ValueError(f"附件 {attachment.filename} 处理失败，不能随消息提交")
+            requested.append(attachment)
+        return requested
+
+    async def _retrieve_memory_context(self, session_id: str, user_message: str) -> str:
         try:
-            memory_context = await self._memory_retrieval.get_relevant_memories(
-                user_message=user_message,
+            context = await self._memory_retrieval.get_relevant_memories(
+                user_message=user_message
             )
             logger.info(
                 "memory_injection_success",
                 session_id=session_id,
-                memory_context=memory_context,
+                memory_context=context,
             )
+            return context
         except Exception as e:
             logger.warning("memory_injection_failed", error=str(e))
+            return ""
 
-        # ── Step 2: 加载历史消息 ──
-        # 优先使用压缩摘要 + 增量消息，避免随对话增长而全量加载。
-        # 首次压缩由 ContextCompressor 在 Harness 循环中触发并持久化摘要；
-        # 后续调用直接复用已有摘要，只加载压缩点之后的增量消息。
+    async def _load_history(self, session_id: str) -> list[Message]:
         session = await self._db.sessions.get(session_id)
-        compression_summary = session.compression_summary if session else None
-        last_compressed_id = session.last_compressed_message_id if session else None
+        if not session or not (
+            session.compression_summary and session.last_compressed_message_id
+        ):
+            return await self._db.messages.get_by_session(session_id)
 
-        if compression_summary and last_compressed_id:
-            history_after = await self._db.messages.get_after_message(
-                session_id,
-                last_compressed_id,
-            )
-            summary_msg = Message(
-                id=generate_time_id(),
+        history_after = await self._db.messages.get_after_message(
+            session_id, session.last_compressed_message_id
+        )
+        summary = Message(
+            id=generate_time_id(),
+            session_id=session_id,
+            role=MessageRole.SYSTEM,
+            content=f"[对话历史摘要]\n{session.compression_summary}",
+            type="conversation_summary",
+            timestamp=datetime.now(),
+        )
+        logger.info(
+            "history_loaded_with_summary",
+            session_id=session_id,
+            incremental_count=len(history_after),
+        )
+        return [summary, *history_after]
+
+    @staticmethod
+    def _build_system_prompt(system_prompt: str | None, memory_context: str) -> str:
+        prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        return (prompt + "\n\n" + memory_context).strip() if memory_context else prompt
+
+    async def _prepare_run(
+        self,
+        session_id: str,
+        user_message: str,
+        attachment_ids: list[str],
+        history: list[Message],
+        continuation: dict[str, Any] | None,
+    ) -> _PreparedRun:
+        run_id = (
+            str(continuation.get("run_id"))
+            if continuation is not None
+            else generate_time_id()
+        )
+        message = await self._get_or_create_user_message(
+            session_id, user_message, run_id, history, continuation
+        )
+        attachment_refs = await self._bind_message_attachments(
+            session_id, message, attachment_ids, continuation
+        )
+        messages = self._build_harness_messages(history, message, continuation)
+        return _PreparedRun(run_id, message, attachment_refs, messages)
+
+    async def _get_or_create_user_message(
+        self,
+        session_id: str,
+        content: str,
+        run_id: str,
+        history: list[Message],
+        continuation: dict[str, Any] | None,
+    ) -> Message:
+        if continuation is not None:
+            message_id = continuation.get("message_id")
+            existing = next((item for item in history if item.id == message_id), None)
+            if existing is not None:
+                return existing
+            return Message(
+                id=str(continuation.get("message_id", generate_time_id())),
                 session_id=session_id,
-                role=MessageRole.SYSTEM,
-                content=f"[对话历史摘要]\n{compression_summary}",
-                type="conversation_summary",
+                role=MessageRole.USER,
+                content=content,
+                run_id=run_id,
                 timestamp=datetime.now(),
             )
-            history: list[Message] = [summary_msg] + history_after
-            logger.info(
-                "history_loaded_with_summary",
-                session_id=session_id,
-                incremental_count=len(history_after),
+
+        message = Message(
+            id=generate_time_id(),
+            session_id=session_id,
+            role=MessageRole.USER,
+            content=content,
+            run_id=run_id,
+            timestamp=datetime.now(),
+        )
+        await self._db.messages.save(message)
+        return message
+
+    async def _bind_message_attachments(
+        self,
+        session_id: str,
+        message: Message,
+        attachment_ids: list[str],
+        continuation: dict[str, Any] | None,
+    ) -> list[AttachmentRef]:
+        if continuation is None:
+            if not attachment_ids:
+                return []
+            attachments = await self._db.files.bind_message(
+                session_id, message.id, attachment_ids
             )
+            refs = [item.to_ref() for item in attachments]
+            message.attachments = refs
+            return refs
+
+        refs = message.attachments
+        if refs:
+            return refs
+        attachments = (await self._db.files.attachments_for_messages([message.id])).get(
+            message.id, []
+        )
+        refs = [item.to_ref() for item in attachments]
+        message.attachments = refs
+        return refs
+
+    @staticmethod
+    def _build_harness_messages(
+        history: list[Message],
+        user_message: Message,
+        continuation: dict[str, Any] | None,
+    ) -> list[Message]:
+        if continuation is None:
+            base_messages = [*history, user_message]
         else:
-            history: list[Message] = await self._db.messages.get_by_session(session_id)
-
-        # ── Step 3: 构建系统提示 ──
-        full_system_prompt = system_prompt or effective_prompt
-        if memory_context:
-            full_system_prompt = (full_system_prompt + "\n\n" + memory_context).strip()
-
-        # ── Step 4: 生成 run_id 并持久化用户消息 ──
-        # run_id 在持久化之前生成，使用户消息与 steps 共享同一分组键：
-        # 前端据此把工具/步骤按"用户请求"归组；同时避免旧 run_id
-        # 按日期+计数方案在进程重启后同一天重号的问题。
-        rid = str(continuation.get("run_id")) if continuation is not None else generate_time_id()
-
-        # 中断恢复保障：run 中途崩溃时用户消息已在库中，
-        # 避免出现没有对应用户消息的孤儿 assistant 消息。
-        user_msg: Message
-        if continuation is not None:
-            user_msg = next(
-                (item for item in history if item.id == continuation.get("message_id")),
-                Message(
-                    id=str(continuation.get("message_id", generate_time_id())),
-                    session_id=session_id, role=MessageRole.USER, content=user_message,
-                    run_id=rid, timestamp=datetime.now(),
-                ),
-            )
-        else:
-            user_msg = Message(
-                id=generate_time_id(), session_id=session_id, role=MessageRole.USER,
-                content=user_message, run_id=rid, timestamp=datetime.now(),
-            )
-            await self._db.messages.save(user_msg)
-        message_attachment_refs: list[AttachmentRef] = []
-        if attachment_ids and continuation is None:
-            bound_attachments = await self._db.files.bind_message(session_id, user_msg.id, attachment_ids)
-            message_attachment_refs = [item.to_ref() for item in bound_attachments]
-            user_msg.attachments = message_attachment_refs
-        elif continuation is not None:
-            message_attachment_refs = user_msg.attachments
-            if not message_attachment_refs:
-                continuation_attachments = (
-                    await self._db.files.attachments_for_messages([user_msg.id])
-                ).get(user_msg.id, [])
-                message_attachment_refs = [item.to_ref() for item in continuation_attachments]
-                user_msg.attachments = message_attachment_refs
-
-        # Keep each message's file context attached to that message.  This avoids
-        # losing older uploads when a later turn adds another attachment, while
-        # leaving the persisted user-visible message text unchanged.
-        messages_for_harness: list[Message] = []
-        if continuation is not None:
             base_messages = [*history]
-            if not any(item.id == user_msg.id for item in base_messages):
-                base_messages.append(user_msg)
-        else:
-            base_messages = [*history, user_msg]
+            if not any(item.id == user_message.id for item in base_messages):
+                base_messages.append(user_message)
+
+        messages: list[Message] = []
         for message in base_messages:
             if message.role != MessageRole.USER or not message.attachments:
-                messages_for_harness.append(message)
+                messages.append(message)
                 continue
             refs = "\n".join(
                 f"- file_id={ref.id}; name={ref.filename}; status={ref.status.value}; "
@@ -538,41 +566,83 @@ class AgentWorkflow:
             )
             context = (
                 "\n\n[该用户消息关联的文件资产]\n"
-                f"{refs}\n文件正文不会自动注入上下文。需要内容时，必须使用正式文件能力工具并传入上述 file_id。"
+                f"{refs}\n文件正文不会自动注入上下文。"
+                "需要内容时，必须使用正式文件能力工具并传入上述 file_id。"
             )
-            messages_for_harness.append(message.model_copy(update={"content": message.content + context}))
+            messages.append(
+                message.model_copy(update={"content": message.content + context})
+            )
+        return messages
 
-        if continuation is None and attachment_ids:
-            tasks_by_attachment = await self._db.files.list_tasks_for_attachments(session_id, attachment_ids)
-            pending_tasks: list[FileTask] = []
-            for file_id in attachment_ids:
-                for task in tasks_by_attachment.get(file_id, []):
-                    if task.status.value in ("queued", "running", "waiting"):
-                        pending_tasks.append(task)
-            pending_attachments = [
-                attachment.id for attachment in requested_attachments
-                if attachment.status.value != "ready"
-            ]
-            if pending_attachments:
-                await self._db.files.create_continuation(
-                    session_id, rid,
-                    task_ids=[task.id for task in pending_tasks],
-                    request={"message_id": user_msg.id, "user_message": user_message,
-                             "attachment_ids": attachment_ids},
-                )
-                await self._db.sessions.update(session_id, status="waiting", run_id=rid)
-                await self._ws.send_to_session(
-                    session_id,
-                    build_event(EventType.AGENT_WAITING_FILE,
-                                {"file_ids": pending_attachments, "task_ids": [task.id for task in pending_tasks]},
-                                session_id=session_id, run_id=rid),
-                )
-                return {"content": "附件正在处理中，完成后将自动继续。", "run_id": rid,
-                        "turn_count": 0, "tool_results": [], "error": None,
-                        "interrupted": False, "waiting": True,
-                        "attachments": [item.model_dump(mode="json") for item in message_attachment_refs]}
+    async def _defer_for_pending_attachments(
+        self,
+        session_id: str,
+        user_message: str,
+        attachment_ids: list[str],
+        requested_attachments: list[Attachment],
+        prepared: _PreparedRun,
+        continuation: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if continuation is not None or not attachment_ids:
+            return None
+        tasks_by_attachment = await self._db.files.list_tasks_for_attachments(
+            session_id, attachment_ids
+        )
+        pending_tasks = [
+            task
+            for file_id in attachment_ids
+            for task in tasks_by_attachment.get(file_id, [])
+            if task.status.value in ("queued", "running", "waiting")
+        ]
+        pending_file_ids = [
+            attachment.id
+            for attachment in requested_attachments
+            if attachment.status != AttachmentStatus.READY
+        ]
+        if not pending_file_ids:
+            return None
 
-        # ── Step 5: 调用 Harness 执行 LLM 交互与工具调用 ──
+        task_ids = [task.id for task in pending_tasks]
+        await self._db.files.create_continuation(
+            session_id,
+            prepared.run_id,
+            task_ids=task_ids,
+            request={
+                "message_id": prepared.user_message.id,
+                "user_message": user_message,
+                "attachment_ids": attachment_ids,
+            },
+        )
+        await self._db.sessions.update(
+            session_id, status="waiting", run_id=prepared.run_id
+        )
+        await self._ws.send_to_session(
+            session_id,
+            build_event(
+                EventType.AGENT_WAITING_FILE,
+                {"file_ids": pending_file_ids, "task_ids": task_ids},
+                session_id=session_id,
+                run_id=prepared.run_id,
+            ),
+        )
+        return {
+            "content": "附件正在处理中，完成后将自动继续。",
+            "run_id": prepared.run_id,
+            "turn_count": 0,
+            "tool_results": [],
+            "error": None,
+            "interrupted": False,
+            "waiting": True,
+            "attachments": self._serialize_attachments(prepared.attachment_refs),
+        }
+
+    async def _run_harness(
+        self,
+        prepared: _PreparedRun,
+        session_id: str,
+        system_prompt: str,
+        stop_signal: asyncio.Event | None,
+    ) -> HarnessRunResult:
         harness = Harness(
             llm=self._llm,
             tool_manager=self._tool_manager,
@@ -582,14 +652,12 @@ class AgentWorkflow:
             compressor=self._compressor,
         )
         result = await harness.run(
-            messages=messages_for_harness,
+            messages=prepared.messages,
             session_id=session_id,
-            system_prompt=full_system_prompt,
-            run_id=rid,
+            system_prompt=system_prompt,
+            run_id=prepared.run_id,
             stop_signal=stop_signal,
         )
-
-        # 工具使用情况反映了三层分类的决策结果，记录用于可观测性。
         logger.info(
             "task_classification_result",
             session_id=session_id,
@@ -598,24 +666,25 @@ class AgentWorkflow:
             had_error=bool(result.error),
             interrupted=result.interrupted,
         )
+        return result
 
-        # ── Step 6: 异步提取事实 ──
-        # 从用户消息中提取原子事实写入长期记忆，不阻塞主流程。
+    async def _post_process(
+        self, session_id: str, user_message: str, result: HarnessRunResult
+    ) -> None:
         asyncio.create_task(
             self._extract_facts_async(user_message, result.content, session_id)
         )
-
-        # ── Step 7: 阈值摘要（增量，按完整轮次触发） ──
-        # summarizer 自行从 DB 加载增量消息，按完整对话轮次边界处理，
-        # 通过 last_summarized_message_id 指针保证每条消息恰好处理一次。
         try:
             await self._conversation_summarizer.summarize_if_needed(
-                session_id=session_id,
-                db=self._db,
+                session_id=session_id, db=self._db
             )
         except Exception as e:
             logger.warning("summary_trigger_failed", error=str(e))
 
+    @classmethod
+    def _result_payload(
+        cls, result: HarnessRunResult, attachment_refs: list[AttachmentRef]
+    ) -> dict[str, Any]:
         return {
             "content": result.content,
             "run_id": result.run_id,
@@ -623,16 +692,22 @@ class AgentWorkflow:
             "tool_results": result.tool_results,
             "error": result.error,
             "interrupted": result.interrupted,
-            "attachments": [item.model_dump(mode="json") for item in message_attachment_refs],
+            "attachments": cls._serialize_attachments(attachment_refs),
         }
+
+    @staticmethod
+    def _serialize_attachments(refs: list[AttachmentRef]) -> list[dict[str, Any]]:
+        return [item.model_dump(mode="json") for item in refs]
 
     async def resume_file_continuation(self, continuation: dict[str, Any]) -> None:
         """Resume a file-waiting run exactly once after its index task completes."""
         try:
             outcomes = continuation.get("file_outcomes", {})
             unavailable = {
-                file_id: status for file_id, status in outcomes.items()
-                if status in {AttachmentStatus.FAILED.value, AttachmentStatus.DELETED.value}
+                file_id: status
+                for file_id, status in outcomes.items()
+                if status
+                in {AttachmentStatus.FAILED.value, AttachmentStatus.DELETED.value}
             }
             if unavailable:
                 attachments = await self._db.files.get_attachments(
@@ -660,17 +735,24 @@ class AgentWorkflow:
                         timestamp=datetime.now(),
                     )
                 )
-                await self._db.sessions.update(continuation["session_id"], status="idle")
+                await self._db.sessions.update(
+                    continuation["session_id"], status="idle"
+                )
                 await self._ws.send_to_session(
                     continuation["session_id"],
                     build_event(
                         EventType.SYSTEM_MESSAGE,
-                        {"content": content, "attachment_ids": list(unavailable.keys())},
+                        {
+                            "content": content,
+                            "attachment_ids": list(unavailable.keys()),
+                        },
                         session_id=continuation["session_id"],
                         run_id=str(continuation.get("run_id", "")),
                     ),
                 )
-                await self._db.files.finish_continuation(continuation["id"], failed=True)
+                await self._db.files.finish_continuation(
+                    continuation["id"], failed=True
+                )
                 return
             await self.process_message(
                 session_id=continuation["session_id"],
@@ -681,7 +763,10 @@ class AgentWorkflow:
             await self._db.files.finish_continuation(continuation["id"])
         except Exception:
             await self._db.files.finish_continuation(continuation["id"], failed=True)
-            logger.exception("file_continuation_resume_failed", continuation_id=continuation.get("id"))
+            logger.exception(
+                "file_continuation_resume_failed",
+                continuation_id=continuation.get("id"),
+            )
 
     async def _extract_facts_async(
         self,

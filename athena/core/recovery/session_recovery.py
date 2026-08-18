@@ -14,9 +14,9 @@ import asyncio
 import json
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.gateway.ws.manager import WebSocketManager
 from athena.models import Message, ToolCallRecord
 from athena.gateway.ws.events import EventType, build_event
@@ -54,8 +54,8 @@ class SessionRecovery:
     def __init__(
         self,
         db: Database,
-        ws_manager: WebSocketManager | None = None,
-        agent_workflow: AgentWorkflow | None = None,
+        ws_manager: WebSocketManager,
+        agent_workflow: AgentWorkflow,
     ) -> None:
         self._db = db
         self._ws = ws_manager
@@ -103,11 +103,6 @@ class SessionRecovery:
         recovery_prompt = self._build_recovery_prompt(resume_point, messages)
 
         # 6. 重新触发 Agent 运行（带重试）
-        if self._workflow is None:
-            logger.warning("no_workflow_for_recovery", session_id=session_id)
-            await self._db.sessions.update(session_id, status="idle")
-            return
-
         for attempt in range(self.MAX_RECOVERY_RETRIES):
             try:
                 await self._workflow.process_message(
@@ -185,20 +180,19 @@ class SessionRecovery:
                     },
                 )
 
-                if self._ws is not None:
-                    await self._ws.send_to_session(
-                        session_id,
-                        build_event(
-                            EventType.APPROVAL_INTERRUPTED,
-                            {
-                                "tool_call_id": tc.id,
-                                "tool_name": tc.tool_name,
-                                "arguments": tc.arguments,
-                                "message": f"上次中断在等待审批：{tc.tool_name}",
-                            },
-                            session_id=session_id,
-                        ),
-                    )
+                await self._ws.send_to_session(
+                    session_id,
+                    build_event(
+                        EventType.APPROVAL_INTERRUPTED,
+                        {
+                            "tool_call_id": tc.id,
+                            "tool_name": tc.tool_name,
+                            "arguments": tc.arguments,
+                            "message": f"上次中断在等待审批：{tc.tool_name}",
+                        },
+                        session_id=session_id,
+                    ),
+                )
                 logger.info(
                     "pending_approval_detected",
                     session_id=session_id,
@@ -242,19 +236,18 @@ class SessionRecovery:
                     },
                 )
 
-                if self._ws is not None:
-                    await self._ws.send_to_session(
-                        session_id,
-                        build_event(
-                            EventType.TOOL_INTERRUPTED,
-                            {
-                                "tool_call_id": tc.id,
-                                "tool_name": tc.tool_name,
-                                "message": f"工具 {tc.tool_name} 执行中断，状态未知",
-                            },
-                            session_id=session_id,
-                        ),
-                    )
+                await self._ws.send_to_session(
+                    session_id,
+                    build_event(
+                        EventType.TOOL_INTERRUPTED,
+                        {
+                            "tool_call_id": tc.id,
+                            "tool_name": tc.tool_name,
+                            "message": f"工具 {tc.tool_name} 执行中断，状态未知",
+                        },
+                        session_id=session_id,
+                    ),
+                )
 
     def _get_interrupted_tool_strategy(
         self, tool_call: ToolCallRecord
@@ -263,7 +256,7 @@ class SessionRecovery:
         tool_name = tool_call.tool_name
 
         # 只读操作，安全重试
-        if tool_name in ("read_file", "list_directory"):
+        if tool_name in ("read_local_file", "list_directory"):
             return InterruptedToolStrategy.RETRY
 
         # 写操作，检查是否已正确完成

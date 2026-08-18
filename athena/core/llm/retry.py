@@ -347,6 +347,11 @@ class LLMRetryManager:
         """
         self._fallback_providers.append(provider)
 
+    @property
+    def config(self) -> RetryConfig:
+        """返回当前 Provider 使用的重试策略."""
+        return self._config
+
     async def execute_with_retry(
         self,
         func: Callable[..., Awaitable[Any]],

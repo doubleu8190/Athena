@@ -16,10 +16,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from athena.core.tools.builtin.registry import register_builtin_tools
+from athena.core.tools.catalog import ToolCatalogService
 from athena.core.tools.manager import UnifiedToolManager
+from athena.core.tools.mcp.adapter import MCPToolAdapter
 from athena.core.tools.mcp.manager import MCPManager
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.models.mcp import McpServerConfig
+from tests.fakes import install_runtime, make_tool_manager
 
 STUB_PATH = Path(__file__).resolve().parent / "fixtures" / "mcp_stub.py"
 
@@ -45,41 +48,31 @@ async def db(db_path):
 
 @pytest.fixture
 def manager() -> UnifiedToolManager:
-    m = UnifiedToolManager()
+    m = make_tool_manager()
     register_builtin_tools(m)
     return m
 
 
 @pytest.fixture
 def mcp_manager(db, manager) -> MCPManager:
-    return MCPManager(tool_manager=manager, db=db)
+    adapter = MCPToolAdapter(manager, ToolCatalogService(db.tools))
+    return MCPManager(tool_manager=manager, db=db, adapter=adapter)
 
 
 @pytest.fixture
 def client(db, mcp_manager):
-    """构造只含 mcp 路由的测试应用，patch get_database 与 get_mcp_manager."""
+    """构造通过 RuntimeContainer 注入依赖的 MCP 测试应用."""
     from athena.gateway.routes.mcp import router
-    import athena.gateway.routes.mcp as mcp_mod
-
-    async def mock_get_database(_path):
-        return db
 
     app = FastAPI()
     app.include_router(router)
-
-    original_get_database = mcp_mod.get_database
-    original_get_mcp_manager = mcp_mod.get_mcp_manager
-    mcp_mod.get_database = mock_get_database
-    mcp_mod.get_mcp_manager = lambda: mcp_manager
+    install_runtime(app, db=db, mcp_manager=mcp_manager)
 
     # 必须用 with 进入：TestClient 只有作为上下文管理器时才共享单个 portal/
     # 事件循环（否则每个请求新建 loop，跨请求的连接状态/后台任务会失效）。
     # 生产环境（uvicorn）为单一事件循环，与 with 语义一致。
     with TestClient(app) as client:
         yield client
-
-    mcp_mod.get_database = original_get_database
-    mcp_mod.get_mcp_manager = original_get_mcp_manager
 
 
 def _register_payload(server_name: str, command: str, args: list[str], env: dict | None = None):
@@ -192,7 +185,8 @@ async def test_load_persisted_recovers(db, mcp_manager, manager):
     assert result["status"] == "connected"
     assert len(await db.mcp_servers.list_all()) == 1
 
-    fresh = MCPManager(tool_manager=manager, db=db)
+    adapter = MCPToolAdapter(manager, ToolCatalogService(db.tools))
+    fresh = MCPManager(tool_manager=manager, db=db, adapter=adapter)
     await fresh.load_persisted()
     names = {t.schema.name for t in manager.list_tools()}
     assert "mcp_persist-me_echo" in names

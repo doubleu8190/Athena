@@ -1,19 +1,27 @@
-"""会话管理路由 — 创建/列出/查询/删除会话、发送消息、恢复中断会话."""
+"""会话管理路由 — 创建/列出/查询/删除会话、发送消息、恢复中断会话。
+
+提供会话的完整 CRUD 操作，以及消息发送、执行步骤查询、工具调用记录查询、
+会话停止和恢复等端点。所有端点挂载在 ``/sessions`` 前缀下。
+"""
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from athena.core.agent.workflow import AgentWorkflow
-from athena.db.database import Database, get_database
+from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, Session, Step
 from athena.utils.ids import generate_session_id
 from athena.utils.logging import get_logger
+from athena.runtime import runtime_from
+
+if TYPE_CHECKING:
+    from athena.core.recovery.session_recovery import SessionRecovery
 
 logger = get_logger(__name__)
 
@@ -21,17 +29,21 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 class CreateSessionRequest(BaseModel):
+    """创建会话请求体。"""
+
     title: str = "New Session"
 
 
 class SendMessageRequest(BaseModel):
+    """发送消息请求体。"""
+
     message: str
     system_prompt: str = ""
     attachment_ids: list[str] = Field(default_factory=list)
 
 
 class InterruptedToolInfo(BaseModel):
-    """中断工具调用的摘要信息."""
+    """中断工具调用的摘要信息。"""
 
     tool_call_id: str
     tool_name: str
@@ -41,20 +53,31 @@ class InterruptedToolInfo(BaseModel):
 
 
 class InterruptedSessionInfo(BaseModel):
-    """中断会话的恢复上下文 — 帮助用户决定是否恢复."""
+    """中断会话的恢复上下文 — 帮助用户决定是否恢复。
+
+    Attributes:
+        session_id: 会话 ID。
+        title: 会话标题。
+        status: 当前状态（interrupted/running/failed）。
+        interrupted_at: 近似中断时间（最后更新时间）。
+        last_message_role: 最后一条消息的角色。
+        last_message_preview: 最后一条消息的前 200 字符。
+        pending_tools: 未完成的工具调用列表。
+        recovery_hint: 恢复策略提示文本。
+    """
 
     session_id: str
     title: str
     status: str
-    interrupted_at: str | None = None  # 最后更新时间近似中断时间
+    interrupted_at: str | None = None
     last_message_role: str | None = None
-    last_message_preview: str | None = None  # 最后一条消息的前 200 字符
+    last_message_preview: str | None = None
     pending_tools: list[InterruptedToolInfo] = Field(default_factory=list)
-    recovery_hint: str = ""  # 恢复策略提示
+    recovery_hint: str = ""
 
 
 class RecoverSessionResponse(BaseModel):
-    """恢复操作的响应."""
+    """恢复操作的响应。"""
 
     session_id: str
     status: str  # "recovering" | "idle" | "failed"
@@ -62,9 +85,9 @@ class RecoverSessionResponse(BaseModel):
 
 
 class ToolCallResponse(BaseModel):
-    """前端工具调用视图 DTO.
+    """前端工具调用视图 DTO。
 
-    数据库领域模型使用 raw_output/error_message；前端和 websocket 使用
+    数据库领域模型使用 raw_output/error_message；前端和 WebSocket 使用
     output/error。这里做一次字段收敛，避免历史回放和实时流展示不一致。
     """
 
@@ -84,40 +107,39 @@ class ToolCallResponse(BaseModel):
     risk_level: str = "low"
 
 
-async def _get_db() -> Database:
-    from athena.config.settings import get_settings
-    return await get_database(get_settings().sqlite_db_path)
+async def _db_for(request: Request) -> Database:
+    """从请求上下文获取数据库实例。"""
+    return runtime_from(request).db
 
 
-async def _get_workflow() -> AgentWorkflow | None:
-    """获取全局 AgentWorkflow 实例（由 main.py 注入）."""
-    from athena.gateway.routes._runtime import get_workflow
-    return get_workflow()
+async def _workflow_for(request: Request) -> AgentWorkflow:
+    """从请求上下文获取 AgentWorkflow 实例。"""
+    return runtime_from(request).workflow
 
 
 @router.post("")
-async def create_session(req: CreateSessionRequest) -> Session:
+async def create_session(req: CreateSessionRequest, request: Request) -> Session:
     """创建新会话."""
-    db = await _get_db()
+    db = await _db_for(request)
     session_id = generate_session_id()
     session = await db.sessions.create(session_id, title=req.title)
     return session
 
 
 @router.get("")
-async def list_sessions() -> list[Session]:
+async def list_sessions(request: Request) -> list[Session]:
     """列出所有会话."""
-    db = await _get_db()
+    db = await _db_for(request)
     return await db.sessions.list_all()
 
 
 @router.get("/interrupted", response_model=list[InterruptedSessionInfo])
-async def list_interrupted_sessions() -> list[InterruptedSessionInfo]:
+async def list_interrupted_sessions(request: Request) -> list[InterruptedSessionInfo]:
     """列出所有中断/失败的会话及恢复上下文.
 
     前端可据此展示恢复面板，用户决定是否恢复。
     """
-    db = await _get_db()
+    db = await _db_for(request)
     sessions = await db.sessions.query_by_status(["interrupted", "running", "failed"])
     result: list[InterruptedSessionInfo] = []
 
@@ -160,9 +182,9 @@ async def list_interrupted_sessions() -> list[InterruptedSessionInfo]:
 
 
 @router.get("/{session_id}")
-async def get_session(session_id: str) -> Session:
+async def get_session(session_id: str, request: Request) -> Session:
     """获取会话详情."""
-    db = await _get_db()
+    db = await _db_for(request)
     session = await db.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -174,12 +196,12 @@ class UpdateSessionRequest(BaseModel):
 
 
 @router.patch("/{session_id}")
-async def update_session(session_id: str, req: UpdateSessionRequest) -> Session:
+async def update_session(session_id: str, req: UpdateSessionRequest, request: Request) -> Session:
     """重命名会话."""
     title = req.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="Title must not be empty")
-    db = await _get_db()
+    db = await _db_for(request)
     session = await db.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -190,42 +212,32 @@ async def update_session(session_id: str, req: UpdateSessionRequest) -> Session:
 
 
 @router.delete("/{session_id}")
-async def delete_session(session_id: str) -> dict[str, str]:
+async def delete_session(session_id: str, request: Request) -> dict[str, str]:
     """删除会话及其所有关联数据."""
-    db = await _get_db()
+    db = await _db_for(request)
     await db.files.delete_session(session_id)
-    runtime = None
-    try:
-        from athena.gateway.routes._runtime import get_file_runtime
-        runtime = get_file_runtime()
-    except (RuntimeError, AttributeError, NameError):
-        pass
-    if runtime is not None:
-        await runtime.cleanup_unreferenced_blobs()
+    await runtime_from(request).file_runtime.cleanup_unreferenced_blobs()
     await db.sessions.delete(session_id)
     return {"status": "deleted", "session_id": session_id}
 
 
 @router.get("/{session_id}/messages")
-async def get_messages(session_id: str, limit: int | None = None) -> list[Message]:
+async def get_messages(session_id: str, request: Request, limit: int | None = None) -> list[Message]:
     """获取会话消息列表."""
-    db = await _get_db()
+    db = await _db_for(request)
     if not await db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return await db.messages.get_by_session(session_id, limit=limit)
 
 
 @router.post("/{session_id}/messages")
-async def send_message(session_id: str, req: SendMessageRequest) -> dict[str, Any]:
+async def send_message(session_id: str, req: SendMessageRequest, request: Request) -> dict[str, Any]:
     """发送消息到会话（同步返回结果，流式输出走 WebSocket）."""
-    db = await _get_db()
+    db = await _db_for(request)
     if not await db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    workflow = await _get_workflow()
-    if workflow is None:
-        raise HTTPException(status_code=503, detail="Agent workflow not initialized")
-
+    workflow = await _workflow_for(request)
     try:
         result = await workflow.process_message(
             session_id=session_id,
@@ -239,23 +251,24 @@ async def send_message(session_id: str, req: SendMessageRequest) -> dict[str, An
 
 
 @router.get("/{session_id}/steps")
-async def get_steps(session_id: str) -> list[Step]:
+async def get_steps(session_id: str, request: Request) -> list[Step]:
     """获取会话执行步骤."""
-    db = await _get_db()
+    db = await _db_for(request)
     if not await db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return await db.steps.get_by_session(session_id)
 
 
 @router.get("/{session_id}/tool_calls")
-async def get_tool_calls(session_id: str, status: str | None = None) -> list[ToolCallResponse]:
+async def get_tool_calls(session_id: str, request: Request, status: str | None = None) -> list[ToolCallResponse]:
     """获取会话工具调用记录."""
-    db = await _get_db()
+    db = await _db_for(request)
     if not await db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     tool_calls = await db.tool_calls.query(session_id, status=status)
     steps = await db.steps.get_by_session(session_id)
     run_by_step = {step.id: step.run_id for step in steps}
+    risk_level = runtime_from(request).tool_manager.get_risk_level
     return [
         ToolCallResponse(
             id=tc.id,
@@ -271,14 +284,14 @@ async def get_tool_calls(session_id: str, status: str | None = None) -> list[Too
             started_at=tc.started_at,
             completed_at=tc.completed_at,
             duration_ms=tc.duration_ms,
-            risk_level=_tool_risk_level(tc.tool_name),
+            risk_level=risk_level(tc.tool_name),
         )
         for tc in tool_calls
     ]
 
 
 @router.post("/{session_id}/stop")
-async def stop_session(session_id: str) -> dict[str, str]:
+async def stop_session(session_id: str, request: Request) -> dict[str, str]:
     """请求停止会话当前运行."""
     from athena.gateway.routes._runtime import get_session_stop_event
     stop_event = get_session_stop_event(session_id)
@@ -290,7 +303,7 @@ async def stop_session(session_id: str) -> dict[str, str]:
 
 
 @router.post("/{session_id}/recover", response_model=RecoverSessionResponse)
-async def recover_session(session_id: str) -> RecoverSessionResponse:
+async def recover_session(session_id: str, request: Request) -> RecoverSessionResponse:
     """手动触发会话恢复 — 完整执行 SessionRecovery 流程.
 
     恢复流程：
@@ -299,7 +312,7 @@ async def recover_session(session_id: str) -> RecoverSessionResponse:
     3. 判断恢复起点
     4. 重新触发 Agent 运行（带重试）
     """
-    db = await _get_db()
+    db = await _db_for(request)
     session = await db.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -311,18 +324,10 @@ async def recover_session(session_id: str) -> RecoverSessionResponse:
             detail=f"Session status is '{current_status}', only interrupted/running/failed sessions can be recovered",
         )
 
-    workflow = await _get_workflow()
-    if workflow is None:
-        raise HTTPException(status_code=503, detail="Agent workflow not initialized")
-
+    workflow = await _workflow_for(request)
     # 异步执行恢复，不阻塞响应
     from athena.core.recovery.session_recovery import SessionRecovery
-    from athena.gateway.ws.manager import get_websocket_manager
-
-    try:
-        ws_manager = get_websocket_manager()
-    except Exception:
-        ws_manager = None  # WS 管理器未初始化时跳过
+    ws_manager = runtime_from(request).websocket_manager
     recovery = SessionRecovery(db=db, ws_manager=ws_manager, agent_workflow=workflow)
 
     try:
@@ -345,13 +350,13 @@ async def recover_session(session_id: str) -> RecoverSessionResponse:
 
 
 @router.post("/{session_id}/abandon", response_model=RecoverSessionResponse)
-async def abandon_session(session_id: str) -> RecoverSessionResponse:
+async def abandon_session(session_id: str, request: Request) -> RecoverSessionResponse:
     """放弃中断的会话 — 重置状态但不触发恢复.
 
     清理孤儿 steps/tool_calls，将状态重置为 idle。
     用户可以在此基础上重新发消息。
     """
-    db = await _get_db()
+    db = await _db_for(request)
     session = await db.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -378,21 +383,19 @@ async def abandon_session(session_id: str) -> RecoverSessionResponse:
 # ── 内部辅助函数 ──────────────────────────────────────────────
 
 
-def _tool_risk_level(tool_name: str) -> str:
-    try:
-        from athena.core.tools.manager import get_tool_manager
-
-        manager = get_tool_manager()
-        return manager.get_risk_level(tool_name)
-    except Exception:
-        return "low"
-
-
 def _build_recovery_hint(
     last_role: str | None,
     pending_tools: list[InterruptedToolInfo],
 ) -> str:
-    """根据中断上下文生成用户可读的恢复策略提示."""
+    """根据中断上下文生成用户可读的恢复策略提示。
+
+    Args:
+        last_role: 最后一条消息的角色（user/assistant/tool）。
+        pending_tools: 未完成的工具调用列表。
+
+    Returns:
+        恢复策略提示文本。
+    """
     if last_role == "user":
         return "用户消息未得到响应，恢复将重新执行 Agent"
     if last_role == "assistant":
@@ -408,7 +411,12 @@ def _build_recovery_hint(
 async def _execute_recovery(
     recovery: "SessionRecovery", session_id: str
 ) -> None:
-    """异步执行恢复流程（被 asyncio.create_task 调用）."""
+    """异步执行恢复流程（被 asyncio.create_task 调用）。
+
+    Args:
+        recovery: 会话恢复器实例。
+        session_id: 会话 ID。
+    """
     try:
         await recovery._recover_session(session_id)
     except Exception as e:

@@ -12,10 +12,11 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from athena.config.settings import Settings, get_settings
+from athena.config.settings import Settings
 from athena.core.llm.provider import LLMProvider
+from athena.core.llm.tokens import TokenCounter
 from athena.core.memory.memory import MemoryManager
-from athena.utils.llm import estimate_tokens, extract_message_text
+from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
 
@@ -48,11 +49,11 @@ class HybridRetrievalManager:
         self,
         llm_provider: LLMProvider,
         memory_manager: MemoryManager,
-        settings: Settings | None = None,
+        settings: Settings,
     ) -> None:
         self._llm = llm_provider
         self._memory = memory_manager
-        self._settings = settings or get_settings()
+        self._settings = settings
         self._min_score = self._settings.memory_min_score
         self._top_k = self._settings.retrieval_top_k
         self._vector_weight = self._settings.vector_weight
@@ -221,7 +222,7 @@ class HybridRetrievalManager:
         content_map: dict[str, SearchResult] = {}
 
         # 加权 RRF：按来源权重缩放贡献，使 vector_weight / keyword_weight 真正生效
-        #（职责边界：向量路承担语义，关键词路仅作精确词/前缀助力的弱贡献）
+        # （职责边界：向量路承担语义，关键词路仅作精确词/前缀助力的弱贡献）
         for rank, r in enumerate(vector_results, 1):
             if r.chunk_id not in scores:
                 scores[r.chunk_id] = 0.0
@@ -291,15 +292,21 @@ class HybridRetrievalManager:
 class MemoryRetrievalService:
     """记忆检索服务 - 对外接口，将检索结果格式化为系统提示."""
 
-    def __init__(self, retrieval_manager: HybridRetrievalManager) -> None:
+    def __init__(
+        self,
+        retrieval_manager: HybridRetrievalManager,
+        token_counter: TokenCounter,
+        settings: Settings,
+    ) -> None:
         self._manager = retrieval_manager
+        self._token_counter = token_counter
+        self._max_tokens = settings.memory_max_tokens
 
     async def get_relevant_memories(
         self,
         user_message: str,
     ) -> str:
         """获取相关记忆并格式化为系统提示（跨会话召回）."""
-        max_tokens = get_settings().memory_max_tokens
         try:
             results = await self._manager.retrieve(
                 query=user_message,
@@ -314,8 +321,8 @@ class MemoryRetrievalService:
         parts = ["[相关记忆]"]
         total_tokens = 0
         for r in results:
-            content_tokens = estimate_tokens(r.content)
-            if total_tokens + content_tokens > max_tokens:
+            content_tokens = self._token_counter.count_text_tokens(r.content)
+            if total_tokens + content_tokens > self._max_tokens:
                 break
             parts.append(f"- {r.content}")
             total_tokens += content_tokens

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from typing import Any, AsyncIterator, Protocol, cast, runtime_checkable
 
 from langchain_core.language_models import BaseChatModel
@@ -15,13 +16,17 @@ from langchain_core.messages import BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, StructuredTool
 
-from athena.config.settings import LLMProviderConfig, Settings, get_settings
+from athena.config.settings import (
+    LLMProviderConfig,
+    LLMRetrySettings,
+    Settings,
+)
 from athena.core.llm.retry import (
     ErrorCategory,
     LLMRetryManager,
     RetryConfig,
-    RetryResult,
 )
+from athena.core.llm.tokens import ModelTokenCounter, TokenCounter
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -61,6 +66,7 @@ class LLMProvider:
     ) -> None:
         self._model = model
         self._retry_manager = retry_manager
+        self._token_counter: TokenCounter = ModelTokenCounter(model)
 
     @property
     def model(self) -> BaseChatModel:
@@ -70,6 +76,14 @@ class LLMProvider:
     def set_retry_manager(self, retry_manager: LLMRetryManager) -> None:
         """注入重试管理器."""
         self._retry_manager = retry_manager
+
+    def count_text_tokens(self, text: str) -> int:
+        """Count raw text tokens using the best local tokenizer available."""
+        return self._token_counter.count_text_tokens(text)
+
+    def count_message_tokens(self, messages: Sequence[BaseMessage]) -> int:
+        """Count structured message tokens without issuing an extra API request."""
+        return self._token_counter.count_message_tokens(messages)
 
     async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> BaseMessage:
         """异步调用模型，失败时使用指数退避重试."""
@@ -118,7 +132,7 @@ class LLMProvider:
 
         # 重试 generator 创建
         last_error: Exception | None = None
-        config = RetryConfig(max_attempts=3, min_delay_ms=1000, max_delay_ms=10000)
+        config = self._retry_manager.config
 
         for attempt in range(config.max_attempts):
             try:
@@ -165,30 +179,26 @@ class LLMProvider:
         # with_structured_output）与 BaseChatModel 一致，故 cast 收窄仅为
         # 消除类型标注差异，运行期安全。
         bound_model = cast(BaseChatModel, self._model.bind_tools(tools))
-        return LLMProvider(bound_model, retry_manager=self._retry_manager)
+        provider = LLMProvider(bound_model, retry_manager=self._retry_manager)
+        provider._token_counter = self._token_counter
+        return provider
 
     def with_structured_output(self, schema: type) -> Runnable:
         """绑定结构化输出 schema，返回可调用的 runnable."""
         return self._model.with_structured_output(schema)
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "LLMProvider":
-        """根据配置创建主 Provider，并将 secondary/fallback 注入重试链.
+    def from_primary_settings(cls, settings: Settings) -> "LLMProvider":
+        """根据配置创建主 Provider和副 Provider，并将 fallback 注入重试链.
 
         创建顺序：
         1. 用 primary config 创建主 provider
-        2. 用 secondary 及之后的 config 创建 fallback providers
+        2. 用 secondary config 之后的 config 创建 fallback providers
         3. 将 fallback providers 注入 retry_manager 的故障转移链
         """
         primary_config = settings.primary_llm
         model = _create_chat_model(primary_config, settings)
-        retry_config = RetryConfig(
-            max_attempts=3,
-            min_delay_ms=2000,
-            max_delay_ms=30000,
-            jitter=0.1,
-            timeout_ms=60000,
-        )
+        retry_config = _to_retry_config(settings.llm_retry)
         retry_manager = LLMRetryManager(retry_config=retry_config)
 
         # 注入 secondary / fallback providers 到故障转移链
@@ -220,13 +230,7 @@ class LLMProvider:
             return None
 
         model = _create_chat_model(secondary_config, settings)
-        retry_config = RetryConfig(
-            max_attempts=2,
-            min_delay_ms=1000,
-            max_delay_ms=15000,
-            jitter=0.1,
-            timeout_ms=30000,
-        )
+        retry_config = _to_retry_config(settings.llm_secondary_retry)
         retry_manager = LLMRetryManager(retry_config=retry_config)
         logger.info(
             "llm_secondary_created",
@@ -237,16 +241,29 @@ class LLMProvider:
         return cls(model, retry_manager=retry_manager)
 
 
-def _create_chat_model(
-    config: LLMProviderConfig, settings: Settings
-) -> BaseChatModel:
+def _to_retry_config(settings: LLMRetrySettings) -> RetryConfig:
+    """将外部配置模型转换为 LLM 重试领域配置."""
+    return RetryConfig(
+        max_attempts=settings.max_attempts,
+        min_delay_ms=settings.min_delay_ms,
+        max_delay_ms=settings.max_delay_ms,
+        jitter=settings.jitter,
+        timeout_ms=settings.timeout_ms,
+    )
+
+
+def _create_chat_model(config: LLMProviderConfig, settings: Settings) -> BaseChatModel:
     """根据 LLMProviderConfig 创建对应的 LangChain ChatModel.
 
     provider 级别的 temperature / max_tokens 为 -1 时回退到全局默认值。
     """
     provider = config.provider.lower()
-    temperature = config.temperature if config.temperature >= 0 else settings.llm_temperature
-    max_tokens = config.max_tokens if config.max_tokens >= 0 else settings.llm_max_tokens
+    temperature = (
+        config.temperature if config.temperature >= 0 else settings.llm_temperature
+    )
+    max_tokens = (
+        config.max_tokens if config.max_tokens >= 0 else settings.llm_max_tokens
+    )
 
     # 注意：各 Provider 的参数名不一致。max_tokens 只对 openai/anthropic 有效；
     # ChatOllama 用 num_predict（且无 streaming 字段，流式由 .astream() 方法控制），
@@ -260,6 +277,7 @@ def _create_chat_model(
             "temperature": temperature,
             "max_tokens": max_tokens,
             "streaming": True,
+            "stream_usage": True,
         }
         if config.base_url:
             kwargs["base_url"] = config.base_url
@@ -292,18 +310,3 @@ def _create_chat_model(
         return ChatOllama(**kwargs)
 
     raise ValueError(f"Unsupported LLM provider: {provider}")
-
-
-# 全局单例
-_llm_instance: LLMProvider
-
-
-def get_llm_provider() -> LLMProvider:
-    """获取 LLM Provider 单例."""
-    return _llm_instance
-
-def set_llm_provider(provider: LLMProvider) -> None:
-    """设置全局 LLM Provider 实例（测试用）."""
-    global _llm_instance
-    _llm_instance = provider
-

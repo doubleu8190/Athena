@@ -19,10 +19,10 @@ from typing import Any, ClassVar
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from athena.config.settings import Settings, get_settings
+from athena.config.settings import Settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
 from athena.utils.llm import extract_json_from_llm_response, extract_message_text
 from athena.utils.message import format_messages_brief
@@ -119,7 +119,8 @@ class FactExtractor:
             提取到的原子事实列表；提取失败或无有价值信息时为空列表。
         """
         existing = await self._fetch_existing_memories(
-            memory_manager, user_message,
+            memory_manager,
+            user_message,
         )
         conversation_text = self._format_conversation(user_message, assistant_reply)
         facts = await self._extract_facts(conversation_text, existing)
@@ -278,18 +279,18 @@ class ConversationSummarizer:
         self,
         llm_provider: LLMProvider,
         memory_manager: MemoryManager,
-        settings: Settings | None = None,
+        settings: Settings,
     ) -> None:
         """初始化对话摘要生成器。
 
         Args:
             llm_provider: LLM 提供者实例，用于调用摘要提示词。
             memory_manager: 长期记忆管理器实例，用于写入生成的摘要。
-            settings: 全局配置；为 ``None`` 时使用默认配置。
+            settings: 全局配置。
         """
         self._llm = llm_provider
         self._memory = memory_manager
-        self._settings = settings or get_settings()
+        self._settings = settings
         self._summary_threshold = self._settings.summary_threshold
 
     async def summarize_if_needed(
@@ -324,7 +325,8 @@ class ConversationSummarizer:
 
         # ── 2. 过滤真实对话消息（排除系统消息） ──
         conversation_messages = [
-            m for m in raw
+            m
+            for m in raw
             if m.role in (MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL)
         ]
         if not conversation_messages:

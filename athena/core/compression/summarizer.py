@@ -8,17 +8,17 @@ _summary_buffer 按 session_id 隔离，避免跨会话数据污染。
 from __future__ import annotations
 
 import json
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from athena.core.llm.provider import LLMProvider
-from athena.utils.llm import estimate_tokens, extract_message_text
+from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
 
 if TYPE_CHECKING:
-    from athena.db.database import Database
+    from athena.infrastructure.sqlite.database import Database
 
 logger = get_logger(__name__)
 
@@ -52,7 +52,7 @@ class IncrementalSummarizer:
                 logger.info(
                     "summary_buffer_lazy_loaded",
                     session_id=session_id,
-                    buffer_tokens=estimate_tokens(summary),
+                    buffer_tokens=self._llm.count_text_tokens(summary),
                 )
         except Exception as e:
             logger.warning("summary_buffer_load_failed", error=str(e), session_id=session_id)
@@ -69,7 +69,7 @@ class IncrementalSummarizer:
         logger.info(
             "summary_buffer_set",
             session_id=session_id,
-            buffer_tokens=estimate_tokens(buffer),
+            buffer_tokens=self._llm.count_text_tokens(buffer),
         )
 
     def reset(self, session_id: str) -> None:

@@ -21,7 +21,7 @@ import tarfile
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from athena.config.settings import Settings, get_settings
+from athena.config.settings import Settings
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -87,16 +87,15 @@ class DockerSandboxManager:
         self._lock = asyncio.Lock()
 
     @classmethod
-    def from_settings(cls, settings: Settings | None = None) -> "DockerSandboxManager":
+    def from_settings(cls, settings: Settings) -> "DockerSandboxManager":
         """从配置创建实例."""
-        s = settings or get_settings()
         return cls(
-            image=s.sandbox_image,
-            network_disabled=s.sandbox_network_disabled,
-            memory_limit=s.sandbox_memory_limit,
-            cpu_limit=s.sandbox_cpu_limit,
-            workspace_path=s.sandbox_workspace_path,
-            allowed_paths=s.allowed_paths_list,
+            image=settings.sandbox_image,
+            network_disabled=settings.sandbox_network_disabled,
+            memory_limit=settings.sandbox_memory_limit,
+            cpu_limit=settings.sandbox_cpu_limit,
+            workspace_path=settings.sandbox_workspace_path,
+            allowed_paths=settings.allowed_paths_list,
         )
 
     def configure_allowed_paths(self, paths: list[str]) -> None:

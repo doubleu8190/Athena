@@ -11,13 +11,14 @@ from __future__ import annotations
 import re
 from typing import Any, TYPE_CHECKING
 
+from athena.core.tools.base import MCPTool
 from athena.core.tools.mcp.client import MCPClient
-from athena.models.tool import RiskLevel, ToolExecutionMode
+from athena.core.tools.catalog import ToolCatalogService
+from athena.models.tool import RiskLevel
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from athena.core.tools.manager import UnifiedToolManager
-    from athena.db.database import Database
 
 logger = get_logger(__name__)
 
@@ -35,7 +36,7 @@ class MCPToolAdapter:
     """MCP 工具适配器 — 注册 MCP Server 的工具到 UnifiedToolManager.
 
     使用方式：
-        adapter = MCPToolAdapter(tool_manager)
+        adapter = MCPToolAdapter(tool_manager, catalog)
         await adapter.register_server(
             server_name="github",
             server_command=["npx", "@modelcontextprotocol/server-github"],
@@ -43,10 +44,12 @@ class MCPToolAdapter:
     """
 
     def __init__(
-        self, tool_manager: UnifiedToolManager, db: Database | None = None
+        self,
+        tool_manager: UnifiedToolManager,
+        catalog: ToolCatalogService,
     ) -> None:
         self._tool_manager = tool_manager
-        self._db = db
+        self._catalog = catalog
         self._clients: dict[str, MCPClient] = {}
 
     async def register_server(
@@ -90,7 +93,11 @@ class MCPToolAdapter:
             try:
                 await client.disconnect()
             except Exception as disconnect_error:
-                logger.warning("mcp_disconnect_after_connect_failed", server=server_name, error=str(disconnect_error))
+                logger.warning(
+                    "mcp_disconnect_after_connect_failed",
+                    server=server_name,
+                    error=str(disconnect_error),
+                )
             logger.error("mcp_server_connect_failed", server=server_name, error=str(e))
             raise
 
@@ -98,7 +105,7 @@ class MCPToolAdapter:
 
         # 获取工具列表并构建注册信息
         tools = await client.list_tools()
-        tool_defs: list[dict[str, Any]] = []
+        mcp_tools: list[MCPTool] = []
         registered_names: list[str] = []
 
         for tool_def in tools:
@@ -110,65 +117,37 @@ class MCPToolAdapter:
             # remote_name 保留原始工具名供远程调用（客户端用原名调用远端）
             full_name = f"mcp_{_sanitize(server_name)}_{_sanitize(tool_name)}"
 
-            description = tool_def.get("description", "")
-            parameters = tool_def.get("inputSchema", {})
-
-            # DB 合并：已存在以治理参数为准，不存在用默认值并写入
-            risk_level = RiskLevel.MEDIUM
-            require_approval = True
-            enabled = True
-
-            if self._db is not None:
-                existing = await self._db.tools.get(full_name)
-                if existing is not None:
-                    risk_level = existing.risk_level
-                    require_approval = existing.require_approval
-                    enabled = existing.enabled
-                    # 更新 description / parameters（以远端最新为准）
-                    await self._db.tools.upsert(
-                        tool_name=full_name,
-                        execution_mode=ToolExecutionMode.MCP.value,
-                        server_name=server_name,
-                        remote_name=tool_name,
-                        description=description,
-                        parameters=parameters,
-                        risk_level=str(risk_level.value),
-                        require_approval=require_approval,
-                        enabled=enabled,
-                    )
-                else:
-                    await self._db.tools.upsert(
-                        tool_name=full_name,
-                        execution_mode=ToolExecutionMode.MCP.value,
-                        server_name=server_name,
-                        remote_name=tool_name,
-                        description=description,
-                        parameters=parameters,
-                        risk_level=str(risk_level.value),
-                        require_approval=require_approval,
-                        enabled=True,
-                    )
-
-            tool_defs.append(
-                {
-                    "name": full_name,
-                    "description": description,
-                    "parameters": parameters,
-                    "remote_name": tool_name,
-                    "risk_level": risk_level,
-                    "require_approval": require_approval,
-                }
+            mcp_tools.append(
+                MCPTool(
+                    name=full_name,
+                    description=tool_def.get("description", ""),
+                    parameters=tool_def.get(
+                        "inputSchema", {"type": "object", "properties": {}}
+                    ),
+                    mcp_client=client,
+                    server_name=server_name,
+                    remote_name=tool_def.get("remote_name"),
+                    risk_level=RiskLevel.MEDIUM,
+                    require_approval=True,
+                )
             )
             registered_names.append(full_name)
-
-            # 停用的工具加入 _disabled（注册后生效）
-            if not enabled:
-                self._tool_manager._disabled.add(full_name)
 
             logger.info("mcp_tool_registered", server=server_name, tool=full_name)
 
         # 批量注册到工具管理器
-        self._tool_manager.register_mcp_tools(server_name, tool_defs, client)
+        self._tool_manager.register_mcp_tools(mcp_tools)
+        await self._catalog.reconcile(
+            self._tool_manager,
+            names=registered_names,
+            registrations={
+                item.schema.name: {
+                    "server_name": item._server_name,
+                    "remote_name": item._remote_name,
+                }
+                for item in mcp_tools
+            },
+        )
 
         return registered_names
 

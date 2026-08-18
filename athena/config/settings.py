@@ -1,4 +1,19 @@
-"""配置管理 — 基于 Pydantic Settings 的统一配置入口."""
+"""配置管理 — 基于 Pydantic Settings 的统一配置入口。
+
+所有配置项通过环境变量或 ``.env`` 文件注入，支持嵌套分隔符 ``__``。
+使用 ``get_settings()`` 获取全局单例实例。
+
+配置分组：
+- Server: 服务端口、调试模式
+- LLM Providers: 主/副/兜底 LLM 配置
+- Database: SQLite 和 ChromaDB 路径
+- File Intelligence: 文件处理参数
+- Harness: Agent 执行参数
+- Memory: 记忆系统参数
+- Context Compression: 上下文压缩参数
+- Docker Sandbox: 沙箱执行环境
+- Approval: 审批流程参数
+"""
 
 from __future__ import annotations
 
@@ -10,16 +25,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class LLMProviderConfig(BaseModel):
-    """单个 LLM Provider 的配置.
+    """单个 LLM Provider 的配置。
 
     Attributes:
-        name: 标识名 — primary(主) / secondary(副) / fallback(兜底)
-        provider: 厂商标识 — openai / anthropic / deepseek / ollama
-        model: 模型名称
-        api_key: API 密钥（ollama 可留空）
-        base_url: 自定义 API 端点（留空使用厂商默认）
-        temperature: 采样温度（-1 则使用全局默认值）
-        max_tokens: 最大输出 token 数（-1 则使用全局默认值）
+        name: 标识名 — ``"primary"``（主）/ ``"secondary"``（副）/ ``"fallback"``（兜底）。
+        provider: 厂商标识 — ``"openai"`` / ``"anthropic"`` / ``"deepseek"`` / ``"ollama"``。
+        model: 模型名称（如 ``"gpt-4o"``、``"claude-3-opus"``）。
+        api_key: API 密钥（ollama 可留空）。
+        base_url: 自定义 API 端点（留空使用厂商默认）。
+        temperature: 采样温度（``-1`` 表示使用全局默认值）。
+        max_tokens: 最大输出 token 数（``-1`` 表示使用全局默认值）。
+        supports_vision: 是否支持视觉输入（图片分析功能）。
     """
 
     name: str = "primary"
@@ -32,12 +48,35 @@ class LLMProviderConfig(BaseModel):
     supports_vision: bool = False
 
 
+class LLMRetrySettings(BaseModel):
+    """LLM 调用的指数退避重试参数。
+
+    Attributes:
+        max_attempts: 最大重试次数。
+        min_delay_ms: 最小重试延迟（毫秒）。
+        max_delay_ms: 最大重试延迟（毫秒）。
+        jitter: 延迟抖动系数（0-1），防止重试风暴。
+        timeout_ms: 单次调用超时时间（毫秒）。
+    """
+
+    max_attempts: int = Field(default=3, ge=1)
+    min_delay_ms: int = Field(default=2000, ge=0)
+    max_delay_ms: int = Field(default=30000, ge=0)
+    jitter: float = Field(default=0.1, ge=0, le=1)
+    timeout_ms: int = Field(default=60000, ge=1)
+
+
 class Settings(BaseSettings):
-    """全局配置，通过环境变量 / .env 文件注入."""
+    """全局配置，通过环境变量 / .env 文件注入。
+
+    使用 ``env_nested_delimiter="__"`` 支持嵌套配置（如 ``LLM__TEMPERATURE``）。
+    使用 ``get_settings()`` 获取缓存的单例实例。
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        env_nested_delimiter="__",
         extra="ignore",
     )
 
@@ -56,7 +95,16 @@ class Settings(BaseSettings):
     # 全局 LLM 参数（provider 级别的值为 -1 时使用这些默认值）
     llm_temperature: float = 0.7
     llm_max_tokens: int = 4096
-    
+    llm_retry: LLMRetrySettings = Field(default_factory=LLMRetrySettings)
+    llm_secondary_retry: LLMRetrySettings = Field(
+        default_factory=lambda: LLMRetrySettings(
+            max_attempts=2,
+            min_delay_ms=1000,
+            max_delay_ms=15000,
+            jitter=0.1,
+            timeout_ms=30000,
+        )
+    )
 
     # --- Database ---
     sqlite_db_path: str = "./data/athena.db"
@@ -64,12 +112,12 @@ class Settings(BaseSettings):
 
     # --- File Intelligence ---
     file_storage_path: str = "./data/files"
-    file_max_upload_bytes: int = 512 * 1024 * 1024
-    file_chunk_tokens: int = 800
-    file_chunk_overlap_tokens: int = 80
+    file_max_upload_bytes: int = 512 * 1024 * 1024  # 512MB
+    file_chunk_tokens: int = 800  # 分块目标 token 数
+    file_chunk_overlap_tokens: int = 80  # 分块重叠 token 数
     file_task_max_attempts: int = 3
-    file_task_timeout: int = 900
-    file_task_poll_interval: float = 0.25
+    file_task_timeout: int = 900  # 15 分钟
+    file_task_poll_interval: float = 0.25  # 250ms
     file_parse_concurrency: int = 2
     file_code_concurrency: int = 1
     file_summary_concurrency: int = 4
@@ -78,25 +126,25 @@ class Settings(BaseSettings):
     # --- Harness ---
     max_turns_per_run: int = 20
     retry_budget: int = 3
-    tool_timeout: int = 60
-    llm_stream_timeout: int = 120
-    approval_timeout: int = 120
+    tool_timeout: int = 60  # 秒
+    llm_stream_timeout: int = 120  # 秒
+    approval_timeout: int = 120  # 秒
 
     # --- Memory ---
-    summary_threshold: int = 10
-    memory_sync_interval: int = 900
+    summary_threshold: int = 10  # 每 N 轮对话触发摘要
+    memory_sync_interval: int = 900  # 15 分钟
     memory_min_score: float = 0.7
     memory_ttl_days: int = 90
     memory_access_window_days: int = 7
-    vector_weight: float = 0.75
-    keyword_weight: float = 0.25
-    rrf_k: int = 60
+    vector_weight: float = 0.75  # 向量检索权重
+    keyword_weight: float = 0.25  # 关键词检索权重
+    rrf_k: int = 60  # RRF 融合参数
     retrieval_top_k: int = 5
     memory_max_tokens: int = 2000
 
     # --- Context Compression ---
     max_context_tokens: int = 128000
-    compression_threshold: float = 0.8
+    compression_threshold: float = 0.8  # 上下文使用率阈值
     keep_recent_turns: int = 3
     max_summary_tokens: int = 2000
     summary_incremental: bool = True
@@ -109,7 +157,7 @@ class Settings(BaseSettings):
     sandbox_memory_limit: str = "256m"
     sandbox_cpu_limit: float = 0.5
     sandbox_workspace_path: str = "/workspace"
-    sandbox_check_interval: int = 300
+    sandbox_check_interval: int = 300  # 5 分钟
     sandbox_allowed_paths: str = ""
 
     # --- Approval ---
@@ -119,35 +167,54 @@ class Settings(BaseSettings):
 
     @property
     def primary_llm(self) -> LLMProviderConfig:
-        """获取主 provider 配置."""
+        """获取主 provider 配置（列表第一个）。
+
+        Returns:
+            主 LLM 配置。
+
+        Raises:
+            ValueError: llm_providers 为空时。
+        """
         if not self.llm_providers:
             raise ValueError("llm_providers 不能为空")
         return self.llm_providers[0]
 
     @property
     def secondary_llm(self) -> LLMProviderConfig | None:
-        """获取副 provider 配置（模型能力稍弱，用于次要任务）."""
+        """获取副 provider 配置（列表第二个，用于次要任务）。
+
+        Returns:
+            副 LLM 配置，不存在时返回 ``None``。
+        """
         return self.llm_providers[1] if len(self.llm_providers) > 1 else None
 
     @property
     def fallback_llm_list(self) -> list[LLMProviderConfig]:
-        """获取所有 fallback provider 配置（secondary 之后的）."""
+        """获取所有 fallback provider 配置（secondary 之后的）。
+
+        Returns:
+            fallback 配置列表。
+        """
         return self.llm_providers[2:] if len(self.llm_providers) > 2 else []
 
     @property
     def db_path(self) -> Path:
+        """SQLite 数据库文件路径。"""
         return Path(self.sqlite_db_path)
 
     @property
     def chroma_path(self) -> Path:
+        """ChromaDB 持久化目录路径。"""
         return Path(self.chromadb_path)
 
     @property
     def files_path(self) -> Path:
+        """文件存储根目录路径。"""
         return Path(self.file_storage_path)
 
     @property
     def allowed_paths_list(self) -> list[str]:
+        """沙箱允许的宿主机路径列表。"""
         if not self.sandbox_allowed_paths:
             return []
         return [p.strip() for p in self.sandbox_allowed_paths.split(",") if p.strip()]
@@ -155,5 +222,9 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """获取全局配置单例."""
+    """获取全局配置单例（缓存，进程生命周期内只创建一次）。
+
+    Returns:
+        ``Settings`` 实例。
+    """
     return Settings()

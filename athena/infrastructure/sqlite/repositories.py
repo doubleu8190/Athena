@@ -1,4 +1,4 @@
-"""Repository 层 — 封装各实体的 CRUD 操作.
+"""SQLite repository implementations.
 
 采用 Repository 模式，每个实体对应一个 Repository 类。
 查询方法返回类型化领域模型（athena.models），save 方法接受类型化模型。
@@ -13,12 +13,10 @@ from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import SQLAlchemyError
 
-from athena.db.engine import get_session
-from athena.db.models import (
+from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.models import (
     ApprovalLogModel,
-    Base,
     McpServerModel,
     MessageModel,
     SessionModel,
@@ -372,7 +370,7 @@ class MessageRepository:
         """Populate lightweight attachment references without exposing storage keys."""
         if not messages:
             return messages
-        from athena.core.files.repository import FileRepository
+        from athena.infrastructure.sqlite.file_repository import FileRepository
 
         refs = await FileRepository().attachments_for_messages([item.id for item in messages])
         for item in messages:
@@ -948,42 +946,6 @@ class ToolRepository:
                             updated_at=now,
                         )
                     )
-
-    async def migrate_legacy_builtin_names(self) -> None:
-        """Move pre-V2 path-tool governance rows to their explicit local names."""
-        mapping = {
-            "read_file": "read_local_file",
-            "get_file_info": "get_local_file_info",
-            "read_file_section": "read_local_file_section",
-            "search_in_file": "search_local_file",
-            "read_full_file": "read_local_file_full",
-        }
-        async with get_session() as session:
-            async with session.begin():
-                for old_name, new_name in mapping.items():
-                    old = await session.get(ToolModel, old_name)
-                    if old is None:
-                        continue
-                    parameters = _json_loads(old.parameters_json, {})
-                    properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
-                    is_path_tool = "path" in properties or "路径" in old.description
-                    if not is_path_tool:
-                        continue
-                    if await session.get(ToolModel, new_name) is None:
-                        session.add(ToolModel(
-                            tool_name=new_name,
-                            execution_mode=old.execution_mode,
-                            server_name=old.server_name,
-                            remote_name=old.remote_name,
-                            description=old.description,
-                            parameters_json=old.parameters_json,
-                            risk_level=old.risk_level,
-                            require_approval=old.require_approval,
-                            enabled=old.enabled,
-                            created_at=old.created_at,
-                            updated_at=_now_iso(),
-                        ))
-                    await session.delete(old)
 
     async def get(self, tool_name: str) -> ToolConfig | None:
         """获取单个工具配置."""

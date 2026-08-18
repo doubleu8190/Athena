@@ -50,7 +50,7 @@ class ApprovalRequest:
         session_id: str,
         run_id: str,
         future: asyncio.Future[bool],
-        tool_call_id: str | None = None,
+        tool_call_id: str,
     ) -> None:
         self.id = id
         self.tool_name = tool_name

@@ -21,10 +21,18 @@ class FileTaskWorker:
         self._task_timeout = settings.file_task_timeout
         self._semaphores = {
             FileTaskType.FILE_PARSE: asyncio.Semaphore(settings.file_parse_concurrency),
-            FileTaskType.FILE_INDEX: asyncio.Semaphore(settings.file_embedding_concurrency),
-            FileTaskType.EMBEDDING_GENERATE: asyncio.Semaphore(settings.file_embedding_concurrency),
-            FileTaskType.FILE_SUMMARY: asyncio.Semaphore(settings.file_summary_concurrency),
-            FileTaskType.CODE_ANALYSIS: asyncio.Semaphore(settings.file_code_concurrency),
+            FileTaskType.FILE_INDEX: asyncio.Semaphore(
+                settings.file_embedding_concurrency
+            ),
+            FileTaskType.EMBEDDING_GENERATE: asyncio.Semaphore(
+                settings.file_embedding_concurrency
+            ),
+            FileTaskType.FILE_SUMMARY: asyncio.Semaphore(
+                settings.file_summary_concurrency
+            ),
+            FileTaskType.CODE_ANALYSIS: asyncio.Semaphore(
+                settings.file_code_concurrency
+            ),
         }
         self._max_running = (
             settings.file_parse_concurrency
@@ -35,15 +43,21 @@ class FileTaskWorker:
         self._dispatcher: asyncio.Task[None] | None = None
         self._running: set[asyncio.Task[Any]] = set()
         self._stopping = False
-        self._continuation_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self._continuation_callback: (
+            Callable[[dict[str, Any]], Awaitable[None]] | None
+        ) = None
 
-    def set_continuation_callback(self, callback: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+    def set_continuation_callback(
+        self, callback: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
         self._continuation_callback = callback
 
     async def resume_continuations(self, attachment_id: str) -> None:
         if self._continuation_callback is None:
             return
-        for continuation in await self.runtime.repository.claim_ready_continuations(attachment_id):
+        for continuation in await self.runtime.repository.claim_ready_continuations(
+            attachment_id
+        ):
             await self._continuation_callback(continuation)
 
     async def start(self) -> None:
@@ -51,7 +65,9 @@ class FileTaskWorker:
         await self.runtime.repository.recover_continuations()
         self._stopping = False
         self._dispatcher = asyncio.create_task(self._run(), name="file-task-dispatcher")
-        for attachment_id in await self.runtime.repository.waiting_continuation_attachment_ids():
+        for (
+            attachment_id
+        ) in await self.runtime.repository.waiting_continuation_attachment_ids():
             await self.resume_continuations(attachment_id)
 
     async def stop(self) -> None:
@@ -66,7 +82,9 @@ class FileTaskWorker:
             await asyncio.gather(*self._running, return_exceptions=True)
 
     async def enqueue_parse(self, session_id: str, attachment_id: str) -> FileTask:
-        task = await self.enqueue_task(session_id, attachment_id, FileTaskType.FILE_PARSE)
+        task = await self.enqueue_task(
+            session_id, attachment_id, FileTaskType.FILE_PARSE
+        )
         attachment = await self.runtime.repository.update_attachment(
             attachment_id, status=AttachmentStatus.QUEUED.value
         )
@@ -120,36 +138,54 @@ class FileTaskWorker:
                 await self._progress(task, 0.05, "starting")
                 if task.task_type == FileTaskType.FILE_PARSE:
                     result = await asyncio.wait_for(
-                        self.runtime.parse_attachment(task.attachment_id), timeout=self._task_timeout
-                    )
-                    await self._complete(task, result)
-                    await self.enqueue_task(task.session_id, task.attachment_id, FileTaskType.FILE_INDEX)
-                elif task.task_type == FileTaskType.FILE_INDEX:
-                    result = await asyncio.wait_for(
-                        self.runtime.index_attachment(task.attachment_id, mark_ready=False), timeout=self._task_timeout
+                        self.runtime.parse_attachment(task.attachment_id),
+                        timeout=self._task_timeout,
                     )
                     await self._complete(task, result)
                     await self.enqueue_task(
-                        task.session_id, task.attachment_id, FileTaskType.EMBEDDING_GENERATE
+                        task.session_id, task.attachment_id, FileTaskType.FILE_INDEX
+                    )
+                elif task.task_type == FileTaskType.FILE_INDEX:
+                    result = await asyncio.wait_for(
+                        self.runtime.index_attachment(
+                            task.attachment_id, mark_ready=False
+                        ),
+                        timeout=self._task_timeout,
+                    )
+                    await self._complete(task, result)
+                    await self.enqueue_task(
+                        task.session_id,
+                        task.attachment_id,
+                        FileTaskType.EMBEDDING_GENERATE,
                     )
                 elif task.task_type == FileTaskType.EMBEDDING_GENERATE:
                     result = await asyncio.wait_for(
-                        self.runtime.index_attachment(task.attachment_id), timeout=self._task_timeout
+                        self.runtime.index_attachment(task.attachment_id),
+                        timeout=self._task_timeout,
                     )
                     await self._complete(task, result)
                 elif task.task_type == FileTaskType.FILE_SUMMARY:
                     result = await asyncio.wait_for(
-                        self.runtime.summarize_file(task.session_id, task.attachment_id, task.payload.get("summary_type", "general")),
+                        self.runtime.summarize_file(
+                            task.session_id,
+                            task.attachment_id,
+                            task.payload.get("summary_type", "general"),
+                        ),
                         timeout=self._task_timeout,
                     )
                     await self._complete(task, result)
                 elif task.task_type == FileTaskType.CODE_ANALYSIS:
                     result = await asyncio.wait_for(
-                        self.runtime.analyze_codebase(task.session_id, task.attachment_id),
+                        self.runtime.analyze_codebase(
+                            task.session_id, task.attachment_id
+                        ),
                         timeout=self._task_timeout,
                     )
                     await self._complete(task, result)
-                if self._continuation_callback is not None and task.task_type == FileTaskType.EMBEDDING_GENERATE:
+                if (
+                    self._continuation_callback is not None
+                    and task.task_type == FileTaskType.EMBEDDING_GENERATE
+                ):
                     await self.resume_continuations(task.attachment_id)
             except asyncio.CancelledError:
                 raise
@@ -158,7 +194,9 @@ class FileTaskWorker:
                 await self.runtime.repository.retry_or_fail_task(task, str(exc))
                 current = await self.runtime.repository.get_task(task.id)
                 if current and current.status == FileTaskStatus.FAILED:
-                    await self.runtime.emit_file_event("file_task_failed", task.session_id, current)
+                    await self.runtime.emit_file_event(
+                        "file_task_failed", task.session_id, current
+                    )
                     if task.task_type in {
                         FileTaskType.FILE_PARSE,
                         FileTaskType.FILE_INDEX,
@@ -174,17 +212,29 @@ class FileTaskWorker:
                     await self.resume_continuations(task.attachment_id)
 
     async def _progress(self, task: FileTask, progress: float, stage: str) -> None:
-        await self.runtime.repository.update_task(task.id, progress=progress, stage=stage)
+        await self.runtime.repository.update_task(
+            task.id, progress=progress, stage=stage
+        )
         current = await self.runtime.repository.get_task(task.id)
         if current:
-            await self.runtime.emit_file_event("file_task_progress", task.session_id, current)
+            await self.runtime.emit_file_event(
+                "file_task_progress", task.session_id, current
+            )
 
     async def _complete(self, task: FileTask, result: dict[str, Any]) -> None:
         current = await self.runtime.repository.get_task(task.id)
         if current is None or current.status == FileTaskStatus.CANCELLED:
             return
-        await self.runtime.repository.update_task(task.id, status=FileTaskStatus.COMPLETED, progress=1.0,
-                                                  stage="completed", result=result, completed_at=datetime.now().isoformat())
+        await self.runtime.repository.update_task(
+            task.id,
+            status=FileTaskStatus.COMPLETED,
+            progress=1.0,
+            stage="completed",
+            result=result,
+            completed_at=datetime.now().isoformat(),
+        )
         current = await self.runtime.repository.get_task(task.id)
         if current:
-            await self.runtime.emit_file_event("file_task_completed", task.session_id, current)
+            await self.runtime.emit_file_event(
+                "file_task_completed", task.session_id, current
+            )

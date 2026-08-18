@@ -106,16 +106,3 @@ class WebSocketManager:
                 await ws.close()
             except Exception as e:
                 logger.warning("ws_close_failed", session_id=session_id, error=str(e))
-
-
-# 全局单例
-_ws_manager: WebSocketManager
-
-
-def get_websocket_manager() -> WebSocketManager:
-    return _ws_manager
-
-
-def set_websocket_manager(manager: WebSocketManager) -> None:
-    global _ws_manager
-    _ws_manager = manager

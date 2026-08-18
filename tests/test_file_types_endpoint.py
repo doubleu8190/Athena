@@ -2,25 +2,23 @@
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock, MagicMock
 
 from athena.core.files.registry import AdapterRegistry
+from tests.fakes import install_runtime
 
 
-def test_supported_attachment_types_come_from_adapter_registry(monkeypatch):
+def test_supported_attachment_types_come_from_adapter_registry():
     from athena.gateway.routes.files import router
-    import athena.gateway.routes.files as files_module
-
-    async def mock_session_exists(_session_id: str):
-        return object()
 
     class Runtime:
-        adapters = AdapterRegistry()
-
-    monkeypatch.setattr(files_module, "_session_exists", mock_session_exists)
-    monkeypatch.setattr(files_module, "get_file_runtime", lambda: Runtime())
+        adapter_registry = AdapterRegistry()
 
     app = FastAPI()
     app.include_router(router)
+    db = MagicMock()
+    db.sessions.get = AsyncMock(return_value=object())
+    install_runtime(app, db=db, file_runtime=Runtime(), file_worker=MagicMock())
     response = TestClient(app).get("/sessions/session/attachment-types")
 
     assert response.status_code == 200

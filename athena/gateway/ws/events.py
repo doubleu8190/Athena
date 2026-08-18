@@ -1,7 +1,17 @@
-"""WebSocket 事件协议 — 事件类型定义与消息构建工具.
+"""WebSocket 事件协议 — 事件类型定义与消息构建工具。
 
-事件类型按功能分类，对应文档 6.1.2 节。
-所有事件统一格式：{type, session_id, run_id, timestamp, data}
+定义服务器与客户端之间的双向事件通信协议。
+所有事件统一格式：``{type, session_id, run_id, timestamp, data}``
+
+事件类型按功能分类：
+- 会话生命周期（start/complete/interrupt/recover）
+- LLM 调用（call_start/token/call_end）
+- 工具执行（call_start/call_end/skipped）
+- 审批流程（request/processing/result/timeout）
+- 子 Agent 生命周期（spawned/start/progress/complete/failed）
+- 记忆系统（extracted/summary/search/saved）
+- 上下文压缩（compress_start/compress_complete）
+- 文件任务（created/progress/completed/failed）
 """
 
 from __future__ import annotations
@@ -14,7 +24,10 @@ from pydantic import BaseModel, Field
 
 
 class EventType(StrEnum):
-    """服务器 → 客户端事件类型."""
+    """服务器 → 客户端事件类型。
+
+    按功能模块分组，前端据此路由到对应的 UI 更新逻辑。
+    """
 
     # 会话生命周期
     SESSION_START = "session_start"
@@ -86,7 +99,10 @@ class EventType(StrEnum):
 
 
 class ClientEventType(StrEnum):
-    """客户端 → 服务器事件类型."""
+    """客户端 → 服务器事件类型。
+
+    客户端通过 WebSocket 发送的命令类型，服务器据此分派到对应处理器。
+    """
 
     USER_COMMAND = "user_command"
     APPROVAL_RESPONSE = "approval_response"
@@ -99,7 +115,15 @@ class ClientEventType(StrEnum):
 
 
 class Event(BaseModel):
-    """通用事件消息格式."""
+    """通用事件消息格式。
+
+    Attributes:
+        type: 事件类型标识。
+        session_id: 关联的会话 ID（可选）。
+        run_id: 关联的运行 ID（可选）。
+        timestamp: 事件发生时间（ISO 格式）。
+        data: 事件负载数据。
+    """
 
     type: str
     session_id: str | None = None
@@ -114,7 +138,17 @@ def build_event(
     session_id: str | None = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    """构建标准事件消息字典."""
+    """构建标准事件消息字典。
+
+    Args:
+        event_type: 事件类型（EventType 枚举或字符串）。
+        data: 事件负载数据。
+        session_id: 关联的会话 ID。
+        run_id: 关联的运行 ID。
+
+    Returns:
+        符合统一格式的事件字典。
+    """
     return {
         "type": str(event_type),
         "session_id": session_id,

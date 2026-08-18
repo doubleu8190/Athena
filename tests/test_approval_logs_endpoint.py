@@ -5,14 +5,14 @@ from __future__ import annotations
 import os
 import tempfile
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 from athena.models.approval import ApprovalDecision, ApprovalLog
+from tests.fakes import install_runtime
 
 
 def _make_log(
@@ -61,12 +61,8 @@ def client(db):
 
     app = FastAPI()
     app.include_router(router)
-
-    with patch(
-        "athena.db.database.get_database",
-        AsyncMock(return_value=db),
-    ):
-        yield TestClient(app)
+    install_runtime(app, db=db)
+    yield TestClient(app)
 
 
 @pytest.mark.asyncio

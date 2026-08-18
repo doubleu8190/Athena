@@ -15,16 +15,16 @@ from pydantic import create_model
 
 from athena.core.tools.base import (
     MCPTool,
-    NativeHandler,
     NativeTool,
     ToolProtocol,
 )
 from athena.models.tool import RiskLevel, ToolResult, ToolSchema
+from athena.core.tools.spec import ApprovalPort
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from athena.core.tools.mcp.client import MCPClient
-    from athena.gateway.approval import ApprovalManager
+    from athena.core.tools.spec import ToolSpec
 
 logger = get_logger(__name__)
 
@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 class UnifiedToolManager:
     """统一工具管理器."""
 
-    def __init__(self, approval_manager: ApprovalManager | None = None) -> None:
+    def __init__(self, approval_manager: ApprovalPort) -> None:
         self._tools: dict[str, ToolProtocol] = {}
         self._disabled: set[str] = set()
         self._approval_manager = approval_manager
@@ -40,34 +40,27 @@ class UnifiedToolManager:
     # ------------------------------------------------------------------
     # 注册接口
     # ------------------------------------------------------------------
-
-    def register_native(
+    def register(
         self,
-        name: str,
-        description: str,
-        handler: NativeHandler,
-        parameters: dict[str, Any] | None = None,
-        risk_level: RiskLevel | str = RiskLevel.LOW,
-        require_approval: bool = False,
+        spec: ToolSpec
     ) -> None:
         """注册 Native 工具."""
-        if name in self._tools:
-            logger.warning("tool_already_registered", tool=name, action="overwrite")
-        self._tools[name] = NativeTool(
-            name=name,
-            description=description,
-            handler=handler,
-            parameters=parameters,
-            risk_level=risk_level,
-            require_approval=require_approval,
+        if spec.name in self._tools:
+            logger.warning("tool_already_registered", tool=spec.name, action="overwrite")
+        self._tools[spec.name] = NativeTool(
+            name=spec.name,
+            description=spec.description,
+            handler=spec.handler,
+            parameters=spec.parameters,
+            risk_level=spec.risk_level,
+            require_approval=spec.require_approval,
         )
-        logger.info("native_tool_registered", tool=name)
+        logger.info("native_tool_registered", tool=spec.name)
+        self.set_enabled(spec.name, spec.enabled)
 
     def register_mcp_tools(
         self,
-        server_name: str,
-        tool_defs: list[dict[str, Any]],
-        mcp_client: MCPClient,
+        tools: list[MCPTool],
     ) -> None:
         """注册 MCP 服务器的工具集.
 
@@ -77,23 +70,12 @@ class UnifiedToolManager:
                 name/description/parameters/remote_name/risk_level/require_approval
             mcp_client: MCP 客户端实例，需提供 async call_tool(name, params) 方法
         """
-        for tool_def in tool_defs:
-            name = tool_def["name"]
+        for tool in tools:
+            name = tool.schema.name
             if name in self._tools:
                 logger.warning("tool_already_registered", tool=name, action="overwrite")
-            self._tools[name] = MCPTool(
-                name=name,
-                description=tool_def.get("description", ""),
-                parameters=tool_def.get(
-                    "parameters", {"type": "object", "properties": {}}
-                ),
-                mcp_client=mcp_client,
-                server_name=server_name,
-                remote_name=tool_def.get("remote_name"),
-                risk_level=tool_def.get("risk_level", RiskLevel.MEDIUM),
-                require_approval=tool_def.get("require_approval", True),
-            )
-            logger.info("mcp_tool_registered", tool=name, server=server_name)
+            self._tools[name] = tool
+            logger.info("mcp_tool_registered", tool=name, server=tool._server_name)
 
     def unregister(self, name: str) -> None:
         """注销工具."""
@@ -106,6 +88,9 @@ class UnifiedToolManager:
     def get_tool(self, name: str) -> ToolProtocol | None:
         return self._tools.get(name)
 
+    def contains(self, name: str) -> bool:
+        return name in self._tools
+
     def list_tools(self) -> list[ToolProtocol]:
         return list(self._tools.values())
 
@@ -114,7 +99,7 @@ class UnifiedToolManager:
 
     def is_enabled(self, name: str) -> bool:
         """工具是否启用（未注册视为不可用）."""
-        return name not in self._disabled
+        return name in self._tools and name not in self._disabled
 
     def set_enabled(self, name: str, enabled: bool) -> bool:
         """启用/停用工具. 未注册返回 False."""
@@ -208,7 +193,7 @@ class UnifiedToolManager:
             return ToolResult(status="failed", error=f"Tool '{name}' is disabled")
 
         # 审批检查
-        if tool.schema.require_approval and self._approval_manager is not None:
+        if tool.schema.require_approval:
             try:
                 request = await self._approval_manager.request_approval(
                     tool_name=name,
@@ -229,23 +214,21 @@ class UnifiedToolManager:
                 logger.error("approval_failed", tool=name, error=str(e))
                 return ToolResult(status="failed", error=f"审批流程异常: {e}")
 
-        # 所有 Native 工具共享当前调用上下文；文件能力通过 ContextVar 读取，
-        # 不把 session_id/run_id 暴露给模型，也避免参数伪造。
+        # All native capabilities read trusted invocation metadata from a
+        # coroutine-local context. It is never exposed as model arguments.
         token = None
         if isinstance(tool, NativeTool):
-            from athena.core.files.context import ToolExecutionContext, reset_context, set_context
+            from athena.core.tools.spec import ToolContext, set_tool_context
 
-            token = set_context(ToolExecutionContext(session_id, run_id, tool_call_id))
-            if name in ("spawn_sub_agent", "spawn_parallel_agents"):
-                params["parent_run_id"] = run_id
-                params["session_id"] = session_id
+            context = ToolContext(session_id, run_id, tool_call_id)
+            token = set_tool_context(context)
         try:
             return await tool.execute(**params)
         finally:
             if token is not None:
-                from athena.core.files.context import reset_context
+                from athena.core.tools.spec import reset_tool_context
 
-                reset_context(token)
+                reset_tool_context(token)
 
     # ------------------------------------------------------------------
     # LangChain 集成
@@ -274,7 +257,17 @@ class UnifiedToolManager:
         schema = tool.schema
 
         async def _runner(**params: Any) -> str:
-            result = await tool.execute(**params)
+            from athena.core.tools.spec import get_tool_context
+
+            context = get_tool_context()
+            params.pop("__placeholder__", None)
+            result = await self.call_tool(
+                schema.name,
+                params,
+                session_id=context.session_id,
+                run_id=context.run_id,
+                tool_call_id=context.tool_call_id,
+            )
             if result.status == "success":
                 return result.output or ""
             return f"[ERROR] {result.error or 'tool failed'}"
@@ -329,17 +322,3 @@ class UnifiedToolManager:
             fields["__placeholder__"] = (str, None)
 
         return create_model(f"{tool.schema.name}Args", **fields)
-
-
-# 全局单例
-_tool_manager: UnifiedToolManager
-
-
-def get_tool_manager() -> UnifiedToolManager:
-    """获取工具管理器单例."""
-    return _tool_manager
-
-
-def set_tool_manager(manager: UnifiedToolManager) -> None:
-    global _tool_manager
-    _tool_manager = manager

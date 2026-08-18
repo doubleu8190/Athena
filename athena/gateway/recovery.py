@@ -6,7 +6,7 @@ project_memory 约束：恢复采用被动模式，仅通知用户不主动执�
 
 from __future__ import annotations
 
-from athena.db.database import Database
+from athena.infrastructure.sqlite.database import Database
 
 from athena.utils.logging import get_logger
 

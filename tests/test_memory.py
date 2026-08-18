@@ -16,8 +16,10 @@ from sqlalchemy import select, update
 from athena.config.settings import Settings
 from athena.core.memory.memory import MemoryManager
 from athena.core.memory.retrieval import HybridRetrievalManager, SearchResult
-from athena.db.engine import close_engine, get_session, init_engine
-from athena.db.models import MemoryModel
+from athena.infrastructure.sqlite.engine import close_engine, get_session, init_engine
+from athena.infrastructure.sqlite.models import MemoryModel
+from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
+from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +146,20 @@ def _make_settings(**overrides: Any) -> Settings:
 
 
 @pytest.fixture
-async def mm(tmp_path):
+def vector_store(tmp_path):
+    return ChromaMemoryStore.with_client(
+        path=str(tmp_path / "chroma"),
+        client=_FakeChromaClient(),
+    )
+
+
+@pytest.fixture
+async def mm(tmp_path, vector_store):
     await init_engine(str(tmp_path / "test.db"))
     manager = MemoryManager(
-        chroma_client=_FakeChromaClient(),
         settings=_make_settings(),
+        repository=SqliteMemoryRepository(),
+        vector_store=vector_store,
     )
     await manager.initialize()
     yield manager
@@ -180,7 +191,9 @@ async def test_reads_record_access_in_memory(mm: MemoryManager):
 
 
 @pytest.mark.asyncio
-async def test_flush_updates_sqlite_and_chroma(mm: MemoryManager):
+async def test_flush_updates_sqlite_and_chroma(
+    mm: MemoryManager, vector_store: ChromaMemoryStore
+):
     mid = await mm.add_memory(
         content="技术决策：采用微服务架构", metadata={"session_id": "s1"}
     )
@@ -196,7 +209,7 @@ async def test_flush_updates_sqlite_and_chroma(mm: MemoryManager):
     assert row.last_accessed is not None
 
     # Chroma 元数据同步
-    meta = mm.collection._items[mid]["metadata"]
+    meta = vector_store.collection._items[mid]["metadata"]
     assert meta["access_count"] == 2
     assert meta["last_accessed"] is not None
     # 非 pinned：expires_at 已滑动到 now + ttl
@@ -204,7 +217,9 @@ async def test_flush_updates_sqlite_and_chroma(mm: MemoryManager):
 
 
 @pytest.mark.asyncio
-async def test_flush_pinned_keeps_expires_at(mm: MemoryManager):
+async def test_flush_pinned_keeps_expires_at(
+    mm: MemoryManager, vector_store: ChromaMemoryStore
+):
     mid = await mm.add_memory(
         content="固定记忆", metadata={"session_id": "s1"}, pinned=True
     )
@@ -217,13 +232,15 @@ async def test_flush_pinned_keeps_expires_at(mm: MemoryManager):
     assert row.expires_at is None  # SQLite 保持 NULL
     assert row.access_count == 1
 
-    meta = mm.collection._items[mid]["metadata"]
+    meta = vector_store.collection._items[mid]["metadata"]
     assert meta["expires_at"] == ""  # Chroma 保持空串
     assert meta["access_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_flush_after_delete_is_safe(mm: MemoryManager):
+async def test_flush_after_delete_is_safe(
+    mm: MemoryManager, vector_store: ChromaMemoryStore
+):
     mid = await mm.add_memory(content="将被删除的记忆", metadata={"session_id": "s1"})
     await mm.search(query="删除", where={"session_id": "s1"})  # 记录访问
     await mm.delete(mid)
@@ -232,7 +249,7 @@ async def test_flush_after_delete_is_safe(mm: MemoryManager):
     row = await _get_row(mid)
     assert row is not None
     assert row.deleted_time is not None  # 保持软删，未被复活
-    assert mid not in mm.collection._items
+    assert mid not in vector_store.collection._items
 
 
 @pytest.mark.asyncio
@@ -269,7 +286,9 @@ async def test_sliding_ttl_refreshes_on_access(mm: MemoryManager):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_expired_respects_expires_at(mm: MemoryManager):
+async def test_cleanup_expired_respects_expires_at(
+    mm: MemoryManager, vector_store: ChromaMemoryStore
+):
     expired_mid = await mm.add_memory(content="过期记忆", metadata={"session_id": "s1"})
     keep_mid = await mm.add_memory(content="保留记忆", metadata={"session_id": "s1"})
     past = (datetime.now() - timedelta(days=1)).isoformat()
@@ -280,7 +299,7 @@ async def test_cleanup_expired_respects_expires_at(mm: MemoryManager):
                 .where(MemoryModel.id == expired_mid)
                 .values(expires_at=past)
             )
-    mm.collection._items[expired_mid]["metadata"]["expires_at"] = past
+    vector_store.collection._items[expired_mid]["metadata"]["expires_at"] = past
 
     assert await mm.cleanup_expired() == 1
     assert await mm.get(expired_mid) is None
@@ -482,4 +501,3 @@ async def test_weighted_rrf_ranks_vector_first():
     assert scores["v"] == pytest.approx(0.75 / 61)
     assert scores["k"] == pytest.approx(0.25 / 61)
     assert scores["v"] > scores["k"]
-

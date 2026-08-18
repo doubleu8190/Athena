@@ -260,8 +260,49 @@ async def test_image_adapter_passes_path_to_rapidocr(tmp_path, monkeypatch):
     result = await ImageAdapter().extract(_context(image_path, tmp_path), Settings(_env_file=None))
 
     assert seen["img_content"] == image_path
-    assert result.units[0].text == "hello"
+    assert result.units[0].content == "hello"
     assert result.metadata["ocr_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_image_analysis_uses_ocr_fallback_without_vision(tmp_path, monkeypatch):
+    from PIL import Image
+
+    class FakeRapidOCR:
+        def __call__(self, img_content):
+            return ([[None, "invoice total 42"]], None)
+
+    rapidocr = types.ModuleType("rapidocr_onnxruntime")
+    rapidocr.RapidOCR = FakeRapidOCR
+    monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", rapidocr)
+
+    db = Database(str(tmp_path / "image-analysis.db"))
+    await db.connect()
+    try:
+        await db.sessions.create("session")
+        settings = Settings(
+            _env_file=None,
+            sqlite_db_path=str(tmp_path / "image-analysis.db"),
+            chromadb_path=str(tmp_path / "chroma"),
+            file_storage_path=str(tmp_path / "storage"),
+        )
+        runtime = FileIntelligenceRuntime(db.files, _FakeLLM(), _FakeLLM(), settings=settings)
+        image_path = tmp_path / "sample.png"
+        Image.new("RGB", (12, 8), "white").save(image_path)
+        blob = await runtime.storage.save_stream(_chunks(image_path.read_bytes()))
+        attachment = await db.files.create_attachment(
+            session_id="session", filename="sample.png", mime_type="image/png",
+            size_bytes=blob.size_bytes, sha256=blob.sha256, storage_key=blob.storage_key,
+        )
+
+        result = await runtime.analyze_file("session", attachment.id, "读取图片里的文字")
+
+        assert result["can_describe_visual_content"] is False
+        assert result["analysis_source"] == "ocr"
+        assert result["ocr_text"] == "invoice total 42"
+        assert "OCR" in result["message"]
+    finally:
+        await db.close()
 
 
 def test_pdf_ocr_page_encodes_rendered_image_as_bytes(tmp_path, monkeypatch):

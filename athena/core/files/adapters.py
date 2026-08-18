@@ -380,9 +380,16 @@ class ImageAdapter:
         )
 
     async def analyze(self, path: Path, task: str) -> dict[str, Any]:
-        """分析图片：返回尺寸、模式和 OCR 可用性等元数据。"""
+        """分析图片：返回尺寸、模式和 OCR 文本等元数据。"""
         result = await asyncio.to_thread(self._extract, path)
-        return {**result.metadata, "note": "视觉模型未配置时仅提供 OCR 结果"}
+        ocr_text = "\n".join(unit.content for unit in result.units).strip()
+        analysis: dict[str, Any] = {
+            **result.metadata,
+            "note": "适配器仅提供图片元数据和 OCR 文本；视觉描述由 runtime 根据模型能力处理。",
+        }
+        if ocr_text:
+            analysis["ocr_text"] = ocr_text
+        return analysis
 
 
 class CodeAdapter:

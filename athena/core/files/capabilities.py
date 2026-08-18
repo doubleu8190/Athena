@@ -60,31 +60,58 @@ def register_file_capabilities(manager: UnifiedToolManager, runtime: FileIntelli
         return await runtime.get_call_graph(get_context().session_id, file_id, symbol, direction)
 
     definitions = [
-        ("list_files", "列出当前会话中的文件资产", list_files, {"type": "object", "properties": {}}),
-        ("get_file_info", "获取会话附件元数据、解析状态和能力", get_file_info, None),
-        ("read_file", "按 file_id 和定位信息读取文件内容", read_file, None),
-        ("search_file", "在会话附件中按 query 搜索内容", search_file, None),
-        ("extract_table", "提取 PDF、Word 或 Excel 中已解析的表格", extract_table, None),
-        ("summarize_file", "对文件执行分层摘要", summarize_file, None),
-        ("analyze_file", "按任务分析文档、数据或图片", analyze_file, None),
-        ("analyze_codebase", "返回代码项目结构、语言、符号和依赖概览", analyze_codebase, None),
-        ("find_symbol", "在代码项目中查找符号", find_symbol, None),
-        ("find_definition", "定位代码符号定义", find_definition, None),
-        ("find_references", "查找代码符号的引用关系", find_references, None),
-        ("get_call_graph", "获取代码符号调用关系", get_call_graph, None),
+        ("list_files", "列出当前会话可访问的文件资产及其解析状态。", list_files, {"type": "object", "properties": {}}),
+        ("get_file_info", "获取指定会话附件的公开元数据、解析状态、能力和解析统计。", get_file_info, None),
+        ("read_file", "读取已解析文件的文本分块；可按 page/sheet/path 定位。图片仅返回 OCR 文本，不做视觉理解。", read_file, None),
+        ("search_file", "在已解析文件文本中执行关键词和向量混合搜索；图片只能搜索 OCR 文本。", search_file, None),
+        ("extract_table", "读取解析阶段缓存的表格数据，支持 CSV、PDF、Word 和 Excel；无表格时返回空列表。", extract_table, None),
+        ("summarize_file", "对文件文本生成分层摘要并缓存；启用任务队列时仅返回 queued 任务信息。", summarize_file, None),
+        ("analyze_file", "按任务分析文件；图片优先使用视觉模型，未启用视觉时使用 OCR 文本 fallback 并明确标注来源。", analyze_file, None),
+        ("analyze_codebase", "返回代码项目结构、语言、符号和依赖概览；启用任务队列时仅返回 queued 任务信息。", analyze_codebase, None),
+        ("find_symbol", "在代码附件的符号索引中按名称模糊查找类、函数等定义。", find_symbol, None),
+        ("find_definition", "定位代码符号定义；当前等价于 find_symbol，返回匹配的定义位置。", find_definition, None),
+        ("find_references", "查找指向指定代码符号的 incoming 引用关系。", find_references, None),
+        ("get_call_graph", "获取指定代码符号的调用关系，direction 支持 incoming、outgoing 或 both。", get_call_graph, None),
     ]
     explicit = {
-        "get_file_info": {"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]},
-        "read_file": {"type": "object", "properties": {"file_id": {"type": "string"}, "locator": {"type": "object"}, "limit": {"type": "integer", "default": 10}}, "required": ["file_id"]},
-        "search_file": {"type": "object", "properties": {"file_id": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "default": 10}}, "required": ["file_id", "query"]},
-        "extract_table": {"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]},
-        "summarize_file": {"type": "object", "properties": {"file_id": {"type": "string"}, "summary_type": {"type": "string", "default": "general"}}, "required": ["file_id"]},
-        "analyze_file": {"type": "object", "properties": {"file_id": {"type": "string"}, "task": {"type": "string"}}, "required": ["file_id", "task"]},
-        "analyze_codebase": {"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]},
-        "find_symbol": {"type": "object", "properties": {"file_id": {"type": "string"}, "name": {"type": "string"}}, "required": ["file_id", "name"]},
-        "find_definition": {"type": "object", "properties": {"file_id": {"type": "string"}, "name": {"type": "string"}}, "required": ["file_id", "name"]},
-        "find_references": {"type": "object", "properties": {"file_id": {"type": "string"}, "name": {"type": "string"}}, "required": ["file_id", "name"]},
-        "get_call_graph": {"type": "object", "properties": {"file_id": {"type": "string"}, "symbol": {"type": "string"}, "direction": {"type": "string", "default": "both"}}, "required": ["file_id", "symbol"]},
+        "get_file_info": {"type": "object", "properties": {"file_id": {"type": "string", "description": "当前会话中的附件 ID。"}}, "required": ["file_id"]},
+        "read_file": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "当前会话中的附件 ID。"},
+            "locator": {"type": "object", "description": "可选定位过滤，如 {\"page\": 3}、{\"sheet\": \"Sheet1\"} 或 {\"path\": \"src/app.py\"}。"},
+            "limit": {"type": "integer", "default": 10, "description": "返回分块数量，运行时限制为 1-50。"},
+        }, "required": ["file_id"]},
+        "search_file": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "当前会话中的附件 ID。"},
+            "query": {"type": "string", "description": "要搜索的文本查询。"},
+            "limit": {"type": "integer", "default": 10, "description": "返回结果数量，运行时限制为 1-50。"},
+        }, "required": ["file_id", "query"]},
+        "extract_table": {"type": "object", "properties": {"file_id": {"type": "string", "description": "当前会话中的 CSV、PDF、Word 或 Excel 附件 ID。"}}, "required": ["file_id"]},
+        "summarize_file": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "当前会话中的附件 ID。"},
+            "summary_type": {"type": "string", "default": "general", "description": "摘要类型标签，如 general、technical。"},
+        }, "required": ["file_id"]},
+        "analyze_file": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "当前会话中的附件 ID。"},
+            "task": {"type": "string", "description": "分析任务描述，例如统计字段、解释图片 OCR 文本或描述图片内容。"},
+        }, "required": ["file_id", "task"]},
+        "analyze_codebase": {"type": "object", "properties": {"file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"}}, "required": ["file_id"]},
+        "find_symbol": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"},
+            "name": {"type": "string", "description": "要查找的类、函数或其他符号名称。"},
+        }, "required": ["file_id", "name"]},
+        "find_definition": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"},
+            "name": {"type": "string", "description": "要定位定义的符号名称。"},
+        }, "required": ["file_id", "name"]},
+        "find_references": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"},
+            "name": {"type": "string", "description": "要查找引用的符号名称。"},
+        }, "required": ["file_id", "name"]},
+        "get_call_graph": {"type": "object", "properties": {
+            "file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"},
+            "symbol": {"type": "string", "description": "目标符号名称。"},
+            "direction": {"type": "string", "default": "both", "description": "调用方向：outgoing、incoming 或 both。"},
+        }, "required": ["file_id", "symbol"]},
     }
     for name, description, handler, params in definitions:
         manager.register_native(name=name, description=description, handler=handler,

@@ -13,6 +13,7 @@ import pytest
 os.environ.setdefault("SQLITE_DB_PATH", "/tmp/athena_test.db")
 os.environ.setdefault("CHROMADB_PATH", "/tmp/athena_test_chromadb")
 os.environ.setdefault("LLM_API_KEY", "test-key")
+os.environ["DEBUG"] = "false"
 
 
 @pytest.fixture(scope="session")

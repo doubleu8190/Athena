@@ -467,12 +467,23 @@ class FileIntelligenceRuntime:
         """
         attachment = await self.require_attachment(session_id, file_id)
         adapter = self.adapters.select(attachment.filename, attachment.mime_type)
-        result = await adapter.analyze(self.storage.resolve(attachment.storage_key), task)
+        path = self.storage.resolve(attachment.storage_key)
+        result = await adapter.analyze(path, task)
         if adapter.info.name == "image" and self.settings.primary_llm.supports_vision:
-            result["vision"] = await self._vision_analysis(self.storage.resolve(attachment.storage_key), task)
+            result["vision"] = await self._vision_analysis(path, task)
         elif adapter.info.name == "image":
             result["can_describe_visual_content"] = False
-            result["message"] = "当前主模型未声明支持视觉输入，因此无法描述图片画面；只能返回尺寸、模式和 OCR 可用性。"
+            if str(result.get("ocr_text", "")).strip():
+                result["analysis_source"] = "ocr"
+                result["message"] = (
+                    "当前主模型未声明支持视觉输入，因此无法描述图片画面；"
+                    "本次使用 OCR 识别出的文字作为 fallback，仅能分析图片中的可识别文本。"
+                )
+            else:
+                result["message"] = (
+                    "当前主模型未声明支持视觉输入，因此无法描述图片画面；"
+                    "图片也未识别出可用的 OCR 文本，只能返回尺寸、模式和 OCR 可用性。"
+                )
         return result
 
     async def analyze_codebase(self, session_id: str, file_id: str) -> dict[str, Any]:

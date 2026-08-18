@@ -1,6 +1,6 @@
-"""内置文件适配器 — 文档、数据、图片、源码和压缩包的提取与分析。
+"""内置文件适配器 — 文档、数据、图片和源码的提取与分析。
 
-本模块提供 7 个内置适配器，覆盖 Athena 系统支持的所有文件类型：
+本模块提供 6 个内置适配器，覆盖 Athena 系统支持的所有文件类型：
 
 - ``TextAdapter``  — 纯文本、Markdown、JSON、YAML、CSV 等
 - ``PdfAdapter``   — PDF 文档（含 OCR 回退和表格提取）
@@ -8,7 +8,6 @@
 - ``ExcelAdapter`` — Excel (.xlsx/.xlsm) 电子表格
 - ``ImageAdapter`` — 图片文件（OCR 文本提取）
 - ``CodeAdapter``  — 源代码文件（符号索引和依赖分析）
-- ``ArchiveAdapter`` — 压缩包（递归提取内部文件）
 
 所有适配器实现 ``FileAdapter`` 协议，返回 ``ExtractionResult``。
 """
@@ -21,11 +20,7 @@ import csv
 import importlib
 import io
 import re
-import stat
-import tarfile
-import zipfile
-from collections import Counter
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from athena.config.settings import Settings
@@ -431,171 +426,6 @@ class CodeAdapter:
         """分析代码文件：返回语言分布和符号数量。"""
         result = await asyncio.to_thread(self._extract_one, path, path.name)
         return {"languages": {result.metadata.get("language", "text"): 1}, "symbols": len(result.symbols)}
-
-
-class ArchiveAdapter:
-    """压缩包适配器 (.zip/.tar/.tgz/.tar.gz)。
-
-    安全解压后递归提取内部文件，对代码文件构建符号索引和依赖图，
-    对文本文件提取内容。内置多层安全校验：路径穿越检测、压缩比炸弹
-    防护、符号链接拒绝、嵌套压缩包拒绝。
-
-    Capabilities: read, search, summarize, analyze, symbols, references, call_graph
-    """
-
-    info = AdapterInfo(
-        name="archive", version="2.0", mime_types=["application/zip", "application/x-tar", "application/gzip"],
-        extensions=[".zip", ".tar", ".tgz", ".tar.gz"],
-        capabilities=["read", "search", "summarize", "analyze", "symbols", "references", "call_graph"],
-    )
-
-    async def extract(
-        self,
-        context: ExtractionContext,
-        settings: Settings,
-    ) -> ExtractionResult:
-        """提取压缩包内容（在线程池中执行 I/O）。"""
-        return await asyncio.to_thread(self._extract, context, settings)
-
-    def _extract(self, context: ExtractionContext, settings: Settings) -> ExtractionResult:
-        """安全解压并递归提取内部文件的代码符号和文本内容。"""
-        path = context.path
-        workspace = context.workspace
-        extracted = workspace / "archive"
-        extracted.mkdir(parents=True, exist_ok=True)
-        members = self._safe_extract(path, extracted, settings)
-        code = CodeAdapter()
-        text_adapter = TextAdapter()
-        units: list[ExtractedUnit] = []
-        symbols: list[dict[str, Any]] = []
-        dependencies: list[dict[str, Any]] = []
-        languages: Counter[str] = Counter()
-        # 按文件类型分发到对应适配器
-        for relative in members:
-            item = extracted / relative
-            suffix = item.suffix.lower()
-            if suffix in CODE_EXTENSIONS:
-                result = code._extract_one(item, relative)
-                units.extend(result.units)
-                symbols.extend(result.symbols)
-                dependencies.extend(result.dependencies)
-                languages[result.metadata["language"]] += 1
-            elif suffix in TEXT_EXTENSIONS or suffix == ".csv":
-                result = text_adapter._extract(ExtractionContext(path=item, workspace=workspace, filename=relative))
-                for unit in result.units:
-                    unit.locator["path"] = relative
-                units.extend(result.units)
-        return ExtractionResult(
-            units=units, symbols=symbols, dependencies=dependencies,
-            metadata={"files": len(members), "indexed_files": len(units), "languages": dict(languages)},
-        )
-
-    def _safe_extract(self, path: Path, destination: Path, settings: Settings) -> list[str]:
-        """安全解压压缩包到目标目录。
-
-        校验流程：收集成员记录 → 安全性校验 → 逐个解压。
-        支持 ZIP 和 TAR 格式，其他格式抛出 ValueError。
-
-        Args:
-            path: 压缩包文件路径。
-            destination: 解压目标目录。
-            settings: 全局配置（含安全限制参数）。
-
-        Returns:
-            成功解压的文件相对路径列表。
-
-        Raises:
-            ValueError: 不支持的格式、路径穿越、压缩比炸弹等安全违规。
-        """
-        records: list[tuple[str, int, int, bool, Any]] = []
-        if zipfile.is_zipfile(path):
-            with zipfile.ZipFile(path) as archive:
-                for member in archive.infolist():
-                    is_link = stat.S_ISLNK(member.external_attr >> 16)
-                    records.append((member.filename, member.file_size, member.compress_size, is_link, member))
-                self._validate_archive(records, settings)
-                for name, _, _, _, member in records:
-                    target = self._safe_target(destination, name)
-                    if member.is_dir():
-                        target.mkdir(parents=True, exist_ok=True)
-                    else:
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        with archive.open(member) as source, target.open("wb") as output:
-                            output.write(source.read())
-        elif tarfile.is_tarfile(path):
-            with tarfile.open(path) as archive:
-                for member in archive.getmembers():
-                    records.append((member.name, member.size, member.size, member.issym() or member.islnk(), member))
-                self._validate_archive(records, settings, compressed_size=path.stat().st_size)
-                for name, _, _, _, member in records:
-                    target = self._safe_target(destination, name)
-                    if member.isdir():
-                        target.mkdir(parents=True, exist_ok=True)
-                    elif member.isfile():
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        source = archive.extractfile(member)
-                        if source:
-                            with source, target.open("wb") as output:
-                                output.write(source.read())
-        else:
-            raise ValueError("不支持的压缩包格式")
-        return [name for name, _, _, _, _ in records if (destination / name).is_file()]
-
-    @staticmethod
-    def _safe_target(root: Path, name: str) -> Path:
-        """计算安全的解压目标路径，防止路径穿越攻击。
-
-        Args:
-            root: 解压根目录。
-            name: 压缩包内的条目路径。
-
-        Returns:
-            解析后的安全绝对路径。
-
-        Raises:
-            ValueError: 路径包含绝对路径组件或 ``..`` 穿越。
-        """
-        pure = PurePosixPath(name)
-        if pure.is_absolute() or ".." in pure.parts:
-            raise ValueError("压缩包包含路径穿越条目")
-        target = (root / Path(*pure.parts)).resolve()
-        if root.resolve() not in target.parents:
-            raise ValueError("压缩包条目逃逸工作目录")
-        return target
-
-    @staticmethod
-    def _validate_archive(
-        records: list[tuple[str, int, int, bool, Any]],
-        settings: Settings,
-        compressed_size: int | None = None,
-    ) -> None:
-        """校验压缩包安全性（条目数、大小、压缩比、符号链接、嵌套）。
-
-        Args:
-            records: 条目记录列表，每项为 (名称, 原始大小, 压缩大小, 是否链接, 原始对象)。
-            settings: 全局配置，包含各项安全限制阈值。
-            compressed_size: 压缩包整体大小（TAR 格式使用），ZIP 格式为 ``None``。
-
-        Raises:
-            ValueError: 任一安全校验失败。
-        """
-        if len(records) > settings.file_archive_max_entries:
-            raise ValueError("压缩包文件数量超过安全上限")
-        total = sum(size for _, size, _, _, _ in records)
-        compressed = compressed_size or sum(max(1, size) for _, _, size, _, _ in records)
-        if total > settings.file_archive_max_uncompressed_bytes:
-            raise ValueError("压缩包解压大小超过安全上限")
-        if total / max(1, compressed) > settings.file_archive_max_ratio:
-            raise ValueError("压缩包压缩比超过安全上限")
-        if any(is_link for _, _, _, is_link, _ in records):
-            raise ValueError("压缩包不允许符号链接")
-        archive_suffixes = {".zip", ".tar", ".tgz", ".gz"}
-        if any(Path(name).suffix.lower() in archive_suffixes for name, _, _, _, _ in records):
-            raise ValueError("不递归解压嵌套压缩包")
-
-    async def analyze(self, path: Path, task: str) -> dict[str, Any]:
-        """分析压缩包：返回提示信息（实际分析使用已生成的符号和依赖索引）。"""
-        return {"task": task, "note": "代码项目分析使用已生成的符号和依赖索引"}
 
 
 def _frame_analysis(frame: Any) -> dict[str, Any]:

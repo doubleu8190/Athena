@@ -6,10 +6,15 @@ import { ActivityPanel } from "./ActivityPanel"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { ApprovalRequest, Message, ToolCall, ToolCallInvocation } from "../types"
+import type { ApprovalRequest, Message, SupportedAttachmentTypes, ToolCall, ToolCallInvocation } from "../types"
 
 interface ChatProps {
   sendEvent: (type: string, data?: Record<string, unknown>) => boolean
+}
+
+function isSupportedAttachment(file: File, supportedTypes: SupportedAttachmentTypes): boolean {
+  const filename = file.name.toLowerCase()
+  return supportedTypes.extensions.some((extension) => filename.endsWith(extension.toLowerCase()))
 }
 
 function Chat({ sendEvent }: ChatProps) {
@@ -50,6 +55,7 @@ function Chat({ sendEvent }: ChatProps) {
   const [showFiles, setShowFiles] = useState(false)
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([])
   const [isUploading, setIsUploading] = useState(false)
+  const [supportedAttachmentTypes, setSupportedAttachmentTypes] = useState<SupportedAttachmentTypes | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -74,9 +80,13 @@ function Chat({ sendEvent }: ChatProps) {
       setIsLoadingHistory(true)
       loadHistory(activeSessionId, () => cancelled)
       setSelectedAttachmentIds([])
+      setSupportedAttachmentTypes(null)
       apiClient.listAttachments(activeSessionId)
         .then((items) => { if (!cancelled) setAttachments(items) })
         .catch(() => { if (!cancelled) setAttachments([]) })
+      apiClient.getSupportedAttachmentTypes(activeSessionId)
+        .then((types) => { if (!cancelled) setSupportedAttachmentTypes(types) })
+        .catch(() => { if (!cancelled) setSupportedAttachmentTypes(null) })
     } else {
       clearMessages()
       clearSteps()
@@ -87,6 +97,7 @@ function Chat({ sendEvent }: ChatProps) {
       clearError()
       setAttachments([])
       setSelectedAttachmentIds([])
+      setSupportedAttachmentTypes(null)
     }
 
     return () => {
@@ -218,6 +229,17 @@ function Chat({ sendEvent }: ChatProps) {
 
   const uploadFiles = useCallback(async (files: File[]) => {
     if (!activeSessionId || files.length === 0 || isUploading) return
+    if (!supportedAttachmentTypes) {
+      setError("Supported file types are still loading. Please try again.")
+      if (fileInputRef.current) fileInputRef.current.value = ""
+      return
+    }
+    const unsupportedFiles = files.filter((file) => !isSupportedAttachment(file, supportedAttachmentTypes))
+    if (unsupportedFiles.length > 0) {
+      setError(`Unsupported file type: ${unsupportedFiles.map((file) => file.name).join(", ")}`)
+      if (fileInputRef.current) fileInputRef.current.value = ""
+      return
+    }
     setIsUploading(true)
     clearError()
     try {
@@ -236,7 +258,7 @@ function Chat({ sendEvent }: ChatProps) {
       setIsUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ""
     }
-  }, [activeSessionId, clearError, isUploading, setError, upsertAttachment, upsertFileTask])
+  }, [activeSessionId, clearError, isUploading, setError, supportedAttachmentTypes, upsertAttachment, upsertFileTask])
 
   const filesFromClipboard = useCallback((clipboardData: DataTransfer): File[] => {
     const fromItems = Array.from(clipboardData.items ?? [])
@@ -662,14 +684,21 @@ function Chat({ sendEvent }: ChatProps) {
               ref={fileInputRef}
               type="file"
               multiple
+              accept={supportedAttachmentTypes?.extensions.join(",")}
               className="hidden"
               onChange={(event) => void uploadFiles(Array.from(event.target.files ?? []))}
             />
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!activeSessionId || isUploading}
-              title="Attach files"
+              disabled={!activeSessionId || isUploading || !supportedAttachmentTypes}
+              title={
+                !activeSessionId
+                  ? "Select a session to attach files"
+                  : supportedAttachmentTypes
+                    ? "Attach files"
+                    : "Loading supported file types"
+              }
               className="inline-flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg border border-athena-border bg-athena-bg text-athena-muted hover:text-athena-text disabled:opacity-50"
             >
               {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />}

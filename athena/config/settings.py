@@ -74,9 +74,6 @@ class Settings(BaseSettings):
     file_code_concurrency: int = 1
     file_summary_concurrency: int = 4
     file_embedding_concurrency: int = 2
-    file_archive_max_entries: int = 10_000
-    file_archive_max_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
-    file_archive_max_ratio: float = 100.0
 
     # --- Harness ---
     max_turns_per_run: int = 20

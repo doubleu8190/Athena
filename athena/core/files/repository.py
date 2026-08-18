@@ -708,10 +708,18 @@ class FileRepository:
                 )
 
     async def sync_adapters(self, adapters: Iterable[AdapterInfo]) -> None:
+        items = list(adapters)
+        names = [item.name for item in items]
         now = _now().isoformat()
         async with get_session() as session:
             async with session.begin():
-                for item in adapters:
+                if names:
+                    await session.execute(
+                        delete(AdapterRegistryModel).where(AdapterRegistryModel.name.not_in(names))
+                    )
+                else:
+                    await session.execute(delete(AdapterRegistryModel))
+                for item in items:
                     await session.execute(
                         sqlite_insert(AdapterRegistryModel).values(
                             name=item.name, version=item.version,

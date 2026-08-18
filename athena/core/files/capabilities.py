@@ -94,21 +94,21 @@ def register_file_capabilities(manager: UnifiedToolManager, runtime: FileIntelli
             "file_id": {"type": "string", "description": "当前会话中的附件 ID。"},
             "task": {"type": "string", "description": "分析任务描述，例如统计字段、解释图片 OCR 文本或描述图片内容。"},
         }, "required": ["file_id", "task"]},
-        "analyze_codebase": {"type": "object", "properties": {"file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"}}, "required": ["file_id"]},
+        "analyze_codebase": {"type": "object", "properties": {"file_id": {"type": "string", "description": "代码文件附件 ID。"}}, "required": ["file_id"]},
         "find_symbol": {"type": "object", "properties": {
-            "file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"},
+            "file_id": {"type": "string", "description": "代码文件附件 ID。"},
             "name": {"type": "string", "description": "要查找的类、函数或其他符号名称。"},
         }, "required": ["file_id", "name"]},
         "find_definition": {"type": "object", "properties": {
-            "file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"},
+            "file_id": {"type": "string", "description": "代码文件附件 ID。"},
             "name": {"type": "string", "description": "要定位定义的符号名称。"},
         }, "required": ["file_id", "name"]},
         "find_references": {"type": "object", "properties": {
-            "file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"},
+            "file_id": {"type": "string", "description": "代码文件附件 ID。"},
             "name": {"type": "string", "description": "要查找引用的符号名称。"},
         }, "required": ["file_id", "name"]},
         "get_call_graph": {"type": "object", "properties": {
-            "file_id": {"type": "string", "description": "代码文件或代码压缩包附件 ID。"},
+            "file_id": {"type": "string", "description": "代码文件附件 ID。"},
             "symbol": {"type": "string", "description": "目标符号名称。"},
             "direction": {"type": "string", "default": "both", "description": "调用方向：outgoing、incoming 或 both。"},
         }, "required": ["file_id", "symbol"]},

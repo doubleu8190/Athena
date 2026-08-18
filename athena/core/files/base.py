@@ -89,7 +89,7 @@ class FileAdapter(Protocol):
     """文件适配器协议。
 
     定义所有文件适配器必须实现的公共接口。适配器负责将特定格式的文件
-    （文本、PDF、Word、Excel、图片、代码、压缩包）解析为统一的
+    （文本、PDF、Word、Excel、图片、代码）解析为统一的
     ``ExtractionResult``。
 
     Attributes:
@@ -107,7 +107,7 @@ class FileAdapter(Protocol):
 
         Args:
             context: 文件路径、临时目录、原始文件名和 MIME 类型。
-            settings: 全局配置，包含 chunk 大小、压缩参数等。
+            settings: 全局配置，包含 chunk 大小等。
 
         Returns:
             ``ExtractionResult``：包含提取的内容单元、元数据和结构化信息。

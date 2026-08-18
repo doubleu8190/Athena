@@ -97,6 +97,10 @@ export interface AttachmentUploadItem {
   task: FileTask
 }
 
+export interface SupportedAttachmentTypes {
+  extensions: string[]
+}
+
 export interface ThinkingState {
   active: boolean
   content: string

@@ -92,6 +92,13 @@ async def list_attachments(session_id: str) -> list[dict]:
     return await get_file_runtime().list_files(session_id)
 
 
+@router.get("/attachment-types")
+async def get_supported_attachment_types(session_id: str) -> dict[str, list[str]]:
+    """返回当前文件适配器支持选择的扩展名。"""
+    await _session_exists(session_id)
+    return {"extensions": get_file_runtime().adapters.supported_extensions()}
+
+
 @router.get("/attachments/{file_id}")
 async def get_attachment(session_id: str, file_id: str) -> dict:
     """获取附件详情（含元数据）。"""

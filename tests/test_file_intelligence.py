@@ -3,14 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 import sys
 import types
-import zipfile
 
 import pytest
 
 from athena.config.settings import Settings
-from athena.core.files.adapters import ExcelAdapter, ImageAdapter, PdfAdapter, WordAdapter, ArchiveAdapter
+from athena.core.files.adapters import ExcelAdapter, ImageAdapter, PdfAdapter, WordAdapter
 from athena.core.files.base import ExtractionContext
 from athena.core.files.capabilities import register_file_capabilities
+from athena.core.files.registry import AdapterRegistry
 from athena.core.files.runtime import FileAccessError, FileIntelligenceRuntime
 from athena.core.files.storage import FileTooLargeError, StorageLayer
 from athena.core.files.tasks import FileTaskWorker
@@ -435,17 +435,13 @@ async def test_continuation_is_claimed_only_once(tmp_path):
         await db.close()
 
 
-@pytest.mark.asyncio
-async def test_archive_rejects_path_traversal(tmp_path):
-    archive_path = tmp_path / "bad.zip"
-    with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.writestr("../escape.txt", "bad")
+def test_adapter_registry_excludes_archive_formats():
+    registry = AdapterRegistry()
 
-    with pytest.raises(ValueError, match="路径穿越"):
-        await ArchiveAdapter().extract(
-            _context(archive_path, tmp_path / "workspace"),
-            Settings(_env_file=None),
-        )
+    assert "archive" not in {adapter.info.name for adapter in registry.list()}
+    assert not {".zip", ".tar", ".tgz", ".tar.gz"} & set(registry.supported_extensions())
+    with pytest.raises(ValueError, match="不支持的文件类型"):
+        registry.select("project.zip", "application/zip")
 
 
 def test_cache_key_changes_with_every_version_dimension(tmp_path):

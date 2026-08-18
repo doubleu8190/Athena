@@ -21,6 +21,7 @@ import type {
   Attachment,
   AttachmentUploadItem,
   FileTask,
+  SupportedAttachmentTypes,
 } from "../types"
 
 class ApiClient {
@@ -117,6 +118,10 @@ class ApiClient {
 
   async listAttachments(sessionId: string): Promise<Attachment[]> {
     return this.request<Attachment[]>(`/api/sessions/${sessionId}/attachments`)
+  }
+
+  async getSupportedAttachmentTypes(sessionId: string): Promise<SupportedAttachmentTypes> {
+    return this.request<SupportedAttachmentTypes>(`/api/sessions/${sessionId}/attachment-types`)
   }
 
   async deleteAttachment(sessionId: string, fileId: string): Promise<void> {

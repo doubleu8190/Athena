@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from athena.core.agent.workflow import AgentWorkflow
 from athena.db.database import Database, get_database
-from athena.models import Message, Session, Step, ToolCallRecord
+from athena.models import Message, Session, Step
 from athena.utils.ids import generate_session_id
 from athena.utils.logging import get_logger
 
@@ -59,6 +59,29 @@ class RecoverSessionResponse(BaseModel):
     session_id: str
     status: str  # "recovering" | "idle" | "failed"
     message: str
+
+
+class ToolCallResponse(BaseModel):
+    """前端工具调用视图 DTO.
+
+    数据库领域模型使用 raw_output/error_message；前端和 websocket 使用
+    output/error。这里做一次字段收敛，避免历史回放和实时流展示不一致。
+    """
+
+    id: str
+    session_id: str
+    step_id: str
+    run_id: str | None = None
+    tool_name: str
+    arguments: dict[str, Any]
+    output: str | None = None
+    error: str | None = None
+    error_stack: str | None = None
+    status: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    duration_ms: float = 0
+    risk_level: str = "low"
 
 
 async def _get_db() -> Database:
@@ -225,10 +248,33 @@ async def get_steps(session_id: str) -> list[Step]:
 
 
 @router.get("/{session_id}/tool_calls")
-async def get_tool_calls(session_id: str, status: str | None = None) -> list[ToolCallRecord]:
+async def get_tool_calls(session_id: str, status: str | None = None) -> list[ToolCallResponse]:
     """获取会话工具调用记录."""
     db = await _get_db()
-    return await db.tool_calls.query(session_id, status=status)
+    if not await db.sessions.get(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    tool_calls = await db.tool_calls.query(session_id, status=status)
+    steps = await db.steps.get_by_session(session_id)
+    run_by_step = {step.id: step.run_id for step in steps}
+    return [
+        ToolCallResponse(
+            id=tc.id,
+            session_id=tc.session_id,
+            step_id=tc.step_id,
+            run_id=run_by_step.get(tc.step_id),
+            tool_name=tc.tool_name,
+            arguments=tc.arguments,
+            output=tc.raw_output,
+            error=tc.error_message,
+            error_stack=tc.error_stack,
+            status=getattr(tc.status, "value", str(tc.status)),
+            started_at=tc.started_at,
+            completed_at=tc.completed_at,
+            duration_ms=tc.duration_ms,
+            risk_level=_tool_risk_level(tc.tool_name),
+        )
+        for tc in tool_calls
+    ]
 
 
 @router.post("/{session_id}/stop")
@@ -330,6 +376,16 @@ async def abandon_session(session_id: str) -> RecoverSessionResponse:
 
 
 # ── 内部辅助函数 ──────────────────────────────────────────────
+
+
+def _tool_risk_level(tool_name: str) -> str:
+    try:
+        from athena.core.tools.manager import get_tool_manager
+
+        manager = get_tool_manager()
+        return manager.get_risk_level(tool_name)
+    except Exception:
+        return "low"
 
 
 def _build_recovery_hint(

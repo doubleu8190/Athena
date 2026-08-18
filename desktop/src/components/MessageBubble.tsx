@@ -1,9 +1,9 @@
 import { Bot, User, Wrench, Clock, Paperclip } from "lucide-react"
 import ReactMarkdown from "react-markdown"
-import type { Message } from "../types"
-import { ToolCard } from "./ToolCard"
-import { safeStringify } from "../utils/safeStringify"
+import type { Message, ToolCallInvocation } from "../types"
+import { ToolResultCard } from "./ToolResultCard"
 import { useChatStore } from "../store/chatStore"
+import type { ToolDisplayData } from "../utils/toolSummary"
 
 interface MessageBubbleProps {
   message: Message
@@ -12,6 +12,7 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const toolCalls = useChatStore((s) => s.toolCalls)
+  const messages = useChatStore((s) => s.messages)
 
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
@@ -26,15 +27,14 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     return null
   }
 
-  // 关联的工具调用卡片
-  const relatedToolCalls = isUser
-    ? []
-    : toolCalls.filter((tc) => {
-        if (message.tool_call_id) {
-          return tc.id === message.tool_call_id
-        }
-        return false
-      })
+  const relatedToolCall = isTool ? findToolCallForToolMessage(message, toolCalls) : null
+  const pendingToolInvocations = !isUser && !isTool
+    ? (message.tool_calls ?? []).filter((tc) => !hasToolResultMessage(tc, messages))
+    : []
+
+  if (!isUser && !isTool && !isSystem && !hasText && hasToolCalls && pendingToolInvocations.length === 0) {
+    return null
+  }
 
   if (isSystem) {
     return (
@@ -80,21 +80,22 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           isUser ? "items-end" : "items-start"
         }`}
       >
-        {/* Assistant 回合发起/落库的工具调用（纯工具回合 content 为空时也可见） */}
-        {!isUser && !isTool && hasToolCalls && (
+        {/* Assistant 发起的工具调用：结果消息未到达前显示 pending，避免完成后重复。 */}
+        {!isUser && !isTool && pendingToolInvocations.length > 0 && (
           <div className="flex flex-col gap-2 w-full">
-            {(message.tool_calls ?? []).map((tc) => (
-              <ToolCard key={tc.id} toolCall={tc} />
+            {pendingToolInvocations.map((tc) => (
+              <ToolResultCard key={tc.id} toolCall={tc} />
             ))}
           </div>
         )}
 
-        {/* Tool Call Cards */}
-        {relatedToolCalls.length > 0 && (
+        {isTool && (
           <div className="flex flex-col gap-2 w-full">
-            {relatedToolCalls.map((tc) => (
-              <ToolCard key={tc.id} toolCall={tc} />
-            ))}
+            <ToolResultCard
+              toolCall={relatedToolCall ?? fallbackToolDisplay(message)}
+              output={message.content}
+              error={relatedToolCall?.error}
+            />
           </div>
         )}
 
@@ -111,30 +112,21 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         )}
 
         {/* Message Bubble（assistant 纯工具回合无文本，不渲染空气泡） */}
-        {(isUser || isTool || isSystem || hasText) && (
+        {(isUser || isSystem || (!isTool && hasText)) && (
           <div
             className={`rounded-2xl px-4 py-3 ${
               isUser
                 ? "bg-athena-accent text-white rounded-tr-sm"
-                : isTool
-                  ? "bg-yellow-500/10 border border-yellow-500/30 rounded-tl-sm"
-                  : "bg-athena-surface border border-athena-border rounded-tl-sm"
+                : "bg-athena-surface border border-athena-border rounded-tl-sm"
             }`}
           >
-            {isTool ? (
-              <ToolMessageContent
-                content={message.content}
-                toolName={message.tool_name}
-              />
-            ) : (
-              <div
-                className={`prose-custom max-w-none text-sm ${
-                  isStreaming ? "typing-cursor" : ""
-                }`}
-              >
-                <ReactMarkdown>{message.content}</ReactMarkdown>
-              </div>
-            )}
+            <div
+              className={`prose-custom max-w-none text-sm ${
+                isStreaming ? "typing-cursor" : ""
+              }`}
+            >
+              <ReactMarkdown>{message.content}</ReactMarkdown>
+            </div>
           </div>
         )}
 
@@ -152,40 +144,6 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   )
 }
 
-function ToolMessageContent({
-  content,
-  toolName,
-}: {
-  content: string
-  toolName?: string
-}) {
-  // 尝试解析 JSON 结果
-  let parsedContent: unknown = null
-  try {
-    parsedContent = JSON.parse(content)
-  } catch {
-    // 非 JSON，直接显示
-  }
-
-  return (
-    <div className="text-sm">
-      {toolName && (
-        <div className="flex items-center gap-2 mb-2 text-yellow-400">
-          <Wrench className="w-3 h-3" />
-          <span className="font-mono text-xs">{toolName}</span>
-        </div>
-      )}
-      {parsedContent !== null ? (
-        <pre className="text-xs bg-athena-bg/50 rounded p-2 overflow-x-auto overflow-y-auto text-athena-text/80 max-h-[24rem] whitespace-pre-wrap">
-          {safeStringify(parsedContent, 50000)}
-        </pre>
-      ) : (
-        <span className="text-athena-text/80 whitespace-pre-wrap">{content}</span>
-      )}
-    </div>
-  )
-}
-
 function formatTime(isoString: string): string {
   try {
     const date = new Date(isoString)
@@ -195,5 +153,34 @@ function formatTime(isoString: string): string {
     })
   } catch {
     return ""
+  }
+}
+
+function findToolCallForToolMessage(
+  message: Message,
+  toolCalls: ReturnType<typeof useChatStore.getState>["toolCalls"],
+) {
+  return toolCalls.find((tc) => {
+    if (message.tool_call_record_id && tc.id === message.tool_call_record_id) return true
+    if (message.step_id && tc.step_id === message.step_id) return true
+    if (message.tool_call_id && tc.id === message.tool_call_id) return true
+    return false
+  }) ?? null
+}
+
+function hasToolResultMessage(invocation: ToolCallInvocation, messages: Message[]): boolean {
+  return messages.some((message) => (
+    message.role === "tool" &&
+    (message.tool_call_id === invocation.id || message.tool_call_record_id === invocation.id)
+  ))
+}
+
+function fallbackToolDisplay(message: Message): ToolDisplayData {
+  return {
+    id: message.tool_call_record_id ?? message.tool_call_id ?? message.id,
+    name: message.tool_name ?? "tool",
+    arguments: {},
+    status: "success",
+    output: message.content,
   }
 }

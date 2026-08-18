@@ -129,6 +129,7 @@ export interface ToolCall {
   duration_ms?: number
   output?: string
   error?: string
+  error_stack?: string
   risk_level: "low" | "medium" | "high"
   /** 实时流由 TOOL_CALL_START 事件补全，用于归组 */
   step_id?: string

@@ -6,7 +6,7 @@ import { ActivityPanel } from "./ActivityPanel"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { ApprovalRequest, Message, ToolCall } from "../types"
+import type { ApprovalRequest, Message, ToolCall, ToolCallInvocation } from "../types"
 
 interface ChatProps {
   sendEvent: (type: string, data?: Record<string, unknown>) => boolean
@@ -374,6 +374,9 @@ function Chat({ sendEvent }: ChatProps) {
     } else if (msg.role === "assistant") {
       const hasContent = !!msg.content.trim()
       const hasToolCalls = (msg.tool_calls?.length ?? 0) > 0
+      if (!hasContent && hasToolCalls && allToolResultsArrived(msg.tool_calls ?? [], messages)) {
+        continue
+      }
       const nextIsTool = messages[i + 1]?.role === "tool"
       // 携带工具调用 / 紧随其后的消息是工具结果 → 处理中；真正的最终答复 → response
       if (hasToolCalls || nextIsTool) {
@@ -835,19 +838,22 @@ interface RawToolCallRecord {
   id: string
   session_id: string
   step_id: string
+  run_id?: string | null
   tool_name: string
   arguments: Record<string, unknown>
+  output?: string | null
   raw_output?: string | null
   status: ToolCall["status"]
   started_at: string
   completed_at?: string | null
   duration_ms?: number
+  error?: string | null
   error_message?: string | null
   error_stack?: string | null
+  risk_level?: ToolCall["risk_level"]
 }
 
-/** ToolCallRecord → 前端 ToolCall：对齐字段名并补默认 risk_level.
- *  run_id 未存于工具记录，Activity 面板通过 step_id → steps.run_id 归组。 */
+/** ToolCallRecord/ToolCallResponse → 前端 ToolCall：兼容历史 raw_* 字段与新 DTO 字段。 */
 function normalizeToolCall(r: RawToolCallRecord): ToolCall {
   return {
     id: r.id,
@@ -857,9 +863,20 @@ function normalizeToolCall(r: RawToolCallRecord): ToolCall {
     started_at: r.started_at,
     completed_at: r.completed_at ?? undefined,
     duration_ms: r.duration_ms,
-    output: r.raw_output ?? undefined,
-    error: r.error_message ?? undefined,
-    risk_level: "medium",
+    output: r.output ?? r.raw_output ?? undefined,
+    error: r.error ?? r.error_message ?? undefined,
+    error_stack: r.error_stack ?? undefined,
+    risk_level: r.risk_level ?? "low",
     step_id: r.step_id,
+    run_id: r.run_id ?? undefined,
   }
+}
+
+function allToolResultsArrived(invocations: ToolCallInvocation[], messages: Message[]): boolean {
+  return invocations.every((invocation) =>
+    messages.some((message) => (
+      message.role === "tool" &&
+      (message.tool_call_id === invocation.id || message.tool_call_record_id === invocation.id)
+    )),
+  )
 }

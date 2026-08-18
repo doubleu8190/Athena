@@ -1,8 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { X, ChevronDown, ChevronRight, MessageSquare } from "lucide-react"
-import { ToolCard } from "./ToolCard"
-import { StepCard } from "./StepCard"
+import {
+  AlertTriangle,
+  CheckCircle,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  X,
+  XCircle,
+} from "lucide-react"
 import type { Message, Step, ToolCall } from "../types"
+import {
+  buildActivityGroups,
+  type ActivityRequestGroup,
+} from "../utils/activityModel"
+import { StepCard } from "./StepCard"
+import { ToolDetailPanel } from "./ToolDetailPanel"
 
 interface ActivityPanelProps {
   messages: Message[]
@@ -11,128 +23,25 @@ interface ActivityPanelProps {
   onClose: () => void
 }
 
-interface ActivityGroup {
-  key: string
-  userMessage: Message | null
-  toolCalls: ToolCall[]
-  steps: Step[]
-}
-
-function toTime(iso: string): number {
-  const t = new Date(iso).getTime()
-  return Number.isNaN(t) ? 0 : t
-}
-
-/** 子 run（"主run_序号"）→ 主 run；主 run 自身不变 */
-function mainRunId(runId: string | null | undefined): string | null {
-  if (!runId) return null
-  const idx = runId.lastIndexOf("_")
-  return idx === -1 ? runId : runId.slice(0, idx)
-}
-
-function userMsgForTime(userMsgs: Message[], time: number): Message | null {
-  let best: Message | null = null
-  for (const m of userMsgs) {
-    if (toTime(m.timestamp) <= time) best = m
-    else break
-  }
-  return best
-}
-
-function positionKey(userMsgs: Message[], timeIso: string): string {
-  const u = userMsgForTime(userMsgs, toTime(timeIso))
-  return u ? `pos:${u.id}` : "orphan"
-}
-
 /**
- * 活动面板（双视图的"工作台/activity"列）：
- * 按用户请求（run）分组展示工具调用与执行步骤 —— 每条用户消息成为一个小节，
- * 直接回答"这些步骤是哪个任务产生的"。借鉴 OpenClaw #74018 任务导向的 activity 视图。
- *
- * 分组键优先用 run_id（后端已把 run_id 写入 messages / steps，join 稳定）；
- * 缺失时（实时本地消息、旧数据）按时间回退到最近一次用户请求。
+ * Activity 面板的主轴是 Request -> Step。
+ * 工具调用不再与 step 平级展示，而是挂在对应 tool_execution step 的详情里。
  */
-export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityPanelProps) {
+export function ActivityPanel({
+  messages,
+  toolCalls,
+  steps,
+  onClose,
+}: ActivityPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
-  // 记录展开明细的分组；默认只展开最新一组（正在进行的任务）
   const [openKeys, setOpenKeys] = useState<Set<string>>(() => new Set())
+  const [debug, setDebug] = useState(false)
 
-  const groups = useMemo<ActivityGroup[]>(() => {
-    const userMsgs = messages
-      .filter((m) => m.role === "user")
-      .slice()
-      .sort((a, b) => toTime(a.timestamp) - toTime(b.timestamp))
-    const userByRun = new Map<string, Message>()
-    for (const m of userMsgs) {
-      if (m.run_id && !userByRun.has(m.run_id)) userByRun.set(m.run_id, m)
-    }
-    const stepIdToRun = new Map<string, string>()
-    for (const s of steps) {
-      if (s.run_id) stepIdToRun.set(s.id, s.run_id)
-    }
+  const groups = useMemo(
+    () => buildActivityGroups(messages, steps, toolCalls),
+    [messages, steps, toolCalls],
+  )
 
-    const groupMap = new Map<string, ActivityGroup>()
-    const ensure = (key: string, userMessage: Message | null): ActivityGroup => {
-      let g = groupMap.get(key)
-      if (!g) {
-        g = { key, userMessage, toolCalls: [], steps: [] }
-        groupMap.set(key, g)
-      }
-      return g
-    }
-
-    // 用户请求 → 归组键，与 placeStep/placeTc 的键保持一致：
-    // 有 run_id 用 run（子 run 归一到主 run）；实时本地消息无 run_id 时
-    // 用时间回退的 pos 键，保证后来的工具调用/步骤能挂到同一小节。
-    const userGroupKey = (m: Message): string => {
-      const mr = mainRunId(m.run_id)
-      return mr ? `run:${mr}` : `pos:${m.id}`
-    }
-
-    const placeStep = (s: Step) => {
-      const mr = mainRunId(s.run_id)
-      const header = mr ? userByRun.get(mr) : undefined
-      const g = header
-        ? ensure(`run:${mr}`, header)
-        : ensure(positionKey(userMsgs, s.started_at), userMsgForTime(userMsgs, toTime(s.started_at)))
-      g.steps.push(s)
-    }
-    const placeTc = (tc: ToolCall) => {
-      const rid = tc.run_id ?? stepIdToRun.get(tc.step_id ?? "")
-      const mr = rid ? mainRunId(rid) : null
-      const header = mr ? userByRun.get(mr) : undefined
-      const g = header
-        ? ensure(`run:${mr}`, header)
-        : ensure(positionKey(userMsgs, tc.started_at), userMsgForTime(userMsgs, toTime(tc.started_at)))
-      g.toolCalls.push(tc)
-    }
-
-    const sortedSteps = steps.slice().sort((a, b) => toTime(a.started_at) - toTime(b.started_at))
-    for (const s of sortedSteps) placeStep(s)
-    const sortedTc = toolCalls.slice().sort((a, b) => toTime(a.started_at) - toTime(b.started_at))
-    for (const tc of sortedTc) placeTc(tc)
-
-    // 核心修复：每条用户请求都成为一个小节，即使该轮没有工具调用 / 步骤记录。
-    // 修复"对话记录变多但 Activity 面板不变"——纯文本问答或实时阶段
-    // 工具/步骤尚未到达时，请求本身也必须在面板上出现。
-    for (const m of userMsgs) ensure(userGroupKey(m), m)
-
-    // 按用户请求的时间排序；没有用户消息的孤儿分组（早于首个请求的
-    // 背景步骤/工具）追加到末尾
-    const ordered: ActivityGroup[] = []
-    for (const m of userMsgs) {
-      const key = userGroupKey(m)
-      const g = groupMap.get(key)
-      if (g) {
-        ordered.push(g)
-        groupMap.delete(key)
-      }
-    }
-    for (const g of groupMap.values()) ordered.push(g)
-    return ordered
-  }, [messages, steps, toolCalls])
-
-  // 出现新分组时自动展开最新一组（正在进行的任务）
   useEffect(() => {
     if (groups.length === 0) return
     setOpenKeys((prev) => {
@@ -142,7 +51,6 @@ export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityP
     })
   }, [groups.length])
 
-  // 新工具调用/步骤到达时滚到底部，便于实时跟踪
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [toolCalls.length, steps.length, messages.length])
@@ -156,15 +64,11 @@ export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityP
     })
   }
 
-  const totalToolCalls = groups.reduce((n, g) => n + g.toolCalls.length, 0)
-  const totalSteps = groups.reduce((n, g) => n + g.steps.length, 0)
-  const groupDuration = (g: ActivityGroup): number => {
-    if (g.steps.length) return g.steps.reduce((n, s) => n + (s.duration_ms || 0), 0)
-    return g.toolCalls.reduce((n, tc) => n + (tc.duration_ms || 0), 0)
-  }
+  const totalToolCalls = groups.reduce((total, group) => total + toolCount(group), 0)
+  const totalSteps = groups.reduce((total, group) => total + group.steps.length, 0)
 
   return (
-    <aside className="w-80 shrink-0 border-l border-athena-border bg-athena-surface/40 flex flex-col h-full">
+    <aside className="fixed inset-y-0 right-0 z-30 flex h-full w-[min(92vw,380px)] shrink-0 flex-col border-l border-athena-border bg-athena-surface shadow-2xl lg:relative lg:z-auto lg:w-[360px] lg:bg-athena-surface/40 lg:shadow-none">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-athena-border flex-shrink-0">
         <span className="text-sm font-semibold text-athena-text">Activity</span>
         <span className="text-xs text-athena-muted">
@@ -172,8 +76,19 @@ export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityP
         </span>
         <button
           type="button"
+          onClick={() => setDebug((value) => !value)}
+          className={`ml-auto rounded-md border px-2 py-1 text-[11px] transition-colors ${
+            debug
+              ? "border-athena-accent/50 bg-athena-accent/10 text-athena-accent"
+              : "border-athena-border text-athena-muted hover:text-athena-text"
+          }`}
+        >
+          Debug
+        </button>
+        <button
+          type="button"
           onClick={onClose}
-          className="ml-auto inline-flex items-center justify-center w-7 h-7 rounded-md text-athena-muted hover:text-athena-text hover:bg-athena-bg transition-colors"
+          className="inline-flex items-center justify-center w-7 h-7 rounded-md text-athena-muted hover:text-athena-text hover:bg-athena-bg transition-colors"
           title="Close panel"
           aria-label="Close activity panel"
         >
@@ -186,18 +101,17 @@ export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityP
           <p className="text-xs text-athena-muted">No activity yet.</p>
         )}
 
-        {groups.map((g) => {
-          const open = openKeys.has(g.key)
-          const hasDetail = g.toolCalls.length > 0 || g.steps.length > 0
+        {groups.map((group) => {
+          const open = openKeys.has(group.key)
+          const hasDetail = group.steps.length > 0 || group.orphanToolCalls.length > 0
           return (
             <div
-              key={g.key}
+              key={group.key}
               className="rounded-lg border border-athena-border bg-athena-bg/40 overflow-hidden"
             >
-              {/* 分组头：用户请求 + 统计 */}
               <button
                 type="button"
-                onClick={() => toggle(g.key)}
+                onClick={() => toggle(group.key)}
                 className="w-full flex items-start gap-2 px-3 py-2 text-left hover:bg-athena-bg/60 transition-colors"
               >
                 {open ? (
@@ -206,31 +120,54 @@ export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityP
                   <ChevronRight className="w-4 h-4 text-athena-muted flex-shrink-0 mt-0.5" />
                 )}
                 <span className="min-w-0 flex-1">
-                  <span className="block text-xs text-athena-text break-words line-clamp-2">
-                    {g.userMessage ? (
-                      <>
-                        <MessageSquare className="w-3 h-3 inline-block mr-1 text-athena-accent -mt-0.5" />
-                        {g.userMessage.content.trim() || "…"}
-                      </>
+                  <span className="flex items-start gap-1.5 text-xs text-athena-text break-words line-clamp-2">
+                    <StatusIcon status={group.status} />
+                    {group.userMessage ? (
+                      <span className="min-w-0 break-words">
+                        {group.userMessage.content.trim() || "..."}
+                      </span>
                     ) : (
                       <span className="text-athena-muted italic">Background work</span>
                     )}
                   </span>
                   <span className="block text-[11px] text-athena-muted mt-0.5">
-                    {g.toolCalls.length} tool · {g.steps.length} step
-                    {groupDuration(g) > 0 && <> · {formatDuration(groupDuration(g))}</>}
+                    {toolCount(group)} tool · {group.steps.length} step
+                    {group.durationMs > 0 && <> · {formatDuration(group.durationMs)}</>}
                   </span>
                 </span>
               </button>
 
-              {/* 分组明细（默认收起，最新一组展开） */}
               {open && hasDetail && (
-                <div className="px-3 pb-3 space-y-2 border-t border-athena-border">
-                  {g.toolCalls.map((tc) => (
-                    <ToolCard key={tc.id} toolCall={tc} />
+                <div className="space-y-3 border-t border-athena-border px-3 pb-3 pt-3">
+                  {group.steps.map((activityStep) => (
+                    <div key={activityStep.step.id}>
+                      <StepCard
+                        step={activityStep.step}
+                        toolCall={activityStep.toolCall}
+                        label={activityStep.label}
+                        debug={debug}
+                        defaultOpen={activityStep.step.status === "failed"}
+                      />
+                      {activityStep.summary && (
+                        <div className="ml-3 mt-1 text-[11px] text-athena-muted line-clamp-2">
+                          {activityStep.summary}
+                        </div>
+                      )}
+                    </div>
                   ))}
-                  {g.steps.map((s) => (
-                    <StepCard key={s.id} step={s} compact />
+
+                  {group.orphanToolCalls.map((toolCall) => (
+                    <div
+                      key={toolCall.id}
+                      className="rounded-lg border border-athena-border bg-athena-surface px-3 py-2"
+                    >
+                      <div className="mb-2 flex items-center gap-2 text-xs">
+                        <AlertTriangle className="h-4 w-4 text-athena-warning" />
+                        <span className="font-mono text-athena-text">{toolCall.tool_name}</span>
+                        <span className="ml-auto text-athena-muted">Unlinked tool</span>
+                      </div>
+                      <ToolDetailPanel toolCall={toolCall} debug={debug} />
+                    </div>
                   ))}
                 </div>
               )}
@@ -243,6 +180,23 @@ export function ActivityPanel({ messages, toolCalls, steps, onClose }: ActivityP
 }
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
+  if (ms < 1000) return `${Math.round(ms)}ms`
   return `${(ms / 1000).toFixed(1)}s`
+}
+
+function toolCount(group: ActivityRequestGroup): number {
+  return group.steps.filter((item) => item.toolCall).length + group.orphanToolCalls.length
+}
+
+function StatusIcon({ status }: { status: ActivityRequestGroup["status"] }) {
+  if (status === "running") {
+    return <Loader2 className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 animate-spin text-athena-accent" />
+  }
+  if (status === "failed") {
+    return <XCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-athena-danger" />
+  }
+  if (status === "completed") {
+    return <CheckCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-athena-success" />
+  }
+  return <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-athena-muted" />
 }

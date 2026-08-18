@@ -618,6 +618,7 @@ class Harness:
                         "step_id": step_id,
                         "tool_name": tool_name,
                         "arguments": args,
+                        "risk_level": self._tool_manager.get_risk_level(tool_name),
                     },
                     session_id,
                     run_id,

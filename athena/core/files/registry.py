@@ -1,4 +1,4 @@
-"""Configuration-driven adapter registry."""
+"""基于配置的适配器注册表。"""
 
 from __future__ import annotations
 
@@ -12,20 +12,50 @@ from athena.core.files.base import FileAdapter
 
 
 class AdapterRegistry:
+    """表示 AdapterRegistry 组件，封装相关状态和行为。
+    """
     def __init__(self) -> None:
+        """初始化当前对象。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         adapters: list[FileAdapter] = [
             PdfAdapter(), WordAdapter(), ExcelAdapter(), ImageAdapter(), CodeAdapter(), TextAdapter(),
         ]
         self._adapters = {adapter.info.name: adapter for adapter in adapters}
 
     def list(self) -> list[FileAdapter]:
+        """列出数据。
+
+        返回值：
+            list[FileAdapter]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return list(self._adapters.values())
 
     def supported_extensions(self) -> list[str]:
-        """Return every selectable extension supported by an enabled adapter."""
+        """返回启用适配器支持的所有可选扩展名。"""
         return sorted({extension for adapter in self._adapters.values() for extension in adapter.info.extensions})
 
     def select(self, filename: str, mime_type: str = "") -> FileAdapter:
+        """选择适配器或资源。
+
+        参数：
+            filename (str): 原始文件名。
+            mime_type (str): 文件 MIME 类型。
+
+        返回值：
+            FileAdapter: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         lower = filename.lower()
         extension = Path(lower).suffix
         if extension in (".doc", ".xls"):

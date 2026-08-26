@@ -30,7 +30,7 @@ class FileTooLargeError(ValueError):
 class StoredBlob:
     """已存储 blob 的元数据。
 
-    Attributes:
+    属性：
         sha256: 文件内容的 SHA-256 哈希值（十六进制字符串）。
         size_bytes: 文件字节数。
         storage_key: 相对于存储根目录的路径键（如 ``blobs/ab/ab1234...``），
@@ -48,13 +48,25 @@ class StorageLayer:
     管理文件 blob 的上传、路径解析、工作区创建和清理。
     blob 不可变：相同内容的文件只存储一份，通过 SHA-256 哈希去重。
 
-    Args:
+    参数：
         root: 存储根目录的绝对路径。
         max_upload_bytes: 单文件上传大小上限（字节），
             超出时抛出 ``FileTooLargeError``。
     """
 
     def __init__(self, root: Path, max_upload_bytes: int) -> None:
+        """初始化当前对象。
+
+        参数：
+            root (Path): 资源根目录。
+            max_upload_bytes (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self.root = root
         self.max_upload_bytes = max_upload_bytes
         self.blob_root = root / "blobs"
@@ -69,13 +81,13 @@ class StorageLayer:
         流式计算 SHA-256，写入临时文件后原子移动到最终位置。
         如果目标 blob 已存在（内容相同），直接丢弃临时文件。
 
-        Args:
+        参数：
             chunks: 异步字节迭代器，通常来自 UploadFile 的分块读取。
 
-        Returns:
+        返回值：
             ``StoredBlob``：包含哈希值、字节数和存储键。
 
-        Raises:
+        异常：
             FileTooLargeError: 累计字节数超过 ``max_upload_bytes``。
         """
         digest = hashlib.sha256()
@@ -111,13 +123,13 @@ class StorageLayer:
     def resolve(self, storage_key: str) -> Path:
         """将存储键解析为绝对路径，并验证路径安全性。
 
-        Args:
+        参数：
             storage_key: 相对存储路径（如 ``blobs/ab/ab1234...``）。
 
-        Returns:
+        返回值：
             解析后的绝对路径。
 
-        Raises:
+        异常：
             PermissionError: 路径穿越存储根目录（安全校验失败）。
         """
         path = (self.root / storage_key).resolve()
@@ -132,10 +144,10 @@ class StorageLayer:
         工作目录位于 ``{root}/work/`` 下，用于适配器解压或生成中间文件。
         使用完毕后应调用 ``cleanup_workspace()`` 清理。
 
-        Args:
+        参数：
             attachment_id: 附件 ID，用作目录名前缀便于识别。
 
-        Returns:
+        返回值：
             创建的临时目录绝对路径。
         """
         path = Path(tempfile.mkdtemp(prefix=f"{attachment_id}-", dir=self.work_root))
@@ -146,7 +158,7 @@ class StorageLayer:
 
         仅删除位于 ``work_root`` 下的目录，防止误删其他路径。
 
-        Args:
+        参数：
             path: ``create_workspace()`` 返回的目录路径。
         """
         if path.exists() and self.work_root.resolve() in path.resolve().parents:
@@ -157,10 +169,10 @@ class StorageLayer:
 
         调用方需确保该 blob 已无活跃引用（即所有关联附件均已软删除）。
 
-        Args:
+        参数：
             storage_key: blob 的存储键。
 
-        Returns:
+        返回值：
             是否成功删除（文件不存在或路径无效时返回 ``False``）。
         """
         path = self.resolve(storage_key)
@@ -172,7 +184,7 @@ class StorageLayer:
     def blob_keys(self) -> list[str]:
         """列出所有已存储 blob 的存储键。
 
-        Returns:
+        返回值：
             存储键列表（相对路径），按文件系统顺序排列。
         """
         if not self.blob_root.exists():

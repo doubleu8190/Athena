@@ -1,4 +1,4 @@
-"""Provider-aware token counting and response usage extraction."""
+"""面向提供者的 token 计数和响应用量提取。"""
 
 from __future__ import annotations
 
@@ -13,33 +13,59 @@ from langchain_core.messages import AIMessageChunk, BaseMessage
 
 
 class TokenCounter(Protocol):
-    """Token counting capability used by context-budget consumers."""
+    """供上下文预算使用方调用的 token 计数能力。"""
 
-    def count_text_tokens(self, text: str) -> int: ...
+    def count_text_tokens(self, text: str) -> int:
+        """计算单段文本的 token 数量。"""
+        ...
 
-    def count_message_tokens(self, messages: Sequence[BaseMessage]) -> int: ...
+    def count_message_tokens(self, messages: Sequence[BaseMessage]) -> int:
+        """计算消息序列的 token 数量。"""
+        ...
 
 
 @dataclass(frozen=True)
 class TokenUsage:
-    """Actual token usage reported by an LLM response."""
+    """LLM 响应报告的实际 token 用量。"""
 
     input_tokens: int
     output_tokens: int
 
 
 class ModelTokenCounter:
-    """Use a local model tokenizer when reliable, otherwise estimate conservatively."""
+    """本地模型 tokenizer 可靠时使用它，否则采用保守估算。"""
 
     def __init__(self, model: BaseChatModel) -> None:
+        """初始化当前对象。
+
+        参数：
+            model (BaseChatModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._model = model
-        # ChatAnthropic's counter performs a synchronous API request and the generic
-        # LangChain/Ollama counter uses a tokenizer unrelated to the selected model.
+    # ChatAnthropic 的计数器会发起同步 API 请求，而通用的 LangChain/Ollama
+    # 计数器使用的 tokenizer 与所选模型无关。
         self._use_model_tokenizer = type(model).__module__.startswith(
             "langchain_openai."
         )
 
     def count_text_tokens(self, text: str) -> int:
+        """执行“count text tokens”操作。
+
+        参数：
+            text (str): 待处理文本。
+
+        返回值：
+            int: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if not text:
             return 0
         if self._use_model_tokenizer:
@@ -50,6 +76,17 @@ class ModelTokenCounter:
         return conservative_text_token_count(text)
 
     def count_message_tokens(self, messages: Sequence[BaseMessage]) -> int:
+        """执行“count message tokens”操作。
+
+        参数：
+            messages (Sequence[BaseMessage]): LangChain 消息序列。
+
+        返回值：
+            int: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if not messages:
             return 0
         if self._use_model_tokenizer:
@@ -60,6 +97,17 @@ class ModelTokenCounter:
         return sum(self._count_message_fallback(message) for message in messages) + 3
 
     def _count_message_fallback(self, message: BaseMessage) -> int:
+        """执行“count message fallback”操作。
+
+        参数：
+            message (BaseMessage): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            int: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         payload: dict[str, object] = {
             "role": message.type,
             "content": message.content,
@@ -75,7 +123,7 @@ class ModelTokenCounter:
 
 
 def conservative_text_token_count(text: str) -> int:
-    """Estimate text tokens without assuming that all scripts tokenize like English."""
+    """估算文本 token 数，不假设所有文字都按英文方式分词。"""
     if not text:
         return 0
     ascii_text_count = sum(
@@ -96,7 +144,7 @@ def conservative_text_token_count(text: str) -> int:
 
 
 def token_usage_from_chunks(chunks: Sequence[AIMessageChunk]) -> TokenUsage | None:
-    """Extract normalized usage from a complete stream of LangChain chunks."""
+    """从完整的 LangChain 分块流中提取规范化用量。"""
     if not chunks:
         return None
     merged = chunks[0]
@@ -113,6 +161,17 @@ def token_usage_from_chunks(chunks: Sequence[AIMessageChunk]) -> TokenUsage | No
 
 
 def _token_usage_from_message(message: BaseMessage) -> TokenUsage | None:
+    """执行“从消息获取 token 用量”操作。
+
+    参数：
+        message (BaseMessage): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        TokenUsage | None: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     usage_metadata = getattr(message, "usage_metadata", None)
     if usage_metadata:
         return _build_usage(
@@ -137,6 +196,18 @@ def _token_usage_from_message(message: BaseMessage) -> TokenUsage | None:
 
 
 def _build_usage(input_tokens: object, output_tokens: object) -> TokenUsage | None:
+    """执行“build usage”操作。
+
+    参数：
+        input_tokens (object): 输入参数；其类型和取值约束由方法签名及实现定义。
+        output_tokens (object): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        TokenUsage | None: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
         return None
     if input_tokens < 0 or output_tokens < 0:

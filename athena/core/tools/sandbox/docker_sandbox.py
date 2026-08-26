@@ -34,9 +34,31 @@ class PathSecurityFilter:
     """路径安全过滤器 - 防路径遍历与白名单校验."""
 
     def __init__(self, allowed_paths: list[str] | None = None) -> None:
+        """初始化当前对象。
+
+        参数：
+            allowed_paths (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._allowed_paths = [str(Path(p).resolve()) for p in (allowed_paths or [])]
 
     def configure(self, paths: list[str]) -> None:
+        """配置运行参数。
+
+        参数：
+            paths (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._allowed_paths = [str(Path(p).resolve()) for p in paths]
 
     def validate(self, file_path: str) -> bool:
@@ -56,6 +78,14 @@ class PathSecurityFilter:
 
     @property
     def allowed_paths(self) -> list[str]:
+        """执行“allowed paths”操作。
+
+        返回值：
+            list[str]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return list(self._allowed_paths)
 
 
@@ -76,13 +106,30 @@ class DockerSandboxManager:
         allowed_paths: list[str] | None = None,
         docker_client: docker.DockerClient | None = None,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            image (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            network_disabled (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_limit (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            cpu_limit (float): 输入参数；其类型和取值约束由方法签名及实现定义。
+            workspace_path (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            allowed_paths (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            docker_client (docker.DockerClient | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._client = docker_client
         self._image = image
         self._network_disabled = network_disabled
         self._memory_limit = memory_limit
         self._cpu_limit = cpu_limit
         self._workspace_path = workspace_path
-        self._containers: dict[str, str] = {}  # scope_key → container_id
+        self._containers: dict[str, str] = {}  # 作用域键 scope_key → 容器 ID container_id
         self._path_filter = PathSecurityFilter(allowed_paths)
         self._lock = asyncio.Lock()
 
@@ -99,9 +146,28 @@ class DockerSandboxManager:
         )
 
     def configure_allowed_paths(self, paths: list[str]) -> None:
+        """执行“configure allowed paths”操作。
+
+        参数：
+            paths (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._path_filter.configure(paths)
 
     def _get_client(self) -> docker.DockerClient:
+        """执行“get client”操作。
+
+        返回值：
+            docker.DockerClient: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if self._client is None:
             import docker
             self._client = docker.from_env()
@@ -110,6 +176,19 @@ class DockerSandboxManager:
     def _get_scope_key(
         self, scope: str, session_id: str, run_id: str | None = None
     ) -> str:
+        """执行“get scope key”操作。
+
+        参数：
+            scope (str): 检索范围或权限范围。
+            session_id (str): 会话唯一标识。
+            run_id (str | None): 运行唯一标识。
+
+        返回值：
+            str: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if scope == self.SCOPE_SESSION:
             return f"session_{session_id}"
         if scope == self.SCOPE_AGENT:
@@ -117,6 +196,17 @@ class DockerSandboxManager:
         return "shared_default"
 
     def _validate_path(self, file_path: str) -> bool:
+        """执行“validate path”操作。
+
+        参数：
+            file_path (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            bool: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return self._path_filter.validate(file_path)
 
     def _ensure_container(
@@ -178,7 +268,7 @@ class DockerSandboxManager:
     ) -> dict[str, Any]:
         """在沙箱中执行命令.
 
-        Args:
+        参数：
             command: 要执行的命令
             session_id: 会话 ID
             run_id: 运行 ID（可选）
@@ -186,7 +276,7 @@ class DockerSandboxManager:
             input_files: 输入文件 [{"host_path": ..., "container_path": ...}]
             timeout: 超时时间（秒）
 
-        Returns:
+        返回值：
             {"exit_code": int, "stdout": str, "stderr": str}
         """
         async with self._lock:
@@ -206,6 +296,14 @@ class DockerSandboxManager:
             container = self._ensure_container(scope, session_id, run_id, bind_mounts)
 
         def _exec() -> dict[str, Any]:
+            """执行“exec”操作。
+
+            返回值：
+                dict[str, Any]: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             result = container.exec_run(
                 cmd=["sh", "-c", command],
                 demux=True,
@@ -249,6 +347,14 @@ class DockerSandboxManager:
             container = client.containers.get(container_id)
 
         def _fetch() -> bytes | None:
+            """执行“fetch”操作。
+
+            返回值：
+                bytes | None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             try:
                 stream, _ = container.get_archive(container_path)
                 buffer = b"".join(stream)
@@ -321,24 +427,60 @@ class SandboxReconstructionChecker:
         manager: DockerSandboxManager,
         check_interval: int = 300,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            manager (DockerSandboxManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            check_interval (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._manager = manager
         self._check_interval = check_interval
         self._task: asyncio.Task | None = None
         self._running = False
 
     async def start(self) -> None:
+        """启动服务。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if self._running:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
+        """停止服务。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._running = False
         if self._task:
             self._task.cancel()
             self._task = None
 
     async def _loop(self) -> None:
+        """执行“loop”操作。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         while self._running:
             try:
                 await asyncio.sleep(self._check_interval)

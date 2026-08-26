@@ -38,7 +38,7 @@ class AtomicFact(BaseModel):
     表示从对话中提取的一条独立、自包含、可验证的信息单元，
     以 key/value 结构存储，附带分类和置信度元数据。
 
-    Attributes:
+    属性：
         key: 简短标识符，snake_case 格式，≤30 字符。
         value: 事实内容，需自包含且可独立理解，≤100 字符。
         category: 事实分类，取值范围见 ``CATEGORIES`` 常量说明。
@@ -91,7 +91,7 @@ class FactExtractor:
     def __init__(self, llm_provider: LLMProvider) -> None:
         """初始化事实提取器。
 
-        Args:
+        参数：
             llm_provider: LLM 提供者实例，用于调用提取提示词。
         """
         self._llm = llm_provider
@@ -109,13 +109,13 @@ class FactExtractor:
         以捕获决策闭环（如用户采纳助手方案）。使用 ``user_message``
         单独进行记忆检索的语义查询，确保召回与用户意图相关的已有记忆。
 
-        Args:
+        参数：
             user_message: 用户消息原始文本，用于记忆检索查询。
             assistant_reply: 助手回复文本；为空时退化为仅提取用户消息。
             session_id: 当前会话 ID。
             memory_manager: 长期记忆管理器实例。
 
-        Returns:
+        返回值：
             提取到的原子事实列表；提取失败或无有价值信息时为空列表。
         """
         existing = await self._fetch_existing_memories(
@@ -148,11 +148,11 @@ class FactExtractor:
         格式与 ``ConversationSummarizer._format_messages`` 保持一致，
         便于 LLM 统一理解对话结构。
 
-        Args:
+        参数：
             user_message: 用户消息原始文本。
             assistant_reply: 助手回复文本；为空时仅返回用户消息。
 
-        Returns:
+        返回值：
             格式化的对话文本，每行一个角色发言。
         """
         lines = [f"[用户] {user_message}"]
@@ -171,12 +171,12 @@ class FactExtractor:
         跨会话召回：与所有会话已建立的记忆做语义比较，避免同一事实
         被重复写入记忆库（历史上按当前会话过滤会导致跨会话重复）。
 
-        Args:
+        参数：
             memory_manager: 长期记忆管理器实例。
             message: 用于语义检索的查询文本（用户消息）。
             limit: 最大召回条数，默认 8。
 
-        Returns:
+        返回值：
             格式化的已有记忆文本，每行一条（``"- content (category: xxx)"``）；
             检索失败或无结果时返回 ``"(无已有记忆)"``。
         """
@@ -203,11 +203,11 @@ class FactExtractor:
         提示词声明纯 JSON 返回格式，通过正则提取 JSON 块后用 Pydantic
         校验解析。使用 ``ainvoke`` 路径以兼容不支持结构化输出的 Provider。
 
-        Args:
+        参数：
             conversation_text: 格式化的多轮对话文本（``[用户]`` / ``[助手]``）。
             existing_memories: 已有记忆的格式化文本，用于提示词语义去重。
 
-        Returns:
+        返回值：
             提取到的原子事实列表；LLM 返回无效 JSON 或无内容时为空列表。
         """
         prompt = self.EXTRACTION_PROMPT.format(
@@ -232,7 +232,7 @@ class Summary(BaseModel):
     表示一段对话的结构化摘要，对应一个讨论主线或问题解决过程，
     保留关键上下文、决策与理由。
 
-    Attributes:
+    属性：
         topic: 讨论主题的简短标签。
         content: 摘要正文，2-3 句话，≤300 字符。
         category: 摘要分类，取值范围见 ``CATEGORIES`` 常量说明。
@@ -283,7 +283,7 @@ class ConversationSummarizer:
     ) -> None:
         """初始化对话摘要生成器。
 
-        Args:
+        参数：
             llm_provider: LLM 提供者实例，用于调用摘要提示词。
             memory_manager: 长期记忆管理器实例，用于写入生成的摘要。
             settings: 全局配置。
@@ -304,11 +304,11 @@ class ConversationSummarizer:
         按用户消息边界分割为完整轮次，当完整轮次数达到 ``summary_threshold``
         时触发摘要。指针推进到最后一个完整轮次的末尾，不截断半轮对话。
 
-        Args:
+        参数：
             session_id: 当前会话 ID。
             db: 数据库实例，用于加载增量消息和更新摘要指针。
 
-        Returns:
+        返回值：
             生成的摘要文本（多条以换行连接）；未触发或生成失败时返回 ``None``。
         """
         # ── 1. 加载增量消息 ──
@@ -398,10 +398,10 @@ class ConversationSummarizer:
         每个轮次从一条用户消息开始，到下一条用户消息之前结束。
         与 ``compression.pairer.MessagePairer`` 逻辑一致，但操作域模型。
 
-        Args:
+        参数：
             messages: 已按时间排序的消息列表。
 
-        Returns:
+        返回值：
             轮次列表，每个元素是一轮对话的消息列表。
         """
         turns: list[list[Message]] = []
@@ -421,10 +421,10 @@ class ConversationSummarizer:
         提示词声明纯 JSON 返回格式，通过正则提取 JSON 块后用 Pydantic
         校验解析。使用 ``ainvoke`` 路径以兼容不支持结构化输出的 Provider。
 
-        Args:
+        参数：
             conversation: 格式化的对话文本（``role: content`` 逐行格式）。
 
-        Returns:
+        返回值：
             摘要条目列表；LLM 返回无效 JSON 或无内容时为空列表。
         """
         prompt = self.SUMMARIES_PROMPT.format(conversation=conversation)

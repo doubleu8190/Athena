@@ -1,4 +1,4 @@
-"""SQLite repository implementations.
+"""SQLite 仓库实现。
 
 采用 Repository 模式，每个实体对应一个 Repository 类。
 查询方法返回类型化领域模型（athena.models），save 方法接受类型化模型。
@@ -76,6 +76,17 @@ def _json_loads(value: str | None, default: Any) -> Any:
 
 
 def _row_to_session(row: SessionModel) -> Session:
+    """执行“行转换为会话”操作。
+
+    参数：
+        row (SessionModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        Session: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     return Session(
         id=row.id,
         title=row.title,
@@ -90,6 +101,17 @@ def _row_to_session(row: SessionModel) -> Session:
 
 
 def _row_to_message(row: MessageModel) -> Message:
+    """执行“行转换为消息”操作。
+
+    参数：
+        row (MessageModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        Message: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     return Message(
         id=row.id,
         session_id=row.session_id,
@@ -107,6 +129,17 @@ def _row_to_message(row: MessageModel) -> Message:
 
 
 def _row_to_step(row: StepModel) -> Step:
+    """执行“行转换为步骤”操作。
+
+    参数：
+        row (StepModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        Step: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     return Step(
         id=row.id,
         session_id=row.session_id,
@@ -128,6 +161,17 @@ def _row_to_step(row: StepModel) -> Step:
 
 
 def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
+    """执行“行转换为工具调用”操作。
+
+    参数：
+        row (ToolCallModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        ToolCallRecord: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     return ToolCallRecord(
         id=row.id,
         session_id=row.session_id,
@@ -147,6 +191,17 @@ def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
 
 
 def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
+    """执行“行转换为审批日志”操作。
+
+    参数：
+        row (审批LogModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        审批Log: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     return ApprovalLog(
         id=row.id,
         session_id=row.session_id,
@@ -161,6 +216,17 @@ def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
 
 
 def _row_to_mcp_server(row: McpServerModel) -> McpServer:
+    """执行“行转换为 MCP 服务端”操作。
+
+    参数：
+        row (Mcp服务端Model): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        Mcp服务端: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     config = _json_loads(row.config_json, {})
     return McpServer(
         name=row.name,
@@ -173,7 +239,7 @@ def _row_to_mcp_server(row: McpServerModel) -> McpServer:
 
 
 # ---------------------------------------------------------------------------
-# SessionRepository
+# 会话仓库（SessionRepository）
 # ---------------------------------------------------------------------------
 
 
@@ -238,7 +304,7 @@ class SessionRepository:
     ) -> None:
         """更新会话字段.
 
-        Args:
+        参数：
             compression_summary: 摘要缓冲区文本（None 表示清空，_SENTINEL 表示不更新）
             last_compressed_message_id: 上次压缩的最后一条消息 ID
             last_summarized_message_id: 上次阈值摘要的最后一条消息 ID
@@ -329,7 +395,7 @@ class SessionRepository:
 
 
 # ---------------------------------------------------------------------------
-# MessageRepository
+# 消息仓库（MessageRepository）
 # ---------------------------------------------------------------------------
 
 
@@ -367,7 +433,7 @@ class MessageRepository:
             return message.id
 
     async def _attach_refs(self, messages: list[Message]) -> list[Message]:
-        """Populate lightweight attachment references without exposing storage keys."""
+        """填充轻量级附件引用，不暴露存储键。"""
         if not messages:
             return messages
         from athena.infrastructure.sqlite.file_repository import FileRepository
@@ -420,7 +486,7 @@ class MessageRepository:
 
 
 # ---------------------------------------------------------------------------
-# StepRepository
+# 步骤仓库（StepRepository）
 # ---------------------------------------------------------------------------
 
 
@@ -559,7 +625,7 @@ class StepRepository:
 
 
 # ---------------------------------------------------------------------------
-# ToolCallRepository
+# 工具调用仓库（ToolCallRepository）
 # ---------------------------------------------------------------------------
 
 
@@ -696,7 +762,7 @@ class ToolCallRepository:
 
 
 # ---------------------------------------------------------------------------
-# ApprovalLogRepository
+# 审批LogRepository
 # ---------------------------------------------------------------------------
 
 
@@ -796,7 +862,7 @@ class ApprovalLogRepository:
 
 
 # ---------------------------------------------------------------------------
-# McpServerRepository
+# Mcp服务端Repository
 # ---------------------------------------------------------------------------
 
 
@@ -865,11 +931,22 @@ class McpServerRepository:
 
 
 # ---------------------------------------------------------------------------
-# _row_to_tool_config
+# _row_to_tool_config 辅助转换
 # ---------------------------------------------------------------------------
 
 
 def _row_to_tool_config(row: ToolModel) -> ToolConfig:
+    """执行“行转换为工具配置”操作。
+
+    参数：
+        row (ToolModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        ToolConfig: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     return ToolConfig(
         tool_name=row.tool_name,
         execution_mode=ToolExecutionMode(row.execution_mode),
@@ -886,7 +963,7 @@ def _row_to_tool_config(row: ToolModel) -> ToolConfig:
 
 
 # ---------------------------------------------------------------------------
-# ToolRepository
+# 工具仓库（ToolRepository）
 # ---------------------------------------------------------------------------
 
 
@@ -894,7 +971,7 @@ class ToolRepository:
     """工具治理配置表 CRUD 操作.
 
     工具记录由注册流程自动创建（upsert），用户通过 update 修改治理参数。
-    无软删除：工具记录跟随 MCP Server 生命周期，Server 注销时可选清理。
+    无软删除：工具记录跟随 MCP 服务端 生命周期，服务端 注销时可选清理。
     """
 
     async def upsert(
@@ -964,7 +1041,7 @@ class ToolRepository:
             return [_row_to_tool_config(row) for row in rows]
 
     async def list_by_server(self, server_name: str) -> list[ToolConfig]:
-        """按 MCP Server 名称查询其关联的工具配置."""
+        """按 MCP 服务端 名称查询其关联的工具配置."""
         async with get_session() as session:
             stmt = (
                 select(ToolModel)
@@ -1006,7 +1083,7 @@ class ToolRepository:
                 )
 
     async def delete_by_server(self, server_name: str) -> None:
-        """删除指定 MCP Server 关联的所有工具配置（Server 注销时调用）."""
+        """删除指定 MCP 服务端 关联的所有工具配置（服务端 注销时调用）."""
         async with get_session() as session:
             async with session.begin():
                 await session.execute(

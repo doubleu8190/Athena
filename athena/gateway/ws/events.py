@@ -117,7 +117,7 @@ class ClientEventType(StrEnum):
 class Event(BaseModel):
     """通用事件消息格式。
 
-    Attributes:
+    属性：
         type: 事件类型标识。
         session_id: 关联的会话 ID（可选）。
         run_id: 关联的运行 ID（可选）。
@@ -140,13 +140,13 @@ def build_event(
 ) -> dict[str, Any]:
     """构建标准事件消息字典。
 
-    Args:
+    参数：
         event_type: 事件类型（EventType 枚举或字符串）。
         data: 事件负载数据。
         session_id: 关联的会话 ID。
         run_id: 关联的运行 ID。
 
-    Returns:
+    返回值：
         符合统一格式的事件字典。
     """
     return {

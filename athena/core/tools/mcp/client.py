@@ -1,4 +1,4 @@
-"""MCP 客户端 — 基于官方 mcp SDK 管理与 MCP Server 的连接和通信.
+"""MCP 客户端 — 基于官方 mcp SDK 管理与 MCP 服务端 的连接和通信.
 
 MCP (Model Context Protocol) 是 Anthropic 提出的工具协议标准，
 允许 AI Agent 通过标准化接口调用外部工具和服务。
@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 
 
 class MCPClient:
-    """MCP 客户端 — 基于官方 SDK 管理 MCP Server 连接.
+    """MCP 客户端 — 基于官方 SDK 管理 MCP 服务端 连接.
 
     支持：
     - stdio 传输（本地进程，server_command）
@@ -60,6 +60,22 @@ class MCPClient:
         timeout: float = 30.0,
         connect_timeout: float = 60.0,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            server_name (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            server_command (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            server_url (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            env (dict[str, str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            timeout (float): 输入参数；其类型和取值约束由方法签名及实现定义。
+            connect_timeout (float): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._server_name = server_name
         self._server_command = server_command
         self._server_url = server_url
@@ -80,14 +96,30 @@ class MCPClient:
 
     @property
     def is_connected(self) -> bool:
+        """执行“is connected”操作。
+
+        返回值：
+            bool: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return self._connected
 
     @property
     def server_name(self) -> str:
+        """执行“server name”操作。
+
+        返回值：
+            str: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return self._server_name
 
     async def connect(self) -> None:
-        """连接到 MCP Server."""
+        """连接到 MCP 服务端."""
         if self._connected:
             return
 
@@ -227,11 +259,11 @@ class MCPClient:
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """调用远程工具.
 
-        Args:
+        参数：
             tool_name: 工具名称
             arguments: 工具参数
 
-        Returns:
+        返回值：
             tools/call 结果（普通 dict，含 content / isError 等字段）
         """
         if not self._connected:

@@ -25,10 +25,10 @@ class ToolConfigRepository(Protocol):
     async def get(self, tool_name: str) -> Any:
         """获取单个工具配置。
 
-        Args:
+        参数：
             tool_name: 工具名称。
 
-        Returns:
+        返回值：
             工具配置对象，不存在时返回 ``None``。
         """
         ...
@@ -47,7 +47,7 @@ class ToolConfigRepository(Protocol):
     ) -> None:
         """插入或更新工具配置（已存在时保留用户治理参数）。
 
-        Args:
+        参数：
             tool_name: 工具名称（主键）。
             execution_mode: 执行模式（``"native"`` / ``"mcp"``）。
             server_name: MCP 服务器名称（仅 MCP 工具）。
@@ -69,7 +69,7 @@ class ToolConfigRepository(Protocol):
     ) -> None:
         """更新工具治理参数（仅更新传入的字段）。
 
-        Args:
+        参数：
             tool_name: 工具名称。
             risk_level: 新的风险等级。
             require_approval: 新的审批要求。
@@ -86,11 +86,22 @@ class ToolCatalogService:
     2. 从数据库恢复用户自定义的治理参数。
     3. 处理用户通过 API 修改的治理参数（``update_governance``）。
 
-    Args:
+    参数：
         repository: 工具配置持久化仓库。
     """
 
     def __init__(self, repository: ToolConfigRepository) -> None:
+        """初始化当前对象。
+
+        参数：
+            repository (ToolConfigRepository): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._repository = repository
 
     async def reconcile(
@@ -104,7 +115,7 @@ class ToolCatalogService:
         遍历管理器中的工具，将配置写入数据库，然后从数据库读取
         用户自定义的治理参数回写到运行时。
 
-        Args:
+        参数：
             manager: 统一工具管理器。
             names: 要协调的工具名称列表；``None`` 表示协调所有工具。
             registrations: 附加注册信息（server_name/remote_name），
@@ -149,14 +160,14 @@ class ToolCatalogService:
     ) -> bool:
         """更新工具治理参数（同时更新运行时和持久化层）。
 
-        Args:
+        参数：
             manager: 统一工具管理器。
             name: 工具名称。
             risk_level: 新的风险等级。
             require_approval: 新的审批要求。
             enabled: 新的启用状态。
 
-        Returns:
+        返回值：
             是否成功（工具必须已注册）。
         """
         if not manager.update_tool_config(
@@ -178,7 +189,7 @@ class ToolCatalogService:
 class ToolRegistry:
     """工具注册器 — 将声明式工具规范安装到运行时管理器。
 
-    Args:
+    参数：
         manager: 统一工具管理器。
         catalog: 工具目录服务，用于持久化协调。
     """
@@ -188,6 +199,18 @@ class ToolRegistry:
         manager: UnifiedToolManager,
         catalog: ToolCatalogService,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            manager (UnifiedToolManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            catalog (ToolCatalogService): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self.manager = manager
         self.catalog = catalog
 
@@ -196,7 +219,7 @@ class ToolRegistry:
 
         注册完成后触发目录服务的持久化协调。
 
-        Args:
+        参数：
             specs: 工具规范列表。
         """
         names: list[str] = []

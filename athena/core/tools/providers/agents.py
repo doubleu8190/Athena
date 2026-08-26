@@ -1,4 +1,4 @@
-"""Agent delegation tool declarations."""
+"""Agent 委派工具声明。"""
 
 from __future__ import annotations
 
@@ -16,11 +16,47 @@ def build_agent_tool_specs(
     parallel_handler: ParallelHandler,
     parallel_description: str,
 ) -> list[ToolSpec]:
+    """执行“build agent tool specs”操作。
+
+    参数：
+        single_handler (SingleHandler): 输入参数；其类型和取值约束由方法签名及实现定义。
+        parallel_handler (ParallelHandler): 输入参数；其类型和取值约束由方法签名及实现定义。
+        parallel_description (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        list[ToolSpec]: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     async def spawn_sub_agent(task: str) -> str:
+        """执行“spawn sub agent”操作。
+
+        参数：
+            task (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            str: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         context = get_tool_context()
         return await single_handler(task, context.session_id, context.run_id)
 
     async def spawn_parallel_agents(tasks: list[str], max_turns: int = 5) -> str:
+        """执行“spawn parallel agents”操作。
+
+        参数：
+            tasks (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            max_turns (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            str: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         context = get_tool_context()
         return await parallel_handler(
             tasks, context.session_id, context.run_id, max_turns

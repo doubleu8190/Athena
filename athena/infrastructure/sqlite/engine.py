@@ -1,4 +1,4 @@
-"""SQLite SQLAlchemy async engine and session factory.
+"""SQLite SQLAlchemy 异步引擎和会话工厂。
 
 管理 AsyncEngine 生命周期和 AsyncSession 创建。
 使用连接池复用数据库连接，避免频繁创建/销毁。
@@ -20,10 +20,11 @@ logger = get_logger(__name__)
 _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
+
 async def init_engine(db_path: str) -> None:
     """初始化数据库引擎并创建表结构.
 
-    Args:
+    参数：
         db_path: SQLite 数据库文件路径
     """
     global _engine, _session_factory
@@ -61,10 +62,10 @@ def get_session() -> AsyncSession:
     - session.close() 后连接归还池，而非关闭
     - 因此"每次操作新建 session"不会创建新连接，仅复用池中连接
 
-    Returns:
+    返回值：
         AsyncSession 实例，使用后需调用 session.close()
 
-    Raises:
+    异常：
         RuntimeError: 如果引擎未初始化
     """
     if _session_factory is None:

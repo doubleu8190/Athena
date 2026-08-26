@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Awaitable, Callable, Protocol
 
 from chromadb import Collection
@@ -33,6 +34,7 @@ from athena.gateway.ws.manager import WebSocketManager
 from athena.infrastructure.sqlite.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
 from athena.core.llm.provider import LLMProvider
+from athena.core.retrieval.trace import RetrievalTrace
 from athena.gateway.ws.events import EventType, build_event
 from athena.models.file import (
     Attachment,
@@ -56,7 +58,14 @@ class FileAccessError(PermissionError):
 class FileEventPublisher(Protocol):
     """文件运行时所需的事件发布端口。"""
 
-    async def send_to_session(self, session_id: str, event: dict[str, Any]) -> None: ...
+    async def send_to_session(self, session_id: str, event: dict[str, Any]) -> None:
+        """向指定会话发布事件。
+
+        参数：
+            session_id: 目标会话标识。
+            event: 要发布的事件字典。
+        """
+        ...
 
 
 class FileIntelligenceRuntime:
@@ -65,7 +74,7 @@ class FileIntelligenceRuntime:
     通过依赖注入获取 Repository、LLM 和 WebSocket 管理器，
     内部管理 StorageLayer、AdapterRegistry 和 ChromaDB 向量索引。
 
-    Args:
+    参数：
         repository: 文件持久化仓库。
         primary_llm: 主 LLM 提供者（用于文档摘要和视觉分析）。
         secondary_llm: 次要 LLM 提供者（用于分块摘要，成本更低）。
@@ -81,7 +90,24 @@ class FileIntelligenceRuntime:
         *,
         settings: Settings,
         ws_manager: WebSocketManager,
+        trace_sink: Callable[[RetrievalTrace], None] | None = None,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            repository (FileRepository): 输入参数；其类型和取值约束由方法签名及实现定义。
+            primary_llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
+            secondary_llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
+            settings (Settings): 全局配置对象。
+            ws_manager (WebSocketManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace_sink (Callable[[RetrievalTrace], None] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self.repository = repository
         self.settings = settings
         self.storage = StorageLayer(
@@ -94,6 +120,7 @@ class FileIntelligenceRuntime:
         self._chroma_client: ClientAPI | None = None
         self._collection: Collection | None = None
         self._task_enqueuer: Callable[..., Awaitable[Any]] | None = None
+        self._trace_sink = trace_sink
 
     def set_task_enqueuer(self, enqueuer: Callable[..., Awaitable[Any]]) -> None:
         """设置文件任务入队回调（由 FileWorker 注入）。"""
@@ -104,21 +131,26 @@ class FileIntelligenceRuntime:
         """文件任务队列是否可用。"""
         return self._task_enqueuer is not None
 
+    @property
+    def vector_index_ready(self) -> bool:
+        """向量索引是否已初始化，可供评估 readiness 检查。"""
+        return self._collection is not None
+
     async def enqueue_task(
         self, session_id: str, file_id: str, task_type: FileTaskType, **kwargs: Any
     ) -> FileTask:
         """向文件任务队列提交任务。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             file_id: 附件 ID。
             task_type: 任务类型（解析/索引/摘要/代码分析等）。
             **kwargs: 附加任务参数。
 
-        Returns:
+        返回值：
             创建的 ``FileTask`` 实例。
 
-        Raises:
+        异常：
             RuntimeError: 任务队列未初始化。
         """
         if self._task_enqueuer is None:
@@ -145,7 +177,7 @@ class FileIntelligenceRuntime:
     async def cleanup_unreferenced_blobs(self) -> int:
         """回收无引用的内容寻址 blob（附件软删除后调用）。
 
-        Returns:
+        返回值：
             删除的 blob 数量。
         """
         live = await self.repository.live_storage_keys()
@@ -160,14 +192,14 @@ class FileIntelligenceRuntime:
     async def require_attachment(self, session_id: str, file_id: str) -> Attachment:
         """获取附件并校验会话归属。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             file_id: 附件 ID。
 
-        Returns:
+        返回值：
             ``Attachment`` 实例。
 
-        Raises:
+        异常：
             FileAccessError: 附件不存在或不属于当前会话。
         """
         attachment = await self.repository.get_attachment(file_id, session_id)
@@ -203,9 +235,8 @@ class FileIntelligenceRuntime:
                 mime_type=attachment.mime_type,
             )
             result = await adapter.extract(context, self.settings)
-            # Adapters receive the content-addressed blob path. Replace that
-            # implementation detail with the user-visible asset name in all
-            # locators and code indexes before persistence.
+            # 适配器接收内容寻址的 blob 路径。持久化前，将这一实现细节替换为
+            # 用户可见的资产名称，并应用到所有定位器和代码索引中。
             for unit in result.units:
                 if unit.locator.get("path") == path.name:
                     unit.locator["path"] = attachment.filename
@@ -254,11 +285,11 @@ class FileIntelligenceRuntime:
         按 100 个分块一批写入，失败时记录警告但不中断流程。
         ``mark_ready=True`` 时将附件状态更新为 READY。
 
-        Args:
+        参数：
             attachment_id: 附件 ID。
             mark_ready: 是否在索引完成后标记附件为就绪状态。
 
-        Returns:
+        返回值：
             包含 chunks 数量和 vector_indexed 标志的字典。
         """
         attachment = await self.repository.get_attachment(attachment_id)
@@ -312,17 +343,15 @@ class FileIntelligenceRuntime:
         - 优先在换行符处断开（避免拆断行）。
         - 相邻块按 token 数保留重叠窗口，确保跨块搜索不丢失上下文。
 
-        Args:
+        参数：
             attachment_id: 附件 ID，写入每个分块的元数据。
             units: 提取的内容单元列表。
 
-        Returns:
+        返回值：
             分块后的 ``FileChunk`` 列表，按序号排列。
         """
         max_tokens = max(1, self.settings.file_chunk_tokens)
-        overlap_tokens = min(
-            max_tokens // 3, self.settings.file_chunk_overlap_tokens
-        )
+        overlap_tokens = min(max_tokens // 3, self.settings.file_chunk_overlap_tokens)
         chunks: list[FileChunk] = []
         ordinal = 0
         for unit in units:
@@ -366,7 +395,7 @@ class FileIntelligenceRuntime:
         return chunks
 
     def _find_chunk_end(self, content: str, start: int, max_tokens: int) -> int:
-        """Find the longest character slice that fits within a token budget."""
+        """查找适合 token 预算的最长字符切片。"""
         if self.secondary_llm.count_text_tokens(content[start:]) <= max_tokens:
             return len(content)
         low = start + 1
@@ -387,7 +416,7 @@ class FileIntelligenceRuntime:
     def _find_overlap_start(
         self, content: str, chunk_start: int, chunk_end: int, overlap_tokens: int
     ) -> int:
-        """Find the earliest suffix that fits within the overlap token budget."""
+        """查找适合重叠 token 预算的最早后缀。"""
         if overlap_tokens <= 0:
             return chunk_end
         low = chunk_start
@@ -430,13 +459,13 @@ class FileIntelligenceRuntime:
         支持按定位器（page/sheet/path）过滤，返回匹配的分块列表。
         附件未就绪时返回 waiting 状态和关联任务信息。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             file_id: 附件 ID。
             locator: 可选的定位器过滤条件（如 ``{"page": 3}``）。
             limit: 返回的最大分块数（1-50）。
 
-        Returns:
+        返回值：
             包含 file/chunks/waiting 等字段的结果字典。
         """
         attachment = await self.require_attachment(session_id, file_id)
@@ -494,31 +523,154 @@ class FileIntelligenceRuntime:
         }
 
     async def search_file(
-        self, session_id: str, file_id: str, query: str, limit: int = 10
+        self,
+        session_id: str,
+        file_id: str,
+        query: str,
+        limit: int = 10,
     ) -> dict[str, Any]:
         """混合搜索文件内容（FTS5 关键词 + ChromaDB 向量语义）。
 
         使用 RRF (Reciprocal Rank Fusion) 融合两种搜索结果，
         公式：score = Σ 1/(60 + rank)。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             file_id: 附件 ID。
             query: 搜索查询文本。
             limit: 返回的最大结果数（1-50）。
 
-        Returns:
+        返回值：
             包含 query/results/score 的搜索结果字典。
         """
         attachment = await self.require_attachment(session_id, file_id)
+        trace = self._new_retrieval_trace(query, attachment.adapter_name)
         if attachment.status == AttachmentStatus.FAILED:
-            return {
-                "query": query,
-                "results": [],
-                "error": attachment.error_message or "文件处理失败",
-            }
-        limit = min(max(limit, 1), 50)
-        keyword = await self.repository.search_chunks(file_id, query, limit=limit)
+            return self._failed_file_search_response(attachment, query, trace)
+
+        selected_ids: list[str] = []
+        try:
+            limit = min(max(limit, 1), 50)
+            keyword = await self._search_file_keywords(file_id, query, limit, trace)
+            vector = await self._search_file_vectors(file_id, query, limit, trace)
+            ordered = self._fuse_file_results(keyword, vector, limit, trace)
+            selected_ids = [item["id"] for item in ordered]
+            response: dict[str, Any] = {"query": query, "results": ordered}
+            if not ordered and attachment.adapter_name == "image":
+                response["message"] = (
+                    "图片没有可搜索的 OCR 文本；搜索工具无法检索视觉元素，请改用 analyze_file。"
+                )
+            return response
+        finally:
+            if trace is not None:
+                trace.mark_selected(selected_ids)
+                trace.finish()
+                self._emit_retrieval_trace(trace)
+
+    def _failed_file_search_response(
+        self,
+        attachment: Attachment,
+        query: str,
+        trace: RetrievalTrace | None,
+    ) -> dict[str, Any]:
+        """执行“文件搜索失败响应”操作。
+
+        参数：
+            attachment (Attachment): 输入参数；其类型和取值约束由方法签名及实现定义。
+            query (str): 检索或搜索文本；应为非空字符串。
+            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            dict[str, Any]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        if trace is not None:
+            trace.add_stage(
+                stage="attachment_check",
+                route="file",
+                query_index=0,
+                duration_ms=0.0,
+                result_count=0,
+                error_code="attachment_failed",
+            )
+            trace.add_fallback("attachment_failed")
+            trace.finish()
+            self._emit_retrieval_trace(trace)
+        return {
+            "query": query,
+            "results": [],
+            "error": attachment.error_message or "文件处理失败",
+        }
+
+    async def _search_file_keywords(
+        self,
+        file_id: str,
+        query: str,
+        limit: int,
+        trace: RetrievalTrace | None,
+    ) -> list[FileChunk]:
+        """执行“搜索文件关键词”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            query (str): 检索或搜索文本；应为非空字符串。
+            limit (int): 最大返回数量；应为非负整数。
+            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            list[FileChunk]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        started = perf_counter()
+        try:
+            keyword = await self.repository.search_chunks(file_id, query, limit=limit)
+        except Exception:
+            if trace is not None:
+                trace.add_fallback("file_keyword_search_failed")
+                trace.add_stage(
+                    stage="candidate_retrieval",
+                    route="keyword",
+                    query_index=0,
+                    duration_ms=(perf_counter() - started) * 1000,
+                    result_count=0,
+                    error_code="file_keyword_search_failed",
+                )
+            raise
+        self._record_file_candidates(
+            trace,
+            route="keyword",
+            candidates=keyword,
+            native_score=None,
+            duration_ms=(perf_counter() - started) * 1000,
+        )
+        return keyword
+
+    async def _search_file_vectors(
+        self,
+        file_id: str,
+        query: str,
+        limit: int,
+        trace: RetrievalTrace | None,
+    ) -> list[dict[str, Any]]:
+        """执行“搜索文件向量”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            query (str): 检索或搜索文本；应为非空字符串。
+            limit (int): 最大返回数量；应为非负整数。
+            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        started = perf_counter()
         vector: list[dict[str, Any]] = []
         if self._collection is not None:
             try:
@@ -529,25 +681,126 @@ class FileIntelligenceRuntime:
                     where={"attachment_id": file_id},
                     include=["documents", "metadatas", "distances"],
                 )
-                for chunk_id, content, metadata, distance in zip(
-                    (result.get("ids") or [[]])[0],
-                    (result.get("documents") or [[]])[0],
-                    (result.get("metadatas") or [[]])[0],
-                    (result.get("distances") or [[]])[0],
-                ):
-                    locator = json.loads((metadata or {}).get("locator_json", "{}"))
-                    vector.append(
-                        {
-                            "id": chunk_id,
-                            "content": content,
-                            "locator": locator,
-                            "score": max(0.0, 1 - float(distance) / 2),
-                        }
-                    )
+                vector = self._vector_items(result)
             except Exception as exc:
                 logger.warning(
                     "file_vector_search_failed", file_id=file_id, error=str(exc)
                 )
+                if trace is not None:
+                    trace.add_fallback("file_vector_search_failed")
+                    trace.add_stage(
+                        stage="candidate_retrieval",
+                        route="vector",
+                        query_index=0,
+                        duration_ms=(perf_counter() - started) * 1000,
+                        result_count=0,
+                        error_code="file_vector_search_failed",
+                    )
+                return vector
+        self._record_file_candidates(
+            trace,
+            route="vector",
+            candidates=vector,
+            native_score="score",
+            duration_ms=(perf_counter() - started) * 1000,
+        )
+        return vector
+
+    @staticmethod
+    def _vector_items(result: dict[str, Any]) -> list[dict[str, Any]]:
+        """执行“vector items”操作。
+
+        参数：
+            result (dict[str, Any]): 底层操作结果。
+
+        返回值：
+            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        return [
+            {
+                "id": chunk_id,
+                "content": content,
+                "locator": json.loads((metadata or {}).get("locator_json", "{}")),
+                "score": max(0.0, 1 - float(distance) / 2),
+            }
+            for chunk_id, content, metadata, distance in zip(
+                (result.get("ids") or [[]])[0],
+                (result.get("documents") or [[]])[0],
+                (result.get("metadatas") or [[]])[0],
+                (result.get("distances") or [[]])[0],
+            )
+        ]
+
+    def _record_file_candidates(
+        self,
+        trace: RetrievalTrace | None,
+        *,
+        route: str,
+        candidates: list[Any],
+        native_score: str | None,
+        duration_ms: float,
+    ) -> None:
+        """执行“记录文件候选项”操作。
+
+        参数：
+            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            route (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            candidates (list[Any]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            native_score (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            duration_ms (float): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        if trace is None:
+            return
+        trace.add_stage(
+            stage="candidate_retrieval",
+            route=route,
+            query_index=0,
+            duration_ms=duration_ms,
+            result_count=len(candidates),
+        )
+        for rank, candidate in enumerate(candidates, 1):
+            item_id = (
+                candidate.id if isinstance(candidate, FileChunk) else candidate["id"]
+            )
+            score = None if native_score is None else candidate[native_score]
+            trace.add_candidate(
+                item_id=item_id,
+                route=route,
+                rank=rank,
+                native_score=score,
+            )
+
+    def _fuse_file_results(
+        self,
+        keyword: list[FileChunk],
+        vector: list[dict[str, Any]],
+        limit: int,
+        trace: RetrievalTrace | None,
+    ) -> list[dict[str, Any]]:
+        """执行“融合文件搜索结果”操作。
+
+        参数：
+            keyword (list[FileChunk]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            vector (list[dict[str, Any]]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            limit (int): 最大返回数量；应为非负整数。
+            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        fusion_started = perf_counter()
         scores: dict[str, float] = {}
         values: dict[str, dict[str, Any]] = {}
         for rank, chunk in enumerate(keyword, 1):
@@ -563,14 +816,74 @@ class FileIntelligenceRuntime:
         ordered = sorted(
             values.values(), key=lambda item: scores[item["id"]], reverse=True
         )[:limit]
+        selection_started = perf_counter()
         for item in ordered:
             item["score"] = scores[item["id"]]
-        response: dict[str, Any] = {"query": query, "results": ordered}
-        if not ordered and attachment.adapter_name == "image":
-            response["message"] = (
-                "图片没有可搜索的 OCR 文本；搜索工具无法检索视觉元素，请改用 analyze_file。"
+        if trace is not None:
+            trace.set_fused_scores(scores)
+            trace.add_stage(
+                stage="fusion",
+                route="rrf",
+                query_index=0,
+                duration_ms=(perf_counter() - fusion_started) * 1000,
+                result_count=len(ordered),
             )
-        return response
+            trace.add_stage(
+                stage="selection",
+                route="file",
+                query_index=0,
+                duration_ms=(perf_counter() - selection_started) * 1000,
+                result_count=len(ordered),
+            )
+        return ordered
+
+    def _new_retrieval_trace(
+        self,
+        query: str,
+        adapter_name: str | None,
+    ) -> RetrievalTrace | None:
+        """执行“new retrieval trace”操作。
+
+        参数：
+            query (str): 检索或搜索文本；应为非空字符串。
+            adapter_name (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+        返回值：
+            RetrievalTrace | None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        if not self.settings.retrieval_trace_enabled:
+            return None
+        labels = ["file"]
+        if adapter_name:
+            labels.append(adapter_name)
+        return RetrievalTrace(
+            source_scope="file",
+            query=query,
+            query_hash_salt=self.settings.retrieval_trace_query_hash_salt,
+            include_raw_query=self.settings.retrieval_trace_include_raw_query,
+            query_labels=labels,
+        )
+
+    def _emit_retrieval_trace(self, trace: RetrievalTrace) -> None:
+        """执行“emit retrieval trace”操作。
+
+        参数：
+            trace (RetrievalTrace): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        try:
+            if self._trace_sink is not None:
+                self._trace_sink(trace)
+            logger.info("retrieval_completed", **trace.as_log_fields())
+        except Exception:
+            logger.warning("retrieval_trace_emit_failed")
 
     async def extract_table(self, session_id: str, file_id: str) -> dict[str, Any]:
         """提取文件的表格数据（从解析阶段缓存的 artifact 读取）。"""
@@ -599,12 +912,12 @@ class FileIntelligenceRuntime:
         使用 ``secondary_llm`` 处理分块和章节摘要（成本低），
         ``primary_llm`` 生成最终摘要（质量高）。结果缓存到 artifact 表。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             file_id: 附件 ID。
             summary_type: 摘要类型（如 ``"general"``、``"technical"``）。
 
-        Returns:
+        返回值：
             包含 summary 和 cached 标志的字典。
         """
         attachment = await self.require_attachment(session_id, file_id)
@@ -664,12 +977,12 @@ class FileIntelligenceRuntime:
         图片文件在适配器分析基础上，额外调用视觉模型描述画面内容
         （需 primary_llm 声明 supports_vision）。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             file_id: 附件 ID。
             task: 分析任务的自然语言描述。
 
-        Returns:
+        返回值：
             分析结果字典，图片文件可能包含 ``vision`` 字段。
         """
         attachment = await self.require_attachment(session_id, file_id)
@@ -718,7 +1031,7 @@ class FileIntelligenceRuntime:
     ) -> list[dict[str, Any]]:
         """获取代码符号的调用关系图。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             file_id: 附件 ID。
             symbol: 符号名称。
@@ -733,12 +1046,12 @@ class FileIntelligenceRuntime:
     ) -> str:
         """调用 LLM 生成文本摘要。
 
-        Args:
+        参数：
             provider: LLM 提供者实例。
             content: 待摘要的文本内容。
             label: 摘要类型标签（如 ``"分块摘要"``、``"文档摘要"``）。
 
-        Returns:
+        返回值：
             生成的摘要文本。
         """
         response = await provider.ainvoke(
@@ -755,11 +1068,11 @@ class FileIntelligenceRuntime:
 
         将图片编码为 base64 后通过多模态消息发送给 LLM。
 
-        Args:
+        参数：
             path: 图片文件路径。
             task: 分析任务描述。
 
-        Returns:
+        返回值：
             视觉模型的分析结果文本。
         """
         import base64
@@ -815,7 +1128,7 @@ class FileIntelligenceRuntime:
     ) -> dict[str, Any]:
         """将 Attachment 转换为公开 API 字典（排除 storage_key 等内部字段）。
 
-        Args:
+        参数：
             attachment: 附件领域模型。
             include_metadata: 是否包含 metadata 字段（默认 ``False``）。
         """

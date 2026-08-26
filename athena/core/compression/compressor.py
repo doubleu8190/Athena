@@ -39,6 +39,20 @@ class ContextCompressor:
         db: Database,
         settings: Settings,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
+            token_counter (TokenCounter): 输入参数；其类型和取值约束由方法签名及实现定义。
+            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
+            settings (Settings): 全局配置对象。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._llm = llm
         self._token_counter = token_counter
         self._settings = settings
@@ -55,6 +69,14 @@ class ContextCompressor:
 
     @property
     def summarizer(self) -> IncrementalSummarizer:
+        """执行“summarizer”操作。
+
+        返回值：
+            IncrementalSummarizer: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return self._summarizer
 
     def _should_compress(self, messages: list[BaseMessage]) -> bool:
@@ -76,11 +98,11 @@ class ContextCompressor:
         增量压缩模式：若 session 记录了上次压缩的消息 ID，只处理该 ID 之后的新消息，
         避免重复处理已压缩的消息，大幅减少送给 LLM 的内容量。
 
-        Args:
+        参数：
             messages: 原始消息列表（完整历史）
             session_id: 会话 ID（用于持久化摘要缓冲区和增量索引）
 
-        Returns:
+        返回值：
             压缩后的消息列表（若未触发压缩，则原样返回）
         """
         # 1. 检查是否需要压缩

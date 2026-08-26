@@ -1,4 +1,4 @@
-"""SQLite SQLAlchemy ORM models.
+"""SQLite SQLAlchemy ORM 模型。
 
 所有模型采用软删除策略，包含 deleted_time 字段。
 不使用 relationship()，级联操作在 Repository 层手动处理。
@@ -160,12 +160,12 @@ class MemoryModel(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[str | None] = mapped_column(
         String, nullable=True
-    )  # extraction / threshold / api
+    )  # extraction / threshold / api（提取 / 阈值 / API）
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class McpServerModel(Base):
-    """MCP 服务器注册表 — 持久化用户注册的 MCP Server 配置.
+    """MCP 服务器注册表 — 持久化用户注册的 MCP 服务端 配置.
 
     config_json 存完整配置 {command, args, env}，env 含密钥（如 SERVER_KEY），
     仅在启动子进程时使用，REST 列表接口只返回掩码。
@@ -183,14 +183,14 @@ class ToolModel(Base):
     """工具治理配置表 — 持久化用户对工具的治理参数调优.
 
     MCP 工具和 Native 工具统一存储，通过 execution_mode 区分。
-    description / parameters_json 以注册时的最新值为准（MCP 工具可能随 Server 升级而变化），
+    description / parameters_json 以注册时的最新值为准（MCP 工具可能随 服务端 升级而变化），
     risk_level / require_approval / enabled 以用户修改为准。
     """
 
     __tablename__ = "tools"
 
     tool_name: Mapped[str] = mapped_column(String, primary_key=True)
-    execution_mode: Mapped[str] = mapped_column(String)  # "native" / "mcp"
+    execution_mode: Mapped[str] = mapped_column(String)  # "native" / "mcp"（本地 / MCP）
     server_name: Mapped[str | None] = mapped_column(String, nullable=True)
     remote_name: Mapped[str | None] = mapped_column(String, nullable=True)
     description: Mapped[str] = mapped_column(Text, default="")
@@ -203,7 +203,7 @@ class ToolModel(Base):
 
 
 class AttachmentModel(Base):
-    """Session-scoped file asset metadata. Raw bytes live in Storage Layer."""
+    """会话范围的文件资产元数据。原始字节存储在存储层。"""
 
     __tablename__ = "attachments"
     __table_args__ = (
@@ -232,6 +232,8 @@ class AttachmentModel(Base):
 
 
 class ProcessingTaskModel(Base):
+    """表示 ProcessingTaskModel 组件，封装相关状态和行为。
+    """
     __tablename__ = "processing_tasks"
     __table_args__ = (
         Index("idx_file_tasks_status", "status", "available_at"),
@@ -260,6 +262,8 @@ class ProcessingTaskModel(Base):
 
 
 class FileChunkModel(Base):
+    """表示 FileChunkModel 组件，封装相关状态和行为。
+    """
     __tablename__ = "file_chunks"
     __table_args__ = (
         UniqueConstraint("attachment_id", "ordinal", name="uq_file_chunk_ordinal"),
@@ -276,6 +280,8 @@ class FileChunkModel(Base):
 
 
 class FileArtifactModel(Base):
+    """表示 FileArtifactModel 组件，封装相关状态和行为。
+    """
     __tablename__ = "file_artifacts"
     __table_args__ = (
         UniqueConstraint("cache_key", name="uq_file_artifact_cache_key"),
@@ -293,6 +299,8 @@ class FileArtifactModel(Base):
 
 
 class AdapterRegistryModel(Base):
+    """表示 AdapterRegistryModel 组件，封装相关状态和行为。
+    """
     __tablename__ = "adapter_registry"
 
     name: Mapped[str] = mapped_column(String, primary_key=True)
@@ -305,6 +313,8 @@ class AdapterRegistryModel(Base):
 
 
 class MessageAttachmentModel(Base):
+    """表示 MessageAttachmentModel 组件，封装相关状态和行为。
+    """
     __tablename__ = "message_attachments"
 
     message_id: Mapped[str] = mapped_column(
@@ -316,6 +326,8 @@ class MessageAttachmentModel(Base):
 
 
 class CodeSymbolModel(Base):
+    """表示 CodeSymbolModel 组件，封装相关状态和行为。
+    """
     __tablename__ = "code_symbols"
     __table_args__ = (
         Index("idx_code_symbols_attachment", "attachment_id"),
@@ -335,6 +347,8 @@ class CodeSymbolModel(Base):
 
 
 class CodeDependencyModel(Base):
+    """表示 CodeDependencyModel 组件，封装相关状态和行为。
+    """
     __tablename__ = "code_dependencies"
     __table_args__ = (Index("idx_code_deps_attachment", "attachment_id"),)
 
@@ -347,6 +361,8 @@ class CodeDependencyModel(Base):
 
 
 class AgentContinuationModel(Base):
+    """表示 AgentContinuationModel 组件，封装相关状态和行为。
+    """
     __tablename__ = "agent_continuations"
     __table_args__ = (
         UniqueConstraint("run_id", name="uq_agent_continuation_run"),

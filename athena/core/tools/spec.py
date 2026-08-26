@@ -4,7 +4,7 @@
 
 - ``ToolContext`` — 工具调用上下文（会话/运行/调用标识），通过 ContextVar 注入。
 - ``ToolSpec`` — 声明式工具规范，定义工具的名称、描述、处理器和治理参数。
-- ``ApprovalPort`` — 审批端口协议，定义审批请求的异步接口。
+- ``审批Port`` — 审批端口协议，定义审批请求的异步接口。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ class ToolContext:
 
     通过 ContextVar 实现协程安全的上下文传递，支持并发的多会话工具调用。
 
-    Attributes:
+    属性：
         session_id: 当前会话 ID。
         run_id: 当前运行 ID。
         tool_call_id: 当前工具调用的唯一标识。
@@ -42,10 +42,10 @@ _current_context: ContextVar[ToolContext | None] = ContextVar(
 def set_tool_context(context: ToolContext) -> Token[ToolContext | None]:
     """设置当前协程的工具调用上下文。
 
-    Args:
+    参数：
         context: 要注入的上下文。
 
-    Returns:
+    返回值：
         ContextVar token，用于后续调用 ``reset_tool_context()`` 恢复上下文。
     """
     return _current_context.set(context)
@@ -54,7 +54,7 @@ def set_tool_context(context: ToolContext) -> Token[ToolContext | None]:
 def reset_tool_context(token: Token[ToolContext | None]) -> None:
     """恢复上下文到指定 token 之前的值。
 
-    Args:
+    参数：
         token: ``set_tool_context()`` 返回的 token 对象。
     """
     _current_context.reset(token)
@@ -63,10 +63,10 @@ def reset_tool_context(token: Token[ToolContext | None]) -> None:
 def get_tool_context() -> ToolContext:
     """获取当前协程的工具调用上下文。
 
-    Returns:
+    返回值：
         当前的 ``ToolContext`` 实例。
 
-    Raises:
+    异常：
         RuntimeError: 在非工具调用上下文中调用时抛出。
     """
     context = _current_context.get()
@@ -81,7 +81,7 @@ class ToolSpec:
 
     用于 ``ToolRegistry.install()`` 批量注册工具到运行时管理器。
 
-    Attributes:
+    属性：
         name: 工具名称（唯一标识）。
         description: 工具功能描述（注入给 LLM）。
         handler: 异步处理函数。
@@ -111,7 +111,7 @@ class ApprovalRequest(Protocol):
 class ApprovalPort(Protocol):
     """审批端口协议 — 定义审批请求的异步接口。
 
-    由 ``ApprovalManager`` 实现，``UnifiedToolManager`` 通过此协议
+    由 ``审批Manager`` 实现，``UnifiedToolManager`` 通过此协议
     与审批系统解耦。
     """
 
@@ -126,7 +126,7 @@ class ApprovalPort(Protocol):
     ) -> ApprovalRequest:
         """提交审批请求。
 
-        Args:
+        参数：
             tool_name: 工具名称。
             arguments: 工具调用参数。
             risk_level: 风险等级。
@@ -134,7 +134,7 @@ class ApprovalPort(Protocol):
             run_id: 运行 ID。
             tool_call_id: 工具调用 ID。
 
-        Returns:
-            ``ApprovalRequest`` 实例，包含 ``future`` 用于等待结果。
+        返回值：
+            ``审批Request`` 实例，包含 ``future`` 用于等待结果。
         """
         ...

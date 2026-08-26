@@ -2,7 +2,7 @@
 
 职责：
 - MCP 工具 Schema 转换为 ToolSchema
-- 工具名称前缀化，避免多 Server 之间冲突
+- 工具名称前缀化，避免多 服务端 之间冲突
 - 批量注册到 UnifiedToolManager
 """
 
@@ -33,7 +33,7 @@ def _sanitize(name: str) -> str:
 
 
 class MCPToolAdapter:
-    """MCP 工具适配器 — 注册 MCP Server 的工具到 UnifiedToolManager.
+    """MCP 工具适配器 — 注册 MCP 服务端 的工具到 UnifiedToolManager.
 
     使用方式：
         adapter = MCPToolAdapter(tool_manager, catalog)
@@ -48,6 +48,18 @@ class MCPToolAdapter:
         tool_manager: UnifiedToolManager,
         catalog: ToolCatalogService,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            tool_manager (UnifiedToolManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            catalog (ToolCatalogService): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._tool_manager = tool_manager
         self._catalog = catalog
         self._clients: dict[str, MCPClient] = {}
@@ -61,12 +73,12 @@ class MCPToolAdapter:
         timeout: float = 30.0,
         connect_timeout: float = 60.0,
     ) -> list[str]:
-        """注册 MCP Server 的所有工具.
+        """注册 MCP 服务端 的所有工具.
 
         注册时集成 DB：已存在的工具以 DB 治理参数为准，不存在则写入 DB。
-        description / parameters 以远端最新为准（MCP Server 可能升级）。
+        description / parameters 以远端最新为准（MCP 服务端 可能升级）。
 
-        Args:
+        参数：
             server_name: 服务器名称（原始名，含 @ / 等字符也保留）
             server_command: 启动命令（stdio 传输）
             server_url: 服务器 URL（SSE 传输）
@@ -74,7 +86,7 @@ class MCPToolAdapter:
             timeout: 工具调用超时
             connect_timeout: 握手阶段超时（npx -y 冷启动可能较慢）
 
-        Returns:
+        返回值：
             注册的工具名称列表
         """
         client = MCPClient(
@@ -162,7 +174,7 @@ class MCPToolAdapter:
             logger.warning("mcp_disconnect_failed", server=server_name, error=str(e))
 
     async def disconnect_all(self) -> None:
-        """断开所有 MCP Server 连接."""
+        """断开所有 MCP 服务端 连接."""
         for name, client in self._clients.items():
             try:
                 await client.disconnect()

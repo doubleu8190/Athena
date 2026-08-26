@@ -18,13 +18,13 @@ _cache: dict[str, str] = {}
 def get_prompt(name: str) -> str:
     """按名称加载提示词（带缓存）.
 
-    Args:
+    参数：
         name: 提示词文件名（不含 .md 扩展名），如 "system"、"fact_extraction"。
 
-    Returns:
+    返回值：
         提示词文本（已 strip）。
 
-    Raises:
+    异常：
         FileNotFoundError: 对应的 .md 文件不存在。
     """
     if name not in _cache:

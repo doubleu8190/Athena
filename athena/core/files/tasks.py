@@ -1,4 +1,4 @@
-"""SQLite-backed in-process worker pool for file processing."""
+"""基于 SQLite 的进程内文件处理工作池。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,20 @@ logger = get_logger(__name__)
 
 
 class FileTaskWorker:
+    """表示 FileTaskWorker 组件，封装相关状态和行为。
+    """
     def __init__(self, runtime: FileIntelligenceRuntime) -> None:
+        """初始化当前对象。
+
+        参数：
+            runtime (FileIntelligenceRuntime): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self.runtime = runtime
         settings = runtime.settings
         self._poll_interval = settings.file_task_poll_interval
@@ -50,9 +63,31 @@ class FileTaskWorker:
     def set_continuation_callback(
         self, callback: Callable[[dict[str, Any]], Awaitable[None]]
     ) -> None:
+        """执行“set continuation callback”操作。
+
+        参数：
+            callback (Callable[[dict[str, Any]], Awaitable[None]]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._continuation_callback = callback
 
     async def resume_continuations(self, attachment_id: str) -> None:
+        """执行“resume continuations”操作。
+
+        参数：
+            attachment_id (str): 附件唯一标识。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if self._continuation_callback is None:
             return
         for continuation in await self.runtime.repository.claim_ready_continuations(
@@ -61,6 +96,14 @@ class FileTaskWorker:
             await self._continuation_callback(continuation)
 
     async def start(self) -> None:
+        """启动服务。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         await self.runtime.repository.recover_running_tasks()
         await self.runtime.repository.recover_continuations()
         self._stopping = False
@@ -71,6 +114,14 @@ class FileTaskWorker:
             await self.resume_continuations(attachment_id)
 
     async def stop(self) -> None:
+        """停止服务。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._stopping = True
         if self._dispatcher:
             self._dispatcher.cancel()
@@ -82,6 +133,18 @@ class FileTaskWorker:
             await asyncio.gather(*self._running, return_exceptions=True)
 
     async def enqueue_parse(self, session_id: str, attachment_id: str) -> FileTask:
+        """执行“enqueue parse”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            attachment_id (str): 附件唯一标识。
+
+        返回值：
+            FileTask: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         task = await self.enqueue_task(
             session_id, attachment_id, FileTaskType.FILE_PARSE
         )
@@ -101,6 +164,21 @@ class FileTaskWorker:
         payload: dict[str, Any] | None = None,
         priority: int = 0,
     ) -> FileTask:
+        """执行“enqueue task”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            attachment_id (str): 附件唯一标识。
+            task_type (FileTaskType): 输入参数；其类型和取值约束由方法签名及实现定义。
+            payload (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            priority (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            FileTask: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         task = await self.runtime.repository.create_task(
             session_id,
             attachment_id,
@@ -113,10 +191,17 @@ class FileTaskWorker:
         return task
 
     async def _run(self) -> None:
-        # Keep dispatch on the application event loop: repository operations use
-        # async SQLAlchemy/aiosqlite and callbacks emit on the same loop.
-        # A worker thread would require a second loop and unsafe cross-thread
-        # ownership of those resources without improving throughput.
+    # 将调度保留在应用事件循环中：仓库操作使用异步 SQLAlchemy/aiosqlite，
+    # 并且回调在同一事件循环中触发。工作线程需要第二个事件循环，
+    # 还会引入不安全的跨线程资源所有权转移，却不会提升吞吐量。
+        """运行流程。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         while not self._stopping:
             if len(self._running) >= self._max_running:
                 await asyncio.sleep(self._poll_interval)
@@ -130,6 +215,18 @@ class FileTaskWorker:
             running.add_done_callback(self._running.discard)
 
     async def _execute_with_limit(self, task: FileTask) -> None:
+        """执行“execute with limit”操作。
+
+        参数：
+            task (FileTask): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        # 每类任务使用独立信号量，限制昂贵操作的并发度，同时允许不同阶段并行推进。
         async with self._semaphores[task.task_type]:
             try:
                 current = await self.runtime.repository.get_task(task.id)
@@ -212,6 +309,19 @@ class FileTaskWorker:
                     await self.resume_continuations(task.attachment_id)
 
     async def _progress(self, task: FileTask, progress: float, stage: str) -> None:
+        """执行“progress”操作。
+
+        参数：
+            task (FileTask): 输入参数；其类型和取值约束由方法签名及实现定义。
+            progress (float): 输入参数；其类型和取值约束由方法签名及实现定义。
+            stage (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         await self.runtime.repository.update_task(
             task.id, progress=progress, stage=stage
         )
@@ -222,6 +332,18 @@ class FileTaskWorker:
             )
 
     async def _complete(self, task: FileTask, result: dict[str, Any]) -> None:
+        """执行“complete”操作。
+
+        参数：
+            task (FileTask): 输入参数；其类型和取值约束由方法签名及实现定义。
+            result (dict[str, Any]): 底层操作结果。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         current = await self.runtime.repository.get_task(task.id)
         if current is None or current.status == FileTaskStatus.CANCELLED:
             return

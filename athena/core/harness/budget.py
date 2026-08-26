@@ -45,10 +45,34 @@ class Budget:
         self.retry_count = 0
 
     def is_exceeded(self) -> bool:
+        """执行“是否已超出”操作。
+
+        返回值：
+            bool: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return self.turn_count > self.max_turns or self.retry_count > self.retry_budget
 
     def remaining_turns(self) -> int:
+        """执行“remaining turns”操作。
+
+        返回值：
+            int: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return max(0, self.max_turns - self.turn_count)
 
     def remaining_retries(self) -> int:
+        """执行“remaining retries”操作。
+
+        返回值：
+            int: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return max(0, self.retry_budget - self.retry_count)

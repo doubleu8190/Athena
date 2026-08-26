@@ -20,7 +20,7 @@ async def recover_interrupted_sessions(db: Database) -> None:
     运行中的 run），故 status ∈ {running, interrupted} 的会话必然是上次
     进程被杀/中断留下的僵尸。恢复仅置位，不主动执行，避免产生副作用。
 
-    Args:
+    参数：
         db: 数据库实例，需提供 query_sessions 和 update_session 方法
     """
     try:

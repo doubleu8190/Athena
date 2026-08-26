@@ -33,6 +33,8 @@ class ProviderInfo(BaseModel):
 
 
 class TestProviderRequest(BaseModel):
+    """表示 TestProviderRequest 组件，封装相关状态和行为。
+    """
     provider: str
     model: str
     api_key: str = ""
@@ -40,6 +42,8 @@ class TestProviderRequest(BaseModel):
 
 
 class TestProviderResult(BaseModel):
+    """表示 TestProviderResult 组件，封装相关状态和行为。
+    """
     ok: bool
     latency_ms: int | None = None
     error: str | None = None

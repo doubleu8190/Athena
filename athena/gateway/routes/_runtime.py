@@ -18,10 +18,10 @@ def get_session_stop_event(session_id: str) -> asyncio.Event:
     每个会话维护一个独立的 ``asyncio.Event``，用于通知正在运行的
     Agent 停止执行。事件由 gateway 层注入到 Harness 及子 Agent。
 
-    Args:
+    参数：
         session_id: 会话 ID。
 
-    Returns:
+    返回值：
         该会话的停止事件实例。
     """
     if session_id not in _stop_events:

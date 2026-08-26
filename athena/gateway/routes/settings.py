@@ -13,16 +13,16 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 class SettingsView(BaseModel):
     """系统设置只读视图（绝不包含 api_key）."""
 
-    # Server
+    # 服务端
     host: str
     port: int
     debug: bool
 
-    # Database
+    # 数据库
     sqlite_db_path: str
     chromadb_path: str
 
-    # Harness
+    # Harness 执行引擎
     max_turns_per_run: int
     retry_budget: int
     tool_timeout: int
@@ -35,24 +35,24 @@ class SettingsView(BaseModel):
     llm_retry: LLMRetrySettings
     llm_secondary_retry: LLMRetrySettings
 
-    # Memory
+    # 记忆
     memory_ttl_days: int
     memory_min_score: float
     summary_threshold: int
     memory_sync_interval: int
 
-    # Context Compression
+    # 上下文压缩
     max_context_tokens: int
     compression_threshold: float
     keep_recent_turns: int
     max_summary_tokens: int
 
-    # Sandbox
+    # 沙箱
     sandbox_enabled: bool
     sandbox_image: str
     sandbox_network_disabled: bool
 
-    # Approval
+    # 审批
     approval_batch_mode: str
     approval_keyboard_shortcuts: bool
 

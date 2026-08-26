@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 from athena.core.tools.manager import UnifiedToolManager
 from athena.runtime import RuntimeContainer
+from athena.evaluation.portal import EvaluationPortal
 
 
 @dataclass
@@ -51,6 +52,7 @@ def install_runtime(app: Any, **overrides: Any) -> RuntimeContainer:
         "file_worker": MagicMock(),
         "memory_manager": MagicMock(),
         "workflow": MagicMock(),
+        "evaluation_portal": EvaluationPortal("/tmp/athena_test_evaluation"),
     }
     dependencies.update(overrides)
     runtime = RuntimeContainer(**dependencies)

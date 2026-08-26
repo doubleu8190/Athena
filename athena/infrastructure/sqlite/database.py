@@ -1,6 +1,6 @@
-"""SQLite database facade.
+"""SQLite 数据库门面。
 
-Database 持有各 Repository 实例并提供 connect/close 生命周期管理。
+数据库 持有各 Repository 实例并提供 connect/close 生命周期管理。
 调用者通过公开属性直接访问 Repository（如 db.messages.save(msg)）。
 所有删除操作为软删除（设置 deleted_time）。
 """
@@ -34,6 +34,17 @@ class Database:
     """
 
     def __init__(self, db_path: str) -> None:
+        """初始化当前对象。
+
+        参数：
+            db_path (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._db_path = db_path
         self.sessions = SessionRepository()
         self.messages = MessageRepository()

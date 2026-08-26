@@ -34,6 +34,104 @@ export interface ToolCallInvocation {
   args: Record<string, unknown>
 }
 
+export type RetrievalSource = "memory" | "file"
+export type RetrievalReferenceStatus = "recorded" | "available_on_feedback"
+export type FeedbackRating = "accepted" | "rejected" | "corrected"
+
+export interface RetrievalReference {
+  event_id: string
+  source: RetrievalSource
+  status: RetrievalReferenceStatus
+  result_count: number
+}
+
+export interface RetrievalResult {
+  id: string
+  source: RetrievalSource
+  title?: string | null
+  summary?: string | null
+  content?: string | null
+  locator?: Record<string, unknown> | null
+  score?: number | null
+}
+
+export interface FeedbackRecord {
+  feedback_id: string
+  event_id: string
+  rating: FeedbackRating
+  correct_result_ids: string[]
+  expect_empty: boolean | null
+  gain: 1 | 2 | 3 | null
+  comment: string | null
+  created_at: string
+  promoted_case_id?: string | null
+  can_promote?: boolean
+}
+
+export interface RetrievalEventSummary {
+  event_id: string
+  session_id: string
+  run_id?: string | null
+  source: RetrievalSource
+  query: string
+  created_at: string
+  result_count: number
+  total_duration_ms?: number | null
+  feedback?: FeedbackRecord | null
+}
+
+export interface RetrievalEventDetail extends RetrievalEventSummary {
+  scope: Record<string, unknown>
+  results: RetrievalResult[]
+  trace?: Record<string, unknown> | null
+}
+
+export interface EvaluationCaseSummary {
+  case_id: string
+  source_event_id: string
+  source: RetrievalSource
+  labels: string[]
+  dataset_version: string
+  status: "active" | "stale"
+  created_at: string
+}
+
+export interface EvaluationReportSummary {
+  report_id: string
+  kind: "run" | "comparison"
+  created_at: string
+  dataset_version?: string | null
+  snapshot?: string | null
+  model?: string | null
+  app_version?: string | null
+  metrics?: Record<string, number | null> | null
+}
+
+export interface EvaluationReport extends EvaluationReportSummary {
+  baseline?: Record<string, number | null> | null
+  candidate?: Record<string, number | null> | null
+  corrected_metrics?: Record<string, number | null> | null
+  cases?: Array<Record<string, unknown>>
+}
+
+export interface EvaluationSettings {
+  record_enabled: boolean
+  record_sample_rate: number
+  data_directory: string
+  counts: {
+    records: number
+    feedback: number
+    cases: number
+    reports: number
+  }
+}
+
+export interface EvaluationPage<T> {
+  items: T[]
+  total: number
+  next_cursor?: string | null
+}
+
 export interface Message {
   id: string
   role: MessageRole
@@ -51,6 +149,8 @@ export interface Message {
   tool_call_id?: string
   /** 所属运行 ID（一次用户请求 ≈ 一个 run），Activity 面板按此归组 */
   run_id?: string
+  /** 可评价的检索事件关联；仅 assistant 消息会使用此字段。 */
+  retrieval_events?: RetrievalReference[]
   /** assistant 回合发起/已落库的工具调用（来自后端 Message.tool_calls） */
   tool_calls?: ToolCallInvocation[]
   attachments?: AttachmentRef[]
@@ -226,6 +326,7 @@ export type AppView =
   | "session-detail"
   | "settings"
   | "mcp"
+  | "evaluation"
 
 // ─── 工具管理 ────────────────────────────────────────────────────
 

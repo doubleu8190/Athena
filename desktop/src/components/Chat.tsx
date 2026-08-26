@@ -33,6 +33,8 @@ function Chat({ sendEvent }: ChatProps) {
     setSteps,
     setToolCalls,
     clearMessages,
+    clearEvaluationFeedback,
+    upsertEvaluationFeedback,
     clearSteps,
     clearToolCalls,
     clearApprovals,
@@ -69,6 +71,7 @@ function Chat({ sendEvent }: ChatProps) {
     if (activeSessionId) {
       // 先完全清除上一个 session 的所有残留状态
       clearMessages()
+      clearEvaluationFeedback()
       clearSteps()
       clearToolCalls()
       clearApprovals()
@@ -79,6 +82,11 @@ function Chat({ sendEvent }: ChatProps) {
       loadingSessionIdRef.current = activeSessionId
       setIsLoadingHistory(true)
       loadHistory(activeSessionId, () => cancelled)
+      apiClient.listEvaluationFeedback({ session_id: activeSessionId, limit: 100 })
+        .then((page) => {
+          if (!cancelled) page.items.forEach(upsertEvaluationFeedback)
+        })
+        .catch(() => { /* 评估 API 不可用时不影响聊天历史 */ })
       setSelectedAttachmentIds([])
       setSupportedAttachmentTypes(null)
       apiClient.listAttachments(activeSessionId)
@@ -89,6 +97,7 @@ function Chat({ sendEvent }: ChatProps) {
         .catch(() => { if (!cancelled) setSupportedAttachmentTypes(null) })
     } else {
       clearMessages()
+      clearEvaluationFeedback()
       clearSteps()
       clearToolCalls()
       clearApprovals()

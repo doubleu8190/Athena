@@ -16,11 +16,15 @@ from pydantic import BaseModel, Field
 
 
 class StepType(StrEnum):
+    """表示 StepType 组件，封装相关状态和行为。
+    """
     LLM_CALL = "llm_call"  # LLM 调用步骤
     TOOL_EXECUTION = "tool_execution"  # 单个工具执行步骤
 
 
 class StepStatus(StrEnum):
+    """表示 StepStatus 组件，封装相关状态和行为。
+    """
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"

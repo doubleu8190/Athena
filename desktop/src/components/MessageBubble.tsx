@@ -1,9 +1,13 @@
+import { useState } from "react"
 import { Bot, User, Wrench, Clock, Paperclip } from "lucide-react"
 import ReactMarkdown from "react-markdown"
-import type { Message, ToolCallInvocation } from "../types"
+import type { FeedbackRecord, Message, ToolCallInvocation } from "../types"
 import { ToolResultCard } from "./ToolResultCard"
 import { useChatStore } from "../store/chatStore"
 import type { ToolDisplayData } from "../utils/toolSummary"
+import AnswerFeedbackToolbar from "./evaluation/AnswerFeedbackToolbar"
+import CorrectionDialog from "./evaluation/CorrectionDialog"
+import { apiClient } from "../api/client"
 
 interface MessageBubbleProps {
   message: Message
@@ -13,6 +17,12 @@ interface MessageBubbleProps {
 export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const toolCalls = useChatStore((s) => s.toolCalls)
   const messages = useChatStore((s) => s.messages)
+  const evaluationFeedback = useChatStore((s) => s.evaluationFeedback)
+  const upsertEvaluationFeedback = useChatStore((s) => s.upsertEvaluationFeedback)
+  const [correctionOpen, setCorrectionOpen] = useState(false)
+  const [submittingFeedback, setSubmittingFeedback] = useState(false)
+  const [submittingRating, setSubmittingRating] = useState<"accepted" | "rejected" | null>(null)
+  const [feedbackError, setFeedbackError] = useState<string | null>(null)
 
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
@@ -20,6 +30,32 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
   const hasText = !!message.content.trim()
   const hasToolCalls = (message.tool_calls?.length ?? 0) > 0
+  const retrievalEvents = message.retrieval_events ?? []
+  const canGiveFeedback = message.role === "assistant" && !isStreaming && retrievalEvents.length > 0
+
+  const feedbackByEvent = retrievalEvents.reduce<Record<string, FeedbackRecord>>((result, event) => {
+    const stored = evaluationFeedback[event.event_id]
+    if (stored) result[event.event_id] = stored
+    return result
+  }, {})
+
+  const submitFeedback = async (rating: "accepted" | "rejected") => {
+    setSubmittingFeedback(true)
+    setSubmittingRating(rating)
+    setFeedbackError(null)
+    const results = await Promise.allSettled(
+      retrievalEvents.map((event) => apiClient.submitFeedback({ event_id: event.event_id, rating })),
+    )
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    results.forEach((result) => {
+      if (result.status === "fulfilled") upsertEvaluationFeedback(result.value)
+    })
+    if (failures.length > 0) {
+      setFeedbackError(failures[0].reason instanceof Error ? failures[0].reason.message : "反馈提交失败")
+    }
+    setSubmittingFeedback(false)
+    setSubmittingRating(null)
+  }
 
   // 无内容且无工具调用的消息不渲染（空气泡）；
   // 纯工具调用回合（content 为空但 tool_calls 有值）需要展示工具卡片。
@@ -139,7 +175,25 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           <Clock className="w-3 h-3" />
           {formatTime(message.timestamp)}
         </div>
+        {canGiveFeedback && (
+          <AnswerFeedbackToolbar
+            retrievalEvents={retrievalEvents}
+            feedback={feedbackByEvent}
+            submitting={submittingFeedback}
+            submittingRating={submittingRating}
+            error={feedbackError}
+            onSubmit={submitFeedback}
+            onCorrect={() => { setFeedbackError(null); setCorrectionOpen(true) }}
+          />
+        )}
       </div>
+      {canGiveFeedback && correctionOpen && (
+        <CorrectionDialog
+          eventIds={retrievalEvents.map((event) => event.event_id)}
+          onClose={() => setCorrectionOpen(false)}
+          onSaved={upsertEvaluationFeedback}
+        />
+      )}
     </div>
   )
 }

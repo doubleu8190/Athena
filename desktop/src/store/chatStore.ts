@@ -11,6 +11,7 @@ import type {
   AppView,
   Attachment,
   FileTask,
+  FeedbackRecord,
 } from "../types"
 
 interface ChatStore {
@@ -44,6 +45,11 @@ interface ChatStore {
   removeMessage: (messageId: string) => void
   clearMessages: () => void
   setMessages: (messages: Message[]) => void
+
+  // 当前会话中已提交的评估反馈；工作台数据不放入聊天 store
+  evaluationFeedback: Record<string, FeedbackRecord>
+  upsertEvaluationFeedback: (feedback: FeedbackRecord) => void
+  clearEvaluationFeedback: () => void
 
   // 执行步骤
   steps: Step[]
@@ -120,7 +126,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   activeView: ((): AppView => {
     try {
       const saved = localStorage.getItem("athena:activeView")
-      if (saved && ["chat", "memory", "tools", "approvals", "providers", "session-detail"].includes(saved)) {
+      if (saved && ["chat", "memory", "tools", "approvals", "providers", "session-detail", "settings", "mcp", "evaluation"].includes(saved)) {
         return saved as AppView
       }
     } catch { /* ignore */ }
@@ -147,6 +153,12 @@ export const useChatStore = create<ChatStore>((set) => ({
     })),
   clearMessages: () => set({ messages: [] }),
   setMessages: (messages) => set({ messages }),
+
+  evaluationFeedback: {},
+  upsertEvaluationFeedback: (feedback) => set((state) => ({
+    evaluationFeedback: { ...state.evaluationFeedback, [feedback.event_id]: feedback },
+  })),
+  clearEvaluationFeedback: () => set({ evaluationFeedback: {} }),
 
   // 执行步骤
   steps: [],

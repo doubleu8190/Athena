@@ -17,6 +17,19 @@ class ShellCommandError(RuntimeError):
     """
 
     def __init__(self, exit_code: int, command: str, output: str) -> None:
+        """初始化当前对象。
+
+        参数：
+            exit_code (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+            command (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            output (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self.exit_code = exit_code
         self.command = command
         self.output = output
@@ -28,17 +41,17 @@ async def exec_shell(
 ) -> str:
     """执行 Shell 命令.
 
-    Args:
+    参数：
         command: 要执行的命令字符串
         timeout: 超时时间（秒），默认 60
         cwd: 工作目录，默认 None（当前目录）
         check: 非零退出码是否视为失败（默认 True，抛 ShellCommandError；
             False 时仅返回输出，不因退出码报错）
 
-    Returns:
+    返回值：
         命令输出（stdout + stderr）
 
-    Raises:
+    异常：
         TimeoutError: 命令超时
         ShellCommandError: 退出码非零且 check=True
     """

@@ -1,4 +1,4 @@
-"""Unified tool declarations, registration, governance and execution."""
+"""统一的工具声明、注册、治理和执行。"""
 
 from athena.core.tools.catalog import ToolCatalogService, ToolRegistry
 from athena.core.tools.manager import UnifiedToolManager

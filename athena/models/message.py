@@ -12,6 +12,8 @@ from athena.models.file import AttachmentRef
 
 
 class MessageRole(StrEnum):
+    """表示 MessageRole 组件，封装相关状态和行为。
+    """
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"

@@ -1,9 +1,9 @@
 """MCP 服务器管理器 — 统一「持久化 + 连接 + 注册」.
 
 职责：
-- register_server: 持久化配置到 DB，连接 MCP Server 并注册其工具到 UnifiedToolManager
+- register_server: 持久化配置到 DB，连接 MCP 服务端 并注册其工具到 UnifiedToolManager
 - unregister_server: 移除已注册工具 + 断开连接 + DB 软删除
-- load_persisted: 启动时恢复所有已持久化的 MCP Server（单台失败不阻断）
+- load_persisted: 启动时恢复所有已持久化的 MCP 服务端（单台失败不阻断）
 - list_servers: 合并 DB 配置与实时连接状态（env 仅返回掩码）
 """
 
@@ -35,10 +35,10 @@ def _mask_env_value(value: str) -> str:
 class MCPManager:
     """MCP 服务器管理器.
 
-    Attributes:
+    属性：
         _servers: name -> {config, tool_names, error} 的实时注册状态
         _adapter: MCPToolAdapter 实例（连接 + 注册工具）
-        _db: Database 实例（持久化）
+        _db: 数据库 实例（持久化）
     """
 
     def __init__(
@@ -47,6 +47,19 @@ class MCPManager:
         db: Database,
         adapter: MCPToolAdapter,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            tool_manager (UnifiedToolManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
+            adapter (MCPToolAdapter): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._tool_manager = tool_manager
         self._db = db
         self._adapter = adapter
@@ -59,12 +72,12 @@ class MCPManager:
     async def register_server(
         self, name: str, config: McpServerConfig
     ) -> dict[str, Any]:
-        """注册一个 MCP Server：持久化配置 + 连接 + 注册工具.
+        """注册一个 MCP 服务端：持久化配置 + 连接 + 注册工具.
 
         已存在同名服务器时先拆除旧连接与旧工具（覆盖重注册）。
         连接失败不抛出：配置仍持久化，返回 status=failed 供前端展示修复。
 
-        Returns:
+        返回值：
             {"name", "status": "connected"|"failed", "tool_count", "error"}
         """
         # 覆盖重注册：先拆除旧的实时状态
@@ -128,7 +141,7 @@ class MCPManager:
     # ------------------------------------------------------------------
 
     async def load_persisted(self) -> None:
-        """启动时恢复所有已持久化的 MCP Server.
+        """启动时恢复所有已持久化的 MCP 服务端.
 
         单台失败仅记录日志并继续，不阻断应用启动。
         """

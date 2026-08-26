@@ -55,7 +55,7 @@ class InterruptedToolInfo(BaseModel):
 class InterruptedSessionInfo(BaseModel):
     """中断会话的恢复上下文 — 帮助用户决定是否恢复。
 
-    Attributes:
+    属性：
         session_id: 会话 ID。
         title: 会话标题。
         status: 当前状态（interrupted/running/failed）。
@@ -80,7 +80,7 @@ class RecoverSessionResponse(BaseModel):
     """恢复操作的响应。"""
 
     session_id: str
-    status: str  # "recovering" | "idle" | "failed"
+    status: str  # "recovering" | "idle" | "failed"（恢复中 / 空闲 / 失败）
     message: str
 
 
@@ -192,6 +192,8 @@ async def get_session(session_id: str, request: Request) -> Session:
 
 
 class UpdateSessionRequest(BaseModel):
+    """表示 UpdateSessionRequest 组件，封装相关状态和行为。
+    """
     title: str
 
 
@@ -389,11 +391,11 @@ def _build_recovery_hint(
 ) -> str:
     """根据中断上下文生成用户可读的恢复策略提示。
 
-    Args:
+    参数：
         last_role: 最后一条消息的角色（user/assistant/tool）。
         pending_tools: 未完成的工具调用列表。
 
-    Returns:
+    返回值：
         恢复策略提示文本。
     """
     if last_role == "user":
@@ -413,7 +415,7 @@ async def _execute_recovery(
 ) -> None:
     """异步执行恢复流程（被 asyncio.create_task 调用）。
 
-    Args:
+    参数：
         recovery: 会话恢复器实例。
         session_id: 会话 ID。
     """

@@ -26,6 +26,14 @@ class WebSocketManager:
 
     def __init__(self) -> None:
         # session_id -> set of WebSocket connections（订阅桶）
+        """初始化当前对象。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._connections: dict[str, set[WebSocket]] = {}
         # WebSocket -> 当前订阅的 session_id（None = 未订阅）
         self._ws_session: dict[WebSocket, str | None] = {}
@@ -95,6 +103,17 @@ class WebSocketManager:
             await self.disconnect(websocket)
 
     def has_session(self, session_id: str) -> bool:
+        """执行“是否存在会话”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+
+        返回值：
+            bool: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return session_id in self._connections and bool(self._connections[session_id])
 
     async def close_session(self, session_id: str) -> None:

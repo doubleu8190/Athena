@@ -29,6 +29,19 @@ class IncrementalSummarizer:
     """增量摘要生成器 — 按 session_id 隔离摘要缓冲区."""
 
     def __init__(self, llm: LLMProvider, db: Database, max_summary_tokens: int = 2000) -> None:
+        """初始化当前对象。
+
+        参数：
+            llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
+            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
+            max_summary_tokens (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._llm = llm
         self._max_summary_tokens = max_summary_tokens
         self._db = db
@@ -83,11 +96,11 @@ class IncrementalSummarizer:
     ) -> str:
         """增量更新摘要.
 
-        Args:
+        参数：
             old_turns: 需摘要的旧轮次
             session_id: 会话 ID（用于隔离缓冲区和持久化到 session 表）
 
-        Returns:
+        返回值：
             更新后的完整摘要文本
         """
         if not old_turns:

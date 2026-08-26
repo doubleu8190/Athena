@@ -44,10 +44,10 @@ async def lifespan(app: FastAPI):
     启动阶段按依赖顺序初始化所有子系统，关闭阶段按逆序释放资源。
     所有子系统通过 ``app.state.runtime`` 注入到路由层。
 
-    Yields:
+    生成值：
         None。yield 前完成初始化，yield 后执行清理。
 
-    Raises:
+    异常：
         Exception: 任何子系统初始化失败时向上抛出，阻止应用启动。
     """
     settings = get_settings()
@@ -57,6 +57,14 @@ async def lifespan(app: FastAPI):
     # ── 1. 数据库 ──
     db = Database(settings.sqlite_db_path)
     await db.connect()
+
+    from athena.evaluation.portal import EvaluationPortal
+
+    evaluation_portal = EvaluationPortal(
+        settings.evaluation_data_path,
+        record_enabled=settings.evaluation_record_enabled,
+        sample_rate=settings.evaluation_record_sample_rate,
+    )
 
     # ── 2. WebSocket 管理器 ──
     ws_manager = WebSocketManager()
@@ -78,7 +86,7 @@ async def lifespan(app: FastAPI):
     builtin_tool_names = register_builtin_tools(tool_manager)
     await tool_catalog.reconcile(tool_manager, names=builtin_tool_names)
 
-    # MCP 服务器管理器（恢复已持久化的 MCP Server 配置）
+    # MCP 服务器管理器（恢复已持久化的 MCP 服务端 配置）
     from athena.core.tools.mcp.adapter import MCPToolAdapter
     from athena.core.tools.mcp.manager import MCPManager
 
@@ -93,14 +101,19 @@ async def lifespan(app: FastAPI):
         LLMProvider.from_secondary_settings(settings=settings) or llm_primary
     )
 
-    # ── 5.1 File Intelligence ──
+    # ── 5.1 文件智能 ──
     from athena.core.files.runtime import FileIntelligenceRuntime
     from athena.core.files.tasks import FileTaskWorker
     from athena.core.tools.catalog import ToolRegistry
     from athena.core.tools.providers.files import build_file_tool_specs
 
     file_runtime = FileIntelligenceRuntime(
-        db.files, llm_primary, llm_secondary, settings=settings, ws_manager=ws_manager
+        db.files,
+        llm_primary,
+        llm_secondary,
+        settings=settings,
+        ws_manager=ws_manager,
+        trace_sink=evaluation_portal.record_trace,
     )
     await file_runtime.initialize()
 
@@ -138,11 +151,38 @@ async def lifespan(app: FastAPI):
         MemoryRetrievalService,
     )
 
+    # Local evaluation records need the same structured trace as diagnostics.
+    # The portal itself applies the configured sampling rate at the write boundary.
+    if settings.evaluation_record_enabled and settings.evaluation_record_sample_rate > 0:
+        settings.retrieval_trace_enabled = True
     retrieval_manager = HybridRetrievalManager(
-        llm_secondary, memory_manager, settings=settings
+        llm_secondary,
+        memory_manager,
+        settings=settings,
+        trace_sink=evaluation_portal.record_trace,
+    )
+    from athena.evaluation.shadow import ShadowRetrievalRunner
+    from athena.evaluation.storage import JsonlEventStore
+
+    async def shadow_memory_executor(
+        query: str, _scope: dict, *, record_access: bool
+    ) -> list:
+        """以旁路只读模式复用 memory 检索组件。"""
+        return await retrieval_manager.retrieve(query, record_access=record_access)
+
+    shadow_runner = ShadowRetrievalRunner(
+        shadow_memory_executor,
+        enabled=settings.retrieval_shadow_enabled,
+        sample_rate=settings.retrieval_shadow_sample_rate,
+        max_concurrency=settings.retrieval_shadow_max_concurrency,
+        timeout_ms=settings.retrieval_shadow_timeout_ms,
+        queue_size=settings.retrieval_shadow_queue_size,
+        drop_on_overload=settings.retrieval_shadow_drop_on_overload,
+        store=JsonlEventStore(Path(settings.retrieval_shadow_event_path)),
+        hash_salt=settings.retrieval_trace_query_hash_salt or "shadow",
     )
     memory_retrieval = MemoryRetrievalService(
-        retrieval_manager, llm_primary, settings
+        retrieval_manager, llm_primary, settings, shadow_runner=shadow_runner
     )
 
     from athena.core.memory.summarizer import ConversationSummarizer
@@ -198,6 +238,7 @@ async def lifespan(app: FastAPI):
         file_worker=file_worker,
         memory_manager=memory_manager,
         workflow=workflow,
+        evaluation_portal=evaluation_portal,
     )
 
     # ── 7. 被动会话恢复 ──
@@ -228,11 +269,15 @@ async def lifespan(app: FastAPI):
         await memory_manager.flush_access_stats()
     except Exception as e:
         logger.warning("memory_final_flush_failed", error=str(e))
-    # 断开所有 MCP Server 连接，防子进程泄漏
+    # 断开所有 MCP 服务端 连接，防子进程泄漏
     try:
         await mcp_manager.shutdown()
     except Exception as e:
         logger.warning("mcp_shutdown_failed", error=str(e))
+    try:
+        await shadow_runner.close()
+    except Exception as e:
+        logger.warning("retrieval_shadow_shutdown_failed", error=str(e))
     await db.close()
     logger.info("athena_stopped")
 

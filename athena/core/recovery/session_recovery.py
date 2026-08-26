@@ -57,6 +57,19 @@ class SessionRecovery:
         ws_manager: WebSocketManager,
         agent_workflow: AgentWorkflow,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
+            ws_manager (WebSocketManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            agent_workflow (AgentWorkflow): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._db = db
         self._ws = ws_manager
         self._workflow = agent_workflow
@@ -227,7 +240,7 @@ class SessionRecovery:
                         "error_message": "进程中断，但操作可能已完成",
                     },
                 )
-            else:  # NOTIFY_USER
+            else:  # 通知用户（NOTIFY_USER）
                 await self._db.tool_calls.update(
                     tc.id,
                     {
@@ -311,12 +324,31 @@ class GracefulShutdown:
     DRAINING_TIMEOUT = 300  # 5 分钟
 
     def __init__(self, db: Database) -> None:
+        """初始化当前对象。
+
+        参数：
+            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._db = db
         self._accepting = True
         self._active_sessions: dict[str, asyncio.Task] = {}
 
     @property
     def is_accepting(self) -> bool:
+        """执行“is accepting”操作。
+
+        返回值：
+            bool: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return self._accepting
 
     def register_active_session(self, session_id: str, task: asyncio.Task) -> None:

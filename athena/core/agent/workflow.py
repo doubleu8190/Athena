@@ -49,7 +49,7 @@ DEFAULT_SYSTEM_PROMPT = get_prompt("system")
 class SubAgentResult(BaseModel):
     """子 Agent 执行结果.
 
-    Attributes:
+    属性：
         task: 分配给子 Agent 的任务描述。
         content: 子 Agent 返回的文本内容；执行失败时为空字符串。
         turn_count: 子 Agent 与 LLM 的交互轮次。
@@ -68,6 +68,8 @@ class SubAgentResult(BaseModel):
 
 @dataclass(frozen=True)
 class _PreparedRun:
+    """表示 PreparedRun 组件，封装相关状态和行为。
+    """
     run_id: str
     user_message: Message
     attachment_refs: list[AttachmentRef]
@@ -85,7 +87,7 @@ class SubAgentManager:
         白名单过滤可用工具；共享同一 ``ContextCompressor`` 实例以复用
         压缩摘要缓冲区。
 
-    Args:
+    参数：
         llm: LLM 提供者实例。
         tool_manager: 统一工具管理器（与父级共享）。
         db: 数据库连接。
@@ -107,6 +109,24 @@ class SubAgentManager:
         settings: Settings,
         main_run_id: str,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
+            tool_manager (UnifiedToolManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
+            ws_manager (WebSocketManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            compressor (ContextCompressor): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_manager (MemoryManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            settings (Settings): 全局配置对象。
+            main_run_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._llm = llm
         self._tool_manager = tool_manager
         self._db = db
@@ -133,14 +153,14 @@ class SubAgentManager:
         但共享父级的工具集和审批队列。执行完成后通过 WebSocket 推送
         生命周期事件（启动 / 完成 / 失败）。
 
-        Args:
+        参数：
             task: 子任务的自然语言描述，直接作为子 Agent 的首轮用户消息。
             session_id: 当前会话 ID，用于事件推送和消息持久化。
             allowed_tools: 工具白名单；``None`` 表示不限制，继承父级全部工具。
             max_turns: 子 Agent 最大 LLM 交互轮次，默认 5。
             stop_signal: 停止事件，置位时终止子 Agent 执行。
 
-        Returns:
+        返回值：
             ``SubAgentResult``：包含子 Agent 输出内容、轮次数和工具调用结果。
             执行失败时 ``error`` 字段非空，``content`` 为空字符串。
         """
@@ -236,19 +256,30 @@ class SubAgentManager:
         使用 ``asyncio.gather`` 并发调度所有子任务，受 ``_parallel_semaphore``
         限制最大并发数。单个子 Agent 的异常不影响其余子 Agent 的执行。
 
-        Args:
+        参数：
             tasks: 子任务描述列表，每个元素对应一个子 Agent。
             session_id: 当前会话 ID。
             allowed_tools: 工具白名单，所有子 Agent 共享。
             max_turns: 每个子 Agent 的最大 LLM 交互轮次。
             stop_signal: 停止事件，置位时终止所有子 Agent。
 
-        Returns:
+        返回值：
             执行结果列表，长度 <= ``len(tasks)``。失败的子 Agent 结果
             以日志形式记录，不包含在返回值中。
         """
 
         async def _spawn_with_semaphore(task: str) -> SubAgentResult:
+            """执行“使用信号量派生子 Agent”操作。
+
+            参数：
+                task (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                SubAgentResult: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             async with self._parallel_semaphore:
                 return await self.spawn(
                     task,
@@ -300,6 +331,26 @@ class AgentWorkflow:
         memory_manager: MemoryManager,
         settings: Settings,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
+            tool_manager (UnifiedToolManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
+            ws_manager (WebSocketManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            compressor (ContextCompressor): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_retrieval (MemoryRetrievalService): 输入参数；其类型和取值约束由方法签名及实现定义。
+            conversation_summarizer (ConversationSummarizer): 输入参数；其类型和取值约束由方法签名及实现定义。
+            fact_extractor (FactExtractor): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_manager (MemoryManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            settings (Settings): 全局配置对象。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._llm = llm
         self._tool_manager = tool_manager
         self._db = db
@@ -314,7 +365,7 @@ class AgentWorkflow:
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
 
     def delegation_tool_specs(self):
-        """Return agent delegation declarations for composition-root registration."""
+        """返回用于组合根注册的 Agent 委派声明。"""
         from athena.core.tools.providers.agents import build_agent_tool_specs
 
         return build_agent_tool_specs(
@@ -380,6 +431,19 @@ class AgentWorkflow:
         attachment_ids: list[str] | None,
         continuation: dict[str, Any] | None,
     ) -> tuple[str, list[str]]:
+        """执行“normalize request”操作。
+
+        参数：
+            user_message (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            attachment_ids (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            continuation (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            tuple[str, list[str]]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if continuation is not None:
             user_message = str(continuation.get("user_message", user_message))
             attachment_ids = list(
@@ -393,6 +457,19 @@ class AgentWorkflow:
         attachment_ids: list[str],
         continuation: dict[str, Any] | None,
     ) -> list[Attachment]:
+        """执行“加载请求的附件”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            attachment_ids (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            continuation (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            list[Attachment]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if not attachment_ids:
             return []
         loaded = await self._db.files.get_attachments(session_id, attachment_ids)
@@ -415,6 +492,18 @@ class AgentWorkflow:
         return requested
 
     async def _retrieve_memory_context(self, session_id: str, user_message: str) -> str:
+        """执行“检索记忆上下文”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            user_message (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            str: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         try:
             context = await self._memory_retrieval.get_relevant_memories(
                 user_message=user_message
@@ -422,7 +511,7 @@ class AgentWorkflow:
             logger.info(
                 "memory_injection_success",
                 session_id=session_id,
-                memory_context=context,
+                memory_context_length=len(context),
             )
             return context
         except Exception as e:
@@ -430,6 +519,17 @@ class AgentWorkflow:
             return ""
 
     async def _load_history(self, session_id: str) -> list[Message]:
+        """执行“加载历史记录”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+
+        返回值：
+            list[Message]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         session = await self._db.sessions.get(session_id)
         if not session or not (
             session.compression_summary and session.last_compressed_message_id
@@ -456,6 +556,18 @@ class AgentWorkflow:
 
     @staticmethod
     def _build_system_prompt(system_prompt: str | None, memory_context: str) -> str:
+        """执行“构建系统提示词”操作。
+
+        参数：
+            system_prompt (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_context (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            str: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         return (prompt + "\n\n" + memory_context).strip() if memory_context else prompt
 
@@ -467,6 +579,21 @@ class AgentWorkflow:
         history: list[Message],
         continuation: dict[str, Any] | None,
     ) -> _PreparedRun:
+        """执行“准备运行”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            user_message (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            attachment_ids (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            history (list[Message]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            continuation (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            _PreparedRun: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         run_id = (
             str(continuation.get("run_id"))
             if continuation is not None
@@ -489,6 +616,21 @@ class AgentWorkflow:
         history: list[Message],
         continuation: dict[str, Any] | None,
     ) -> Message:
+        """执行“获取或创建用户消息”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            content (str): 待保存或处理的内容。
+            run_id (str): 运行唯一标识。
+            history (list[Message]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            continuation (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            Message: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if continuation is not None:
             message_id = continuation.get("message_id")
             existing = next((item for item in history if item.id == message_id), None)
@@ -521,6 +663,20 @@ class AgentWorkflow:
         attachment_ids: list[str],
         continuation: dict[str, Any] | None,
     ) -> list[AttachmentRef]:
+        """执行“绑定消息附件”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            message (Message): 输入参数；其类型和取值约束由方法签名及实现定义。
+            attachment_ids (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            continuation (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            list[AttachmentRef]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if continuation is None:
             if not attachment_ids:
                 return []
@@ -547,6 +703,19 @@ class AgentWorkflow:
         user_message: Message,
         continuation: dict[str, Any] | None,
     ) -> list[Message]:
+        """执行“构建 Harness 消息”操作。
+
+        参数：
+            history (list[Message]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            user_message (Message): 输入参数；其类型和取值约束由方法签名及实现定义。
+            continuation (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            list[Message]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if continuation is None:
             base_messages = [*history, user_message]
         else:
@@ -583,6 +752,22 @@ class AgentWorkflow:
         prepared: _PreparedRun,
         continuation: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
+        """执行“延迟处理待完成附件”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            user_message (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            attachment_ids (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            requested_attachments (list[Attachment]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            prepared (_PreparedRun): 输入参数；其类型和取值约束由方法签名及实现定义。
+            continuation (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            dict[str, Any] | None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if continuation is not None or not attachment_ids:
             return None
         tasks_by_attachment = await self._db.files.list_tasks_for_attachments(
@@ -643,6 +828,20 @@ class AgentWorkflow:
         system_prompt: str,
         stop_signal: asyncio.Event | None,
     ) -> HarnessRunResult:
+        """执行“运行 Harness”操作。
+
+        参数：
+            prepared (_PreparedRun): 输入参数；其类型和取值约束由方法签名及实现定义。
+            session_id (str): 会话唯一标识。
+            system_prompt (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            stop_signal (asyncio.Event | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            HarnessRunResult: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         harness = Harness(
             llm=self._llm,
             tool_manager=self._tool_manager,
@@ -671,6 +870,19 @@ class AgentWorkflow:
     async def _post_process(
         self, session_id: str, user_message: str, result: HarnessRunResult
     ) -> None:
+        """执行“后处理”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            user_message (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            result (HarnessRunResult): 底层操作结果。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         asyncio.create_task(
             self._extract_facts_async(user_message, result.content, session_id)
         )
@@ -685,6 +897,18 @@ class AgentWorkflow:
     def _result_payload(
         cls, result: HarnessRunResult, attachment_refs: list[AttachmentRef]
     ) -> dict[str, Any]:
+        """执行“结果负载”操作。
+
+        参数：
+            result (HarnessRunResult): 底层操作结果。
+            attachment_refs (list[AttachmentRef]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            dict[str, Any]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return {
             "content": result.content,
             "run_id": result.run_id,
@@ -697,10 +921,21 @@ class AgentWorkflow:
 
     @staticmethod
     def _serialize_attachments(refs: list[AttachmentRef]) -> list[dict[str, Any]]:
+        """执行“序列化附件”操作。
+
+        参数：
+            refs (list[AttachmentRef]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return [item.model_dump(mode="json") for item in refs]
 
     async def resume_file_continuation(self, continuation: dict[str, Any]) -> None:
-        """Resume a file-waiting run exactly once after its index task completes."""
+        """索引任务完成后，仅恢复一次等待文件的运行。"""
         try:
             outcomes = continuation.get("file_outcomes", {})
             unavailable = {
@@ -783,7 +1018,7 @@ class AgentWorkflow:
         作为 ``asyncio.create_task`` 的目标运行，不阻塞主编排流程。
         提取失败时仅记录警告日志，不影响主流程返回结果。
 
-        Args:
+        参数：
             user_message: 用户消息的原始文本。
             assistant_reply: 助手回复的文本内容；为空时退化为仅提取用户消息。
             session_id: 当前会话 ID。
@@ -829,13 +1064,13 @@ class AgentWorkflow:
 
         并行派生多个子 Agent 执行独立子任务，汇总结果后返回 JSON 数组。
 
-        Args:
+        参数：
             tasks: 子任务描述列表（2-6 个）。
             session_id: 当前会话 ID。
             parent_run_id: 父级运行 ID，由工具管理器从调用链注入。
             max_turns: 每个子 Agent 的最大 LLM 交互轮次。
 
-        Returns:
+        返回值：
             JSON 数组字符串，每个元素包含 task/status/output/error/turns_used；
             输入校验失败时返回错误信息 JSON。
         """
@@ -914,7 +1149,7 @@ class AgentWorkflow:
         创建子 Agent 执行独立子任务，返回其输出结果。失败时返回错误信息
         而非抛出异常，使 LLM 能够感知失败并决定是否重试或降级处理。
 
-        Args:
+        参数：
             task: 子任务的自然语言描述。
             session_id: 当前会话 ID。
             parent_run_id: 父级运行 ID，由工具管理器从调用链注入
@@ -922,7 +1157,7 @@ class AgentWorkflow:
                 带父链的 sub_run_id（``"{parent_run_id}_{index}"``），
                 前端可将子任务的步骤归组到父请求下。
 
-        Returns:
+        返回值：
             子 Agent 的输出文本；失败时返回 ``"[SUB-AGENT ERROR] {error}"``；
             无输出时返回 ``"[SUB-AGENT] Completed with no output."``。
         """
@@ -961,10 +1196,10 @@ class AgentWorkflow:
         每次调用返回新实例，共享当前工作流的 LLM、工具集、数据库连接
         和压缩器等依赖。``main_run_id`` 用于生成子 Agent 的 ``sub_run_id``。
 
-        Args:
+        参数：
             main_run_id: 父级运行 ID；为 ``None`` 时子 Agent 使用独立的时间戳 ID。
 
-        Returns:
+        返回值：
             配置完成的 ``SubAgentManager`` 实例。
         """
         return SubAgentManager(

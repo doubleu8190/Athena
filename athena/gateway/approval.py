@@ -5,7 +5,7 @@
 - 通过 asyncio.Future 实现请求方等待，request_approval 立即返回 Future
 - 同一时刻只处理一个请求，防止审批风暴
 - 每个工具调用生成唯一 approval_id
-- 子 Agent 通过依赖注入共享父 ApprovalManager 实例
+- 子 Agent 通过依赖注入共享父 审批Manager 实例
 """
 
 from __future__ import annotations
@@ -36,6 +36,19 @@ class ApprovalManager:
         db: Database,
         approval_timeout: int = 120,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            websocket_manager (WebSocketManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
+            approval_timeout (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._queue: deque[ApprovalRequest] = deque()
         self._pending: dict[str, ApprovalRequest] = {}  # approval_id → request
         self._processing: bool = False
@@ -47,6 +60,14 @@ class ApprovalManager:
 
     @property
     def queue_length(self) -> int:
+        """执行“queue length”操作。
+
+        返回值：
+            int: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return len(self._queue) + (1 if self._processing else 0)
 
     # ------------------------------------------------------------------
@@ -62,7 +83,7 @@ class ApprovalManager:
         run_id: str,
         tool_call_id: str,
     ) -> ApprovalRequest:
-        """请求审批 — 立即返回 ApprovalRequest（含 Future）.
+        """请求审批 — 立即返回 审批Request（含 Future）.
 
         关键：此方法立即返回，不等待审批完成。
         调用方通过 await request.future 等待审批结果。
@@ -104,11 +125,11 @@ class ApprovalManager:
     async def respond_approval(self, approval_id: str, action: str) -> bool:
         """响应审批请求.
 
-        Args:
+        参数：
             approval_id: 审批请求 ID
-            action: "allow" / "deny"
+            action: "allow" / "deny"（允许 / 拒绝）
 
-        Returns:
+        返回值：
             是否成功处理（请求存在且未完成）
         """
         async with self._lock:

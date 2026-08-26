@@ -19,6 +19,8 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 
 
 class SaveMemoryRequest(BaseModel):
+    """表示 SaveMemoryRequest 组件，封装相关状态和行为。
+    """
     content: str
     session_id: str
     metadata: dict[str, Any] | None = None
@@ -26,16 +28,31 @@ class SaveMemoryRequest(BaseModel):
 
 
 class SearchMemoryRequest(BaseModel):
+    """表示 SearchMemoryRequest 组件，封装相关状态和行为。
+    """
     query: str
     where: dict[str, Any] | None = None
     n_results: int = 5
 
 
 class UpdateMemoryRequest(BaseModel):
+    """表示 UpdateMemoryRequest 组件，封装相关状态和行为。
+    """
     content: str
 
 
 async def _get_memory_manager(request: Request) -> MemoryManager:
+    """执行“get memory manager”操作。
+
+    参数：
+        request (Request): 当前 HTTP 或 WebSocket 请求对象。
+
+    返回值：
+        MemoryManager: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     return runtime_from(request).memory_manager
 
 

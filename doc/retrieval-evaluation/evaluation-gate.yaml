@@ -1,0 +1,18 @@
+metrics:
+  candidate.recall_at_30:
+    max_regression: 0.01
+  final.hit_at_3:
+    max_regression: 0.01
+  locator_accuracy:
+    max_regression: 0.01
+  negative.empty_false_positive_rate:
+    max_increase: 0.0
+  latency.p95:
+    max_relative_increase: 0.20
+labels:
+  exact_identifier:
+    final.hit_at_1:
+      max_regression: 0.01
+  error_code:
+    final.hit_at_3:
+      max_regression: 0.01

@@ -58,7 +58,7 @@ logger = get_logger(__name__)
 class HarnessSettings:
     """Harness 运行时配置.
 
-    Attributes:
+    属性：
         max_turns_per_run: 单次 run 的最大 LLM 调用轮次。
         retry_budget: 工具调用失败后的最大重试次数（工具成功后重置）。
         tool_timeout: 单个工具调用的超时时间（秒）。
@@ -76,7 +76,7 @@ class HarnessSettings:
 class HarnessRunResult:
     """单次 Harness 运行结果.
 
-    Attributes:
+    属性：
         content: 最后一轮 LLM 返回的文本内容。
         run_id: 本次运行的唯一标识。
         turn_count: 实际 LLM 调用轮次。
@@ -123,7 +123,7 @@ class Harness:
     ) -> None:
         """初始化 Harness 实例.
 
-        Args:
+        参数：
             llm: LLM Provider，负责模型调用（流式/非流式）。
             tool_manager: 统一工具管理器，负责工具注册与调用。
             settings: 全局配置。
@@ -193,7 +193,7 @@ class Harness:
         主循环流程: LLM 流式调用 → 工具并行执行 → LLM 再调用 → ...
         终止条件: LLM 无工具调用 / 预算超限 / 停止信号 / 异常。
 
-        Args:
+        参数：
             messages: 对话历史（含最新用户消息）。支持 Message 对象或 dict 格式。
             session_id: 会话 ID，用于关联 Step / Message / 事件推送。
             system_prompt: 系统提示词，作为第一条 SystemMessage 注入。
@@ -204,10 +204,10 @@ class Harness:
             stop_signal: 外部停止信号（会话级 stop 事件），由 gateway 层注入；
                 与 request_stop() 的 _stop_event 等价，任一置位即终止运行。
 
-        Returns:
+        返回值：
             HarnessRunResult，包含最终文本、run_id、轮次、工具结果、错误和中断状态。
 
-        Raises:
+        异常：
             BudgetExceeded: 预算超限且无剩余重试次数时抛出。
             Exception: 未预期的执行异常（会被捕获并记录到 error 字段）。
         """
@@ -570,7 +570,7 @@ class Harness:
         使用 asyncio.gather 并行执行，每个工具调用独立创建 Step 和
         ToolCallRecord 记录。单个工具的异常不会影响其他工具执行。
 
-        Args:
+        参数：
             tool_step_starts: 预分配的工具执行计划，每项为
                 (step_number, step_id, tool_call_dict)。
             parent_step_id: 父 LLM 调用的 step_id，用于建立步骤层级关系。
@@ -578,7 +578,7 @@ class Harness:
             run_id: 运行 ID。
             tool_results_all: 累积工具结果的列表（原地追加）。
 
-        Returns:
+        返回值：
             ToolMessage 列表，按输入顺序排列，用于追加到 LLM 消息上下文。
         """
 
@@ -776,14 +776,14 @@ class Harness:
         3. 失败时查 Fallback 路由 → retry / alternate / passthrough / escalate
         4. 熔断器打开时直接返回失败
 
-        Args:
+        参数：
             tool_name: 工具名称。
             args: 工具调用参数。
             session_id: 会话 ID。
             run_id: 运行 ID。
             tool_call_id: 工具调用记录 ID。
 
-        Returns:
+        返回值：
             四元组 ``(result_content, status, error_msg, error_stack)``:
             - result_content: 工具输出文本（成功）或错误描述（失败）。
             - status: "success" / "failed" / "denied"。
@@ -878,7 +878,7 @@ class Harness:
                         break
                 elif action == "passthrough":
                     return f"[工具 {tool_name} 返回空结果]", "success", None, None
-                else:  # escalate
+                else:  # 升级处理（escalate）
                     break
 
         # 全部失败
@@ -896,11 +896,11 @@ class Harness:
         利用 langchain 的 AIMessageChunk.__add__ 拼接文本分片并累加 tool_call
         的 args JSON 分片，比手动拼装可靠。空流时回退到已累积的 fallback_content。
 
-        Args:
+        参数：
             stream_chunks: LLM 流式返回的 AIMessageChunk 列表。
             fallback_content: 流为空时的回退文本（来自已累积的 full_content）。
 
-        Returns:
+        返回值：
             二元组 ``(content, tool_calls)``:
             - content: 合并后的完整文本内容。
             - tool_calls: 归一化后的工具调用列表，每项含 id / name / args。
@@ -936,7 +936,7 @@ class Harness:
     def _should_stop(self) -> bool:
         """检查是否应停止运行.
 
-        Returns:
+        返回值：
             True 表示内部 request_stop() 或外部 stop_signal 任一已置位。
         """
         return self._stop_event.is_set() or bool(
@@ -949,7 +949,7 @@ class Harness:
         自动注入 parent_run_id（子 Agent 运行时由 run() 设置）。
         持久化异常仅记录日志，不向上抛出。
 
-        Args:
+        参数：
             step: 待持久化的 Step 实例。
         """
         try:
@@ -963,7 +963,7 @@ class Harness:
     async def _update_step(self, step_id: str, updates: dict[str, Any]) -> None:
         """更新已有步骤记录的部分字段.
 
-        Args:
+        参数：
             step_id: 步骤 ID。
             updates: 待更新的字段字典，键为字段名，值为新值。
         """
@@ -983,7 +983,7 @@ class Harness:
 
         推送异常仅记录警告日志，不向上抛出。
 
-        Args:
+        参数：
             event_type: 事件类型枚举。
             data: 事件数据字典。
             session_id: 会话 ID。
@@ -1017,7 +1017,7 @@ class Harness:
         纯工具调用回合（无文本）通过 tool_calls 把工具名/参数带给前端，
         使其与历史视图一致地展示该回合的工具卡片。
 
-        Args:
+        参数：
             step_id: LLM 调用步骤 ID。
             status: "completed" 或 "failed"。
             session_id: 会话 ID。

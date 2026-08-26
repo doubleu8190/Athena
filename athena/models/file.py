@@ -62,7 +62,7 @@ class FileTaskStatus(StrEnum):
 class AttachmentRef(BaseModel):
     """附件的轻量引用（用于消息关联，不暴露存储细节）。
 
-    Attributes:
+    属性：
         id: 附件 ID。
         filename: 原始文件名。
         mime_type: MIME 类型。
@@ -83,7 +83,7 @@ class Attachment(BaseModel):
     表示用户上传的文件资产，关联到特定会话。``storage_key`` 字段
     排除在 JSON 序列化之外（``exclude=True``），不暴露给前端。
 
-    Attributes:
+    属性：
         id: 附件唯一标识（时间戳 ID）。
         session_id: 所属会话 ID。
         message_id: 关联的消息 ID（可选）。
@@ -138,7 +138,7 @@ class FileTask(BaseModel):
     表示一个异步文件处理任务（解析、索引、摘要等）。
     支持重试（``attempts`` / ``max_attempts``）和优先级调度。
 
-    Attributes:
+    属性：
         id: 任务唯一标识。
         session_id: 所属会话 ID。
         attachment_id: 关联的附件 ID。
@@ -185,7 +185,7 @@ class FileChunk(BaseModel):
     文件解析后按大小分块存储，每个分块附带定位器和元数据，
     用于精准读取和搜索结果定位。
 
-    Attributes:
+    属性：
         id: 分块唯一标识。
         attachment_id: 所属附件 ID。
         ordinal: 分块序号（从 0 开始）。
@@ -210,7 +210,7 @@ class AdapterInfo(BaseModel):
     描述适配器的名称、版本、支持的文件类型和能力列表，
     用于适配器选择和 DB 同步。
 
-    Attributes:
+    属性：
         name: 适配器名称（如 ``"text"``、``"pdf"``）。
         version: 适配器版本号。
         mime_types: 支持的 MIME 类型列表。

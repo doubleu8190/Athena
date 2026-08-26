@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field
 
 
 class McpServerConfig(BaseModel):
-    """单个 MCP Server 的注册配置（与用户输入的 mcpServers 项一致）.
+    """单个 MCP 服务端 的注册配置（与用户输入的 mcp服务端s 项一致）.
 
-    Attributes:
+    属性：
         command: 启动命令（如 npx / python）
         args: 命令参数
         env: 环境变量（含密钥，仅用于启动子进程，列表接口返回掩码）

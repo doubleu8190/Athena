@@ -22,6 +22,15 @@ import type {
   AttachmentUploadItem,
   FileTask,
   SupportedAttachmentTypes,
+  EvaluationCaseSummary,
+  EvaluationPage,
+  EvaluationReport,
+  EvaluationReportSummary,
+  EvaluationSettings,
+  FeedbackRecord,
+  FeedbackRating,
+  RetrievalEventDetail,
+  RetrievalEventSummary,
 } from "../types"
 
 class ApiClient {
@@ -326,6 +335,123 @@ class ApiClient {
       `/api/mcp/servers/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     )
+  }
+
+  // ─── 检索评估 ────────────────────────────────────────────────
+
+  async listEvaluationEvents(opts?: {
+    session_id?: string
+    source?: string
+    feedback_status?: string
+    limit?: number
+    cursor?: string
+  }): Promise<EvaluationPage<RetrievalEventSummary>> {
+    const params = new URLSearchParams()
+    Object.entries(opts ?? {}).forEach(([key, value]) => {
+      if (value != null && value !== "") params.set(key, String(value))
+    })
+    return this.request<EvaluationPage<RetrievalEventSummary>>(
+      `/api/evaluation/events${params.size ? `?${params.toString()}` : ""}`,
+    )
+  }
+
+  async getEvaluationEvent(eventId: string): Promise<RetrievalEventDetail> {
+    return this.request<RetrievalEventDetail>(`/api/evaluation/events/${encodeURIComponent(eventId)}`)
+  }
+
+  async submitFeedback(payload: {
+    event_id: string
+    rating: FeedbackRating
+    correct_result_ids?: string[]
+    expect_empty?: boolean
+    gain?: 1 | 2 | 3
+    comment?: string
+  }): Promise<FeedbackRecord> {
+    return this.request<FeedbackRecord>("/api/evaluation/feedback", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+  }
+
+  async listEvaluationFeedback(opts?: {
+    status?: string
+    rating?: FeedbackRating
+    session_id?: string
+    limit?: number
+    cursor?: string
+  }): Promise<EvaluationPage<FeedbackRecord>> {
+    const params = new URLSearchParams()
+    Object.entries(opts ?? {}).forEach(([key, value]) => {
+      if (value != null && value !== "") params.set(key, String(value))
+    })
+    return this.request<EvaluationPage<FeedbackRecord>>(
+      `/api/evaluation/feedback${params.size ? `?${params.toString()}` : ""}`,
+    )
+  }
+
+  async promoteEvaluationFeedback(
+    feedbackId: string,
+    payload?: { case_id?: string; labels?: string[] },
+  ): Promise<{ case: EvaluationCaseSummary; dataset_version: string }> {
+    return this.request<{ case: EvaluationCaseSummary; dataset_version: string }>(
+      `/api/evaluation/feedback/${encodeURIComponent(feedbackId)}/promote`,
+      { method: "POST", body: JSON.stringify(payload ?? {}) },
+    )
+  }
+
+  async listEvaluationCases(opts?: {
+    label?: string
+    source?: string
+    status?: string
+    limit?: number
+    cursor?: string
+  }): Promise<EvaluationPage<EvaluationCaseSummary>> {
+    const params = new URLSearchParams()
+    Object.entries(opts ?? {}).forEach(([key, value]) => {
+      if (value != null && value !== "") params.set(key, String(value))
+    })
+    return this.request<EvaluationPage<EvaluationCaseSummary>>(
+      `/api/evaluation/cases${params.size ? `?${params.toString()}` : ""}`,
+    )
+  }
+
+  async listEvaluationReports(opts?: {
+    kind?: "run" | "comparison"
+    limit?: number
+    cursor?: string
+  }): Promise<EvaluationPage<EvaluationReportSummary>> {
+    const params = new URLSearchParams()
+    Object.entries(opts ?? {}).forEach(([key, value]) => {
+      if (value != null && value !== "") params.set(key, String(value))
+    })
+    return this.request<EvaluationPage<EvaluationReportSummary>>(
+      `/api/evaluation/reports${params.size ? `?${params.toString()}` : ""}`,
+    )
+  }
+
+  async getEvaluationReport(reportId: string): Promise<EvaluationReport> {
+    return this.request<EvaluationReport>(`/api/evaluation/reports/${encodeURIComponent(reportId)}`)
+  }
+
+  async getEvaluationSettings(): Promise<EvaluationSettings> {
+    return this.request<EvaluationSettings>("/api/evaluation/settings")
+  }
+
+  async updateEvaluationSettings(payload: {
+    record_enabled?: boolean
+    record_sample_rate?: number
+  }): Promise<EvaluationSettings> {
+    return this.request<EvaluationSettings>("/api/evaluation/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    })
+  }
+
+  async clearEvaluationRecords(targets: Array<"records" | "feedback" | "cases" | "reports">): Promise<void> {
+    await this.request("/api/evaluation/records", {
+      method: "DELETE",
+      body: JSON.stringify({ targets }),
+    })
   }
 }
 

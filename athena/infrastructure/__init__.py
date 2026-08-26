@@ -1,1 +1,1 @@
-"""Technology-specific adapters wired by the application composition root."""
+"""由应用组合根连接的技术专用适配器。"""

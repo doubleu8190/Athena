@@ -66,13 +66,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     除 SUBSCRIBE 外的会话级消息（USER_COMMAND 等）session_id 必填，
     缺失/为空时回推 ERROR 事件并跳过该消息（不当作退订或空会话处理）。
 
-    Args:
+    参数：
         websocket: FastAPI 传入的 WebSocket 连接实例。
 
-    Returns:
+    返回值：
         None。连接断开或异常时返回。
 
-    Raises:
+    异常：
         WebSocketDisconnect: 客户端断开连接（在函数内部捕获处理）。
     """
     runtime = runtime_from(websocket)
@@ -175,7 +175,7 @@ async def _handle_user_command(
     将消息提交给 AgentWorkflow.process_message() 异步执行，
     不等待结果，避免阻塞 WebSocket 接收循环。
 
-    Args:
+    参数：
         session_id: 会话 ID。
         data: 命令数据，需包含 "message" 字段（用户消息内容）。
     """
@@ -219,7 +219,7 @@ async def _handle_approval_response(
 ) -> None:
     """处理审批响应（允许/拒绝）.
 
-    Args:
+    参数：
         data: 审批数据，需包含:
             - approval_id: 审批请求 ID
             - action: "allow"（允许）或 "deny"（拒绝）
@@ -236,7 +236,7 @@ async def _handle_approval_cancel(
 ) -> None:
     """处理审批取消（用户放弃审批，工具执行将被终止）.
 
-    Args:
+    参数：
         data: 审批数据，需包含 approval_id（审批请求 ID）。
     """
     approval_id = data.get("approval_id", "")
@@ -253,7 +253,7 @@ async def _handle_memory_save(
     通过 workflow 内部对象链 (_memory_retrieval._memory) 定位 MemoryManager，
     写入内容时自动注入 session_id 元数据用于来源追踪。
 
-    Args:
+    参数：
         session_id: 会话 ID。
         data: 记忆数据，需包含:
             - content: 记忆文本内容
@@ -276,13 +276,13 @@ async def _handle_session_resume(
     仅当会话状态为 interrupted / running / failed 时才允许恢复。
     其他状态回推 ERROR 事件。
 
-    Args:
+    参数：
         session_id: 会话 ID。
         data: 恢复数据，可选 mode 字段:
             - mode="recover"（默认）: 完整恢复流程，重新触发 Agent 执行
             - mode="abandon": 仅重置状态为 idle，不触发恢复
 
-    Raises:
+    异常：
         WebSocketDisconnect: 由异步恢复任务抛出时被捕获并记录日志。
     """
     from athena.core.recovery.session_recovery import SessionRecovery
@@ -366,7 +366,7 @@ async def _execute_ws_recovery(
     作为独立任务运行（由 _handle_session_resume 创建），
     成功后推送 SESSION_RECOVERED，失败推送 ERROR。
 
-    Args:
+    参数：
         recovery: 会话恢复器实例。
         session_id: 会话 ID。
         ws_manager: WebSocket 管理器，用于推送事件。

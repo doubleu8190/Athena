@@ -69,7 +69,7 @@ class RetryConfig:
     控制指数退避重试的行为参数。延迟计算公式:
         delay = min(min_delay_ms * 2^attempt, max_delay_ms) + jitter
 
-    Attributes:
+    属性：
         max_attempts: 最大重试次数（含首次调用）。
         min_delay_ms: 首次重试的最小延迟（毫秒）。
         max_delay_ms: 延迟上限（毫秒），防止指数退避无限增长。
@@ -109,10 +109,10 @@ def categorize_error(error: Exception) -> ErrorCategory:
     分类优先级：TRANSIENT > RATE_LIMITED > CONTEXT_OVERFLOW >
     MODEL_MISBEHAVIOR > PERMANENT > UNKNOWN。
 
-    Args:
+    参数：
         error: 待分类的异常实例。
 
-    Returns:
+    返回值：
         错误类别枚举值。
     """
     error_str = str(error).lower()
@@ -158,10 +158,10 @@ def get_retry_after(error: Exception) -> float | None:
     - ``retry-after``: 秒数（标准 HTTP header）
     - ``retry-after-ms``: 毫秒数（部分 API 扩展）
 
-    Args:
+    参数：
         error: HTTP 相关异常，需具有 ``response.headers`` 属性。
 
-    Returns:
+    返回值：
         建议等待秒数（上限 60s），无法提取时返回 None。
     """
     if hasattr(error, "response"):
@@ -185,7 +185,7 @@ def get_retry_after(error: Exception) -> float | None:
 class RetryResult:
     """重试结果.
 
-    Attributes:
+    属性：
         success: 是否最终成功。
         result: 成功时的 LLM 响应消息。
         error: 失败时的最后一次异常。
@@ -216,7 +216,7 @@ async def retry_with_backoff(
     若异常携带 HTTP retry-after header，优先使用该值。
     不可重试的错误类别（CONTEXT_OVERFLOW / PERMANENT）立即返回失败。
 
-    Args:
+    参数：
         func: 待执行的异步函数。
         *args: 传递给 func 的位置参数。
         retry_config: 重试配置。未提供时根据 error_category 从 RETRY_CONFIGS 查找；
@@ -226,7 +226,7 @@ async def retry_with_backoff(
             未提供时使用默认 logger.warning 回调。
         **kwargs: 传递给 func 的关键字参数。
 
-    Returns:
+    返回值：
         RetryResult，包含成功/失败状态、结果或异常、尝试次数和总耗时。
     """
     if retry_config is None and error_category is not None:
@@ -238,6 +238,19 @@ async def retry_with_backoff(
         async def _default_on_retry(
             attempt: int, error: Exception, delay_s: float
         ) -> None:
+            """执行“default on retry”操作。
+
+            参数：
+                attempt (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+                error (Exception): 输入参数；其类型和取值约束由方法签名及实现定义。
+                delay_s (float): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             logger.warning(
                 "llm_retry",
                 attempt=attempt,
@@ -333,7 +346,7 @@ class LLMRetryManager:
     def __init__(self, retry_config: RetryConfig | None = None) -> None:
         """初始化重试管理器.
 
-        Args:
+        参数：
             retry_config: 重试配置，未提供时使用默认值。
         """
         self._config = retry_config or RetryConfig()
@@ -342,7 +355,7 @@ class LLMRetryManager:
     def add_fallback_provider(self, provider: LLMProvider) -> None:
         """添加备用 LLM Provider（故障转移用）.
 
-        Args:
+        参数：
             provider: 备用 LLM Provider 实例，按添加顺序依次尝试。
         """
         self._fallback_providers.append(provider)
@@ -361,13 +374,13 @@ class LLMRetryManager:
     ) -> RetryResult:
         """执行 LLM 调用，失败时按多级故障转移策略重试.
 
-        Args:
+        参数：
             func: 待执行的 LLM 调用异步函数。
             *args: 传递给 func 的位置参数。
             on_retry: 每次重试前的回调，参见 ``retry_with_backoff``。
             **kwargs: 传递给 func 的关键字参数。
 
-        Returns:
+        返回值：
             RetryResult，包含成功/失败状态、结果或异常、尝试次数和总耗时。
         """
         # 阶段 1: 同模型重试

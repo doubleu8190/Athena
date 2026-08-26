@@ -1,10 +1,10 @@
-"""Adapter contracts and normalized extraction types.
+"""适配器契约和标准化提取类型。
 
 定义文件适配器的公共协议和提取结果的数据结构。所有内置适配器
 （TextAdapter、PdfAdapter 等）和自定义适配器均需实现 ``FileAdapter``
 协议，并返回 ``ExtractionResult`` 作为统一的提取产物。
 
-Typical usage example::
+典型用法示例：
 
     adapter: FileAdapter = TextAdapter()
     context = ExtractionContext(path=path, workspace=workspace, filename=path.name)
@@ -27,7 +27,7 @@ from athena.models.file import AdapterInfo
 class ExtractionContext:
     """文件提取上下文。
 
-    Attributes:
+    属性：
         path: 文件的绝对路径。
         workspace: 临时工作目录路径，适配器可在此解压或生成中间文件。
         filename: 用户上传时的可见文件名。
@@ -47,7 +47,7 @@ class ExtractedUnit:
     每个单元代表一段连续的文本内容，附带定位信息和元数据。
     例如：PDF 的一页、Word 的一个段落、代码文件的完整源码。
 
-    Attributes:
+    属性：
         content: 提取的文本内容。
         locator: 内容在源文件中的定位信息（如页码、段落号、行范围），
             用于前端定位和高亮显示。
@@ -67,7 +67,7 @@ class ExtractionResult:
     包含内容单元列表、文件级元数据，以及可选的结构化信息
     （符号表、依赖关系、表格数据）。
 
-    Attributes:
+    属性：
         units: 提取的内容单元列表，按源文件顺序排列。
         metadata: 文件级元数据（如总页数、行数、语言分布）。
         symbols: 代码符号列表，每项含 name/qualified_name/kind/start_line 等字段，
@@ -92,7 +92,7 @@ class FileAdapter(Protocol):
     （文本、PDF、Word、Excel、图片、代码）解析为统一的
     ``ExtractionResult``。
 
-    Attributes:
+    属性：
         info: 适配器注册信息，包含名称、版本、MIME 类型、扩展名和能力列表。
     """
 
@@ -105,11 +105,11 @@ class FileAdapter(Protocol):
     ) -> ExtractionResult:
         """从文件中提取内容、符号和表格数据。
 
-        Args:
+        参数：
             context: 文件路径、临时目录、原始文件名和 MIME 类型。
             settings: 全局配置，包含 chunk 大小等。
 
-        Returns:
+        返回值：
             ``ExtractionResult``：包含提取的内容单元、元数据和结构化信息。
         """
         ...
@@ -117,11 +117,11 @@ class FileAdapter(Protocol):
     async def analyze(self, path: Path, task: str) -> dict[str, Any]:
         """对文件执行高级分析（如统计摘要、数据透视）。
 
-        Args:
+        参数：
             path: 文件的绝对路径。
             task: 分析任务的自然语言描述。
 
-        Returns:
+        返回值：
             分析结果字典，结构因适配器类型而异。
         """
         ...

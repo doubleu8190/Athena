@@ -79,7 +79,9 @@ class ToolProtocol(Protocol):
 
     schema: ToolSchema
 
-    async def execute(self, **params: Any) -> ToolResult: ...
+    async def execute(self, **params: Any) -> ToolResult:
+        """执行工具并返回统一工具结果。"""
+        ...
 
 
 class NativeTool:
@@ -94,6 +96,22 @@ class NativeTool:
         risk_level: RiskLevel | str = RiskLevel.LOW,
         require_approval: bool = False,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            name (str): 资源名称或稳定标识。
+            description (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            handler (NativeHandler): 输入参数；其类型和取值约束由方法签名及实现定义。
+            parameters (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            risk_level (RiskLevel | str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            require_approval (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self.schema = ToolSchema(
             name=name,
             description=description,
@@ -135,6 +153,24 @@ class MCPTool:
         risk_level: RiskLevel | str = RiskLevel.MEDIUM,
         require_approval: bool = True,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            name (str): 资源名称或稳定标识。
+            description (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            parameters (dict[str, Any]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            mcp_client (MCPClient): 输入参数；其类型和取值约束由方法签名及实现定义。
+            server_name (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            remote_name (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            risk_level (RiskLevel | str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            require_approval (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self.schema = ToolSchema(
             name=name,
             description=description,

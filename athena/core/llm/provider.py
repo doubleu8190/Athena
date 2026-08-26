@@ -37,19 +37,29 @@ class LLMProviderProtocol(Protocol):
     """统一的 LLM 调用接口协议."""
 
     @property
-    def model(self) -> BaseChatModel: ...
+    def model(self) -> BaseChatModel:
+        """返回底层 LangChain 聊天模型。"""
+        ...
 
     async def ainvoke(
         self, messages: list[BaseMessage], **kwargs: Any
-    ) -> BaseMessage: ...
+    ) -> BaseMessage:
+        """异步调用模型并返回消息结果。"""
+        ...
 
     def astream(
         self, messages: list[BaseMessage], **kwargs: Any
-    ) -> AsyncIterator[BaseMessage]: ...
+    ) -> AsyncIterator[BaseMessage]:
+        """以异步迭代器流式返回模型消息块。"""
+        ...
 
-    def bind_tools(self, tools: list[BaseTool]) -> "LLMProviderProtocol": ...
+    def bind_tools(self, tools: list[BaseTool]) -> "LLMProviderProtocol":
+        """返回绑定指定工具定义的模型提供商。"""
+        ...
 
-    def with_structured_output(self, schema: type) -> Runnable: ...
+    def with_structured_output(self, schema: type) -> Runnable:
+        """返回约束为指定结构化输出的模型提供商。"""
+        ...
 
 
 class LLMProvider:
@@ -64,6 +74,18 @@ class LLMProvider:
         model: BaseChatModel,
         retry_manager: LLMRetryManager | None = None,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            model (BaseChatModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+            retry_manager (LLMRetryManager | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._model = model
         self._retry_manager = retry_manager
         self._token_counter: TokenCounter = ModelTokenCounter(model)
@@ -78,11 +100,11 @@ class LLMProvider:
         self._retry_manager = retry_manager
 
     def count_text_tokens(self, text: str) -> int:
-        """Count raw text tokens using the best local tokenizer available."""
+        """使用可用的最佳本地 tokenizer 统计原始文本 token 数。"""
         return self._token_counter.count_text_tokens(text)
 
     def count_message_tokens(self, messages: Sequence[BaseMessage]) -> int:
-        """Count structured message tokens without issuing an extra API request."""
+        """不发起额外 API 请求，统计结构化消息的 token 数。"""
         return self._token_counter.count_message_tokens(messages)
 
     async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> BaseMessage:

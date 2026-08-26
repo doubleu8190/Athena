@@ -33,6 +33,17 @@ class UnifiedToolManager:
     """统一工具管理器."""
 
     def __init__(self, approval_manager: ApprovalPort) -> None:
+        """初始化当前对象。
+
+        参数：
+            approval_manager (审批Port): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._tools: dict[str, ToolProtocol] = {}
         self._disabled: set[str] = set()
         self._approval_manager = approval_manager
@@ -64,7 +75,7 @@ class UnifiedToolManager:
     ) -> None:
         """注册 MCP 服务器的工具集.
 
-        Args:
+        参数：
             server_name: MCP 服务器名称
             tool_defs: 工具定义列表，每项含
                 name/description/parameters/remote_name/risk_level/require_approval
@@ -86,15 +97,53 @@ class UnifiedToolManager:
     # ------------------------------------------------------------------
 
     def get_tool(self, name: str) -> ToolProtocol | None:
+        """执行“get tool”操作。
+
+        参数：
+            name (str): 资源名称或稳定标识。
+
+        返回值：
+            ToolProtocol | None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return self._tools.get(name)
 
     def contains(self, name: str) -> bool:
+        """执行“contains”操作。
+
+        参数：
+            name (str): 资源名称或稳定标识。
+
+        返回值：
+            bool: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return name in self._tools
 
     def list_tools(self) -> list[ToolProtocol]:
+        """执行“list tools”操作。
+
+        返回值：
+            list[ToolProtocol]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return list(self._tools.values())
 
     def list_names(self) -> list[str]:
+        """执行“list names”操作。
+
+        返回值：
+            list[str]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return list(self._tools.keys())
 
     def is_enabled(self, name: str) -> bool:
@@ -134,7 +183,7 @@ class UnifiedToolManager:
         同步更新 ToolSchema 字段和 _disabled 集合。
         DB 写入由调用方负责，保持职责分离。
 
-        Returns:
+        返回值：
             是否成功（工具必须已注册）
         """
         tool = self._tools.get(name)
@@ -174,14 +223,14 @@ class UnifiedToolManager:
     ) -> ToolResult:
         """统一工具调用入口，含审批检查.
 
-        遵循 project_memory：审批通过 ApprovalManager.request_approval() 立即返回 Future，
+        遵循 project_memory：审批通过 审批Manager.request_approval() 立即返回 Future，
         调用方 await future 等待结果，避免审批风暴。
 
         session_id / run_id / tool_call_id 为必填：标识本次工具调用归属的会话、运行与
         具体工具调用，用于审批留痕与子代理父链上下文。
         """
-        # Each invocation owns its parameter mapping.  Concurrent sessions may
-        # call the same NativeTool, so context fields must never leak between them.
+        # 每次调用拥有独立的参数映射。并发会话可能调用同一个 NativeTool，
+        # 因此上下文字段绝不能在会话之间泄漏。
         params = dict(params)
         tool = self._tools.get(name)
         if tool is None:
@@ -214,8 +263,8 @@ class UnifiedToolManager:
                 logger.error("approval_failed", tool=name, error=str(e))
                 return ToolResult(status="failed", error=f"审批流程异常: {e}")
 
-        # All native capabilities read trusted invocation metadata from a
-        # coroutine-local context. It is never exposed as model arguments.
+        # 所有本地能力都从协程本地上下文读取可信的调用元数据，
+        # 该元数据不会暴露为模型参数。
         token = None
         if isinstance(tool, NativeTool):
             from athena.core.tools.spec import ToolContext, set_tool_context
@@ -257,6 +306,17 @@ class UnifiedToolManager:
         schema = tool.schema
 
         async def _runner(**params: Any) -> str:
+            """执行“runner”操作。
+
+            参数：
+                params (Any): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                str: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             from athena.core.tools.spec import get_tool_context
 
             context = get_tool_context()

@@ -1,4 +1,4 @@
-"""File intelligence tool declarations."""
+"""文件智能工具声明。"""
 
 from __future__ import annotations
 
@@ -12,27 +12,114 @@ if TYPE_CHECKING:
 
 
 def build_file_tool_specs(runtime: FileIntelligenceRuntime) -> list[ToolSpec]:
+    """执行“build file tool specs”操作。
+
+    参数：
+        runtime (FileIntelligenceRuntime): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+    返回值：
+        list[ToolSpec]: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     def session_id() -> str:
+        """执行“session id”操作。
+
+        返回值：
+            str: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return get_tool_context().session_id
 
     async def list_files() -> Any:
+        """执行“list files”操作。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.list_files(session_id())
 
     async def get_file_info(file_id: str) -> Any:
+        """执行“get file info”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.get_file_info(session_id(), file_id)
 
     async def read_file(
         file_id: str, locator: dict[str, Any] | None = None, limit: int = 10
     ) -> Any:
+        """执行“read file”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            locator (dict[str, Any] | None): 源文档定位信息。
+            limit (int): 最大返回数量；应为非负整数。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.read_file(session_id(), file_id, locator, limit)
 
     async def search_file(file_id: str, query: str, limit: int = 10) -> Any:
+        """执行“search file”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            query (str): 检索或搜索文本；应为非空字符串。
+            limit (int): 最大返回数量；应为非负整数。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.search_file(session_id(), file_id, query, limit)
 
     async def extract_table(file_id: str) -> Any:
+        """执行“extract table”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.extract_table(session_id(), file_id)
 
     async def summarize_file(file_id: str, summary_type: str = "general") -> Any:
+        """执行“summarize file”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            summary_type (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if runtime.task_queue_available:
             task = await runtime.enqueue_task(
                 session_id(), file_id, FileTaskType.FILE_SUMMARY,
@@ -42,9 +129,32 @@ def build_file_tool_specs(runtime: FileIntelligenceRuntime) -> list[ToolSpec]:
         return await runtime.summarize_file(session_id(), file_id, summary_type)
 
     async def analyze_file(file_id: str, task: str) -> Any:
+        """执行“analyze file”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            task (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.analyze_file(session_id(), file_id, task)
 
     async def analyze_codebase(file_id: str) -> Any:
+        """执行“analyze codebase”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         if runtime.task_queue_available:
             task = await runtime.enqueue_task(
                 session_id(), file_id, FileTaskType.CODE_ANALYSIS,
@@ -53,17 +163,66 @@ def build_file_tool_specs(runtime: FileIntelligenceRuntime) -> list[ToolSpec]:
         return await runtime.analyze_codebase(session_id(), file_id)
 
     async def find_symbol(file_id: str, name: str) -> Any:
+        """执行“find symbol”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            name (str): 资源名称或稳定标识。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.find_symbol(session_id(), file_id, name)
 
     async def find_definition(file_id: str, name: str) -> Any:
+        """执行“find definition”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            name (str): 资源名称或稳定标识。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.find_symbol(session_id(), file_id, name)
 
     async def find_references(file_id: str, name: str) -> Any:
+        """执行“find references”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            name (str): 资源名称或稳定标识。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.get_call_graph(session_id(), file_id, name, "incoming")
 
     async def get_call_graph(
         file_id: str, symbol: str, direction: str = "both"
     ) -> Any:
+        """执行“get call graph”操作。
+
+        参数：
+            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            symbol (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            direction (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            Any: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         return await runtime.get_call_graph(session_id(), file_id, symbol, direction)
 
     file_id = {

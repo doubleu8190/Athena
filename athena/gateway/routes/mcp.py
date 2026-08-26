@@ -1,7 +1,7 @@
-"""MCP 服务器路由 — 注册 / 列出 / 注销 MCP Server.
+"""MCP 服务器路由 — 注册 / 列出 / 注销 MCP 服务端.
 
-请求体与用户输入的 mcpServers 格式完全一致：
-    {"mcpServers": {"<name>": {"command": "...", "args": [...], "env": {...}}}}
+请求体与用户输入的 mcp服务端s 格式完全一致：
+    {"mcp服务端s": {"<name>": {"command": "...", "args": [...], "env": {...}}}}
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 
 class McpServersPayload(BaseModel):
-    """注册请求体 — 与用户输入的 mcpServers 格式一致."""
+    """注册请求体 — 与用户输入的 mcp服务端s 格式一致."""
 
     mcpServers: dict[str, McpServerConfig]
 
@@ -30,7 +30,7 @@ class McpServerView(BaseModel):
     command: str
     args: list[str]
     env_masked: dict[str, str]
-    status: str  # connected / failed
+    status: str  # connected / failed（已连接 / 失败）
     tool_count: int
     error: str | None = None
     created_at: str
@@ -40,7 +40,7 @@ class McpRegisterResult(BaseModel):
     """单台服务器注册结果."""
 
     name: str
-    status: str  # connected / failed
+    status: str  # connected / failed（已连接 / 失败）
     tool_count: int
     error: str | None = None
 

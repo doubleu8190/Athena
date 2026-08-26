@@ -1,8 +1,8 @@
 """领域模型 — 供 repository 层与业务层使用的类型化数据结构.
 
-- Message/Session/Step/ToolCallRecord/ApprovalLog: repository 查询结果与 save 输入的类型
+- Message/Session/Step/ToolCallRecord/审批Log: repository 查询结果与 save 输入的类型
 - 各 StrEnum: 状态/角色/类型枚举
-- ToolSchema/ToolResult/ApprovalRequest: 工具与审批流程使用的模型
+- ToolSchema/ToolResult/审批Request: 工具与审批流程使用的模型
 """
 
 from athena.models.approval import (

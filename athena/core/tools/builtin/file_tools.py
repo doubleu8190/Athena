@@ -31,14 +31,14 @@ _MAX_SECTION_LINES = 200
 def _safe_resolve_path(path: str, *, for_write: bool = False) -> Path:
     """使用 PathSecurityFilter 验证并解析路径.
 
-    Args:
+    参数：
         path: 原始路径字符串
         for_write: 是否为写操作（启用写保护检查）
 
-    Returns:
+    返回值：
         解析后的安全 Path 对象
 
-    Raises:
+    异常：
         PathSecurityError: 路径不安全
     """
     filter = get_path_security_filter()
@@ -50,11 +50,11 @@ def _safe_resolve_path(path: str, *, for_write: bool = False) -> Path:
 async def read_file(path: str, encoding: str = "utf-8") -> str:
     """读取文件内容.
 
-    Args:
+    参数：
         path: 文件路径（经 PathSecurityFilter 验证）
         encoding: 文件编码，默认 utf-8
 
-    Returns:
+    返回值：
         文件文本内容
     """
     try:
@@ -73,13 +73,13 @@ async def read_file(path: str, encoding: str = "utf-8") -> str:
 async def write_file(path: str, content: str, encoding: str = "utf-8", append: bool = False) -> str:
     """写入文件内容.
 
-    Args:
+    参数：
         path: 文件路径（经 PathSecurityFilter 验证）
         content: 要写入的内容
         encoding: 文件编码，默认 utf-8
         append: 是否追加写入，默认 False（覆盖）
 
-    Returns:
+    返回值：
         操作结果描述
     """
     try:
@@ -101,11 +101,11 @@ async def write_file(path: str, content: str, encoding: str = "utf-8", append: b
 async def list_directory(path: str = ".", include_hidden: bool = False) -> str:
     """列出目录内容.
 
-    Args:
+    参数：
         path: 目录路径（经 PathSecurityFilter 验证），默认当前目录
         include_hidden: 是否包含隐藏文件（以 . 开头），默认 False
 
-    Returns:
+    返回值：
         目录条目列表（文件/目录标识 + 名称）
     """
     try:
@@ -141,10 +141,10 @@ async def get_file_info(path: str) -> dict:
 
     Agent 首先调用此工具判断文件大小，决定下一步策略（直接读还是分段搜）。
 
-    Args:
+    参数：
         path: 文件路径（经 PathSecurityFilter 验证）
 
-    Returns:
+    返回值：
         包含文件元数据的字典：
         - size_kb: 文件大小（KB）
         - line_count: 文件行数
@@ -209,15 +209,15 @@ async def read_file_section(
 
     当 Agent 知道要查具体哪个函数或报错行时，窄读局部代码。
 
-    Args:
+    参数：
         path: 文件路径（经 PathSecurityFilter 验证）
         start_line: 起始行号（从 1 开始）
         limit: 读取行数（最大 200）
 
-    Returns:
+    返回值：
         指定范围的文件内容
 
-    Raises:
+    异常：
         ValueError: 参数无效
     """
     if start_line < 1:
@@ -270,11 +270,11 @@ async def search_in_file(path: str, pattern: str) -> str:
 
     当 Agent 想找"哪里定义了某函数"或"哪里抛出某异常"时，先搜再读。
 
-    Args:
+    参数：
         path: 文件路径（经 PathSecurityFilter 验证）
         pattern: 正则表达式模式
 
-    Returns:
+    返回值：
         JSON 格式的匹配结果列表：[{"line": 42, "content": "def login():"}, ...]
     """
     try:
@@ -321,14 +321,14 @@ async def read_full_file(path: str, encoding: str = "utf-8") -> str:
 
     处理小脚本时的快捷方式。
 
-    Args:
+    参数：
         path: 文件路径（经 PathSecurityFilter 验证）
         encoding: 文件编码，默认 utf-8
 
-    Returns:
+    返回值：
         文件文本内容
 
-    Raises:
+    异常：
         ValueError: 文件过大（> 50KB）
     """
     try:

@@ -8,7 +8,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from time import perf_counter
+from typing import Any, Awaitable, Callable, Protocol
 
 from langchain_core.messages import HumanMessage
 
@@ -16,6 +17,7 @@ from athena.config.settings import Settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import TokenCounter
 from athena.core.memory.memory import MemoryManager
+from athena.core.retrieval.trace import RetrievalTrace
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
@@ -34,9 +36,22 @@ class SearchResult:
 
     content: str
     score: float
-    source: str  # "vector" / "keyword" / "fused"
+    source: str  # "vector" / "keyword" / "fused"（向量 / 关键词 / 融合）
     metadata: dict[str, Any]
     chunk_id: str
+
+
+class ShadowSubmitter(Protocol):
+    """应用层 Shadow runner 的最小依赖，避免 core 依赖评估实现。"""
+
+    async def submit(
+        self,
+        *,
+        query: str,
+        scope: dict[str, Any],
+        baseline_ids: list[str],
+        labels: list[str] | None = None,
+    ) -> bool: ...
 
 
 class HybridRetrievalManager:
@@ -50,7 +65,22 @@ class HybridRetrievalManager:
         llm_provider: LLMProvider,
         memory_manager: MemoryManager,
         settings: Settings,
+        trace_sink: Callable[[RetrievalTrace], None] | None = None,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            llm_provider (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_manager (MemoryManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            settings (Settings): 全局配置对象。
+            trace_sink (Callable[[RetrievalTrace], None] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._llm = llm_provider
         self._memory = memory_manager
         self._settings = settings
@@ -60,11 +90,15 @@ class HybridRetrievalManager:
         self._keyword_weight = self._settings.keyword_weight
         self._rrf_k = self._settings.rrf_k
         self._ttl_days = self._settings.memory_ttl_days
+        self._trace_enabled = self._settings.retrieval_trace_enabled
+        self._trace_sink = trace_sink
 
     async def retrieve(
         self,
         query: str,
         filter_params: dict[str, Any] | None = None,
+        *,
+        record_access: bool = True,
     ) -> list[SearchResult]:
         """执行混合检索（默认跨会话全库）.
 
@@ -72,57 +106,84 @@ class HybridRetrievalManager:
         记忆都可被召回；filter_params 为可选显式过滤（按需传入 category/
         type 等），产线不传即全库检索。
         """
-        # 1. LLM 查询扩展
-        expanded_query = await self._expand_query(query)
+        trace = self._new_trace(query)
+        selected: list[SearchResult] = []
+        try:
+            # 1. LLM 查询扩展
+            expanded_query = await self._expand_query(query, trace)
 
-        # 2. 向量检索
-        vector_results = await self._vector_search(
-            expanded_query or query, filter_params
-        )
+            # 2. 向量检索
+            vector_results = await self._vector_search(
+                expanded_query or query, filter_params, trace, record_access
+            )
 
-        # 3. 关键词检索
-        keyword_results = await self._keyword_search(query, filter_params)
+            # 3. 关键词检索
+            keyword_results = await self._keyword_search(
+                query, filter_params, trace, record_access
+            )
 
-        # 4. RRF 融合
-        fused = self._reciprocal_rank_fusion(vector_results, keyword_results)
+            # 4. RRF 融合
+            fusion_started = perf_counter()
+            fused = self._reciprocal_rank_fusion(vector_results, keyword_results)
+            if trace is not None:
+                trace.set_fused_scores(
+                    {result.chunk_id: result.score for result in fused}
+                )
+                trace.add_stage(
+                    stage="fusion",
+                    route="rrf",
+                    query_index=0,
+                    duration_ms=(perf_counter() - fusion_started) * 1000,
+                    result_count=len(fused),
+                )
 
-        # 5. 记忆度叠加 + 时间衰减 + 过滤 + 排序
-        # 未落盘的访问统计先叠加进 metadata，使加权实时生效（不等同步周期）
-        pending = self._memory.pending_access_stats(r.chunk_id for r in fused)
-        for r in fused:
-            meta = r.metadata
-            if r.chunk_id in pending:
-                extra, last = pending[r.chunk_id]
-                meta = {
-                    **meta,
-                    "access_count": (int(meta.get("access_count") or 0) + extra),
-                    "last_accessed": last,
-                }
-            r.score *= self._calculate_temporal_decay(meta)
-            r.score *= self._calculate_memorability(meta)
+            # 5. 记忆度叠加 + 时间衰减 + 过滤 + 排序
+            # 未落盘的访问统计先叠加进 metadata，使加权实时生效（不等同步周期）
+            selection_started = perf_counter()
+            pending = self._memory.pending_access_stats(r.chunk_id for r in fused)
+            for r in fused:
+                meta = r.metadata
+                if r.chunk_id in pending:
+                    extra, last = pending[r.chunk_id]
+                    meta = {
+                        **meta,
+                        "access_count": (int(meta.get("access_count") or 0) + extra),
+                        "last_accessed": last,
+                    }
+                r.score *= self._calculate_temporal_decay(meta)
+                r.score *= self._calculate_memorability(meta)
 
-        # RRF 分数上界约 2/(rrf_k+1)；按比例放缩阈值，避免永远为空
-        # 1. 阈值重标定 —— 把 0-1 语义阈值映射到 RRF 分数尺度
-        # memory_min_score=0.7 是原始语义相似度上的阈值（向量 score 1-dist/2 的范围）。但融合后 r.score 已经是 RRF 分数，它的上界极小：
-        # 满分（两个列表都排第 1）：0.75/61 + 0.25/61 = 1/61 ≈ 0.0164
-        # 如果不缩放，score >= 0.7 永远不成立 → retrieve() 永远返回空数组。所以除以 (rrf_k+1) 把 0.7 重新映射到 RRF 的尺度上：0.7/61 ≈ 0.0115。
-        # 这个值的具体含义：约等于"向量路排前 5"的命中（0.75/61 ≈ 0.0123 ≥ 0.0115 通过，rank 6 起 0.75/66 ≈ 0.0114 开始不过），正好对齐 retrieval_top_k=5。
-        # 2. 相关性下限过滤 —— 记忆的"准入门槛"
-        # 只保留融合证据足够强的记忆，防止噪声/弱命中污染 agent 上下文。注意它作用的是已经乘过时间衰减和记忆度的分（:95-96），所以：
-        # 记忆度高（频繁+近期被召回，≥1.0 加成）→ 更容易过线
-        # 记忆久远（衰减到 0.1）→ 更难过线
-        # 一个有意思的副作用：纯关键词命中的结果永远过不了线（关键词单路最高 0.25/61 ≈ 0.0041 < 0.0115）。这是符合职责设计的——关键词路只是"精确词/前缀"的弱助力，用来给双路命中叠加贡献，而不是独立召回通道；真正的语义召回由向量路承担。
-        threshold = self._min_score / (self._rrf_k + 1)
-        filtered = [r for r in fused if r.score >= threshold]
-        filtered.sort(key=lambda x: x.score, reverse=True)
-        return filtered[: self._top_k]
+            # RRF 分数上界约 2/(rrf_k+1)，将原语义阈值映射到该尺度。
+            # 融合后只保留证据足够强的记忆，避免弱命中污染上下文。
+            # 纯关键词命中通常不能单独跨线；这是现有 legacy 行为，PR-02 才调整。
+            threshold = self._min_score / (self._rrf_k + 1)
+            filtered = [r for r in fused if r.score >= threshold]
+            filtered.sort(key=lambda x: x.score, reverse=True)
+            selected = filtered[: self._top_k]
+            if trace is not None:
+                trace.add_stage(
+                    stage="selection",
+                    route="memory",
+                    query_index=0,
+                    duration_ms=(perf_counter() - selection_started) * 1000,
+                    result_count=len(selected),
+                )
+            return selected
+        finally:
+            if trace is not None:
+                trace.mark_selected([result.chunk_id for result in selected])
+                trace.finish()
+                self._emit_trace(trace)
 
-    async def _expand_query(self, query: str) -> str:
+    async def _expand_query(
+        self, query: str, trace: RetrievalTrace | None = None
+    ) -> str:
         """使用 LLM 扩展查询.
 
         扩展结果仅用于向量语义检索（关键词检索使用原始查询走 FTS5），
         因此提示词明确语义检索目标、约束输出为单行语句。
         """
+        started = perf_counter()
         prompt = get_prompt("query_expansion").format(query=query)
         try:
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
@@ -130,27 +191,71 @@ class HybridRetrievalManager:
             if not expanded:
                 # 空响应（模型返回工具调用/错误/无文本）静默回落为 "None" 曾导致
                 # 下游检索被垃圾查询污染且无日志，这里显式记录并回退原查询。
-                logger.warning("query_expand_empty", query=query[:50])
+                logger.warning("query_expand_empty", query_length=len(query))
+                if trace is not None:
+                    trace.add_fallback("query_expand_empty")
+                    trace.add_stage(
+                        stage="query_expand",
+                        route="llm",
+                        query_index=0,
+                        duration_ms=(perf_counter() - started) * 1000,
+                        result_count=0,
+                        error_code="query_expand_empty",
+                    )
                 return query
+            if trace is not None:
+                trace.add_stage(
+                    stage="query_expand",
+                    route="llm",
+                    query_index=0,
+                    duration_ms=(perf_counter() - started) * 1000,
+                    result_count=1,
+                )
             return expanded
         except Exception as e:
             logger.warning("query_expand_failed", error=str(e))
+            if trace is not None:
+                trace.add_fallback("query_expand_failed")
+                trace.add_stage(
+                    stage="query_expand",
+                    route="llm",
+                    query_index=0,
+                    duration_ms=(perf_counter() - started) * 1000,
+                    result_count=0,
+                    error_code="query_expand_failed",
+                )
             return query
 
     async def _vector_search(
         self,
         query: str,
         filter_params: dict[str, Any] | None,
+        trace: RetrievalTrace | None = None,
+        record_access: bool = True,
     ) -> list[SearchResult]:
         """向量检索（跨会话全库；filter_params 为可选显式过滤）."""
+        started = perf_counter()
         try:
-            results = await self._memory.search(
-                query=query,
-                n_results=self._top_k * 2,
-                where=filter_params,
-            )
+            kwargs: dict[str, Any] = {
+                "query": query,
+                "n_results": self._top_k * 2,
+                "where": filter_params,
+            }
+            if not record_access:
+                kwargs["record_access"] = False
+            results = await self._memory.search(**kwargs)
         except Exception as e:
             logger.warning("vector_search_failed", error=str(e))
+            if trace is not None:
+                trace.add_fallback("vector_search_failed")
+                trace.add_stage(
+                    stage="candidate_retrieval",
+                    route="vector",
+                    query_index=0,
+                    duration_ms=(perf_counter() - started) * 1000,
+                    result_count=0,
+                    error_code="vector_search_failed",
+                )
             return []
 
         out: list[SearchResult] = []
@@ -169,12 +274,29 @@ class HybridRetrievalManager:
         # 融合处生效，这里不乘权重，避免融合改读 r.score 时双倍加权。上游
         # ChromaDB 已按距离升序返回，这里显式按 score 降序把不变量固化。
         out.sort(key=lambda x: x.score, reverse=True)
+        if trace is not None:
+            trace.add_stage(
+                stage="candidate_retrieval",
+                route="vector",
+                query_index=0,
+                duration_ms=(perf_counter() - started) * 1000,
+                result_count=len(out),
+            )
+            for rank, result in enumerate(out, 1):
+                trace.add_candidate(
+                    item_id=result.chunk_id,
+                    route="vector",
+                    rank=rank,
+                    native_score=result.score,
+                )
         return out
 
     async def _keyword_search(
         self,
         query: str,
         filter_params: dict[str, Any] | None,
+        trace: RetrievalTrace | None = None,
+        record_access: bool = True,
     ) -> list[SearchResult]:
         """关键词检索（SQLite FTS5 MATCH 全文检索）.
 
@@ -185,14 +307,28 @@ class HybridRetrievalManager:
         跨会话全库检索：不再按 session_id 过滤，跨会话的关键词命中也参与
         RRF 融合；filter_params 为可选显式过滤（仅支持 memories 表顶层列）。
         """
+        started = perf_counter()
         try:
-            results = await self._memory.keyword_search(
-                query=query,
-                n_results=self._top_k * 2,
-                where=filter_params,
-            )
+            kwargs = {
+                "query": query,
+                "n_results": self._top_k * 2,
+                "where": filter_params,
+            }
+            if not record_access:
+                kwargs["record_access"] = False
+            results = await self._memory.keyword_search(**kwargs)
         except Exception as e:
             logger.warning("keyword_search_failed", error=str(e))
+            if trace is not None:
+                trace.add_fallback("keyword_search_failed")
+                trace.add_stage(
+                    stage="candidate_retrieval",
+                    route="keyword",
+                    query_index=0,
+                    duration_ms=(perf_counter() - started) * 1000,
+                    result_count=0,
+                    error_code="keyword_search_failed",
+                )
             return []
 
         out: list[SearchResult] = []
@@ -210,18 +346,81 @@ class HybridRetrievalManager:
         # （越大越相关），keyword_weight 统一在 RRF 融合处生效。上游已
         # ORDER BY rank(=bm25 升序) 返回，这里显式按 score 降序固化不变量。
         out.sort(key=lambda x: x.score, reverse=True)
+        if trace is not None:
+            trace.add_stage(
+                stage="candidate_retrieval",
+                route="keyword",
+                query_index=0,
+                duration_ms=(perf_counter() - started) * 1000,
+                result_count=len(out),
+            )
+            for rank, result in enumerate(out, 1):
+                trace.add_candidate(
+                    item_id=result.chunk_id,
+                    route="keyword",
+                    rank=rank,
+                    native_score=result.score,
+                )
         return out
+
+    def _new_trace(
+        self,
+        query: str,
+    ) -> RetrievalTrace | None:
+        """执行“new trace”操作。
+
+        参数：
+            query (str): 检索或搜索文本；应为非空字符串。
+        返回值：
+            RetrievalTrace | None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        if not self._trace_enabled:
+            return None
+        return RetrievalTrace(
+            source_scope="memory",
+            query=query,
+            query_hash_salt=self._settings.retrieval_trace_query_hash_salt,
+            include_raw_query=self._settings.retrieval_trace_include_raw_query,
+            query_labels=["memory"],
+        )
+
+    def _emit_trace(self, trace: RetrievalTrace) -> None:
+        """执行“emit trace”操作。
+
+        参数：
+            trace (RetrievalTrace): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
+        try:
+            if self._trace_sink is not None:
+                self._trace_sink(trace)
+            logger.info("retrieval_completed", **trace.as_log_fields())
+        except Exception:
+            logger.warning("retrieval_trace_emit_failed")
 
     def _reciprocal_rank_fusion(
         self,
         vector_results: list[SearchResult],
         keyword_results: list[SearchResult],
     ) -> list[SearchResult]:
-        """倒数排名融合 (RRF). RRF 的核心思想是：一个文档在多个检索结果列表中的排名越靠前（即排名数字越小），其融合分数越高。"""
+        """使用加权倒数排名融合向量和关键词候选集。
+
+        每条检索路只贡献排名证据，不直接比较不同路由的原始分数，因而
+        可以在向量距离和 BM25 分数尺度不同的情况下保持排序稳定。
+        """
         scores: dict[str, float] = {}
         content_map: dict[str, SearchResult] = {}
 
-        # 加权 RRF：按来源权重缩放贡献，使 vector_weight / keyword_weight 真正生效
+        # 加权 RRF：按来源权重缩放贡献，使 vector_weight / keyword_weight 真正生效。
+        # 首次出现时保留完整结果对象，后续只更新融合分数，避免重复候选携带不一致内容。
         # （职责边界：向量路承担语义，关键词路仅作精确词/前缀助力的弱贡献）
         for rank, r in enumerate(vector_results, 1):
             if r.chunk_id not in scores:
@@ -297,10 +496,25 @@ class MemoryRetrievalService:
         retrieval_manager: HybridRetrievalManager,
         token_counter: TokenCounter,
         settings: Settings,
+        shadow_runner: ShadowSubmitter | None = None,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            retrieval_manager (HybridRetrievalManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            token_counter (TokenCounter): 输入参数；其类型和取值约束由方法签名及实现定义。
+            settings (Settings): 全局配置对象。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._manager = retrieval_manager
         self._token_counter = token_counter
         self._max_tokens = settings.memory_max_tokens
+        self._shadow_runner = shadow_runner
 
     async def get_relevant_memories(
         self,
@@ -311,6 +525,16 @@ class MemoryRetrievalService:
             results = await self._manager.retrieve(
                 query=user_message,
             )
+            if self._shadow_runner is not None:
+                try:
+                    await self._shadow_runner.submit(
+                        query=user_message,
+                        scope={"source": "memory"},
+                        baseline_ids=[result.chunk_id for result in results],
+                        labels=["memory"],
+                    )
+                except Exception:
+                    logger.warning("memory_shadow_submit_failed")
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))
             return ""

@@ -88,10 +88,10 @@ def normalize_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
     统一处理 langchain 不同版本的字段差异（args vs arguments），
     并为缺失 id 的工具调用自动生成。
 
-    Args:
+    参数：
         tc: langchain 返回的原始 tool_call 字典。
 
-    Returns:
+    返回值：
         归一化后的字典，包含 id / name / args 三个字段。
     """
     return {
@@ -125,12 +125,12 @@ def format_messages_brief(
     兼容 ``Message`` 域模型和原始 dict 两种输入格式，
     跳过 role 或 content 为空的消息。
 
-    Args:
+    参数：
         messages: 消息列表，元素为 ``Message`` 实例或 ``{"role": ..., "content": ...}`` dict。
         role_labels: 可选的角色名映射（如 ``{"user": "用户", "assistant": "助手"}``），
                      未映射的角色使用原始 role 值。
 
-    Returns:
+    返回值：
         格式化的对话文本，每行一条消息；列表为空时返回空字符串。
     """
     if not messages:

@@ -6,6 +6,7 @@ import ProvidersView from "./ProvidersView"
 import SessionDetailView from "./SessionDetailView"
 import SettingsView from "./SettingsView"
 import McpView from "./McpView"
+import EvaluationView from "./EvaluationView"
 
 interface PageViewProps {
   view: AppView
@@ -31,6 +32,8 @@ function PageView({ view }: PageViewProps) {
       return <SessionDetailView />
     case "settings":
       return <SettingsView />
+    case "evaluation":
+      return <EvaluationView />
     default:
       return null
   }

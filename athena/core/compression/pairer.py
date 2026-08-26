@@ -11,7 +11,7 @@ class MessagePairer:
     def identify_turns(self, messages: list[BaseMessage]) -> list[list[BaseMessage]]:
         """将消息列表分割为完整的对话轮次，以用户消息为边界.
 
-        Returns:
+        返回值：
             轮次列表，每个轮次是一个消息列表
         """
         turns: list[list[BaseMessage]] = []
@@ -42,7 +42,7 @@ class MessagePairer:
     ) -> tuple[list[list[BaseMessage]], list[list[BaseMessage]]]:
         """分离旧轮次与最近轮次.
 
-        Returns:
+        返回值：
             (旧轮次列表, 最近轮次列表)，最近轮次列表前置系统消息段。
         """
         if len(turns) <= keep_count:

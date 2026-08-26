@@ -20,10 +20,23 @@ router = APIRouter(prefix="/approvals", tags=["approvals"])
 
 
 class ApprovalResponseRequest(BaseModel):
-    action: str  # allow / deny
+    """表示 审批ResponseRequest 组件，封装相关状态和行为。
+    """
+    action: str  # allow / deny（允许 / 拒绝）
 
 
 async def _get_approval_manager(request: Request) -> ApprovalManager:
+    """执行“获取审批管理器”操作。
+
+    参数：
+        request (Request): 当前 HTTP 或 WebSocket 请求对象。
+
+    返回值：
+        审批Manager: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     return runtime_from(request).approval_manager
 
 

@@ -49,6 +49,18 @@ class PathSecurityError(Exception):
     """路径安全检查失败."""
 
     def __init__(self, path: str, reason: str) -> None:
+        """初始化当前对象。
+
+        参数：
+            path (str): 目标文件或目录路径。
+            reason (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self.path = path
         self.reason = reason
         super().__init__(f"Path security check failed for '{path}': {reason}")
@@ -59,8 +71,8 @@ class PathSecurityFilter:
 
     使用方式：
         filter = PathSecurityFilter(allowed_dirs=["/workspace", "/tmp"])
-        safe_path = filter.validate("/workspace/file.txt")  # OK
-        safe_path = filter.validate("/etc/passwd")  # raises PathSecurityError
+    safe_path = filter.validate("/workspace/file.txt")  # 通过
+    safe_path = filter.validate("/etc/passwd")  # 抛出 PathSecurityError
     """
 
     def __init__(
@@ -71,6 +83,21 @@ class PathSecurityFilter:
         max_path_length: int = 4096,
         strict_mode: bool = True,
     ) -> None:
+        """初始化当前对象。
+
+        参数：
+            allowed_dirs (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            blocked_dirs (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            allowed_extensions (set[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            max_path_length (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+            strict_mode (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         self._allowed_dirs = [Path(d).resolve() for d in (allowed_dirs or [])]
         self._blocked_dirs = [Path(d).resolve() for d in (blocked_dirs or [])]
         self._allowed_extensions = allowed_extensions
@@ -80,13 +107,13 @@ class PathSecurityFilter:
     def validate(self, path: str) -> Path:
         """验证路径安全性.
 
-        Args:
+        参数：
             path: 待验证的路径字符串
 
-        Returns:
+        返回值：
             解析后的安全 Path 对象
 
-        Raises:
+        异常：
             PathSecurityError: 路径不安全
         """
         # 1. 长度检查

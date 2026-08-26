@@ -73,10 +73,10 @@ def _decode(data: bytes) -> str:
     优先使用 charset_normalizer 自动检测编码，失败时回退到 UTF-8
     （errors='replace' 确保不会抛出异常）。
 
-    Args:
+    参数：
         data: 原始字节数据。
 
-    Returns:
+    返回值：
         解码后的字符串。
     """
     try:
@@ -113,7 +113,7 @@ class TextAdapter:
 
     CSV 文件会额外提取表格数据（最多 200 行），并支持 pandas 分析。
 
-    Capabilities: read, search, summarize, analyze
+    能力：read、search、summarize、analyze
     """
 
     info = AdapterInfo(
@@ -180,7 +180,7 @@ class PdfAdapter:
     提取策略：先用 pypdf 提取文本层，对空白页自动回退到 OCR
     （pypdfium2 + RapidOCR）。表格提取使用 pdfplumber。
 
-    Capabilities: read, search, summarize, analyze, extract_table
+    能力：read、search、summarize、analyze, extract_table
     """
 
     info = AdapterInfo(
@@ -250,11 +250,11 @@ class PdfAdapter:
         使用 pypdfium2 渲染页面为图片（2x 缩放），再通过 RapidOCR 提取文本。
         任何异常均记录日志并返回空字符串（降级为无文本页）。
 
-        Args:
+        参数：
             path: PDF 文件路径。
             page_index: 页码索引（从 0 开始）。
 
-        Returns:
+        返回值：
             OCR 识别的文本内容，失败时返回空字符串。
         """
         try:
@@ -281,7 +281,7 @@ class WordAdapter:
     按段落提取文本内容（保留段落样式信息），并提取嵌入表格。
     空段落自动过滤。
 
-    Capabilities: read, search, summarize, analyze, extract_table
+    能力：read、search、summarize、analyze, extract_table
     """
 
     info = AdapterInfo(
@@ -342,7 +342,7 @@ class ExcelAdapter:
     按工作表提取数据，保留公式信息。每个工作表生成一个内容单元
     和一个表格记录。分析模式使用 pandas 进行列级统计。
 
-    Capabilities: read, search, summarize, analyze, extract_table
+    能力：read、search、summarize、analyze, extract_table
     """
 
     info = AdapterInfo(
@@ -432,7 +432,7 @@ class ImageAdapter:
     图片尺寸、色彩模式等元数据。视觉分析（描述图片内容）需配合
     支持 vision 的 LLM 模型，在 runtime 层实现。
 
-    Capabilities: read, search, summarize, analyze
+    能力：read、search、summarize、analyze
     """
 
     info = AdapterInfo(
@@ -496,7 +496,7 @@ class CodeAdapter:
     提取源码内容的同时构建符号索引（类、函数、接口等）和依赖关系图。
     Python 使用 AST 解析，其他语言优先使用 tree-sitter，回退到正则匹配。
 
-    Capabilities: read, search, summarize, analyze, symbols, references, call_graph
+    能力：read、search、summarize、analyze, symbols, references, call_graph
     """
 
     info = AdapterInfo(
@@ -556,10 +556,10 @@ def _frame_analysis(frame: Any) -> dict[str, Any]:
 
     返回行数、列名、数据类型、缺失值统计和数值列的描述性统计。
 
-    Args:
+    参数：
         frame: pandas DataFrame 对象。
 
-    Returns:
+    返回值：
         包含 rows/columns/dtypes/missing/description 字段的分析结果字典。
     """
     numeric = frame.select_dtypes(include="number")
@@ -587,12 +587,12 @@ def _code_index(
     2. 其他语言 → tree-sitter 解析（语法精确）
     3. 回退 → 正则匹配（兼容性最好，精度最低）
 
-    Args:
+    参数：
         text: 源代码文本。
         language: 编程语言标识（如 ``"python"``、``"typescript"``）。
         path: 文件相对路径，用于符号定位。
 
-    Returns:
+    返回值：
         (symbols, dependencies) 二元组：符号列表和依赖关系列表。
     """
     if language == "python":
@@ -646,10 +646,10 @@ def _code_index(
 def _tree_sitter_index(
     text: str, language: str, path: str
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
-    """Use tree-sitter when the optional grammar pack is available.
+    """可选语法包可用时使用 tree-sitter。
 
-    Grammar downloads or parser changes must never make uploads fail, so all
-    failures intentionally return ``None`` and the caller uses text fallback.
+    语法包下载或解析器变更不得导致上传失败，因此所有失败都明确返回
+    ``None``，由调用方使用文本回退。
     """
     try:
         from tree_sitter_language_pack import get_parser
@@ -720,14 +720,14 @@ def _python_index(
     遍历 AST 节点提取类定义、函数定义（含异步函数）、import 语句
     和函数调用关系。类/函数支持嵌套，通过 ``parents`` 栈维护限定名。
 
-    Args:
+    参数：
         text: Python 源代码文本。
         path: 文件相对路径，用于符号定位。
 
-    Returns:
+    返回值：
         (symbols, dependencies) 二元组。
 
-    Raises:
+    异常：
         SyntaxError: 源码语法错误时由 ``ast.parse()`` 抛出，
             调用方应回退到正则匹配。
     """
@@ -737,7 +737,20 @@ def _python_index(
     parents: list[str] = []  # 嵌套类/函数的名称栈，用于构建限定名
 
     class Visitor(ast.NodeVisitor):
+        """表示 Visitor 组件，封装相关状态和行为。
+        """
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            """执行“visit ClassDef”操作。
+
+            参数：
+                node (ast.ClassDef): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             qualified = ".".join([*parents, node.name])
             symbols.append(
                 {
@@ -756,12 +769,45 @@ def _python_index(
             parents.pop()
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            """执行“visit FunctionDef”操作。
+
+            参数：
+                node (ast.FunctionDef): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             self._visit_function(node)
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            """执行“visit AsyncFunctionDef”操作。
+
+            参数：
+                node (ast.AsyncFunctionDef): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             self._visit_function(node)
 
         def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            """执行“visit function”操作。
+
+            参数：
+                node (ast.FunctionDef | ast.AsyncFunctionDef): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             qualified = ".".join([*parents, node.name])
             args = ", ".join(arg.arg for arg in node.args.args)
             symbols.append(
@@ -781,6 +827,17 @@ def _python_index(
             parents.pop()
 
         def visit_Import(self, node: ast.Import) -> None:
+            """执行“visit Import”操作。
+
+            参数：
+                node (ast.Import): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             for name in node.names:
                 dependencies.append(
                     {
@@ -792,6 +849,17 @@ def _python_index(
                 )
 
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            """执行“visit ImportFrom”操作。
+
+            参数：
+                node (ast.ImportFrom): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             dependencies.append(
                 {
                     "source": path,
@@ -802,6 +870,17 @@ def _python_index(
             )
 
         def visit_Call(self, node: ast.Call) -> None:
+            """执行“visit Call”操作。
+
+            参数：
+                node (ast.Call): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+            返回值：
+                None: 操作结果；具体语义由调用场景决定。
+
+            异常：
+                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            """
             target = ""
             if isinstance(node.func, ast.Name):
                 target = node.func.id

@@ -4,15 +4,15 @@
 使用 ``get_settings()`` 获取全局单例实例。
 
 配置分组：
-- Server: 服务端口、调试模式
-- LLM Providers: 主/副/兜底 LLM 配置
-- Database: SQLite 和 ChromaDB 路径
+- 服务端: 服务端口、调试模式
+- LLM 提供者: 主/副/兜底 LLM 配置
+- 数据库: SQLite 和 ChromaDB 路径
 - File Intelligence: 文件处理参数
 - Harness: Agent 执行参数
 - Memory: 记忆系统参数
-- Context Compression: 上下文压缩参数
-- Docker Sandbox: 沙箱执行环境
-- Approval: 审批流程参数
+- 上下文压缩: 上下文压缩参数
+- Docker 沙箱: 沙箱执行环境
+- 审批: 审批流程参数
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class LLMProviderConfig(BaseModel):
     """单个 LLM Provider 的配置。
 
-    Attributes:
+    属性：
         name: 标识名 — ``"primary"``（主）/ ``"secondary"``（副）/ ``"fallback"``（兜底）。
         provider: 厂商标识 — ``"openai"`` / ``"anthropic"`` / ``"deepseek"`` / ``"ollama"``。
         model: 模型名称（如 ``"gpt-4o"``、``"claude-3-opus"``）。
@@ -51,7 +51,7 @@ class LLMProviderConfig(BaseModel):
 class LLMRetrySettings(BaseModel):
     """LLM 调用的指数退避重试参数。
 
-    Attributes:
+    属性：
         max_attempts: 最大重试次数。
         min_delay_ms: 最小重试延迟（毫秒）。
         max_delay_ms: 最大重试延迟（毫秒）。
@@ -80,12 +80,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Server ---
+    # --- 服务端 ---
     host: str = "127.0.0.1"
     port: int = 8000
     debug: bool = True
 
-    # --- LLM Providers ---
+    # --- LLM 提供者 ---
     # 按优先级排列：primary → secondary → fallback
     llm_providers: list[LLMProviderConfig] = Field(
         default_factory=lambda: [
@@ -106,11 +106,11 @@ class Settings(BaseSettings):
         )
     )
 
-    # --- Database ---
+    # --- 数据库 ---
     sqlite_db_path: str = "./data/athena.db"
     chromadb_path: str = "./data/chromadb"
 
-    # --- File Intelligence ---
+    # --- 文件智能 ---
     file_storage_path: str = "./data/files"
     file_max_upload_bytes: int = 512 * 1024 * 1024  # 512MB
     file_chunk_tokens: int = 800  # 分块目标 token 数
@@ -123,14 +123,14 @@ class Settings(BaseSettings):
     file_summary_concurrency: int = 4
     file_embedding_concurrency: int = 2
 
-    # --- Harness ---
+    # --- Harness 执行引擎 ---
     max_turns_per_run: int = 20
     retry_budget: int = 3
     tool_timeout: int = 60  # 秒
     llm_stream_timeout: int = 120  # 秒
     approval_timeout: int = 120  # 秒
 
-    # --- Memory ---
+    # --- 记忆 ---
     summary_threshold: int = 10  # 每 N 轮对话触发摘要
     memory_sync_interval: int = 900  # 15 分钟
     memory_min_score: float = 0.7
@@ -142,7 +142,29 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 5
     memory_max_tokens: int = 2000
 
-    # --- Context Compression ---
+    # --- 检索可观测性 ---
+    # 默认关闭，避免在生产路径上产生额外日志和任何查询内容暴露。
+    retrieval_trace_enabled: bool = False
+    # 仅本地开发诊断时开启；生产环境应保持 false。
+    retrieval_trace_include_raw_query: bool = False
+    # 用于 query_hash 的部署级 salt，避免日志中的短查询被直接枚举。
+    retrieval_trace_query_hash_salt: str = ""
+
+    # --- 检索评估 / 影子流程 ---
+    retrieval_shadow_enabled: bool = False
+    retrieval_shadow_sample_rate: float = Field(default=0.05, ge=0, le=1)
+    retrieval_shadow_max_concurrency: int = Field(default=4, ge=1)
+    retrieval_shadow_timeout_ms: int = Field(default=5000, ge=1)
+    retrieval_shadow_queue_size: int = Field(default=1000, ge=1)
+    retrieval_shadow_drop_on_overload: bool = True
+    retrieval_shadow_event_path: str = "./logs/retrieval-shadow.jsonl"
+
+    # --- 个人检索评估门户 ---
+    evaluation_record_enabled: bool = True
+    evaluation_record_sample_rate: float = Field(default=1.0, ge=0, le=1)
+    evaluation_data_path: str = "./data/evaluation"
+
+    # --- 上下文压缩 ---
     max_context_tokens: int = 128000
     compression_threshold: float = 0.8  # 上下文使用率阈值
     keep_recent_turns: int = 3
@@ -150,7 +172,7 @@ class Settings(BaseSettings):
     summary_incremental: bool = True
     save_summary_to_memory: bool = True
 
-    # --- Docker Sandbox ---
+    # --- Docker 沙箱 ---
     sandbox_enabled: bool = False
     sandbox_image: str = "athena-sandbox:latest"
     sandbox_network_disabled: bool = True
@@ -160,8 +182,8 @@ class Settings(BaseSettings):
     sandbox_check_interval: int = 300  # 5 分钟
     sandbox_allowed_paths: str = ""
 
-    # --- Approval ---
-    approval_batch_mode: str = "sequential"  # sequential / batch
+    # --- 审批 ---
+    approval_batch_mode: str = "sequential"  # 串行 / 批量
     approval_keyboard_shortcuts: bool = True
     approval_sound_alert: bool = False
 
@@ -169,10 +191,10 @@ class Settings(BaseSettings):
     def primary_llm(self) -> LLMProviderConfig:
         """获取主 provider 配置（列表第一个）。
 
-        Returns:
+        返回值：
             主 LLM 配置。
 
-        Raises:
+        异常：
             ValueError: llm_providers 为空时。
         """
         if not self.llm_providers:
@@ -183,7 +205,7 @@ class Settings(BaseSettings):
     def secondary_llm(self) -> LLMProviderConfig | None:
         """获取副 provider 配置（列表第二个，用于次要任务）。
 
-        Returns:
+        返回值：
             副 LLM 配置，不存在时返回 ``None``。
         """
         return self.llm_providers[1] if len(self.llm_providers) > 1 else None
@@ -192,7 +214,7 @@ class Settings(BaseSettings):
     def fallback_llm_list(self) -> list[LLMProviderConfig]:
         """获取所有 fallback provider 配置（secondary 之后的）。
 
-        Returns:
+        返回值：
             fallback 配置列表。
         """
         return self.llm_providers[2:] if len(self.llm_providers) > 2 else []
@@ -224,7 +246,7 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """获取全局配置单例（缓存，进程生命周期内只创建一次）。
 
-    Returns:
+    返回值：
         ``Settings`` 实例。
     """
     return Settings()

@@ -33,6 +33,8 @@ from athena.core.tools.spec import ToolSpec
 from athena.models.tool import RiskLevel
 
 class BuiltinToolDefinition(TypedDict):
+    """表示 BuiltinToolDefinition 组件，封装相关状态和行为。
+    """
     name: str
     description: str
     handler: NativeHandler
@@ -120,7 +122,7 @@ _BUILTIN_TOOLS: list[BuiltinToolDefinition] = [
 def register_builtin_tools(
     manager: UnifiedToolManager,
 ) -> list[str]:
-    """Register built-ins and return the names installed into the manager."""
+    """注册内置工具，并返回已安装到管理器中的名称。"""
     for tool_def in _BUILTIN_TOOLS:
         manager.register(
             ToolSpec(

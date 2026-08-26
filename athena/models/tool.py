@@ -38,13 +38,15 @@ class ToolSchema(BaseModel):
 class ToolResult(BaseModel):
     """工具执行结果."""
 
-    status: str  # success/failed/denied/timeout
+    status: str  # success/failed/denied/timeout（成功 / 失败 / 已拒绝 / 超时）
     output: str | None = None
     error: str | None = None
     duration_ms: float = 0
 
 
 class ToolCallStatus(StrEnum):
+    """表示 ToolCallStatus 组件，封装相关状态和行为。
+    """
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"

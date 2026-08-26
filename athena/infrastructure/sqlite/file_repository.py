@@ -1,4 +1,4 @@
-"""SQLite persistence for File Intelligence.
+"""文件智能的 SQLite 持久化。
 
 ``FileRepository`` 封装所有 File Intelligence 相关的数据库操作，
 遵循 Repository 模式：查询方法返回类型化领域模型，写入方法接受类型化模型。
@@ -112,13 +112,13 @@ class FileRepository:
     ) -> str:
         """创建 Agent 续跑记录（附件处理完成后恢复执行）。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             run_id: 运行 ID。
             task_ids: 等待完成的任务 ID 列表。
             request: 原始请求数据（含 message_id、attachment_ids 等）。
 
-        Returns:
+        返回值：
             续跑记录 ID。
         """
         continuation_id = generate_time_id()
@@ -254,7 +254,7 @@ class FileRepository:
         )
 
     async def delete_session(self, session_id: str) -> None:
-        """Soft-delete all file records for a session and cancel pending work."""
+        """软删除会话的所有文件记录，并取消待处理工作。"""
         now = _now().isoformat()
         async with get_session() as session:
             async with session.begin():
@@ -344,7 +344,7 @@ class FileRepository:
                 )
 
     async def orphan_storage_keys(self) -> list[str]:
-        """Return blob keys with no live attachment reference for cleanup workers."""
+        """返回没有活动附件引用的 blob 键，供清理工作池使用。"""
         async with get_session() as session:
             rows = (
                 await session.execute(
@@ -355,6 +355,14 @@ class FileRepository:
             return sorted({key for key, _ in rows} - live)
 
     async def live_storage_keys(self) -> set[str]:
+        """执行“live storage keys”操作。
+
+        返回值：
+            set[str]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             return set(
                 (
@@ -380,7 +388,7 @@ class FileRepository:
     ) -> Attachment:
         """创建附件记录（上传完成后调用）。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             filename: 原始文件名。
             mime_type: MIME 类型。
@@ -388,7 +396,7 @@ class FileRepository:
             sha256: 文件内容的 SHA-256 哈希。
             storage_key: 存储层的 blob 键。
 
-        Returns:
+        返回值：
             创建的 ``Attachment`` 实例。
         """
         now = _now().isoformat()
@@ -416,6 +424,19 @@ class FileRepository:
         *,
         include_deleted: bool = False,
     ) -> Attachment | None:
+        """执行“get attachment”操作。
+
+        参数：
+            attachment_id (str): 附件唯一标识。
+            session_id (str | None): 会话唯一标识。
+            include_deleted (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            Attachment | None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             stmt = select(AttachmentModel).where(AttachmentModel.id == attachment_id)
             if session_id is not None:
@@ -432,7 +453,7 @@ class FileRepository:
         *,
         include_deleted: bool = False,
     ) -> list[Attachment]:
-        """Load several session attachments with one database round trip."""
+        """通过一次数据库往返加载多个会话附件。"""
         ids = list(dict.fromkeys(attachment_ids))
         if not ids:
             return []
@@ -448,6 +469,17 @@ class FileRepository:
         return [by_id[item] for item in ids if item in by_id]
 
     async def list_attachments(self, session_id: str) -> list[Attachment]:
+        """执行“list attachments”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+
+        返回值：
+            list[Attachment]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             rows = (
                 (
@@ -470,12 +502,12 @@ class FileRepository:
     ) -> Attachment | None:
         """更新附件字段（支持 capabilities 和 metadata 的便捷写入）。
 
-        Args:
+        参数：
             attachment_id: 附件 ID。
             **values: 要更新的字段，支持 capabilities（自动序列化为 JSON）和
                 metadata（自动序列化为 JSON）的便捷参数。
 
-        Returns:
+        返回值：
             更新后的 ``Attachment`` 实例，不存在时返回 ``None``。
         """
         allowed = {
@@ -514,6 +546,18 @@ class FileRepository:
                 return _attachment(row) if row else None
 
     async def soft_delete_attachment(self, attachment_id: str, session_id: str) -> bool:
+        """执行“soft delete attachment”操作。
+
+        参数：
+            attachment_id (str): 附件唯一标识。
+            session_id (str): 会话唯一标识。
+
+        返回值：
+            bool: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         now = _now().isoformat()
         async with get_session() as session:
             async with session.begin():
@@ -582,6 +626,19 @@ class FileRepository:
     async def bind_message(
         self, session_id: str, message_id: str, attachment_ids: Iterable[str]
     ) -> list[Attachment]:
+        """执行“bind message”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            message_id (str): 消息唯一标识。
+            attachment_ids (Iterable[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            list[Attachment]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         ids = list(dict.fromkeys(attachment_ids))
         if not ids:
             return []
@@ -614,6 +671,17 @@ class FileRepository:
     async def attachments_for_messages(
         self, message_ids: Iterable[str]
     ) -> dict[str, list[Attachment]]:
+        """执行“消息对应的附件”操作。
+
+        参数：
+            message_ids (Iterable[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            dict[str, list[Attachment]]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         ids = list(message_ids)
         if not ids:
             return {}
@@ -646,7 +714,7 @@ class FileRepository:
     ) -> FileTask:
         """创建处理任务（幂等：同附件同类型的进行中任务不重复创建）。
 
-        Args:
+        参数：
             session_id: 会话 ID。
             attachment_id: 附件 ID。
             task_type: 任务类型（解析/索引/摘要/代码分析等）。
@@ -654,7 +722,7 @@ class FileRepository:
             priority: 优先级（数值越大越优先）。
             max_attempts: 最大重试次数。
 
-        Returns:
+        返回值：
             创建的或已存在的 ``FileTask`` 实例。
         """
         now = _now().isoformat()
@@ -699,6 +767,18 @@ class FileRepository:
     async def get_task(
         self, task_id: str, session_id: str | None = None
     ) -> FileTask | None:
+        """执行“get task”操作。
+
+        参数：
+            task_id (str): 任务唯一标识。
+            session_id (str | None): 会话唯一标识。
+
+        返回值：
+            FileTask | None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             stmt = select(ProcessingTaskModel).where(ProcessingTaskModel.id == task_id)
             if session_id is not None:
@@ -709,6 +789,18 @@ class FileRepository:
     async def list_tasks(
         self, session_id: str, attachment_id: str | None = None
     ) -> list[FileTask]:
+        """执行“list tasks”操作。
+
+        参数：
+            session_id (str): 会话唯一标识。
+            attachment_id (str | None): 附件唯一标识。
+
+        返回值：
+            list[FileTask]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             stmt = select(ProcessingTaskModel).where(
                 ProcessingTaskModel.session_id == session_id
@@ -729,7 +821,7 @@ class FileRepository:
     async def list_tasks_for_attachments(
         self, session_id: str, attachment_ids: Iterable[str]
     ) -> dict[str, list[FileTask]]:
-        """Load tasks for multiple attachments with one query."""
+        """通过一次查询加载多个附件的任务。"""
         ids = list(dict.fromkeys(attachment_ids))
         if not ids:
             return {}
@@ -758,7 +850,7 @@ class FileRepository:
 
         将任务状态从 QUEUED 更新为 RUNNING，递增 attempts 计数。
 
-        Returns:
+        返回值：
             认领的 ``FileTask`` 实例，无可用任务时返回 ``None``。
         """
         now = _now().isoformat()
@@ -788,6 +880,18 @@ class FileRepository:
             return _task(row)
 
     async def update_task(self, task_id: str, **values: Any) -> None:
+        """执行“update task”操作。
+
+        参数：
+            task_id (str): 任务唯一标识。
+            values (Any): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         payload: dict[str, Any] = {}
         for key in (
             "status",
@@ -818,7 +922,7 @@ class FileRepository:
         未超过最大重试次数时，按 ``2^attempts`` 秒的退避时间重新入队；
         超过时标记为 FAILED。
 
-        Args:
+        参数：
             task: 当前任务实例。
             error: 错误信息。
         """
@@ -842,6 +946,14 @@ class FileRepository:
             )
 
     async def recover_running_tasks(self) -> int:
+        """执行“recover running tasks”操作。
+
+        返回值：
+            int: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         now = _now().isoformat()
         async with get_session() as session:
             async with session.begin():
@@ -858,6 +970,18 @@ class FileRepository:
                 return int(result.rowcount or 0)
 
     async def replace_chunks(self, attachment_id: str, chunks: list[FileChunk]) -> None:
+        """执行“replace chunks”操作。
+
+        参数：
+            attachment_id (str): 附件唯一标识。
+            chunks (list[FileChunk]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             async with session.begin():
                 existing_ids = (
@@ -872,7 +996,7 @@ class FileRepository:
                     .all()
                 )
                 if existing_ids:
-                    # FTS5 has no SQLAlchemy table model; bind each id safely.
+    # FTS5 没有 SQLAlchemy 表模型；为每个 ID 安全绑定参数。
                     placeholders = ", ".join(
                         f":id{i}" for i in range(len(existing_ids))
                     )
@@ -913,6 +1037,19 @@ class FileRepository:
     async def get_chunks(
         self, attachment_id: str, *, offset: int = 0, limit: int = 50
     ) -> list[FileChunk]:
+        """执行“get chunks”操作。
+
+        参数：
+            attachment_id (str): 附件唯一标识。
+            offset (int): 分页偏移量；应为非负整数。
+            limit (int): 最大返回数量；应为非负整数。
+
+        返回值：
+            list[FileChunk]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             rows = (
                 (
@@ -943,6 +1080,19 @@ class FileRepository:
     async def search_chunks(
         self, attachment_id: str, query: str, limit: int = 10
     ) -> list[FileChunk]:
+        """执行“search chunks”操作。
+
+        参数：
+            attachment_id (str): 附件唯一标识。
+            query (str): 检索或搜索文本；应为非空字符串。
+            limit (int): 最大返回数量；应为非负整数。
+
+        返回值：
+            list[FileChunk]: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             rows = []
             try:
@@ -1008,6 +1158,17 @@ class FileRepository:
             ]
 
     async def get_artifact(self, cache_key: str) -> dict[str, Any] | None:
+        """执行“get artifact”操作。
+
+        参数：
+            cache_key (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            dict[str, Any] | None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             row = (
                 await session.execute(
@@ -1034,6 +1195,21 @@ class FileRepository:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """执行“put artifact”操作。
+
+        参数：
+            attachment_id (str): 附件唯一标识。
+            kind (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            cache_key (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            content (str): 待保存或处理的内容。
+            metadata (dict[str, Any] | None): 附加元数据字典。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         async with get_session() as session:
             async with session.begin():
                 await session.execute(
@@ -1058,6 +1234,17 @@ class FileRepository:
                 )
 
     async def sync_adapters(self, adapters: Iterable[AdapterInfo]) -> None:
+        """执行“sync adapters”操作。
+
+        参数：
+            adapters (Iterable[AdapterInfo]): 输入参数；其类型和取值约束由方法签名及实现定义。
+
+        返回值：
+            None: 操作结果；具体语义由调用场景决定。
+
+        异常：
+            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        """
         items = list(adapters)
         names = [item.name for item in items]
         now = _now().isoformat()
@@ -1138,12 +1325,12 @@ class FileRepository:
     ) -> list[dict[str, Any]]:
         """按名称模糊搜索代码符号。
 
-        Args:
+        参数：
             attachment_id: 附件 ID。
             name: 符号名称关键词。
             limit: 最大返回数。
 
-        Returns:
+        返回值：
             符号信息列表（含 name/qualified_name/kind/path/language 等字段）。
         """
         async with get_session() as session:
@@ -1180,13 +1367,13 @@ class FileRepository:
     ) -> list[dict[str, Any]]:
         """查询代码符号的依赖关系。
 
-        Args:
+        参数：
             attachment_id: 附件 ID。
             symbol: 符号名称。
             direction: ``"outgoing"``（调用）、``"incoming"``（被调用）、``"both"``。
             limit: 最大返回数。
 
-        Returns:
+        返回值：
             依赖关系列表（含 source/target/kind/metadata 字段）。
         """
         async with get_session() as session:

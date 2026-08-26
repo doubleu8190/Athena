@@ -18,11 +18,34 @@ router = APIRouter(prefix="/sessions/{session_id}", tags=["files"])
 
 
 def _file_services(request: Request):
+    """执行“文件服务”操作。
+
+    参数：
+        request (Request): 当前 HTTP 或 WebSocket 请求对象。
+
+    返回值：
+        Any: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     runtime = runtime_from(request)
     return runtime.file_runtime, runtime.file_worker
 
 
 async def _ensure_session(session_id: str, request: Request):
+    """执行“ensure session”操作。
+
+    参数：
+        session_id (str): 会话唯一标识。
+        request (Request): 当前 HTTP 或 WebSocket 请求对象。
+
+    返回值：
+        Any: 操作结果；具体语义由调用场景决定。
+
+    异常：
+        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+    """
     runtime = runtime_from(request)
     session = await runtime.db.sessions.get(session_id)
     if not session:
@@ -49,7 +72,7 @@ async def upload_attachments(
 
     处理流程：校验文件名 → 适配器选择 → 流式存储 → 创建附件记录 → 入队解析任务。
 
-    Returns:
+    返回值：
         包含 items 列表的字典，每项含 attachment 和 task 信息。
     """
     await _ensure_session(session_id, request)
@@ -67,6 +90,14 @@ async def upload_attachments(
                 raise HTTPException(status_code=415, detail=str(exc)) from exc
 
             async def chunks():
+                """执行“chunks”操作。
+
+                返回值：
+                    Any: 操作结果；具体语义由调用场景决定。
+
+                异常：
+                    Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                """
                 while True:
                     chunk = await upload.read(1024 * 1024)
                     if not chunk:

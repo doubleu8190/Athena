@@ -53,7 +53,7 @@ class CircuitBreaker:
     状态转换由 ``record_result()`` 驱动，``_get_state()`` 负责
     OPEN → HALF_OPEN 的超时自动转换。
 
-    Args:
+    参数：
         failure_threshold: 失败率阈值 (0~1)，达到此值且样本充足时触发熔断。
         window_size: 滑动窗口大小（最近 N 次调用）。
         open_duration_s: OPEN 状态持续时间（秒），超时后自动转 HALF_OPEN。
@@ -67,7 +67,7 @@ class CircuitBreaker:
     ) -> None:
         """初始化熔断器.
 
-        Args:
+        参数：
             failure_threshold: 失败率阈值，默认 0.8（80% 失败触发熔断）。
             window_size: 滑动窗口大小，默认最近 10 次调用。
             open_duration_s: 熔断持续时间，默认 30 秒后转半开。
@@ -88,7 +88,7 @@ class CircuitBreaker:
         - CLOSED: 失败率达阈值且样本 ≥ 3 → OPEN
         - OPEN: 不做转换（等待超时自动转 HALF_OPEN）
 
-        Args:
+        参数：
             tool_name: 工具名称。
             success: 调用是否成功。
         """
@@ -126,10 +126,10 @@ class CircuitBreaker:
     def is_open(self, tool_name: str) -> bool:
         """检查熔断器是否处于 OPEN 状态.
 
-        Args:
+        参数：
             tool_name: 工具名称。
 
-        Returns:
+        返回值：
             True 表示熔断器打开，调用方应走 Fallback 路由。
         """
         state = self._get_state(tool_name)
@@ -140,10 +140,10 @@ class CircuitBreaker:
 
         具有副作用: OPEN 状态超过 ``open_duration_s`` 后自动转为 HALF_OPEN。
 
-        Args:
+        参数：
             tool_name: 工具名称。
 
-        Returns:
+        返回值：
             当前熔断状态。
         """
         state = self._states[tool_name]
@@ -159,10 +159,10 @@ class CircuitBreaker:
     def _failure_rate(self, tool_name: str) -> float:
         """计算滑动窗口内的失败率.
 
-        Args:
+        参数：
             tool_name: 工具名称。
 
-        Returns:
+        返回值：
             失败率 (0~1)，无记录时返回 0.0。
         """
         records = self._records[tool_name]
@@ -174,7 +174,7 @@ class CircuitBreaker:
     def reset(self, tool_name: str | None = None) -> None:
         """重置熔断器状态.
 
-        Args:
+        参数：
             tool_name: 指定工具名称时仅重置该工具；为 None 时重置所有工具。
         """
         if tool_name is None:
@@ -192,7 +192,7 @@ class FallbackRoute:
 
     定义工具失败时的恢复策略，由 ``ToolErrorHandler.register_fallback()`` 注册。
 
-    Attributes:
+    属性：
         tool_name: 目标工具名称。
         on_errors: 触发此路由的错误关键词列表（匹配异常消息或类型名）。
         action: 恢复动作，可选值:
@@ -216,7 +216,7 @@ class FallbackRoute:
     ) -> None:
         """初始化 Fallback 路由.
 
-        Args:
+        参数：
             tool_name: 目标工具名称。
             on_errors: 错误关键词列表。
             action: 恢复动作 ("retry" / "alternate" / "escalate" / "passthrough")。
@@ -248,7 +248,7 @@ class ToolErrorHandler:
     def __init__(self, circuit_breaker: CircuitBreaker | None = None) -> None:
         """初始化错误处理器.
 
-        Args:
+        参数：
             circuit_breaker: 自定义熔断器实例，未提供时使用默认配置。
         """
         self._circuit = circuit_breaker or CircuitBreaker()
@@ -258,7 +258,7 @@ class ToolErrorHandler:
     def circuit_breaker(self) -> CircuitBreaker:
         """获取内部熔断器实例.
 
-        Returns:
+        返回值：
             CircuitBreaker 实例。
         """
         return self._circuit
@@ -277,7 +277,7 @@ class ToolErrorHandler:
         同一工具可注册多条路由，按 on_errors 中的关键词匹配。
         匹配逻辑: 异常消息或异常类名中包含 err_key 即命中。
 
-        Args:
+        参数：
             tool_name: 目标工具名称。
             on_errors: 错误关键词列表，每个关键词对应一条路由。
             action: 恢复动作 ("retry" / "alternate" / "escalate" / "passthrough")。
@@ -307,11 +307,11 @@ class ToolErrorHandler:
         匹配规则: 遍历该工具的所有路由，检查 err_key 是否出现在
         异常消息（str(error)）或异常类名（type(error).__name__）中。
 
-        Args:
+        参数：
             tool_name: 工具名称。
             error: 工具调用抛出的异常。
 
-        Returns:
+        返回值：
             匹配的 FallbackRoute，无匹配时返回 None。
         """
         err_msg = str(error).lower()
@@ -326,10 +326,10 @@ class ToolErrorHandler:
     def is_circuit_open(self, tool_name: str) -> bool:
         """检查工具的熔断器是否打开.
 
-        Args:
+        参数：
             tool_name: 工具名称。
 
-        Returns:
+        返回值：
             True 表示熔断，调用方应走 Fallback 路由而非直接调用工具。
         """
         return self._circuit.is_open(tool_name)
@@ -337,7 +337,7 @@ class ToolErrorHandler:
     def record_result(self, tool_name: str, success: bool) -> None:
         """记录工具调用结果到熔断器.
 
-        Args:
+        参数：
             tool_name: 工具名称。
             success: 调用是否成功。
         """
@@ -351,11 +351,11 @@ class ToolErrorHandler:
         常见场景: 工具超时后将 timeout 参数翻倍再重试。
         变换函数抛出异常时跳过该参数（保留原值），不中断整体流程。
 
-        Args:
+        参数：
             params: 原始工具调用参数。
             route: 包含 param_transform 配置的 FallbackRoute。
 
-        Returns:
+        返回值：
             变换后的新参数字典（不修改原字典）。
         """
         new_params = dict(params)

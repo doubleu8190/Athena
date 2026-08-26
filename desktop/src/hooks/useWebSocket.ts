@@ -226,6 +226,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
 
         case EventType.STREAM_END:
         case EventType.SESSION_COMPLETE:
+          applyRetrievalReferences(data, event.run_id)
           setAgentStatus("idle")
           clearThinking()
           break
@@ -241,6 +242,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
             content: "",
             timestamp: new Date().toISOString(),
             session_id: sessionId ?? undefined,
+            run_id: event.run_id,
           })
           // 实时步骤流：后端只把 step 落库、不推送 STEP 事件，
           // 前端从 LLM/TOOL 事件还原 step，使 Activity 面板随执行推进更新
@@ -294,6 +296,10 @@ export function useWebSocket(options: UseWebSocketOptions) {
           const tc = data.tool_calls as Message["tool_calls"]
           if (buildingId && tc?.length) {
             updateMessage(buildingId, { tool_calls: tc })
+          }
+          const retrievalEvents = data.retrieval_events as Message["retrieval_events"]
+          if (buildingId && retrievalEvents) {
+            updateMessage(buildingId, { retrieval_events: retrievalEvents })
           }
           buildingMessageId.current = null
           // status=failed（空响应/异常重试路径）：移除本次调用创建的气泡，
@@ -485,4 +491,15 @@ function makeLiveStep(
     llm_input_tokens: 0,
     llm_output_tokens: 0,
   }
+}
+
+function applyRetrievalReferences(data: Record<string, unknown>, runId?: string) {
+  const retrievalEvents = data.retrieval_events as Message["retrieval_events"]
+  if (!retrievalEvents) return
+  const assistantMessageId = data.assistant_message_id as string | undefined
+  const state = useChatStore.getState()
+  const target = assistantMessageId
+    ? state.messages.find((message) => message.id === assistantMessageId)
+    : [...state.messages].reverse().find((message) => message.role === "assistant" && message.run_id === runId)
+  if (target) state.updateMessage(target.id, { retrieval_events: retrievalEvents })
 }

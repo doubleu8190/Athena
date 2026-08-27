@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Iterable, Protocol
 
 from langchain_core.messages import HumanMessage
 
@@ -30,15 +32,61 @@ _MEM_FREQ_K = 0.15  # log1p 缩放系数
 _MEM_RECENCY_M = 0.4  # 新近度加成上限
 
 
-@dataclass
+@dataclass(init=False)
 class SearchResult:
-    """检索结果."""
+    """检索结果，分别保存各阶段分数的语义。"""
 
     content: str
-    score: float
-    source: str  # "vector" / "keyword" / "fused"（向量 / 关键词 / 融合）
+    item_id: str
+    source: str
     metadata: dict[str, Any]
-    chunk_id: str
+    native_score: float | None
+    fused_score: float | None
+    rerank_score: float | None
+    exact_match: bool
+    rank_sources: dict[str, int]
+
+    def __init__(
+        self,
+        content: str,
+        item_id: str | None = None,
+        source: str = "vector",
+        metadata: dict[str, Any] | None = None,
+        native_score: float | None = None,
+        fused_score: float | None = None,
+        rerank_score: float | None = None,
+        exact_match: bool = False,
+        rank_sources: dict[str, int] | None = None,
+        *,
+        score: float | None = None,
+        chunk_id: str | None = None,
+    ) -> None:
+        self.content = content
+        self.item_id = item_id or chunk_id or ""
+        self.source = source
+        self.metadata = metadata or {}
+        self.native_score = native_score if native_score is not None else score
+        self.fused_score = fused_score
+        self.rerank_score = rerank_score
+        self.exact_match = exact_match
+        self.rank_sources = dict(rank_sources or {})
+
+    @property
+    def score(self) -> float:
+        """迁移期兼容属性，按 rerank > fused > native 的顺序读取。"""
+        return next(
+            (
+                value
+                for value in (self.rerank_score, self.fused_score, self.native_score)
+                if value is not None
+            ),
+            0.0,
+        )
+
+    @property
+    def chunk_id(self) -> str:
+        """迁移期兼容别名。"""
+        return self.item_id
 
 
 class ShadowSubmitter(Protocol):
@@ -86,12 +134,27 @@ class HybridRetrievalManager:
         self._settings = settings
         self._min_score = self._settings.memory_min_score
         self._top_k = self._settings.retrieval_top_k
+        self._candidate_k = getattr(
+            self._settings, "retrieval_candidate_k", self._top_k * 2
+        )
+        self._rerank_k = getattr(self._settings, "retrieval_rerank_k", self._top_k)
+        self._context_k = getattr(self._settings, "retrieval_context_k", self._top_k)
+        self._vector_min_score = getattr(
+            self._settings, "memory_vector_min_score", self._min_score
+        )
+        self._pipeline_mode = getattr(
+            self._settings, "retrieval_pipeline_mode", "legacy"
+        )
         self._vector_weight = self._settings.vector_weight
         self._keyword_weight = self._settings.keyword_weight
         self._rrf_k = self._settings.rrf_k
         self._ttl_days = self._settings.memory_ttl_days
         self._trace_enabled = self._settings.retrieval_trace_enabled
         self._trace_sink = trace_sink
+
+    def record_selected_access(self, memory_ids: Iterable[str]) -> None:
+        """记录已写入上下文的记忆访问。"""
+        self._memory.record_selected_access(memory_ids)
 
     async def retrieve(
         self,
@@ -109,25 +172,51 @@ class HybridRetrievalManager:
         trace = self._new_trace(query)
         selected: list[SearchResult] = []
         try:
-            # 1. LLM 查询扩展
+            # Corrected 模式并发启动原始向量和关键词路线；扩展 query 只作为
+            # 完成原始路线后的附加向量证据。
+            keyword_task = asyncio.create_task(
+                self._keyword_search(query, filter_params, trace, route="keyword")
+            )
+            raw_vector_task = (
+                asyncio.create_task(
+                    self._vector_search(query, filter_params, trace, route="vector")
+                )
+                if self._pipeline_mode == "corrected"
+                else None
+            )
             expanded_query = await self._expand_query(query, trace)
+            keyword_results = await keyword_task
 
-            # 2. 向量检索
-            vector_results = await self._vector_search(
-                expanded_query or query, filter_params, trace, record_access
-            )
+            if self._pipeline_mode == "legacy":
+                # Legacy 保留改写 query 替代原始向量 query 的行为，便于回滚。
+                vector_results = await self._vector_search(
+                    expanded_query or query,
+                    filter_params,
+                    trace,
+                    route="vector",
+                )
+            else:
+                vector_results = await raw_vector_task if raw_vector_task else []
+                if expanded_query and expanded_query.strip() != query.strip():
+                    vector_results.extend(
+                        await self._vector_search(
+                            expanded_query,
+                            filter_params,
+                            trace,
+                            route="vector_rewrite",
+                            query_index=1,
+                        )
+                    )
 
-            # 3. 关键词检索
-            keyword_results = await self._keyword_search(
-                query, filter_params, trace, record_access
-            )
-
-            # 4. RRF 融合
+            # RRF 只排序已经通过通道准入的候选，不承担相关性阈值判断。
             fusion_started = perf_counter()
-            fused = self._reciprocal_rank_fusion(vector_results, keyword_results)
+            fused = self._reciprocal_rank_fusion(
+                vector_results,
+                keyword_results,
+            )
             if trace is not None:
                 trace.set_fused_scores(
-                    {result.chunk_id: result.score for result in fused}
+                    {result.item_id: result.fused_score or 0.0 for result in fused}
                 )
                 trace.add_stage(
                     stage="fusion",
@@ -137,29 +226,31 @@ class HybridRetrievalManager:
                     result_count=len(fused),
                 )
 
-            # 5. 记忆度叠加 + 时间衰减 + 过滤 + 排序
-            # 未落盘的访问统计先叠加进 metadata，使加权实时生效（不等同步周期）
+            # 生命周期信号只作为同一相关度层内的 tie-break。
             selection_started = perf_counter()
-            pending = self._memory.pending_access_stats(r.chunk_id for r in fused)
             for r in fused:
-                meta = r.metadata
-                if r.chunk_id in pending:
-                    extra, last = pending[r.chunk_id]
-                    meta = {
-                        **meta,
-                        "access_count": (int(meta.get("access_count") or 0) + extra),
-                        "last_accessed": last,
-                    }
-                r.score *= self._calculate_temporal_decay(meta)
-                r.score *= self._calculate_memorability(meta)
+                lifecycle = self._lifecycle_score(r.metadata)
+                r.rerank_score = (
+                    (r.fused_score or 0.0) * lifecycle
+                    if self._pipeline_mode == "legacy"
+                    else r.fused_score
+                )
 
-            # RRF 分数上界约 2/(rrf_k+1)，将原语义阈值映射到该尺度。
-            # 融合后只保留证据足够强的记忆，避免弱命中污染上下文。
-            # 纯关键词命中通常不能单独跨线；这是现有 legacy 行为，PR-02 才调整。
-            threshold = self._min_score / (self._rrf_k + 1)
-            filtered = [r for r in fused if r.score >= threshold]
-            filtered.sort(key=lambda x: x.score, reverse=True)
-            selected = filtered[: self._top_k]
+            if self._pipeline_mode == "legacy":
+                threshold = self._min_score / (self._rrf_k + 1)
+                eligible = [r for r in fused if (r.fused_score or 0.0) >= threshold]
+                eligible.sort(key=lambda x: (-float(x.fused_score or 0.0), x.item_id))
+                selected = eligible[: self._top_k]
+            else:
+                fused.sort(
+                    key=lambda x: (
+                        0 if x.exact_match else 1,
+                        -float(x.fused_score or 0.0),
+                        -self._lifecycle_score(x.metadata),
+                        x.item_id,
+                    )
+                )
+                selected = fused[: self._rerank_k][: self._context_k]
             if trace is not None:
                 trace.add_stage(
                     stage="selection",
@@ -177,7 +268,7 @@ class HybridRetrievalManager:
 
     async def _expand_query(
         self, query: str, trace: RetrievalTrace | None = None
-    ) -> str:
+    ) -> str | None:
         """使用 LLM 扩展查询.
 
         扩展结果仅用于向量语义检索（关键词检索使用原始查询走 FTS5），
@@ -202,7 +293,7 @@ class HybridRetrievalManager:
                         result_count=0,
                         error_code="query_expand_empty",
                     )
-                return query
+                return None
             if trace is not None:
                 trace.add_stage(
                     stage="query_expand",
@@ -224,34 +315,44 @@ class HybridRetrievalManager:
                     result_count=0,
                     error_code="query_expand_failed",
                 )
-            return query
+            return None
 
     async def _vector_search(
         self,
         query: str,
         filter_params: dict[str, Any] | None,
         trace: RetrievalTrace | None = None,
-        record_access: bool = True,
+        record_access: bool = False,
+        *,
+        route: str = "vector",
+        query_index: int = 0,
     ) -> list[SearchResult]:
         """向量检索（跨会话全库；filter_params 为可选显式过滤）."""
         started = perf_counter()
         try:
             kwargs: dict[str, Any] = {
                 "query": query,
-                "n_results": self._top_k * 2,
+                "n_results": self._candidate_k,
                 "where": filter_params,
             }
-            if not record_access:
-                kwargs["record_access"] = False
-            results = await self._memory.search(**kwargs)
+            kwargs["record_access"] = False
+            try:
+                results = await self._memory.search(**kwargs)
+            except TypeError as exc:
+                # Small adapters used by older callers may not expose the
+                # compatibility flag; they are read-only by contract here.
+                if "record_access" not in str(exc):
+                    raise
+                kwargs.pop("record_access")
+                results = await self._memory.search(**kwargs)
         except Exception as e:
             logger.warning("vector_search_failed", error=str(e))
             if trace is not None:
                 trace.add_fallback("vector_search_failed")
                 trace.add_stage(
                     stage="candidate_retrieval",
-                    route="vector",
-                    query_index=0,
+                    route=route,
+                    query_index=query_index,
                     duration_ms=(perf_counter() - started) * 1000,
                     result_count=0,
                     error_code="vector_search_failed",
@@ -259,13 +360,15 @@ class HybridRetrievalManager:
             return []
 
         out: list[SearchResult] = []
+        has_raw_native_scores = any(r.get("native_score") is not None for r in results)
         for i, r in enumerate(results, 1):
             out.append(
                 SearchResult(
                     content=r["content"],
-                    score=r["score"],
-                    source="vector",
+                    source=route,
                     metadata=r.get("metadata", {}),
+                    native_score=r.get("native_score", r.get("score")),
+                    rank_sources={route: i},
                     chunk_id=r.get("id", str(i)),
                 )
             )
@@ -273,21 +376,30 @@ class HybridRetrievalManager:
         # score 为原始相似度 1-dist/2（越大越相似），vector_weight 统一在 RRF
         # 融合处生效，这里不乘权重，避免融合改读 r.score 时双倍加权。上游
         # ChromaDB 已按距离升序返回，这里显式按 score 降序把不变量固化。
-        out.sort(key=lambda x: x.score, reverse=True)
+        out.sort(
+            key=lambda x: x.native_score or 0.0,
+            reverse=not has_raw_native_scores,
+        )
+        if self._pipeline_mode == "corrected":
+            out = [
+                result
+                for result in out
+                if (result.native_score or 0.0) >= self._vector_min_score
+            ]
         if trace is not None:
             trace.add_stage(
                 stage="candidate_retrieval",
-                route="vector",
-                query_index=0,
+                route=route,
+                query_index=query_index,
                 duration_ms=(perf_counter() - started) * 1000,
                 result_count=len(out),
             )
             for rank, result in enumerate(out, 1):
                 trace.add_candidate(
                     item_id=result.chunk_id,
-                    route="vector",
+                    route=route,
                     rank=rank,
-                    native_score=result.score,
+                    native_score=result.native_score,
                 )
         return out
 
@@ -296,7 +408,10 @@ class HybridRetrievalManager:
         query: str,
         filter_params: dict[str, Any] | None,
         trace: RetrievalTrace | None = None,
-        record_access: bool = True,
+        record_access: bool = False,
+        *,
+        route: str = "keyword",
+        query_index: int = 0,
     ) -> list[SearchResult]:
         """关键词检索（SQLite FTS5 MATCH 全文检索）.
 
@@ -311,20 +426,25 @@ class HybridRetrievalManager:
         try:
             kwargs = {
                 "query": query,
-                "n_results": self._top_k * 2,
+                "n_results": self._candidate_k,
                 "where": filter_params,
             }
-            if not record_access:
-                kwargs["record_access"] = False
-            results = await self._memory.keyword_search(**kwargs)
+            kwargs["record_access"] = False
+            try:
+                results = await self._memory.keyword_search(**kwargs)
+            except TypeError as exc:
+                if "record_access" not in str(exc):
+                    raise
+                kwargs.pop("record_access")
+                results = await self._memory.keyword_search(**kwargs)
         except Exception as e:
             logger.warning("keyword_search_failed", error=str(e))
             if trace is not None:
                 trace.add_fallback("keyword_search_failed")
                 trace.add_stage(
                     stage="candidate_retrieval",
-                    route="keyword",
-                    query_index=0,
+                    route=route,
+                    query_index=query_index,
                     duration_ms=(perf_counter() - started) * 1000,
                     result_count=0,
                     error_code="keyword_search_failed",
@@ -336,30 +456,33 @@ class HybridRetrievalManager:
             out.append(
                 SearchResult(
                     content=r["content"],
-                    score=r["score"],
-                    source="keyword",
+                    source=route,
                     metadata=r.get("metadata", {}),
+                    native_score=r.get("score"),
+                    exact_match=bool(r.get("exact_match"))
+                    or self._is_exact_match(query, r["content"]),
+                    rank_sources={route: i},
                     chunk_id=r.get("id", str(i)),
                 )
             )
         # 同上：RRF 需要"最相关在前"。score 为原始相似度 |bm25|/(1+|bm25|)
         # （越大越相关），keyword_weight 统一在 RRF 融合处生效。上游已
         # ORDER BY rank(=bm25 升序) 返回，这里显式按 score 降序固化不变量。
-        out.sort(key=lambda x: x.score, reverse=True)
+        out.sort(key=lambda x: x.native_score or 0.0, reverse=True)
         if trace is not None:
             trace.add_stage(
                 stage="candidate_retrieval",
-                route="keyword",
-                query_index=0,
+                route=route,
+                query_index=query_index,
                 duration_ms=(perf_counter() - started) * 1000,
                 result_count=len(out),
             )
             for rank, result in enumerate(out, 1):
                 trace.add_candidate(
                     item_id=result.chunk_id,
-                    route="keyword",
+                    route=route,
                     rank=rank,
-                    native_score=result.score,
+                    native_score=result.native_score,
                 )
         return out
 
@@ -385,6 +508,7 @@ class HybridRetrievalManager:
             query_hash_salt=self._settings.retrieval_trace_query_hash_salt,
             include_raw_query=self._settings.retrieval_trace_include_raw_query,
             query_labels=["memory"],
+            analyzer_mode=self._pipeline_mode,
         )
 
     def _emit_trace(self, trace: RetrievalTrace) -> None:
@@ -423,24 +547,57 @@ class HybridRetrievalManager:
         # 首次出现时保留完整结果对象，后续只更新融合分数，避免重复候选携带不一致内容。
         # （职责边界：向量路承担语义，关键词路仅作精确词/前缀助力的弱贡献）
         for rank, r in enumerate(vector_results, 1):
+            route = r.source if r.source.startswith("vector") else "vector"
+            route_rank = r.rank_sources.get(route, rank)
             if r.chunk_id not in scores:
                 scores[r.chunk_id] = 0.0
                 content_map[r.chunk_id] = r
-            scores[r.chunk_id] += self._vector_weight / (self._rrf_k + rank)
+            content_map[r.chunk_id].rank_sources.setdefault(route, route_rank)
+            scores[r.chunk_id] += self._vector_weight / (self._rrf_k + route_rank)
 
         for rank, r in enumerate(keyword_results, 1):
+            route = "keyword"
+            route_rank = r.rank_sources.get(route, rank)
             if r.chunk_id not in scores:
                 scores[r.chunk_id] = 0.0
                 content_map[r.chunk_id] = r
-            scores[r.chunk_id] += self._keyword_weight / (self._rrf_k + rank)
+            content_map[r.chunk_id].rank_sources.setdefault(route, route_rank)
+            content_map[r.chunk_id].exact_match = (
+                content_map[r.chunk_id].exact_match or r.exact_match
+            )
+            scores[r.chunk_id] += self._keyword_weight / (self._rrf_k + route_rank)
 
         fused: list[SearchResult] = []
         for chunk_id, rrf_score in scores.items():
             result = content_map[chunk_id]
-            result.score = rrf_score
+            result.fused_score = rrf_score
             result.source = "fused"
             fused.append(result)
         return fused
+
+    def _lifecycle_score(self, metadata: dict[str, Any]) -> float:
+        """Return a secondary lifecycle signal without changing relevance."""
+        return self._calculate_temporal_decay(metadata) * self._calculate_memorability(
+            metadata
+        )
+
+    @staticmethod
+    def _is_exact_match(query: str, content: str) -> bool:
+        """Identify complete terms without treating arbitrary substrings as exact."""
+        needle = query.strip().casefold()
+        haystack = content.casefold()
+        if not needle:
+            return False
+        if needle == haystack.strip():
+            return True
+        boundary = r"[\w\u4e00-\u9fff]"
+        return (
+            re.search(
+                rf"(?<!{boundary}){re.escape(needle)}(?!{boundary})",
+                haystack,
+            )
+            is not None
+        )
 
     def _calculate_temporal_decay(self, metadata: dict[str, Any]) -> float:
         """计算时间衰减因子."""
@@ -448,6 +605,8 @@ class HybridRetrievalManager:
         if not created_at:
             return 1.0
         try:
+            if metadata.get("pinned"):
+                return 1.0
             created = datetime.fromisoformat(created_at)
             age_days = (datetime.now() - created).days
             decay = max(0.1, 1.0 - (age_days / max(self._ttl_days, 1)))
@@ -544,14 +703,17 @@ class MemoryRetrievalService:
 
         parts = ["[相关记忆]"]
         total_tokens = 0
+        selected_ids: list[str] = []
         for r in results:
             content_tokens = self._token_counter.count_text_tokens(r.content)
             if total_tokens + content_tokens > self._max_tokens:
                 break
             parts.append(f"- {r.content}")
             total_tokens += content_tokens
+            selected_ids.append(r.item_id)
 
         if len(parts) > 1:
             parts.append("[/相关记忆]")
+            self._manager.record_selected_access(selected_ids)
             return "\n".join(parts)
         return ""

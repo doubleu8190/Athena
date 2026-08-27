@@ -644,7 +644,7 @@ class FileIntelligenceRuntime:
             trace,
             route="keyword",
             candidates=keyword,
-            native_score=None,
+            native_score="native_score",
             duration_ms=(perf_counter() - started) * 1000,
         )
         return keyword
@@ -725,6 +725,7 @@ class FileIntelligenceRuntime:
                 "content": content,
                 "locator": json.loads((metadata or {}).get("locator_json", "{}")),
                 "score": max(0.0, 1 - float(distance) / 2),
+                "native_score": max(0.0, 1 - float(distance) / 2),
             }
             for chunk_id, content, metadata, distance in zip(
                 (result.get("ids") or [[]])[0],
@@ -771,7 +772,15 @@ class FileIntelligenceRuntime:
             item_id = (
                 candidate.id if isinstance(candidate, FileChunk) else candidate["id"]
             )
-            score = None if native_score is None else candidate[native_score]
+            score = (
+                None
+                if native_score is None
+                else (
+                    getattr(candidate, native_score, None)
+                    if isinstance(candidate, FileChunk)
+                    else candidate.get(native_score)
+                )
+            )
             trace.add_candidate(
                 item_id=item_id,
                 route=route,
@@ -809,10 +818,17 @@ class FileIntelligenceRuntime:
                 "id": chunk.id,
                 "content": chunk.content,
                 "locator": chunk.locator,
+                "native_score": chunk.native_score,
             }
         for rank, item in enumerate(vector, 1):
             scores[item["id"]] = scores.get(item["id"], 0) + 1 / (60 + rank)
-            values[item["id"]] = item
+            previous = values.get(item["id"], {})
+            values[item["id"]] = {
+                **previous,
+                **item,
+                "keyword_native_score": previous.get("native_score"),
+                "vector_native_score": item.get("native_score"),
+            }
         ordered = sorted(
             values.values(), key=lambda item: scores[item["id"]], reverse=True
         )[:limit]

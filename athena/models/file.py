@@ -202,6 +202,9 @@ class FileChunk(BaseModel):
     token_count: int = 0
     locator: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # SQLite FTS5 exposes BM25 as a native rank.  It is intentionally kept
+    # separate from the public fused score produced by file retrieval.
+    native_score: float | None = None
 
 
 class AdapterInfo(BaseModel):

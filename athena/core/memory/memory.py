@@ -90,6 +90,12 @@ class MemoryManager:
             stat.count += 1
             stat.last_accessed = now
 
+    def record_selected_access(self, memory_ids: Iterable[str]) -> None:
+        """记录最终写入上下文的记忆访问，单个请求内按 ID 去重。"""
+        for memory_id in dict.fromkeys(memory_ids):
+            if memory_id:
+                self._record_access(memory_id)
+
     def pending_access_stats(self, ids: Iterable[str]) -> dict[str, tuple[int, str]]:
         """执行“pending access stats”操作。
 
@@ -283,6 +289,9 @@ class MemoryManager:
                     "source": "vector",
                 }
             )
+            # Kept for direct callers during the compatibility cycle. Retrieval
+            # routes explicitly pass record_access=False and confirm access only
+            # after context selection.
             if record_access:
                 self._record_access(memory_id)
         return output
@@ -313,8 +322,8 @@ class MemoryManager:
         except Exception as exc:
             logger.error("memory_keyword_search_failed", error=str(exc))
             return []
-        for item in results:
-            if record_access:
+        if record_access:
+            for item in results:
                 self._record_access(item["id"])
         return results
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -140,6 +141,12 @@ class Settings(BaseSettings):
     keyword_weight: float = 0.25  # 关键词检索权重
     rrf_k: int = 60  # RRF 融合参数
     retrieval_top_k: int = 5
+    # PR-02: 检索候选、重排和最终上下文使用独立的容量。
+    retrieval_candidate_k: int = 30
+    retrieval_rerank_k: int = 10
+    retrieval_context_k: int = 5
+    memory_vector_min_score: float = 0.70
+    retrieval_pipeline_mode: Literal["legacy", "corrected"] = "legacy"
     memory_max_tokens: int = 2000
 
     # --- 检索可观测性 ---

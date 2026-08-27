@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import re
 from typing import Any, Iterable
 
 from sqlalchemy import delete, select, text, update
@@ -37,6 +38,17 @@ from athena.models.file import (
     FileTaskType,
 )
 from athena.utils.ids import generate_time_id
+
+
+_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*|[\u4e00-\u9fff]+")
+
+
+def _fts_match_expression(query: str) -> str | None:
+    """Build a quoted FTS5 expression without allowing query operators through."""
+    tokens = _FTS_TOKEN_RE.findall(query)
+    if not tokens:
+        return None
+    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
 
 
 def _now() -> datetime:
@@ -1095,23 +1107,34 @@ class FileRepository:
         """
         async with get_session() as session:
             rows = []
+            ranks: dict[str, float] = {}
+            fts_succeeded = False
+            match_expr = _fts_match_expression(query)
             try:
-                chunk_ids = list(
+                if match_expr is None:
+                    raise ValueError("query has no FTS tokens")
+                fts_rows = list(
                     (
                         await session.execute(
                             text(
-                                "SELECT chunk_id FROM file_chunk_fts WHERE attachment_id = :attachment_id AND file_chunk_fts MATCH :query LIMIT :limit"
+                                "SELECT chunk_id, bm25(file_chunk_fts) AS rank "
+                                "FROM file_chunk_fts "
+                                "WHERE attachment_id = :attachment_id "
+                                "AND file_chunk_fts MATCH :match_expr "
+                                "ORDER BY rank LIMIT :limit"
                             ),
                             {
                                 "attachment_id": attachment_id,
-                                "query": query,
+                                "match_expr": match_expr,
                                 "limit": limit,
                             },
                         )
                     )
-                    .scalars()
                     .all()
                 )
+                fts_succeeded = True
+                chunk_ids = [row.chunk_id for row in fts_rows]
+                ranks = {row.chunk_id: float(row.rank) for row in fts_rows}
                 if chunk_ids:
                     fetched = (
                         (
@@ -1126,9 +1149,9 @@ class FileRepository:
                     )
                     by_id = {row.id: row for row in fetched}
                     rows = [by_id[item] for item in chunk_ids if item in by_id]
-            except SQLAlchemyError:
+            except (SQLAlchemyError, ValueError):
                 rows = []
-            if not rows:
+            if not fts_succeeded:
                 rows = (
                     (
                         await session.execute(
@@ -1153,6 +1176,7 @@ class FileRepository:
                     token_count=r.token_count,
                     locator=_json_loads(r.locator_json, {}),
                     metadata=_json_loads(r.metadata_json, {}),
+                    native_score=ranks.get(r.id) if fts_succeeded else None,
                 )
                 for r in rows
             ]

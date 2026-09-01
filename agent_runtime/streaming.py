@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from athena.contracts.events import ApplicationEvent, EventDurability
+from athena.models.json_models import JsonObject
 
 
 class StreamCoalescer:
@@ -20,6 +21,7 @@ class StreamCoalescer:
         stream_id: str,
         publish: Callable[[ApplicationEvent], Awaitable[object]],
         stream_type: str = "answer",
+        message_id: str | None = None,
         interval_ms: int = 50,
         max_bytes: int = 512,
     ) -> None:
@@ -39,6 +41,7 @@ class StreamCoalescer:
         """
         self.session_id, self.run_id, self.stream_id = session_id, run_id, stream_id
         self.stream_type = stream_type
+        self.message_id = message_id
         self.publish = publish
         self.interval = interval_ms / 1000
         self.max_bytes = max_bytes
@@ -110,17 +113,21 @@ class StreamCoalescer:
                 durability=EventDurability.REALTIME,
                 session_id=self.session_id,
                 run_id=self.run_id,
+                message_id=self.message_id,
                 stream_id=self.stream_id,
                 stream_type=self.stream_type,
                 chunk_id=self._version,
                 is_complete=is_complete,
-                payload={
-                    "stream_id": self.stream_id,
-                    "chunk_id": self._version,
-                    "base_version": self._version - 1,
-                    "start_offset": start,
-                    "end_offset": self._offset,
-                    "delta": delta,
-                },
+                payload=JsonObject.model_validate(
+                    {
+                        "stream_id": self.stream_id,
+                        "message_id": self.message_id,
+                        "chunk_id": self._version,
+                        "base_version": self._version - 1,
+                        "start_offset": start,
+                        "end_offset": self._offset,
+                        "delta": delta,
+                    }
+                ),
             )
         )

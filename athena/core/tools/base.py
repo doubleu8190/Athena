@@ -229,5 +229,7 @@ def build_langchain_tool_schema(tool: ToolProtocol) -> dict[str, Any]:
     return {
         "name": tool.schema.name,
         "description": tool.schema.description,
-        "parameters": tool.schema.parameters,
+        "parameters": tool.schema.parameters.model_dump(
+            mode="json", by_alias=True, exclude_none=True
+        ),
     }

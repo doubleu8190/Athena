@@ -8,11 +8,17 @@ from typing import TYPE_CHECKING, Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from athena.utils.ids import generate_time_id
+
 from .nodes import (
+    check_file_results,
+    create_handle_file_failure_node,
     create_execute_tools_and_llm_node,
     create_finalize_response_node,
     create_prepare_context_node,
     create_prepare_request_node,
+    create_persist_message_and_attachments_node,
+    create_process_attachments_node,
     create_retrieve_memory_node,
 )
 from .state import AgentState
@@ -36,6 +42,12 @@ def build_graph(
     """
     graph = StateGraph(AgentState)
     graph.add_node("prepare_request", create_prepare_request_node(runtime))
+    graph.add_node(
+        "persist_message_and_attachments",
+        create_persist_message_and_attachments_node(runtime),
+    )
+    graph.add_node("process_attachments", create_process_attachments_node(runtime))
+    graph.add_node("handle_file_failure", create_handle_file_failure_node())
     graph.add_node("retrieve_memory", create_retrieve_memory_node(runtime))
     graph.add_node("prepare_context", create_prepare_context_node(runtime))
     graph.add_node(
@@ -43,7 +55,17 @@ def build_graph(
     )
     graph.add_node("finalize_response", create_finalize_response_node())
     graph.add_edge(START, "prepare_request")
-    graph.add_edge("prepare_request", "retrieve_memory")
+    graph.add_edge("prepare_request", "persist_message_and_attachments")
+    graph.add_edge("persist_message_and_attachments", "process_attachments")
+    graph.add_conditional_edges(
+        "process_attachments",
+        check_file_results,
+        {
+            "prepare_context": "retrieve_memory",
+            "handle_file_failure": "handle_file_failure",
+        },
+    )
+    graph.add_edge("handle_file_failure", "finalize_response")
     graph.add_edge("retrieve_memory", "prepare_context")
     graph.add_edge("prepare_context", "execute_tools_and_llm")
     graph.add_edge("execute_tools_and_llm", "finalize_response")
@@ -59,9 +81,9 @@ async def invoke_graph(
     run_id: str = "",
     command_id: str = "",
     attachment_ids: list[str] | None = None,
+    message_id: str = "",
     system_prompt: str | None = None,
     stop_signal: asyncio.Event | None = None,
-    continuation: dict[str, Any] | None = None,
 ) -> Any:
     """以指定会话配置执行已编译的 Agent 图。
 
@@ -74,7 +96,6 @@ async def invoke_graph(
         attachment_ids (list[str] | None): 可选附件 ID 列表，元素必须为非空字符串。
         system_prompt (str | None): 可选系统提示词，会随图状态传递。
         stop_signal (asyncio.Event | None): 可选停止信号；置位后终止当前 Harness 和子 Agent 执行。
-        continuation (dict[str, Any] | None): 可选的中断续接数据。
     返回值:
         Any: 图最终产生的业务结果；无结果时返回 ``None``。
     异常:
@@ -88,12 +109,11 @@ async def invoke_graph(
         "session_id": session_id,
         "run_id": run_id,
         "command_id": command_id,
+        "message_id": message_id or generate_time_id(),
         "user_message": user_message,
         "attachment_ids": attachment_ids or [],
         "system_prompt": system_prompt or "",
     }
-    if continuation is not None:
-        initial_state["continuation"] = continuation
     state = await graph.ainvoke(
         initial_state,
         config={

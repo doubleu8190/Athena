@@ -18,7 +18,7 @@ def test_supported_attachment_types_come_from_adapter_registry():
     app.include_router(router)
     db = MagicMock()
     db.sessions.get = AsyncMock(return_value=object())
-    install_runtime(app, db=db, file_runtime=Runtime(), file_worker=MagicMock())
+    install_runtime(app, db=db, file_runtime=Runtime())
     response = TestClient(app).get("/sessions/session/attachment-types")
 
     assert response.status_code == 200

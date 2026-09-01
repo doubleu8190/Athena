@@ -12,7 +12,6 @@ from athena.infrastructure.sqlite.agent_store import AgentStore
 
 if TYPE_CHECKING:
     from athena.core.files.runtime import FileIntelligenceRuntime
-    from athena.core.files.tasks import FileTaskWorker
     from athena.core.llm.provider import LLMProvider
     from athena.core.memory.memory import MemoryManager
     from athena.core.tools.catalog import ToolCatalogService
@@ -33,7 +32,6 @@ class RuntimeContainer:
     mcp_manager: MCPManager
     llm: LLMProvider
     file_runtime: FileIntelligenceRuntime
-    file_worker: FileTaskWorker
     memory_manager: MemoryManager
     agent_store: AgentStore
     realtime_transport: SessionEventBus

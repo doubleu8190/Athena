@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from datetime import datetime
 import sys
 import types
@@ -13,13 +12,12 @@ from athena.core.files.base import ExtractedUnit, ExtractionContext
 from athena.core.files.registry import AdapterRegistry
 from athena.core.files.runtime import FileAccessError, FileIntelligenceRuntime
 from athena.core.files.storage import FileTooLargeError, StorageLayer
-from athena.core.files.tasks import FileTaskWorker
 from athena.core.tools.catalog import ToolCatalogService, ToolRegistry
 from athena.core.tools.providers.files import build_file_tool_specs
 from athena.core.llm.tokens import conservative_text_token_count
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
-from athena.models.file import FileChunk, FileTaskStatus, FileTaskType
+from athena.models.file import FileChunk
 from tests.fakes import make_tool_manager
 
 
@@ -124,32 +122,10 @@ async def test_parse_csv_preserves_suffix_for_table_artifact(tmp_path):
         assert parsed["row_count"] == 2
         assert parsed["columns"] == ["name", "value"]
         assert artifact is not None
-        assert artifact["metadata"]["count"] == 1
+        assert artifact.metadata.model_dump()["count"] == 1
 
         tables = await runtime.extract_table("session", attachment.id)
         assert tables["tables"][0]["headers"] == ["name", "value"]
-    finally:
-        await db.close()
-
-
-@pytest.mark.asyncio
-async def test_queue_recovery_and_active_task_idempotency(tmp_path):
-    db = Database(str(tmp_path / "queue.db"))
-    await db.connect()
-    try:
-        await db.sessions.create("session")
-        attachment = await db.files.create_attachment(
-            session_id="session", filename="a.txt", mime_type="text/plain",
-            size_bytes=1, sha256="0" * 64, storage_key="blobs/00/placeholder",
-        )
-        first = await db.files.create_task("session", attachment.id, FileTaskType.FILE_PARSE)
-        duplicate = await db.files.create_task("session", attachment.id, FileTaskType.FILE_PARSE)
-        assert duplicate.id == first.id
-        claimed = await db.files.claim_next_task()
-        assert claimed and claimed.status == FileTaskStatus.RUNNING
-        assert await db.files.recover_running_tasks() == 1
-        recovered = await db.files.get_task(first.id)
-        assert recovered and recovered.status == FileTaskStatus.QUEUED
     finally:
         await db.close()
 
@@ -366,40 +342,6 @@ def test_pdf_ocr_page_encodes_rendered_image_as_bytes(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_summary_task_failure_does_not_mark_attachment_failed(tmp_path):
-    db = Database(str(tmp_path / "summary-task.db"))
-    await db.connect()
-    try:
-        await db.sessions.create("session")
-        settings = Settings(
-            _env_file=None,
-            sqlite_db_path=str(tmp_path / "summary-task.db"),
-            chromadb_path=str(tmp_path / "chroma"),
-            file_storage_path=str(tmp_path / "storage"),
-            file_task_max_attempts=1,
-        )
-        runtime = _make_runtime(db.files, settings)
-        worker = FileTaskWorker(runtime)
-        attachment = await db.files.create_attachment(
-            session_id="session", filename="empty.txt", mime_type="text/plain",
-            size_bytes=1, sha256="5" * 64, storage_key="blobs/55/placeholder",
-        )
-        await db.files.update_attachment(attachment.id, status="ready", adapter_name="text")
-        await worker.enqueue_task("session", attachment.id, FileTaskType.FILE_SUMMARY)
-        task = await db.files.claim_next_task()
-        assert task is not None
-
-        await worker._execute_with_limit(task)
-        current_task = await db.files.get_task(task.id)
-        current_attachment = await db.files.get_attachment(attachment.id, "session")
-
-        assert current_task and current_task.status == FileTaskStatus.FAILED
-        assert current_attachment and current_attachment.status.value == "ready"
-    finally:
-        await db.close()
-
-
-@pytest.mark.asyncio
 async def test_file_capability_governance_is_applied_to_runtime_manager(tmp_path):
     db = Database(str(tmp_path / "tools.db"))
     await db.connect()
@@ -425,28 +367,6 @@ async def test_file_capability_governance_is_applied_to_runtime_manager(tmp_path
     finally:
         await db.close()
 
-
-@pytest.mark.asyncio
-async def test_continuation_is_claimed_only_once(tmp_path):
-    db = Database(str(tmp_path / "continuation.db"))
-    await db.connect()
-    try:
-        await db.sessions.create("session")
-        attachment = await db.files.create_attachment(
-            session_id="session", filename="a.txt", mime_type="text/plain",
-            size_bytes=1, sha256="1" * 64, storage_key="blobs/11/placeholder",
-        )
-        await db.files.update_attachment(attachment.id, status="ready")
-        await db.files.create_continuation(
-            "session", "run", task_ids=[],
-            request={"attachment_ids": [attachment.id], "message_id": "message", "user_message": "read"},
-        )
-        claimed = await db.files.claim_ready_continuations(attachment.id)
-        assert len(claimed) == 1
-        assert await db.files.claim_ready_continuations(attachment.id) == []
-        await db.files.finish_continuation(claimed[0]["id"])
-    finally:
-        await db.close()
 
 
 def test_adapter_registry_excludes_archive_formats():

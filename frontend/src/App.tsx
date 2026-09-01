@@ -53,7 +53,10 @@ function AppContent() {
     const run = async () => {
       try {
         if (type === ClientEventType.USER_COMMAND) {
-          await apiClient.submitRun(activeSessionId, { message: String(data.message || ""), attachment_ids: data.attachment_ids as string[] | undefined })
+          await apiClient.submitRun(activeSessionId, {
+            message: String(data.message || ""),
+            files: Array.isArray(data.files) ? data.files as File[] : undefined,
+          })
         } else if (type === ClientEventType.SESSION_STOP) {
           await apiClient.cancelSession(activeSessionId)
         } else if (type === ClientEventType.SESSION_RESUME) {

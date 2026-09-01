@@ -11,15 +11,23 @@ from athena.models.approval import (
     ApprovalRequest,
 )
 from athena.models.mcp import McpServer, McpServerConfig
+from athena.models.json_models import (
+    CommandPayload,
+    ExtensibleJsonModel,
+    FileArtifact,
+    FileLocator,
+    FileMetadata,
+    JsonObject,
+    JsonSchema,
+    ToolArguments,
+    ToolCall,
+)
 from athena.models.file import (
     AdapterInfo,
     Attachment,
     AttachmentRef,
     AttachmentStatus,
     FileChunk,
-    FileTask,
-    FileTaskStatus,
-    FileTaskType,
 )
 from athena.models.message import Message, MessageRole
 from athena.models.session import Session, SessionStatus
@@ -48,6 +56,9 @@ __all__ = [
     "ToolResult",
     "ToolCallRecord",
     "ToolCallStatus",
+    "ToolCall",
+    "ToolArguments",
+    "JsonSchema",
     # 审批
     "ApprovalDecision",
     "ApprovalLog",
@@ -60,7 +71,10 @@ __all__ = [
     "AttachmentRef",
     "AttachmentStatus",
     "FileChunk",
-    "FileTask",
-    "FileTaskStatus",
-    "FileTaskType",
+    "FileArtifact",
+    "FileLocator",
+    "FileMetadata",
+    "CommandPayload",
+    "JsonObject",
+    "ExtensibleJsonModel",
 ]

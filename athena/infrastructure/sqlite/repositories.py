@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -17,6 +17,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import (
     ApprovalLogModel,
+    AttachmentModel,
+    MessageAttachmentModel,
     McpServerModel,
     MessageModel,
     SessionModel,
@@ -38,12 +40,15 @@ from athena.models import (
     ToolExecutionMode,
     RiskLevel,
 )
+from athena.models.json_models import ToolArguments, ToolCall, JsonSchema
+from pydantic import BaseModel, ValidationError
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 # 用于区分"未传参"和"显式传 None"的哨兵对象
 _SENTINEL = object()
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def _now_iso() -> str:
@@ -52,17 +57,35 @@ def _now_iso() -> str:
 
 
 def _json_dumps(value: Any) -> str:
-    """JSON 序列化，支持自定义类型."""
-    return json.dumps(value, ensure_ascii=False, default=str)
+    """把值转换成 JSON 文本；Pydantic 模型会先转换成普通 JSON 数据。"""
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json", exclude_none=True)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def _json_loads(value: str | None, default: Any) -> Any:
-    """JSON 反序列化，失败返回默认值."""
+    """读取 JSON 文本；内容为空或格式不正确时返回默认值。"""
     if not value:
         return default
     try:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def _json_loads_model(
+    value: str | None, model: type[ModelT], default: ModelT
+) -> ModelT:
+    """把 JSON 文本读取为指定模型；旧数据损坏时使用默认模型。"""
+    if not value:
+        return default
+    try:
+        return model.model_validate_json(value)
+    except (ValueError, ValidationError):
         return default
 
 
@@ -113,7 +136,11 @@ def _row_to_message(row: MessageModel) -> Message:
         session_id=row.session_id,
         role=MessageRole(row.role),
         content=row.content,
-        tool_calls=_json_loads(row.tool_calls_json, []),
+        tool_calls=[
+            ToolCall.model_validate(item)
+            for item in _json_loads(row.tool_calls_json, [])
+            if isinstance(item, dict)
+        ],
         tool_call_id=row.tool_call_id,
         run_id=row.run_id,
         tool_call_record_id=row.tool_call_record_id,
@@ -139,7 +166,7 @@ def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
         id=row.id,
         session_id=row.session_id,
         tool_name=row.tool_name,
-        arguments=_json_loads(row.arguments_json, {}),
+        arguments=_json_loads_model(row.arguments_json, ToolArguments, ToolArguments()),
         raw_output=row.raw_output,
         status=ToolCallStatus(row.status),
         started_at=datetime.fromisoformat(row.started_at),
@@ -169,7 +196,7 @@ def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
         session_id=row.session_id,
         tool_call_id=row.tool_call_id,
         tool_name=row.tool_name,
-        arguments=_json_loads(row.arguments_json, {}),
+        arguments=_json_loads_model(row.arguments_json, ToolArguments, ToolArguments()),
         risk_level=row.risk_level,
         decision=ApprovalDecision(row.decision),
         decision_time_ms=row.decision_time_ms,
@@ -189,10 +216,11 @@ def _row_to_mcp_server(row: McpServerModel) -> McpServer:
     异常：
         异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
-    config = _json_loads(row.config_json, {})
     return McpServer(
         name=row.name,
-        config=McpServerConfig.model_validate(config),
+        config=_json_loads_model(
+            row.config_json, McpServerConfig, McpServerConfig(command="")
+        ),
         created_at=datetime.fromisoformat(row.created_at),
         deleted_time=(
             datetime.fromisoformat(row.deleted_time) if row.deleted_time else None
@@ -384,6 +412,87 @@ class MessageRepository:
                     .values(updated_at=_now_iso())
                 )
             return message.id
+
+    async def get(self, message_id: str) -> Message | None:
+        """按 ID 获取一条未删除消息。"""
+        async with get_session() as session:
+            row = await session.get(MessageModel, message_id)
+            if row is None or row.deleted_time is not None:
+                return None
+            messages = await self._attach_refs([_row_to_message(row)])
+            return messages[0] if messages else None
+
+    async def create_message_with_attachments(
+        self, message: Message, attachment_ids: list[str]
+    ) -> Message:
+        """幂等创建用户消息并在同一事务内绑定附件。"""
+        ids = list(dict.fromkeys(attachment_ids))
+        async with get_session() as session:
+            async with session.begin():
+                existing = await session.get(MessageModel, message.id)
+                if existing is None:
+                    session.add(
+                        MessageModel(
+                            id=message.id,
+                            session_id=message.session_id,
+                            role=message.role.value,
+                            content=message.content,
+                            tool_calls_json=_json_dumps(message.tool_calls),
+                            tool_call_id=message.tool_call_id,
+                            run_id=message.run_id,
+                            tool_call_record_id=message.tool_call_record_id,
+                            tool_name=message.tool_name,
+                            type=message.type,
+                            timestamp=message.timestamp.isoformat(),
+                        )
+                    )
+                elif (
+                    existing.session_id != message.session_id
+                    or existing.role != message.role.value
+                    or existing.content != message.content
+                ):
+                    raise ValueError("message_id 已关联其他消息")
+
+                if ids:
+                    rows = (
+                        await session.execute(
+                            select(AttachmentModel).where(
+                                AttachmentModel.id.in_(ids),
+                                AttachmentModel.session_id == message.session_id,
+                                AttachmentModel.deleted_time.is_(None),
+                            )
+                        )
+                    ).scalars().all()
+                    if len(rows) != len(ids):
+                        raise ValueError("附件不存在或不属于当前会话")
+                    for row in rows:
+                        if row.message_id not in (None, message.id):
+                            raise ValueError("附件已关联其他消息")
+                        row.message_id = message.id
+                        await session.execute(
+                            sqlite_insert(MessageAttachmentModel)
+                            .values(message_id=message.id, attachment_id=row.id)
+                            .on_conflict_do_nothing()
+                        )
+                await session.execute(
+                    update(SessionModel)
+                    .where(
+                        SessionModel.id == message.session_id,
+                        SessionModel.deleted_time.is_(None),
+                    )
+                    .values(updated_at=_now_iso())
+                )
+        from athena.infrastructure.sqlite.file_repository import FileRepository
+
+        refs_by_message = await FileRepository().attachments_for_messages([message.id])
+        return message.model_copy(
+            update={
+                "attachments": [
+                    attachment.to_ref()
+                    for attachment in refs_by_message.get(message.id, [])
+                ]
+            }
+        )
 
     async def _attach_refs(self, messages: list[Message]) -> list[Message]:
         """填充轻量级附件引用，不暴露存储键。"""
@@ -766,7 +875,7 @@ def _row_to_tool_config(row: ToolModel) -> ToolConfig:
         server_name=row.server_name,
         remote_name=row.remote_name,
         description=row.description,
-        parameters=_json_loads(row.parameters_json, {}),
+        parameters=_json_loads_model(row.parameters_json, JsonSchema, JsonSchema()),
         risk_level=RiskLevel(row.risk_level),
         require_approval=bool(row.require_approval),
         enabled=bool(row.enabled),

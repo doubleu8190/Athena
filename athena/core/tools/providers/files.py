@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from athena.core.tools.spec import ToolSpec, get_tool_context
-from athena.models.file import FileTaskType
 
 if TYPE_CHECKING:
     from athena.core.files.runtime import FileIntelligenceRuntime
@@ -120,12 +119,6 @@ def build_file_tool_specs(runtime: FileIntelligenceRuntime) -> list[ToolSpec]:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        if runtime.task_queue_available:
-            task = await runtime.enqueue_task(
-                session_id(), file_id, FileTaskType.FILE_SUMMARY,
-                payload={"summary_type": summary_type},
-            )
-            return {"queued": True, "task": task.model_dump(mode="json")}
         return await runtime.summarize_file(session_id(), file_id, summary_type)
 
     async def analyze_file(file_id: str, task: str) -> Any:
@@ -155,11 +148,6 @@ def build_file_tool_specs(runtime: FileIntelligenceRuntime) -> list[ToolSpec]:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        if runtime.task_queue_available:
-            task = await runtime.enqueue_task(
-                session_id(), file_id, FileTaskType.CODE_ANALYSIS,
-            )
-            return {"queued": True, "task": task.model_dump(mode="json")}
         return await runtime.analyze_codebase(session_id(), file_id)
 
     async def find_symbol(file_id: str, name: str) -> Any:

@@ -354,13 +354,13 @@ class UnifiedToolManager:
 
     def _build_args_model(self, tool: ToolProtocol) -> type:
         """根据工具 parameters JSON Schema 构建 Pydantic 模型."""
-        params = tool.schema.parameters or {}
-        properties = params.get("properties", {})
-        required = set(params.get("required", []))
+        params = tool.schema.parameters
+        properties = params.properties
+        required = set(params.required)
 
         fields: dict[str, Any] = {}
         for field_name, spec in properties.items():
-            json_type = spec.get("type", "string")
+            json_type = spec.type or "string"
             py_type = {
                 "string": str,
                 "integer": int,
@@ -373,7 +373,7 @@ class UnifiedToolManager:
             if field_name in required:
                 fields[field_name] = (py_type, ...)
             else:
-                default = spec.get("default")
+                default = spec.default
                 fields[field_name] = (py_type, default)
 
         # 至少留一个占位字段，避免空模型报错

@@ -39,6 +39,7 @@ from athena.core.llm.tokens import token_usage_from_chunks
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole, ToolCallRecord
+from athena.models.json_models import JsonObject
 from athena.models.tool import ToolCallStatus
 from athena.contracts.events import EventType
 from athena.contracts.events import ApplicationEvent, EventDurability
@@ -149,6 +150,7 @@ class Harness:
         self._stop_signal: asyncio.Event | None = None
         self._allowed_tool_names: set[str] | None = None
         self._parent_run_id: str | None = None
+        self._message_id: str | None = None
         self._answer_stream_id: str | None = None
         self._answer_stream: StreamCoalescer | None = None
         self._thinking_chunk_id = 0
@@ -216,6 +218,7 @@ class Harness:
         """
         rid = run_id or generate_time_id()
         self._parent_run_id = parent_run_id
+        self._message_id = self._message_id_from_messages(messages)
         budget = Budget(
             max_turns=self._harness_settings.max_turns_per_run,
             retry_budget=self._harness_settings.retry_budget,
@@ -234,6 +237,7 @@ class Harness:
             run_id=rid,
             stream_id=self._answer_stream_id,
             stream_type="answer",
+            message_id=self._message_id,
             publish=self._events.publish,
         )
         await self._emit(
@@ -875,6 +879,26 @@ class Harness:
             self._stop_signal is not None and self._stop_signal.is_set()
         )
 
+    @staticmethod
+    def _message_id_from_messages(
+        messages: Sequence[Message | dict[str, Any]],
+    ) -> str | None:
+        """从本次 Harness 输入中提取最新用户消息 ID。"""
+        for message in reversed(messages):
+            if isinstance(message, Message):
+                if message.role == MessageRole.USER:
+                    return message.id
+                continue
+            if message.get("role") != MessageRole.USER.value:
+                continue
+            message_id = message.get("id")
+            if message_id:
+                return str(message_id)
+            metadata = message.get("metadata") or {}
+            if metadata.get("message_id"):
+                return str(metadata["message_id"])
+        return None
+
     async def _emit(
         self,
         event_type: EventType,
@@ -893,6 +917,9 @@ class Harness:
             run_id: 运行 ID。
         """
         try:
+            data = dict(data)
+            if self._message_id is not None:
+                data.setdefault("message_id", self._message_id)
             if event_type == EventType.LLM_TOKEN:
                 if self._answer_stream is not None:
                     await self._answer_stream.append(str(data.get("token", data.get("delta", ""))))
@@ -902,10 +929,11 @@ class Harness:
                 event_type=str(event_type), durability=durability,
                 session_id=session_id,
                 run_id=run_id,
+                message_id=self._message_id,
                 stream_id=str(data["stream_id"]) if data.get("stream_id") else None,
                 stream_type=str(data["stream_type"]) if data.get("stream_type") else None,
                 parent_run_id=self._parent_run_id,
-                payload=data,
+                payload=JsonObject.model_validate(data),
             ))
         except Exception as e:
             logger.warning(
@@ -937,10 +965,13 @@ class Harness:
                     durability=EventDurability.DURABLE,
                     session_id=session_id,
                     run_id=run_id,
+                    message_id=self._message_id,
                     stream_id=stream_id,
                     stream_type="thinking",
                     chunk_id=chunk_id,
-                    payload={"content": content, "stream_id": stream_id},
+                    payload=JsonObject.model_validate(
+                        {"content": content, "stream_id": stream_id}
+                    ),
                 )
             )
             upsert_snapshot = getattr(self._events, "upsert_snapshot", None)

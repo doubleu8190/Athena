@@ -18,8 +18,6 @@ import type {
   McpRegisterResponse,
   McpServerListResponse,
   Attachment,
-  AttachmentUploadItem,
-  FileTask,
   SupportedAttachmentTypes,
 } from "../types"
 
@@ -47,12 +45,13 @@ class ApiClient {
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
+    const headers = new Headers(options.headers)
+    if (!(options.body instanceof FormData) && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json")
+    }
     const url = `${this.baseUrl}${path}`
     const res = await fetch(url, {
-      headers: {
-        "Content-Type": "application/json",
-        ...options.headers,
-      },
+      headers,
       ...options,
     })
     if (!res.ok) {
@@ -111,9 +110,19 @@ class ApiClient {
    * @returns Promise 包含命令 ID、运行 ID及排队状态。
    * @throws Error 当会话不存在、命令冲突或会话不可并行运行时抛出。
    */
-  async submitRun(sessionId: string, payload: { message: string; attachment_ids?: string[]; command_id?: string }): Promise<{ command_id: string; run_id?: string; status: string; deduplicated?: boolean }> {
+  async submitRun(sessionId: string, payload: { message: string; files?: File[]; command_id?: string }): Promise<{ command_id: string; run_id?: string; message_id: string; status: string; deduplicated?: boolean }> {
+    const commandId = payload.command_id || `cmd_${crypto.randomUUID()}`
+    if (payload.files && payload.files.length > 0) {
+      const form = new FormData()
+      form.append("message", payload.message)
+      form.append("command_id", commandId)
+      payload.files.forEach((file) => form.append("files", file))
+      return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/runs`, {
+        method: "POST", body: form,
+      })
+    }
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/runs`, {
-      method: "POST", body: JSON.stringify(payload),
+      method: "POST", body: JSON.stringify({ message: payload.message, command_id: commandId }),
     })
   }
 
@@ -135,21 +144,6 @@ class ApiClient {
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/cancel${suffix}`, { method: "POST" })
   }
 
-  /** 上传会话附件并返回后端创建的附件/任务信息。
-   * @throws Error 当上传请求失败时抛出。
-   */
-  async uploadAttachments(sessionId: string, files: File[]): Promise<AttachmentUploadItem[]> {
-    const form = new FormData()
-    files.forEach((file) => form.append("files", file))
-    const response = await fetch(`${this.baseUrl}/api/sessions/${sessionId}/attachments`, {
-      method: "POST",
-      body: form,
-    })
-    if (!response.ok) throw new Error(`上传失败: ${response.status} ${await response.text()}`)
-    const data = await response.json() as { items: AttachmentUploadItem[] }
-    return data.items
-  }
-
   /** 列出会话附件。 */
   async listAttachments(sessionId: string): Promise<Attachment[]> {
     return this.request<Attachment[]>(`/api/sessions/${sessionId}/attachments`)
@@ -163,16 +157,6 @@ class ApiClient {
   /** 软删除会话附件。 */
   async deleteAttachment(sessionId: string, fileId: string): Promise<void> {
     await this.request(`/api/sessions/${sessionId}/attachments/${fileId}`, { method: "DELETE" })
-  }
-
-  /** 重新提交失败的附件处理任务。 */
-  async retryAttachment(sessionId: string, fileId: string): Promise<AttachmentUploadItem> {
-    return this.request<AttachmentUploadItem>(`/api/sessions/${sessionId}/attachments/${fileId}/retry`, { method: "POST" })
-  }
-
-  /** 查询文件任务状态。 */
-  async getFileTask(sessionId: string, taskId: string): Promise<FileTask> {
-    return this.request<FileTask>(`/api/sessions/${sessionId}/file-tasks/${taskId}`)
   }
 
   // ─── 审批管理 ─────────────────────────────────────────────────

@@ -28,12 +28,19 @@ from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
-from athena.models.file import Attachment, AttachmentRef, AttachmentStatus
+from athena.models.json_models import JsonObject
+from athena.models.file import (
+    Attachment,
+    AttachmentRef,
+    AttachmentStatus,
+)
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
 from athena.utils.ids import generate_sub_run_id, generate_time_id
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
+
+from .state import AgentState
 
 logger = get_logger(__name__)
 
@@ -168,11 +175,13 @@ class SubAgentManager:
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=sub_run_id,
-                payload={
-                    "task": task,
-                    "sub_run_id": sub_run_id,
-                    "max_turns": max_turns,
-                },
+                payload=JsonObject.model_validate(
+                    {
+                        "task": task,
+                        "sub_run_id": sub_run_id,
+                        "max_turns": max_turns,
+                    }
+                ),
             )
         )
 
@@ -212,11 +221,13 @@ class SubAgentManager:
                     durability=EventDurability.DURABLE,
                     session_id=session_id,
                     run_id=sub_run_id,
-                    payload={
-                        "task": task,
-                        "sub_run_id": sub_run_id,
-                        "turn_count": result.turn_count,
-                    },
+                    payload=JsonObject.model_validate(
+                        {
+                            "task": task,
+                            "sub_run_id": sub_run_id,
+                            "turn_count": result.turn_count,
+                        }
+                    ),
                 )
             )
             return sub_result
@@ -228,7 +239,9 @@ class SubAgentManager:
                     durability=EventDurability.DURABLE,
                     session_id=session_id,
                     run_id=sub_run_id,
-                    payload={"task": task, "sub_run_id": sub_run_id, "error": str(e)},
+                    payload=JsonObject.model_validate(
+                        {"task": task, "sub_run_id": sub_run_id, "error": str(e)}
+                    ),
                 )
             )
             return SubAgentResult(
@@ -321,6 +334,7 @@ class LangGraphRuntime:
         fact_extractor: FactExtractor,
         memory_manager: MemoryManager,
         settings: Settings,
+        file_runtime: Any | None = None,
     ) -> None:
         """
 
@@ -352,21 +366,15 @@ class LangGraphRuntime:
         self._fact_extractor = fact_extractor
         self._memory_manager = memory_manager
         self._settings = settings
-        self._graph: Any | None = None
+        self._file_runtime = file_runtime
+        self._file_parse_semaphore = asyncio.Semaphore(
+            max(1, settings.file_parse_concurrency)
+        )
+        self._file_embedding_semaphore = asyncio.Semaphore(
+            max(1, settings.file_embedding_concurrency)
+        )
         # 会话级停止事件，由 gateway 层注入，透传给 Harness 及子 Agent。
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
-
-    def set_graph(self, graph: Any) -> None:
-        """绑定已编译的 LangGraph 图，供附件处理完成后的续跑使用。
-
-        参数:
-            graph (Any): 已编译且支持 ``ainvoke`` 的 LangGraph 图对象。
-        返回值:
-            None: 图对象已保存到当前运行时。
-        异常:
-            不主动校验图对象；续跑时图缺少 ``ainvoke`` 会抛出 ``AttributeError``。
-        """
-        self._graph = graph
 
     def set_stop_signal(
         self, session_id: str, stop_signal: asyncio.Event | None
@@ -403,40 +411,28 @@ class LangGraphRuntime:
     def normalize_request(
         user_message: str,
         attachment_ids: list[str] | None,
-        continuation: dict[str, Any] | None,
     ) -> tuple[str, list[str]]:
-        """恢复续跑数据后规范化用户消息和附件 ID。
+        """规范化用户消息和附件 ID。
 
         参数：
             user_message (str): 当前用户消息；允许为空以支持仅附件请求。
             attachment_ids (list[str] | None): 附件 ID 列表；为空时按空列表处理，并去除重复 ID。
-            continuation (dict[str, Any] | None): 可选续跑数据；存在时其中的消息和附件字段覆盖当前输入。
 
         返回值：
             tuple[str, list[str]]: 规范化后的消息文本和去重附件 ID 列表。
-
-        异常：
-            不抛出业务异常；非标准续跑字段按默认值处理。
         """
-        if continuation is not None:
-            user_message = str(continuation.get("user_message", user_message))
-            attachment_ids = list(
-                continuation.get("attachment_ids", attachment_ids or [])
-            )
         return user_message, list(dict.fromkeys(attachment_ids or []))
 
     async def load_requested_attachments(
         self,
         session_id: str,
         attachment_ids: list[str],
-        continuation: dict[str, Any] | None,
     ) -> list[Attachment]:
         """加载并校验请求附件是否属于当前会话。
 
         参数：
             session_id (str): 会话唯一标识。
             attachment_ids (list[str]): 待加载的附件 ID 列表。
-            continuation (dict[str, Any] | None): 可选续跑数据；已标记删除的附件在续跑时跳过。
 
         返回值：
             list[Attachment]: 按请求顺序返回属于当前会话的附件。
@@ -453,15 +449,8 @@ class LangGraphRuntime:
         for file_id in attachment_ids:
             attachment = attachments_by_id.get(file_id)
             if attachment is None:
-                deleted_during_wait = (
-                    continuation is not None
-                    and continuation.get("file_outcomes", {}).get(file_id)
-                    == AttachmentStatus.DELETED.value
-                )
-                if deleted_during_wait:
-                    continue
                 raise ValueError("附件不存在或不属于当前会话")
-            if continuation is None and attachment.status == AttachmentStatus.FAILED:
+            if attachment.status == AttachmentStatus.FAILED:
                 raise ValueError(f"附件 {attachment.filename} 处理失败，不能随消息提交")
             requested.append(attachment)
         return requested
@@ -529,6 +518,140 @@ class LangGraphRuntime:
         )
         return [summary, *history_after]
 
+    async def persist_message_and_attachments(
+        self, state: AgentState
+    ) -> AgentState:
+        """幂等持久化当前用户消息及其附件关系。"""
+        message_id = state.get("message_id") or state.get("user_message_id")
+        if not message_id:
+            raise KeyError("message_id")
+        message = Message(
+            id=message_id,
+            session_id=state["session_id"],
+            role=MessageRole.USER,
+            content=state.get("user_message", ""),
+            run_id=state["run_id"],
+            timestamp=datetime.now(),
+        )
+        persisted = await self._db.messages.create_message_with_attachments(
+            message, state.get("attachment_ids", [])
+        )
+        await self._events.publish(
+            ApplicationEvent(
+                event_type="message.persisted",
+                durability=EventDurability.DURABLE,
+                session_id=state["session_id"],
+                run_id=state["run_id"],
+                message_id=persisted.id,
+                payload=JsonObject.model_validate(
+                    {
+                        "message_id": persisted.id,
+                        "attachment_ids": state.get("attachment_ids", []),
+                    }
+                ),
+            )
+        )
+        return {
+            "message_id": persisted.id,
+            "user_message_id": persisted.id,
+        }
+
+    async def process_attachment(
+        self, attachment_id: str, message_id: str, session_id: str, run_id: str
+    ) -> dict[str, Any]:
+        """在统一 Graph 内完成一个附件的解析和向量索引。"""
+        if self._file_runtime is None:
+            raise RuntimeError("file runtime is not configured")
+        await self._events.publish(
+            ApplicationEvent(
+                event_type="file_processing_started",
+                durability=EventDurability.DURABLE,
+                session_id=session_id,
+                run_id=run_id,
+                message_id=message_id,
+                attachment_id=attachment_id,
+                payload=JsonObject.model_validate(
+                    {"message_id": message_id, "attachment_id": attachment_id}
+                ),
+            )
+        )
+        try:
+            async with self._file_parse_semaphore:
+                metadata = await self._file_runtime.parse_attachment(
+                    attachment_id, run_id=run_id
+                )
+            await self._file_runtime.emit(
+                "file_processing_progress",
+                session_id,
+                {
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "run_id": run_id,
+                    "progress": 0.7,
+                },
+            )
+            async with self._file_embedding_semaphore:
+                indexed = await self._file_runtime.index_attachment(
+                    attachment_id, run_id=run_id
+                )
+            await self._file_runtime.emit(
+                "file_index_progress",
+                session_id,
+                {
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "run_id": run_id,
+                    "progress": 1.0,
+                },
+            )
+            await self._file_runtime.emit(
+                "file_processing_completed",
+                session_id,
+                {
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "run_id": run_id,
+                    "chunk_count": int(
+                        metadata.get("chunk_count", indexed.get("chunks", 0))
+                    ),
+                },
+            )
+            return {
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "status": "ready",
+                "error": None,
+                "chunk_count": int(
+                    metadata.get("chunk_count", indexed.get("chunks", 0))
+                ),
+            }
+        except Exception as exc:
+            attachment = await self._db.files.update_attachment(
+                attachment_id,
+                status=AttachmentStatus.FAILED.value,
+                error_message=str(exc),
+            )
+            if attachment is not None:
+                await self._file_runtime.emit_attachment(attachment, run_id=run_id)
+                session_id = attachment.session_id
+            await self._file_runtime.emit(
+                "file_processing_failed",
+                session_id,
+                {
+                    "message_id": message_id,
+                    "attachment_id": attachment_id,
+                    "run_id": run_id,
+                    "error": str(exc),
+                },
+            )
+            return {
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "status": "failed",
+                "error": str(exc),
+                "chunk_count": None,
+            }
+
     @staticmethod
     def build_system_prompt(system_prompt: str | None, memory_context: str) -> str:
         """选择系统提示词并在存在记忆时追加记忆上下文。
@@ -552,8 +675,8 @@ class LangGraphRuntime:
         user_message: str,
         attachment_ids: list[str],
         history: list[Message],
-        continuation: dict[str, Any] | None,
         run_id_override: str | None = None,
+        message_id_override: str | None = None,
     ) -> tuple[Message, list[AttachmentRef], list[Message]]:
         """
 
@@ -562,7 +685,6 @@ class LangGraphRuntime:
             user_message (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             attachment_ids (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             history (list[Message]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            continuation (dict[str, Any] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
             tuple[Message, list[AttachmentRef], list[Message]]: 依次返回用户消息、附件引用和 Harness 消息。
@@ -570,18 +692,17 @@ class LangGraphRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        run_id = run_id_override or (
-            str(continuation.get("run_id"))
-            if continuation is not None
-            else generate_time_id()
-        )
+        run_id = run_id_override or generate_time_id()
         message = await self._get_or_create_user_message(
-            session_id, user_message, run_id, history, continuation
+            session_id,
+            user_message,
+            run_id,
+            message_id_override,
         )
         attachment_refs = await self._bind_message_attachments(
-            session_id, message, attachment_ids, continuation
+            session_id, message, attachment_ids
         )
-        messages = self._build_harness_messages(history, message, continuation)
+        messages = self._build_harness_messages(history, message)
         return message, attachment_refs, messages
 
     async def _get_or_create_user_message(
@@ -589,8 +710,7 @@ class LangGraphRuntime:
         session_id: str,
         content: str,
         run_id: str,
-        history: list[Message],
-        continuation: dict[str, Any] | None,
+        message_id_override: str | None = None,
     ) -> Message:
         """
 
@@ -598,8 +718,6 @@ class LangGraphRuntime:
             session_id (str): 会话唯一标识。
             content (str): 待保存或处理的内容。
             run_id (str): 运行唯一标识。
-            history (list[Message]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            continuation (dict[str, Any] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
             Message: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -607,13 +725,13 @@ class LangGraphRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        if continuation is not None:
-            message_id = continuation.get("message_id")
-            existing = next((item for item in history if item.id == message_id), None)
+        message_id = message_id_override
+        if message_id:
+            existing = await self._db.messages.get(str(message_id))
             if existing is not None:
                 return existing
             return Message(
-                id=str(continuation.get("message_id", generate_time_id())),
+                id=str(message_id),
                 session_id=session_id,
                 role=MessageRole.USER,
                 content=content,
@@ -637,7 +755,6 @@ class LangGraphRuntime:
         session_id: str,
         message: Message,
         attachment_ids: list[str],
-        continuation: dict[str, Any] | None,
     ) -> list[AttachmentRef]:
         """
 
@@ -645,7 +762,6 @@ class LangGraphRuntime:
             session_id (str): 会话唯一标识。
             message (Message): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             attachment_ids (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            continuation (dict[str, Any] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
             list[AttachmentRef]: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -653,21 +769,10 @@ class LangGraphRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        if continuation is None:
-            if not attachment_ids:
-                return []
-            attachments = await self._db.files.bind_message(
-                session_id, message.id, attachment_ids
-            )
-            refs = [item.to_ref() for item in attachments]
-            message.attachments = refs
-            return refs
-
-        refs = message.attachments
-        if refs:
-            return refs
-        attachments = (await self._db.files.attachments_for_messages([message.id])).get(
-            message.id, []
+        if not attachment_ids:
+            return []
+        attachments = await self._db.files.bind_message(
+            session_id, message.id, attachment_ids
         )
         refs = [item.to_ref() for item in attachments]
         message.attachments = refs
@@ -677,14 +782,12 @@ class LangGraphRuntime:
     def _build_harness_messages(
         history: list[Message],
         user_message: Message,
-        continuation: dict[str, Any] | None,
     ) -> list[Message]:
         """
 
         参数：
             history (list[Message]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             user_message (Message): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            continuation (dict[str, Any] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
             list[Message]: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -692,12 +795,9 @@ class LangGraphRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        if continuation is None:
-            base_messages = [*history, user_message]
-        else:
-            base_messages = [*history]
-            if not any(item.id == user_message.id for item in base_messages):
-                base_messages.append(user_message)
+        base_messages = [*history]
+        if not any(item.id == user_message.id for item in base_messages):
+            base_messages.append(user_message)
 
         messages: list[Message] = []
         for message in base_messages:
@@ -719,87 +819,6 @@ class LangGraphRuntime:
             )
         return messages
 
-    async def defer_for_pending_attachments(
-        self,
-        session_id: str,
-        user_message: str,
-        attachment_ids: list[str],
-        requested_attachment_refs: list[AttachmentRef],
-        run_id: str,
-        user_message_id: str,
-        attachment_refs: list[AttachmentRef],
-        continuation: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        """
-
-        参数：
-            session_id (str): 会话唯一标识。
-            user_message (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            attachment_ids (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            requested_attachment_refs (list[AttachmentRef]): 已校验附件的轻量引用列表。
-            run_id (str): 当前运行 ID。
-            user_message_id (str): 已持久化用户消息的 ID。
-            attachment_refs (list[AttachmentRef]): 当前用户消息关联的附件引用。
-            continuation (dict[str, Any] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-
-        返回值：
-            dict[str, Any] | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        if continuation is not None or not attachment_ids:
-            return None
-        tasks_by_attachment = await self._db.files.list_tasks_for_attachments(
-            session_id, attachment_ids
-        )
-        pending_tasks = [
-            task
-            for file_id in attachment_ids
-            for task in tasks_by_attachment.get(file_id, [])
-            if task.status.value in ("queued", "running", "waiting")
-        ]
-        pending_file_ids = [
-            attachment.id
-            for attachment in requested_attachment_refs
-            if attachment.status != AttachmentStatus.READY
-        ]
-        if not pending_file_ids:
-            return None
-
-        task_ids = [task.id for task in pending_tasks]
-        await self._db.files.create_continuation(
-            session_id,
-            run_id,
-            task_ids=task_ids,
-            request={
-                "message_id": user_message_id,
-                "user_message": user_message,
-                "attachment_ids": attachment_ids,
-            },
-        )
-        await self._db.sessions.update(
-            session_id, status="waiting", run_id=run_id
-        )
-        await self._events.publish(
-            ApplicationEvent(
-                event_type=str(EventType.AGENT_WAITING_FILE),
-                durability=EventDurability.DURABLE,
-                session_id=session_id,
-                run_id=run_id,
-                payload={"file_ids": pending_file_ids, "task_ids": task_ids},
-            )
-        )
-        return {
-            "content": "附件正在处理中，完成后将自动继续。",
-            "run_id": run_id,
-            "turn_count": 0,
-            "tool_results": [],
-            "error": None,
-            "interrupted": False,
-            "waiting": True,
-            "attachments": self._serialize_attachments(attachment_refs),
-        }
 
     async def run_harness(
         self,
@@ -928,80 +947,6 @@ class LangGraphRuntime:
         """
         return [item.model_dump(mode="json") for item in refs]
 
-    async def resume_file_continuation(self, continuation: dict[str, Any]) -> None:
-        """索引任务完成后，仅恢复一次等待文件的运行。"""
-        try:
-            outcomes = continuation.get("file_outcomes", {})
-            unavailable = {
-                file_id: status
-                for file_id, status in outcomes.items()
-                if status
-                in {AttachmentStatus.FAILED.value, AttachmentStatus.DELETED.value}
-            }
-            if unavailable:
-                attachments = await self._db.files.get_attachments(
-                    continuation["session_id"],
-                    continuation.get("attachment_ids", []),
-                    include_deleted=True,
-                )
-                names = {item.id: item.filename for item in attachments}
-                details = "\n".join(
-                    f"- {names.get(file_id, file_id)}: "
-                    f"{'已删除' if status == AttachmentStatus.DELETED.value else '处理失败'}"
-                    for file_id, status in unavailable.items()
-                )
-                content = (
-                    "附件处理未完成，无法自动继续本次请求。\n"
-                    f"{details}\n请重新上传文件或重试处理后再发送消息。"
-                )
-                await self._db.messages.save(
-                    Message(
-                        id=generate_time_id(),
-                        session_id=continuation["session_id"],
-                        role=MessageRole.ASSISTANT,
-                        content=content,
-                        run_id=str(continuation.get("run_id", "")),
-                        timestamp=datetime.now(),
-                    )
-                )
-                await self._db.sessions.update(
-                    continuation["session_id"], status="idle"
-                )
-                await self._events.publish(
-                    ApplicationEvent(
-                        event_type=str(EventType.SYSTEM_MESSAGE),
-                        durability=EventDurability.DURABLE,
-                        session_id=continuation["session_id"],
-                        run_id=str(continuation.get("run_id", "")),
-                        payload={
-                            "content": content,
-                            "attachment_ids": list(unavailable.keys()),
-                        },
-                    )
-                )
-                await self._db.files.finish_continuation(
-                    continuation["id"], failed=True
-                )
-                return
-            if self._graph is None:
-                raise RuntimeError("LangGraph has not been bound to the runtime")
-            from .langgraph_graph import invoke_graph
-
-            await invoke_graph(
-                self._graph,
-                session_id=continuation["session_id"],
-                run_id=str(continuation.get("run_id", "")),
-                user_message=continuation.get("user_message", ""),
-                attachment_ids=continuation.get("attachment_ids", []),
-                continuation=continuation,
-            )
-            await self._db.files.finish_continuation(continuation["id"])
-        except Exception:
-            await self._db.files.finish_continuation(continuation["id"], failed=True)
-            logger.exception(
-                "file_continuation_resume_failed",
-                continuation_id=continuation.get("id"),
-            )
 
     async def _extract_facts_async(
         self,
@@ -1099,7 +1044,9 @@ class LangGraphRuntime:
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=parent_run_id,
-                payload={"task_count": len(tasks), "tasks": [t[:500] for t in tasks]},
+                payload=JsonObject.model_validate(
+                    {"task_count": len(tasks), "tasks": [t[:500] for t in tasks]}
+                ),
             )
         )
 

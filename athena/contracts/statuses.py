@@ -11,7 +11,6 @@ class AgentRunStatus(StrEnum):
     PAUSED = "paused"
     CANCEL_REQUESTED = "cancel_requested"
     WAITING_APPROVAL = "waiting_approval"
-    WAITING_FILES = "waiting_files"
     CANCELLED = "cancelled"
     COMPLETED = "completed"
     FAILED = "failed"

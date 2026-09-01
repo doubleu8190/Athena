@@ -34,6 +34,8 @@ export interface ApplicationEventEnvelope {
   durability?: string
   session_id?: string
   run_id?: string
+  message_id?: string | null
+  attachment_id?: string | null
   stream_id?: string
   stream_type?: string
   chunk_id?: number

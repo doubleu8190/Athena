@@ -22,7 +22,7 @@ import hashlib
 import json
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from chromadb import Collection
 from langchain_core.messages import HumanMessage
@@ -39,9 +39,8 @@ from athena.models.file import (
     Attachment,
     AttachmentStatus,
     FileChunk,
-    FileTask,
-    FileTaskType,
 )
+from athena.models.json_models import FileLocator, JsonObject
 from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
@@ -121,43 +120,12 @@ class FileIntelligenceRuntime:
         self._events = event_publisher
         self._chroma_client: ClientAPI | None = None
         self._collection: Collection | None = None
-        self._task_enqueuer: Callable[..., Awaitable[Any]] | None = None
         self._trace_sink = trace_sink
-
-    def set_task_enqueuer(self, enqueuer: Callable[..., Awaitable[Any]]) -> None:
-        """设置文件任务入队回调（由 FileWorker 注入）。"""
-        self._task_enqueuer = enqueuer
-
-    @property
-    def task_queue_available(self) -> bool:
-        """文件任务队列是否可用。"""
-        return self._task_enqueuer is not None
 
     @property
     def vector_index_ready(self) -> bool:
         """向量索引是否已初始化，可供评估 readiness 检查。"""
         return self._collection is not None
-
-    async def enqueue_task(
-        self, session_id: str, file_id: str, task_type: FileTaskType, **kwargs: Any
-    ) -> FileTask:
-        """向文件任务队列提交任务。
-
-        参数：
-            session_id: 会话 ID。
-            file_id: 附件 ID。
-            task_type: 任务类型（解析/索引/摘要/代码分析等）。
-            **kwargs: 附加任务参数。
-
-        返回值：
-            创建的 ``FileTask`` 实例。
-
-        异常：
-            RuntimeError: 任务队列未初始化。
-        """
-        if self._task_enqueuer is None:
-            raise RuntimeError("文件任务 worker 未初始化")
-        return await self._task_enqueuer(session_id, file_id, task_type, **kwargs)
 
     async def initialize(self) -> None:
         """初始化运行时：同步适配器注册表到 DB，创建 ChromaDB 向量集合。"""
@@ -209,7 +177,9 @@ class FileIntelligenceRuntime:
             raise FileAccessError("文件不存在或不属于当前会话")
         return attachment
 
-    async def parse_attachment(self, attachment_id: str) -> dict[str, Any]:
+    async def parse_attachment(
+        self, attachment_id: str, *, run_id: str | None = None
+    ) -> dict[str, Any]:
         """解析附件：提取内容、分块、构建符号索引和表格缓存。"""
         attachment = await self.repository.get_attachment(attachment_id)
         if attachment is None:
@@ -226,7 +196,7 @@ class FileIntelligenceRuntime:
             error_message=None,
         )
         if processing is not None:
-            await self.emit_attachment(processing)
+            await self.emit_attachment(processing, run_id=run_id)
         path = self.storage.resolve(attachment.storage_key)
         workspace = self.storage.create_workspace(attachment.id)
         try:
@@ -280,7 +250,7 @@ class FileIntelligenceRuntime:
             self.storage.cleanup_workspace(workspace)
 
     async def index_attachment(
-        self, attachment_id: str, *, mark_ready: bool = True
+        self, attachment_id: str, *, mark_ready: bool = True, run_id: str | None = None
     ) -> dict[str, Any]:
         """将附件分块写入 ChromaDB 向量索引。
 
@@ -315,7 +285,10 @@ class FileIntelligenceRuntime:
                                     "attachment_id": attachment_id,
                                     "ordinal": chunk.ordinal,
                                     "locator_json": json.dumps(
-                                        chunk.locator, ensure_ascii=False
+                                        chunk.locator.model_dump(
+                                            mode="json", exclude_none=True
+                                        ),
+                                        ensure_ascii=False,
                                     ),
                                 }
                                 for chunk in batch
@@ -332,7 +305,7 @@ class FileIntelligenceRuntime:
                 attachment_id, status=AttachmentStatus.READY.value, error_message=None
             )
             if ready is not None:
-                await self.emit_attachment(ready)
+                await self.emit_attachment(ready, run_id=run_id)
         return {"chunks": len(chunks), "vector_indexed": self._collection is not None}
 
     def _chunk_units(
@@ -459,7 +432,7 @@ class FileIntelligenceRuntime:
         """读取文件内容分块。
 
         支持按定位器（page/sheet/path）过滤，返回匹配的分块列表。
-        附件未就绪时返回 waiting 状态和关联任务信息。
+        附件未就绪时返回 waiting 状态。
 
         参数：
             session_id: 会话 ID。
@@ -479,25 +452,19 @@ class FileIntelligenceRuntime:
                 "message": "文件处理失败，无法读取内容。请重新上传或重试处理。",
             }
         if attachment.status != AttachmentStatus.READY:
-            tasks = await self.repository.list_tasks(session_id, file_id)
             await self.emit(
                 EventType.AGENT_WAITING_FILE,
                 session_id,
                 {
+                    "message_id": attachment.message_id,
                     "file_id": file_id,
                     "status": attachment.status.value,
-                    "task_ids": [
-                        task.id
-                        for task in tasks
-                        if task.status in ("queued", "running", "waiting")
-                    ],
                 },
             )
             return {
                 "file": self.public_attachment(attachment),
                 "waiting": True,
-                "message": "文件仍在处理中，请在任务完成后再次读取。",
-                "tasks": [task.model_dump(mode="json") for task in tasks],
+                "message": "文件仍在处理中，请稍后再次读取。",
             }
         limit = min(max(limit, 1), 50)
         chunks = await self.repository.get_chunks(
@@ -513,13 +480,23 @@ class FileIntelligenceRuntime:
         for key in ("page", "sheet", "path"):
             if key in locator:
                 chunks = [
-                    chunk for chunk in chunks if chunk.locator.get(key) == locator[key]
+                    chunk
+                    for chunk in chunks
+                    if getattr(chunk.locator, key, None) == locator[key]
                 ]
         chunks = chunks[:limit]
         return {
             "file": self.public_attachment(attachment),
             "chunks": [
-                {"content": c.content, "locator": c.locator, "metadata": c.metadata}
+                {
+                    "content": c.content,
+                    "locator": c.locator.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "metadata": c.metadata.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                }
                 for c in chunks
             ],
         }
@@ -725,7 +702,9 @@ class FileIntelligenceRuntime:
             {
                 "id": chunk_id,
                 "content": content,
-                "locator": json.loads((metadata or {}).get("locator_json", "{}")),
+            "locator": FileLocator.model_validate_json(
+                    (metadata or {}).get("locator_json", "{}")
+                ).model_dump(mode="json", exclude_none=True),
                 "score": max(0.0, 1 - float(distance) / 2),
                 "native_score": max(0.0, 1 - float(distance) / 2),
             }
@@ -819,7 +798,9 @@ class FileIntelligenceRuntime:
             values[chunk.id] = {
                 "id": chunk.id,
                 "content": chunk.content,
-                "locator": chunk.locator,
+                "locator": chunk.locator.model_dump(
+                    mode="json", exclude_none=True
+                ),
                 "native_score": chunk.native_score,
             }
         for rank, item in enumerate(vector, 1):
@@ -916,8 +897,8 @@ class FileIntelligenceRuntime:
         artifact = await self.repository.get_artifact(key)
         return {
             "tables": (
-                json.loads(artifact["content"])
-                if artifact and artifact.get("content")
+                json.loads(artifact.content)
+                if artifact and artifact.content
                 else []
             )
         }
@@ -948,7 +929,7 @@ class FileIntelligenceRuntime:
         )
         cached = await self.repository.get_artifact(key)
         if cached:
-            return {"summary": cached.get("content", ""), "cached": True}
+            return {"summary": cached.content or "", "cached": True}
         chunks = await self.repository.get_chunks(file_id, limit=100_000)
         if not chunks:
             if attachment.adapter_name == "image":
@@ -1031,10 +1012,10 @@ class FileIntelligenceRuntime:
         attachment = await self.require_attachment(session_id, file_id)
         return {
             "file": self.public_attachment(attachment),
-            "languages": attachment.metadata.get("languages", {}),
-            "files": attachment.metadata.get("files", 1),
-            "symbols": attachment.metadata.get("symbol_count", 0),
-            "dependencies": attachment.metadata.get("dependency_count", 0),
+            "languages": attachment.metadata.languages,
+            "files": attachment.metadata.files or 1,
+            "symbols": attachment.metadata.symbol_count or 0,
+            "dependencies": attachment.metadata.dependency_count or 0,
         }
 
     async def find_symbol(
@@ -1167,7 +1148,9 @@ class FileIntelligenceRuntime:
             "updated_at": attachment.updated_at.isoformat(),
         }
         if include_metadata:
-            data["metadata"] = attachment.metadata
+            data["metadata"] = attachment.metadata.model_dump(
+                mode="json", exclude_none=True
+            )
         return data
 
     async def emit(
@@ -1178,7 +1161,7 @@ class FileIntelligenceRuntime:
         参数:
             event_type (EventType | str): 事件类型；字符串必须非空。
             session_id (str): 事件所属会话 ID，必须非空。
-            data (dict[str, Any]): 事件 payload，必须可 JSON 序列化。
+            data (dict[str, Any]): 要发布的事件数据，必须可以转换为 JSON。
         返回值:
             None: 事件已交给事件发布器。
         异常:
@@ -1186,19 +1169,27 @@ class FileIntelligenceRuntime:
         """
         await self._events.publish(ApplicationEvent(
             event_type=str(event_type), durability=EventDurability.DURABLE,
-            session_id=session_id, payload=data,
+            session_id=session_id,
+            message_id=str(data["message_id"]) if data.get("message_id") else None,
+            attachment_id=(
+                str(data.get("attachment_id") or data.get("id"))
+                if data.get("attachment_id") or data.get("id")
+                else None
+            ),
+            run_id=str(data["run_id"]) if data.get("run_id") else None,
+            payload=JsonObject.model_validate(data),
         ))
 
-    async def emit_file_event(
-        self, event_type: str, session_id: str, task: Any
+    async def emit_attachment(
+        self, attachment: Attachment, *, run_id: str | None = None
     ) -> None:
-        """推送文件任务事件。"""
-        await self.emit(event_type, session_id, task.model_dump(mode="json"))
-
-    async def emit_attachment(self, attachment: Attachment) -> None:
         """推送附件状态更新事件。"""
+        data = self.public_attachment(attachment, True)
+        data["attachment_id"] = attachment.id
+        if run_id:
+            data["run_id"] = run_id
         await self.emit(
             "attachment_updated",
             attachment.session_id,
-            self.public_attachment(attachment, True),
+            data,
         )

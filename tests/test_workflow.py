@@ -49,17 +49,13 @@ async def test_invoke_graph_requires_run_id_for_checkpointing():
         )
 
 
-def test_normalize_request_uses_continuation_values_and_deduplicates_files():
+def test_normalize_request_deduplicates_files():
     user_message, attachment_ids = LangGraphRuntime.normalize_request(
         "new message",
-        ["new-file"],
-        {
-            "user_message": "original message",
-            "attachment_ids": ["file-2", "file-1", "file-2"],
-        },
+        ["file-2", "file-1", "file-2"],
     )
 
-    assert user_message == "original message"
+    assert user_message == "new message"
     assert attachment_ids == ["file-2", "file-1"]
 
 
@@ -90,9 +86,7 @@ def test_build_harness_messages_adds_attachment_context_without_mutating_message
         timestamp=datetime.now(),
     )
 
-    messages = LangGraphRuntime._build_harness_messages(
-        [], persisted_message, continuation=None
-    )
+    messages = LangGraphRuntime._build_harness_messages([], persisted_message)
 
     assert persisted_message.content == "read this"
     assert messages[0] is not persisted_message
@@ -122,9 +116,7 @@ def test_build_harness_messages_does_not_change_non_user_messages():
     )
 
     messages = LangGraphRuntime._build_harness_messages(
-        [system_message],
-        system_message,
-        continuation={"message_id": system_message.id},
+        [system_message], system_message
     )
 
     assert messages == [system_message]

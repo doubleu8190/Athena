@@ -121,7 +121,6 @@ async def lifespan(app: FastAPI):
 
     # ── 5.1 文件智能 ──
     from athena.core.files.runtime import FileIntelligenceRuntime
-    from athena.core.files.tasks import FileTaskWorker
     from athena.core.tools.catalog import ToolRegistry
     from athena.core.tools.providers.files import build_file_tool_specs
 
@@ -138,10 +137,6 @@ async def lifespan(app: FastAPI):
     tool_registry = ToolRegistry(tool_manager, tool_catalog)
     toolSpecList: list = build_file_tool_specs(file_runtime)
     await tool_registry.install(toolSpecList)
-
-    # 启动文件任务 Worker（后台消费解析/索引/摘要任务队列）
-    file_worker = FileTaskWorker(file_runtime)
-    file_runtime.set_task_enqueuer(file_worker.enqueue_task)
 
     # ── 5.2 记忆系统 ──
     from athena.core.memory.memory import MemoryManager
@@ -207,10 +202,10 @@ async def lifespan(app: FastAPI):
         fact_extractor=fact_extractor,
         memory_manager=memory_manager,
         settings=settings,
+        file_runtime=file_runtime,
     )
     # 注册子 Agent 派生工具到工具管理器
     await tool_registry.install(graph_runtime.delegation_tool_specs())
-    file_worker.set_continuation_callback(graph_runtime.resume_file_continuation)
 
     # ── 6.1 RuntimeContainer（路由层依赖注入容器） ──
     realtime_transport = SessionEventBus()
@@ -224,7 +219,6 @@ async def lifespan(app: FastAPI):
         mcp_manager=mcp_manager,
         llm=llm_primary,
         file_runtime=file_runtime,
-        file_worker=file_worker,
         memory_manager=memory_manager,
         agent_store=agent_store,
         realtime_transport=realtime_transport,
@@ -234,15 +228,12 @@ async def lifespan(app: FastAPI):
     checkpointer = AsyncSqliteSaver(checkpoint_conn)
     await checkpointer.setup()
     graph = build_graph(graph_runtime, checkpointer)
-    graph_runtime.set_graph(graph)
-    await file_worker.start()
     command_consumer = CommandConsumer(
         app.state.runtime.agent_store,
         notifier=command_notifier,
         graph=graph,
         cancellation=CancellationRegistry(),
         memory_manager=memory_manager,
-        file_worker=file_worker,
     )
     await command_consumer.start()
 
@@ -255,10 +246,6 @@ async def lifespan(app: FastAPI):
         await command_consumer.stop()
     except Exception as e:
         logger.warning("command_consumer_shutdown_failed", error=str(e))
-    try:
-        await file_worker.stop()
-    except Exception as e:
-        logger.warning("file_worker_shutdown_failed", error=str(e))
     await checkpoint_conn.close()
     try:
         await approval_manager.cancel_all_pending("")

@@ -34,25 +34,10 @@ async def execute_tools_and_llm(
         KeyError: 状态缺少运行前准备字段，或配置结构不符合预期时抛出。
         运行时异常: 附件等待、工具调用或 LLM 执行失败时传播底层异常。
     """
-    requested_attachments = runtime.deserialize_attachment_refs(
-        state.get("requested_attachment_refs", [])
-    )
     attachment_refs = runtime.deserialize_attachment_refs(
         state.get("attachment_refs", [])
     )
     messages = runtime.deserialize_messages(state["harness_messages"])
-    waiting = await runtime.defer_for_pending_attachments(
-        state["session_id"],
-        state["user_message"],
-        state["attachment_ids"],
-        requested_attachments,
-        state["run_id"],
-        state["user_message_id"],
-        attachment_refs,
-        state.get("continuation"),
-    )
-    if waiting is not None:
-        return {"result": waiting}
     stop_signal = config.get("configurable", {}).get("stop_signal")
     runtime.set_stop_signal(state["session_id"], stop_signal)
     try:

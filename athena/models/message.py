@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
-
 from pydantic import BaseModel, Field
 
+from athena.models.json_models import ToolCall
 from athena.models.file import AttachmentRef
 
 
@@ -27,7 +26,7 @@ class Message(BaseModel):
     session_id: str
     role: MessageRole
     content: str = ""
-    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    tool_calls: list[ToolCall] = Field(default_factory=list)
     tool_call_id: str | None = None
     run_id: str | None = None  # 所属运行 ID（一次用户请求 ≈ 一个 run），前端按此分组
     tool_call_record_id: str | None = None  # 关联的 tool_call 记录 ID（tool 消息）

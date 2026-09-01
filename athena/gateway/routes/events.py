@@ -11,6 +11,8 @@ from fastapi.responses import StreamingResponse
 
 from athena.contracts.errors import ErrorDetail
 from athena.runtime import runtime_from
+from athena.infrastructure.sqlite.repositories import _json_loads_model
+from athena.models.json_models import JsonObject
 
 router = APIRouter(prefix="/sessions", tags=["events"])
 
@@ -37,6 +39,8 @@ def _row_payload(row) -> dict:
         "durability": row.durability,
         "session_id": row.session_id,
         "run_id": row.run_id,
+        "message_id": row.message_id,
+        "attachment_id": row.attachment_id,
         "stream_id": row.stream_id,
         "stream_type": row.stream_type,
         "chunk_id": row.chunk_id,
@@ -44,7 +48,9 @@ def _row_payload(row) -> dict:
         "parent_run_id": row.parent_run_id,
         "producer_id": row.producer_id,
         "sequence": row.sequence,
-        "payload": json.loads(row.payload_json),
+        "payload": _json_loads_model(
+            row.payload_json, JsonObject, JsonObject()
+        ).model_dump(mode="json", exclude_none=True),
         "occurred_at": row.occurred_at,
     }
 

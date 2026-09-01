@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from athena.contracts.commands import CommandType
 from athena.contracts.statuses import AgentCommandStatus, AgentRunStatus
@@ -36,6 +36,8 @@ class SubmitRunResponse(BaseModel):
 
     command_id: str
     run_id: str | None = None
+    message_id: str
+    attachment_ids: list[str] = Field(default_factory=list)
     status: AgentCommandStatus
     deduplicated: bool
 

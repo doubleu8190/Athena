@@ -1,6 +1,6 @@
 """File Intelligence 领域模型。
 
-定义文件智能系统的核心数据结构，包括附件、处理任务、分块和适配器信息。
+定义文件智能系统的核心数据结构，包括附件、分块和适配器信息。
 所有模型使用 Pydantic v2，支持 JSON 序列化和数据库映射。
 """
 
@@ -8,55 +8,25 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
-
 from pydantic import BaseModel, Field
+
+from athena.models.json_models import (
+    FileLocator,
+    FileMetadata,
+)
 
 
 class AttachmentStatus(StrEnum):
     """附件生命周期状态。
 
-    状态流转：UPLOADED → QUEUED → PROCESSING → READY / FAILED → DELETED
+    状态流转：UPLOADED → PROCESSING → READY / FAILED → DELETED
     """
 
     UPLOADED = "uploaded"
-    QUEUED = "queued"
     PROCESSING = "processing"
     READY = "ready"
     FAILED = "failed"
     DELETED = "deleted"
-
-
-class FileTaskType(StrEnum):
-    """文件处理任务类型。
-
-    - FILE_PARSE: 文件解析（提取内容、分块）
-    - FILE_INDEX: 向量索引构建
-    - FILE_SUMMARY: 文档摘要生成
-    - CODE_ANALYSIS: 代码符号和依赖分析
-    - EMBEDDING_GENERATE: 嵌入向量生成
-    """
-
-    FILE_PARSE = "FILE_PARSE"
-    FILE_INDEX = "FILE_INDEX"
-    FILE_SUMMARY = "FILE_SUMMARY"
-    CODE_ANALYSIS = "CODE_ANALYSIS"
-    EMBEDDING_GENERATE = "EMBEDDING_GENERATE"
-
-
-class FileTaskStatus(StrEnum):
-    """文件处理任务状态。
-
-    状态流转：QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
-    重试时从 FAILED 回退到 QUEUED。
-    """
-
-    QUEUED = "queued"
-    RUNNING = "running"
-    WAITING = "waiting"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 class AttachmentRef(BaseModel):
@@ -115,7 +85,7 @@ class Attachment(BaseModel):
     adapter_version: str | None = None
     status: AttachmentStatus = AttachmentStatus.UPLOADED
     capabilities: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: FileMetadata = Field(default_factory=FileMetadata)
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -130,53 +100,6 @@ class Attachment(BaseModel):
             size_bytes=self.size_bytes,
             status=self.status,
         )
-
-
-class FileTask(BaseModel):
-    """文件处理任务领域模型。
-
-    表示一个异步文件处理任务（解析、索引、摘要等）。
-    支持重试（``attempts`` / ``max_attempts``）和优先级调度。
-
-    属性：
-        id: 任务唯一标识。
-        session_id: 所属会话 ID。
-        attachment_id: 关联的附件 ID。
-        task_type: 任务类型。
-        status: 当前状态。
-        progress: 进度（0.0-1.0）。
-        stage: 当前阶段描述。
-        priority: 调度优先级（数值越大越优先）。
-        attempts: 已尝试次数。
-        max_attempts: 最大重试次数。
-        payload: 任务参数。
-        result: 任务结果。
-        error_message: 失败时的错误信息。
-        available_at: 可执行时间（用于退避调度）。
-        created_at: 创建时间。
-        updated_at: 最后更新时间。
-        started_at: 开始执行时间。
-        completed_at: 完成时间。
-    """
-
-    id: str
-    session_id: str
-    attachment_id: str
-    task_type: FileTaskType
-    status: FileTaskStatus = FileTaskStatus.QUEUED
-    progress: float = 0.0
-    stage: str = "queued"
-    priority: int = 0
-    attempts: int = 0
-    max_attempts: int = 3
-    payload: dict[str, Any] = Field(default_factory=dict)
-    result: dict[str, Any] = Field(default_factory=dict)
-    error_message: str | None = None
-    available_at: datetime
-    created_at: datetime
-    updated_at: datetime
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
 
 
 class FileChunk(BaseModel):
@@ -200,8 +123,8 @@ class FileChunk(BaseModel):
     ordinal: int
     content: str
     token_count: int = 0
-    locator: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    locator: FileLocator = Field(default_factory=FileLocator)
+    metadata: FileMetadata = Field(default_factory=FileMetadata)
     # SQLite FTS5 的 BM25 是底层原生排序值，与文件检索对外暴露的融合分数保持分离。
     native_score: float | None = None
 

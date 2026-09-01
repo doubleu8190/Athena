@@ -53,9 +53,9 @@ def test_native_tool_schema_inferred():
     assert tool.schema.execution_mode == ToolExecutionMode.NATIVE
     assert tool.schema.risk_level == RiskLevel.LOW
     params = tool.schema.parameters
-    assert params["properties"]["path"]["type"] == "string"
-    assert "path" in params["required"]
-    assert "encoding" not in params.get("required", [])
+    assert params.properties["path"].type == "string"
+    assert "path" in params.required
+    assert "encoding" not in params.required
 
 
 @pytest.mark.asyncio

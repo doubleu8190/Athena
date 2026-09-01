@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
 import json
-from typing import Any
 from athena.contracts.statuses import AgentApprovalDecision
+from athena.models.json_models import CommandPayload
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -19,8 +19,6 @@ class CommandType(StrEnum):
     APPROVAL_RESOLVE = "approval.resolve"
     APPROVAL_CANCEL = "approval.cancel"
     MEMORY_CREATE = "memory.create"
-    FILE_RETRY = "file.retry"
-    FILE_CANCEL = "file.cancel"
 
 
 class Command(BaseModel):
@@ -33,10 +31,10 @@ class Command(BaseModel):
     session_id: str = Field(min_length=1)
     run_id: str | None = Field(default=None, min_length=1)
     issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    payload: dict[str, Any] = Field(default_factory=dict)
+    payload: CommandPayload = Field(default_factory=CommandPayload)
 
     def validate_payload(self) -> None:
-        """校验不同命令类型所需的最小 payload 协议。
+        """检查当前命令是否包含所需的基本内容。
 
         参数:
             无；使用当前命令中的 ``command_type`` 和 ``payload``。
@@ -50,19 +48,17 @@ class Command(BaseModel):
             CommandType.APPROVAL_RESOLVE: ("approval_id", "decision"),
             CommandType.APPROVAL_CANCEL: ("approval_id",),
             CommandType.MEMORY_CREATE: ("content",),
-            CommandType.FILE_RETRY: ("task_id",),
-            CommandType.FILE_CANCEL: ("task_id",),
         }
         missing = [
             key
             for key in required.get(self.command_type, ())
-            if key not in self.payload
+            if getattr(self.payload, key, None) is None
         ]
         if missing:
             raise ValueError(f"missing command payload: {', '.join(missing)}")
         if self.command_type == CommandType.APPROVAL_RESOLVE:
             try:
-                AgentApprovalDecision(str(self.payload["decision"]))
+                AgentApprovalDecision(str(self.payload.decision))
             except ValueError as exc:
                 raise ValueError("invalid approval decision") from exc
 
@@ -74,9 +70,12 @@ class Command(BaseModel):
         返回值:
             str: 64 位小写十六进制 SHA-256 摘要。
         异常:
-            TypeError: payload 含不可 JSON 序列化的值时抛出。
+            TypeError: 命令内容中包含无法转换为 JSON 的值时抛出。
         """
         raw = json.dumps(
-            self.payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            self.payload.model_dump(mode="json", exclude_none=True),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
         )
         return hashlib.sha256(raw.encode()).hexdigest()

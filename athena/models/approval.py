@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from athena.models.json_models import ToolArguments
+
 
 class ApprovalDecision(StrEnum):
     """审批结果枚举。"""
@@ -89,7 +91,7 @@ class ApprovalLog(BaseModel):
     session_id: str
     tool_call_id: str
     tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    arguments: ToolArguments = Field(default_factory=ToolArguments)
     risk_level: str
     decision: ApprovalDecision
     decision_time_ms: float = 0  # 用户响应耗时

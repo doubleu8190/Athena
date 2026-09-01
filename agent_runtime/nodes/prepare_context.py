@@ -41,13 +41,14 @@ async def prepare_context(
         message_content,
         state.get("attachment_ids", []),
         history,
-        state.get("continuation"),
         run_id_override=state["run_id"],
+        message_id_override=state.get("message_id"),
     )
     return {
         "session_id": state["session_id"],
         "run_id": state["run_id"],
         "user_message_id": message.id,
+        "message_id": message.id,
         "attachment_refs": [
             item.model_dump(mode="json") for item in attachment_refs
         ],

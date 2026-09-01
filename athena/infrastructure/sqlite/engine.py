@@ -49,30 +49,20 @@ async def init_engine(db_path: str) -> None:
     )
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
-    # 保留旧版本文件任务表中的数据；CREATE TABLE IF NOT EXISTS 本身不会重命名表。
     async with _engine.begin() as conn:
-        table_names = set(
-            (
-                await conn.execute(
-                    text("SELECT name FROM sqlite_master WHERE type = 'table'")
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if "processing_tasks" in table_names and "file_processing_tasks" not in table_names:
-            await conn.execute(
-                text("ALTER TABLE processing_tasks RENAME TO file_processing_tasks")
-            )
-            for index_name in (
-                "idx_file_tasks_status",
-                "idx_file_tasks_attachment",
-                "idx_file_tasks_session",
-            ):
-                await conn.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
-
         # 创建所有表（CREATE TABLE IF NOT EXISTS，不会修改已有表）
+        # 统一 Graph 已取代 continuation 和独立文件任务；旧表不再使用。
+        await conn.execute(text("DROP TABLE IF EXISTS agent_continuations"))
+        await conn.execute(text("DROP TABLE IF EXISTS processing_tasks"))
+        await conn.execute(text("DROP TABLE IF EXISTS file_processing_tasks"))
+        await conn.execute(text("DROP INDEX IF EXISTS uq_agent_runs_active_session"))
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            text("UPDATE agent_runs SET status = 'failed', error = '旧文件任务已移除' WHERE status = 'waiting_files'")
+        )
+        await conn.execute(
+            text("UPDATE attachments SET status = 'uploaded' WHERE status = 'queued'")
+        )
         # agent_events 曾使用 event_id 作为游标。逐列迁移可以让已有数据库
         # 在不丢失事件的前提下切换到会话级 session_seq。
         columns = {
@@ -85,6 +75,8 @@ async def init_engine(db_path: str) -> None:
             ("chunk_id", "INTEGER"),
             ("is_complete", "INTEGER NOT NULL DEFAULT 0"),
             ("parent_run_id", "VARCHAR"),
+            ("message_id", "VARCHAR"),
+            ("attachment_id", "VARCHAR"),
         )
         for name, definition in migrations:
             if name not in columns:
@@ -124,7 +116,7 @@ async def init_engine(db_path: str) -> None:
                 ON agent_runs(session_id)
                 WHERE status IN (
                     'queued', 'running', 'cancel_requested',
-                    'waiting_approval', 'waiting_files'
+                    'waiting_approval'
                 )
                 """
             )

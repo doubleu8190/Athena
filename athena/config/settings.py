@@ -121,12 +121,7 @@ class Settings(BaseSettings):
     file_max_upload_bytes: int = 512 * 1024 * 1024  # 512MB
     file_chunk_tokens: int = 800  # 分块目标 token 数
     file_chunk_overlap_tokens: int = 80  # 分块重叠 token 数
-    file_task_max_attempts: int = 3
-    file_task_timeout: int = 900  # 15 分钟
-    file_task_poll_interval: float = 0.25  # 250ms
     file_parse_concurrency: int = 2
-    file_code_concurrency: int = 1
-    file_summary_concurrency: int = 4
     file_embedding_concurrency: int = 2
 
     # --- Harness 执行引擎 ---

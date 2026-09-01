@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Required, TypedDict
+from typing import Any, Literal, Required, TypedDict
+
+
+class FileProcessResult(TypedDict):
+    """单个附件在统一 Run 中的最终处理结果。"""
+
+    message_id: str
+    attachment_id: str
+    status: Literal["ready", "failed"]
+    error: str | None
+    chunk_count: int | None
 
 
 class AgentState(TypedDict, total=False):
@@ -18,7 +28,10 @@ class AgentState(TypedDict, total=False):
     user_message: str
     system_prompt: str
     attachment_ids: list[str]
-    continuation: dict[str, Any]
+    message_id: Required[str]
+    file_results: list[FileProcessResult]
+    files_ready: bool
+    file_error: str | None
     memory_context: str
     history: list[dict[str, Any]]
     requested_attachment_refs: list[dict[str, Any]]

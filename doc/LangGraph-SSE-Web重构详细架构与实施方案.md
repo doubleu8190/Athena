@@ -543,7 +543,7 @@ stream_snapshots update WHERE old_version < new_version
 agent_events 永久保存，不设置 TTL、自动清理或按 Session 删除策略
 ```
 
-消息、步骤、记忆、MCP、工具治理、附件、文件任务、分块和 artifact 按新 schema 重建。允许清库不代表省略 schema、并发和恢复测试。
+消息、步骤、记忆、MCP、工具治理、附件、文件分块和 artifact 按新 schema 重建。允许清库不代表省略 schema、并发和恢复测试。
 
 ## 18. Web 与认证
 
@@ -695,7 +695,7 @@ Memory、Tools、MCP、Providers、Settings 和 Files 保留现有 REST 资源�
 
 单元测试覆盖 schema/version、command dedupe/retry、event classification、coalescing/offset/snapshot、Graph reducer/routing/cancel gate、Tool Ledger、认证和 bind guard。
 
-集成测试覆盖 HTTP -> Command Store -> Consumer -> Graph -> Event Store、Interrupt -> resolve -> resume、cancel -> checkpoint -> restart、file continuation、replay/live handoff 和多个 subscriber 背压。
+集成测试覆盖 HTTP -> Command Store -> Consumer -> Graph -> Event Store、Interrupt -> resolve -> resume、cancel -> checkpoint -> restart、文件处理节点、replay/live handoff 和多个 subscriber 背压。
 
 端到端测试覆盖登录、创建会话、流式回复、双标签页审批竞争、断网重连、生成中取消、文件自动继续及所有保留管理页面；同时断言 Evaluation API 和页面不存在。
 

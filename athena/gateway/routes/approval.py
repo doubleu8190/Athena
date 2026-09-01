@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,6 +14,8 @@ from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentApprovalDecision
 from athena.utils.ids import generate_time_id
+from athena.infrastructure.sqlite.repositories import _json_loads_model
+from athena.models.json_models import CommandPayload, ToolArguments
 
 if TYPE_CHECKING:
     from athena.gateway.approval import ApprovalManager
@@ -58,7 +59,9 @@ async def list_pending_approvals(
         {
             "approval_id": row.approval_id,
             "tool_name": row.tool_name,
-            "arguments": json.loads(row.arguments_json),
+            "arguments": _json_loads_model(
+                row.arguments_json, ToolArguments, ToolArguments()
+            ).model_dump(mode="json", exclude_none=True),
             "risk_level": row.risk_level,
             "created_at": row.created_at,
             "session_id": row.session_id,
@@ -87,14 +90,16 @@ async def respond_approval(
         command_type=CommandType.APPROVAL_RESOLVE,
         session_id=approval.session_id,
         run_id=approval.run_id,
-        payload={
-            "approval_id": approval_id,
-            "decision": (
-                AgentApprovalDecision.APPROVED.value
-                if req.action == "allow"
-                else AgentApprovalDecision.DENIED.value
-            ),
-        },
+        payload=CommandPayload.model_validate(
+            {
+                "approval_id": approval_id,
+                "decision": (
+                    AgentApprovalDecision.APPROVED.value
+                    if req.action == "allow"
+                    else AgentApprovalDecision.DENIED.value
+                ),
+            }
+        ),
     )
     await runtime.agent_store.enqueue(command)
     return {
@@ -116,7 +121,7 @@ async def cancel_approval(approval_id: str, request: Request) -> dict[str, Any]:
         command_type=CommandType.APPROVAL_CANCEL,
         session_id=approval.session_id,
         run_id=approval.run_id,
-        payload={"approval_id": approval_id},
+        payload=CommandPayload.model_validate({"approval_id": approval_id}),
     )
     await runtime.agent_store.enqueue(command)
     return {

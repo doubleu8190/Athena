@@ -29,12 +29,11 @@ async def prepare_request(
         KeyError: ``state`` 缺少 ``session_id`` 时抛出。
         运行时异常: 附件或历史加载失败时传播底层运行时异常。
     """
-    continuation = state.get("continuation") or None
     message, attachment_ids = runtime.normalize_request(
-        state.get("user_message", ""), state.get("attachment_ids", []), continuation
+        state.get("user_message", ""), state.get("attachment_ids", [])
     )
     requested_attachments = await runtime.load_requested_attachments(
-        state["session_id"], attachment_ids, continuation
+        state["session_id"], attachment_ids
     )
     history = await runtime.load_history(state["session_id"])
     prepared_state: AgentState = {
@@ -43,13 +42,15 @@ async def prepare_request(
         "command_id": state.get("command_id", ""),
         "user_message": message,
         "attachment_ids": attachment_ids,
+        "message_id": str(state.get("message_id") or ""),
+        "system_prompt": state.get("system_prompt", ""),
         "history": [item.model_dump(mode="json") for item in history],
         "requested_attachment_refs": [
             item.to_ref().model_dump(mode="json") for item in requested_attachments
         ],
     }
-    if continuation is not None:
-        prepared_state["continuation"] = continuation
+    if not prepared_state["message_id"]:
+        raise KeyError("message_id")
     return prepared_state
 
 

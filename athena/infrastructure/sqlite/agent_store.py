@@ -16,7 +16,7 @@ from agent_runtime.command_notifications import CommandNotifier
 from agent_runtime.transport import SessionEventBus
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
-from athena.contracts.events import ApplicationEvent, EventDurability
+from athena.contracts.events import ApplicationEvent
 from athena.contracts.ports import AgentCommandRecord, AgentRunRecord
 from athena.contracts.statuses import (
     AgentApprovalDecision,
@@ -36,6 +36,8 @@ from athena.infrastructure.sqlite.models import (
     ApprovalRecordModel,
     ToolExecutionModel,
 )
+from athena.infrastructure.sqlite.repositories import _json_dumps
+from athena.models.json_models import JsonObject, ToolArguments
 from athena.models.tool import RiskLevel
 from athena.utils.ids import generate_time_id
 
@@ -100,7 +102,6 @@ class AgentStore:
                             AgentRunStatus.PAUSED,
                             AgentRunStatus.CANCEL_REQUESTED,
                             AgentRunStatus.WAITING_APPROVAL,
-                            AgentRunStatus.WAITING_FILES,
                         )
                     ),
                 )
@@ -285,12 +286,8 @@ class AgentStore:
             if row is None:
                 return
             row.status = status.value
-            row.result_json = (
-                json.dumps(result, ensure_ascii=False) if result is not None else None
-            )
-            row.error_json = (
-                json.dumps(error, ensure_ascii=False) if error is not None else None
-            )
+            row.result_json = _json_dumps(result) if result is not None else None
+            row.error_json = _json_dumps(error) if error is not None else None
             await db.commit()
 
     async def get_command(self, command_id: str) -> AgentCommandModel | None:
@@ -425,7 +422,10 @@ class AgentStore:
         """
         command.validate_payload()
         payload_hash = command.payload_fingerprint()
-        payload_json = json.dumps(command.payload, sort_keys=True)
+        payload_json = json.dumps(
+            command.payload.model_dump(mode="json", exclude_none=True),
+            sort_keys=True,
+        )
         async with get_session() as db:
             lock_timeout_changed = False
             try:
@@ -466,7 +466,6 @@ class AgentStore:
                                     AgentRunStatus.RUNNING,
                                     AgentRunStatus.CANCEL_REQUESTED,
                                     AgentRunStatus.WAITING_APPROVAL,
-                                    AgentRunStatus.WAITING_FILES,
                                 )
                             ),
                         )
@@ -539,8 +538,11 @@ class AgentStore:
             async with get_session() as db:
                 # 进程内按会话串行，事务锁覆盖多进程/多实例下的 SQLite 竞争。
                 await db.execute(text("BEGIN IMMEDIATE"))
+                payload = JsonObject.model_validate(event.payload)
                 payload_json = json.dumps(
-                    event.payload, ensure_ascii=False, sort_keys=True
+                    payload.model_dump(mode="json", exclude_none=True),
+                    ensure_ascii=False,
+                    sort_keys=True,
                 )
 
                 # stream_id + chunk_id 是流事件的幂等键。重复发布不再次广播，
@@ -557,6 +559,8 @@ class AgentStore:
                         same = (
                             existing.event_type == event.event_type
                             and existing.run_id == event.run_id
+                            and existing.message_id == event.message_id
+                            and existing.attachment_id == event.attachment_id
                             and existing.payload_json == payload_json
                             and existing.is_complete == int(event.is_complete)
                         )
@@ -612,6 +616,8 @@ class AgentStore:
                     event_id=session_seq,
                     session_seq=session_seq,
                     run_id=event.run_id,
+                    message_id=event.message_id,
+                    attachment_id=event.attachment_id,
                     event_type=event.event_type,
                     durability=event.durability.value,
                     stream_id=event.stream_id,
@@ -716,7 +722,7 @@ class AgentStore:
         run_id: str,
         tool_call_id: str,
         tool_name: str,
-        arguments: dict,
+        arguments: ToolArguments | dict[str, Any],
         risk_level: RiskLevel,
     ) -> None:
         """创建待审批记录并持久化工具参数。
@@ -734,6 +740,7 @@ class AgentStore:
         异常:
             参数无法序列化或数据库约束不满足时传播相应异常。
         """
+        arguments_model = ToolArguments.model_validate(arguments)
         async with get_session() as db:
             db.add(
                 ApprovalRecordModel(
@@ -742,7 +749,7 @@ class AgentStore:
                     run_id=run_id,
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
-                    arguments_json=json.dumps(arguments, sort_keys=True),
+                    arguments_json=_json_dumps(arguments_model),
                     risk_level=risk_level.value,
                     created_at=_now(),
                 )
@@ -818,7 +825,7 @@ class AgentStore:
         run_id: str,
         tool_call_id: str,
         tool_name: str,
-        arguments: dict,
+        arguments: ToolArguments | dict[str, Any],
         side_effect_class: ToolSideEffectClass = ToolSideEffectClass.UNKNOWN,
         retry_of_execution_id: str | None = None,
     ) -> str:
@@ -838,8 +845,12 @@ class AgentStore:
             参数无法 JSON 序列化或数据库写入失败时传播相应异常。
         """
         execution_id = generate_time_id()
+        arguments_model = ToolArguments.model_validate(arguments)
         normalized = json.dumps(
-            arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            arguments_model.model_dump(mode="json", exclude_none=True),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
         )
         sensitive = {
             "api_key",
@@ -850,9 +861,10 @@ class AgentStore:
             "cookie",
             "authorization",
         }
+        argument_values = arguments_model.model_dump(mode="python")
         audit = {
             key: ("[REDACTED]" if key.lower() in sensitive else value)
-            for key, value in arguments.items()
+            for key, value in argument_values.items()
         }
         audit_json = json.dumps(
             audit, sort_keys=True, separators=(",", ":"), ensure_ascii=True

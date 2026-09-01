@@ -79,7 +79,7 @@ export interface Message {
   attachments?: AttachmentRef[]
 }
 
-export type AttachmentStatus = "uploaded" | "queued" | "processing" | "ready" | "failed" | "deleted"
+export type AttachmentStatus = "uploaded" | "processing" | "ready" | "failed" | "deleted"
 
 export interface AttachmentRef {
   id: string
@@ -100,24 +100,6 @@ export interface Attachment extends AttachmentRef {
   created_at: string
   updated_at: string
   metadata?: Record<string, unknown>
-}
-
-export type FileTaskStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"
-
-export interface FileTask {
-  id: string
-  session_id: string
-  attachment_id: string
-  task_type: string
-  status: FileTaskStatus
-  progress: number
-  stage: string
-  error_message?: string | null
-}
-
-export interface AttachmentUploadItem {
-  attachment: Attachment
-  task: FileTask
 }
 
 export interface SupportedAttachmentTypes {

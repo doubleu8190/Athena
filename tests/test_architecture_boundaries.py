@@ -91,7 +91,7 @@ def test_main_uses_runtime_container_not_service_setters():
     assert "RuntimeContainer" in source
     for setter in (
         "set_tool_manager", "set_memory_manager", "set_mcp_manager",
-        "set_workflow", "set_file_runtime", "set_file_worker",
+        "set_workflow", "set_file_runtime",
     ):
         assert setter not in source
 
@@ -145,8 +145,6 @@ def test_service_locator_compatibility_hooks_are_absent():
         "set_workflow",
         "get_file_runtime",
         "set_file_runtime",
-        "get_file_worker",
-        "set_file_worker",
         "get_database",
         "close_database",
     )

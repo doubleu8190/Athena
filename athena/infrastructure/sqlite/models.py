@@ -2,6 +2,9 @@
 
 所有模型采用软删除策略，包含 deleted_time 字段。
 不使用 relationship()，级联操作在 Repository 层手动处理。
+
+名称以 ``_json`` 结尾的字段在数据库中仍保存为文本，这样可以兼容已有的 SQLite 数据库。
+Repository 读取后，会把文本转换成 ``athena.models.json_models`` 中对应的业务模型。
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ class AgentRunModel(Base):
             "session_id",
             unique=True,
             sqlite_where=text(
-                "status IN ('queued','running','cancel_requested','waiting_approval','waiting_files')"
+                "status IN ('queued','running','cancel_requested','waiting_approval')"
             ),
         ),
     )
@@ -82,9 +85,11 @@ class AgentCommandModel(Base):
         Integer, default=1, comment="命令协议版本"
     )
     payload_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="命令载荷 JSON"
+        Text, default="{}", comment="命令内容（JSON 格式）"
     )
-    payload_hash: Mapped[str] = mapped_column(String, comment="命令载荷指纹")
+    payload_hash: Mapped[str] = mapped_column(
+        String, comment="命令内容的哈希值，用于幂等校验"
+    )
     status: Mapped[str] = mapped_column(
         String, default="pending", comment="命令处理状态"
     )
@@ -95,12 +100,12 @@ class AgentCommandModel(Base):
         String, comment="命令可被消费的时间（UTC）"
     )
     result_json: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="命令成功结果 JSON"
+        Text, nullable=True, comment="命令成功返回的结果（JSON 格式）"
     )
     error_json: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="命令错误信息 JSON"
+        Text, nullable=True, comment="命令处理失败时的错误信息（JSON 格式）"
     )
-    issued_at: Mapped[str] = mapped_column(String, comment="命令签发时间（UTC）")
+    issued_at: Mapped[str] = mapped_column(String, comment="命令发出时间（UTC）")
 
 
 class AgentEventModel(Base):
@@ -129,6 +134,12 @@ class AgentEventModel(Base):
     run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="关联运行标识"
     )
+    message_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="关联消息标识"
+    )
+    attachment_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="关联附件标识"
+    )
     event_type: Mapped[str] = mapped_column(String, comment="事件类型")
     durability: Mapped[str] = mapped_column(String, comment="事件持久化级别")
     stream_id: Mapped[str | None] = mapped_column(
@@ -138,7 +149,7 @@ class AgentEventModel(Base):
         String, nullable=True, comment="流类型，例如 answer 或 thinking"
     )
     chunk_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="流内从 1 开始的 Chunk 序号"
+        Integer, nullable=True, comment="流内从 1 开始的数据块序号"
     )
     is_complete: Mapped[int] = mapped_column(
         Integer, default=0, comment="是否为流完成 Chunk"
@@ -151,7 +162,7 @@ class AgentEventModel(Base):
         Integer, comment="同一生产者下的事件序号"
     )
     payload_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="事件载荷 JSON"
+        Text, default="{}", comment="事件内容（JSON 格式）"
     )
     occurred_at: Mapped[str] = mapped_column(String, comment="事件发生时间（UTC）")
 
@@ -199,7 +210,7 @@ class ApprovalRecordModel(Base):
     tool_call_id: Mapped[str] = mapped_column(String, comment="待审批的工具调用标识")
     tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
     arguments_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="工具调用参数 JSON"
+        Text, default="{}", comment="工具调用参数（JSON 格式）"
     )
     risk_level: Mapped[str] = mapped_column(
         String, default="low", comment="工具风险等级"
@@ -238,7 +249,7 @@ class ToolExecutionModel(Base):
     )
     tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
     arguments_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="工具参数 JSON"
+        Text, default="{}", comment="工具参数（JSON 格式）"
     )
     arguments_fingerprint: Mapped[str] = mapped_column(
         String, comment="工具参数指纹"
@@ -314,7 +325,7 @@ class MessageModel(Base):
     role: Mapped[str] = mapped_column(String, comment="消息角色")
     content: Mapped[str] = mapped_column(Text, default="", comment="消息正文")
     tool_calls_json: Mapped[str] = mapped_column(
-        Text, default="[]", comment="工具调用列表 JSON"
+        Text, default="[]", comment="工具调用列表（JSON 格式）"
     )
     tool_call_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="关联工具调用标识"
@@ -354,7 +365,7 @@ class ToolCallModel(Base):
     )
     tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
     arguments_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="工具调用参数 JSON"
+        Text, default="{}", comment="工具调用参数（JSON 格式）"
     )
     raw_output: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="工具原始输出"
@@ -393,7 +404,7 @@ class ApprovalLogModel(Base):
     tool_call_id: Mapped[str] = mapped_column(String, comment="工具调用标识")
     tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
     arguments_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="工具调用参数 JSON"
+        Text, default="{}", comment="工具调用参数（JSON 格式）"
     )
     risk_level: Mapped[str] = mapped_column(String, comment="工具风险等级")
     decision: Mapped[str] = mapped_column(String, comment="审批决定")
@@ -423,7 +434,7 @@ class MemoryModel(Base):
     content: Mapped[str] = mapped_column(Text, comment="记忆内容")
     # 仅存任意用户扩展字段（系统/语义字段一律拆为独立列，避免双源真相）
     metadata_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="用户扩展元数据 JSON"
+        Text, default="{}", comment="用户自定义的额外信息（JSON 格式）"
     )
     pinned: Mapped[int] = mapped_column(
         Integer, default=0, comment="是否固定，0 表示否，1 表示是"
@@ -471,7 +482,7 @@ class McpServerModel(Base):
         String, primary_key=True, comment="MCP 服务器名称"
     )
     config_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="MCP 服务器配置 JSON"
+        Text, default="{}", comment="MCP 服务器配置（JSON 格式）"
     )
     created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
     deleted_time: Mapped[str | None] = mapped_column(
@@ -503,7 +514,7 @@ class ToolModel(Base):
     )
     description: Mapped[str] = mapped_column(Text, default="", comment="工具描述")
     parameters_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="工具参数 Schema JSON"
+        Text, default="{}", comment="工具参数 Schema（JSON 格式）"
     )
     risk_level: Mapped[str] = mapped_column(
         String, default="medium", comment="工具风险等级"
@@ -552,10 +563,10 @@ class AttachmentModel(Base):
         String, default="uploaded", comment="附件处理状态"
     )
     capabilities_json: Mapped[str] = mapped_column(
-        Text, default="[]", comment="附件能力列表 JSON"
+        Text, default="[]", comment="附件支持的能力列表（JSON 格式）"
     )
     metadata_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="附件元数据 JSON"
+        Text, default="{}", comment="附件信息（JSON 格式）"
     )
     error_message: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="附件处理错误信息"
@@ -564,60 +575,6 @@ class AttachmentModel(Base):
     updated_at: Mapped[str] = mapped_column(String, comment="最后更新时间（UTC）")
     deleted_time: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="软删除时间（UTC）"
-    )
-
-
-class FileProcessingTaskModel(Base):
-    """文件处理任务的 ORM 映射。表名显式限定为文件处理任务。"""
-
-    __tablename__ = "file_processing_tasks"
-    __table_args__ = (
-        Index("idx_file_processing_tasks_status", "status", "available_at"),
-        Index("idx_file_processing_tasks_attachment", "attachment_id"),
-        Index("idx_file_processing_tasks_session", "session_id"),
-    )
-
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="文件处理任务唯一标识"
-    )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
-    attachment_id: Mapped[str] = mapped_column(
-        ForeignKey("attachments.id"), comment="待处理附件标识"
-    )
-    task_type: Mapped[str] = mapped_column(String, comment="处理任务类型")
-    status: Mapped[str] = mapped_column(
-        String, default="queued", comment="任务状态"
-    )
-    progress: Mapped[float] = mapped_column(
-        Float, default=0, comment="处理进度，范围为 0 到 1"
-    )
-    stage: Mapped[str] = mapped_column(String, default="queued", comment="当前处理阶段")
-    priority: Mapped[int] = mapped_column(Integer, default=0, comment="任务优先级")
-    attempts: Mapped[int] = mapped_column(Integer, default=0, comment="已尝试处理次数")
-    max_attempts: Mapped[int] = mapped_column(
-        Integer, default=3, comment="最大尝试处理次数"
-    )
-    payload_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="任务输入载荷 JSON"
-    )
-    result_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="任务处理结果 JSON"
-    )
-    error_message: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="任务处理错误信息"
-    )
-    available_at: Mapped[str] = mapped_column(
-        String, comment="任务可被消费的时间（UTC）"
-    )
-    created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
-    updated_at: Mapped[str] = mapped_column(String, comment="最后更新时间（UTC）")
-    started_at: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="开始处理时间（UTC）"
-    )
-    completed_at: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="完成处理时间（UTC）"
     )
 
 
@@ -645,7 +602,7 @@ class FileChunkModel(Base):
         Text, default="{}", comment="分块在原文件中的定位信息 JSON"
     )
     metadata_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="分块元数据 JSON"
+        Text, default="{}", comment="分块信息（JSON 格式）"
     )
 
 
@@ -673,7 +630,7 @@ class FileArtifactModel(Base):
         String, nullable=True, comment="产物存储键"
     )
     metadata_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="产物元数据 JSON"
+        Text, default="{}", comment="产物信息（JSON 格式）"
     )
     created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
 
@@ -688,13 +645,13 @@ class AdapterRegistryModel(Base):
     )
     version: Mapped[str] = mapped_column(String, comment="适配器版本")
     mime_types_json: Mapped[str] = mapped_column(
-        Text, default="[]", comment="支持的 MIME 类型列表 JSON"
+        Text, default="[]", comment="支持的 MIME 类型列表（JSON 格式）"
     )
     extensions_json: Mapped[str] = mapped_column(
-        Text, default="[]", comment="支持的文件扩展名列表 JSON"
+        Text, default="[]", comment="支持的文件扩展名列表（JSON 格式）"
     )
     capabilities_json: Mapped[str] = mapped_column(
-        Text, default="[]", comment="适配器能力列表 JSON"
+        Text, default="[]", comment="适配器支持的能力列表（JSON 格式）"
     )
     enabled: Mapped[int] = mapped_column(
         Integer, default=1, comment="是否启用，0 表示否，1 表示是"
@@ -760,38 +717,7 @@ class CodeDependencyModel(Base):
         String, default="reference", comment="依赖关系类型"
     )
     metadata_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="依赖关系元数据 JSON"
-    )
-
-
-class AgentContinuationModel(Base):
-    """等待附件完成后继续执行记录的 ORM 映射。"""
-
-    __tablename__ = "agent_continuations"
-    __table_args__ = (
-        UniqueConstraint("run_id", name="uq_agent_continuation_run"),
-        Index("idx_agent_continuations_status", "status"),
-    )
-
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="继续执行记录唯一标识"
-    )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
-    run_id: Mapped[str] = mapped_column(String, comment="待继续执行的运行标识")
-    task_ids_json: Mapped[str] = mapped_column(
-        Text, default="[]", comment="关联文件任务标识列表 JSON"
-    )
-    tool_calls_json: Mapped[str] = mapped_column(
-        Text, default="[]", comment="待继续处理的工具调用列表 JSON"
-    )
-    status: Mapped[str] = mapped_column(
-        String, default="waiting", comment="继续执行状态"
-    )
-    created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
-    resumed_at: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="恢复执行时间（UTC）"
+        Text, default="{}", comment="依赖关系的额外信息（JSON 格式）"
     )
 
 

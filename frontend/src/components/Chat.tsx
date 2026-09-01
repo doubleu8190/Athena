@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, Paperclip, Files, X, RotateCw, Trash2 } from "lucide-react"
+import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, Paperclip, Files, X, Trash2 } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ApprovalDialog } from "./ApprovalDialog"
 import { ActivityPanel } from "./ActivityPanel"
@@ -39,10 +39,7 @@ function Chat({ sendEvent }: ChatProps) {
     setError,
     clearError,
     attachments,
-    fileTasks,
     setAttachments,
-    upsertAttachment,
-    upsertFileTask,
     removeAttachment,
   } = useChatStore()
 
@@ -51,7 +48,7 @@ function Chat({ sendEvent }: ChatProps) {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [showActivity, setShowActivity] = useState(false)
   const [showFiles, setShowFiles] = useState(false)
-  const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([])
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [supportedAttachmentTypes, setSupportedAttachmentTypes] = useState<SupportedAttachmentTypes | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -77,7 +74,7 @@ function Chat({ sendEvent }: ChatProps) {
       loadingSessionIdRef.current = activeSessionId
       setIsLoadingHistory(true)
       loadHistory(activeSessionId, () => cancelled)
-      setSelectedAttachmentIds([])
+      setPendingFiles([])
       setSupportedAttachmentTypes(null)
       apiClient.listAttachments(activeSessionId)
         .then((items) => { if (!cancelled) setAttachments(items) })
@@ -94,7 +91,7 @@ function Chat({ sendEvent }: ChatProps) {
       setAgentStatus("idle")
       clearError()
       setAttachments([])
-      setSelectedAttachmentIds([])
+      setPendingFiles([])
       setSupportedAttachmentTypes(null)
     }
 
@@ -150,13 +147,7 @@ function Chat({ sendEvent }: ChatProps) {
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
-    if ((!text && selectedAttachmentIds.length === 0) || !activeSessionId || isSending || isUploading) return
-
-    const selectedAttachments = attachments.filter((item) => selectedAttachmentIds.includes(item.id))
-    if (selectedAttachments.some((item) => item.status === "failed")) {
-      setError("Failed attachments must be retried or removed before sending.")
-      return
-    }
+    if ((!text && pendingFiles.length === 0) || !activeSessionId || isSending || isUploading) return
 
     setIsSending(true)
     setInput("")
@@ -168,7 +159,7 @@ function Chat({ sendEvent }: ChatProps) {
       content: text || "Please process the attached files.",
       timestamp: new Date().toISOString(),
       session_id: activeSessionId,
-      attachments: selectedAttachments,
+      attachments: [],
     }
     addMessage(userMsg)
 
@@ -183,7 +174,7 @@ function Chat({ sendEvent }: ChatProps) {
     const sent = sendEvent(ClientEventType.USER_COMMAND, {
       message: text || "Please process the attached files.",
       session_id: activeSessionId,
-      attachment_ids: selectedAttachmentIds,
+      files: pendingFiles,
     })
 
     if (!sent) {
@@ -193,7 +184,7 @@ function Chat({ sendEvent }: ChatProps) {
       removeMessage(userMsg.id)
       setInput(text)
     } else {
-      setSelectedAttachmentIds([])
+      setPendingFiles([])
     }
 
     setIsSending(false)
@@ -207,7 +198,7 @@ function Chat({ sendEvent }: ChatProps) {
     setError,
     clearThinking,
     sendEvent,
-    selectedAttachmentIds,
+    pendingFiles,
     attachments,
     isUploading,
   ])
@@ -228,22 +219,14 @@ function Chat({ sendEvent }: ChatProps) {
     setIsUploading(true)
     clearError()
     try {
-      const items = await apiClient.uploadAttachments(activeSessionId, files)
-      items.forEach(({ attachment, task }) => {
-        upsertAttachment(attachment)
-        upsertFileTask(task)
-      })
-      setSelectedAttachmentIds((current) => [
-        ...current,
-        ...items.map((item) => item.attachment.id).filter((id) => !current.includes(id)),
-      ])
+      setPendingFiles((current) => [...current, ...files])
     } catch (err) {
       setError(err instanceof Error ? err.message : "Attachment upload failed")
     } finally {
       setIsUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ""
     }
-  }, [activeSessionId, clearError, isUploading, setError, supportedAttachmentTypes, upsertAttachment, upsertFileTask])
+  }, [activeSessionId, clearError, isUploading, setError, supportedAttachmentTypes])
 
   const filesFromClipboard = useCallback((clipboardData: DataTransfer): File[] => {
     const fromItems = Array.from(clipboardData.items ?? [])
@@ -296,15 +279,7 @@ function Chat({ sendEvent }: ChatProps) {
     if (!activeSessionId) return
     await apiClient.deleteAttachment(activeSessionId, fileId)
     removeAttachment(fileId)
-    setSelectedAttachmentIds((items) => items.filter((id) => id !== fileId))
   }, [activeSessionId, removeAttachment])
-
-  const handleRetryAttachment = useCallback(async (fileId: string) => {
-    if (!activeSessionId) return
-    const item = await apiClient.retryAttachment(activeSessionId, fileId)
-    upsertAttachment(item.attachment)
-    upsertFileTask(item.task)
-  }, [activeSessionId, upsertAttachment, upsertFileTask])
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return
@@ -644,17 +619,16 @@ function Chat({ sendEvent }: ChatProps) {
         }}
       >
         <div className="max-w-3xl mx-auto">
-          {selectedAttachmentIds.length > 0 && (
+          {pendingFiles.length > 0 && (
             <div className="flex flex-wrap gap-2 mb-2">
-              {attachments.filter((item) => selectedAttachmentIds.includes(item.id)).map((item) => (
-                <div key={item.id} className="flex items-center gap-2 max-w-full rounded-md border border-athena-border bg-athena-bg px-2 py-1.5 text-xs">
+              {pendingFiles.map((file, index) => (
+                <div key={`${file.name}-${file.lastModified}-${index}`} className="flex items-center gap-2 max-w-full rounded-md border border-athena-border bg-athena-bg px-2 py-1.5 text-xs">
                   <Paperclip className="w-3.5 h-3.5 text-athena-accent flex-shrink-0" />
-                  <span className="truncate max-w-[220px]">{item.filename}</span>
-                  <span className="text-athena-muted">{item.status}</span>
+                  <span className="truncate max-w-[220px]">{file.name}</span>
                   <button
                     type="button"
                     title="Remove from message"
-                    onClick={() => setSelectedAttachmentIds((ids) => ids.filter((id) => id !== item.id))}
+                    onClick={() => setPendingFiles((files) => files.filter((_, fileIndex) => fileIndex !== index))}
                     className="text-athena-muted hover:text-athena-text"
                   >
                     <X className="w-3.5 h-3.5" />
@@ -715,7 +689,7 @@ function Chat({ sendEvent }: ChatProps) {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={(!input.trim() && selectedAttachmentIds.length === 0) || !activeSessionId || isSending || isUploading}
+                disabled={(!input.trim() && pendingFiles.length === 0) || !activeSessionId || isSending || isUploading}
                 className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
                 title="Send"
               >
@@ -741,26 +715,13 @@ function Chat({ sendEvent }: ChatProps) {
               {attachments.length === 0 ? (
                 <div className="py-3 text-center text-xs text-athena-muted">No files in this session</div>
               ) : attachments.map((item) => {
-                const attachmentTasks = fileTasks.filter((entry) => entry.attachment_id === item.id)
-                const task = attachmentTasks[attachmentTasks.length - 1]
                 return (
                   <div key={item.id} className="flex items-center gap-3 py-2 border-b border-athena-border/60 last:border-0">
                     <Files className="w-4 h-4 text-athena-accent flex-shrink-0" />
-                    <button
-                      type="button"
-                      className="min-w-0 flex-1 text-left"
-                      onClick={() => item.status !== "failed" && setSelectedAttachmentIds((ids) => ids.includes(item.id) ? ids : [...ids, item.id])}
-                    >
+                    <div className="min-w-0 flex-1 text-left">
                       <div className="truncate text-xs text-athena-text">{item.filename}</div>
-                      <div className="text-[11px] text-athena-muted">
-                        {item.status}{task ? ` · ${Math.round(task.progress * 100)}% ${task.stage}` : ""}
-                      </div>
-                    </button>
-                    {item.status === "failed" && (
-                      <button type="button" title="Retry" onClick={() => void handleRetryAttachment(item.id)} className="text-athena-muted hover:text-athena-text">
-                        <RotateCw className="w-3.5 h-3.5" />
-                      </button>
-                    )}
+                      <div className="text-[11px] text-athena-muted">{item.status}</div>
+                    </div>
                     <button type="button" title="Delete" onClick={() => void handleDeleteAttachment(item.id)} className="text-athena-muted hover:text-athena-danger">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

@@ -20,7 +20,6 @@ class ErrorDetail(StrEnum):
     APPROVAL_NOT_FOUND = "approval_not_found"
     MEMORY_NOT_FOUND = "memory_not_found"
     ATTACHMENT_NOT_FOUND = "attachment_not_found"
-    FILE_TASK_NOT_FOUND = "file_task_not_found"
     MCP_SERVER_NOT_FOUND = "mcp_server_not_found"
     TOOL_NOT_REGISTERED = "tool_not_registered"
 

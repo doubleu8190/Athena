@@ -71,7 +71,9 @@ async def list_tools(request: Request) -> dict[str, Any]:
                 execution_mode=str(schema.execution_mode.value),
                 require_approval=schema.require_approval,
                 enabled=manager.is_enabled(schema.name),
-                parameters=schema.parameters or {},
+                parameters=schema.parameters.model_dump(
+                    mode="json", by_alias=True, exclude_none=True
+                ),
                 last_called_at=last_called.get(schema.name),
             )
         )

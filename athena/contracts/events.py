@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from athena.models.json_models import JsonObject
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -36,6 +36,12 @@ class EventType(StrEnum):
     THINKING_COMPLETED = "thinking.completed"
     TOOL_CALL_END = "tool.completed"
     TOOL_CALL_START = "tool.started"
+    MESSAGE_PERSISTED = "message.persisted"
+    FILE_PROCESSING_STARTED = "file_processing_started"
+    FILE_PROCESSING_PROGRESS = "file_processing_progress"
+    FILE_INDEX_PROGRESS = "file_index_progress"
+    FILE_PROCESSING_COMPLETED = "file_processing_completed"
+    FILE_PROCESSING_FAILED = "file_processing_failed"
 
 
 class ApplicationEvent(BaseModel):
@@ -50,6 +56,8 @@ class ApplicationEvent(BaseModel):
     durability: EventDurability
     session_id: str = Field(min_length=1)
     run_id: str | None = None
+    message_id: str | None = None
+    attachment_id: str | None = None
     stream_id: str | None = None
     stream_type: str | None = None
     chunk_id: int | None = Field(default=None, ge=1)
@@ -58,4 +66,4 @@ class ApplicationEvent(BaseModel):
     producer_id: str = Field(default="runtime-main", min_length=1)
     sequence: int = Field(default=0, ge=0)
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    payload: dict[str, Any] = Field(default_factory=dict)
+    payload: JsonObject = Field(default_factory=JsonObject)

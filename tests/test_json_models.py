@@ -4,9 +4,7 @@ from athena.infrastructure.sqlite.repositories import _json_dumps, _json_loads_m
 from athena.models import (
     FileLocator,
     CommandPayload,
-    JsonObject,
     JsonSchema,
-    ToolArguments,
     ToolCall,
 )
 
@@ -28,14 +26,14 @@ def test_json_models_preserve_known_and_extension_fields() -> None:
 
 def test_json_round_trip_uses_models_without_changing_storage_shape() -> None:
     call = ToolCall(
-        id="call-1", name="read_file", args=ToolArguments(path="README.md")
+        id="call-1", name="read_file", args={"path": "README.md"}
     )
     raw = _json_dumps(call)
     restored = _json_loads_model(raw, ToolCall, ToolCall())
 
     assert raw == '{"id": "call-1", "name": "read_file", "args": {"path": "README.md"}}'
     assert isinstance(restored, ToolCall)
-    assert restored.args.path == "README.md"
+    assert restored.args["path"] == "README.md"
 
 
 def test_json_schema_is_nested_and_attribute_accessible() -> None:
@@ -56,4 +54,3 @@ def test_json_schema_is_nested_and_attribute_accessible() -> None:
         ]["type"]
         == "string"
     )
-    assert isinstance(JsonObject.model_validate({"status": "ok"}), JsonObject)

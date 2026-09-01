@@ -28,7 +28,6 @@ from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
-from athena.models.json_models import JsonObject
 from athena.models.file import (
     Attachment,
     AttachmentRef,
@@ -175,13 +174,11 @@ class SubAgentManager:
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=sub_run_id,
-                payload=JsonObject.model_validate(
-                    {
-                        "task": task,
-                        "sub_run_id": sub_run_id,
-                        "max_turns": max_turns,
-                    }
-                ),
+                payload={
+                    "task": task,
+                    "sub_run_id": sub_run_id,
+                    "max_turns": max_turns,
+                },
             )
         )
 
@@ -221,13 +218,11 @@ class SubAgentManager:
                     durability=EventDurability.DURABLE,
                     session_id=session_id,
                     run_id=sub_run_id,
-                    payload=JsonObject.model_validate(
-                        {
-                            "task": task,
-                            "sub_run_id": sub_run_id,
-                            "turn_count": result.turn_count,
-                        }
-                    ),
+                    payload={
+                        "task": task,
+                        "sub_run_id": sub_run_id,
+                        "turn_count": result.turn_count,
+                    },
                 )
             )
             return sub_result
@@ -239,9 +234,7 @@ class SubAgentManager:
                     durability=EventDurability.DURABLE,
                     session_id=session_id,
                     run_id=sub_run_id,
-                    payload=JsonObject.model_validate(
-                        {"task": task, "sub_run_id": sub_run_id, "error": str(e)}
-                    ),
+                    payload={"task": task, "sub_run_id": sub_run_id, "error": str(e)},
                 )
             )
             return SubAgentResult(
@@ -407,23 +400,7 @@ class LangGraphRuntime:
             self._build_parallel_spawn_description(),
         )
 
-    @staticmethod
-    def normalize_request(
-        user_message: str,
-        attachment_ids: list[str] | None,
-    ) -> tuple[str, list[str]]:
-        """规范化用户消息和附件 ID。
-
-        参数：
-            user_message (str): 当前用户消息；允许为空以支持仅附件请求。
-            attachment_ids (list[str] | None): 附件 ID 列表；为空时按空列表处理，并去除重复 ID。
-
-        返回值：
-            tuple[str, list[str]]: 规范化后的消息文本和去重附件 ID 列表。
-        """
-        return user_message, list(dict.fromkeys(attachment_ids or []))
-
-    async def load_requested_attachments(
+    async def load_banded_attachments(
         self,
         session_id: str,
         attachment_ids: list[str],
@@ -445,15 +422,15 @@ class LangGraphRuntime:
             return []
         attachments = await self._db.files.get_attachments(session_id, attachment_ids)
         attachments_by_id = {item.id: item for item in attachments}
-        requested: list[Attachment] = []
+        result: list[Attachment] = []
         for file_id in attachment_ids:
             attachment = attachments_by_id.get(file_id)
             if attachment is None:
                 raise ValueError("附件不存在或不属于当前会话")
             if attachment.status == AttachmentStatus.FAILED:
                 raise ValueError(f"附件 {attachment.filename} 处理失败，不能随消息提交")
-            requested.append(attachment)
-        return requested
+            result.append(attachment)
+        return result
 
     async def retrieve_memory_context(self, session_id: str, user_message: str) -> str:
         """检索与用户消息相关的长期记忆上下文。
@@ -518,9 +495,7 @@ class LangGraphRuntime:
         )
         return [summary, *history_after]
 
-    async def persist_message_and_attachments(
-        self, state: AgentState
-    ) -> AgentState:
+    async def persist_message_and_attachments(self, state: AgentState) -> AgentState:
         """幂等持久化当前用户消息及其附件关系。"""
         message_id = state.get("message_id") or state.get("user_message_id")
         if not message_id:
@@ -543,12 +518,10 @@ class LangGraphRuntime:
                 session_id=state["session_id"],
                 run_id=state["run_id"],
                 message_id=persisted.id,
-                payload=JsonObject.model_validate(
-                    {
-                        "message_id": persisted.id,
-                        "attachment_ids": state.get("attachment_ids", []),
-                    }
-                ),
+                payload={
+                    "message_id": persisted.id,
+                    "attachment_ids": state.get("attachment_ids", []),
+                },
             )
         )
         return {
@@ -570,9 +543,7 @@ class LangGraphRuntime:
                 run_id=run_id,
                 message_id=message_id,
                 attachment_id=attachment_id,
-                payload=JsonObject.model_validate(
-                    {"message_id": message_id, "attachment_id": attachment_id}
-                ),
+                payload={"message_id": message_id, "attachment_id": attachment_id},
             )
         )
         try:
@@ -653,11 +624,10 @@ class LangGraphRuntime:
             }
 
     @staticmethod
-    def build_system_prompt(system_prompt: str | None, memory_context: str) -> str:
-        """选择系统提示词并在存在记忆时追加记忆上下文。
+    def build_system_prompt(memory_context: str) -> str:
+        """使用内置系统提示词，并在存在记忆时追加记忆上下文。
 
         参数：
-            system_prompt (str | None): 可选自定义系统提示词；为空时使用默认提示词。
             memory_context (str): 检索得到的记忆上下文；为空时不追加换行。
 
         返回值：
@@ -666,8 +636,9 @@ class LangGraphRuntime:
         异常：
             不抛出业务异常。
         """
-        prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
-        return (prompt + "\n\n" + memory_context).strip() if memory_context else prompt
+        return (
+            DEFAULT_SYSTEM_PROMPT + "\n\n" + memory_context
+        ).strip() if memory_context else DEFAULT_SYSTEM_PROMPT
 
     async def prepare_run(
         self,
@@ -819,12 +790,11 @@ class LangGraphRuntime:
             )
         return messages
 
-
     async def run_harness(
         self,
         messages: list[Message],
         session_id: str,
-        system_prompt: str,
+        memory_context: str,
         run_id: str,
         stop_signal: asyncio.Event | None,
     ) -> HarnessRunResult:
@@ -833,7 +803,7 @@ class LangGraphRuntime:
         参数：
             messages (list[Message]): 已构建的 Harness 消息列表。
             session_id (str): 会话唯一标识。
-            system_prompt (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            memory_context (str): 检索得到的记忆上下文。
             run_id (str): 当前运行 ID。
             stop_signal (asyncio.Event | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
@@ -854,7 +824,7 @@ class LangGraphRuntime:
         result = await harness.run(
             messages=messages,
             session_id=session_id,
-            system_prompt=system_prompt,
+            system_prompt=self.build_system_prompt(memory_context),
             run_id=run_id,
             stop_signal=stop_signal,
         )
@@ -946,7 +916,6 @@ class LangGraphRuntime:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return [item.model_dump(mode="json") for item in refs]
-
 
     async def _extract_facts_async(
         self,
@@ -1044,9 +1013,7 @@ class LangGraphRuntime:
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=parent_run_id,
-                payload=JsonObject.model_validate(
-                    {"task_count": len(tasks), "tasks": [t[:500] for t in tasks]}
-                ),
+                payload={"task_count": len(tasks), "tasks": [t[:500] for t in tasks]},
             )
         )
 

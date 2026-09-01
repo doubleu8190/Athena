@@ -82,7 +82,6 @@ async def invoke_graph(
     command_id: str = "",
     attachment_ids: list[str] | None = None,
     message_id: str = "",
-    system_prompt: str | None = None,
     stop_signal: asyncio.Event | None = None,
 ) -> Any:
     """以指定会话配置执行已编译的 Agent 图。
@@ -94,7 +93,6 @@ async def invoke_graph(
         run_id (str): 非空运行 ID，同时作为 LangGraph 检查点线程 ID。
         command_id (str): 可选命令 ID，用于幂等追踪。
         attachment_ids (list[str] | None): 可选附件 ID 列表，元素必须为非空字符串。
-        system_prompt (str | None): 可选系统提示词，会随图状态传递。
         stop_signal (asyncio.Event | None): 可选停止信号；置位后终止当前 Harness 和子 Agent 执行。
     返回值:
         Any: 图最终产生的业务结果；无结果时返回 ``None``。
@@ -112,7 +110,6 @@ async def invoke_graph(
         "message_id": message_id or generate_time_id(),
         "user_message": user_message,
         "attachment_ids": attachment_ids or [],
-        "system_prompt": system_prompt or "",
     }
     state = await graph.ainvoke(
         initial_state,

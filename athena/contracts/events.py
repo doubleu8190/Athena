@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from athena.models.json_models import JsonObject
+from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -51,7 +51,6 @@ class ApplicationEvent(BaseModel):
     schema_version: int = Field(default=2, ge=1)
     session_seq: int | None = Field(default=None, ge=1)
     """会话级 SSE 游标；由事件存储分配。"""
-    event_id: int | None = Field(default=None, ge=1)
     event_type: str = Field(min_length=1)
     durability: EventDurability
     session_id: str = Field(min_length=1)
@@ -63,7 +62,5 @@ class ApplicationEvent(BaseModel):
     chunk_id: int | None = Field(default=None, ge=1)
     is_complete: bool = False
     parent_run_id: str | None = None
-    producer_id: str = Field(default="runtime-main", min_length=1)
-    sequence: int = Field(default=0, ge=0)
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    payload: JsonObject = Field(default_factory=JsonObject)
+    payload: dict[str, Any] = Field(default_factory=dict)

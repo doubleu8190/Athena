@@ -13,7 +13,6 @@ from athena.infrastructure.sqlite.agent_store import AgentStore
 from athena.infrastructure.sqlite.database import Database
 from athena.models.approval import ApprovalDecision, ApprovalRequest
 from athena.models.tool import RiskLevel
-from athena.models.json_models import JsonObject
 from athena.utils.ids import generate_time_id
 
 
@@ -99,16 +98,14 @@ class ApprovalManager:
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=run_id,
-                payload=JsonObject.model_validate(
-                    {
-                        "approval_id": approval_id,
-                        "tool_name": tool_name,
-                        "arguments": arguments,
-                        "risk_level": risk_level.value,
-                        "timeout": self._timeout,
-                        "tool_call_id": tool_call_id,
-                    }
-                ),
+                payload={
+                    "approval_id": approval_id,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "risk_level": risk_level.value,
+                    "timeout": self._timeout,
+                    "tool_call_id": tool_call_id,
+                },
             )
         )
         return request

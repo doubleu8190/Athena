@@ -199,7 +199,7 @@ SANDBOX_ENABLED=false
 | 审批 | `POST /api/approvals/{id}/respond` | 允许或拒绝审批 |
 | 记忆 | `GET /api/memory`、`POST /api/memory/search` | 管理和搜索记忆 |
 | 文件 | `/api/sessions/{id}/attachments` | 上传和管理附件 |
-客户端通过 HTTP 提交版本化 Command，通过 SSE 接收 Application Event。Durable Event 使用会话内 `event_id` 重放，Realtime Delta 仅用于低延迟展示。
+客户端通过 HTTP 提交版本化 Command，通过 SSE 接收 Application Event。Durable Event 使用会话内 `session_seq` 重放，Realtime Delta 仅用于低延迟展示。
 
 ## 测试与构建
 

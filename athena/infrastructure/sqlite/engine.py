@@ -63,29 +63,6 @@ async def init_engine(db_path: str) -> None:
         await conn.execute(
             text("UPDATE attachments SET status = 'uploaded' WHERE status = 'queued'")
         )
-        # agent_events 曾使用 event_id 作为游标。逐列迁移可以让已有数据库
-        # 在不丢失事件的前提下切换到会话级 session_seq。
-        columns = {
-            row[1]
-            for row in (await conn.execute(text("PRAGMA table_info(agent_events)"))).all()
-        }
-        migrations = (
-            ("session_seq", "INTEGER"),
-            ("stream_type", "VARCHAR"),
-            ("chunk_id", "INTEGER"),
-            ("is_complete", "INTEGER NOT NULL DEFAULT 0"),
-            ("parent_run_id", "VARCHAR"),
-            ("message_id", "VARCHAR"),
-            ("attachment_id", "VARCHAR"),
-        )
-        for name, definition in migrations:
-            if name not in columns:
-                await conn.execute(
-                    text(f"ALTER TABLE agent_events ADD COLUMN {name} {definition}")
-                )
-        await conn.execute(
-            text("UPDATE agent_events SET session_seq = event_id WHERE session_seq IS NULL")
-        )
         snapshot_columns = {
             row[1]
             for row in (await conn.execute(text("PRAGMA table_info(stream_snapshots)"))).all()

@@ -75,7 +75,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         const envelope = JSON.parse(event.data) as ApplicationEventEnvelope
         const type = envelope.event_type || event.type
         const data: Record<string, unknown> = envelope.payload ?? (envelope as Record<string, unknown>)
-        const sequence = envelope.session_seq ?? envelope.event_id
+        const sequence = envelope.session_seq
         if (sequence !== undefined) {
           if (sequence <= lastSeqRef.current) return
           lastSeqRef.current = sequence

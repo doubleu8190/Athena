@@ -42,11 +42,11 @@ async def execute_tools_and_llm(
     runtime.set_stop_signal(state["session_id"], stop_signal)
     try:
         result = await runtime.run_harness(
-            messages,
-            state["session_id"],
-            state.get("system_prompt", ""),
-            state["run_id"],
-            stop_signal,
+            messages=messages,
+            session_id=state["session_id"],
+            memory_context=state.get("memory_context", ""),
+            run_id=state["run_id"],
+            stop_signal=stop_signal,
         )
         await runtime.post_process(state["session_id"], state["user_message"], result)
         return {"result": runtime.result_payload(result, attachment_refs)}

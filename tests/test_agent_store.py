@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -42,6 +43,33 @@ def _message(
         run_id=run_id,
         payload={"message": content},
     )
+
+
+@pytest.mark.asyncio
+async def test_event_cursor_cache_initializes_each_maximum_once():
+    """会话游标和流 Chunk 游标只从数据库初始化一次。"""
+    store = AgentStore()
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[7, 3])
+
+    assert await store._cached_session_seq(db, "session-1") == 7
+    assert await store._cached_session_seq(db, "session-1") == 7
+    assert await store._cached_stream_chunk_id(db, "session-1", "stream-1") == 3
+    assert await store._cached_stream_chunk_id(db, "session-1", "stream-1") == 3
+    assert db.scalar.await_count == 2
+
+
+def test_stream_chunk_cache_never_moves_backward():
+    """乱序或重试的较小 Chunk 不会让缓存游标回退。"""
+    store = AgentStore()
+    cache_key = ("session-1", "stream-1")
+    store._stream_chunk_cache[cache_key] = 5
+
+    store._advance_stream_chunk_cache(cache_key, 3)
+    assert store._stream_chunk_cache[cache_key] == 5
+
+    store._advance_stream_chunk_cache(cache_key, 6)
+    assert store._stream_chunk_cache[cache_key] == 6
 
 
 @pytest.mark.asyncio
@@ -161,7 +189,6 @@ async def test_events_share_session_sequence_across_durability_levels(agent_stor
     assert (first.session_seq, second.session_seq) == (1, 2)
     rows = await store.events_after(session.id)
     assert [row.session_seq for row in rows] == [1, 2]
-    assert [row.event_id for row in rows] == [1, 2]
 
 
 @pytest.mark.asyncio

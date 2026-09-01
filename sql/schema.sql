@@ -145,8 +145,6 @@ CREATE INDEX IF NOT EXISTS idx_agent_commands_status_available ON agent_commands
 CREATE TABLE IF NOT EXISTS agent_events (
     session_id VARCHAR NOT NULL REFERENCES sessions(id),
     session_seq INTEGER NOT NULL,
-    -- Deprecated compatibility alias; equal to session_seq for new events.
-    event_id INTEGER NOT NULL,
     run_id VARCHAR,
     event_type VARCHAR NOT NULL,
     durability VARCHAR NOT NULL,
@@ -155,12 +153,9 @@ CREATE TABLE IF NOT EXISTS agent_events (
     chunk_id INTEGER,
     is_complete INTEGER NOT NULL DEFAULT 0,
     parent_run_id VARCHAR,
-    producer_id VARCHAR NOT NULL,
-    sequence INTEGER NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
     occurred_at VARCHAR NOT NULL,
-    PRIMARY KEY(session_id, event_id),
-    UNIQUE(session_id, run_id, producer_id, sequence),
+    PRIMARY KEY(session_id, session_seq),
     UNIQUE(session_id, stream_id, chunk_id)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id, session_seq);

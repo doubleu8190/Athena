@@ -6,8 +6,7 @@ from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentCommandStatus
 from athena.utils.ids import generate_time_id
 from athena.gateway.routes.schemas import CancelCommandResponse, CommandStatusResponse
-from athena.models.json_models import JsonObject
-from athena.infrastructure.sqlite.repositories import _json_loads_model
+from athena.infrastructure.sqlite.repositories import _json_loads
 
 router = APIRouter(prefix="/commands", tags=["commands"])
 run_router = APIRouter(prefix="/runs", tags=["runs"])
@@ -71,16 +70,12 @@ async def get_command(command_id: str, request: Request) -> CommandStatusRespons
         status=row.status,
         attempt=row.attempt,
         result=(
-            _json_loads_model(row.result_json, JsonObject, JsonObject()).model_dump(
-                mode="json", exclude_none=True
-            )
+            _json_loads(row.result_json, {})
             if row.result_json
             else None
         ),
         error=(
-            _json_loads_model(row.error_json, JsonObject, JsonObject()).model_dump(
-                mode="json", exclude_none=True
-            )
+            _json_loads(row.error_json, {})
             if row.error_json
             else None
         ),

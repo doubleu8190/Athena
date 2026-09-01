@@ -14,8 +14,8 @@ from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentApprovalDecision
 from athena.utils.ids import generate_time_id
-from athena.infrastructure.sqlite.repositories import _json_loads_model
-from athena.models.json_models import CommandPayload, ToolArguments
+from athena.infrastructure.sqlite.repositories import _json_loads
+from athena.models.json_models import CommandPayload
 
 if TYPE_CHECKING:
     from athena.gateway.approval import ApprovalManager
@@ -59,9 +59,7 @@ async def list_pending_approvals(
         {
             "approval_id": row.approval_id,
             "tool_name": row.tool_name,
-            "arguments": _json_loads_model(
-                row.arguments_json, ToolArguments, ToolArguments()
-            ).model_dump(mode="json", exclude_none=True),
+            "arguments": _json_loads(row.arguments_json, {}),
             "risk_level": row.risk_level,
             "created_at": row.created_at,
             "session_id": row.session_id,

@@ -111,7 +111,6 @@ class AgentCommandModel(Base):
 class AgentEventModel(Base):
     __tablename__ = "agent_events"
     __table_args__ = (
-        UniqueConstraint("session_id", "run_id", "producer_id", "sequence"),
         Index(
             "uq_agent_events_stream_chunk",
             "session_id",
@@ -125,11 +124,8 @@ class AgentEventModel(Base):
     session_id: Mapped[str] = mapped_column(
         ForeignKey("sessions.id"), primary_key=True, comment="所属会话标识"
     )
-    event_id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, comment="兼容旧客户端的会话事件游标别名"
-    )
     session_seq: Mapped[int] = mapped_column(
-        Integer, comment="会话内递增的事件游标"
+        Integer, primary_key=True, comment="会话内递增的事件游标"
     )
     run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="关联运行标识"
@@ -156,10 +152,6 @@ class AgentEventModel(Base):
     )
     parent_run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="父运行标识"
-    )
-    producer_id: Mapped[str] = mapped_column(String, comment="事件生产者标识")
-    sequence: Mapped[int] = mapped_column(
-        Integer, comment="同一生产者下的事件序号"
     )
     payload_json: Mapped[str] = mapped_column(
         Text, default="{}", comment="事件内容（JSON 格式）"

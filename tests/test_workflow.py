@@ -13,9 +13,11 @@ from athena.models.file import AttachmentRef, AttachmentStatus
 
 class _RecordingGraph:
     def __init__(self):
+        self.state = None
         self.config = None
 
-    async def ainvoke(self, _state, *, config):
+    async def ainvoke(self, state, *, config):
+        self.state = state
         self.config = config
         return {"result": "ok"}
 
@@ -37,6 +39,7 @@ async def test_invoke_graph_uses_run_id_as_checkpoint_thread_id():
     )
     assert graph.config["configurable"]["thread_id"] == "run-1"
     assert graph.config["configurable"]["stop_signal"] is stop_signal
+    assert "system_prompt" not in graph.state
 
 
 @pytest.mark.asyncio
@@ -49,24 +52,14 @@ async def test_invoke_graph_requires_run_id_for_checkpointing():
         )
 
 
-def test_normalize_request_deduplicates_files():
-    user_message, attachment_ids = LangGraphRuntime.normalize_request(
-        "new message",
-        ["file-2", "file-1", "file-2"],
-    )
+def test_build_system_prompt_uses_builtin_prompt_and_appends_memory():
+    prompt = LangGraphRuntime.build_system_prompt("memory context")
 
-    assert user_message == "new message"
-    assert attachment_ids == ["file-2", "file-1"]
-
-
-def test_build_system_prompt_uses_custom_prompt_and_appends_memory():
-    prompt = LangGraphRuntime.build_system_prompt("custom prompt", "memory context")
-
-    assert prompt == "custom prompt\n\nmemory context"
+    assert prompt == f"{DEFAULT_SYSTEM_PROMPT}\n\nmemory context"
 
 
 def test_build_system_prompt_falls_back_to_default():
-    assert LangGraphRuntime.build_system_prompt(None, "") == DEFAULT_SYSTEM_PROMPT
+    assert LangGraphRuntime.build_system_prompt("") == DEFAULT_SYSTEM_PROMPT
 
 
 def test_build_harness_messages_adds_attachment_context_without_mutating_message():

@@ -29,7 +29,6 @@ export type ApplicationEventType = (typeof ApplicationEventType)[keyof typeof Ap
 export interface ApplicationEventEnvelope {
   schema_version?: number
   session_seq?: number
-  event_id?: number
   event_type?: string
   durability?: string
   session_id?: string

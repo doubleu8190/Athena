@@ -41,7 +41,6 @@ from athena.models.json_models import (
     FileArtifact,
     FileLocator,
     FileMetadata,
-    JsonObject,
 )
 from athena.utils.ids import generate_time_id
 
@@ -880,7 +879,7 @@ class FileRepository:
                     )
                 for dep in dependencies:
                     values = dict(dep)
-                    metadata = JsonObject.model_validate(values.pop("metadata", {}))
+                    metadata = values.pop("metadata", {})
                     session.add(
                         CodeDependencyModel(
                             id=generate_time_id(),
@@ -965,9 +964,7 @@ class FileRepository:
                     "source": r.source,
                     "target": r.target,
                     "kind": r.kind,
-                    "metadata": _json_loads_model(
-                        r.metadata_json, JsonObject, JsonObject()
-                    ).model_dump(mode="json", exclude_none=True),
+                    "metadata": _json_loads(r.metadata_json, {}),
                 }
                 for r in rows
             ]

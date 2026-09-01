@@ -11,17 +11,16 @@ from fastapi.responses import StreamingResponse
 
 from athena.contracts.errors import ErrorDetail
 from athena.runtime import runtime_from
-from athena.infrastructure.sqlite.repositories import _json_loads_model
-from athena.models.json_models import JsonObject
+from athena.infrastructure.sqlite.repositories import _json_loads
 
 router = APIRouter(prefix="/sessions", tags=["events"])
 
 
-def _sse(data: dict, event: str | None = None, event_id: int | None = None) -> str:
-    """编码单条 SSE 帧；event_id 对外语义为 session_seq。"""
+def _sse(data: dict, event: str | None = None, session_seq: int | None = None) -> str:
+    """编码单条 SSE 帧，并将会话序号写入 SSE id。"""
     lines: list[str] = []
-    if event_id is not None:
-        lines.append(f"id: {event_id}")
+    if session_seq is not None:
+        lines.append(f"id: {session_seq}")
     if event:
         lines.append(f"event: {event}")
     lines.append("data: " + json.dumps(data, ensure_ascii=False))
@@ -30,11 +29,9 @@ def _sse(data: dict, event: str | None = None, event_id: int | None = None) -> s
 
 def _row_payload(row) -> dict:
     """将数据库事件转换为稳定的 v2 Envelope。"""
-    session_seq = row.session_seq or row.event_id
     return {
         "schema_version": 2,
-        "session_seq": session_seq,
-        "event_id": session_seq,
+        "session_seq": row.session_seq,
         "event_type": row.event_type,
         "durability": row.durability,
         "session_id": row.session_id,
@@ -46,11 +43,7 @@ def _row_payload(row) -> dict:
         "chunk_id": row.chunk_id,
         "is_complete": bool(row.is_complete),
         "parent_run_id": row.parent_run_id,
-        "producer_id": row.producer_id,
-        "sequence": row.sequence,
-        "payload": _json_loads_model(
-            row.payload_json, JsonObject, JsonObject()
-        ).model_dump(mode="json", exclude_none=True),
+        "payload": _json_loads(row.payload_json, {}),
         "occurred_at": row.occurred_at,
     }
 
@@ -99,7 +92,7 @@ async def session_events(
         cursor = after
         try:
             for row in await agent_store.events_between(session_id, after, watermark):
-                seq = row.session_seq or row.event_id
+                seq = row.session_seq
                 if seq <= cursor:
                     continue
                 cursor = seq
@@ -117,7 +110,7 @@ async def session_events(
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
                     continue
-                seq = event.session_seq or event.event_id
+                seq = event.session_seq
                 if seq is None or seq <= cursor:
                     continue
                 cursor = seq

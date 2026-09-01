@@ -26,7 +26,6 @@ class AgentState(TypedDict, total=False):
     run_id: Required[str]
     command_id: str
     user_message: str
-    system_prompt: str
     attachment_ids: list[str]
     message_id: Required[str]
     file_results: list[FileProcessResult]

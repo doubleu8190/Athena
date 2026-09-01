@@ -41,7 +41,7 @@ athena/infrastructure/
 
 ## 5. 事件与流式输出
 
-Durable Event 写入 SQLite，使用会话级 `event_id` 支持 SSE 的 `Last-Event-ID` 重放；Realtime Event 通过进程内 `RealtimeTransport` 降低展示延迟，不承担历史恢复职责。消息正文同时保存为带版本的 `StreamSnapshot`，用于客户端重连后的状态恢复。
+Durable Event 写入 SQLite，使用会话级 `session_seq` 支持 SSE 的 `Last-Event-ID` 重放；Realtime Event 通过进程内 `RealtimeTransport` 降低展示延迟，不承担历史恢复职责。消息正文同时保存为带版本的 `StreamSnapshot`，用于客户端重连后的状态恢复。
 
 SSE 端点必须先登记实时订阅，再读取持久化事件。实时通知只作为“有新事件”的提示，实际游标始终从 SQLite 读取，因而不会因为通知丢失而跳过 Durable Event。
 

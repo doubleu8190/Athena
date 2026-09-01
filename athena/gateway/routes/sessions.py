@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeGuard
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from pydantic import BaseModel
@@ -15,7 +17,7 @@ from athena.infrastructure.sqlite.database import Database
 from athena.models import CommandPayload, Message, Session
 from athena.utils.ids import generate_session_id
 from athena.utils.logging import get_logger
-from athena.runtime import runtime_from
+from athena.runtime import RuntimeContainer, runtime_from
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentCommandStatus
@@ -46,9 +48,123 @@ class SendMessageRequest(BaseModel):
     command_id: str
 
 
+@dataclass
+class ParsedSubmitRun:
+    """已解析的消息提交请求及本次请求产生的附件。"""
+
+    message: str
+    command_id: str
+    attachment_ids: list[str] = field(default_factory=list)
+    uploaded_ids: list[str] = field(default_factory=list)
+
+
+def _is_upload_file(value: object) -> TypeGuard[UploadFile]:
+    """判断 multipart 表单值是否具备上传文件接口。"""
+    return isinstance(value, UploadFile) or (
+        hasattr(value, "filename")
+        and hasattr(value, "content_type")
+        and hasattr(value, "read")
+        and hasattr(value, "close")
+    )
+
+
 async def _db_for(request: Request) -> Database:
     """从请求上下文获取数据库实例。"""
     return runtime_from(request).db
+
+
+async def _cleanup_uploaded_attachments(
+    runtime: RuntimeContainer, session_id: str, uploaded_ids: list[str]
+) -> None:
+    """回滚本次请求已创建的附件及其无引用 blob。"""
+    for attachment_id in uploaded_ids:
+        await runtime.file_runtime.repository.soft_delete_attachment(
+            attachment_id, session_id
+        )
+    if uploaded_ids:
+        await runtime.file_runtime.cleanup_unreferenced_blobs()
+
+
+async def _parse_json_run_request(request: Request) -> ParsedSubmitRun:
+    """解析 JSON 消息提交请求。"""
+    try:
+        req = SendMessageRequest.model_validate(await request.json())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ParsedSubmitRun(message=req.message, command_id=req.command_id)
+
+
+async def _parse_multipart_run_request(
+    session_id: str,
+    request: Request,
+    runtime: RuntimeContainer,
+    message_id: str,
+) -> ParsedSubmitRun:
+    """解析 multipart 消息提交请求并保存附件。"""
+    form = await request.form()
+    message = str(form.get("message") or "")
+    command_id = str(form.get("command_id") or "")
+    upload_files = [
+        item
+        for item in form.getlist("files")
+        if _is_upload_file(item)
+    ]
+    if not command_id:
+        for file in upload_files:
+            await file.close()
+        raise HTTPException(status_code=422, detail="command_id is required")
+
+    attachment_ids: list[str] = []
+    uploaded_ids: list[str] = []
+    for file in upload_files:
+        try:
+            filename = Path((file.filename or "upload.bin").replace("\\", "/")).name
+            if not filename or "\x00" in filename:
+                raise HTTPException(
+                    status_code=400, detail=ErrorDetail.INVALID_FILENAME
+                )
+            try:
+                # 判断是否是支持的文件类型，若不支持则抛出 ValueError
+                runtime.file_runtime.adapter_registry.select(
+                    filename, file.content_type or ""
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=415, detail=str(exc)) from exc
+
+            async def chunks():
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+            try:
+                stored = await runtime.file_runtime.storage.save_stream(chunks())
+            except ValueError as exc:
+                raise HTTPException(status_code=413, detail=str(exc)) from exc
+            attachment = await runtime.file_runtime.repository.create_attachment(
+                session_id=session_id,
+                message_id=message_id,
+                filename=filename,
+                mime_type=file.content_type or "application/octet-stream",
+                size_bytes=stored.size_bytes,
+                sha256=stored.sha256,
+                storage_key=stored.storage_key,
+            )
+            attachment_ids.append(attachment.id)
+            uploaded_ids.append(attachment.id)
+        except Exception:
+            await _cleanup_uploaded_attachments(runtime, session_id, uploaded_ids)
+            raise
+        finally:
+            await file.close()
+
+    return ParsedSubmitRun(
+        message=message,
+        command_id=command_id,
+        attachment_ids=attachment_ids,
+        uploaded_ids=uploaded_ids,
+    )
 
 
 @router.post("")
@@ -155,9 +271,7 @@ async def get_runs(session_id: str, request: Request) -> list[RunSummaryResponse
 
 
 @router.post("/{session_id}/runs", status_code=202)
-async def submit_run(
-    session_id: str, request: Request
-) -> SubmitRunResponse:
+async def submit_run(session_id: str, request: Request) -> SubmitRunResponse:
     """提交异步消息命令，交由 Runtime 消费者执行。
 
     参数:
@@ -174,82 +288,18 @@ async def submit_run(
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
 
     message_id = generate_time_id()
-    attachment_ids: list[str] = []
-    uploaded_ids: list[str] = []
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("multipart/"):
-        form = await request.form()
-        message = str(form.get("message") or "")
-        command_id = str(form.get("command_id") or "")
-        system_prompt = str(form.get("system_prompt") or "") or None
-        uploads = [
-            item
-            for item in form.getlist("files")
-            if isinstance(item, UploadFile)
-            or (hasattr(item, "filename") and hasattr(item, "read"))
-        ]
-        if not command_id:
-            raise HTTPException(status_code=422, detail="command_id is required")
-        for upload in uploads:
-            filename = Path((upload.filename or "upload.bin").replace("\\", "/")).name
-            if not filename or "\x00" in filename:
-                await upload.close()
-                for attachment_id in uploaded_ids:
-                    await runtime.file_runtime.repository.soft_delete_attachment(
-                        attachment_id, session_id
-                    )
-                if uploaded_ids:
-                    await runtime.file_runtime.cleanup_unreferenced_blobs()
-                raise HTTPException(status_code=400, detail=ErrorDetail.INVALID_FILENAME)
-            try:
-                try:
-                    runtime.file_runtime.adapter_registry.select(
-                        filename, upload.content_type or ""
-                    )
-                except ValueError as exc:
-                    raise HTTPException(status_code=415, detail=str(exc)) from exc
-
-                async def chunks():
-                    while True:
-                        chunk = await upload.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        yield chunk
-
-                try:
-                    stored = await runtime.file_runtime.storage.save_stream(chunks())
-                except ValueError as exc:
-                    raise HTTPException(status_code=413, detail=str(exc)) from exc
-                attachment = await runtime.file_runtime.repository.create_attachment(
-                    session_id=session_id,
-                    message_id=message_id,
-                    filename=filename,
-                    mime_type=upload.content_type or "application/octet-stream",
-                    size_bytes=stored.size_bytes,
-                    sha256=stored.sha256,
-                    storage_key=stored.storage_key,
-                )
-                attachment_ids.append(attachment.id)
-                uploaded_ids.append(attachment.id)
-            except Exception:
-                for attachment_id in uploaded_ids:
-                    await runtime.file_runtime.repository.soft_delete_attachment(
-                        attachment_id, session_id
-                    )
-                if uploaded_ids:
-                    await runtime.file_runtime.cleanup_unreferenced_blobs()
-                raise
-            finally:
-                await upload.close()
+        parsed = await _parse_multipart_run_request(
+            session_id, request, runtime, message_id
+        )
     else:
-        try:
-            req = SendMessageRequest.model_validate(await request.json())
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        message = req.message
-        command_id = req.command_id
-        attachment_ids = []
-        system_prompt = None
+        parsed = await _parse_json_run_request(request)
+
+    message = parsed.message
+    command_id = parsed.command_id
+    attachment_ids = parsed.attachment_ids
+    uploaded_ids = parsed.uploaded_ids
 
     command = Command(
         command_id=command_id,
@@ -261,19 +311,13 @@ async def submit_run(
                 "message": message,
                 "message_id": message_id,
                 "attachment_ids": attachment_ids,
-                "system_prompt": system_prompt,
             }
         ),
     )
     try:
         inserted = await runtime.agent_store.enqueue(command)
     except ValueError as exc:
-        for attachment_id in uploaded_ids:
-            await runtime.file_runtime.repository.soft_delete_attachment(
-                attachment_id, session_id
-            )
-        if uploaded_ids:
-            await runtime.file_runtime.cleanup_unreferenced_blobs()
+        await _cleanup_uploaded_attachments(runtime, session_id, uploaded_ids)
         detail = str(exc)
         try:
             error_detail = ErrorDetail(detail)
@@ -289,9 +333,7 @@ async def submit_run(
             }
             else 400
         )
-        raise HTTPException(
-            status_code=status, detail=error_detail or detail
-        ) from exc
+        raise HTTPException(status_code=status, detail=error_detail or detail) from exc
 
     if not inserted:
         existing = await runtime.agent_store.get_command(command.command_id)

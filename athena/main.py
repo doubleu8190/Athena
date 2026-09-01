@@ -223,10 +223,15 @@ async def lifespan(app: FastAPI):
         agent_store=agent_store,
         realtime_transport=realtime_transport,
     )
+    
+    # 目的是将没来得及取消的run，在重启的时候取消掉
     await RecoveryReconciler(app.state.runtime.agent_store).reconcile()
+    
+    # 初始化sqlite checkpointer，确保langgraph的状态可以在中断后恢复
     checkpoint_conn = await aiosqlite.connect(settings.sqlite_db_path)
     checkpointer = AsyncSqliteSaver(checkpoint_conn)
     await checkpointer.setup()
+    
     graph = build_graph(graph_runtime, checkpointer)
     command_consumer = CommandConsumer(
         app.state.runtime.agent_store,

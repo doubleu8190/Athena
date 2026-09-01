@@ -39,7 +39,6 @@ from athena.core.llm.tokens import token_usage_from_chunks
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole, ToolCallRecord
-from athena.models.json_models import JsonObject
 from athena.models.tool import ToolCallStatus
 from athena.contracts.events import EventType
 from athena.contracts.events import ApplicationEvent, EventDurability
@@ -933,7 +932,7 @@ class Harness:
                 stream_id=str(data["stream_id"]) if data.get("stream_id") else None,
                 stream_type=str(data["stream_type"]) if data.get("stream_type") else None,
                 parent_run_id=self._parent_run_id,
-                payload=JsonObject.model_validate(data),
+                payload=data,
             ))
         except Exception as e:
             logger.warning(
@@ -969,9 +968,7 @@ class Harness:
                     stream_id=stream_id,
                     stream_type="thinking",
                     chunk_id=chunk_id,
-                    payload=JsonObject.model_validate(
-                        {"content": content, "stream_id": stream_id}
-                    ),
+                    payload={"content": content, "stream_id": stream_id},
                 )
             )
             upsert_snapshot = getattr(self._events, "upsert_snapshot", None)

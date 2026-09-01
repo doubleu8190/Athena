@@ -40,7 +40,7 @@ from athena.models.file import (
     AttachmentStatus,
     FileChunk,
 )
-from athena.models.json_models import FileLocator, JsonObject
+from athena.models.json_models import FileLocator
 from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
@@ -1177,7 +1177,7 @@ class FileIntelligenceRuntime:
                 else None
             ),
             run_id=str(data["run_id"]) if data.get("run_id") else None,
-            payload=JsonObject.model_validate(data),
+            payload=data,
         ))
 
     async def emit_attachment(

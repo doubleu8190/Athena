@@ -132,7 +132,7 @@ SSE endpoint  -X-> LangGraph State/Checkpoint internals
 | `session_id` | 会话及 LangGraph `thread_id` | 整个会话 |
 | `run_id` | 一轮 Agent 执行，由 Gateway 生成 | 消息提交至完成、取消或失败 |
 | `command_id` | 客户端意图幂等键 | 一条命令 |
-| `event_id` | Durable Event 在 Session 内的连续游标 | 一条持久事件 |
+| `session_seq` | Durable Event 在 Session 内的连续游标 | 一条持久事件 |
 | `stream_id` | 一段 Assistant 流 | 一条流式消息 |
 | `tool_execution_id` | 工具执行账本 ID | 一次工具尝试 |
 | `approval_id` | 可竞争决策的审批项 | 一次 Interrupt |
@@ -197,14 +197,12 @@ SQLite 不提供真正的行级锁；本文的“Session 行锁”是逻辑语�
 ```json
 {
   "schema_version": 1,
-  "event_id": 123,
+  "session_seq": 123,
   "event_type": "tool.completed",
   "durability": "durable",
   "session_id": "session_...",
   "run_id": "run_...",
   "stream_id": null,
-  "producer_id": "runtime-main",
-  "sequence": 8,
   "occurred_at": "2026-08-28T10:00:01Z",
   "payload": {}
 }
@@ -214,8 +212,7 @@ SQLite 不提供真正的行级锁；本文的“Session 行锁”是逻辑语�
 
 - 前端只依赖 Application Event，不依赖 LangGraph 原始 event。
 - Event name 使用点分层级并保持向后兼容。
-- `event_id` 只分配给 Durable Event，并在每个 `session_id` 内从 1 严格连续递增；不同 Session 可出现相同 `event_id`。
-- `sequence` 在 `(run_id, producer_id)` 内递增，用于并发诊断，不是全局游标。
+- `session_seq` 只分配给 Durable Event，并在每个 `session_id` 内从 1 严格连续递增；不同 Session 可出现相同 `session_seq`。
 - 每种事件是否需要长期保存，由 Runtime 的统一规则决定；Graph Node 只负责报告发生了什么，不能自行把重要事件标记为“只实时发送、不保存”。
 
 事件分层：
@@ -309,9 +306,9 @@ Accept: text/event-stream
 Last-Event-ID: 123
 ```
 
-Durable Event 使用 Session 内的 `event_id` 作为 `id:`；Realtime Event 不设置 Durable ID，避免浏览器把不可重放的 delta 当作可靠游标。`Last-Event-ID` 只在 URL 指定的 Session 内解释。
+Durable Event 使用 Session 内的 `session_seq` 作为 `id:`；Realtime Event 不设置 Durable ID，避免浏览器把不可重放的 delta 当作可靠游标。`Last-Event-ID` 只在 URL 指定的 Session 内解释。
 
-原生 `EventSource` 自动重连会发送 `Last-Event-ID`，但页面刷新后 JavaScript 不能自行设置该 Header。因此端点同时支持 `?after=<event_id>`：服务端优先使用合法的 `Last-Event-ID`，否则使用 `after`。前端在本地持久化每个 Session 最后处理的 Durable `event_id`，刷新后通过 `after` 恢复。该游标只用于定位，不承载认证或权限信息。
+原生 `EventSource` 自动重连会发送 `Last-Event-ID`，但页面刷新后 JavaScript 不能自行设置该 Header。因此端点同时支持 `?after=<session_seq>`：服务端优先使用合法的 `Last-Event-ID`，否则使用 `after`。前端在本地持久化每个 Session 最后处理的 Durable `session_seq`，刷新后通过 `after` 恢复。该游标只用于定位，不承载认证或权限信息。
 
 ### 12.1 Replay 与 Live 无缝切换
 
@@ -322,7 +319,7 @@ Durable Event 使用 Session 内的 `event_id` 作为 `id:`；Realtime Event 不
 3. 从 `Last-Event-ID` 重放到 high-water mark。
 4. 发送当前 active stream snapshots。
 5. 开始消费 Subscription 中的 live notification。
-6. Durable notification 按 Session 内 `event_id` 去重；发现不连续时回 Event Store 补查。
+6. Durable notification 按 Session 内 `session_seq` 去重；发现不连续时回 Event Store 补查。
 7. Realtime delta 按 `stream_id + offset` 合并；不连续时 snapshot resync。
 
 Event Store 是 Durable replay 唯一真相源；进程内通知只用于降低延迟。
@@ -333,7 +330,7 @@ Event Store 是 Durable replay 唯一真相源；进程内通知只用于降低�
 - 客户端断开不影响 Runtime。
 - Run terminal 后不强制关闭，因为同一 Session 后续 Run 复用连接。
 - 同一 Session 支持多个 EventSource，各自维护游标和 UI projection。
-- 前端 Durable Event 按 `event_id` 去重；Message、Tool 和 Approval 分别按稳定 ID upsert；Snapshot 仅接受更高 version。
+- 前端 Durable Event 按 `session_seq` 去重；Message、Tool 和 Approval 分别按稳定 ID upsert；Snapshot 仅接受更高 version。
 
 ## 13. LangGraph Runtime
 
@@ -512,7 +509,7 @@ Run 状态和 LangGraph Checkpoint 是运行位点的权威来源；业务表只
 | Tool 调用中退出，副作用结果未知 | Ledger attempt 为 RUNNING，无可靠完成结果 | 可安全重试的工具创建新 attempt；不可安全重试的工具创建人工核对 Interrupt，不自动重放 |
 | Tool 已将 SUCCEEDED 结果写入 Ledger、Checkpoint 尚未接收结果时退出 | Ledger 有完整成功结果，Graph Checkpoint 仍位于 Tool Node | 按 `tool_call_id` 和 fingerprint 复用结果并推进 Graph；不得再次调用工具 |
 | 最终 Snapshot 已提交、`message.completed` 尚未提交时退出 | Snapshot 为 final，消息/Run 仍非 terminal | 根据 `stream_id` 和 transition key 补写最终消息、terminal Event 与 Run/Command 状态 |
-| 最终消息、Run、Event 和 Command ack 的事务中途失败 | 整个事务不可见，原状态保持 | 从 Checkpoint 或 final Snapshot 重试同一原子转换；Session 内 `event_id` 不被消耗 |
+| 最终消息、Run、Event 和 Command ack 的事务中途失败 | 整个事务不可见，原状态保持 | 从 Checkpoint 或 final Snapshot 重试同一原子转换；Session 内 `session_seq` 不被消耗 |
 | CANCEL_REQUESTED 持久化后、Graph 到达安全点前退出 | Run 为 CANCEL_REQUESTED，Checkpoint 仍在上一个安全点 | 启动时继续执行取消 gate，收敛为 CANCELLED，不自动继续业务节点 |
 | Realtime Queue 阻塞期间客户端断开 | Subscription 被取消；Durable Event/Snapshot 已持久化到各自最近提交点 | 释放阻塞生产者；重连通过 Durable replay 和 Snapshot 收敛，不伪造已丢失的未 flush Delta |
 | Runtime 在 Snapshot flush 前异常退出 | Checkpoint 存在，Snapshot 可能落后于已显示的 Realtime Delta | 丢弃客户端未持久化尾部，按 Snapshot 对齐；恢复时允许重新执行当前 LLM Node并创建新的 stream |
@@ -525,7 +522,7 @@ Run 状态和 LangGraph Checkpoint 是运行位点的权威来源；业务表只
 
 - `agent_runs`：`run_id`、`session_id`、`created_by_command_id`、status、pause/cancel flag、错误和时间。一个 Run 可关联多个 Command，Command 与 Run 的多对一关系由 `agent_commands.run_id` 表达。
 - `agent_commands`：Envelope、payload hash、status、attempt、available time、result/error。
-- `agent_events`：`session_id` 与 Session 内连续 `event_id`（联合主键或唯一约束）、event type、session/run、producer、sequence、payload 和时间。若需要跨 Session 的物理排序，可另设内部 `row_id`，但不得将其作为 SSE 游标。
+- `agent_events`：`session_id` 与 Session 内连续 `session_seq`（联合主键或唯一约束）、event type、session/run、payload 和时间。若需要跨 Session 的物理排序，可另设内部 `row_id`，但不得将其作为 SSE 游标。
 - `stream_snapshots`：`stream_id PRIMARY KEY`、version、content、length、status 和时间。
 - `approvals`：pending decision、version 和条件更新字段。
 - `tool_executions`：工具执行账本。
@@ -535,9 +532,8 @@ Run 状态和 LangGraph Checkpoint 是运行位点的权威来源；业务表只
 ```text
 agent_commands.command_id UNIQUE
 agent_commands(status, available_at)
-agent_events PRIMARY KEY(session_id, event_id)
-agent_events(run_id, event_id)
-agent_events UNIQUE(session_id, run_id, producer_id, sequence)
+agent_events PRIMARY KEY(session_id, session_seq)
+agent_events(run_id, session_seq)
 stream_snapshots update WHERE old_version < new_version
 同一 session 同时只允许一个非终态 Run（SQLite partial unique index，覆盖 `QUEUED`、`RUNNING`、`CANCEL_REQUESTED`、`WAITING_APPROVAL`、`WAITING_FILES`）
 agent_events 永久保存，不设置 TTL、自动清理或按 Session 删除策略

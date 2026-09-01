@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 from pydantic import BaseModel, Field
 
-from athena.models.json_models import JsonSchema, ToolArguments
+from athena.models.json_models import JsonSchema
 
 
 class RiskLevel(StrEnum):
@@ -61,7 +62,7 @@ class ToolCallRecord(BaseModel):
     id: str
     session_id: str
     tool_name: str
-    arguments: ToolArguments = Field(default_factory=ToolArguments)
+    arguments: dict[str, Any] = Field(default_factory=dict)
     raw_output: str | None = None
     status: ToolCallStatus = ToolCallStatus.PENDING
     started_at: datetime

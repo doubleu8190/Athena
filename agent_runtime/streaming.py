@@ -7,7 +7,6 @@ import time
 from collections.abc import Awaitable, Callable
 
 from athena.contracts.events import ApplicationEvent, EventDurability
-from athena.models.json_models import JsonObject
 
 
 class StreamCoalescer:
@@ -118,16 +117,14 @@ class StreamCoalescer:
                 stream_type=self.stream_type,
                 chunk_id=self._version,
                 is_complete=is_complete,
-                payload=JsonObject.model_validate(
-                    {
-                        "stream_id": self.stream_id,
-                        "message_id": self.message_id,
-                        "chunk_id": self._version,
-                        "base_version": self._version - 1,
-                        "start_offset": start,
-                        "end_offset": self._offset,
-                        "delta": delta,
-                    }
-                ),
+                payload={
+                    "stream_id": self.stream_id,
+                    "message_id": self.message_id,
+                    "chunk_id": self._version,
+                    "base_version": self._version - 1,
+                    "start_offset": start,
+                    "end_offset": self._offset,
+                    "delta": delta,
+                },
             )
         )

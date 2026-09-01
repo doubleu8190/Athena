@@ -40,7 +40,7 @@ from athena.models import (
     ToolExecutionMode,
     RiskLevel,
 )
-from athena.models.json_models import ToolArguments, ToolCall, JsonSchema
+from athena.models.json_models import ToolCall, JsonSchema
 from pydantic import BaseModel, ValidationError
 from athena.utils.logging import get_logger
 
@@ -166,7 +166,7 @@ def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
         id=row.id,
         session_id=row.session_id,
         tool_name=row.tool_name,
-        arguments=_json_loads_model(row.arguments_json, ToolArguments, ToolArguments()),
+        arguments=_json_loads(row.arguments_json, {}),
         raw_output=row.raw_output,
         status=ToolCallStatus(row.status),
         started_at=datetime.fromisoformat(row.started_at),
@@ -196,7 +196,7 @@ def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
         session_id=row.session_id,
         tool_call_id=row.tool_call_id,
         tool_name=row.tool_name,
-        arguments=_json_loads_model(row.arguments_json, ToolArguments, ToolArguments()),
+        arguments=_json_loads(row.arguments_json, {}),
         risk_level=row.risk_level,
         decision=ApprovalDecision(row.decision),
         decision_time_ms=row.decision_time_ms,

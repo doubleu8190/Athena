@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 from agent_runtime.command_notifications import CommandNotifier
 from agent_runtime.transport import SessionEventBus
 from athena.contracts.commands import Command, CommandType
@@ -37,7 +38,6 @@ from athena.infrastructure.sqlite.models import (
     ToolExecutionModel,
 )
 from athena.infrastructure.sqlite.repositories import _json_dumps
-from athena.models.json_models import JsonObject, ToolArguments
 from athena.models.tool import RiskLevel
 from athena.utils.ids import generate_time_id
 
@@ -74,10 +74,81 @@ class AgentStore:
         self.transport = transport
         self.command_notifier = command_notifier
         self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._session_seq_cache: dict[str, int] = {}
+        self._stream_chunk_cache: dict[tuple[str, str], int] = {}
 
     transport: SessionEventBus | None
     command_notifier: CommandNotifier | None
     _event_locks: dict[str, asyncio.Lock]
+    _session_seq_cache: dict[str, int]
+    _stream_chunk_cache: dict[tuple[str, str], int]
+
+    async def _cached_session_seq(self, db: AsyncSession, session_id: str) -> int:
+        """读取或初始化会话事件游标缓存。
+
+        参数:
+            db (AsyncSession): 当前已开启事务的数据库会话。
+            session_id (str): 会话 ID。
+        返回值:
+            int: 当前会话已持久化的最大 session_seq；没有事件时返回 0。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        if session_id not in self._session_seq_cache:
+            self._session_seq_cache[session_id] = (
+                await db.scalar(
+                    select(func.max(AgentEventModel.session_seq)).where(
+                        AgentEventModel.session_id == session_id
+                    )
+                )
+                or 0
+            )
+        return self._session_seq_cache[session_id]
+
+    async def _cached_stream_chunk_id(
+        self, db: AsyncSession, session_id: str, stream_id: str
+    ) -> int:
+        """读取或初始化指定流的 Chunk 序号缓存。
+
+        参数:
+            db (AsyncSession): 当前已开启事务的数据库会话。
+            session_id (str): 流所属会话 ID。
+            stream_id (str): 流标识。
+        返回值:
+            int: 当前流已持久化的最大 chunk_id；没有 Chunk 时返回 0。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        cache_key = (session_id, stream_id)
+        if cache_key not in self._stream_chunk_cache:
+            self._stream_chunk_cache[cache_key] = (
+                await db.scalar(
+                    select(func.max(AgentEventModel.chunk_id)).where(
+                        AgentEventModel.session_id == session_id,
+                        AgentEventModel.stream_id == stream_id,
+                    )
+                )
+                or 0
+            )
+        return self._stream_chunk_cache[cache_key]
+
+    def _advance_stream_chunk_cache(
+        self, cache_key: tuple[str, str], chunk_id: int
+    ) -> None:
+        """提交成功后推进流 Chunk 游标缓存，且不允许缓存回退。
+
+        参数:
+            cache_key (tuple[str, str]): 会话 ID 和流 ID 组成的缓存键。
+            chunk_id (int): 已成功持久化的 Chunk 序号。
+        返回值:
+            None: 缓存不存在时不创建缓存，避免为显式 Chunk 额外查询数据库。
+        异常:
+            不抛出业务异常。
+        """
+        current = self._stream_chunk_cache.get(cache_key)
+        if current is not None:
+            # 缓存记录的是已知最大值；乱序 Chunk 或重试不能把它覆盖成较小值。
+            self._stream_chunk_cache[cache_key] = max(current, chunk_id)
 
     async def active_run(self, session_id: str) -> AgentRunModel | None:
         """查询会话最近的活跃运行，包括暂停中的运行。
@@ -310,9 +381,9 @@ class AgentStore:
 
         参数:
             session_id (str): 会话 ID。
-            after (int): 排除该事件 ID 及之前事件，必须为非负整数。
+            after (int): 排除该 session_seq 及之前事件，必须为非负整数。
         返回值:
-            list[AgentEventModel]: 按事件 ID 升序排列的事件。
+            list[AgentEventModel]: 按 session_seq 升序排列的事件。
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
@@ -350,14 +421,7 @@ class AgentStore:
         async with self._event_locks[session_id]:
             queue = await self.transport.open_subscription(session_id)
             async with get_session() as db:
-                watermark = (
-                    await db.scalar(
-                        select(func.max(AgentEventModel.session_seq)).where(
-                            AgentEventModel.session_id == session_id
-                        )
-                    )
-                    or 0
-                )
+                watermark = await self._cached_session_seq(db, session_id)
             return queue, watermark
 
     async def snapshots_for_session(self, session_id: str) -> list[StreamSnapshotModel]:
@@ -530,7 +594,7 @@ class AgentStore:
         参数:
             event (ApplicationEvent): 要发布的事件。
         返回值:
-            ApplicationEvent: 带最终事件 ID 和序号的事件对象。
+            ApplicationEvent: 带最终 session_seq 和 Chunk 序号的事件对象。
         异常:
             事件 payload 无法序列化或数据库、实时传输失败时传播相应异常。
         """
@@ -538,12 +602,31 @@ class AgentStore:
             async with get_session() as db:
                 # 进程内按会话串行，事务锁覆盖多进程/多实例下的 SQLite 竞争。
                 await db.execute(text("BEGIN IMMEDIATE"))
-                payload = JsonObject.model_validate(event.payload)
+                payload = {
+                    key: value
+                    for key, value in event.payload.items()
+                    if value is not None
+                }
                 payload_json = json.dumps(
-                    payload.model_dump(mode="json", exclude_none=True),
+                    payload,
                     ensure_ascii=False,
                     sort_keys=True,
                 )
+
+                current = await self._cached_session_seq(db, event.session_id)
+                stream_cache_key = (
+                    (event.session_id, event.stream_id)
+                    if event.stream_id is not None
+                    else None
+                )
+                if (
+                    stream_cache_key is not None
+                    and event.event_type == "message.delta"
+                    and event.chunk_id is None
+                ):
+                    await self._cached_stream_chunk_id(
+                        db, stream_cache_key[0], stream_cache_key[1]
+                    )
 
                 # stream_id + chunk_id 是流事件的幂等键。重复发布不再次广播，
                 # 内容变化则拒绝，避免客户端出现不可诊断的分叉流。
@@ -568,52 +651,23 @@ class AgentStore:
                             raise ValueError("stream chunk idempotency conflict")
                         return event.model_copy(
                             update={
-                                "event_id": existing.event_id,
                                 "session_seq": existing.session_seq,
                                 "chunk_id": existing.chunk_id,
-                                "sequence": existing.sequence,
                             }
                         )
 
-                current = (
-                    await db.scalar(
-                        select(func.max(AgentEventModel.session_seq)).where(
-                            AgentEventModel.session_id == event.session_id
-                        )
-                    )
-                    or 0
-                )
                 chunk_id = event.chunk_id
                 if (
                     event.stream_id
                     and event.event_type == "message.delta"
                     and chunk_id is None
                 ):
-                    chunk_id = (
-                        await db.scalar(
-                            select(func.max(AgentEventModel.chunk_id)).where(
-                                AgentEventModel.session_id == event.session_id,
-                                AgentEventModel.stream_id == event.stream_id,
-                            )
-                        )
-                        or 0
-                    ) + 1
-                sequence = event.sequence
-                if sequence == 0:
-                    sequence = (
-                        await db.scalar(
-                            select(func.max(AgentEventModel.sequence)).where(
-                                AgentEventModel.session_id == event.session_id,
-                                AgentEventModel.run_id == event.run_id,
-                                AgentEventModel.producer_id == event.producer_id,
-                            )
-                        )
-                        or 0
-                    ) + 1
+                    chunk_id = self._stream_chunk_cache[
+                        (event.session_id, event.stream_id)
+                    ] + 1
                 session_seq = current + 1
                 row = AgentEventModel(
                     session_id=event.session_id,
-                    event_id=session_seq,
                     session_seq=session_seq,
                     run_id=event.run_id,
                     message_id=event.message_id,
@@ -625,19 +679,18 @@ class AgentStore:
                     chunk_id=chunk_id,
                     is_complete=int(event.is_complete),
                     parent_run_id=event.parent_run_id,
-                    producer_id=event.producer_id,
-                    sequence=sequence,
                     payload_json=payload_json,
                     occurred_at=event.occurred_at.isoformat(),
                 )
                 db.add(row)
                 await db.commit()
+                self._session_seq_cache[event.session_id] = session_seq
+                if stream_cache_key is not None and chunk_id is not None:
+                    self._advance_stream_chunk_cache(stream_cache_key, chunk_id)
                 persisted = event.model_copy(
                     update={
-                        "event_id": session_seq,
                         "session_seq": session_seq,
                         "chunk_id": chunk_id,
-                        "sequence": sequence,
                     }
                 )
                 if self.transport is not None:
@@ -683,14 +736,8 @@ class AgentStore:
                 )
                 db.add(row)
             if last_chunk_id == 0:
-                last_chunk_id = (
-                    await db.scalar(
-                        select(func.max(AgentEventModel.chunk_id)).where(
-                            AgentEventModel.session_id == session_id,
-                            AgentEventModel.stream_id == stream_id,
-                        )
-                    )
-                    or 0
+                last_chunk_id = await self._cached_stream_chunk_id(
+                    db, session_id, stream_id
                 )
             (
                 row.run_id,
@@ -722,7 +769,7 @@ class AgentStore:
         run_id: str,
         tool_call_id: str,
         tool_name: str,
-        arguments: ToolArguments | dict[str, Any],
+        arguments: dict[str, Any],
         risk_level: RiskLevel,
     ) -> None:
         """创建待审批记录并持久化工具参数。
@@ -740,7 +787,6 @@ class AgentStore:
         异常:
             参数无法序列化或数据库约束不满足时传播相应异常。
         """
-        arguments_model = ToolArguments.model_validate(arguments)
         async with get_session() as db:
             db.add(
                 ApprovalRecordModel(
@@ -749,7 +795,7 @@ class AgentStore:
                     run_id=run_id,
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
-                    arguments_json=_json_dumps(arguments_model),
+                    arguments_json=_json_dumps(arguments),
                     risk_level=risk_level.value,
                     created_at=_now(),
                 )
@@ -825,7 +871,7 @@ class AgentStore:
         run_id: str,
         tool_call_id: str,
         tool_name: str,
-        arguments: ToolArguments | dict[str, Any],
+        arguments: dict[str, Any],
         side_effect_class: ToolSideEffectClass = ToolSideEffectClass.UNKNOWN,
         retry_of_execution_id: str | None = None,
     ) -> str:
@@ -845,9 +891,8 @@ class AgentStore:
             参数无法 JSON 序列化或数据库写入失败时传播相应异常。
         """
         execution_id = generate_time_id()
-        arguments_model = ToolArguments.model_validate(arguments)
         normalized = json.dumps(
-            arguments_model.model_dump(mode="json", exclude_none=True),
+            arguments,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
@@ -861,7 +906,7 @@ class AgentStore:
             "cookie",
             "authorization",
         }
-        argument_values = arguments_model.model_dump(mode="python")
+        argument_values = arguments
         audit = {
             key: ("[REDACTED]" if key.lower() in sensitive else value)
             for key, value in argument_values.items()

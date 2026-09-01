@@ -14,7 +14,7 @@ from athena.contracts.statuses import (
     AgentRunStatus,
     StreamSnapshotStatus,
 )
-from athena.models.json_models import CommandPayload, JsonObject
+from athena.models.json_models import CommandPayload
 from athena.core.memory.memory import MemoryManager
 from .command_notifications import CommandNotifier
 from .langgraph_graph import invoke_graph
@@ -281,7 +281,6 @@ class CommandConsumer:
             user_message=payload.message or "",
             message_id=payload.message_id or "",
             attachment_ids=payload.attachment_ids,
-            system_prompt=payload.system_prompt,
             stop_signal=cancel_event,
         )
         if cancel_event.is_set():
@@ -325,20 +324,18 @@ class CommandConsumer:
                 message_id=self._command_message_id(command),
                 stream_id=stream_id,
                 stream_type="answer",
-                payload=JsonObject.model_validate(
-                    {
-                        "session_id": command.session_id,
-                        "run_id": run_id,
-                        "message_id": self._command_message_id(command),
-                        "stream_id": stream_id,
-                        "stream_type": "answer",
-                        "version": 1,
-                        "last_chunk_id": 0,
-                        "content": content,
-                        "content_length": len(content.encode("utf-8")),
-                        "status": StreamSnapshotStatus.COMPLETED.value,
-                    }
-                ),
+                payload={
+                    "session_id": command.session_id,
+                    "run_id": run_id,
+                    "message_id": self._command_message_id(command),
+                    "stream_id": stream_id,
+                    "stream_type": "answer",
+                    "version": 1,
+                    "last_chunk_id": 0,
+                    "content": content,
+                    "content_length": len(content.encode("utf-8")),
+                    "status": StreamSnapshotStatus.COMPLETED.value,
+                },
             )
         )
         await self._publish_run_event(command, "run.completed")
@@ -369,12 +366,10 @@ class CommandConsumer:
                 session_id=command.session_id,
                 run_id=command.run_id,
                 message_id=self._command_message_id(command),
-                payload=JsonObject.model_validate(
-                    {
-                        "command_id": command.command_id,
-                        "message_id": self._command_message_id(command),
-                    }
-                ),
+                payload={
+                    "command_id": command.command_id,
+                    "message_id": self._command_message_id(command),
+                },
             )
         )
 
@@ -404,13 +399,11 @@ class CommandConsumer:
                     session_id=command.session_id,
                     run_id=run_id,
                     message_id=self._command_message_id(command),
-                    payload=JsonObject.model_validate(
-                        {
-                            "command_id": command.command_id,
-                            "message_id": self._command_message_id(command),
-                            "error": str(exc),
-                        }
-                    ),
+                    payload={
+                        "command_id": command.command_id,
+                        "message_id": self._command_message_id(command),
+                        "error": str(exc),
+                    },
                 )
             )
         await self.store.complete(

@@ -29,7 +29,7 @@ async def prepare_context(
 
     异常：
         KeyError: 状态缺少历史消息或请求字段时抛出。
-        运行时异常: Harness 输入准备或系统提示词构建失败时传播底层异常。
+        运行时异常: Harness 输入准备失败时传播底层异常。
     """
     history = [Message.model_validate(item) for item in state.get("history", [])]
     message_content = state.get("user_message")
@@ -55,9 +55,6 @@ async def prepare_context(
         "harness_messages": [
             item.model_dump(mode="json") for item in harness_messages
         ],
-        "system_prompt": runtime.build_system_prompt(
-            state.get("system_prompt"), state.get("memory_context", "")
-        ),
     }
 
 

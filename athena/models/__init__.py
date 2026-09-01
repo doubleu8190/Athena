@@ -17,9 +17,7 @@ from athena.models.json_models import (
     FileArtifact,
     FileLocator,
     FileMetadata,
-    JsonObject,
     JsonSchema,
-    ToolArguments,
     ToolCall,
 )
 from athena.models.file import (
@@ -57,7 +55,6 @@ __all__ = [
     "ToolCallRecord",
     "ToolCallStatus",
     "ToolCall",
-    "ToolArguments",
     "JsonSchema",
     # 审批
     "ApprovalDecision",
@@ -75,6 +72,5 @@ __all__ = [
     "FileLocator",
     "FileMetadata",
     "CommandPayload",
-    "JsonObject",
     "ExtensibleJsonModel",
 ]

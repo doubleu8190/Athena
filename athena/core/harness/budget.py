@@ -45,34 +45,34 @@ class Budget:
         self.retry_count = 0
 
     def is_exceeded(self) -> bool:
-        """执行“是否已超出”操作。
+        """
 
         返回值：
-            bool: 操作结果；具体语义由调用场景决定。
+            bool: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return self.turn_count > self.max_turns or self.retry_count > self.retry_budget
 
     def remaining_turns(self) -> int:
-        """执行“remaining turns”操作。
+        """
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return max(0, self.max_turns - self.turn_count)
 
     def remaining_retries(self) -> int:
-        """执行“remaining retries”操作。
+        """
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return max(0, self.retry_budget - self.retry_count)

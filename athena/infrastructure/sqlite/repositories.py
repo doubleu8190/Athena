@@ -20,7 +20,6 @@ from athena.infrastructure.sqlite.models import (
     McpServerModel,
     MessageModel,
     SessionModel,
-    StepModel,
     ToolCallModel,
     ToolModel,
 )
@@ -33,9 +32,6 @@ from athena.models import (
     MessageRole,
     Session,
     SessionStatus,
-    Step,
-    StepStatus,
-    StepType,
     ToolCallRecord,
     ToolCallStatus,
     ToolConfig,
@@ -79,13 +75,13 @@ def _row_to_session(row: SessionModel) -> Session:
     """执行“行转换为会话”操作。
 
     参数：
-        row (SessionModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+        row (SessionModel): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        Session: 操作结果；具体语义由调用场景决定。
+        Session: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     return Session(
         id=row.id,
@@ -101,16 +97,16 @@ def _row_to_session(row: SessionModel) -> Session:
 
 
 def _row_to_message(row: MessageModel) -> Message:
-    """执行“行转换为消息”操作。
+    """
 
     参数：
-        row (MessageModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+        row (MessageModel): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        Message: 操作结果；具体语义由调用场景决定。
+        Message: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     return Message(
         id=row.id,
@@ -120,7 +116,6 @@ def _row_to_message(row: MessageModel) -> Message:
         tool_calls=_json_loads(row.tool_calls_json, []),
         tool_call_id=row.tool_call_id,
         run_id=row.run_id,
-        step_id=row.step_id,
         tool_call_record_id=row.tool_call_record_id,
         tool_name=row.tool_name,
         type=row.type,
@@ -128,54 +123,21 @@ def _row_to_message(row: MessageModel) -> Message:
     )
 
 
-def _row_to_step(row: StepModel) -> Step:
-    """执行“行转换为步骤”操作。
-
-    参数：
-        row (StepModel): 输入参数；其类型和取值约束由方法签名及实现定义。
-
-    返回值：
-        Step: 操作结果；具体语义由调用场景决定。
-
-    异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
-    """
-    return Step(
-        id=row.id,
-        session_id=row.session_id,
-        run_id=row.run_id,
-        step_number=row.step_number,
-        step_type=StepType(row.step_type),
-        parent_step_id=row.parent_step_id,
-        parent_run_id=row.parent_run_id,
-        status=StepStatus(row.status),
-        started_at=datetime.fromisoformat(row.started_at),
-        completed_at=(
-            datetime.fromisoformat(row.completed_at) if row.completed_at else None
-        ),
-        duration_ms=row.duration_ms,
-        llm_input_tokens=row.llm_input_tokens,
-        llm_output_tokens=row.llm_output_tokens,
-        error_message=row.error_message,
-    )
-
-
 def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
-    """执行“行转换为工具调用”操作。
+    """
 
     参数：
-        row (ToolCallModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+        row (ToolCallModel): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        ToolCallRecord: 操作结果；具体语义由调用场景决定。
+        ToolCallRecord: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     return ToolCallRecord(
         id=row.id,
         session_id=row.session_id,
-        step_id=row.step_id,
         tool_name=row.tool_name,
         arguments=_json_loads(row.arguments_json, {}),
         raw_output=row.raw_output,
@@ -191,16 +153,16 @@ def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
 
 
 def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
-    """执行“行转换为审批日志”操作。
+    """
 
     参数：
-        row (审批LogModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+        row (审批LogModel): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        审批Log: 操作结果；具体语义由调用场景决定。
+        审批Log: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     return ApprovalLog(
         id=row.id,
@@ -216,16 +178,16 @@ def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
 
 
 def _row_to_mcp_server(row: McpServerModel) -> McpServer:
-    """执行“行转换为 MCP 服务端”操作。
+    """
 
     参数：
-        row (Mcp服务端Model): 输入参数；其类型和取值约束由方法签名及实现定义。
+        row (Mcp服务端Model): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        Mcp服务端: 操作结果；具体语义由调用场景决定。
+        Mcp服务端: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     config = _json_loads(row.config_json, {})
     return McpServer(
@@ -369,14 +331,6 @@ class SessionRepository:
                     .values(deleted_time=now)
                 )
                 await session.execute(
-                    update(StepModel)
-                    .where(
-                        StepModel.session_id == session_id,
-                        StepModel.deleted_time.is_(None),
-                    )
-                    .values(deleted_time=now)
-                )
-                await session.execute(
                     update(ToolCallModel)
                     .where(
                         ToolCallModel.session_id == session_id,
@@ -414,7 +368,6 @@ class MessageRepository:
                     tool_calls_json=_json_dumps(message.tool_calls),
                     tool_call_id=message.tool_call_id,
                     run_id=message.run_id,
-                    step_id=message.step_id,
                     tool_call_record_id=message.tool_call_record_id,
                     tool_name=message.tool_name,
                     type=message.type,
@@ -486,145 +439,6 @@ class MessageRepository:
 
 
 # ---------------------------------------------------------------------------
-# 步骤仓库（StepRepository）
-# ---------------------------------------------------------------------------
-
-
-class StepRepository:
-    """执行步骤表 CRUD 操作."""
-
-    async def save(self, step: Step) -> None:
-        """保存执行步骤."""
-        async with get_session() as session:
-            async with session.begin():
-                model = StepModel(
-                    id=step.id,
-                    session_id=step.session_id,
-                    run_id=step.run_id,
-                    step_number=step.step_number,
-                    step_type=step.step_type.value,
-                    parent_step_id=step.parent_step_id,
-                    parent_run_id=step.parent_run_id,
-                    status=step.status.value,
-                    started_at=step.started_at.isoformat(),
-                    completed_at=(
-                        step.completed_at.isoformat() if step.completed_at else None
-                    ),
-                    duration_ms=step.duration_ms,
-                    llm_input_tokens=step.llm_input_tokens,
-                    llm_output_tokens=step.llm_output_tokens,
-                    error_message=step.error_message,
-                )
-                session.add(model)
-
-    async def update(self, step_id: str, updates: dict[str, Any]) -> None:
-        """更新执行步骤."""
-        if not updates:
-            return
-        allowed = {
-            "status",
-            "completed_at",
-            "duration_ms",
-            "llm_input_tokens",
-            "llm_output_tokens",
-            "error_message",
-        }
-        values: dict[str, Any] = {}
-        for key, value in updates.items():
-            if key not in allowed:
-                continue
-            values[key] = value
-        if not values:
-            return
-
-        async with get_session() as session:
-            async with session.begin():
-                await session.execute(
-                    update(StepModel)
-                    .where(StepModel.id == step_id, StepModel.deleted_time.is_(None))
-                    .values(**values)
-                )
-
-    async def update_running_by_session(
-        self, session_id: str, updates: dict[str, Any]
-    ) -> None:
-        """批量更新指定会话所有 running 步骤（进程中断恢复清理）."""
-        if not updates:
-            return
-        allowed = {
-            "status",
-            "completed_at",
-            "duration_ms",
-            "llm_input_tokens",
-            "llm_output_tokens",
-            "error_message",
-        }
-        values: dict[str, Any] = {}
-        for key, value in updates.items():
-            if key not in allowed:
-                continue
-            values[key] = value
-        if not values:
-            return
-
-        async with get_session() as session:
-            async with session.begin():
-                await session.execute(
-                    update(StepModel)
-                    .where(
-                        StepModel.session_id == session_id,
-                        StepModel.status == "running",
-                        StepModel.deleted_time.is_(None),
-                    )
-                    .values(**values)
-                )
-
-    async def get_by_session(
-        self, session_id: str, include_deleted: bool = False
-    ) -> list[Step]:
-        """获取会话的执行步骤."""
-        async with get_session() as session:
-            stmt = (
-                select(StepModel)
-                .where(StepModel.session_id == session_id)
-                .order_by(StepModel.step_number.asc())
-            )
-            if not include_deleted:
-                stmt = stmt.where(StepModel.deleted_time.is_(None))
-            result = await session.execute(stmt)
-            rows = result.scalars().all()
-            return [_row_to_step(row) for row in rows]
-
-    async def get_by_run(
-        self, run_id: str, include_deleted: bool = False
-    ) -> list[Step]:
-        """按 run_id 获取执行步骤."""
-        async with get_session() as session:
-            stmt = (
-                select(StepModel)
-                .where(StepModel.run_id == run_id)
-                .order_by(StepModel.step_number.asc())
-            )
-            if not include_deleted:
-                stmt = stmt.where(StepModel.deleted_time.is_(None))
-            result = await session.execute(stmt)
-            rows = result.scalars().all()
-            return [_row_to_step(row) for row in rows]
-
-    async def get_last_step_number(self, run_id: str) -> int:
-        """获取指定 run_id 的最大步骤号."""
-        from sqlalchemy import func
-
-        async with get_session() as session:
-            stmt = select(func.max(StepModel.step_number)).where(
-                StepModel.run_id == run_id, StepModel.deleted_time.is_(None)
-            )
-            result = await session.execute(stmt)
-            max_num = result.scalar()
-            return max_num if max_num is not None else 0
-
-
-# ---------------------------------------------------------------------------
 # 工具调用仓库（ToolCallRepository）
 # ---------------------------------------------------------------------------
 
@@ -639,7 +453,6 @@ class ToolCallRepository:
                 model = ToolCallModel(
                     id=tool_call.id,
                     session_id=tool_call.session_id,
-                    step_id=tool_call.step_id,
                     tool_name=tool_call.tool_name,
                     arguments_json=_json_dumps(tool_call.arguments),
                     raw_output=tool_call.raw_output,
@@ -936,16 +749,16 @@ class McpServerRepository:
 
 
 def _row_to_tool_config(row: ToolModel) -> ToolConfig:
-    """执行“行转换为工具配置”操作。
+    """
 
     参数：
-        row (ToolModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+        row (ToolModel): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        ToolConfig: 操作结果；具体语义由调用场景决定。
+        ToolConfig: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     return ToolConfig(
         tool_name=row.tool_name,

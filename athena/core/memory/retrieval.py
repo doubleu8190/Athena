@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Awaitable, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable
 
 from langchain_core.messages import HumanMessage
 
@@ -61,6 +61,25 @@ class SearchResult:
         score: float | None = None,
         chunk_id: str | None = None,
     ) -> None:
+        """构造检索结果并兼容旧版 ``score``、``chunk_id`` 字段。
+
+        参数:
+            content (str): 检索到的正文。
+            item_id (str | None): 结果唯一 ID；为空时回退到 ``chunk_id``。
+            source (str): 结果来源或融合来源标识。
+            metadata (dict[str, Any] | None): 结果元数据。
+            native_score (float | None): 向量或关键词通道原始分数。
+            fused_score (float | None): 融合阶段分数。
+            rerank_score (float | None): 重排阶段分数。
+            exact_match (bool): 是否命中完整查询词。
+            rank_sources (dict[str, int] | None): 各检索通道中的排名。
+            score (float | None): 旧字段兼容值，仅在 ``native_score`` 为空时使用。
+            chunk_id (str | None): 旧字段兼容别名，仅在 ``item_id`` 为空时使用。
+        返回值:
+            None: 字段已规范化并写入对象。
+        异常:
+            不抛出业务异常。
+        """
         self.content = content
         self.item_id = item_id or chunk_id or ""
         self.source = source
@@ -89,19 +108,6 @@ class SearchResult:
         return self.item_id
 
 
-class ShadowSubmitter(Protocol):
-    """应用层 Shadow runner 的最小依赖，避免 core 依赖评估实现。"""
-
-    async def submit(
-        self,
-        *,
-        query: str,
-        scope: dict[str, Any],
-        baseline_ids: list[str],
-        labels: list[str] | None = None,
-    ) -> bool: ...
-
-
 class HybridRetrievalManager:
     """混合检索管理器.
 
@@ -115,19 +121,19 @@ class HybridRetrievalManager:
         settings: Settings,
         trace_sink: Callable[[RetrievalTrace], None] | None = None,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            llm_provider (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
-            memory_manager (MemoryManager): 输入参数；其类型和取值约束由方法签名及实现定义。
+            llm_provider (LLMProvider): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            memory_manager (MemoryManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
-            trace_sink (Callable[[RetrievalTrace], None] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace_sink (Callable[[RetrievalTrace], None] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._llm = llm_provider
         self._memory = memory_manager
@@ -142,9 +148,7 @@ class HybridRetrievalManager:
         self._vector_min_score = getattr(
             self._settings, "memory_vector_min_score", self._min_score
         )
-        self._pipeline_mode = getattr(
-            self._settings, "retrieval_pipeline_mode", "legacy"
-        )
+        self._pipeline_mode = "corrected"
         self._vector_weight = self._settings.vector_weight
         self._keyword_weight = self._settings.keyword_weight
         self._rrf_k = self._settings.rrf_k
@@ -187,26 +191,12 @@ class HybridRetrievalManager:
             expanded_query = await self._expand_query(query, trace)
             keyword_results = await keyword_task
 
-            if self._pipeline_mode == "legacy":
-                # Legacy 保留改写 query 替代原始向量 query 的行为，便于回滚。
-                vector_results = await self._vector_search(
-                    expanded_query or query,
-                    filter_params,
-                    trace,
-                    route="vector",
-                )
-            else:
-                vector_results = await raw_vector_task if raw_vector_task else []
-                if expanded_query and expanded_query.strip() != query.strip():
-                    vector_results.extend(
-                        await self._vector_search(
-                            expanded_query,
-                            filter_params,
-                            trace,
-                            route="vector_rewrite",
-                            query_index=1,
-                        )
-                    )
+            vector_results = await raw_vector_task if raw_vector_task else []
+            if expanded_query and expanded_query.strip() != query.strip():
+                vector_results.extend(await self._vector_search(
+                    expanded_query, filter_params, trace,
+                    route="vector_rewrite", query_index=1,
+                ))
 
             # RRF 只排序已经通过通道准入的候选，不承担相关性阈值判断。
             fusion_started = perf_counter()
@@ -229,28 +219,11 @@ class HybridRetrievalManager:
             # 生命周期信号只作为同一相关度层内的 tie-break。
             selection_started = perf_counter()
             for r in fused:
-                lifecycle = self._lifecycle_score(r.metadata)
-                r.rerank_score = (
-                    (r.fused_score or 0.0) * lifecycle
-                    if self._pipeline_mode == "legacy"
-                    else r.fused_score
-                )
-
-            if self._pipeline_mode == "legacy":
-                threshold = self._min_score / (self._rrf_k + 1)
-                eligible = [r for r in fused if (r.fused_score or 0.0) >= threshold]
-                eligible.sort(key=lambda x: (-float(x.fused_score or 0.0), x.item_id))
-                selected = eligible[: self._top_k]
-            else:
-                fused.sort(
-                    key=lambda x: (
-                        0 if x.exact_match else 1,
-                        -float(x.fused_score or 0.0),
-                        -self._lifecycle_score(x.metadata),
-                        x.item_id,
-                    )
-                )
-                selected = fused[: self._rerank_k][: self._context_k]
+                r.rerank_score = r.fused_score
+            fused.sort(key=lambda x: (0 if x.exact_match else 1,
+                                       -float(x.fused_score or 0.0),
+                                       -self._lifecycle_score(x.metadata), x.item_id))
+            selected = fused[: self._rerank_k][: self._context_k]
             if trace is not None:
                 trace.add_stage(
                     stage="selection",
@@ -336,15 +309,7 @@ class HybridRetrievalManager:
                 "where": filter_params,
             }
             kwargs["record_access"] = False
-            try:
-                results = await self._memory.search(**kwargs)
-            except TypeError as exc:
-                # Small adapters used by older callers may not expose the
-                # compatibility flag; they are read-only by contract here.
-                if "record_access" not in str(exc):
-                    raise
-                kwargs.pop("record_access")
-                results = await self._memory.search(**kwargs)
+            results = await self._memory.search(**kwargs)
         except Exception as e:
             logger.warning("vector_search_failed", error=str(e))
             if trace is not None:
@@ -430,13 +395,7 @@ class HybridRetrievalManager:
                 "where": filter_params,
             }
             kwargs["record_access"] = False
-            try:
-                results = await self._memory.keyword_search(**kwargs)
-            except TypeError as exc:
-                if "record_access" not in str(exc):
-                    raise
-                kwargs.pop("record_access")
-                results = await self._memory.keyword_search(**kwargs)
+            results = await self._memory.keyword_search(**kwargs)
         except Exception as e:
             logger.warning("keyword_search_failed", error=str(e))
             if trace is not None:
@@ -490,15 +449,15 @@ class HybridRetrievalManager:
         self,
         query: str,
     ) -> RetrievalTrace | None:
-        """执行“new trace”操作。
+        """
 
         参数：
             query (str): 检索或搜索文本；应为非空字符串。
         返回值：
-            RetrievalTrace | None: 操作结果；具体语义由调用场景决定。
+            RetrievalTrace | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if not self._trace_enabled:
             return None
@@ -512,16 +471,16 @@ class HybridRetrievalManager:
         )
 
     def _emit_trace(self, trace: RetrievalTrace) -> None:
-        """执行“emit trace”操作。
+        """
 
         参数：
-            trace (RetrievalTrace): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace (RetrievalTrace): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         try:
             if self._trace_sink is not None:
@@ -576,14 +535,31 @@ class HybridRetrievalManager:
         return fused
 
     def _lifecycle_score(self, metadata: dict[str, Any]) -> float:
-        """Return a secondary lifecycle signal without changing relevance."""
+        """计算不改变相关度语义的次级生命周期信号。
+
+        参数:
+            metadata (dict[str, Any]): 记忆的生命周期元数据。
+        返回值:
+            float: 时间衰减与记忆度的乘积，用作同分结果的排序依据。
+        异常:
+            元数据格式异常时由内部计算逻辑传播相应异常。
+        """
         return self._calculate_temporal_decay(metadata) * self._calculate_memorability(
             metadata
         )
 
     @staticmethod
     def _is_exact_match(query: str, content: str) -> bool:
-        """Identify complete terms without treating arbitrary substrings as exact."""
+        """判断是否命中完整词项，避免把任意子串误判为精确命中。
+
+        参数:
+            query (str): 用户查询文本。
+            content (str): 候选内容文本。
+        返回值:
+            bool: 查询是完整内容或以词边界出现时返回 ``True``。
+        异常:
+            不抛出业务异常。
+        """
         needle = query.strip().casefold()
         haystack = content.casefold()
         if not needle:
@@ -655,25 +631,23 @@ class MemoryRetrievalService:
         retrieval_manager: HybridRetrievalManager,
         token_counter: TokenCounter,
         settings: Settings,
-        shadow_runner: ShadowSubmitter | None = None,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            retrieval_manager (HybridRetrievalManager): 输入参数；其类型和取值约束由方法签名及实现定义。
-            token_counter (TokenCounter): 输入参数；其类型和取值约束由方法签名及实现定义。
+            retrieval_manager (HybridRetrievalManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            token_counter (TokenCounter): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._manager = retrieval_manager
         self._token_counter = token_counter
         self._max_tokens = settings.memory_max_tokens
-        self._shadow_runner = shadow_runner
 
     async def get_relevant_memories(
         self,
@@ -684,16 +658,6 @@ class MemoryRetrievalService:
             results = await self._manager.retrieve(
                 query=user_message,
             )
-            if self._shadow_runner is not None:
-                try:
-                    await self._shadow_runner.submit(
-                        query=user_message,
-                        scope={"source": "memory"},
-                        baseline_ids=[result.chunk_id for result in results],
-                        labels=["memory"],
-                    )
-                except Exception:
-                    logger.warning("memory_shadow_submit_failed")
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))
             return ""

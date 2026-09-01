@@ -17,18 +17,18 @@ class ShellCommandError(RuntimeError):
     """
 
     def __init__(self, exit_code: int, command: str, output: str) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            exit_code (int): 输入参数；其类型和取值约束由方法签名及实现定义。
-            command (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            output (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            exit_code (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            command (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            output (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.exit_code = exit_code
         self.command = command

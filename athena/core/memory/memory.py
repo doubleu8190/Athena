@@ -36,18 +36,18 @@ class MemoryManager:
         repository: MemoryRepository,
         vector_store: MemoryVectorStore,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
             settings (Settings): 全局配置对象。
-            repository (MemoryRepository): 输入参数；其类型和取值约束由方法签名及实现定义。
-            vector_store (MemoryVectorStore): 输入参数；其类型和取值约束由方法签名及实现定义。
+            repository (MemoryRepository): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            vector_store (MemoryVectorStore): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._settings = settings
         self._repository = repository
@@ -59,10 +59,10 @@ class MemoryManager:
         """初始化资源。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if self._initialized:
             return
@@ -71,16 +71,16 @@ class MemoryManager:
         logger.info("memory_manager_initialized", path=str(self._settings.chroma_path))
 
     def _record_access(self, memory_id: str) -> None:
-        """执行“record access”操作。
+        """
 
         参数：
             memory_id (str): 记忆记录唯一标识。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         now = datetime.now().isoformat()
         stat = self._access_stats.get(memory_id)
@@ -97,16 +97,16 @@ class MemoryManager:
                 self._record_access(memory_id)
 
     def pending_access_stats(self, ids: Iterable[str]) -> dict[str, tuple[int, str]]:
-        """执行“pending access stats”操作。
+        """
 
         参数：
-            ids (Iterable[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            ids (Iterable[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            dict[str, tuple[int, str]]: 操作结果；具体语义由调用场景决定。
+            dict[str, tuple[int, str]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return {
             memory_id: (
@@ -118,13 +118,13 @@ class MemoryManager:
         }
 
     async def flush_access_stats(self) -> int:
-        """执行“flush access stats”操作。
+        """
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         stats = dict(self._access_stats)
         self._access_stats.clear()
@@ -157,13 +157,13 @@ class MemoryManager:
         return len(stats)
 
     async def run_periodic_flush(self) -> None:
-        """执行“run periodic flush”操作。
+        """
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         while True:
             await asyncio.sleep(self._settings.memory_sync_interval)
@@ -182,18 +182,18 @@ class MemoryManager:
         metadata: dict[str, Any] | None = None,
         pinned: bool = False,
     ) -> str:
-        """执行“添加记忆”操作。
+        """
 
         参数：
             content (str): 待保存或处理的内容。
             metadata (dict[str, Any] | None): 附加元数据字典。
-            pinned (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            pinned (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            str: 操作结果；具体语义由调用场景决定。
+            str: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.initialize()
         metadata = metadata or {}
@@ -254,15 +254,15 @@ class MemoryManager:
 
         参数：
             query (str): 检索或搜索文本；应为非空字符串。
-            n_results (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+            n_results (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             where (dict[str, Any] | None): 可选过滤条件。
-            record_access (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            record_access (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.initialize()
         try:
@@ -289,9 +289,6 @@ class MemoryManager:
                     "source": "vector",
                 }
             )
-            # Kept for direct callers during the compatibility cycle. Retrieval
-            # routes explicitly pass record_access=False and confirm access only
-            # after context selection.
             if record_access:
                 self._record_access(memory_id)
         return output
@@ -303,19 +300,19 @@ class MemoryManager:
         where: dict[str, Any] | None = None,
         record_access: bool = True,
     ) -> list[dict[str, Any]]:
-        """执行“keyword search”操作。
+        """
 
         参数：
             query (str): 检索或搜索文本；应为非空字符串。
-            n_results (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+            n_results (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             where (dict[str, Any] | None): 可选过滤条件。
-            record_access (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            record_access (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         try:
             results = await self._repository.keyword_search(query, n_results, where)
@@ -334,10 +331,10 @@ class MemoryManager:
             memory_id (str): 记忆记录唯一标识。
 
         返回值：
-            dict[str, Any] | None: 操作结果；具体语义由调用场景决定。
+            dict[str, Any] | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.initialize()
         try:
@@ -362,20 +359,20 @@ class MemoryManager:
         expired_only: bool = False,
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """执行“list memories”操作。
+        """
 
         参数：
             limit (int): 最大返回数量；应为非负整数。
             offset (int): 分页偏移量；应为非负整数。
-            pinned_only (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
-            expired_only (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            pinned_only (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            expired_only (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             session_id (str | None): 会话唯一标识。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return await self._repository.list(
             limit=limit,
@@ -386,28 +383,28 @@ class MemoryManager:
         )
 
     async def count_memories(self) -> dict[str, int]:
-        """执行“count memories”操作。
+        """
 
         返回值：
-            dict[str, int]: 操作结果；具体语义由调用场景决定。
+            dict[str, int]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return await self._repository.counts()
 
     async def update_memory(self, memory_id: str, content: str) -> bool:
-        """执行“更新记忆”操作。
+        """
 
         参数：
             memory_id (str): 记忆记录唯一标识。
             content (str): 待保存或处理的内容。
 
         返回值：
-            bool: 操作结果；具体语义由调用场景决定。
+            bool: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.initialize()
         previous = await self._repository.update_content(memory_id, content)
@@ -428,10 +425,10 @@ class MemoryManager:
             memory_id (str): 记忆记录唯一标识。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.initialize()
         await self._repository.soft_delete([memory_id])
@@ -447,13 +444,13 @@ class MemoryManager:
 
         参数：
             memory_id (str): 记忆记录唯一标识。
-            pinned (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            pinned (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.initialize()
         expires_at = (
@@ -480,13 +477,13 @@ class MemoryManager:
             raise
 
     async def cleanup_expired(self) -> int:
-        """执行“cleanup expired”操作。
+        """
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.initialize()
         ids = await self._repository.expired_ids(datetime.now().isoformat())

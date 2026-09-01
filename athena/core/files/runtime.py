@@ -30,12 +30,11 @@ from langchain_core.messages import HumanMessage
 from athena.config.settings import Settings
 from athena.core.files.base import ExtractedUnit, ExtractionContext
 from athena.core.files.registry import AdapterRegistry
-from athena.gateway.ws.manager import WebSocketManager
 from athena.infrastructure.sqlite.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
 from athena.core.llm.provider import LLMProvider
 from athena.core.retrieval.trace import RetrievalTrace
-from athena.gateway.ws.events import EventType, build_event
+from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.models.file import (
     Attachment,
     AttachmentStatus,
@@ -58,12 +57,15 @@ class FileAccessError(PermissionError):
 class FileEventPublisher(Protocol):
     """文件运行时所需的事件发布端口。"""
 
-    async def send_to_session(self, session_id: str, event: dict[str, Any]) -> None:
-        """向指定会话发布事件。
+    async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
+        """发布文件生命周期事件。
 
-        参数：
-            session_id: 目标会话标识。
-            event: 要发布的事件字典。
+        参数:
+            event (ApplicationEvent): 要发布的文件事件。
+        返回值:
+            ApplicationEvent: 事件发布器确认后的事件对象。
+        异常:
+            事件传输失败时传播底层异常。
         """
         ...
 
@@ -71,7 +73,7 @@ class FileEventPublisher(Protocol):
 class FileIntelligenceRuntime:
     """File Intelligence 运行时，协调文件的解析、索引、搜索和分析。
 
-    通过依赖注入获取 Repository、LLM 和 WebSocket 管理器，
+    通过依赖注入获取 Repository、LLM 和事件发布器，
     内部管理 StorageLayer、AdapterRegistry 和 ChromaDB 向量索引。
 
     参数：
@@ -79,7 +81,7 @@ class FileIntelligenceRuntime:
         primary_llm: 主 LLM 提供者（用于文档摘要和视觉分析）。
         secondary_llm: 次要 LLM 提供者（用于分块摘要，成本更低）。
         settings: 全局配置。
-        ws_manager: WebSocket 管理器，用于推送文件状态事件。
+        event_publisher: 应用事件发布器。
     """
 
     def __init__(
@@ -89,24 +91,24 @@ class FileIntelligenceRuntime:
         secondary_llm: LLMProvider,
         *,
         settings: Settings,
-        ws_manager: WebSocketManager,
+        event_publisher: FileEventPublisher,
         trace_sink: Callable[[RetrievalTrace], None] | None = None,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            repository (FileRepository): 输入参数；其类型和取值约束由方法签名及实现定义。
-            primary_llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
-            secondary_llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
+            repository (FileRepository): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            primary_llm (LLMProvider): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            secondary_llm (LLMProvider): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
-            ws_manager (WebSocketManager): 输入参数；其类型和取值约束由方法签名及实现定义。
-            trace_sink (Callable[[RetrievalTrace], None] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            event_publisher: 应用事件发布器。
+            trace_sink (Callable[[RetrievalTrace], None] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.repository = repository
         self.settings = settings
@@ -116,7 +118,7 @@ class FileIntelligenceRuntime:
         self.adapter_registry = AdapterRegistry()
         self.primary_llm = primary_llm
         self.secondary_llm = secondary_llm
-        self.ws = ws_manager
+        self._events = event_publisher
         self._chroma_client: ClientAPI | None = None
         self._collection: Collection | None = None
         self._task_enqueuer: Callable[..., Awaitable[Any]] | None = None
@@ -573,18 +575,18 @@ class FileIntelligenceRuntime:
         query: str,
         trace: RetrievalTrace | None,
     ) -> dict[str, Any]:
-        """执行“文件搜索失败响应”操作。
+        """
 
         参数：
-            attachment (Attachment): 输入参数；其类型和取值约束由方法签名及实现定义。
+            attachment (Attachment): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             query (str): 检索或搜索文本；应为非空字符串。
-            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            dict[str, Any]: 操作结果；具体语义由调用场景决定。
+            dict[str, Any]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if trace is not None:
             trace.add_stage(
@@ -611,19 +613,19 @@ class FileIntelligenceRuntime:
         limit: int,
         trace: RetrievalTrace | None,
     ) -> list[FileChunk]:
-        """执行“搜索文件关键词”操作。
+        """
 
         参数：
-            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            file_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             query (str): 检索或搜索文本；应为非空字符串。
             limit (int): 最大返回数量；应为非负整数。
-            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[FileChunk]: 操作结果；具体语义由调用场景决定。
+            list[FileChunk]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         started = perf_counter()
         try:
@@ -656,19 +658,19 @@ class FileIntelligenceRuntime:
         limit: int,
         trace: RetrievalTrace | None,
     ) -> list[dict[str, Any]]:
-        """执行“搜索文件向量”操作。
+        """
 
         参数：
-            file_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            file_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             query (str): 检索或搜索文本；应为非空字符串。
             limit (int): 最大返回数量；应为非负整数。
-            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         started = perf_counter()
         vector: list[dict[str, Any]] = []
@@ -708,16 +710,16 @@ class FileIntelligenceRuntime:
 
     @staticmethod
     def _vector_items(result: dict[str, Any]) -> list[dict[str, Any]]:
-        """执行“vector items”操作。
+        """
 
         参数：
-            result (dict[str, Any]): 底层操作结果。
+            result (dict[str, Any]): 方法返回的领域结果。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return [
             {
@@ -747,17 +749,17 @@ class FileIntelligenceRuntime:
         """执行“记录文件候选项”操作。
 
         参数：
-            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            route (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            candidates (list[Any]): 输入参数；其类型和取值约束由方法签名及实现定义。
-            native_score (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            duration_ms (float): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            route (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            candidates (list[Any]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            native_score (str | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            duration_ms (float): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if trace is None:
             return
@@ -795,19 +797,19 @@ class FileIntelligenceRuntime:
         limit: int,
         trace: RetrievalTrace | None,
     ) -> list[dict[str, Any]]:
-        """执行“融合文件搜索结果”操作。
+        """
 
         参数：
-            keyword (list[FileChunk]): 输入参数；其类型和取值约束由方法签名及实现定义。
-            vector (list[dict[str, Any]]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            keyword (list[FileChunk]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            vector (list[dict[str, Any]]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             limit (int): 最大返回数量；应为非负整数。
-            trace (RetrievalTrace | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         fusion_started = perf_counter()
         scores: dict[str, float] = {}
@@ -858,16 +860,16 @@ class FileIntelligenceRuntime:
         query: str,
         adapter_name: str | None,
     ) -> RetrievalTrace | None:
-        """执行“new retrieval trace”操作。
+        """
 
         参数：
             query (str): 检索或搜索文本；应为非空字符串。
-            adapter_name (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            adapter_name (str | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
         返回值：
-            RetrievalTrace | None: 操作结果；具体语义由调用场景决定。
+            RetrievalTrace | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if not self.settings.retrieval_trace_enabled:
             return None
@@ -883,16 +885,16 @@ class FileIntelligenceRuntime:
         )
 
     def _emit_retrieval_trace(self, trace: RetrievalTrace) -> None:
-        """执行“emit retrieval trace”操作。
+        """
 
         参数：
-            trace (RetrievalTrace): 输入参数；其类型和取值约束由方法签名及实现定义。
+            trace (RetrievalTrace): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         try:
             if self._trace_sink is not None:
@@ -1171,10 +1173,21 @@ class FileIntelligenceRuntime:
     async def emit(
         self, event_type: EventType | str, session_id: str, data: dict[str, Any]
     ) -> None:
-        """向会话推送 WebSocket 事件。"""
-        await self.ws.send_to_session(
-            session_id, build_event(event_type, data, session_id=session_id)
-        )
+        """通过应用事件契约发布文件生命周期事件。
+
+        参数:
+            event_type (EventType | str): 事件类型；字符串必须非空。
+            session_id (str): 事件所属会话 ID，必须非空。
+            data (dict[str, Any]): 事件 payload，必须可 JSON 序列化。
+        返回值:
+            None: 事件已交给事件发布器。
+        异常:
+            payload 无法序列化或事件发布失败时传播相应异常。
+        """
+        await self._events.publish(ApplicationEvent(
+            event_type=str(event_type), durability=EventDurability.DURABLE,
+            session_id=session_id, payload=data,
+        ))
 
     async def emit_file_event(
         self, event_type: str, session_id: str, task: Any

@@ -10,12 +10,14 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
-    "websockets>=12.0",
     "langchain>=0.3.0",
     "langchain-openai>=0.2.0",
     "langchain-anthropic>=0.2.0",
     "langchain-community>=0.3.0",
     "langchain-ollama>=0.2.0",
+    # LangGraph runtime and SQLite checkpointer used by the SSE migration.
+    "langgraph==1.2.7",
+    "langgraph-checkpoint-sqlite==3.1.0",
     "chromadb>=0.5.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -47,7 +49,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["athena*"]
+include = ["athena*", "agent_runtime*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

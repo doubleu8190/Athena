@@ -60,7 +60,6 @@ class ToolCallRecord(BaseModel):
 
     id: str
     session_id: str
-    step_id: str  # 所属步骤 ID
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     raw_output: str | None = None

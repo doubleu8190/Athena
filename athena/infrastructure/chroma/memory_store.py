@@ -16,17 +16,17 @@ class ChromaMemoryStore:
         path: str,
         collection_name: str = "athena_memory",
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
             path (str): 目标文件或目录路径。
-            collection_name (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            collection_name (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._path = path
         self._client: ClientAPI | None = None
@@ -49,10 +49,10 @@ class ChromaMemoryStore:
         """初始化资源。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if self._collection is not None:
             return
@@ -67,13 +67,13 @@ class ChromaMemoryStore:
 
     @property
     def collection(self) -> Any:
-        """执行“collection”操作。
+        """
 
         返回值：
-            Any: 操作结果；具体语义由调用场景决定。
+            Any: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if self._collection is None:
             raise RuntimeError("ChromaMemoryStore is not initialized")
@@ -88,10 +88,10 @@ class ChromaMemoryStore:
             metadata (dict[str, Any]): 附加元数据字典。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await asyncio.to_thread(
             self.collection.add,
@@ -111,10 +111,10 @@ class ChromaMemoryStore:
             where (dict[str, Any] | None): 可选过滤条件。
 
         返回值：
-            dict[str, Any]: 操作结果；具体语义由调用场景决定。
+            dict[str, Any]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         kwargs: dict[str, Any] = {
             "query_texts": [query],
@@ -132,10 +132,10 @@ class ChromaMemoryStore:
             memory_id (str): 记忆记录唯一标识。
 
         返回值：
-            dict[str, Any]: 操作结果；具体语义由调用场景决定。
+            dict[str, Any]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return await asyncio.to_thread(self.collection.get, ids=[memory_id])
 
@@ -153,10 +153,10 @@ class ChromaMemoryStore:
             metadata (dict[str, Any] | None): 附加元数据字典。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         kwargs: dict[str, Any] = {"ids": [memory_id]}
         if content is not None:
@@ -169,12 +169,12 @@ class ChromaMemoryStore:
         """删除数据。
 
         参数：
-            memory_ids (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_ids (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await asyncio.to_thread(self.collection.delete, ids=memory_ids)

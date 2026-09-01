@@ -1,0 +1,122 @@
+"""由基础设施适配器实现的 Runtime 端口协议。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Protocol
+from athena.contracts.commands import CommandType
+from athena.contracts.events import ApplicationEvent
+from athena.contracts.statuses import (
+    AgentApprovalDecision,
+    AgentCommandStatus,
+    AgentRunStatus,
+    StreamSnapshotStatus,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCommandRecord:
+    """Runtime 消费命令所需的字段集合。"""
+
+    command_id: str
+    session_id: str
+    run_id: str | None
+    command_type: CommandType
+    schema_version: int
+    payload_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunRecord:
+    """启动恢复对账所需的运行字段集合。"""
+
+    run_id: str
+    status: AgentRunStatus
+    cancel_requested: int
+
+
+class AgentStorePort(Protocol):
+    async def claim_pending(self) -> AgentCommandRecord | None:
+        """按最早发布时间领取一条可执行命令；无命令时返回 ``None``。"""
+        ...
+
+    async def complete(
+        self,
+        command_id: str,
+        *,
+        status: AgentCommandStatus,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        """以终态写入命令结果或错误。"""
+        ...
+
+    async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
+        """持久化或广播应用事件，并返回最终事件。"""
+        ...
+
+    async def list_recoverable_runs(self) -> list[AgentRunRecord]:
+        """返回启动恢复所需的运行记录，包括暂停中的运行。"""
+        ...
+
+    async def update_run_status(
+        self, run_id: str, status: AgentRunStatus, error: str | None = None
+    ) -> None:
+        """更新运行状态，并可选记录错误信息。"""
+        ...
+
+    async def update_run_control(
+        self,
+        run_id: str,
+        *,
+        pause: bool = False,
+        clear_pause: bool = False,
+        cancel: bool = False,
+        status: AgentRunStatus | None = None,
+    ) -> bool:
+        """更新运行控制标志及状态；运行不存在时返回 ``False``。"""
+        ...
+
+    async def upsert_snapshot(
+        self,
+        session_id: str,
+        stream_id: str,
+        version: int,
+        content: str,
+        *,
+        run_id: str | None = None,
+        stream_type: str = "answer",
+        last_chunk_id: int = 0,
+        status: StreamSnapshotStatus = StreamSnapshotStatus.STREAMING,
+    ) -> bool:
+        """按版本条件写入流快照；版本未增长时返回 ``False``。"""
+        ...
+
+    async def resolve_approval(
+        self, approval_id: str, decision: AgentApprovalDecision
+    ) -> bool:
+        """原子解析审批记录；记录不存在或已处理时返回 ``False``。"""
+        ...
+
+
+class EventPublisherPort(Protocol):
+    """Runtime 事件接收端口；具体传输和网关实现均属于适配器。"""
+
+    async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
+        """将事件发送到运行时事件接收端。"""
+        ...
+
+    async def upsert_snapshot(
+        self,
+        session_id: str,
+        stream_id: str,
+        version: int,
+        content: str,
+        *,
+        run_id: str | None = None,
+        stream_type: str = "answer",
+        last_chunk_id: int = 0,
+        status: StreamSnapshotStatus = StreamSnapshotStatus.STREAMING,
+    ) -> bool:
+        """按版本写入可恢复的流快照。"""
+        ...

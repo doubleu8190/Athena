@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -11,8 +10,7 @@ from pydantic import BaseModel, Field
 
 
 class ApprovalDecision(StrEnum):
-    """表示 审批Decision 组件，封装相关状态和行为。
-    """
+    """审批结果枚举。"""
     APPROVED = "approved"
     DENIED = "denied"
     TIMEOUT = "timeout"
@@ -21,8 +19,7 @@ class ApprovalDecision(StrEnum):
 class ApprovalRequest:
     """审批请求的完整数据结构.
 
-    使用普通类（非 Pydantic）以容纳 asyncio.Future，
-    Future 无法被 Pydantic 序列化。
+    运行时请求对象仅保存展示信息；审批决定以 SQLite Approval Record 为准。
     """
 
     __slots__ = (
@@ -34,7 +31,6 @@ class ApprovalRequest:
         "created_at",
         "session_id",
         "run_id",
-        "future",
         "resolved",
         "resolution",
         "tool_call_id",
@@ -51,28 +47,26 @@ class ApprovalRequest:
         created_at: datetime,
         session_id: str,
         run_id: str,
-        future: asyncio.Future[bool],
         tool_call_id: str,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
             id (str): 资源唯一标识。
-            tool_name (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            arguments (dict[str, Any]): 输入参数；其类型和取值约束由方法签名及实现定义。
-            risk_level (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            timeout (int): 输入参数；其类型和取值约束由方法签名及实现定义。
-            created_at (datetime): 输入参数；其类型和取值约束由方法签名及实现定义。
+            tool_name (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            arguments (dict[str, Any]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            risk_level (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            timeout (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            created_at (datetime): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             session_id (str): 会话唯一标识。
             run_id (str): 运行唯一标识。
-            future (asyncio.Future[bool]): 输入参数；其类型和取值约束由方法签名及实现定义。
-            tool_call_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            tool_call_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.id = id
         self.tool_name = tool_name
@@ -83,7 +77,6 @@ class ApprovalRequest:
         self.session_id = session_id
         self.run_id = run_id
         self.tool_call_id = tool_call_id
-        self.future = future
         self.resolved: bool = False
         self.resolution: str = "pending"  # approved/denied/timeout（已批准 / 已拒绝 / 超时）
         self.decided_at: datetime | None = None

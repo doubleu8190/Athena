@@ -13,7 +13,9 @@ from athena.gateway.routes.sessions import router as sessions_router
 from athena.gateway.routes.settings import router as settings_router
 from athena.gateway.routes.tools import router as tools_router
 from athena.gateway.routes.files import router as files_router
-from athena.gateway.routes.evaluation import router as evaluation_router
+from athena.gateway.routes.events import router as events_router
+from athena.gateway.routes.commands import router as commands_router, run_router
+from athena.gateway.auth.routes import router as auth_router
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(health_router)
@@ -25,6 +27,9 @@ api_router.include_router(settings_router)
 api_router.include_router(providers_router)
 api_router.include_router(mcp_router)
 api_router.include_router(files_router)
-api_router.include_router(evaluation_router)
+api_router.include_router(events_router)
+api_router.include_router(commands_router)
+api_router.include_router(run_router)
+api_router.include_router(auth_router)
 
 __all__ = ["api_router"]

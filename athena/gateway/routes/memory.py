@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from athena.utils.logging import get_logger
 from athena.runtime import runtime_from
+from athena.contracts.errors import ErrorDetail
 
 if TYPE_CHECKING:
     from athena.core.memory.memory import MemoryManager
@@ -19,8 +20,7 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 
 
 class SaveMemoryRequest(BaseModel):
-    """表示 SaveMemoryRequest 组件，封装相关状态和行为。
-    """
+    """主动保存记忆的请求体。"""
     content: str
     session_id: str
     metadata: dict[str, Any] | None = None
@@ -28,30 +28,28 @@ class SaveMemoryRequest(BaseModel):
 
 
 class SearchMemoryRequest(BaseModel):
-    """表示 SearchMemoryRequest 组件，封装相关状态和行为。
-    """
+    """记忆检索请求体。"""
     query: str
     where: dict[str, Any] | None = None
     n_results: int = 5
 
 
 class UpdateMemoryRequest(BaseModel):
-    """表示 UpdateMemoryRequest 组件，封装相关状态和行为。
-    """
+    """修改记忆正文的请求体。"""
     content: str
 
 
 async def _get_memory_manager(request: Request) -> MemoryManager:
-    """执行“get memory manager”操作。
+    """从请求应用状态获取记忆管理器。
 
     参数：
-        request (Request): 当前 HTTP 或 WebSocket 请求对象。
+        request (Request): 当前 HTTP 请求对象。
 
     返回值：
-        MemoryManager: 操作结果；具体语义由调用场景决定。
+        MemoryManager: 应用启动时注入的记忆管理器。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        RuntimeError: 应用运行时未初始化。
     """
     return runtime_from(request).memory_manager
 
@@ -116,7 +114,7 @@ async def get_memory(memory_id: str, request: Request) -> dict[str, Any]:
     manager = await _get_memory_manager(request)
     result = await manager.get(memory_id)
     if not result:
-        raise HTTPException(status_code=404, detail="Memory not found")
+        raise HTTPException(status_code=404, detail=ErrorDetail.MEMORY_NOT_FOUND)
     return result
 
 
@@ -135,11 +133,11 @@ async def update_memory(
     """编辑记忆内容."""
     content = req.content.strip()
     if not content:
-        raise HTTPException(status_code=400, detail="Content must not be empty")
+        raise HTTPException(status_code=400, detail=ErrorDetail.CONTENT_EMPTY)
     manager = await _get_memory_manager(request)
     updated = await manager.update_memory(memory_id, content)
     if not updated:
-        raise HTTPException(status_code=404, detail="Memory not found")
+        raise HTTPException(status_code=404, detail=ErrorDetail.MEMORY_NOT_FOUND)
     return {"status": "updated", "memory_id": memory_id}
 
 

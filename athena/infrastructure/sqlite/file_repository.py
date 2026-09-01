@@ -25,7 +25,7 @@ from athena.infrastructure.sqlite.models import (
     FileArtifactModel,
     FileChunkModel,
     MessageAttachmentModel,
-    ProcessingTaskModel,
+    FileProcessingTaskModel,
 )
 from athena.infrastructure.sqlite.repositories import _json_dumps, _json_loads
 from athena.models.file import (
@@ -44,7 +44,15 @@ _FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*|[\u4e00-\u9fff]
 
 
 def _fts_match_expression(query: str) -> str | None:
-    """Build a quoted FTS5 expression without allowing query operators through."""
+    """构造带引号的 FTS5 表达式，阻止查询运算符直接进入全文检索语法。
+
+    参数:
+        query (str): 用户输入的检索词。
+    返回值:
+        str | None: 由安全词元组成的 OR 表达式；没有有效词元时返回 ``None``。
+    异常:
+        不抛出业务异常。
+    """
     tokens = _FTS_TOKEN_RE.findall(query)
     if not tokens:
         return None
@@ -81,7 +89,7 @@ def _attachment(row: AttachmentModel) -> Attachment:
     )
 
 
-def _task(row: ProcessingTaskModel) -> FileTask:
+def _task(row: FileProcessingTaskModel) -> FileTask:
     """将 ORM 模型转换为领域模型。"""
     return FileTask(
         id=row.id,
@@ -158,9 +166,9 @@ class FileRepository:
             async with session.begin():
                 task_rows = (
                     await session.execute(
-                        select(ProcessingTaskModel.session_id).where(
-                            ProcessingTaskModel.attachment_id == attachment_id,
-                            ProcessingTaskModel.status.in_(
+                        select(FileProcessingTaskModel.session_id).where(
+                            FileProcessingTaskModel.attachment_id == attachment_id,
+                            FileProcessingTaskModel.status.in_(
                                 ["queued", "running", "waiting"]
                             ),
                         )
@@ -318,10 +326,12 @@ class FileRepository:
                     )
                 )
                 await session.execute(
-                    update(ProcessingTaskModel)
-                    .where(ProcessingTaskModel.attachment_id.in_(attachment_ids))
+                    update(FileProcessingTaskModel)
+                    .where(FileProcessingTaskModel.attachment_id.in_(attachment_ids))
                     .where(
-                        ProcessingTaskModel.status.in_(["queued", "running", "waiting"])
+                        FileProcessingTaskModel.status.in_(
+                            ["queued", "running", "waiting"]
+                        )
                     )
                     .values(
                         status=FileTaskStatus.CANCELLED.value,
@@ -367,13 +377,13 @@ class FileRepository:
             return sorted({key for key, _ in rows} - live)
 
     async def live_storage_keys(self) -> set[str]:
-        """执行“live storage keys”操作。
+        """
 
         返回值：
-            set[str]: 操作结果；具体语义由调用场景决定。
+            set[str]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             return set(
@@ -436,18 +446,18 @@ class FileRepository:
         *,
         include_deleted: bool = False,
     ) -> Attachment | None:
-        """执行“get attachment”操作。
+        """
 
         参数：
             attachment_id (str): 附件唯一标识。
             session_id (str | None): 会话唯一标识。
-            include_deleted (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            include_deleted (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            Attachment | None: 操作结果；具体语义由调用场景决定。
+            Attachment | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             stmt = select(AttachmentModel).where(AttachmentModel.id == attachment_id)
@@ -477,20 +487,20 @@ class FileRepository:
             if not include_deleted:
                 stmt = stmt.where(AttachmentModel.deleted_time.is_(None))
             rows = (await session.execute(stmt)).scalars().all()
-        by_id = {row.id: _attachment(row) for row in rows}
-        return [by_id[item] for item in ids if item in by_id]
+        # IN 查询不保证返回顺序；当前调用方会自行按 ID 查找或重排，因此无需构建索引。
+        return [_attachment(row) for row in rows]
 
     async def list_attachments(self, session_id: str) -> list[Attachment]:
-        """执行“list attachments”操作。
+        """
 
         参数：
             session_id (str): 会话唯一标识。
 
         返回值：
-            list[Attachment]: 操作结果；具体语义由调用场景决定。
+            list[Attachment]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             rows = (
@@ -558,17 +568,17 @@ class FileRepository:
                 return _attachment(row) if row else None
 
     async def soft_delete_attachment(self, attachment_id: str, session_id: str) -> bool:
-        """执行“soft delete attachment”操作。
+        """
 
         参数：
             attachment_id (str): 附件唯一标识。
             session_id (str): 会话唯一标识。
 
         返回值：
-            bool: 操作结果；具体语义由调用场景决定。
+            bool: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         now = _now().isoformat()
         async with get_session() as session:
@@ -595,10 +605,10 @@ class FileRepository:
                     {"attachment_id": attachment_id},
                 )
                 await session.execute(
-                    update(ProcessingTaskModel)
+                    update(FileProcessingTaskModel)
                     .where(
-                        ProcessingTaskModel.attachment_id == attachment_id,
-                        ProcessingTaskModel.status.in_(
+                        FileProcessingTaskModel.attachment_id == attachment_id,
+                        FileProcessingTaskModel.status.in_(
                             ["queued", "running", "waiting"]
                         ),
                     )
@@ -638,18 +648,18 @@ class FileRepository:
     async def bind_message(
         self, session_id: str, message_id: str, attachment_ids: Iterable[str]
     ) -> list[Attachment]:
-        """执行“bind message”操作。
+        """
 
         参数：
             session_id (str): 会话唯一标识。
             message_id (str): 消息唯一标识。
-            attachment_ids (Iterable[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            attachment_ids (Iterable[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[Attachment]: 操作结果；具体语义由调用场景决定。
+            list[Attachment]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         ids = list(dict.fromkeys(attachment_ids))
         if not ids:
@@ -683,16 +693,16 @@ class FileRepository:
     async def attachments_for_messages(
         self, message_ids: Iterable[str]
     ) -> dict[str, list[Attachment]]:
-        """执行“消息对应的附件”操作。
+        """
 
         参数：
-            message_ids (Iterable[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            message_ids (Iterable[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            dict[str, list[Attachment]]: 操作结果；具体语义由调用场景决定。
+            dict[str, list[Attachment]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         ids = list(message_ids)
         if not ids:
@@ -738,7 +748,7 @@ class FileRepository:
             创建的或已存在的 ``FileTask`` 实例。
         """
         now = _now().isoformat()
-        row = ProcessingTaskModel(
+        row = FileProcessingTaskModel(
             id=generate_time_id(),
             session_id=session_id,
             attachment_id=attachment_id,
@@ -759,15 +769,15 @@ class FileRepository:
             async with session.begin():
                 existing = (
                     await session.execute(
-                        select(ProcessingTaskModel)
+                        select(FileProcessingTaskModel)
                         .where(
-                            ProcessingTaskModel.attachment_id == attachment_id,
-                            ProcessingTaskModel.task_type == task_type.value,
-                            ProcessingTaskModel.status.in_(
+                            FileProcessingTaskModel.attachment_id == attachment_id,
+                            FileProcessingTaskModel.task_type == task_type.value,
+                            FileProcessingTaskModel.status.in_(
                                 ["queued", "running", "waiting"]
                             ),
                         )
-                        .order_by(ProcessingTaskModel.created_at.desc())
+                        .order_by(FileProcessingTaskModel.created_at.desc())
                         .limit(1)
                     )
                 ).scalar_one_or_none()
@@ -779,50 +789,54 @@ class FileRepository:
     async def get_task(
         self, task_id: str, session_id: str | None = None
     ) -> FileTask | None:
-        """执行“get task”操作。
+        """
 
         参数：
             task_id (str): 任务唯一标识。
             session_id (str | None): 会话唯一标识。
 
         返回值：
-            FileTask | None: 操作结果；具体语义由调用场景决定。
+            FileTask | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
-            stmt = select(ProcessingTaskModel).where(ProcessingTaskModel.id == task_id)
+            stmt = select(FileProcessingTaskModel).where(
+                FileProcessingTaskModel.id == task_id
+            )
             if session_id is not None:
-                stmt = stmt.where(ProcessingTaskModel.session_id == session_id)
+                stmt = stmt.where(FileProcessingTaskModel.session_id == session_id)
             row = (await session.execute(stmt)).scalar_one_or_none()
             return _task(row) if row else None
 
     async def list_tasks(
         self, session_id: str, attachment_id: str | None = None
     ) -> list[FileTask]:
-        """执行“list tasks”操作。
+        """
 
         参数：
             session_id (str): 会话唯一标识。
             attachment_id (str | None): 附件唯一标识。
 
         返回值：
-            list[FileTask]: 操作结果；具体语义由调用场景决定。
+            list[FileTask]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
-            stmt = select(ProcessingTaskModel).where(
-                ProcessingTaskModel.session_id == session_id
+            stmt = select(FileProcessingTaskModel).where(
+                FileProcessingTaskModel.session_id == session_id
             )
             if attachment_id:
-                stmt = stmt.where(ProcessingTaskModel.attachment_id == attachment_id)
+                stmt = stmt.where(
+                    FileProcessingTaskModel.attachment_id == attachment_id
+                )
             rows = (
                 (
                     await session.execute(
-                        stmt.order_by(ProcessingTaskModel.created_at.desc())
+                        stmt.order_by(FileProcessingTaskModel.created_at.desc())
                     )
                 )
                 .scalars()
@@ -841,12 +855,12 @@ class FileRepository:
             rows = (
                 (
                     await session.execute(
-                        select(ProcessingTaskModel)
+                        select(FileProcessingTaskModel)
                         .where(
-                            ProcessingTaskModel.session_id == session_id,
-                            ProcessingTaskModel.attachment_id.in_(ids),
+                            FileProcessingTaskModel.session_id == session_id,
+                            FileProcessingTaskModel.attachment_id.in_(ids),
                         )
-                        .order_by(ProcessingTaskModel.created_at.desc())
+                        .order_by(FileProcessingTaskModel.created_at.desc())
                     )
                 )
                 .scalars()
@@ -870,14 +884,15 @@ class FileRepository:
             async with session.begin():
                 row = (
                     await session.execute(
-                        select(ProcessingTaskModel)
+                        select(FileProcessingTaskModel)
                         .where(
-                            ProcessingTaskModel.status == FileTaskStatus.QUEUED.value,
-                            ProcessingTaskModel.available_at <= now,
+                            FileProcessingTaskModel.status
+                            == FileTaskStatus.QUEUED.value,
+                            FileProcessingTaskModel.available_at <= now,
                         )
                         .order_by(
-                            ProcessingTaskModel.priority.desc(),
-                            ProcessingTaskModel.created_at.asc(),
+                            FileProcessingTaskModel.priority.desc(),
+                            FileProcessingTaskModel.created_at.asc(),
                         )
                         .limit(1)
                     )
@@ -892,17 +907,17 @@ class FileRepository:
             return _task(row)
 
     async def update_task(self, task_id: str, **values: Any) -> None:
-        """执行“update task”操作。
+        """
 
         参数：
             task_id (str): 任务唯一标识。
-            values (Any): 输入参数；其类型和取值约束由方法签名及实现定义。
+            values (Any): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         payload: dict[str, Any] = {}
         for key in (
@@ -923,8 +938,8 @@ class FileRepository:
         async with get_session() as session:
             async with session.begin():
                 await session.execute(
-                    update(ProcessingTaskModel)
-                    .where(ProcessingTaskModel.id == task_id)
+                    update(FileProcessingTaskModel)
+                    .where(FileProcessingTaskModel.id == task_id)
                     .values(**payload)
                 )
 
@@ -958,20 +973,24 @@ class FileRepository:
             )
 
     async def recover_running_tasks(self) -> int:
-        """执行“recover running tasks”操作。
+        """
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         now = _now().isoformat()
         async with get_session() as session:
             async with session.begin():
                 result = await session.execute(
-                    update(ProcessingTaskModel)
-                    .where(ProcessingTaskModel.status.in_(["running", "waiting"]))
+                    update(FileProcessingTaskModel)
+                    .where(
+                        FileProcessingTaskModel.status.in_(
+                            ["running", "waiting"]
+                        )
+                    )
                     .values(
                         status="queued",
                         stage="recovered",
@@ -982,17 +1001,17 @@ class FileRepository:
                 return int(result.rowcount or 0)
 
     async def replace_chunks(self, attachment_id: str, chunks: list[FileChunk]) -> None:
-        """执行“replace chunks”操作。
+        """
 
         参数：
             attachment_id (str): 附件唯一标识。
-            chunks (list[FileChunk]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            chunks (list[FileChunk]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             async with session.begin():
@@ -1049,7 +1068,7 @@ class FileRepository:
     async def get_chunks(
         self, attachment_id: str, *, offset: int = 0, limit: int = 50
     ) -> list[FileChunk]:
-        """执行“get chunks”操作。
+        """
 
         参数：
             attachment_id (str): 附件唯一标识。
@@ -1057,10 +1076,10 @@ class FileRepository:
             limit (int): 最大返回数量；应为非负整数。
 
         返回值：
-            list[FileChunk]: 操作结果；具体语义由调用场景决定。
+            list[FileChunk]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             rows = (
@@ -1092,7 +1111,7 @@ class FileRepository:
     async def search_chunks(
         self, attachment_id: str, query: str, limit: int = 10
     ) -> list[FileChunk]:
-        """执行“search chunks”操作。
+        """
 
         参数：
             attachment_id (str): 附件唯一标识。
@@ -1100,10 +1119,10 @@ class FileRepository:
             limit (int): 最大返回数量；应为非负整数。
 
         返回值：
-            list[FileChunk]: 操作结果；具体语义由调用场景决定。
+            list[FileChunk]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             rows = []
@@ -1182,16 +1201,16 @@ class FileRepository:
             ]
 
     async def get_artifact(self, cache_key: str) -> dict[str, Any] | None:
-        """执行“get artifact”操作。
+        """
 
         参数：
-            cache_key (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            cache_key (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            dict[str, Any] | None: 操作结果；具体语义由调用场景决定。
+            dict[str, Any] | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             row = (
@@ -1219,20 +1238,20 @@ class FileRepository:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """执行“put artifact”操作。
+        """
 
         参数：
             attachment_id (str): 附件唯一标识。
-            kind (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            cache_key (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            kind (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            cache_key (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             content (str): 待保存或处理的内容。
             metadata (dict[str, Any] | None): 附加元数据字典。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             async with session.begin():
@@ -1258,16 +1277,16 @@ class FileRepository:
                 )
 
     async def sync_adapters(self, adapters: Iterable[AdapterInfo]) -> None:
-        """执行“sync adapters”操作。
+        """
 
         参数：
-            adapters (Iterable[AdapterInfo]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            adapters (Iterable[AdapterInfo]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         items = list(adapters)
         names = [item.name for item in items]

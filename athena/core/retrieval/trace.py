@@ -32,10 +32,10 @@ class RetrievalStageTrace:
         """生成结构化日志字段。
 
         返回值：
-            dict[str, Any]: 操作结果；具体语义由调用场景决定。
+            dict[str, Any]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return {
             "stage": self.stage,
@@ -62,10 +62,10 @@ class RetrievalCandidateTrace:
         """生成结构化日志字段。
 
         返回值：
-            dict[str, Any]: 操作结果；具体语义由调用场景决定。
+            dict[str, Any]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return {
             "item_id": self.item_id,
@@ -86,7 +86,7 @@ class RetrievalTrace:
     query_hash_salt: str = ""
     include_raw_query: bool = False
     query_labels: list[str] = field(default_factory=list)
-    analyzer_mode: str = "legacy"
+    analyzer_mode: str = "rule"
     request_id: str = field(default_factory=generate_time_id)
     stages: list[RetrievalStageTrace] = field(default_factory=list)
     candidates: list[RetrievalCandidateTrace] = field(default_factory=list)
@@ -97,13 +97,13 @@ class RetrievalTrace:
 
     @property
     def query_hash(self) -> str:
-        """执行“query hash”操作。
+        """
 
         返回值：
-            str: 操作结果；具体语义由调用场景决定。
+            str: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         salt = self.query_hash_salt or _DEFAULT_QUERY_HASH_SALT
         payload = f"{salt}\x00{self.query}".encode("utf-8")
@@ -111,13 +111,13 @@ class RetrievalTrace:
 
     @property
     def query_length(self) -> int:
-        """执行“query length”操作。
+        """
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return len(self.query)
 
@@ -131,21 +131,21 @@ class RetrievalTrace:
         result_count: int,
         error_code: str | None = None,
     ) -> None:
-        """执行“add stage”操作。
+        """
 
         参数：
-            stage (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            route (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            query_index (int): 输入参数；其类型和取值约束由方法签名及实现定义。
-            duration_ms (float): 输入参数；其类型和取值约束由方法签名及实现定义。
-            result_count (int): 输入参数；其类型和取值约束由方法签名及实现定义。
-            error_code (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            stage (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            route (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            query_index (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            duration_ms (float): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            result_count (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            error_code (str | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.stages.append(
             RetrievalStageTrace(
@@ -166,19 +166,19 @@ class RetrievalTrace:
         rank: int,
         native_score: float | None,
     ) -> None:
-        """执行“add candidate”操作。
+        """
 
         参数：
-            item_id (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            route (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            rank (int): 输入参数；其类型和取值约束由方法签名及实现定义。
-            native_score (float | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            item_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            route (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            rank (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            native_score (float | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.candidates.append(
             RetrievalCandidateTrace(
@@ -190,31 +190,31 @@ class RetrievalTrace:
         )
 
     def set_fused_scores(self, scores: dict[str, float]) -> None:
-        """执行“set fused scores”操作。
+        """
 
         参数：
-            scores (dict[str, float]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            scores (dict[str, float]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         for candidate in self.candidates:
             candidate.fused_score = scores.get(candidate.item_id)
 
     def mark_selected(self, item_ids: list[str]) -> None:
-        """执行“mark selected”操作。
+        """
 
         参数：
-            item_ids (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            item_ids (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.selected_ids = list(dict.fromkeys(item_ids))
         selected = set(self.selected_ids)
@@ -222,16 +222,16 @@ class RetrievalTrace:
             candidate.selected = candidate.item_id in selected
 
     def add_fallback(self, reason: str) -> None:
-        """执行“add fallback”操作。
+        """
 
         参数：
-            reason (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            reason (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if reason not in self.fallback_reasons:
             self.fallback_reasons.append(reason)
@@ -240,10 +240,10 @@ class RetrievalTrace:
         """完成追踪。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if self._total_duration_ms is None:
             self._total_duration_ms = (perf_counter() - self._started_at) * 1000

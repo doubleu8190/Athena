@@ -12,7 +12,6 @@ from athena.core.harness.harness import Harness
 from athena.core.memory.memory import MemoryManager
 from athena.core.memory.retrieval import HybridRetrievalManager, MemoryRetrievalService
 from athena.core.memory.summarizer import ConversationSummarizer
-from athena.core.recovery.session_recovery import SessionRecovery
 from athena.core.tools.catalog import ToolRegistry
 from athena.core.tools.manager import UnifiedToolManager
 from athena.core.tools.mcp.adapter import MCPToolAdapter
@@ -101,11 +100,10 @@ def test_runtime_dependencies_are_required():
     required_parameters = {
         RuntimeContainer: tuple(RuntimeContainer.__dataclass_fields__),
         UnifiedToolManager: ("approval_manager",),
-        ApprovalManager: ("websocket_manager", "db"),
+        ApprovalManager: ("event_publisher", "db"),
         MemoryManager: ("settings", "repository", "vector_store"),
-        FileIntelligenceRuntime: ("settings", "ws_manager"),
-        SessionRecovery: ("ws_manager", "agent_workflow"),
-        Harness: ("settings", "db", "ws_manager", "compressor"),
+        FileIntelligenceRuntime: ("settings", "event_publisher"),
+        Harness: ("settings", "db", "event_publisher", "compressor"),
         ContextCompressor: ("settings",),
         HybridRetrievalManager: ("settings",),
         MemoryRetrievalService: ("settings",),
@@ -127,8 +125,6 @@ def test_service_locator_compatibility_hooks_are_absent():
         ROOT / "athena/core/tools/manager.py",
         ROOT / "athena/core/tools/mcp/manager.py",
         ROOT / "athena/gateway/approval.py",
-        ROOT / "athena/gateway/ws/manager.py",
-        ROOT / "athena/gateway/routes/_runtime.py",
         ROOT / "athena/infrastructure/sqlite/database.py",
     )
     source = "\n".join(path.read_text(encoding="utf-8") for path in paths)

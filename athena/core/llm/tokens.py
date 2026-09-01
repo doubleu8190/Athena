@@ -36,16 +36,16 @@ class ModelTokenCounter:
     """本地模型 tokenizer 可靠时使用它，否则采用保守估算。"""
 
     def __init__(self, model: BaseChatModel) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            model (BaseChatModel): 输入参数；其类型和取值约束由方法签名及实现定义。
+            model (BaseChatModel): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._model = model
     # ChatAnthropic 的计数器会发起同步 API 请求，而通用的 LangChain/Ollama
@@ -55,16 +55,16 @@ class ModelTokenCounter:
         )
 
     def count_text_tokens(self, text: str) -> int:
-        """执行“count text tokens”操作。
+        """
 
         参数：
             text (str): 待处理文本。
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if not text:
             return 0
@@ -76,16 +76,16 @@ class ModelTokenCounter:
         return conservative_text_token_count(text)
 
     def count_message_tokens(self, messages: Sequence[BaseMessage]) -> int:
-        """执行“count message tokens”操作。
+        """
 
         参数：
             messages (Sequence[BaseMessage]): LangChain 消息序列。
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if not messages:
             return 0
@@ -97,16 +97,16 @@ class ModelTokenCounter:
         return sum(self._count_message_fallback(message) for message in messages) + 3
 
     def _count_message_fallback(self, message: BaseMessage) -> int:
-        """执行“count message fallback”操作。
+        """
 
         参数：
-            message (BaseMessage): 输入参数；其类型和取值约束由方法签名及实现定义。
+            message (BaseMessage): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            int: 操作结果；具体语义由调用场景决定。
+            int: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         payload: dict[str, object] = {
             "role": message.type,
@@ -161,16 +161,16 @@ def token_usage_from_chunks(chunks: Sequence[AIMessageChunk]) -> TokenUsage | No
 
 
 def _token_usage_from_message(message: BaseMessage) -> TokenUsage | None:
-    """执行“从消息获取 token 用量”操作。
+    """
 
     参数：
-        message (BaseMessage): 输入参数；其类型和取值约束由方法签名及实现定义。
+        message (BaseMessage): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        TokenUsage | None: 操作结果；具体语义由调用场景决定。
+        TokenUsage | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     usage_metadata = getattr(message, "usage_metadata", None)
     if usage_metadata:
@@ -196,17 +196,17 @@ def _token_usage_from_message(message: BaseMessage) -> TokenUsage | None:
 
 
 def _build_usage(input_tokens: object, output_tokens: object) -> TokenUsage | None:
-    """执行“build usage”操作。
+    """
 
     参数：
-        input_tokens (object): 输入参数；其类型和取值约束由方法签名及实现定义。
-        output_tokens (object): 输入参数；其类型和取值约束由方法签名及实现定义。
+        input_tokens (object): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+        output_tokens (object): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        TokenUsage | None: 操作结果；具体语义由调用场景决定。
+        TokenUsage | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
         return None

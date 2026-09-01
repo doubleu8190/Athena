@@ -15,11 +15,9 @@ from athena.infrastructure.sqlite.repositories import (
     McpServerRepository,
     MessageRepository,
     SessionRepository,
-    StepRepository,
     ToolCallRepository,
     ToolRepository,
 )
-from athena.models.step import StepStatus
 from athena.models.tool import ToolCallStatus
 from athena.utils.logging import get_logger
 
@@ -34,21 +32,20 @@ class Database:
     """
 
     def __init__(self, db_path: str) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            db_path (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            db_path (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._db_path = db_path
         self.sessions = SessionRepository()
         self.messages = MessageRepository()
-        self.steps = StepRepository()
         self.tool_calls = ToolCallRepository()
         self.approval_logs = ApprovalLogRepository()
         self.mcp_servers = McpServerRepository()
@@ -71,19 +68,10 @@ class Database:
         """清理进程中断遗留的 running 步骤/工具调用，统一标记为 failed.
 
         仅在服务启动恢复阶段调用（此时不存在运行中的 run）。
-        状态值必须用 enum 合法值（failed），否则 repository 反序列化时
-        _row_to_step / _row_to_tool_call 的枚举转换会抛 ValueError。
+        状态值必须使用合法的工具状态值。
         """
         now = datetime.now().isoformat()
         err = "进程中断(服务重启)"
-        await self.steps.update_running_by_session(
-            session_id,
-            {
-                "status": str(StepStatus.FAILED),
-                "completed_at": now,
-                "error_message": err,
-            },
-        )
         await self.tool_calls.update_running_by_session(
             session_id,
             {

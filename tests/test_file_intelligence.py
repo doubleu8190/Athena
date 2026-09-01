@@ -40,7 +40,7 @@ def _make_runtime(repository, settings: Settings) -> FileIntelligenceRuntime:
         _FakeLLM(),
         _FakeLLM(),
         settings=settings,
-        ws_manager=AsyncMock(),
+            event_publisher=AsyncMock(),
     )
 
 

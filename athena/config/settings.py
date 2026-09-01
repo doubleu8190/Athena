@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     debug: bool = True
+    auth_enabled: bool = False
+    auth_username: str = "athena"
+    auth_password: str = "change-me"
+    auth_session_secret: str = ""
+    auth_session_ttl_hours: int = Field(default=24, ge=1)
 
     # --- LLM 提供者 ---
     # 按优先级排列：primary → secondary → fallback
@@ -146,7 +151,7 @@ class Settings(BaseSettings):
     retrieval_rerank_k: int = 10
     retrieval_context_k: int = 5
     memory_vector_min_score: float = 0.70
-    retrieval_pipeline_mode: Literal["legacy", "corrected"] = "legacy"
+    retrieval_pipeline_mode: Literal["corrected"] = "corrected"
     memory_max_tokens: int = 2000
 
     # --- 检索可观测性 ---
@@ -156,20 +161,6 @@ class Settings(BaseSettings):
     retrieval_trace_include_raw_query: bool = False
     # 用于 query_hash 的部署级 salt，避免日志中的短查询被直接枚举。
     retrieval_trace_query_hash_salt: str = ""
-
-    # --- 检索评估 / 影子流程 ---
-    retrieval_shadow_enabled: bool = False
-    retrieval_shadow_sample_rate: float = Field(default=0.05, ge=0, le=1)
-    retrieval_shadow_max_concurrency: int = Field(default=4, ge=1)
-    retrieval_shadow_timeout_ms: int = Field(default=5000, ge=1)
-    retrieval_shadow_queue_size: int = Field(default=1000, ge=1)
-    retrieval_shadow_drop_on_overload: bool = True
-    retrieval_shadow_event_path: str = "./logs/retrieval-shadow.jsonl"
-
-    # --- 个人检索评估门户 ---
-    evaluation_record_enabled: bool = True
-    evaluation_record_sample_rate: float = Field(default=1.0, ge=0, le=1)
-    evaluation_data_path: str = "./data/evaluation"
 
     # --- 上下文压缩 ---
     max_context_tokens: int = 128000

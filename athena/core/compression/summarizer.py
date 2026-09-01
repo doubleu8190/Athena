@@ -29,18 +29,18 @@ class IncrementalSummarizer:
     """增量摘要生成器 — 按 session_id 隔离摘要缓冲区."""
 
     def __init__(self, llm: LLMProvider, db: Database, max_summary_tokens: int = 2000) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            llm (LLMProvider): 输入参数；其类型和取值约束由方法签名及实现定义。
-            db (数据库): 输入参数；其类型和取值约束由方法签名及实现定义。
-            max_summary_tokens (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+            llm (LLMProvider): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            db (数据库): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            max_summary_tokens (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._llm = llm
         self._max_summary_tokens = max_summary_tokens

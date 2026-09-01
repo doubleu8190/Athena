@@ -4,13 +4,11 @@
 1. 配置 structlog 日志
 2. 初始化 SQLite 数据库（建表）
 3. 初始化 LLM Provider / 工具管理器 / 审批管理器 / 记忆系统 / 上下文压缩
-4. 构建 AgentWorkflow 并注入路由运行时
-5. 注册 REST API 路由与 WebSocket 端点
-6. 启动时执行被动会话恢复（检测 interrupted 会话并通知用户）
+4. 构建 LangGraph 运行时并编译唯一 Agent 入口
+5. 注册 REST API 与 SSE 路由
 
 业务逻辑已剥离至：
-- gateway/ws/handler.py — WebSocket 端点与消息处理
-- gateway/recovery.py — 会话恢复
+- agent_runtime — 命令消费、LangGraph 与恢复协调
 """
 
 from __future__ import annotations
@@ -19,19 +17,33 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import aiosqlite
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 from athena.config.settings import get_settings
 from athena.core.llm.provider import LLMProvider
 from athena.infrastructure.sqlite.database import Database
 from athena.runtime import RuntimeContainer
+from athena.infrastructure.sqlite.agent_store import AgentStore
+from agent_runtime import (
+    CommandConsumer,
+    RecoveryReconciler,
+    build_graph,
+    CancellationRegistry,
+    LangGraphRuntime,
+)
+from agent_runtime.command_notifications import CommandNotifier
+from agent_runtime.transport import SessionEventBus, RuntimeEventPublisher
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from athena.gateway.auth.routes import is_authenticated
+from athena.contracts.errors import ErrorDetail
 
 from athena.gateway.approval import ApprovalManager
 from athena.gateway.routes import api_router
 
-from athena.gateway.ws.handler import router as websocket_router
-from athena.gateway.ws.manager import WebSocketManager
 from athena.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -48,32 +60,38 @@ async def lifespan(app: FastAPI):
         None。yield 前完成初始化，yield 后执行清理。
 
     异常：
-        Exception: 任何子系统初始化失败时向上抛出，阻止应用启动。
+        异常: 任何子系统初始化失败时向上抛出，阻止应用启动。
     """
     settings = get_settings()
+    loopback = settings.host in {"127.0.0.1", "localhost", "::1"}
+    if not loopback and not settings.auth_enabled:
+        raise RuntimeError("AUTH_ENABLED must be true when binding beyond loopback")
+    if settings.auth_enabled and (
+        not settings.auth_username
+        or not settings.auth_password
+        or len(settings.auth_session_secret) < 32
+    ):
+        raise RuntimeError(
+            "Authentication requires username, password and a 32+ byte session secret"
+        )
     configure_logging(debug=settings.debug)
     logger.info("athena_starting", host=settings.host, port=settings.port)
 
     # ── 1. 数据库 ──
     db = Database(settings.sqlite_db_path)
     await db.connect()
+    command_notifier = CommandNotifier()
+    agent_store = AgentStore(command_notifier=command_notifier)
 
-    from athena.evaluation.portal import EvaluationPortal
+    # ── 2. Application Event publisher ──
+    event_publisher = RuntimeEventPublisher(agent_store)
 
-    evaluation_portal = EvaluationPortal(
-        settings.evaluation_data_path,
-        record_enabled=settings.evaluation_record_enabled,
-        sample_rate=settings.evaluation_record_sample_rate,
-    )
-
-    # ── 2. WebSocket 管理器 ──
-    ws_manager = WebSocketManager()
-
-    # ── 3. 审批管理器（绑定 ws + db） ──
+    # ── 3. 审批管理器（绑定事件发布器与数据库） ──
     approval_manager = ApprovalManager(
         approval_timeout=settings.approval_timeout,
-        websocket_manager=ws_manager,
+        event_publisher=event_publisher,
         db=db,
+        agent_store=agent_store,
     )
 
     # ── 4. 工具管理器（注册内置工具 + MCP 工具） ──
@@ -112,8 +130,7 @@ async def lifespan(app: FastAPI):
         llm_primary,
         llm_secondary,
         settings=settings,
-        ws_manager=ws_manager,
-        trace_sink=evaluation_portal.record_trace,
+        event_publisher=event_publisher,
     )
     await file_runtime.initialize()
 
@@ -151,39 +168,12 @@ async def lifespan(app: FastAPI):
         MemoryRetrievalService,
     )
 
-    # Local evaluation records need the same structured trace as diagnostics.
-    # The portal itself applies the configured sampling rate at the write boundary.
-    if settings.evaluation_record_enabled and settings.evaluation_record_sample_rate > 0:
-        settings.retrieval_trace_enabled = True
     retrieval_manager = HybridRetrievalManager(
         llm_secondary,
         memory_manager,
         settings=settings,
-        trace_sink=evaluation_portal.record_trace,
     )
-    from athena.evaluation.shadow import ShadowRetrievalRunner
-    from athena.evaluation.storage import JsonlEventStore
-
-    async def shadow_memory_executor(
-        query: str, _scope: dict, *, record_access: bool
-    ) -> list:
-        """以旁路只读模式复用 memory 检索组件。"""
-        return await retrieval_manager.retrieve(query, record_access=record_access)
-
-    shadow_runner = ShadowRetrievalRunner(
-        shadow_memory_executor,
-        enabled=settings.retrieval_shadow_enabled,
-        sample_rate=settings.retrieval_shadow_sample_rate,
-        max_concurrency=settings.retrieval_shadow_max_concurrency,
-        timeout_ms=settings.retrieval_shadow_timeout_ms,
-        queue_size=settings.retrieval_shadow_queue_size,
-        drop_on_overload=settings.retrieval_shadow_drop_on_overload,
-        store=JsonlEventStore(Path(settings.retrieval_shadow_event_path)),
-        hash_salt=settings.retrieval_trace_query_hash_salt or "shadow",
-    )
-    memory_retrieval = MemoryRetrievalService(
-        retrieval_manager, llm_primary, settings, shadow_runner=shadow_runner
-    )
+    memory_retrieval = MemoryRetrievalService(retrieval_manager, llm_primary, settings)
 
     from athena.core.memory.summarizer import ConversationSummarizer
 
@@ -205,14 +195,12 @@ async def lifespan(app: FastAPI):
         settings=settings,
     )
 
-    # ── 6. AgentWorkflow（核心编排入口） ──
-    from athena.core.agent.workflow import AgentWorkflow
-
-    workflow = AgentWorkflow(
+    # ── 6. LangGraph 运行时（唯一 Agent 编排入口） ──
+    graph_runtime = LangGraphRuntime(
         llm=llm_primary,
         tool_manager=tool_manager,
         db=db,
-        ws_manager=ws_manager,
+        event_publisher=event_publisher,
         compressor=compressor,
         memory_retrieval=memory_retrieval,
         conversation_summarizer=conversation_summarizer,
@@ -221,14 +209,15 @@ async def lifespan(app: FastAPI):
         settings=settings,
     )
     # 注册子 Agent 派生工具到工具管理器
-    await tool_registry.install(workflow.delegation_tool_specs())
-    file_worker.set_continuation_callback(workflow.resume_file_continuation)
-    await file_worker.start()
+    await tool_registry.install(graph_runtime.delegation_tool_specs())
+    file_worker.set_continuation_callback(graph_runtime.resume_file_continuation)
 
     # ── 6.1 RuntimeContainer（路由层依赖注入容器） ──
+    realtime_transport = SessionEventBus()
+    agent_store.transport = realtime_transport
     app.state.runtime = RuntimeContainer(
         db=db,
-        websocket_manager=ws_manager,
+        event_publisher=event_publisher,
         approval_manager=approval_manager,
         tool_manager=tool_manager,
         tool_catalog=tool_catalog,
@@ -237,14 +226,25 @@ async def lifespan(app: FastAPI):
         file_runtime=file_runtime,
         file_worker=file_worker,
         memory_manager=memory_manager,
-        workflow=workflow,
-        evaluation_portal=evaluation_portal,
+        agent_store=agent_store,
+        realtime_transport=realtime_transport,
     )
-
-    # ── 7. 被动会话恢复 ──
-    from athena.gateway.recovery import recover_interrupted_sessions
-
-    await recover_interrupted_sessions(db)
+    await RecoveryReconciler(app.state.runtime.agent_store).reconcile()
+    checkpoint_conn = await aiosqlite.connect(settings.sqlite_db_path)
+    checkpointer = AsyncSqliteSaver(checkpoint_conn)
+    await checkpointer.setup()
+    graph = build_graph(graph_runtime, checkpointer)
+    graph_runtime.set_graph(graph)
+    await file_worker.start()
+    command_consumer = CommandConsumer(
+        app.state.runtime.agent_store,
+        notifier=command_notifier,
+        graph=graph,
+        cancellation=CancellationRegistry(),
+        memory_manager=memory_manager,
+        file_worker=file_worker,
+    )
+    await command_consumer.start()
 
     logger.info("athena_started")
     yield
@@ -252,9 +252,14 @@ async def lifespan(app: FastAPI):
     # ── 关闭清理（按初始化逆序释放资源） ──
     logger.info("athena_shutting_down")
     try:
+        await command_consumer.stop()
+    except Exception as e:
+        logger.warning("command_consumer_shutdown_failed", error=str(e))
+    try:
         await file_worker.stop()
     except Exception as e:
         logger.warning("file_worker_shutdown_failed", error=str(e))
+    await checkpoint_conn.close()
     try:
         await approval_manager.cancel_all_pending("")
     except Exception as e:
@@ -274,10 +279,6 @@ async def lifespan(app: FastAPI):
         await mcp_manager.shutdown()
     except Exception as e:
         logger.warning("mcp_shutdown_failed", error=str(e))
-    try:
-        await shadow_runner.close()
-    except Exception as e:
-        logger.warning("retrieval_shadow_shutdown_failed", error=str(e))
     await db.close()
     logger.info("athena_stopped")
 
@@ -293,18 +294,58 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# 允许所有来源的 CORS 请求（开发环境）
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        """校验写请求来源和受保护接口的认证状态。
+
+        参数:
+            request (Request): 当前 HTTP 请求。
+            call_next (Callable): 下一个中间件或路由处理器。
+        返回值:
+            Response: 下游响应，或认证失败时的 JSON 错误响应。
+        异常:
+            下游处理器抛出的异常由中间件链继续传播。
+        """
+        settings = get_settings()
+        if (
+            settings.auth_enabled
+            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and request.url.path not in {"/api/auth/login", "/api/auth/logout"}
+        ):
+            origin = request.headers.get("origin")
+            if origin and origin not in {
+                f"http://{settings.host}:{settings.port}",
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+            }:
+                return JSONResponse(
+                    {"detail": ErrorDetail.INVALID_ORIGIN}, status_code=403
+                )
+        if (
+            settings.auth_enabled
+            and request.url.path
+            not in {"/api/auth/login", "/api/auth/logout", "/api/health", "/health"}
+            and not is_authenticated(request)
+        ):
+            return JSONResponse(
+                {"detail": ErrorDetail.AUTHENTICATION_REQUIRED}, status_code=401
+            )
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 注册 REST API 路由（/api/*）和 WebSocket 端点（/ws）
+# 注册 REST API 路由（/api/*）；事件通过 SSE 提供。
 app.include_router(api_router)
-app.include_router(websocket_router)
 
 
 def run() -> None:
@@ -316,6 +357,19 @@ def run() -> None:
     import uvicorn
 
     settings = get_settings()
+    if (
+        settings.host not in {"127.0.0.1", "localhost", "::1"}
+        and settings.auth_enabled is False
+    ):
+        raise RuntimeError("AUTH_ENABLED must be true when binding beyond loopback")
+    if settings.host not in {"127.0.0.1", "localhost", "::1"} and (
+        len(settings.auth_session_secret) < 32
+        or not settings.auth_username
+        or not settings.auth_password
+    ):
+        raise RuntimeError(
+            "LAN binding requires AUTH_USERNAME, AUTH_PASSWORD and a 32+ byte AUTH_SESSION_SECRET"
+        )
     # reload 模式只监听源码目录，避免误重启：
     # 内置工具(write_file / exec_shell)会向项目根目录写 .py 产物
     # （如 create_paper.py），pip install 也会向 .venv 写 .py；

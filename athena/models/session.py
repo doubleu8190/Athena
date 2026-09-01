@@ -33,7 +33,7 @@ class Session(BaseModel):
     id: str
     title: str = "New Session"
     status: SessionStatus = SessionStatus.IDLE
-    run_id: str | None = None  # 当前运行 ID，关联 steps 表
+    run_id: str | None = None  # 当前运行 ID
     created_at: datetime
     updated_at: datetime
     # 压缩相关字段

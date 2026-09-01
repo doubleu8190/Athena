@@ -740,16 +740,16 @@ def _python_index(
         """表示 Visitor 组件，封装相关状态和行为。
         """
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
-            """执行“visit ClassDef”操作。
+            """
 
             参数：
-                node (ast.ClassDef): 输入参数；其类型和取值约束由方法签名及实现定义。
+                node (ast.ClassDef): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
             返回值：
-                None: 操作结果；具体语义由调用场景决定。
+                None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             qualified = ".".join([*parents, node.name])
             symbols.append(
@@ -769,44 +769,44 @@ def _python_index(
             parents.pop()
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            """执行“visit FunctionDef”操作。
+            """
 
             参数：
-                node (ast.FunctionDef): 输入参数；其类型和取值约束由方法签名及实现定义。
+                node (ast.FunctionDef): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
             返回值：
-                None: 操作结果；具体语义由调用场景决定。
+                None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             self._visit_function(node)
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            """执行“visit AsyncFunctionDef”操作。
+            """
 
             参数：
-                node (ast.AsyncFunctionDef): 输入参数；其类型和取值约束由方法签名及实现定义。
+                node (ast.AsyncFunctionDef): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
             返回值：
-                None: 操作结果；具体语义由调用场景决定。
+                None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             self._visit_function(node)
 
         def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-            """执行“visit function”操作。
+            """
 
             参数：
-                node (ast.FunctionDef | ast.AsyncFunctionDef): 输入参数；其类型和取值约束由方法签名及实现定义。
+                node (ast.FunctionDef | ast.AsyncFunctionDef): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
             返回值：
-                None: 操作结果；具体语义由调用场景决定。
+                None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             qualified = ".".join([*parents, node.name])
             args = ", ".join(arg.arg for arg in node.args.args)
@@ -827,16 +827,16 @@ def _python_index(
             parents.pop()
 
         def visit_Import(self, node: ast.Import) -> None:
-            """执行“visit Import”操作。
+            """
 
             参数：
-                node (ast.Import): 输入参数；其类型和取值约束由方法签名及实现定义。
+                node (ast.Import): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
             返回值：
-                None: 操作结果；具体语义由调用场景决定。
+                None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             for name in node.names:
                 dependencies.append(
@@ -849,16 +849,16 @@ def _python_index(
                 )
 
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-            """执行“visit ImportFrom”操作。
+            """
 
             参数：
-                node (ast.ImportFrom): 输入参数；其类型和取值约束由方法签名及实现定义。
+                node (ast.ImportFrom): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
             返回值：
-                None: 操作结果；具体语义由调用场景决定。
+                None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             dependencies.append(
                 {
@@ -870,16 +870,16 @@ def _python_index(
             )
 
         def visit_Call(self, node: ast.Call) -> None:
-            """执行“visit Call”操作。
+            """
 
             参数：
-                node (ast.Call): 输入参数；其类型和取值约束由方法签名及实现定义。
+                node (ast.Call): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
             返回值：
-                None: 操作结果；具体语义由调用场景决定。
+                None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             target = ""
             if isinstance(node.func, ast.Name):

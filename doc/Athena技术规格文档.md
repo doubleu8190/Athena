@@ -1,5 +1,7 @@
 # Athena 技术规格文档
 
+> 文档状态：历史方案，仅用于查阅早期设计。当前实现已迁移到 `agent_runtime`、LangGraph、HTTP Command 和 SSE；实际接口、目录和依赖以项目源码、README 及 `doc/architecture.md` 为准。
+
 **版本：** v1.0
 **最后更新：** 2026-07-30
 **项目名称：** Athena — 自主 AI Agent 桌面应用

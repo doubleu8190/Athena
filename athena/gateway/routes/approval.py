@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
@@ -10,6 +11,10 @@ from pydantic import BaseModel
 from athena.models import ApprovalLog
 from athena.utils.logging import get_logger
 from athena.runtime import runtime_from
+from athena.contracts.commands import Command, CommandType
+from athena.contracts.errors import ErrorDetail
+from athena.contracts.statuses import AgentApprovalDecision
+from athena.utils.ids import generate_time_id
 
 if TYPE_CHECKING:
     from athena.gateway.approval import ApprovalManager
@@ -20,55 +25,105 @@ router = APIRouter(prefix="/approvals", tags=["approvals"])
 
 
 class ApprovalResponseRequest(BaseModel):
-    """表示 审批ResponseRequest 组件，封装相关状态和行为。
+    """审批响应请求体。
+
+    ``action`` 仅接受 ``allow`` 或 ``deny``，由路由转换为内部审批决定。
     """
+
     action: str  # allow / deny（允许 / 拒绝）
 
 
 async def _get_approval_manager(request: Request) -> ApprovalManager:
-    """执行“获取审批管理器”操作。
+    """从请求应用状态获取审批管理器。
 
     参数：
-        request (Request): 当前 HTTP 或 WebSocket 请求对象。
+        request (Request): 当前 HTTP 请求对象。
 
     返回值：
-        审批Manager: 操作结果；具体语义由调用场景决定。
+        ApprovalManager: 应用启动时注入的审批管理器。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        RuntimeError: 应用运行时未初始化。
     """
     return runtime_from(request).approval_manager
 
 
 @router.get("")
-async def list_pending_approvals(request: Request, session_id: str | None = None) -> list[dict[str, Any]]:
+async def list_pending_approvals(
+    request: Request, session_id: str | None = None
+) -> list[dict[str, Any]]:
     """列出待审批请求."""
-    manager = await _get_approval_manager(request)
-    return manager.get_pending(session_id=session_id)
+    rows = await runtime_from(request).agent_store.pending_approvals(session_id)
+    return [
+        {
+            "approval_id": row.approval_id,
+            "tool_name": row.tool_name,
+            "arguments": json.loads(row.arguments_json),
+            "risk_level": row.risk_level,
+            "created_at": row.created_at,
+            "session_id": row.session_id,
+            "run_id": row.run_id,
+            "tool_call_id": row.tool_call_id,
+            "resolved": False,
+            "resolution": "pending",
+        }
+        for row in rows
+    ]
 
 
-@router.post("/{approval_id}/respond")
+@router.post("/{approval_id}/respond", status_code=202)
 async def respond_approval(
     approval_id: str, req: ApprovalResponseRequest, request: Request
 ) -> dict[str, Any]:
     """响应审批请求."""
-    manager = await _get_approval_manager(request)
     if req.action not in ("allow", "deny"):
-        raise HTTPException(status_code=400, detail="action must be 'allow' or 'deny'")
-    ok = await manager.respond_approval(approval_id, req.action)
-    if not ok:
-        raise HTTPException(
-            status_code=404, detail="Approval not found or already resolved"
-        )
-    return {"status": "responded", "approval_id": approval_id, "action": req.action}
+        raise HTTPException(status_code=400, detail=ErrorDetail.INVALID_APPROVAL_ACTION)
+    runtime = runtime_from(request)
+    approval = await runtime.agent_store.get_approval(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail=ErrorDetail.APPROVAL_NOT_FOUND)
+    command = Command(
+        command_id=f"cmd_{generate_time_id()}",
+        command_type=CommandType.APPROVAL_RESOLVE,
+        session_id=approval.session_id,
+        run_id=approval.run_id,
+        payload={
+            "approval_id": approval_id,
+            "decision": (
+                AgentApprovalDecision.APPROVED.value
+                if req.action == "allow"
+                else AgentApprovalDecision.DENIED.value
+            ),
+        },
+    )
+    await runtime.agent_store.enqueue(command)
+    return {
+        "status": "pending",
+        "approval_id": approval_id,
+        "command_id": command.command_id,
+    }
 
 
 @router.post("/{approval_id}/cancel")
 async def cancel_approval(approval_id: str, request: Request) -> dict[str, Any]:
-    """取消审批请求."""
-    manager = await _get_approval_manager(request)
-    await manager.cancel_approval(approval_id)
-    return {"status": "cancelled", "approval_id": approval_id}
+    """提交审批取消命令，由 Runtime 条件更新持久化记录。"""
+    runtime = runtime_from(request)
+    approval = await runtime.agent_store.get_approval(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail=ErrorDetail.APPROVAL_NOT_FOUND)
+    command = Command(
+        command_id=f"cmd_{generate_time_id()}",
+        command_type=CommandType.APPROVAL_CANCEL,
+        session_id=approval.session_id,
+        run_id=approval.run_id,
+        payload={"approval_id": approval_id},
+    )
+    await runtime.agent_store.enqueue(command)
+    return {
+        "status": "pending",
+        "approval_id": approval_id,
+        "command_id": command.command_id,
+    }
 
 
 @router.post("/session/{session_id}/cancel-all")

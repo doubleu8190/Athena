@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from athena.models.mcp import McpServerConfig
 from athena.runtime import runtime_from
+from athena.contracts.errors import ErrorDetail
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
@@ -84,6 +85,9 @@ async def unregister_mcp_server(name: str, request: Request) -> dict[str, Any]:
     manager = runtime.mcp_manager
     db = runtime.db
     if await db.mcp_servers.get(name) is None:
-        raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
+        raise HTTPException(
+            status_code=404,
+            detail=f"{ErrorDetail.MCP_SERVER_NOT_FOUND}: {name}",
+        )
     await manager.unregister_server(name)
     return {"status": "deleted", "name": name}

@@ -15,13 +15,13 @@ class AdapterRegistry:
     """表示 AdapterRegistry 组件，封装相关状态和行为。
     """
     def __init__(self) -> None:
-        """初始化当前对象。
+        """
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         adapters: list[FileAdapter] = [
             PdfAdapter(), WordAdapter(), ExcelAdapter(), ImageAdapter(), CodeAdapter(), TextAdapter(),
@@ -32,10 +32,10 @@ class AdapterRegistry:
         """列出数据。
 
         返回值：
-            list[FileAdapter]: 操作结果；具体语义由调用场景决定。
+            list[FileAdapter]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return list(self._adapters.values())
 
@@ -51,10 +51,10 @@ class AdapterRegistry:
             mime_type (str): 文件 MIME 类型。
 
         返回值：
-            FileAdapter: 操作结果；具体语义由调用场景决定。
+            FileAdapter: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         lower = filename.lower()
         extension = Path(lower).suffix

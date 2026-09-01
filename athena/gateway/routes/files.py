@@ -13,43 +13,44 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from athena.core.files.runtime import FileAccessError
 from athena.runtime import runtime_from
+from athena.contracts.errors import ErrorDetail
 
 router = APIRouter(prefix="/sessions/{session_id}", tags=["files"])
 
 
 def _file_services(request: Request):
-    """执行“文件服务”操作。
+    """从请求应用状态获取文件运行时和任务工作器。
 
     参数：
-        request (Request): 当前 HTTP 或 WebSocket 请求对象。
+        request (Request): 当前 HTTP 请求对象。
 
     返回值：
-        Any: 操作结果；具体语义由调用场景决定。
+        tuple[FileIntelligenceRuntime, FileTaskWorker]: 文件服务和任务工作器。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        RuntimeError: 应用运行时未初始化。
     """
     runtime = runtime_from(request)
     return runtime.file_runtime, runtime.file_worker
 
 
 async def _ensure_session(session_id: str, request: Request):
-    """执行“ensure session”操作。
+    """校验会话存在，并返回数据库访问对象。
 
     参数：
         session_id (str): 会话唯一标识。
-        request (Request): 当前 HTTP 或 WebSocket 请求对象。
+        request (Request): 当前 HTTP 请求对象。
 
     返回值：
-        Any: 操作结果；具体语义由调用场景决定。
+        Database: 当前应用的数据库访问对象。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        HTTP异常: 会话不存在时返回 404。
     """
     runtime = runtime_from(request)
     session = await runtime.db.sessions.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
     return runtime.db
 
 
@@ -57,7 +58,7 @@ def _raise_file_http_error(exc: Exception) -> None:
     """将文件操作异常转换为 HTTP 异常。"""
     if isinstance(exc, (FileAccessError, FileNotFoundError)):
         raise HTTPException(
-            status_code=404, detail=str(exc) or "Attachment not found"
+            status_code=404, detail=str(exc) or ErrorDetail.ATTACHMENT_NOT_FOUND
         ) from exc
     if isinstance(exc, ValueError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -82,7 +83,7 @@ async def upload_attachments(
         filename = Path((upload.filename or "upload.bin").replace("\\", "/")).name
         if not filename or "\x00" in filename:
             await upload.close()
-            raise HTTPException(status_code=400, detail="Invalid filename")
+            raise HTTPException(status_code=400, detail=ErrorDetail.INVALID_FILENAME)
         try:
             try:
                 runtime.adapter_registry.select(filename, upload.content_type or "")
@@ -90,14 +91,7 @@ async def upload_attachments(
                 raise HTTPException(status_code=415, detail=str(exc)) from exc
 
             async def chunks():
-                """执行“chunks”操作。
-
-                返回值：
-                    Any: 操作结果；具体语义由调用场景决定。
-
-                异常：
-                    Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
-                """
+                """以固定块大小异步读取当前上传文件。"""
                 while True:
                     chunk = await upload.read(1024 * 1024)
                     if not chunk:
@@ -171,7 +165,7 @@ async def delete_attachment(
     runtime, worker = _file_services(request)
     deleted = await runtime.repository.soft_delete_attachment(file_id, session_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Attachment not found")
+        raise HTTPException(status_code=404, detail=ErrorDetail.ATTACHMENT_NOT_FOUND)
     await worker.resume_continuations(file_id)
     await runtime.cleanup_unreferenced_blobs()
     return {"status": "deleted", "file_id": file_id}
@@ -202,7 +196,7 @@ async def get_file_task(session_id: str, task_id: str, request: Request) -> dict
     runtime, _ = _file_services(request)
     task = await runtime.repository.get_task(task_id, session_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="File task not found")
+        raise HTTPException(status_code=404, detail=ErrorDetail.FILE_TASK_NOT_FOUND)
     return task.model_dump(mode="json")
 
 
@@ -215,7 +209,7 @@ async def cancel_file_task(
     runtime, worker = _file_services(request)
     task = await runtime.repository.get_task(task_id, session_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="File task not found")
+        raise HTTPException(status_code=404, detail=ErrorDetail.FILE_TASK_NOT_FOUND)
     await runtime.repository.update_task(
         task_id,
         status="cancelled",

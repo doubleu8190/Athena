@@ -1,0 +1,920 @@
+"""版本化命令、事件和流快照的 SQLite 持久化实现。"""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import hmac
+import os
+import asyncio
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Any
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
+from agent_runtime.command_notifications import CommandNotifier
+from agent_runtime.transport import SessionEventBus
+from athena.contracts.commands import Command, CommandType
+from athena.contracts.errors import ErrorDetail
+from athena.contracts.events import ApplicationEvent, EventDurability
+from athena.contracts.ports import AgentCommandRecord, AgentRunRecord
+from athena.contracts.statuses import (
+    AgentApprovalDecision,
+    AgentApprovalStatus,
+    AgentCommandStatus,
+    AgentRunStatus,
+    StreamSnapshotStatus,
+    ToolExecutionStatus,
+    ToolSideEffectClass,
+)
+from athena.infrastructure.sqlite.engine import SQLITE_BUSY_TIMEOUT_MS, get_session
+from athena.infrastructure.sqlite.models import (
+    AgentCommandModel,
+    AgentEventModel,
+    StreamSnapshotModel,
+    AgentRunModel,
+    ApprovalRecordModel,
+    ToolExecutionModel,
+)
+from athena.models.tool import RiskLevel
+from athena.utils.ids import generate_time_id
+
+
+def _now() -> str:
+    """返回当前 UTC 时间的 ISO 8601 字符串。
+
+    返回值:
+        str: 带时区信息的 UTC 时间。
+    异常:
+        不抛出业务异常。
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
+class AgentStore:
+    """保存 Runtime 的命令、运行、事件、快照、审批和工具执行记录。"""
+
+    def __init__(
+        self,
+        transport: SessionEventBus | None = None,
+        command_notifier: CommandNotifier | None = None,
+    ) -> None:
+        """创建 Agent Store。
+
+        参数:
+            transport (SessionEventBus | None): 可选会话事件总线；为空时只持久化事件。
+            command_notifier (CommandNotifier | None): Command 持久化后的进程内唤醒通知器。
+        返回值:
+            None。
+        异常:
+            不抛出业务异常。
+        """
+        self.transport = transport
+        self.command_notifier = command_notifier
+        self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    transport: SessionEventBus | None
+    command_notifier: CommandNotifier | None
+    _event_locks: dict[str, asyncio.Lock]
+
+    async def active_run(self, session_id: str) -> AgentRunModel | None:
+        """查询会话最近的活跃运行，包括暂停中的运行。
+
+        参数:
+            session_id (str): 非空会话 ID。
+        返回值:
+            AgentRunModel | None: 活跃运行记录；不存在时返回 ``None``。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            return await db.scalar(
+                select(AgentRunModel)
+                .where(
+                    AgentRunModel.session_id == session_id,
+                    AgentRunModel.status.in_(
+                        status.value
+                        for status in (
+                            AgentRunStatus.QUEUED,
+                            AgentRunStatus.RUNNING,
+                            AgentRunStatus.PAUSED,
+                            AgentRunStatus.CANCEL_REQUESTED,
+                            AgentRunStatus.WAITING_APPROVAL,
+                            AgentRunStatus.WAITING_FILES,
+                        )
+                    ),
+                )
+                .order_by(AgentRunModel.updated_at.desc())
+                .limit(1)
+            )
+
+    async def update_run_status(
+        self, run_id: str, status: AgentRunStatus, error: str | None = None
+    ) -> None:
+        """更新运行状态并记录可选错误信息。
+
+        参数:
+            run_id (str): 运行 ID。
+            status (AgentRunStatus): 目标运行状态。
+            error (str | None): 可选错误文本。
+        返回值:
+            None: 运行不存在时也保持幂等。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            row = await db.get(AgentRunModel, run_id)
+            if row:
+                row.status, row.error, row.updated_at = status.value, error, _now()
+                await db.commit()
+
+    async def update_run_control(
+        self,
+        run_id: str,
+        *,
+        pause: bool = False,
+        clear_pause: bool = False,
+        cancel: bool = False,
+        status: AgentRunStatus | None = None,
+    ) -> bool:
+        """更新运行的暂停、取消控制标志和可选状态。
+
+        参数:
+            run_id (str): 运行 ID。
+            pause (bool): 是否设置暂停请求标志。
+            clear_pause (bool): 是否清除暂停请求标志。
+            cancel (bool): 是否设置取消请求标志。
+            status (AgentRunStatus | None): 可选的新状态。
+        返回值:
+            bool: 找到并更新运行时返回 ``True``，否则返回 ``False``。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            row = await db.get(AgentRunModel, run_id)
+            if row is None:
+                return False
+            if pause:
+                row.pause_requested = 1
+            if clear_pause:
+                row.pause_requested = 0
+            if cancel:
+                row.cancel_requested = 1
+            if status:
+                row.status = status.value
+            row.updated_at = _now()
+            await db.commit()
+            return True
+
+    async def runs_for_session(self, session_id: str) -> list[AgentRunModel]:
+        """按创建时间返回会话的全部运行记录。
+
+        参数:
+            session_id (str): 非空会话 ID。
+        返回值:
+            list[AgentRunModel]: 按创建时间升序排列的运行记录。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            result = await db.execute(
+                select(AgentRunModel)
+                .where(AgentRunModel.session_id == session_id)
+                .order_by(AgentRunModel.created_at)
+            )
+            return list(result.scalars())
+
+    async def get_run(self, run_id: str) -> AgentRunModel | None:
+        """按主键查询运行记录。
+
+        参数:
+            run_id (str): 运行主键。
+        返回值:
+            AgentRunModel | None: 匹配记录；不存在时返回 ``None``。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            return await db.get(AgentRunModel, run_id)
+
+    async def list_recoverable_runs(self) -> list[AgentRunRecord]:
+        """返回启动恢复需要处理的运行，包括暂停中的运行。
+
+        返回值:
+            list[AgentRunRecord]: 状态为排队、运行、暂停或待取消的轻量记录。
+        异常:
+            数据库查询或状态值转换失败时传播相应异常。
+        """
+        async with get_session() as db:
+            result = await db.execute(
+                select(AgentRunModel).where(
+                    AgentRunModel.status.in_(
+                        status.value
+                        for status in (
+                            AgentRunStatus.QUEUED,
+                            AgentRunStatus.RUNNING,
+                            AgentRunStatus.PAUSED,
+                            AgentRunStatus.CANCEL_REQUESTED,
+                        )
+                    )
+                )
+            )
+            return [
+                AgentRunRecord(
+                    run_id=row.run_id,
+                    status=AgentRunStatus(row.status),
+                    cancel_requested=row.cancel_requested,
+                )
+                for row in result.scalars()
+            ]
+
+    async def claim_pending(self) -> AgentCommandRecord | None:
+        """领取一条可执行命令并标记为处理中。
+
+        返回值:
+            AgentCommandRecord | None: 成功领取的命令；没有可执行命令时返回 ``None``。
+        异常:
+            数据库竞争或状态转换失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            row = await db.scalar(
+                select(AgentCommandModel)
+                .where(
+                    AgentCommandModel.status == AgentCommandStatus.PENDING.value,
+                    AgentCommandModel.available_at <= _now(),
+                )
+                .order_by(AgentCommandModel.issued_at)
+                .limit(1)
+            )
+            if row is None:
+                return None
+            row.status = AgentCommandStatus.CLAIMED.value
+            row.attempt += 1
+            await db.commit()
+            return AgentCommandRecord(
+                command_id=row.command_id,
+                session_id=row.session_id,
+                run_id=row.run_id,
+                command_type=CommandType(row.command_type),
+                schema_version=row.schema_version,
+                payload_json=row.payload_json,
+            )
+
+    async def complete(
+        self,
+        command_id: str,
+        *,
+        status: AgentCommandStatus,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        """完成命令并写入结果或错误。
+
+        参数:
+            command_id (str): 命令 ID。
+            status (AgentCommandStatus): 命令终态。
+            result (dict[str, Any] | None): 可选成功结果。
+            error (dict[str, Any] | None): 可选错误结构。
+        返回值:
+            None: 命令不存在时保持幂等。
+        异常:
+            结果无法序列化或数据库写入失败时传播相应异常。
+        """
+        async with get_session() as db:
+            row = await db.get(AgentCommandModel, command_id)
+            if row is None:
+                return
+            row.status = status.value
+            row.result_json = (
+                json.dumps(result, ensure_ascii=False) if result is not None else None
+            )
+            row.error_json = (
+                json.dumps(error, ensure_ascii=False) if error is not None else None
+            )
+            await db.commit()
+
+    async def get_command(self, command_id: str) -> AgentCommandModel | None:
+        """按 ID 查询命令记录。
+
+        参数:
+            command_id (str): 命令主键。
+        返回值:
+            AgentCommandModel | None: 匹配记录；不存在时返回 ``None``。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            return await db.get(AgentCommandModel, command_id)
+
+    async def events_after(
+        self, session_id: str, after: int = 0
+    ) -> list[AgentEventModel]:
+        """查询会话中游标之后的持久化事件。
+
+        参数:
+            session_id (str): 会话 ID。
+            after (int): 排除该事件 ID 及之前事件，必须为非负整数。
+        返回值:
+            list[AgentEventModel]: 按事件 ID 升序排列的事件。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            result = await db.execute(
+                select(AgentEventModel)
+                .where(
+                    AgentEventModel.session_id == session_id,
+                    AgentEventModel.session_seq > after,
+                )
+                .order_by(AgentEventModel.session_seq)
+            )
+            return list(result.scalars())
+
+    async def events_between(
+        self, session_id: str, after: int = 0, upto: int | None = None
+    ) -> list[AgentEventModel]:
+        """查询指定会话游标区间内的事件，供 SSE watermark 重放使用。"""
+        async with get_session() as db:
+            query = select(AgentEventModel).where(
+                AgentEventModel.session_id == session_id,
+                AgentEventModel.session_seq > after,
+            )
+            if upto is not None:
+                query = query.where(AgentEventModel.session_seq <= upto)
+            result = await db.execute(query.order_by(AgentEventModel.session_seq))
+            return list(result.scalars())
+
+    async def open_subscription(
+        self, session_id: str
+    ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
+        """登记订阅并原子取得历史重放 watermark。"""
+        if self.transport is None:
+            raise RuntimeError("Realtime transport is not configured")
+        async with self._event_locks[session_id]:
+            queue = await self.transport.open_subscription(session_id)
+            async with get_session() as db:
+                watermark = (
+                    await db.scalar(
+                        select(func.max(AgentEventModel.session_seq)).where(
+                            AgentEventModel.session_id == session_id
+                        )
+                    )
+                    or 0
+                )
+            return queue, watermark
+
+    async def snapshots_for_session(self, session_id: str) -> list[StreamSnapshotModel]:
+        """查询会话的流快照，并按更新时间升序返回。
+
+        参数:
+            session_id (str): 会话 ID。
+        返回值:
+            list[StreamSnapshotModel]: 会话快照列表。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            result = await db.execute(
+                select(StreamSnapshotModel)
+                .where(StreamSnapshotModel.session_id == session_id)
+                .order_by(StreamSnapshotModel.updated_at)
+            )
+            return list(result.scalars())
+
+    @staticmethod
+    def _same_command(
+        existing: AgentCommandModel, command: Command, payload_hash: str
+    ) -> bool:
+        """判断数据库记录是否与待入队命令代表同一客户端意图。
+
+        ``MESSAGE_SUBMIT`` 的 ``run_id`` 由服务端生成，重试请求可能携带新的候选值，
+        因此该字段不参与消息命令的幂等比较；其它命令的目标运行必须保持一致。
+        """
+        same_identity = (
+            existing.payload_hash == payload_hash
+            and existing.command_type == command.command_type.value
+            and existing.session_id == command.session_id
+            and existing.schema_version == command.schema_version
+        )
+        if not same_identity:
+            return False
+        return command.command_type == CommandType.MESSAGE_SUBMIT or (
+            existing.run_id == command.run_id
+        )
+
+    @staticmethod
+    def _reuse_or_conflict(
+        existing: AgentCommandModel, command: Command, payload_hash: str
+    ) -> bool:
+        """复用相同命令的持久化运行 ID，或抛出命令冲突异常。"""
+        if not AgentStore._same_command(existing, command, payload_hash):
+            raise ValueError(ErrorDetail.COMMAND_ID_CONFLICT)
+        command.run_id = existing.run_id
+        return False
+
+    async def enqueue(self, command: Command) -> bool:
+        """校验并幂等入队命令，必要时原子创建运行记录。
+
+        参数:
+            command (Command): 已构造的版本化命令；payload 必须符合命令协议。
+        返回值:
+            bool: 新命令已插入时返回 ``True``，重复且内容一致时返回 ``False``。
+        异常:
+            ValueError: payload 非法、命令 ID 冲突或会话已有不可并行运行。
+            数据库异常: 持久化失败且无法恢复时传播 SQLAlchemy 异常。
+        """
+        command.validate_payload()
+        payload_hash = command.payload_fingerprint()
+        payload_json = json.dumps(command.payload, sort_keys=True)
+        async with get_session() as db:
+            lock_timeout_changed = False
+            try:
+                existing = await db.get(AgentCommandModel, command.command_id)
+                if existing:
+                    return AgentStore._reuse_or_conflict(
+                        existing, command, payload_hash
+                    )
+
+                if command.command_type == CommandType.MESSAGE_SUBMIT:
+                    # 只有消息命令需要竞争会话的 Run 创建权；控制命令可以直接入队。
+                    try:
+                        await db.rollback()
+                        await db.execute(text("PRAGMA busy_timeout = 0"))
+                        lock_timeout_changed = True
+                        await db.execute(text("BEGIN IMMEDIATE"))
+                    except OperationalError as exc:
+                        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                            raise ValueError(ErrorDetail.SESSION_BUSY) from exc
+                        raise
+
+                    # 首次快速查重未命中时，必须在写锁内再次查重，避免同一命令的
+                    # 并发重试被错误识别为 session_busy。
+                    existing = await db.get(AgentCommandModel, command.command_id)
+                    if existing:
+                        return AgentStore._reuse_or_conflict(
+                            existing, command, payload_hash
+                        )
+
+                    active = await db.scalar(
+                        select(AgentRunModel)
+                        .where(
+                            AgentRunModel.session_id == command.session_id,
+                            AgentRunModel.status.in_(
+                                status.value
+                                for status in (
+                                    AgentRunStatus.QUEUED,
+                                    AgentRunStatus.RUNNING,
+                                    AgentRunStatus.CANCEL_REQUESTED,
+                                    AgentRunStatus.WAITING_APPROVAL,
+                                    AgentRunStatus.WAITING_FILES,
+                                )
+                            ),
+                        )
+                        .limit(1)
+                    )
+                    if active:
+                        raise ValueError(ErrorDetail.SESSION_BUSY)
+
+                    # 暂停只影响原 Run；新消息必须创建独立 Run，避免重新唤醒或覆盖旧 Run。
+                    run_id = command.run_id or generate_time_id()
+                    if await db.get(AgentRunModel, run_id):
+                        raise ValueError(ErrorDetail.RUN_ID_CONFLICT)
+                    db.add(
+                        AgentRunModel(
+                            run_id=run_id,
+                            session_id=command.session_id,
+                            created_by_command_id=command.command_id,
+                            status=AgentRunStatus.QUEUED.value,
+                            created_at=_now(),
+                            updated_at=_now(),
+                        )
+                    )
+                    command.run_id = run_id
+
+                row = AgentCommandModel(
+                    command_id=command.command_id,
+                    session_id=command.session_id,
+                    run_id=command.run_id,
+                    command_type=command.command_type.value,
+                    schema_version=command.schema_version,
+                    payload_json=payload_json,
+                    payload_hash=payload_hash,
+                    available_at=_now(),
+                    issued_at=command.issued_at.isoformat(),
+                )
+                try:
+                    db.add(row)
+                    await db.commit()
+                    if self.command_notifier is not None:
+                        await self.command_notifier.notify()
+                    return True
+                except IntegrityError:
+                    await db.rollback()
+                    existing = await db.get(AgentCommandModel, command.command_id)
+                    if existing:
+                        return AgentStore._reuse_or_conflict(
+                            existing, command, payload_hash
+                        )
+                    # 不是命令主键冲突时保留原始数据库异常，避免误报为命令冲突。
+                    raise
+            finally:
+                if lock_timeout_changed:
+                    if db.in_transaction():
+                        await db.rollback()
+                    await db.execute(
+                        text(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+                    )
+
+    async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
+        """按会话串行分配游标，持久化事件后广播。
+
+        参数:
+            event (ApplicationEvent): 要发布的事件。
+        返回值:
+            ApplicationEvent: 带最终事件 ID 和序号的事件对象。
+        异常:
+            事件 payload 无法序列化或数据库、实时传输失败时传播相应异常。
+        """
+        async with self._event_locks[event.session_id]:
+            async with get_session() as db:
+                # 进程内按会话串行，事务锁覆盖多进程/多实例下的 SQLite 竞争。
+                await db.execute(text("BEGIN IMMEDIATE"))
+                payload_json = json.dumps(
+                    event.payload, ensure_ascii=False, sort_keys=True
+                )
+
+                # stream_id + chunk_id 是流事件的幂等键。重复发布不再次广播，
+                # 内容变化则拒绝，避免客户端出现不可诊断的分叉流。
+                if event.stream_id is not None and event.chunk_id is not None:
+                    existing = await db.scalar(
+                        select(AgentEventModel).where(
+                            AgentEventModel.session_id == event.session_id,
+                            AgentEventModel.stream_id == event.stream_id,
+                            AgentEventModel.chunk_id == event.chunk_id,
+                        )
+                    )
+                    if existing is not None:
+                        same = (
+                            existing.event_type == event.event_type
+                            and existing.run_id == event.run_id
+                            and existing.payload_json == payload_json
+                            and existing.is_complete == int(event.is_complete)
+                        )
+                        if not same:
+                            raise ValueError("stream chunk idempotency conflict")
+                        return event.model_copy(
+                            update={
+                                "event_id": existing.event_id,
+                                "session_seq": existing.session_seq,
+                                "chunk_id": existing.chunk_id,
+                                "sequence": existing.sequence,
+                            }
+                        )
+
+                current = (
+                    await db.scalar(
+                        select(func.max(AgentEventModel.session_seq)).where(
+                            AgentEventModel.session_id == event.session_id
+                        )
+                    )
+                    or 0
+                )
+                chunk_id = event.chunk_id
+                if (
+                    event.stream_id
+                    and event.event_type == "message.delta"
+                    and chunk_id is None
+                ):
+                    chunk_id = (
+                        await db.scalar(
+                            select(func.max(AgentEventModel.chunk_id)).where(
+                                AgentEventModel.session_id == event.session_id,
+                                AgentEventModel.stream_id == event.stream_id,
+                            )
+                        )
+                        or 0
+                    ) + 1
+                sequence = event.sequence
+                if sequence == 0:
+                    sequence = (
+                        await db.scalar(
+                            select(func.max(AgentEventModel.sequence)).where(
+                                AgentEventModel.session_id == event.session_id,
+                                AgentEventModel.run_id == event.run_id,
+                                AgentEventModel.producer_id == event.producer_id,
+                            )
+                        )
+                        or 0
+                    ) + 1
+                session_seq = current + 1
+                row = AgentEventModel(
+                    session_id=event.session_id,
+                    event_id=session_seq,
+                    session_seq=session_seq,
+                    run_id=event.run_id,
+                    event_type=event.event_type,
+                    durability=event.durability.value,
+                    stream_id=event.stream_id,
+                    stream_type=event.stream_type,
+                    chunk_id=chunk_id,
+                    is_complete=int(event.is_complete),
+                    parent_run_id=event.parent_run_id,
+                    producer_id=event.producer_id,
+                    sequence=sequence,
+                    payload_json=payload_json,
+                    occurred_at=event.occurred_at.isoformat(),
+                )
+                db.add(row)
+                await db.commit()
+                persisted = event.model_copy(
+                    update={
+                        "event_id": session_seq,
+                        "session_seq": session_seq,
+                        "chunk_id": chunk_id,
+                        "sequence": sequence,
+                    }
+                )
+                if self.transport is not None:
+                    # 只有提交成功后才广播；队列满时在这里背压，不丢事件。
+                    await self.transport.publish(persisted)
+                return persisted
+
+    async def upsert_snapshot(
+        self,
+        session_id: str,
+        stream_id: str,
+        version: int,
+        content: str,
+        *,
+        run_id: str | None = None,
+        stream_type: str = "answer",
+        last_chunk_id: int = 0,
+        status: StreamSnapshotStatus = StreamSnapshotStatus.STREAMING,
+    ) -> bool:
+        """按版本递增条件写入流快照。
+
+        参数:
+            session_id (str): 快照所属会话 ID。
+            stream_id (str): 流快照主键。
+            version (int): 新快照版本，必须高于已保存版本。
+            content (str): 当前完整文本内容。
+            run_id (str | None): 可选关联运行 ID。
+            status (StreamSnapshotStatus): 快照状态。
+        返回值:
+            bool: 实际写入新版本时返回 ``True``，版本未增长时返回 ``False``。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            row = await db.get(StreamSnapshotModel, stream_id)
+            if row and row.version >= version:
+                return False
+            if row is None:
+                row = StreamSnapshotModel(
+                    stream_id=stream_id,
+                    session_id=session_id,
+                    stream_type=stream_type,
+                )
+                db.add(row)
+            if last_chunk_id == 0:
+                last_chunk_id = (
+                    await db.scalar(
+                        select(func.max(AgentEventModel.chunk_id)).where(
+                            AgentEventModel.session_id == session_id,
+                            AgentEventModel.stream_id == stream_id,
+                        )
+                    )
+                    or 0
+                )
+            (
+                row.run_id,
+                row.stream_type,
+                row.version,
+                row.last_chunk_id,
+                row.content,
+                row.content_length,
+                row.status,
+                row.updated_at,
+            ) = (
+                run_id,
+                stream_type,
+                version,
+                last_chunk_id,
+                content,
+                len(content.encode("utf-8")),
+                status.value,
+                _now(),
+            )
+            await db.commit()
+            return True
+
+    async def create_approval(
+        self,
+        *,
+        approval_id: str,
+        session_id: str,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict,
+        risk_level: RiskLevel,
+    ) -> None:
+        """创建待审批记录并持久化工具参数。
+
+        参数:
+            approval_id (str): 审批 ID。
+            session_id (str): 会话 ID。
+            run_id (str): 运行 ID。
+            tool_call_id (str): 工具调用 ID。
+            tool_name (str): 工具名称。
+            arguments (dict): 工具参数，可 JSON 序列化。
+            risk_level (RiskLevel): 工具风险等级。
+        返回值:
+            None: 记录已提交。
+        异常:
+            参数无法序列化或数据库约束不满足时传播相应异常。
+        """
+        async with get_session() as db:
+            db.add(
+                ApprovalRecordModel(
+                    approval_id=approval_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    arguments_json=json.dumps(arguments, sort_keys=True),
+                    risk_level=risk_level.value,
+                    created_at=_now(),
+                )
+            )
+            await db.commit()
+
+    async def get_approval(self, approval_id: str) -> ApprovalRecordModel | None:
+        """按 ID 查询审批记录。
+
+        参数:
+            approval_id (str): 审批主键。
+        返回值:
+            ApprovalRecordModel | None: 匹配记录；不存在时返回 ``None``。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            return await db.get(ApprovalRecordModel, approval_id)
+
+    async def pending_approvals(
+        self, session_id: str | None = None
+    ) -> list[ApprovalRecordModel]:
+        """查询待审批记录，可按会话过滤。
+
+        参数:
+            session_id (str | None): 可选会话 ID；为空时返回全部待审批记录。
+        返回值:
+            list[ApprovalRecordModel]: 按创建时间升序排列的记录。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            query = select(ApprovalRecordModel).where(
+                ApprovalRecordModel.status == AgentApprovalStatus.PENDING.value
+            )
+            if session_id:
+                query = query.where(ApprovalRecordModel.session_id == session_id)
+            result = await db.execute(query.order_by(ApprovalRecordModel.created_at))
+            return list(result.scalars())
+
+    async def resolve_approval(
+        self, approval_id: str, decision: AgentApprovalDecision
+    ) -> bool:
+        """原子地将待审批记录解析为已处理状态。
+
+        参数:
+            approval_id (str): 审批 ID。
+            decision (AgentApprovalDecision): 审批决定。
+        返回值:
+            bool: 成功解析待处理记录时返回 ``True``；不存在或已解析时返回 ``False``。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            row = await db.scalar(
+                select(ApprovalRecordModel).where(
+                    ApprovalRecordModel.approval_id == approval_id,
+                    ApprovalRecordModel.status == AgentApprovalStatus.PENDING.value,
+                )
+            )
+            if row is None:
+                return False
+            row.status = AgentApprovalStatus.RESOLVED.value
+            row.decision = decision.value
+            row.decided_at = _now()
+            await db.commit()
+            return True
+
+    async def begin_tool_execution(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict,
+        side_effect_class: ToolSideEffectClass = ToolSideEffectClass.UNKNOWN,
+        retry_of_execution_id: str | None = None,
+    ) -> str:
+        """记录一次工具执行并生成参数指纹。
+
+        参数:
+            session_id (str): 会话 ID。
+            run_id (str): 运行 ID。
+            tool_call_id (str): 工具调用 ID。
+            tool_name (str): 工具名称。
+            arguments (dict): 工具参数，可 JSON 序列化；敏感值不会明文写入审计字段。
+            side_effect_class (ToolSideEffectClass): 工具副作用分类。
+            retry_of_execution_id (str | None): 可选的前一次执行 ID。
+        返回值:
+            str: 新生成的工具执行 ID。
+        异常:
+            参数无法 JSON 序列化或数据库写入失败时传播相应异常。
+        """
+        execution_id = generate_time_id()
+        normalized = json.dumps(
+            arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        sensitive = {
+            "api_key",
+            "apikey",
+            "password",
+            "token",
+            "secret",
+            "cookie",
+            "authorization",
+        }
+        audit = {
+            key: ("[REDACTED]" if key.lower() in sensitive else value)
+            for key, value in arguments.items()
+        }
+        audit_json = json.dumps(
+            audit, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )[:16384]
+        secret = os.environ.get(
+            "ATHENA_TOOL_FINGERPRINT_KEY", "development-only-key"
+        ).encode()
+        fingerprint = hmac.new(secret, normalized.encode(), hashlib.sha256).hexdigest()
+        async with get_session() as db:
+            previous = (
+                await db.scalar(
+                    select(func.max(ToolExecutionModel.attempt)).where(
+                        ToolExecutionModel.tool_call_id == tool_call_id
+                    )
+                )
+                or 0
+            )
+            db.add(
+                ToolExecutionModel(
+                    tool_execution_id=execution_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    tool_call_id=tool_call_id,
+                    attempt=previous + 1,
+                    retry_of_execution_id=retry_of_execution_id,
+                    tool_name=tool_name,
+                    arguments_json=audit_json,
+                    arguments_fingerprint=fingerprint,
+                    redaction_policy_version="tool-args-v1",
+                    fingerprint_key_version="v1",
+                    side_effect_class=side_effect_class.value,
+                    created_at=_now(),
+                )
+            )
+            await db.commit()
+        return execution_id
+
+    async def finish_tool_execution(
+        self,
+        execution_id: str,
+        *,
+        status: ToolExecutionStatus,
+        error: str | None = None,
+    ) -> bool:
+        """将处于执行中的工具记录写入终态。
+
+        参数:
+            execution_id (str): 工具执行 ID。
+            status (ToolExecutionStatus): 目标执行状态。
+            error (str | None): 可选错误文本。
+        返回值:
+            bool: 记录存在且仍可结束时返回 ``True``，否则返回 ``False``。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            row = await db.get(ToolExecutionModel, execution_id)
+            if row is None or row.status not in {
+                ToolExecutionStatus.PENDING.value,
+                ToolExecutionStatus.RUNNING.value,
+            }:
+                return False
+            row.status, row.error, row.completed_at = status.value, error, _now()
+            await db.commit()
+            return True

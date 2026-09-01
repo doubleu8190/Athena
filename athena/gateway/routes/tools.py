@@ -12,6 +12,7 @@ from athena.core.tools.manager import UnifiedToolManager
 from athena.models.tool import RiskLevel
 from athena.utils.logging import get_logger
 from athena.runtime import runtime_from
+from athena.contracts.errors import ErrorDetail
 
 logger = get_logger(__name__)
 
@@ -93,7 +94,10 @@ async def update_tool(name: str, req: UpdateToolRequest, request: Request) -> di
     """
     manager = _manager_or_503(request)
     if manager.get_tool(name) is None:
-        raise HTTPException(status_code=404, detail=f"Tool '{name}' not registered")
+        raise HTTPException(
+            status_code=404,
+            detail=f"{ErrorDetail.TOOL_NOT_REGISTERED}: {name}",
+        )
 
     # 验证 risk_level 枚举值
     if req.risk_level is not None:
@@ -102,7 +106,10 @@ async def update_tool(name: str, req: UpdateToolRequest, request: Request) -> di
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid risk_level: '{req.risk_level}'. Must be one of: low, medium, high",
+                detail=(
+                    f"{ErrorDetail.INVALID_RISK_LEVEL}: '{req.risk_level}'. "
+                    "Must be one of: low, medium, high"
+                ),
             )
 
     runtime = runtime_from(request)

@@ -18,12 +18,11 @@ from athena.core.tools.base import (
     NativeTool,
     ToolProtocol,
 )
+from athena.gateway.approval import ApprovalManager
 from athena.models.tool import RiskLevel, ToolResult, ToolSchema
-from athena.core.tools.spec import ApprovalPort
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from athena.core.tools.mcp.client import MCPClient
     from athena.core.tools.spec import ToolSpec
 
 logger = get_logger(__name__)
@@ -32,17 +31,17 @@ logger = get_logger(__name__)
 class UnifiedToolManager:
     """统一工具管理器."""
 
-    def __init__(self, approval_manager: ApprovalPort) -> None:
-        """初始化当前对象。
+    def __init__(self, approval_manager: ApprovalManager) -> None:
+        """
 
         参数：
-            approval_manager (审批Port): 输入参数；其类型和取值约束由方法签名及实现定义。
+            approval_manager (ApprovalManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._tools: dict[str, ToolProtocol] = {}
         self._disabled: set[str] = set()
@@ -51,13 +50,12 @@ class UnifiedToolManager:
     # ------------------------------------------------------------------
     # 注册接口
     # ------------------------------------------------------------------
-    def register(
-        self,
-        spec: ToolSpec
-    ) -> None:
+    def register(self, spec: ToolSpec) -> None:
         """注册 Native 工具."""
         if spec.name in self._tools:
-            logger.warning("tool_already_registered", tool=spec.name, action="overwrite")
+            logger.warning(
+                "tool_already_registered", tool=spec.name, action="overwrite"
+            )
         self._tools[spec.name] = NativeTool(
             name=spec.name,
             description=spec.description,
@@ -97,52 +95,52 @@ class UnifiedToolManager:
     # ------------------------------------------------------------------
 
     def get_tool(self, name: str) -> ToolProtocol | None:
-        """执行“get tool”操作。
+        """
 
         参数：
             name (str): 资源名称或稳定标识。
 
         返回值：
-            ToolProtocol | None: 操作结果；具体语义由调用场景决定。
+            ToolProtocol | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return self._tools.get(name)
 
     def contains(self, name: str) -> bool:
-        """执行“contains”操作。
+        """
 
         参数：
             name (str): 资源名称或稳定标识。
 
         返回值：
-            bool: 操作结果；具体语义由调用场景决定。
+            bool: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return name in self._tools
 
     def list_tools(self) -> list[ToolProtocol]:
-        """执行“list tools”操作。
+        """
 
         返回值：
-            list[ToolProtocol]: 操作结果；具体语义由调用场景决定。
+            list[ToolProtocol]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return list(self._tools.values())
 
     def list_names(self) -> list[str]:
-        """执行“list names”操作。
+        """
 
         返回值：
-            list[str]: 操作结果；具体语义由调用场景决定。
+            list[str]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return list(self._tools.keys())
 
@@ -223,8 +221,7 @@ class UnifiedToolManager:
     ) -> ToolResult:
         """统一工具调用入口，含审批检查.
 
-        遵循 project_memory：审批通过 审批Manager.request_approval() 立即返回 Future，
-        调用方 await future 等待结果，避免审批风暴。
+        审批请求立即持久化，调用方等待 SQLite Approval Record 的决定。
 
         session_id / run_id / tool_call_id 为必填：标识本次工具调用归属的会话、运行与
         具体工具调用，用于审批留痕与子代理父链上下文。
@@ -247,12 +244,14 @@ class UnifiedToolManager:
                 request = await self._approval_manager.request_approval(
                     tool_name=name,
                     arguments=params,
-                    risk_level=str(tool.schema.risk_level),
+                    risk_level=tool.schema.risk_level,
                     session_id=session_id,
                     run_id=run_id,
                     tool_call_id=tool_call_id,
                 )
-                approved = await request.future
+                approved = await self._approval_manager.wait_for_decision(
+                    request.id, request.timeout
+                )
                 if not approved:
                     logger.info("tool_call_denied", tool=name, session_id=session_id)
                     return ToolResult(
@@ -306,16 +305,16 @@ class UnifiedToolManager:
         schema = tool.schema
 
         async def _runner(**params: Any) -> str:
-            """执行“runner”操作。
+            """
 
             参数：
-                params (Any): 输入参数；其类型和取值约束由方法签名及实现定义。
+                params (Any): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
             返回值：
-                str: 操作结果；具体语义由调用场景决定。
+                str: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             from athena.core.tools.spec import get_tool_context
 

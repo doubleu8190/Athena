@@ -4,15 +4,12 @@
 - 执行 LLM 调用（流式输出，支持超时兜底）
 - 编排工具调用（asyncio.gather 并行执行无依赖工具）
 - 预算控制（max_turns + retry_budget 双重限制）
-- 事件流式推送到前端（WebSocket）
-- 执行过程日志持久化到 SQLite（Step + ToolCallRecord）
+- 发布应用事件到 Gateway
+- 执行过程日志通过 Application Event 发布，并持久化消息与工具账本
 
 执行流程:
     用户消息 → LLM 流式调用 → 工具调用（并行） → LLM 再调用 → ... → 终止
 
-project_memory 约束:
-- step_number 在 run_id 范围内全局递增，并行工具调用前预分配序号（避免 race condition）
-- 一次 LLM 调用 = 1 step，一次工具执行 = 1 step
 """
 
 from __future__ import annotations
@@ -41,15 +38,17 @@ from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import token_usage_from_chunks
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
-from athena.gateway.ws.manager import WebSocketManager
-from athena.models import Message, MessageRole, Step, ToolCallRecord
-from athena.models.step import StepStatus, StepType
+from athena.models import Message, MessageRole, ToolCallRecord
 from athena.models.tool import ToolCallStatus
-from athena.gateway.ws.events import EventType, build_event
+from athena.contracts.events import EventType
+from athena.contracts.events import ApplicationEvent, EventDurability
+from athena.contracts.ports import EventPublisherPort
+from athena.contracts.statuses import StreamSnapshotStatus
 from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.message import dict_to_message, normalize_tool_calls
+from agent_runtime.streaming import StreamCoalescer
 
 logger = get_logger(__name__)
 
@@ -104,7 +103,7 @@ class Harness:
             tool_manager=manager,
             settings=settings,
             db=db,
-            ws_manager=ws_manager,
+            event_publisher=publisher,
             compressor=compressor,
         )
         result = await harness.run(messages=msgs, session_id="s1")
@@ -116,8 +115,8 @@ class Harness:
         tool_manager: UnifiedToolManager,
         settings: Settings,
         db: Database,
-        ws_manager: WebSocketManager,
         compressor: ContextCompressor,
+        event_publisher: EventPublisherPort,
         error_handler: ToolErrorHandler | None = None,
         harness_settings: HarnessSettings | None = None,
     ) -> None:
@@ -127,8 +126,8 @@ class Harness:
             llm: LLM Provider，负责模型调用（流式/非流式）。
             tool_manager: 统一工具管理器，负责工具注册与调用。
             settings: 全局配置。
-            db: 数据库实例，用于持久化 Step / Message / ToolCallRecord。
-            ws_manager: WebSocket 管理器，用于向前端推送事件。
+            db: 数据库实例，用于持久化消息与工具调用账本。
+            event_publisher: Runtime event publisher; no transport details leak into the harness.
             compressor: 上下文压缩器，在每轮 LLM 调用前压缩消息列表。
             error_handler: 工具错误自愈路由器（含熔断器）。未提供时使用默认实例。
             harness_settings: Harness 运行时配置。未提供时从全局 Settings 派生。
@@ -137,7 +136,7 @@ class Harness:
         self._tool_manager = tool_manager
         self._settings = settings
         self._db = db
-        self._ws = ws_manager
+        self._events = event_publisher
         self._compressor = compressor
         self._error_handler = error_handler or ToolErrorHandler()
         self._harness_settings = harness_settings or HarnessSettings(
@@ -150,6 +149,10 @@ class Harness:
         self._stop_signal: asyncio.Event | None = None
         self._allowed_tool_names: set[str] | None = None
         self._parent_run_id: str | None = None
+        self._answer_stream_id: str | None = None
+        self._answer_stream: StreamCoalescer | None = None
+        self._thinking_chunk_id = 0
+        self._thinking_content = ""
         self._register_default_routes()
 
     def _register_default_routes(self) -> None:
@@ -195,11 +198,11 @@ class Harness:
 
         参数：
             messages: 对话历史（含最新用户消息）。支持 Message 对象或 dict 格式。
-            session_id: 会话 ID，用于关联 Step / Message / 事件推送。
+            session_id: 会话 ID，用于关联消息与事件推送。
             system_prompt: 系统提示词，作为第一条 SystemMessage 注入。
             run_id: 可选 run_id（子 Agent 使用），未提供则自动生成。
             parent_run_id: 父 run_id（子 Agent 运行时指向其父 run；主 run 为 None），
-                写入每个 step，使步骤能显式追溯所属的任务树。
+                发布每个调用事件，使执行过程能显式追溯。
             tool_names: 可选工具白名单（子 Agent 使用），None 表示允许全部工具。
             stop_signal: 外部停止信号（会话级 stop 事件），由 gateway 层注入；
                 与 request_stop() 的 _stop_event 等价，任一置位即终止运行。
@@ -209,7 +212,7 @@ class Harness:
 
         异常：
             BudgetExceeded: 预算超限且无剩余重试次数时抛出。
-            Exception: 未预期的执行异常（会被捕获并记录到 error 字段）。
+            异常: 未预期的执行异常（会被捕获并记录到 error 字段）。
         """
         rid = run_id or generate_time_id()
         self._parent_run_id = parent_run_id
@@ -223,7 +226,28 @@ class Harness:
         # 更新会话状态为 running
         await self._db.sessions.update(session_id, status="running", run_id=rid)
 
-        await self._emit(EventType.STREAM_START, {"run_id": rid}, session_id, rid)
+        self._answer_stream_id = f"answer-{rid}"
+        self._thinking_chunk_id = 0
+        self._thinking_content = ""
+        self._answer_stream = StreamCoalescer(
+            session_id=session_id,
+            run_id=rid,
+            stream_id=self._answer_stream_id,
+            stream_type="answer",
+            publish=self._events.publish,
+        )
+        await self._emit(
+            EventType.STREAM_START,
+            {"run_id": rid, "stream_id": self._answer_stream_id, "stream_type": "answer"},
+            session_id,
+            rid,
+        )
+        await self._emit_thinking(
+            EventType.THINKING_STARTED,
+            "正在准备请求",
+            session_id,
+            rid,
+        )
 
         # 构建消息列表
         lc_messages: list[BaseMessage] = []
@@ -237,7 +261,6 @@ class Harness:
         lc_tools = self._tool_manager.get_langchain_tools(names=tool_names)
         bound_llm = self._llm.bind_tools(lc_tools) if lc_tools else self._llm
 
-        step_counter = 0
         tool_results_all: list[dict[str, Any]] = []
         last_content = ""
         error_msg: str | None = None
@@ -253,26 +276,19 @@ class Harness:
                 if len(compressed) < len(lc_messages):
                     lc_messages = compressed
 
-                # Step: LLM 调用
-                step_counter += 1
-                llm_step_id = generate_time_id()
+                # LLM 调用事件使用稳定的调用 ID 关联生命周期。
+                llm_call_id = generate_time_id()
                 budget.increment_turn()
-
-                await self._save_step(
-                    Step(
-                        id=llm_step_id,
-                        session_id=session_id,
-                        run_id=rid,
-                        step_number=step_counter,
-                        step_type=StepType.LLM_CALL,
-                        status=StepStatus.RUNNING,
-                        started_at=datetime.now(),
-                    )
-                )
 
                 await self._emit(
                     EventType.LLM_CALL_START,
-                    {"step_id": llm_step_id, "turn": budget.turn_count},
+                    {"call_id": llm_call_id, "turn": budget.turn_count},
+                    session_id,
+                    rid,
+                )
+                await self._emit_thinking(
+                    EventType.THINKING_SUMMARY,
+                    "正在生成回答",
                     session_id,
                     rid,
                 )
@@ -282,7 +298,7 @@ class Harness:
                 stream_chunks: list[AIMessageChunk] = []
                 try:
                     # 流式调用整体包超时兜底：流挂死时 stop 的 _should_stop() break
-                    # 永远等不到 __anext__，只有超时能终态化当前 LLM step
+                    # 永远等不到 __anext__，只有超时能终态化当前 LLM 调用
                     async with asyncio.timeout(
                         self._harness_settings.llm_stream_timeout
                     ):
@@ -294,12 +310,8 @@ class Harness:
                             chunk_content = extract_message_text(chunk)
                             if chunk_content:
                                 full_content += chunk_content
-                                await self._emit(
-                                    EventType.LLM_TOKEN,
-                                    {"token": chunk_content},
-                                    session_id,
-                                    rid,
-                                )
+                                if self._answer_stream is not None:
+                                    await self._answer_stream.append(chunk_content)
 
                         # 合并流式 chunk → 完整响应（content + tool_calls）
                         merged_content, final_tc = self._assemble_response(
@@ -311,21 +323,12 @@ class Harness:
 
                     # 停止信号在流式中途置位 → 结束本轮 run
                     # （不落库残缺 assistant 消息、不执行残缺 tool_calls；
-                    #   必须终态化当前 llm step 并补发 LLM_CALL_END，
-                    #   否则 step 遗留 running、前端气泡不结束）
+                    #   必须终态化当前 LLM 调用并补发 LLM_CALL_END，
+                    #   否则前端气泡无法结束）
                     if self._should_stop():
                         interrupted = True
-                        await self._update_step(
-                            llm_step_id,
-                            {
-                                "status": str(StepStatus.FAILED),
-                                "completed_at": datetime.now().isoformat(),
-                                "duration_ms": (time.time() - start_time) * 1000,
-                                "error_message": "运行被用户停止",
-                            },
-                        )
                         await self._emit_llm_call_end(
-                            llm_step_id,
+                            llm_call_id,
                             status="failed",
                             session_id=session_id,
                             run_id=rid,
@@ -338,19 +341,10 @@ class Harness:
                         logger.warning(
                             "llm_empty_response", run_id=rid, error=error_msg
                         )
-                        await self._update_step(
-                            llm_step_id,
-                            {
-                                "status": str(StepStatus.FAILED),
-                                "completed_at": datetime.now().isoformat(),
-                                "duration_ms": (time.time() - start_time) * 1000,
-                                "error_message": error_msg,
-                            },
-                        )
                         await self._emit(
                             EventType.ERROR,
                             {
-                                "step_id": llm_step_id,
+                                "call_id": llm_call_id,
                                 "error": error_msg,
                                 "phase": "llm_call",
                             },
@@ -360,7 +354,7 @@ class Harness:
                         # 失败路径同样需结束 LLM 调用生命周期：前端据此移除
                         # 本次调用创建的流式气泡，避免重试残留空气泡
                         await self._emit_llm_call_end(
-                            llm_step_id,
+                            llm_call_id,
                             status="failed",
                             session_id=session_id,
                             run_id=rid,
@@ -382,19 +376,10 @@ class Harness:
                 except TimeoutError:
                     error_msg = f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）"
                     logger.warning("llm_stream_timeout", run_id=rid, error=error_msg)
-                    await self._update_step(
-                        llm_step_id,
-                        {
-                            "status": str(StepStatus.FAILED),
-                            "completed_at": datetime.now().isoformat(),
-                            "duration_ms": (time.time() - start_time) * 1000,
-                            "error_message": error_msg,
-                        },
-                    )
                     await self._emit(
                         EventType.ERROR,
                         {
-                            "step_id": llm_step_id,
+                            "call_id": llm_call_id,
                             "error": error_msg,
                             "phase": "llm_call",
                         },
@@ -402,59 +387,31 @@ class Harness:
                         rid,
                     )
                     await self._emit_llm_call_end(
-                        llm_step_id, status="failed", session_id=session_id, run_id=rid
+                        llm_call_id, status="failed", session_id=session_id, run_id=rid
                     )
                     budget.increment_retry()
                     continue
                 except Exception as e:
                     logger.error("llm_call_failed", error=str(e), run_id=rid)
                     error_msg = f"LLM 调用失败: {e}"
-                    await self._update_step(
-                        llm_step_id,
-                        {
-                            "status": str(StepStatus.FAILED),
-                            "completed_at": datetime.now().isoformat(),
-                            "duration_ms": (time.time() - start_time) * 1000,
-                            "error_message": str(e),
-                        },
-                    )
                     await self._emit(
                         EventType.ERROR,
-                        {"step_id": llm_step_id, "error": str(e), "phase": "llm_call"},
+                        {"call_id": llm_call_id, "error": str(e), "phase": "llm_call"},
                         session_id,
                         rid,
                     )
                     await self._emit_llm_call_end(
-                        llm_step_id, status="failed", session_id=session_id, run_id=rid
+                        llm_call_id, status="failed", session_id=session_id, run_id=rid
                     )
                     budget.increment_retry()
                     if not isinstance(e, BudgetExceeded):
                         continue
                     raise
 
-                # 更新 LLM 步骤记录
                 duration_ms = (time.time() - start_time) * 1000
-                await self._update_step(
-                    llm_step_id,
-                    {
-                        "status": str(StepStatus.COMPLETED),
-                        "completed_at": datetime.now().isoformat(),
-                        "duration_ms": duration_ms,
-                        "llm_input_tokens": (
-                            token_usage.input_tokens
-                            if token_usage is not None
-                            else bound_llm.count_message_tokens(lc_messages[:-1])
-                        ),
-                        "llm_output_tokens": (
-                            token_usage.output_tokens
-                            if token_usage is not None
-                            else bound_llm.count_message_tokens([ai_message])
-                        ),
-                    },
-                )
 
                 await self._emit_llm_call_end(
-                    llm_step_id,
+                    llm_call_id,
                     status="completed",
                     session_id=session_id,
                     run_id=rid,
@@ -474,7 +431,6 @@ class Harness:
                             content=full_content,
                             tool_calls=final_tc,
                             run_id=rid,
-                            step_id=llm_step_id,
                             timestamp=datetime.now(),
                         )
                     )
@@ -483,17 +439,19 @@ class Harness:
                 if not final_tc:
                     break
 
-                # Step: 工具执行（并行）
-                # 预分配 step_number（project_memory 约束：避免并行 race condition）
-                tool_step_starts: list[tuple[int, str, dict[str, Any]]] = []
+                # 工具执行（并行）；调用 ID 在事件和工具账本中保持稳定。
+                await self._emit_thinking(
+                    EventType.THINKING_SUMMARY,
+                    "正在执行工具",
+                    session_id,
+                    rid,
+                )
+                tool_calls: list[tuple[str, dict[str, Any]]] = []
                 for tc in final_tc:
-                    step_counter += 1
-                    tool_step_id = generate_time_id()
-                    tool_step_starts.append((step_counter, tool_step_id, tc))
+                    tool_calls.append((generate_time_id(), tc))
 
                 tool_messages = await self._execute_tool_calls(
-                    tool_step_starts=tool_step_starts,
-                    parent_step_id=llm_step_id,
+                    tool_calls=tool_calls,
                     session_id=session_id,
                     run_id=rid,
                     tool_results_all=tool_results_all,
@@ -533,9 +491,23 @@ class Harness:
             interrupted = True
 
         # 后处理
+        if self._answer_stream is not None:
+            await self._answer_stream.flush(is_complete=True)
+        await self._emit_thinking(
+            EventType.THINKING_COMPLETED,
+            "",
+            session_id,
+            rid,
+        )
         await self._emit(
             EventType.STREAM_END,
-            {"run_id": rid, "turn_count": budget.turn_count, "error": error_msg},
+            {
+                "run_id": rid,
+                "stream_id": self._answer_stream_id,
+                "stream_type": "answer",
+                "turn_count": budget.turn_count,
+                "error": error_msg,
+            },
             session_id,
             rid,
         )
@@ -559,21 +531,17 @@ class Harness:
 
     async def _execute_tool_calls(
         self,
-        tool_step_starts: list[tuple[int, str, dict[str, Any]]],
-        parent_step_id: str,
+        tool_calls: list[tuple[str, dict[str, Any]]],
         session_id: str,
         run_id: str,
         tool_results_all: list[dict[str, Any]],
     ) -> list[ToolMessage]:
         """并行执行所有工具调用，同时记录日志与推送事件.
 
-        使用 asyncio.gather 并行执行，每个工具调用独立创建 Step 和
-        ToolCallRecord 记录。单个工具的异常不会影响其他工具执行。
+        使用 asyncio.gather 并行执行，每个工具调用独立创建 ToolCallRecord。
 
         参数：
-            tool_step_starts: 预分配的工具执行计划，每项为
-                (step_number, step_id, tool_call_dict)。
-            parent_step_id: 父 LLM 调用的 step_id，用于建立步骤层级关系。
+            tool_calls: 预分配的工具调用计划，每项为 (call_id, tool_call_dict)。
             session_id: 会话 ID。
             run_id: 运行 ID。
             tool_results_all: 累积工具结果的列表（原地追加）。
@@ -582,9 +550,7 @@ class Harness:
             ToolMessage 列表，按输入顺序排列，用于追加到 LLM 消息上下文。
         """
 
-        async def _execute_one(
-            step_number: int, step_id: str, tc: dict[str, Any]
-        ) -> ToolMessage:
+        async def _execute_one(call_id: str, tc: dict[str, Any]) -> ToolMessage:
             """执行单个工具调用的完整生命周期: 创建记录 → 执行 → 更新状态 → 推送事件.
 
             异常会被内部捕获并转换为 ToolMessage 错误响应，确保不会中断
@@ -595,27 +561,11 @@ class Harness:
             tc_id = tc.get("id", generate_time_id())
 
             try:
-                # 创建 tool_execution step
-                await self._save_step(
-                    Step(
-                        id=step_id,
-                        session_id=session_id,
-                        run_id=run_id,
-                        step_number=step_number,
-                        step_type=StepType.TOOL_EXECUTION,
-                        parent_step_id=parent_step_id,
-                        status=StepStatus.RUNNING,
-                        started_at=datetime.now(),
-                    )
-                )
-
-                # 创建 tool_call 记录
                 tc_record_id = generate_time_id()
                 await self._db.tool_calls.save(
                     ToolCallRecord(
                         id=tc_record_id,
                         session_id=session_id,
-                        step_id=step_id,
                         tool_name=tool_name,
                         arguments=args,
                         status=ToolCallStatus.RUNNING,
@@ -627,7 +577,7 @@ class Harness:
                     EventType.TOOL_CALL_START,
                     {
                         "tool_call_id": tc_record_id,
-                        "step_id": step_id,
+                        "call_id": call_id,
                         "tool_name": tool_name,
                         "arguments": args,
                         "risk_level": self._tool_manager.get_risk_level(tool_name),
@@ -663,28 +613,11 @@ class Harness:
                     },
                 )
 
-                # 更新 tool_execution step
-                await self._update_step(
-                    step_id,
-                    {
-                        "status": (
-                            str(StepStatus.COMPLETED)
-                            if status == "success"
-                            else str(StepStatus.FAILED)
-                        ),
-                        "completed_at": datetime.now().isoformat(),
-                        "duration_ms": duration_ms,
-                        "error_message": error_msg,
-                    },
-                )
-
                 await self._emit(
                     EventType.TOOL_CALL_END,
                     {
                         "tool_call_id": tc_record_id,
-                        # step_id 必须带出：前端据 TOOL_CALL_START 合成 tool_execution
-                        # step，若 END 不带 step_id，该 step 永远停在 running。
-                        "step_id": step_id,
+                        "call_id": call_id,
                         "tool_name": tool_name,
                         "status": status,
                         "output": result_content if status == "success" else None,
@@ -722,7 +655,6 @@ class Harness:
                         content=tool_content,
                         tool_call_id=tc_id,
                         run_id=run_id,
-                        step_id=step_id,
                         tool_call_record_id=tc_record_id,
                         # 前端据此给工具气泡标名（避免跨表 join）
                         tool_name=tool_name,
@@ -741,7 +673,7 @@ class Harness:
                 )
 
         # 并行执行
-        tasks = [_execute_one(sn, sid, tc) for (sn, sid, tc) in tool_step_starts]
+        tasks = [_execute_one(call_id, tc) for call_id, tc in tool_calls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         tool_messages: list[ToolMessage] = []
@@ -943,35 +875,6 @@ class Harness:
             self._stop_signal is not None and self._stop_signal.is_set()
         )
 
-    async def _save_step(self, step: Step) -> None:
-        """持久化步骤记录到数据库.
-
-        自动注入 parent_run_id（子 Agent 运行时由 run() 设置）。
-        持久化异常仅记录日志，不向上抛出。
-
-        参数：
-            step: 待持久化的 Step 实例。
-        """
-        try:
-            # 步骤显式记录父 run（子 Agent 运行时由 run() 注入）
-            if step.parent_run_id is None:
-                step.parent_run_id = self._parent_run_id
-            await self._db.steps.save(step)
-        except Exception as e:
-            logger.error("save_step_failed", error=str(e))
-
-    async def _update_step(self, step_id: str, updates: dict[str, Any]) -> None:
-        """更新已有步骤记录的部分字段.
-
-        参数：
-            step_id: 步骤 ID。
-            updates: 待更新的字段字典，键为字段名，值为新值。
-        """
-        try:
-            await self._db.steps.update(step_id, updates)
-        except Exception as e:
-            logger.error("update_step_failed", step_id=step_id, error=str(e))
-
     async def _emit(
         self,
         event_type: EventType,
@@ -979,7 +882,7 @@ class Harness:
         session_id: str,
         run_id: str,
     ) -> None:
-        """向前端推送事件（WebSocket）.
+        """发布 Runtime 应用事件。
 
         推送异常仅记录警告日志，不向上抛出。
 
@@ -990,18 +893,81 @@ class Harness:
             run_id: 运行 ID。
         """
         try:
-            await self._ws.send_to_session(
-                session_id,
-                build_event(event_type, data, session_id=session_id, run_id=run_id),
-            )
+            if event_type == EventType.LLM_TOKEN:
+                if self._answer_stream is not None:
+                    await self._answer_stream.append(str(data.get("token", data.get("delta", ""))))
+                return
+            durability = EventDurability.REALTIME if event_type in {EventType.LLM_TOKEN} else EventDurability.DURABLE
+            await self._events.publish(ApplicationEvent(
+                event_type=str(event_type), durability=durability,
+                session_id=session_id,
+                run_id=run_id,
+                stream_id=str(data["stream_id"]) if data.get("stream_id") else None,
+                stream_type=str(data["stream_type"]) if data.get("stream_type") else None,
+                parent_run_id=self._parent_run_id,
+                payload=data,
+            ))
         except Exception as e:
             logger.warning(
                 "emit_event_failed", event_type=str(event_type), error=str(e)
             )
 
+    async def _emit_thinking(
+        self,
+        event_type: EventType,
+        content: str,
+        session_id: str,
+        run_id: str,
+    ) -> None:
+        """发布受控的思考阶段摘要，不暴露模型隐藏推理内容。"""
+        stream_id = f"thinking-{run_id}"
+        chunk_id: int | None = None
+        if event_type == EventType.THINKING_SUMMARY:
+            current = getattr(self, "_thinking_chunk_id", 0) + 1
+            self._thinking_chunk_id = current
+            chunk_id = current
+            self._thinking_content = (
+                f"{self._thinking_content}\n{content}" if self._thinking_content else content
+            )
+        snapshot_content = self._thinking_content
+        try:
+            await self._events.publish(
+                ApplicationEvent(
+                    event_type=str(event_type),
+                    durability=EventDurability.DURABLE,
+                    session_id=session_id,
+                    run_id=run_id,
+                    stream_id=stream_id,
+                    stream_type="thinking",
+                    chunk_id=chunk_id,
+                    payload={"content": content, "stream_id": stream_id},
+                )
+            )
+            upsert_snapshot = getattr(self._events, "upsert_snapshot", None)
+            if upsert_snapshot is not None:
+                snapshot_version = max(self._thinking_chunk_id, 1)
+                if event_type == EventType.THINKING_COMPLETED:
+                    snapshot_version += 1
+                await upsert_snapshot(
+                    session_id,
+                    stream_id,
+                    snapshot_version,
+                    snapshot_content,
+                    run_id=run_id,
+                    stream_type="thinking",
+                    last_chunk_id=self._thinking_chunk_id,
+                    status=(
+                        StreamSnapshotStatus.COMPLETED
+                        if event_type == EventType.THINKING_COMPLETED
+                        else StreamSnapshotStatus.STREAMING
+                    ),
+                )
+        except Exception as exc:
+            logger.warning("emit_thinking_failed", event_type=str(event_type), error=str(exc))
+
     async def _emit_llm_call_end(
         self,
-        step_id: str,
+        call_id: str,
         status: str,
         session_id: str,
         run_id: str,
@@ -1018,7 +984,7 @@ class Harness:
         使其与历史视图一致地展示该回合的工具卡片。
 
         参数：
-            step_id: LLM 调用步骤 ID。
+            call_id: LLM 调用 ID。
             status: "completed" 或 "failed"。
             session_id: 会话 ID。
             run_id: 运行 ID。
@@ -1029,7 +995,7 @@ class Harness:
         await self._emit(
             EventType.LLM_CALL_END,
             {
-                "step_id": step_id,
+                "call_id": call_id,
                 "status": status,
                 "duration_ms": duration_ms,
                 "tool_calls_count": tool_calls_count,

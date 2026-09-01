@@ -1,5 +1,7 @@
 # Athena 个人助手检索评估前端技术方案
 
+> 文档状态：评估功能规划稿。当前版本已移除评估页面和旧 WebSocket 入口，本文中的 Electron、WebSocket 及评估接口描述不代表现行实现。
+
 ## 1. 目标
 
 本文为 [个人助手检索评估技术方案](personal-retrieval-evaluation-plan.md) 定义桌面端功能入口和前后端契约。

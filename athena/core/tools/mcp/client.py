@@ -60,21 +60,21 @@ class MCPClient:
         timeout: float = 30.0,
         connect_timeout: float = 60.0,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            server_name (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            server_command (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            server_url (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            env (dict[str, str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            timeout (float): 输入参数；其类型和取值约束由方法签名及实现定义。
-            connect_timeout (float): 输入参数；其类型和取值约束由方法签名及实现定义。
+            server_name (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            server_command (list[str] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            server_url (str | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            env (dict[str, str] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            timeout (float): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            connect_timeout (float): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._server_name = server_name
         self._server_command = server_command
@@ -96,25 +96,25 @@ class MCPClient:
 
     @property
     def is_connected(self) -> bool:
-        """执行“is connected”操作。
+        """返回 MCP 客户端当前是否已连接。
 
         返回值：
-            bool: 操作结果；具体语义由调用场景决定。
+            bool: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return self._connected
 
     @property
     def server_name(self) -> str:
-        """执行“server name”操作。
+        """返回 MCP 服务器名称。
 
         返回值：
-            str: 操作结果；具体语义由调用场景决定。
+            str: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return self._server_name
 
@@ -156,7 +156,7 @@ class MCPClient:
 
         try:
             await self._ready.wait()
-        except BaseException:
+        except Base异常:
             # connect 被取消 / 异常：终止后台任务，防止子进程 / 连接泄漏
             self._session_task.cancel()
             await asyncio.gather(self._session_task, return_exceptions=True)

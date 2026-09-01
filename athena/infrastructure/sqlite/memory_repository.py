@@ -28,16 +28,16 @@ _FILTER_COLUMNS = frozenset(
 
 
 def _metadata(row: Any) -> dict[str, Any]:
-    """执行“metadata”操作。
+    """
 
     参数：
-        row (Any): 输入参数；其类型和取值约束由方法签名及实现定义。
+        row (Any): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
     返回值：
-        dict[str, Any]: 操作结果；具体语义由调用场景决定。
+        dict[str, Any]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
     异常：
-        Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+        异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     metadata: dict[str, Any] = {
         "created_at": row.created_at,
@@ -62,13 +62,13 @@ class SqliteMemoryRepository:
         """添加数据。
 
         参数：
-            record (dict[str, Any]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            record (dict[str, Any]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         metadata = record["metadata"]
         extras = {
@@ -105,17 +105,17 @@ class SqliteMemoryRepository:
     async def flush_access_stats(
         self, stats: dict[str, Any], expires_at: str
     ) -> list[dict[str, Any]]:
-        """执行“flush access stats”操作。
+        """
 
         参数：
-            stats (dict[str, Any]): 输入参数；其类型和取值约束由方法签名及实现定义。
-            expires_at (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            stats (dict[str, Any]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            expires_at (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if not stats:
             return []
@@ -157,7 +157,7 @@ class SqliteMemoryRepository:
     async def keyword_search(
         self, query: str, limit: int, where: dict[str, Any] | None
     ) -> list[dict[str, Any]]:
-        """执行“keyword search”操作。
+        """
 
         参数：
             query (str): 检索或搜索文本；应为非空字符串。
@@ -165,10 +165,10 @@ class SqliteMemoryRepository:
             where (dict[str, Any] | None): 可选过滤条件。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fa5]+", query)
         terms: list[str] = []
@@ -217,13 +217,13 @@ class SqliteMemoryRepository:
         """列出数据。
 
         参数：
-            filters (Any): 输入参数；其类型和取值约束由方法签名及实现定义。
+            filters (Any): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[dict[str, Any]]: 操作结果；具体语义由调用场景决定。
+            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         stmt = select(MemoryModel).where(MemoryModel.deleted_time.is_(None))
         if filters.get("pinned_only"):
@@ -261,10 +261,10 @@ class SqliteMemoryRepository:
         """统计数量。
 
         返回值：
-            dict[str, int]: 操作结果；具体语义由调用场景决定。
+            dict[str, int]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         now = datetime.now()
         conditions = {
@@ -293,17 +293,17 @@ class SqliteMemoryRepository:
         return result
 
     async def update_content(self, memory_id: str, content: str) -> str | None:
-        """执行“update content”操作。
+        """
 
         参数：
             memory_id (str): 记忆记录唯一标识。
             content (str): 待保存或处理的内容。
 
         返回值：
-            str | None: 操作结果；具体语义由调用场景决定。
+            str | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             async with session.begin():
@@ -332,16 +332,16 @@ class SqliteMemoryRepository:
                 return previous
 
     async def soft_delete(self, memory_ids: list[str]) -> None:
-        """执行“soft delete”操作。
+        """
 
         参数：
-            memory_ids (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_ids (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if not memory_ids:
             return
@@ -360,18 +360,18 @@ class SqliteMemoryRepository:
     async def set_pin(
         self, memory_id: str, pinned: bool, expires_at: str | None
     ) -> tuple[bool, str | None] | None:
-        """执行“set pin”操作。
+        """
 
         参数：
             memory_id (str): 记忆记录唯一标识。
-            pinned (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
-            expires_at (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            pinned (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            expires_at (str | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            tuple[bool, str | None] | None: 操作结果；具体语义由调用场景决定。
+            tuple[bool, str | None] | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             async with session.begin():
@@ -384,16 +384,16 @@ class SqliteMemoryRepository:
                 return previous
 
     async def expired_ids(self, now_iso: str) -> list[str]:
-        """执行“expired ids”操作。
+        """
 
         参数：
-            now_iso (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            now_iso (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            list[str]: 操作结果；具体语义由调用场景决定。
+            list[str]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             rows = (
@@ -409,16 +409,16 @@ class SqliteMemoryRepository:
         return [row[0] for row in rows]
 
     async def hard_delete(self, memory_id: str) -> None:
-        """执行“hard delete”操作。
+        """
 
         参数：
             memory_id (str): 记忆记录唯一标识。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             async with session.begin():
@@ -431,16 +431,16 @@ class SqliteMemoryRepository:
                 )
 
     async def restore_deleted(self, memory_ids: list[str]) -> None:
-        """执行“restore deleted”操作。
+        """
 
         参数：
-            memory_ids (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            memory_ids (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         async with get_session() as session:
             async with session.begin():

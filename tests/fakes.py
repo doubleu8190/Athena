@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 from athena.core.tools.manager import UnifiedToolManager
 from athena.runtime import RuntimeContainer
-from athena.evaluation.portal import EvaluationPortal
 
 
 @dataclass
@@ -42,7 +41,7 @@ def install_runtime(app: Any, **overrides: Any) -> RuntimeContainer:
     """Attach a complete runtime container to a focused FastAPI test app."""
     dependencies = {
         "db": MagicMock(),
-        "websocket_manager": MagicMock(),
+        "event_publisher": MagicMock(),
         "approval_manager": MagicMock(),
         "tool_manager": MagicMock(),
         "tool_catalog": MagicMock(),
@@ -51,8 +50,8 @@ def install_runtime(app: Any, **overrides: Any) -> RuntimeContainer:
         "file_runtime": MagicMock(),
         "file_worker": MagicMock(),
         "memory_manager": MagicMock(),
-        "workflow": MagicMock(),
-        "evaluation_portal": EvaluationPortal("/tmp/athena_test_evaluation"),
+        "agent_store": MagicMock(),
+        "realtime_transport": MagicMock(),
     }
     dependencies.update(overrides)
     runtime = RuntimeContainer(**dependencies)

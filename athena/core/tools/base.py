@@ -96,21 +96,21 @@ class NativeTool:
         risk_level: RiskLevel | str = RiskLevel.LOW,
         require_approval: bool = False,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
             name (str): 资源名称或稳定标识。
-            description (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            handler (NativeHandler): 输入参数；其类型和取值约束由方法签名及实现定义。
-            parameters (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            risk_level (RiskLevel | str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            require_approval (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            description (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            handler (NativeHandler): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            parameters (dict[str, Any] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            risk_level (RiskLevel | str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            require_approval (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.schema = ToolSchema(
             name=name,
@@ -153,23 +153,23 @@ class MCPTool:
         risk_level: RiskLevel | str = RiskLevel.MEDIUM,
         require_approval: bool = True,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
             name (str): 资源名称或稳定标识。
-            description (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            parameters (dict[str, Any]): 输入参数；其类型和取值约束由方法签名及实现定义。
-            mcp_client (MCPClient): 输入参数；其类型和取值约束由方法签名及实现定义。
-            server_name (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            remote_name (str | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            risk_level (RiskLevel | str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            require_approval (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
+            description (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            parameters (dict[str, Any]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            mcp_client (MCPClient): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            server_name (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            remote_name (str | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            risk_level (RiskLevel | str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            require_approval (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.schema = ToolSchema(
             name=name,

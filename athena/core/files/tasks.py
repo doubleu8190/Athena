@@ -17,16 +17,16 @@ class FileTaskWorker:
     """表示 FileTaskWorker 组件，封装相关状态和行为。
     """
     def __init__(self, runtime: FileIntelligenceRuntime) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            runtime (FileIntelligenceRuntime): 输入参数；其类型和取值约束由方法签名及实现定义。
+            runtime (FileIntelligenceRuntime): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self.runtime = runtime
         settings = runtime.settings
@@ -63,30 +63,30 @@ class FileTaskWorker:
     def set_continuation_callback(
         self, callback: Callable[[dict[str, Any]], Awaitable[None]]
     ) -> None:
-        """执行“set continuation callback”操作。
+        """
 
         参数：
-            callback (Callable[[dict[str, Any]], Awaitable[None]]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            callback (Callable[[dict[str, Any]], Awaitable[None]]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._continuation_callback = callback
 
     async def resume_continuations(self, attachment_id: str) -> None:
-        """执行“resume continuations”操作。
+        """
 
         参数：
             attachment_id (str): 附件唯一标识。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if self._continuation_callback is None:
             return
@@ -99,10 +99,10 @@ class FileTaskWorker:
         """启动服务。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.runtime.repository.recover_running_tasks()
         await self.runtime.repository.recover_continuations()
@@ -117,10 +117,10 @@ class FileTaskWorker:
         """停止服务。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._stopping = True
         if self._dispatcher:
@@ -133,17 +133,17 @@ class FileTaskWorker:
             await asyncio.gather(*self._running, return_exceptions=True)
 
     async def enqueue_parse(self, session_id: str, attachment_id: str) -> FileTask:
-        """执行“enqueue parse”操作。
+        """
 
         参数：
             session_id (str): 会话唯一标识。
             attachment_id (str): 附件唯一标识。
 
         返回值：
-            FileTask: 操作结果；具体语义由调用场景决定。
+            FileTask: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         task = await self.enqueue_task(
             session_id, attachment_id, FileTaskType.FILE_PARSE
@@ -164,20 +164,20 @@ class FileTaskWorker:
         payload: dict[str, Any] | None = None,
         priority: int = 0,
     ) -> FileTask:
-        """执行“enqueue task”操作。
+        """
 
         参数：
             session_id (str): 会话唯一标识。
             attachment_id (str): 附件唯一标识。
-            task_type (FileTaskType): 输入参数；其类型和取值约束由方法签名及实现定义。
-            payload (dict[str, Any] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            priority (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+            task_type (FileTaskType): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            payload (dict[str, Any] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            priority (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            FileTask: 操作结果；具体语义由调用场景决定。
+            FileTask: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         task = await self.runtime.repository.create_task(
             session_id,
@@ -197,10 +197,10 @@ class FileTaskWorker:
         """运行流程。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         while not self._stopping:
             if len(self._running) >= self._max_running:
@@ -215,16 +215,16 @@ class FileTaskWorker:
             running.add_done_callback(self._running.discard)
 
     async def _execute_with_limit(self, task: FileTask) -> None:
-        """执行“execute with limit”操作。
+        """在并发上限内执行任务。
 
         参数：
-            task (FileTask): 输入参数；其类型和取值约束由方法签名及实现定义。
+            task (FileTask): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         # 每类任务使用独立信号量，限制昂贵操作的并发度，同时允许不同阶段并行推进。
         async with self._semaphores[task.task_type]:
@@ -309,18 +309,18 @@ class FileTaskWorker:
                     await self.resume_continuations(task.attachment_id)
 
     async def _progress(self, task: FileTask, progress: float, stage: str) -> None:
-        """执行“progress”操作。
+        """
 
         参数：
-            task (FileTask): 输入参数；其类型和取值约束由方法签名及实现定义。
-            progress (float): 输入参数；其类型和取值约束由方法签名及实现定义。
-            stage (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            task (FileTask): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            progress (float): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            stage (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.runtime.repository.update_task(
             task.id, progress=progress, stage=stage
@@ -332,17 +332,17 @@ class FileTaskWorker:
             )
 
     async def _complete(self, task: FileTask, result: dict[str, Any]) -> None:
-        """执行“complete”操作。
+        """
 
         参数：
-            task (FileTask): 输入参数；其类型和取值约束由方法签名及实现定义。
-            result (dict[str, Any]): 底层操作结果。
+            task (FileTask): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            result (dict[str, Any]): 方法返回的领域结果。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         current = await self.runtime.repository.get_task(task.id)
         if current is None or current.status == FileTaskStatus.CANCELLED:

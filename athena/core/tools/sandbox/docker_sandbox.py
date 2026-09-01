@@ -34,16 +34,16 @@ class PathSecurityFilter:
     """路径安全过滤器 - 防路径遍历与白名单校验."""
 
     def __init__(self, allowed_paths: list[str] | None = None) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            allowed_paths (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            allowed_paths (list[str] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._allowed_paths = [str(Path(p).resolve()) for p in (allowed_paths or [])]
 
@@ -51,13 +51,13 @@ class PathSecurityFilter:
         """配置运行参数。
 
         参数：
-            paths (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            paths (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._allowed_paths = [str(Path(p).resolve()) for p in paths]
 
@@ -78,13 +78,13 @@ class PathSecurityFilter:
 
     @property
     def allowed_paths(self) -> list[str]:
-        """执行“allowed paths”操作。
+        """
 
         返回值：
-            list[str]: 操作结果；具体语义由调用场景决定。
+            list[str]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return list(self._allowed_paths)
 
@@ -106,22 +106,22 @@ class DockerSandboxManager:
         allowed_paths: list[str] | None = None,
         docker_client: docker.DockerClient | None = None,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            image (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            network_disabled (bool): 输入参数；其类型和取值约束由方法签名及实现定义。
-            memory_limit (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            cpu_limit (float): 输入参数；其类型和取值约束由方法签名及实现定义。
-            workspace_path (str): 输入参数；其类型和取值约束由方法签名及实现定义。
-            allowed_paths (list[str] | None): 输入参数；其类型和取值约束由方法签名及实现定义。
-            docker_client (docker.DockerClient | None): 输入参数；其类型和取值约束由方法签名及实现定义。
+            image (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            network_disabled (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            memory_limit (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            cpu_limit (float): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            workspace_path (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            allowed_paths (list[str] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            docker_client (docker.DockerClient | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._client = docker_client
         self._image = image
@@ -146,27 +146,27 @@ class DockerSandboxManager:
         )
 
     def configure_allowed_paths(self, paths: list[str]) -> None:
-        """执行“configure allowed paths”操作。
+        """
 
         参数：
-            paths (list[str]): 输入参数；其类型和取值约束由方法签名及实现定义。
+            paths (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._path_filter.configure(paths)
 
     def _get_client(self) -> docker.DockerClient:
-        """执行“get client”操作。
+        """
 
         返回值：
-            docker.DockerClient: 操作结果；具体语义由调用场景决定。
+            docker.DockerClient: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if self._client is None:
             import docker
@@ -176,7 +176,7 @@ class DockerSandboxManager:
     def _get_scope_key(
         self, scope: str, session_id: str, run_id: str | None = None
     ) -> str:
-        """执行“get scope key”操作。
+        """
 
         参数：
             scope (str): 检索范围或权限范围。
@@ -184,10 +184,10 @@ class DockerSandboxManager:
             run_id (str | None): 运行唯一标识。
 
         返回值：
-            str: 操作结果；具体语义由调用场景决定。
+            str: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if scope == self.SCOPE_SESSION:
             return f"session_{session_id}"
@@ -196,16 +196,16 @@ class DockerSandboxManager:
         return "shared_default"
 
     def _validate_path(self, file_path: str) -> bool:
-        """执行“validate path”操作。
+        """
 
         参数：
-            file_path (str): 输入参数；其类型和取值约束由方法签名及实现定义。
+            file_path (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            bool: 操作结果；具体语义由调用场景决定。
+            bool: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return self._path_filter.validate(file_path)
 
@@ -296,13 +296,13 @@ class DockerSandboxManager:
             container = self._ensure_container(scope, session_id, run_id, bind_mounts)
 
         def _exec() -> dict[str, Any]:
-            """执行“exec”操作。
+            """
 
             返回值：
-                dict[str, Any]: 操作结果；具体语义由调用场景决定。
+                dict[str, Any]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             result = container.exec_run(
                 cmd=["sh", "-c", command],
@@ -347,13 +347,13 @@ class DockerSandboxManager:
             container = client.containers.get(container_id)
 
         def _fetch() -> bytes | None:
-            """执行“fetch”操作。
+            """
 
             返回值：
-                bytes | None: 操作结果；具体语义由调用场景决定。
+                bytes | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
             异常：
-                Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+                异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
             """
             try:
                 stream, _ = container.get_archive(container_path)
@@ -427,17 +427,17 @@ class SandboxReconstructionChecker:
         manager: DockerSandboxManager,
         check_interval: int = 300,
     ) -> None:
-        """初始化当前对象。
+        """
 
         参数：
-            manager (DockerSandboxManager): 输入参数；其类型和取值约束由方法签名及实现定义。
-            check_interval (int): 输入参数；其类型和取值约束由方法签名及实现定义。
+            manager (DockerSandboxManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            check_interval (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._manager = manager
         self._check_interval = check_interval
@@ -448,10 +448,10 @@ class SandboxReconstructionChecker:
         """启动服务。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if self._running:
             return
@@ -462,10 +462,10 @@ class SandboxReconstructionChecker:
         """停止服务。
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._running = False
         if self._task:
@@ -473,13 +473,13 @@ class SandboxReconstructionChecker:
             self._task = None
 
     async def _loop(self) -> None:
-        """执行“loop”操作。
+        """
 
         返回值：
-            None: 操作结果；具体语义由调用场景决定。
+            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
-            Exception: 底层校验、存储、网络或服务调用失败且未被当前方法处理时抛出。
+            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         while self._running:
             try:

@@ -8,11 +8,11 @@
 #   3. 命令行参数驱动的多模式启动：
 #        start|all      — 同时启动后端 + 前端（生产开发默认）
 #        backend        — 仅启动后端 FastAPI
-#        frontend|desktop — 仅启动 Electron 前端
+#        frontend       — 仅启动 Vite Web 前端
 #        stop           — 停止所有由本脚本启动的进程
 #        restart        — 停止后再启动
 #        status         — 查看进程与端口状态
-#        build          — 构建后端测试 + 前端生产产物 + Electron 打包（可选）
+#        build          — 构建后端测试 + 前端生产产物
 #        test           — 运行后端 pytest 测试套件
 #        install|setup  — 安装/校验后端 + 前端依赖
 #        logs           — 实时查看日志（tail -f）
@@ -49,7 +49,7 @@ PROJECT_ROOT="${SCRIPT_DIR}"
 
 # 各子路径常量
 BACKEND_DIR="${PROJECT_ROOT}"                              # 后端 Python 项目根
-FRONTEND_DIR="${PROJECT_ROOT}/desktop"                     # Electron 前端根（方案 B 后的目录名）
+FRONTEND_DIR="${PROJECT_ROOT}/desktop"                     # React Web 前端根目录
 RUN_DIR="${PROJECT_ROOT}/.run"                             # PID / 锁 / 临时文件
 LOG_DIR="${PROJECT_ROOT}/logs"                             # 运行日志
 ENV_FILE="${PROJECT_ROOT}/.env"                            # 用户环境变量
@@ -109,7 +109,7 @@ export PYTHON_BIN
 export HOST="${HOST:-127.0.0.1}"
 export PORT="${PORT:-8000}"
 export DEBUG="${DEBUG:-true}"
-# 前端端口对齐 electron.vite.config.ts (默认 5173)
+# Vite 前端端口（默认 5173）
 export FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 # LLM 默认值
 export LLM_PROVIDER="${LLM_PROVIDER:-openai}"
@@ -246,7 +246,7 @@ check_llm_key() {
 
 cmd_stop() {
   log_step "停止所有 Athena 相关进程"
-  stop_pid "${PID_FRONTEND}" "Electron 前端"
+  stop_pid "${PID_FRONTEND}" "Web 前端"
   stop_pid "${PID_BACKEND}"  "FastAPI 后端"
   # 清理可能仍在占用端口的遗留进程（仅针对默认端口）
   local bpid fpid
@@ -287,7 +287,7 @@ cmd_status() {
   [[ -n "${bpid}" ]] && echo -e "${C_YELLOW}被占用 (PID=${bpid})${C_RESET}" || echo -e "${C_GREEN}空闲${C_RESET}"
   echo -e "    日志:       ${LOG_BACKEND}"
   echo ""
-  echo -e "  ${C_BOLD}[前端 Electron]${C_RESET}"
+  echo -e "  ${C_BOLD}[Web 前端]${C_RESET}"
   if pid_alive "${PID_FRONTEND}"; then
     echo -e "    进程:       ${C_GREEN}运行中 (PID=$(cat "${PID_FRONTEND}"))${C_RESET}"
   else
@@ -361,23 +361,19 @@ cmd_test() {
 # ---------------------------------------------------------------------------
 
 cmd_build() {
-  log_step "开始生产构建（后端测试 + 前端构建 + 可选 Electron 打包）"
+  log_step "开始生产构建（后端测试 + Web 前端构建）"
   # 9.1 先跑后端测试（快速回归）
   cmd_test
 
   # 9.2 前端构建
-  log_step "前端生产构建：electron-vite build"
+  log_step "前端生产构建：vite build"
   check_dependencies_frontend || fatal "前端依赖缺失，请先 ./start.sh install"
   (
     cd "${FRONTEND_DIR}"
     npm run typecheck || fatal "TypeScript 类型检查失败。"
     npm run build || fatal "前端构建失败。"
   )
-  log_success "前端构建完成 -> ${FRONTEND_DIR}/out"
-
-  # 9.3 可选：electron-builder 打包（需要交互，默认跳过，提供明确提示）
-  log_info "如需进一步生成桌面安装包，可手动执行："
-  log_info "  ${C_BOLD}cd ${FRONTEND_DIR} && npm run electron:build${C_RESET}"
+  log_success "前端构建完成 -> ${FRONTEND_DIR}/dist"
   log_success "构建完成"
 }
 
@@ -430,11 +426,11 @@ start_backend() {
 cmd_backend() { start_backend; }
 
 # ---------------------------------------------------------------------------
-# 11. 前端启动（cmd_frontend / cmd_desktop）
+# 11. 前端启动（cmd_frontend）
 # ---------------------------------------------------------------------------
 
 start_frontend() {
-  log_step "启动 Electron 前端 (electron-vite dev)"
+  log_step "启动 Web 前端 (vite dev)"
 
   # 如果后端没启动，给出警告但不阻塞（允许用户分开启动）
   if ! backend_healthy; then
@@ -446,25 +442,20 @@ start_frontend() {
 
   (
     cd "${FRONTEND_DIR}"
-    # electron-vite dev 会启动 Vite(端口 5173) 并拉起 Electron 主进程
     nohup env \
       HOST="${HOST}" PORT="${PORT}" \
-      API_BASE="http://${HOST}:${PORT}" \
-      WS_BASE="ws://${HOST}:${PORT}" \
       npm run dev \
       >> "${LOG_FRONTEND}" 2>&1 &
     echo $! > "${PID_FRONTEND}"
   )
 
   # 给前端最多 30 秒启动窗口：检查 Vite 端口是否打开
-  # 注意：electron-vite dev 需要依次构建 main/preload + 启动 Vite + 拉起 Electron，
-  # 首次冷启动可能较慢，因此超时设为 30s。
   local timeout=30
   log_info "等待前端就绪（最多 ${timeout}s）..."
   if wait_for "${timeout}" "lsof -iTCP:${FRONTEND_PORT} -sTCP:LISTEN -t >/dev/null 2>&1"; then
     log_success "前端已就绪 (PID=$(cat "${PID_FRONTEND}"))"
     log_info "    Vite 地址:  http://localhost:${FRONTEND_PORT}"
-    log_info "    Electron 窗口应由系统自动弹出（首次启动可能需要几秒冷启动）"
+    log_info "    浏览器访问: http://localhost:${FRONTEND_PORT}"
     log_info "    实时日志:   ${C_BOLD}./start.sh logs frontend${C_RESET}"
   else
     log_warn "前端 Vite 端口未在 ${timeout}s 内就绪。请检查日志：tail -f ${LOG_FRONTEND}"
@@ -472,7 +463,6 @@ start_frontend() {
 }
 
 cmd_frontend() { start_frontend; }
-cmd_desktop()  { start_frontend; }
 
 # ---------------------------------------------------------------------------
 # 12. 全栈启动（cmd_start / cmd_all）
@@ -510,7 +500,7 @@ cmd_logs() {
       [[ -f "${LOG_BACKEND}" ]] || { log_warn "日志不存在，等待生成..."; touch "${LOG_BACKEND}"; }
       exec tail -f "${LOG_BACKEND}"
       ;;
-    frontend|desktop)
+frontend)
       log_info "实时跟踪前端日志：${LOG_FRONTEND}"
       [[ -f "${LOG_FRONTEND}" ]] || { log_warn "日志不存在，等待生成..."; touch "${LOG_FRONTEND}"; }
       exec tail -f "${LOG_FRONTEND}"
@@ -548,7 +538,7 @@ USAGE:
 COMMANDS:
   start | all          同时启动后端 + 前端（默认命令，不传参即为此）
   backend              仅启动后端 FastAPI
-  frontend | desktop   仅启动 Electron 前端
+  frontend              仅启动 Vite Web 前端
   stop                 停止所有由本脚本启动的进程
   restart              停止后再启动
   status               显示进程 / 端口 / 健康状态
@@ -607,7 +597,7 @@ trap cleanup_on_exit EXIT
 handle_interrupt() {
   echo ""
   log_warn "收到中断信号，清理所有由本脚本启动的进程..."
-  stop_pid "${PID_FRONTEND}" "Electron 前端" >/dev/null 2>&1 || true
+  stop_pid "${PID_FRONTEND}" "Web 前端" >/dev/null 2>&1 || true
   stop_pid "${PID_BACKEND}"  "FastAPI 后端"  >/dev/null 2>&1 || true
   exit 130
 }
@@ -639,7 +629,7 @@ main() {
     backend)
       cmd_backend
       ;;
-    frontend|desktop)
+    frontend)
       cmd_frontend
       ;;
     restart)

@@ -79,7 +79,6 @@ async def invoke_graph(
     session_id: str,
     user_message: str,
     run_id: str = "",
-    command_id: str = "",
     attachment_ids: list[str] | None = None,
     message_id: str = "",
     stop_signal: asyncio.Event | None = None,
@@ -91,7 +90,6 @@ async def invoke_graph(
         session_id (str): 非空会话 ID，用于加载会话级历史和附件。
         user_message (str): 用户输入文本，可为空但通常应包含有效请求。
         run_id (str): 非空运行 ID，同时作为 LangGraph 检查点线程 ID。
-        command_id (str): 可选命令 ID，用于幂等追踪。
         attachment_ids (list[str] | None): 可选附件 ID 列表，元素必须为非空字符串。
         stop_signal (asyncio.Event | None): 可选停止信号；置位后终止当前 Harness 和子 Agent 执行。
     返回值:
@@ -106,7 +104,6 @@ async def invoke_graph(
     initial_state: AgentState = {
         "session_id": session_id,
         "run_id": run_id,
-        "command_id": command_id,
         "message_id": message_id or generate_time_id(),
         "user_message": user_message,
         "attachment_ids": attachment_ids or [],
@@ -121,7 +118,6 @@ async def invoke_graph(
             "metadata": {
                 "session_id": session_id,
                 "run_id": run_id,
-                "command_id": command_id,
             },
         },
     )

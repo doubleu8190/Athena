@@ -40,6 +40,8 @@ async def test_invoke_graph_uses_run_id_as_checkpoint_thread_id():
     assert graph.config["configurable"]["thread_id"] == "run-1"
     assert graph.config["configurable"]["stop_signal"] is stop_signal
     assert "system_prompt" not in graph.state
+    assert "command_id" not in graph.state
+    assert "command_id" not in graph.config["metadata"]
 
 
 @pytest.mark.asyncio

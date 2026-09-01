@@ -36,10 +36,9 @@ async def prepare_request(
         state["session_id"], attachment_ids
     )
     history = await runtime.load_history(state["session_id"])
-    prepared_state: AgentState = {
+    return {
         "session_id": state["session_id"],
         "run_id": state["run_id"],
-        "command_id": state.get("command_id", ""),
         "user_message": message,
         "attachment_ids": attachment_ids,
         "message_id": str(state.get("message_id") or ""),
@@ -48,9 +47,6 @@ async def prepare_request(
             item.to_ref().model_dump(mode="json") for item in requested_attachments
         ],
     }
-    if not prepared_state["message_id"]:
-        raise KeyError("message_id")
-    return prepared_state
 
 
 def create_prepare_request_node(

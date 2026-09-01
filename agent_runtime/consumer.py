@@ -277,7 +277,6 @@ class CommandConsumer:
             self.graph,
             session_id=command.session_id,
             run_id=run_id,
-            command_id=command.command_id,
             user_message=payload.message or "",
             message_id=payload.message_id or "",
             attachment_ids=payload.attachment_ids,

@@ -24,7 +24,6 @@ class AgentState(TypedDict, total=False):
 
     session_id: Required[str]
     run_id: Required[str]
-    command_id: str
     user_message: str
     attachment_ids: list[str]
     message_id: Required[str]

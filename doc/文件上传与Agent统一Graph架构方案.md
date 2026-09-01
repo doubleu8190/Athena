@@ -454,7 +454,6 @@ class FileProcessResult(TypedDict):
 class AgentState(TypedDict, total=False):
     session_id: str
     run_id: str
-    command_id: str
     user_message: str
     attachment_ids: list[str]
     message_id: Required[str]

@@ -340,7 +340,7 @@ Event Store 是 Durable replay 唯一真相源；进程内通知只用于降低�
 LangGraph thread_id = session_id
 ```
 
-每次调用携带 `run_id` 和 `command_id` metadata。同一 Thread 保存多轮对话；业务代码不直接读写 Checkpoint 表。
+每次调用携带 `run_id` metadata。同一 Thread 保存多轮对话；业务代码不直接读写 Checkpoint 表。`command_id` 只属于 Gateway/Command Store 的幂等链路，不进入图状态。
 
 建议 State：
 

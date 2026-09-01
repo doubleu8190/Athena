@@ -472,9 +472,9 @@ class LangGraphRuntime:
             数据库读取失败时向上传播底层异常。
         """
         session = await self._db.sessions.get(session_id)
-        if not session or not (
-            session.compression_summary and session.last_compressed_message_id
-        ):
+        if not session:
+            raise ValueError(f"会话 {session_id} 不存在")
+        if not (session.compression_summary and session.last_compressed_message_id):
             return await self._db.messages.get_by_session(session_id)
 
         history_after = await self._db.messages.get_after_message(
@@ -497,9 +497,7 @@ class LangGraphRuntime:
 
     async def persist_message_and_attachments(self, state: AgentState) -> AgentState:
         """幂等持久化当前用户消息及其附件关系。"""
-        message_id = state.get("message_id") or state.get("user_message_id")
-        if not message_id:
-            raise KeyError("message_id")
+        message_id = state.get("message_id")
         message = Message(
             id=message_id,
             session_id=state["session_id"],
@@ -637,8 +635,10 @@ class LangGraphRuntime:
             不抛出业务异常。
         """
         return (
-            DEFAULT_SYSTEM_PROMPT + "\n\n" + memory_context
-        ).strip() if memory_context else DEFAULT_SYSTEM_PROMPT
+            (DEFAULT_SYSTEM_PROMPT + "\n\n" + memory_context).strip()
+            if memory_context
+            else DEFAULT_SYSTEM_PROMPT
+        )
 
     async def prepare_run(
         self,

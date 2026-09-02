@@ -47,8 +47,8 @@ async def prepare_and_persist_request(
             item.to_ref().model_dump(mode="json") for item in requested_attachments
         ],
     }
-    persisted_state = await runtime.persist_message_and_attachments(prepared_state)
-    return {**prepared_state, **persisted_state}
+    await runtime.persist_message_and_attachments(prepared_state)
+    return prepared_state
 
 
 def create_prepare_and_persist_request_node(

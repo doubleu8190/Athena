@@ -41,7 +41,7 @@ from athena.models.file import (
     AttachmentStatus,
     FileChunk,
 )
-from athena.models.json_models import FileLocator
+from athena.models.json_models import FileLocator, FileMetadata
 from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
@@ -209,7 +209,7 @@ class FileIntelligenceRuntime:
             )
             result = await adapter.extract(context, self.settings)
             # 适配器接收内容寻址的 blob 路径。持久化前，将这一实现细节替换为
-            # 用户可见的资产名称，并应用到所有定位器和代码索引中。
+            # 用户可见的文件名，并应用到所有定位器和代码索引中。
             for unit in result.units:
                 if unit.locator.get("path") == path.name:
                     unit.locator["path"] = attachment.filename
@@ -251,17 +251,14 @@ class FileIntelligenceRuntime:
             self.storage.cleanup_workspace(workspace)
 
     async def index_attachment(
-        self, attachment_id: str, *, mark_ready: bool = True, run_id: str | None = None
+        self, attachment_id: str
     ) -> dict[str, Any]:
         """将附件分块写入 ChromaDB 向量索引。
 
-        按 100 个分块一批写入，失败时记录警告但不中断流程。
-        ``mark_ready=True`` 时将附件状态更新为 READY。
+        按 100 个分块一批写入；失败时抛出异常，由调用方统一更新附件状态。
 
         参数：
             attachment_id: 附件 ID。
-            mark_ready: 是否在索引完成后标记附件为就绪状态。
-
         返回值：
             包含 chunks 数量和 vector_indexed 标志的字典。
         """
@@ -301,12 +298,7 @@ class FileIntelligenceRuntime:
                     attachment_id=attachment_id,
                     error=str(exc),
                 )
-        if mark_ready:
-            ready = await self.repository.update_attachment(
-                attachment_id, status=AttachmentStatus.READY.value, error_message=None
-            )
-            if ready is not None:
-                await self.emit_attachment(ready, run_id=run_id)
+                raise
         return {"chunks": len(chunks), "vector_indexed": self._collection is not None}
 
     def _chunk_units(
@@ -353,12 +345,14 @@ class FileIntelligenceRuntime:
                             ordinal=ordinal,
                             content=piece,
                             token_count=token_count,
-                            locator={
-                                **unit.locator,
-                                "char_start": start,
-                                "char_end": end,
-                            },
-                            metadata=unit.metadata,
+                            locator=FileLocator.model_validate(
+                                {
+                                    **unit.locator,
+                                    "char_start": start,
+                                    "char_end": end,
+                                }
+                            ),
+                            metadata=FileMetadata.model_validate(unit.metadata),
                         )
                     )
                     ordinal += 1

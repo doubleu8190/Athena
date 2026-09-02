@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from datetime import datetime
 import sys
 import types
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from athena.config.settings import Settings
+from agent_runtime.graph_runtime import LangGraphRuntime
 from athena.core.files.adapters import (
     ExcelAdapter,
     ImageAdapter,
@@ -96,6 +98,84 @@ async def test_parse_search_message_binding_and_session_isolation(tmp_path):
 
         with pytest.raises(FileAccessError):
             await runtime.read_file("two", attachment.id)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_process_attachment_index_failure_marks_attachment_failed(tmp_path):
+    db = Database(str(tmp_path / "index-failure.db"))
+    await db.connect()
+    try:
+        await db.sessions.create("session")
+        settings = Settings(
+            _env_file=None,
+            sqlite_db_path=str(tmp_path / "index-failure.db"),
+            chromadb_path=str(tmp_path / "chroma"),
+            file_storage_path=str(tmp_path / "storage"),
+        )
+        runtime = _make_runtime(db.files, settings)
+        attachment = await db.files.create_attachment(
+            session_id="session", filename="notes.txt", mime_type="text/plain",
+            size_bytes=1, sha256="5" * 64, storage_key="blobs/55/placeholder",
+        )
+        await db.files.replace_chunks(
+            attachment.id,
+            [FileChunk(id="chunk", attachment_id=attachment.id, ordinal=0, content="text")],
+        )
+
+        class BrokenCollection:
+            def delete(self, **_kwargs):
+                raise RuntimeError("vector index unavailable")
+
+        runtime._collection = BrokenCollection()
+
+        runtime.parse_attachment = AsyncMock(return_value={"chunk_count": 1})
+        graph_runtime = LangGraphRuntime.__new__(LangGraphRuntime)
+        graph_runtime._db = db
+        graph_runtime._events = AsyncMock()
+        graph_runtime._file_runtime = runtime
+        graph_runtime._file_parse_semaphore = asyncio.Semaphore(1)
+        graph_runtime._file_embedding_semaphore = asyncio.Semaphore(1)
+
+        result = await graph_runtime.process_attachment(
+            attachment.id, "message-1", "session", "run-1"
+        )
+
+        current = await db.files.get_attachment(attachment.id)
+        assert current is not None
+        assert result["status"] == "failed"
+        assert current.status.value == "failed"
+        assert current.error_message == "vector index unavailable"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_attachment_cannot_be_bound_to_different_messages(tmp_path):
+    db = Database(str(tmp_path / "attachment-binding.db"))
+    await db.connect()
+    try:
+        await db.sessions.create("session")
+        for message_id in ("message-1", "message-2"):
+            await db.messages.save(
+                Message(
+                    id=message_id,
+                    session_id="session",
+                    role=MessageRole.USER,
+                    content=message_id,
+                    timestamp=datetime.now(),
+                )
+            )
+        attachment = await db.files.create_attachment(
+            session_id="session", filename="notes.txt", mime_type="text/plain",
+            size_bytes=1, sha256="6" * 64, storage_key="blobs/66/placeholder",
+        )
+
+        await db.files.bind_message("session", "message-1", [attachment.id])
+
+        with pytest.raises(ValueError, match="附件已关联其他消息"):
+            await db.files.bind_message("session", "message-2", [attachment.id])
     finally:
         await db.close()
 

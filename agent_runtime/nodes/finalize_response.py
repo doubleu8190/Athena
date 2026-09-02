@@ -18,7 +18,11 @@ async def finalize_response(state: AgentState) -> AgentState:
     异常：
         运行时异常: 后处理或结果序列化失败时传播底层异常。
     """
-    return {"result": state.get("result")}
+    return {
+        "session_id": state["session_id"],
+        "run_id": state["run_id"],
+        "message_id": state.get("message_id"),
+    }
 
 
 def create_finalize_response_node() -> StateNode[AgentState, None]:

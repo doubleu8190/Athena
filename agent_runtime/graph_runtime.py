@@ -40,7 +40,7 @@ from athena.utils.ids import generate_sub_run_id, generate_time_id
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
 
-from .state import AgentState
+from .state import AgentState, FileProcessResult
 
 logger = get_logger(__name__)
 
@@ -496,7 +496,7 @@ class LangGraphRuntime:
         )
         return [summary, *history_after]
 
-    async def persist_message_and_attachments(self, state: AgentState) -> AgentState:
+    async def persist_message_and_attachments(self, state: AgentState):
         """幂等持久化当前用户消息及其附件关系。"""
         message_id = state.get("message_id")
         message = Message(
@@ -523,19 +523,24 @@ class LangGraphRuntime:
                 },
             )
         )
-        return {
-            "session_id": state["session_id"],
-            "run_id": state["run_id"],
-            "message_id": persisted.id,
-            "user_message_id": persisted.id,
-        }
 
     async def process_attachment(
         self, attachment_id: str, message_id: str, session_id: str, run_id: str
-    ) -> dict[str, Any]:
+    ) -> FileProcessResult:
         """在统一 Graph 内完成一个附件的解析和向量索引。"""
         if self._file_runtime is None:
             raise RuntimeError("file runtime is not configured")
+        attachment = await self._db.files.get_attachment(attachment_id, session_id)
+        # 如果附件已存在且状态为 READY，则直接返回 READY 状态和元数据，避免重复处理
+        if attachment is not None and attachment.status == AttachmentStatus.READY:
+            metadata = attachment.metadata.model_dump(mode="json")
+            return {
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "status": "ready",
+                "error": None,
+                "chunk_count": int(metadata.get("chunk_count", 0)),
+            }
         await self._events.publish(
             ApplicationEvent(
                 event_type=EventType.FILE_PROCESSING_STARTED,
@@ -548,6 +553,7 @@ class LangGraphRuntime:
             )
         )
         try:
+            # 解析附件
             async with self._file_parse_semaphore:
                 metadata = await self._file_runtime.parse_attachment(
                     attachment_id, run_id=run_id
@@ -562,10 +568,20 @@ class LangGraphRuntime:
                     "progress": 0.7,
                 },
             )
+            
+            # 生成向量索引
             async with self._file_embedding_semaphore:
-                indexed = await self._file_runtime.index_attachment(
-                    attachment_id, run_id=run_id
-                )
+                indexed = await self._file_runtime.index_attachment(attachment_id)
+            
+            # 标记附件处理完成
+            ready = await self._db.files.update_attachment(
+                attachment_id,
+                status=AttachmentStatus.READY.value,
+                error_message=None,
+            )
+            if ready is not None:
+                await self._file_runtime.emit_attachment(ready, run_id=run_id)
+                
             await self._file_runtime.emit(
                 EventType.FILE_INDEX_PROGRESS,
                 session_id,
@@ -605,7 +621,6 @@ class LangGraphRuntime:
             )
             if attachment is not None:
                 await self._file_runtime.emit_attachment(attachment, run_id=run_id)
-                session_id = attachment.session_id
             await self._file_runtime.emit(
                 EventType.FILE_PROCESSING_FAILED,
                 session_id,

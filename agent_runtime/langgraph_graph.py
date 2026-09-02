@@ -58,7 +58,7 @@ def build_graph(
         "process_attachments",
         check_file_results,
         {
-            "prepare_context": "retrieve_memory",
+            "retrieve_memory": "retrieve_memory",
             "handle_file_failure": "handle_file_failure",
         },
     )

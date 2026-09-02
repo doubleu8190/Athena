@@ -33,7 +33,10 @@ async def process_attachments(
         )
     )
     return {
-        "file_results": list(results),
+        "session_id": state["session_id"],
+        "run_id": state["run_id"],
+        "message_id": message_id,
+        "file_results": results,
         "files_ready": all(item["status"] == "ready" for item in results),
     }
 

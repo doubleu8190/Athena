@@ -468,8 +468,7 @@ class FileRepository:
             return {}
         async with get_session() as session:
             result = await session.execute(
-                select(AttachmentModel)
-                .where(
+                select(AttachmentModel).where(
                     AttachmentModel.message_id.in_(ids),
                     AttachmentModel.deleted_time.is_(None),
                 )
@@ -582,7 +581,9 @@ class FileRepository:
                     ordinal=r.ordinal,
                     content=r.content,
                     token_count=r.token_count,
-                    locator=_json_loads_model(r.locator_json, FileLocator, FileLocator()),
+                    locator=_json_loads_model(
+                        r.locator_json, FileLocator, FileLocator()
+                    ),
                     metadata=_json_loads_model(
                         r.metadata_json, FileMetadata, FileMetadata()
                     ),
@@ -674,7 +675,9 @@ class FileRepository:
                     ordinal=r.ordinal,
                     content=r.content,
                     token_count=r.token_count,
-                    locator=_json_loads_model(r.locator_json, FileLocator, FileLocator()),
+                    locator=_json_loads_model(
+                        r.locator_json, FileLocator, FileLocator()
+                    ),
                     metadata=_json_loads_model(
                         r.metadata_json, FileMetadata, FileMetadata()
                     ),

@@ -15,17 +15,10 @@ async def handle_file_failure(state: AgentState) -> AgentState:
         for item in failed
     )
     return {
-        "result": {
-            "content": f"附件处理失败，无法执行本次请求。{details}",
-            "run_id": state["run_id"],
-            "turn_count": 0,
-            "tool_results": [],
-            "error": details or "附件处理失败",
-            "interrupted": False,
-            "waiting": False,
-            "file_results": state.get("file_results", []),
-        },
-        "error": details or "附件处理失败",
+        "session_id": state["session_id"],
+        "run_id": state["run_id"],
+        "message_id": state.get("message_id"),
+        "error": f"附件处理失败，无法执行本次请求。{details}",
     }
 
 

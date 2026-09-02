@@ -35,6 +35,7 @@ async def retrieve_memory(
     return {
         "session_id": state["session_id"],
         "run_id": state["run_id"],
+        "message_id": state.get("message_id"),
         "memory_context": memory_context,
     }
 

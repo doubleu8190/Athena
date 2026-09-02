@@ -138,7 +138,7 @@ class TextAdapter:
         filename = Path(context.filename).name
         suffix = Path(filename).suffix.lower()
         text = _decode(path.read_bytes())
-        metadata: dict[str, Any] = {"line_count": len(text.splitlines())}
+        metadata: dict[str, Any] = {}
         tables: list[dict[str, Any]] = []
         # CSV 文件额外解析表格结构
         if suffix == ".csv":
@@ -150,10 +150,17 @@ class TextAdapter:
                 tables.append(
                     {"name": filename, "headers": rows[0], "rows": rows[1:201]}
                 )
+        else:
+            metadata.update({"line_count": len(text.splitlines())})
         return ExtractionResult(
             units=[
                 ExtractedUnit(
-                    text, {"path": path.name, "start_line": 1}, {"kind": "text"}
+                    text,
+                    {"path": path.name, "start_line": 1},
+                    {
+                        "kind": "table" if suffix == ".csv" else "text",
+                        "format": suffix[1:] if suffix else "text",
+                    },
                 )
             ],
             metadata=metadata,
@@ -737,8 +744,8 @@ def _python_index(
     parents: list[str] = []  # 嵌套类/函数的名称栈，用于构建限定名
 
     class Visitor(ast.NodeVisitor):
-        """表示 Visitor 组件，封装相关状态和行为。
-        """
+        """表示 Visitor 组件，封装相关状态和行为。"""
+
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
             """
 

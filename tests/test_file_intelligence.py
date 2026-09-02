@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from athena.config.settings import Settings
-from athena.core.files.adapters import ExcelAdapter, ImageAdapter, PdfAdapter, WordAdapter
+from athena.core.files.adapters import (
+    ExcelAdapter,
+    ImageAdapter,
+    PdfAdapter,
+    TextAdapter,
+    WordAdapter,
+)
 from athena.core.files.base import ExtractedUnit, ExtractionContext
 from athena.core.files.registry import AdapterRegistry
 from athena.core.files.runtime import FileAccessError, FileIntelligenceRuntime
@@ -121,6 +127,7 @@ async def test_parse_csv_preserves_suffix_for_table_artifact(tmp_path):
 
         assert parsed["row_count"] == 2
         assert parsed["columns"] == ["name", "value"]
+        assert "line_count" not in parsed
         assert artifact is not None
         assert artifact.metadata.model_dump()["count"] == 1
 
@@ -422,6 +429,16 @@ async def test_office_pdf_and_image_adapters_preserve_structure(tmp_path):
     from pypdf import PdfWriter
 
     settings = Settings(_env_file=None)
+
+    text_path = tmp_path / "sample.txt"
+    text_path.write_text("hello\nworld\n", encoding="utf-8")
+    text = await TextAdapter().extract(_context(text_path, tmp_path), settings)
+    assert text.units[0].metadata == {"kind": "text", "format": "txt"}
+
+    csv_path = tmp_path / "sample.csv"
+    csv_path.write_text("name,value\nalpha,1\n", encoding="utf-8")
+    csv = await TextAdapter().extract(_context(csv_path, tmp_path), settings)
+    assert csv.units[0].metadata == {"kind": "table", "format": "csv"}
 
     document = Document()
     document.add_heading("Title", level=1)

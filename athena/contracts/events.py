@@ -17,6 +17,7 @@ class EventDurability(StrEnum):
 class EventType(StrEnum):
     """稳定的点分隔应用事件名称。"""
 
+    APPROVAL_REQUIRED = "approval.required"
     AGENT_WAITING_FILE = "agent.waiting_for_files"
     PARALLEL_AGENTS_STARTED = "subagent.started"
     SUB_AGENT_COMPLETE = "subagent.completed"
@@ -37,6 +38,13 @@ class EventType(StrEnum):
     TOOL_CALL_END = "tool.completed"
     TOOL_CALL_START = "tool.started"
     MESSAGE_PERSISTED = "message.persisted"
+    RUN_STARTED = "run.started"
+    RUN_PAUSED = "run.paused"
+    RUN_RESUMED = "run.resumed"
+    RUN_CANCELLED = "run.cancelled"
+    RUN_COMPLETED = "run.completed"
+    RUN_FAILED = "run.failed"
+    ATTACHMENT_UPDATED = "attachment_updated"
     FILE_PROCESSING_STARTED = "file_processing_started"
     FILE_PROCESSING_PROGRESS = "file_processing_progress"
     FILE_INDEX_PROGRESS = "file_index_progress"
@@ -51,7 +59,7 @@ class ApplicationEvent(BaseModel):
     schema_version: int = Field(default=2, ge=1)
     session_seq: int | None = Field(default=None, ge=1)
     """会话级 SSE 游标；由事件存储分配。"""
-    event_type: str = Field(min_length=1)
+    event_type: EventType
     durability: EventDurability
     session_id: str = Field(min_length=1)
     run_id: str | None = None

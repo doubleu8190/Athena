@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
+from athena.core.files.runtime import FileIntelligenceRuntime
 from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
@@ -170,7 +171,7 @@ class SubAgentManager:
         # 推送子 Agent 启动事件
         await self._events.publish(
             ApplicationEvent(
-                event_type=str(EventType.SUB_AGENT_SPAWNED),
+                event_type=EventType.SUB_AGENT_SPAWNED,
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=sub_run_id,
@@ -214,7 +215,7 @@ class SubAgentManager:
             )
             await self._events.publish(
                 ApplicationEvent(
-                    event_type=str(EventType.SUB_AGENT_COMPLETE),
+                    event_type=EventType.SUB_AGENT_COMPLETE,
                     durability=EventDurability.DURABLE,
                     session_id=session_id,
                     run_id=sub_run_id,
@@ -230,7 +231,7 @@ class SubAgentManager:
             logger.exception("sub_agent_failed", sub_run_id=sub_run_id)
             await self._events.publish(
                 ApplicationEvent(
-                    event_type=str(EventType.SUB_AGENT_FAILED),
+                    event_type=EventType.SUB_AGENT_FAILED,
                     durability=EventDurability.DURABLE,
                     session_id=session_id,
                     run_id=sub_run_id,
@@ -327,7 +328,7 @@ class LangGraphRuntime:
         fact_extractor: FactExtractor,
         memory_manager: MemoryManager,
         settings: Settings,
-        file_runtime: Any | None = None,
+        file_runtime: FileIntelligenceRuntime,
     ) -> None:
         """
 
@@ -342,7 +343,7 @@ class LangGraphRuntime:
             fact_extractor (FactExtractor): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             memory_manager (MemoryManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
-
+            file_runtime (FileIntelligenceRuntime): 文件智能运行时服务。
         返回值：
             None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
@@ -511,7 +512,7 @@ class LangGraphRuntime:
         )
         await self._events.publish(
             ApplicationEvent(
-                event_type="message.persisted",
+                event_type=EventType.MESSAGE_PERSISTED,
                 durability=EventDurability.DURABLE,
                 session_id=state["session_id"],
                 run_id=state["run_id"],
@@ -523,6 +524,8 @@ class LangGraphRuntime:
             )
         )
         return {
+            "session_id": state["session_id"],
+            "run_id": state["run_id"],
             "message_id": persisted.id,
             "user_message_id": persisted.id,
         }
@@ -535,7 +538,7 @@ class LangGraphRuntime:
             raise RuntimeError("file runtime is not configured")
         await self._events.publish(
             ApplicationEvent(
-                event_type="file_processing_started",
+                event_type=EventType.FILE_PROCESSING_STARTED,
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=run_id,
@@ -550,7 +553,7 @@ class LangGraphRuntime:
                     attachment_id, run_id=run_id
                 )
             await self._file_runtime.emit(
-                "file_processing_progress",
+                EventType.FILE_PROCESSING_PROGRESS,
                 session_id,
                 {
                     "message_id": message_id,
@@ -564,7 +567,7 @@ class LangGraphRuntime:
                     attachment_id, run_id=run_id
                 )
             await self._file_runtime.emit(
-                "file_index_progress",
+                EventType.FILE_INDEX_PROGRESS,
                 session_id,
                 {
                     "message_id": message_id,
@@ -574,7 +577,7 @@ class LangGraphRuntime:
                 },
             )
             await self._file_runtime.emit(
-                "file_processing_completed",
+                EventType.FILE_PROCESSING_COMPLETED,
                 session_id,
                 {
                     "message_id": message_id,
@@ -604,7 +607,7 @@ class LangGraphRuntime:
                 await self._file_runtime.emit_attachment(attachment, run_id=run_id)
                 session_id = attachment.session_id
             await self._file_runtime.emit(
-                "file_processing_failed",
+                EventType.FILE_PROCESSING_FAILED,
                 session_id,
                 {
                     "message_id": message_id,
@@ -1009,7 +1012,7 @@ class LangGraphRuntime:
         # 推送并行启动事件
         await self._events.publish(
             ApplicationEvent(
-                event_type=str(EventType.PARALLEL_AGENTS_STARTED),
+                event_type=EventType.PARALLEL_AGENTS_STARTED,
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=parent_run_id,

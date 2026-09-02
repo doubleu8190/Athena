@@ -57,6 +57,34 @@ async def init_engine(db_path: str) -> None:
         await conn.execute(text("DROP TABLE IF EXISTS file_processing_tasks"))
         await conn.execute(text("DROP INDEX IF EXISTS uq_agent_runs_active_session"))
         await conn.run_sync(Base.metadata.create_all)
+        # 兼容旧版本：附件关系已从中间表收敛到 attachments.message_id。
+        legacy_link_table = await conn.execute(
+            text(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'message_attachments'"
+            )
+        )
+        if legacy_link_table.scalar_one_or_none() is not None:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE attachments
+                    SET message_id = (
+                        SELECT message_id
+                        FROM message_attachments
+                        WHERE message_attachments.attachment_id = attachments.id
+                        LIMIT 1
+                    )
+                    WHERE attachments.message_id IS NULL
+                      AND EXISTS (
+                          SELECT 1
+                          FROM message_attachments
+                          WHERE message_attachments.attachment_id = attachments.id
+                      )
+                    """
+                )
+            )
+            await conn.execute(text("DROP TABLE message_attachments"))
         await conn.execute(
             text("UPDATE agent_runs SET status = 'failed', error = '旧文件任务已移除' WHERE status = 'waiting_files'")
         )

@@ -925,7 +925,7 @@ class Harness:
                 return
             durability = EventDurability.REALTIME if event_type in {EventType.LLM_TOKEN} else EventDurability.DURABLE
             await self._events.publish(ApplicationEvent(
-                event_type=str(event_type), durability=durability,
+                event_type=event_type, durability=durability,
                 session_id=session_id,
                 run_id=run_id,
                 message_id=self._message_id,
@@ -960,7 +960,7 @@ class Harness:
         try:
             await self._events.publish(
                 ApplicationEvent(
-                    event_type=str(event_type),
+                    event_type=event_type,
                     durability=EventDurability.DURABLE,
                     session_id=session_id,
                     run_id=run_id,

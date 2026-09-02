@@ -7,8 +7,9 @@ import pytest
 
 from agent_runtime.graph_runtime import DEFAULT_SYSTEM_PROMPT, LangGraphRuntime
 from agent_runtime.langgraph_graph import invoke_graph
+from agent_runtime.nodes.prepare_request import prepare_and_persist_request
 from athena.models import Message, MessageRole
-from athena.models.file import AttachmentRef, AttachmentStatus
+from athena.models.file import Attachment, AttachmentRef, AttachmentStatus
 
 
 class _RecordingGraph:
@@ -62,6 +63,56 @@ def test_build_system_prompt_uses_builtin_prompt_and_appends_memory():
 
 def test_build_system_prompt_falls_back_to_default():
     assert LangGraphRuntime.build_system_prompt("") == DEFAULT_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_prepare_and_persist_request_merges_prepared_and_persisted_state():
+    calls = []
+
+    class Runtime:
+        async def load_banded_attachments(self, session_id, attachment_ids):
+            calls.append(("load_attachments", session_id, attachment_ids))
+            return [
+                Attachment(
+                    id="file-1",
+                    session_id=session_id,
+                    filename="notes.txt",
+                    mime_type="text/plain",
+                    size_bytes=10,
+                    sha256="a" * 64,
+                    storage_key="blob",
+                    created_at=datetime.now(),
+                    updated_at=datetime.now(),
+                )
+            ]
+
+        async def load_history(self, session_id):
+            calls.append(("load_history", session_id))
+            return []
+
+        async def persist_message_and_attachments(self, state):
+            calls.append(("persist", state["message_id"], state["attachment_ids"]))
+            return {"message_id": "message-1", "user_message_id": "message-1"}
+
+    result = await prepare_and_persist_request(
+        {
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "message_id": "message-1",
+            "user_message": "read this",
+            "attachment_ids": ["file-1", "file-1"],
+        },
+        runtime=Runtime(),
+    )
+
+    assert calls == [
+        ("load_attachments", "session-1", ["file-1"]),
+        ("load_history", "session-1"),
+        ("persist", "message-1", ["file-1"]),
+    ]
+    assert result["history"] == []
+    assert result["message_id"] == "message-1"
+    assert result["requested_attachment_refs"][0]["id"] == "file-1"
 
 
 def test_build_harness_messages_adds_attachment_context_without_mutating_message():

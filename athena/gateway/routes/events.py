@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from athena.contracts.errors import ErrorDetail
+from athena.contracts.events import EventType
 from athena.runtime import runtime_from
 from athena.infrastructure.sqlite.repositories import _json_loads
 
@@ -52,7 +53,7 @@ def _snapshot_payload(snapshot) -> dict:
     """将最新流快照编码为不占用 SSE 游标的恢复消息。"""
     return {
         "schema_version": 2,
-        "event_type": "stream.snapshot",
+        "event_type": EventType.STREAM_SNAPSHOT.value,
         "session_id": snapshot.session_id,
         "run_id": snapshot.run_id,
         "stream_id": snapshot.stream_id,
@@ -100,7 +101,7 @@ async def session_events(
 
             # 快照用于修复客户端本地缺口；它不推进 Last-Event-ID。
             for snapshot in await agent_store.snapshots_for_session(session_id):
-                yield _sse(_snapshot_payload(snapshot), "stream.snapshot")
+                yield _sse(_snapshot_payload(snapshot), EventType.STREAM_SNAPSHOT)
 
             while True:
                 if await request.is_disconnected():

@@ -527,6 +527,7 @@ class AttachmentModel(Base):
     __tablename__ = "attachments"
     __table_args__ = (
         Index("idx_attachments_session", "session_id"),
+        Index("idx_attachments_message", "message_id"),
         Index("idx_attachments_hash", "sha256"),
         Index("idx_attachments_status", "status"),
     )
@@ -538,7 +539,7 @@ class AttachmentModel(Base):
         ForeignKey("sessions.id"), comment="所属会话标识"
     )
     message_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="关联消息标识"
+        ForeignKey("messages.id"), nullable=True, comment="关联消息标识"
     )
     filename: Mapped[str] = mapped_column(String, comment="原始文件名")
     mime_type: Mapped[str] = mapped_column(String, comment="文件 MIME 类型")
@@ -649,19 +650,6 @@ class AdapterRegistryModel(Base):
         Integer, default=1, comment="是否启用，0 表示否，1 表示是"
     )
     updated_at: Mapped[str] = mapped_column(String, comment="最后更新时间（UTC）")
-
-
-class MessageAttachmentModel(Base):
-    """消息与附件关联关系的 ORM 映射。"""
-
-    __tablename__ = "message_attachments"
-
-    message_id: Mapped[str] = mapped_column(
-        ForeignKey("messages.id"), primary_key=True, comment="消息标识"
-    )
-    attachment_id: Mapped[str] = mapped_column(
-        ForeignKey("attachments.id"), primary_key=True, comment="附件标识"
-    )
 
 
 class CodeSymbolModel(Base):

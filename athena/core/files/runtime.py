@@ -29,6 +29,7 @@ from langchain_core.messages import HumanMessage
 
 from athena.config.settings import Settings
 from athena.core.files.base import ExtractedUnit, ExtractionContext
+from athena.core.files.converters import _attachment_to_public
 from athena.core.files.registry import AdapterRegistry
 from athena.infrastructure.sqlite.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
@@ -412,13 +413,13 @@ class FileIntelligenceRuntime:
     async def list_files(self, session_id: str) -> list[dict[str, Any]]:
         """列出会话的所有附件（公开字段）。"""
         return [
-            self.public_attachment(item)
+            _attachment_to_public(item)
             for item in await self.repository.list_attachments(session_id)
         ]
 
     async def get_file_info(self, session_id: str, file_id: str) -> dict[str, Any]:
         """获取附件详情（含元数据）。"""
-        return self.public_attachment(
+        return _attachment_to_public(
             await self.require_attachment(session_id, file_id), include_metadata=True
         )
 
@@ -446,7 +447,7 @@ class FileIntelligenceRuntime:
         attachment = await self.require_attachment(session_id, file_id)
         if attachment.status == AttachmentStatus.FAILED:
             return {
-                "file": self.public_attachment(attachment),
+                "file": _attachment_to_public(attachment),
                 "waiting": False,
                 "error": attachment.error_message or "文件处理失败",
                 "message": "文件处理失败，无法读取内容。请重新上传或重试处理。",
@@ -462,7 +463,7 @@ class FileIntelligenceRuntime:
                 },
             )
             return {
-                "file": self.public_attachment(attachment),
+                "file": _attachment_to_public(attachment),
                 "waiting": True,
                 "message": "文件仍在处理中，请稍后再次读取。",
             }
@@ -472,7 +473,7 @@ class FileIntelligenceRuntime:
         )
         if not chunks and attachment.adapter_name == "image":
             return {
-                "file": self.public_attachment(attachment),
+                "file": _attachment_to_public(attachment),
                 "chunks": [],
                 "message": "图片未识别出可读取的 OCR 文本；如需描述图片画面，请使用 analyze_file，并确保视觉模型能力已启用。",
             }
@@ -486,16 +487,12 @@ class FileIntelligenceRuntime:
                 ]
         chunks = chunks[:limit]
         return {
-            "file": self.public_attachment(attachment),
+            "file": _attachment_to_public(attachment),
             "chunks": [
                 {
                     "content": c.content,
-                    "locator": c.locator.model_dump(
-                        mode="json", exclude_none=True
-                    ),
-                    "metadata": c.metadata.model_dump(
-                        mode="json", exclude_none=True
-                    ),
+                    "locator": c.locator.model_dump(mode="json", exclude_none=True),
+                    "metadata": c.metadata.model_dump(mode="json", exclude_none=True),
                 }
                 for c in chunks
             ],
@@ -702,7 +699,7 @@ class FileIntelligenceRuntime:
             {
                 "id": chunk_id,
                 "content": content,
-            "locator": FileLocator.model_validate_json(
+                "locator": FileLocator.model_validate_json(
                     (metadata or {}).get("locator_json", "{}")
                 ).model_dump(mode="json", exclude_none=True),
                 "score": max(0.0, 1 - float(distance) / 2),
@@ -798,9 +795,7 @@ class FileIntelligenceRuntime:
             values[chunk.id] = {
                 "id": chunk.id,
                 "content": chunk.content,
-                "locator": chunk.locator.model_dump(
-                    mode="json", exclude_none=True
-                ),
+                "locator": chunk.locator.model_dump(mode="json", exclude_none=True),
                 "native_score": chunk.native_score,
             }
         for rank, item in enumerate(vector, 1):
@@ -897,9 +892,7 @@ class FileIntelligenceRuntime:
         artifact = await self.repository.get_artifact(key)
         return {
             "tables": (
-                json.loads(artifact.content)
-                if artifact and artifact.content
-                else []
+                json.loads(artifact.content) if artifact and artifact.content else []
             )
         }
 
@@ -1011,7 +1004,7 @@ class FileIntelligenceRuntime:
         """分析代码项目：返回语言分布、文件数、符号数和依赖数。"""
         attachment = await self.require_attachment(session_id, file_id)
         return {
-            "file": self.public_attachment(attachment),
+            "file": _attachment_to_public(attachment),
             "languages": attachment.metadata.languages,
             "files": attachment.metadata.files or 1,
             "symbols": attachment.metadata.symbol_count or 0,
@@ -1121,45 +1114,13 @@ class FileIntelligenceRuntime:
         )
         return hashlib.sha256(raw.encode()).hexdigest()
 
-    @staticmethod
-    def public_attachment(
-        attachment: Attachment, include_metadata: bool = False
-    ) -> dict[str, Any]:
-        """将 Attachment 转换为公开 API 字典（排除 storage_key 等内部字段）。
-
-        参数：
-            attachment: 附件领域模型。
-            include_metadata: 是否包含 metadata 字段（默认 ``False``）。
-        """
-        data = {
-            "id": attachment.id,
-            "session_id": attachment.session_id,
-            "message_id": attachment.message_id,
-            "filename": attachment.filename,
-            "mime_type": attachment.mime_type,
-            "size_bytes": attachment.size_bytes,
-            "sha256": attachment.sha256,
-            "status": attachment.status.value,
-            "adapter_name": attachment.adapter_name,
-            "adapter_version": attachment.adapter_version,
-            "capabilities": attachment.capabilities,
-            "error_message": attachment.error_message,
-            "created_at": attachment.created_at.isoformat(),
-            "updated_at": attachment.updated_at.isoformat(),
-        }
-        if include_metadata:
-            data["metadata"] = attachment.metadata.model_dump(
-                mode="json", exclude_none=True
-            )
-        return data
-
     async def emit(
-        self, event_type: EventType | str, session_id: str, data: dict[str, Any]
+        self, event_type: EventType, session_id: str, data: dict[str, Any]
     ) -> None:
         """通过应用事件契约发布文件生命周期事件。
 
         参数:
-            event_type (EventType | str): 事件类型；字符串必须非空。
+            event_type (EventType): 文件生命周期事件类型。
             session_id (str): 事件所属会话 ID，必须非空。
             data (dict[str, Any]): 要发布的事件数据，必须可以转换为 JSON。
         返回值:
@@ -1167,29 +1128,32 @@ class FileIntelligenceRuntime:
         异常:
             payload 无法序列化或事件发布失败时传播相应异常。
         """
-        await self._events.publish(ApplicationEvent(
-            event_type=str(event_type), durability=EventDurability.DURABLE,
-            session_id=session_id,
-            message_id=str(data["message_id"]) if data.get("message_id") else None,
-            attachment_id=(
-                str(data.get("attachment_id") or data.get("id"))
-                if data.get("attachment_id") or data.get("id")
-                else None
-            ),
-            run_id=str(data["run_id"]) if data.get("run_id") else None,
-            payload=data,
-        ))
+        await self._events.publish(
+            ApplicationEvent(
+                event_type=event_type,
+                durability=EventDurability.DURABLE,
+                session_id=session_id,
+                message_id=str(data["message_id"]) if data.get("message_id") else None,
+                attachment_id=(
+                    str(data.get("attachment_id") or data.get("id"))
+                    if data.get("attachment_id") or data.get("id")
+                    else None
+                ),
+                run_id=str(data["run_id"]) if data.get("run_id") else None,
+                payload=data,
+            )
+        )
 
     async def emit_attachment(
         self, attachment: Attachment, *, run_id: str | None = None
     ) -> None:
         """推送附件状态更新事件。"""
-        data = self.public_attachment(attachment, True)
+        data = _attachment_to_public(attachment, True)
         data["attachment_id"] = attachment.id
         if run_id:
             data["run_id"] = run_id
         await self.emit(
-            "attachment_updated",
+            EventType.ATTACHMENT_UPDATED,
             attachment.session_id,
             data,
         )

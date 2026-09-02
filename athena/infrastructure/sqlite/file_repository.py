@@ -24,13 +24,13 @@ from athena.infrastructure.sqlite.models import (
     CodeSymbolModel,
     FileArtifactModel,
     FileChunkModel,
-    MessageAttachmentModel,
 )
 from athena.infrastructure.sqlite.repositories import (
     _json_dumps,
     _json_loads,
     _json_loads_model,
 )
+from athena.infrastructure.sqlite.repositories.converters import _row_to_attachment
 from athena.models.file import (
     AdapterInfo,
     Attachment,
@@ -66,31 +66,6 @@ def _fts_match_expression(query: str) -> str | None:
 def _now() -> datetime:
     """返回当前时间。"""
     return datetime.now()
-
-
-def _attachment(row: AttachmentModel) -> Attachment:
-    """将 ORM 模型转换为领域模型。"""
-    return Attachment(
-        id=row.id,
-        session_id=row.session_id,
-        message_id=row.message_id,
-        filename=row.filename,
-        mime_type=row.mime_type,
-        size_bytes=row.size_bytes,
-        sha256=row.sha256,
-        storage_key=row.storage_key,
-        adapter_name=row.adapter_name,
-        adapter_version=row.adapter_version,
-        status=AttachmentStatus(row.status),
-        capabilities=_json_loads(row.capabilities_json, []),
-        metadata=_json_loads_model(row.metadata_json, FileMetadata, FileMetadata()),
-        error_message=row.error_message,
-        created_at=datetime.fromisoformat(row.created_at),
-        updated_at=datetime.fromisoformat(row.updated_at),
-        deleted_time=(
-            datetime.fromisoformat(row.deleted_time) if row.deleted_time else None
-        ),
-    )
 
 
 class FileRepository:
@@ -165,11 +140,6 @@ class FileRepository:
                 await session.execute(
                     delete(CodeDependencyModel).where(
                         CodeDependencyModel.attachment_id.in_(attachment_ids)
-                    )
-                )
-                await session.execute(
-                    delete(MessageAttachmentModel).where(
-                        MessageAttachmentModel.attachment_id.in_(attachment_ids)
                     )
                 )
 
@@ -248,7 +218,7 @@ class FileRepository:
         async with get_session() as session:
             async with session.begin():
                 session.add(row)
-        return _attachment(row)
+        return _row_to_attachment(row)
 
     async def get_attachment(
         self,
@@ -277,7 +247,7 @@ class FileRepository:
             if not include_deleted:
                 stmt = stmt.where(AttachmentModel.deleted_time.is_(None))
             row = (await session.execute(stmt)).scalar_one_or_none()
-            return _attachment(row) if row else None
+            return _row_to_attachment(row) if row else None
 
     async def get_attachments(
         self,
@@ -299,7 +269,7 @@ class FileRepository:
                 stmt = stmt.where(AttachmentModel.deleted_time.is_(None))
             rows = (await session.execute(stmt)).scalars().all()
         # IN 查询不保证返回顺序；当前调用方会自行按 ID 查找或重排，因此无需构建索引。
-        return [_attachment(row) for row in rows]
+        return [_row_to_attachment(row) for row in rows]
 
     async def list_attachments(self, session_id: str) -> list[Attachment]:
         """
@@ -328,7 +298,7 @@ class FileRepository:
                 .scalars()
                 .all()
             )
-            return [_attachment(row) for row in rows]
+            return [_row_to_attachment(row) for row in rows]
 
     async def update_attachment(
         self, attachment_id: str, **values: Any
@@ -376,7 +346,7 @@ class FileRepository:
                         )
                     )
                 ).scalar_one_or_none()
-                return _attachment(row) if row else None
+                return _row_to_attachment(row) if row else None
 
     async def soft_delete_attachment(self, attachment_id: str, session_id: str) -> bool:
         """
@@ -435,11 +405,6 @@ class FileRepository:
                         CodeDependencyModel.attachment_id == attachment_id
                     )
                 )
-                await session.execute(
-                    delete(MessageAttachmentModel).where(
-                        MessageAttachmentModel.attachment_id == attachment_id
-                    )
-                )
                 return True
 
     async def bind_message(
@@ -479,13 +444,10 @@ class FileRepository:
                 if len(rows) != len(ids):
                     raise PermissionError("附件不存在或不属于当前会话")
                 for row in rows:
+                    if row.message_id not in (None, message_id):
+                        raise ValueError("附件已关联其他消息")
                     row.message_id = message_id
-                    await session.execute(
-                        sqlite_insert(MessageAttachmentModel)
-                        .values(message_id=message_id, attachment_id=row.id)
-                        .on_conflict_do_nothing()
-                    )
-        return [_attachment(row) for row in rows]
+        return [_row_to_attachment(row) for row in rows]
 
     async def attachments_for_messages(
         self, message_ids: Iterable[str]
@@ -506,19 +468,16 @@ class FileRepository:
             return {}
         async with get_session() as session:
             result = await session.execute(
-                select(MessageAttachmentModel.message_id, AttachmentModel)
-                .join(
-                    AttachmentModel,
-                    AttachmentModel.id == MessageAttachmentModel.attachment_id,
-                )
+                select(AttachmentModel)
                 .where(
-                    MessageAttachmentModel.message_id.in_(ids),
+                    AttachmentModel.message_id.in_(ids),
                     AttachmentModel.deleted_time.is_(None),
                 )
             )
             out: dict[str, list[Attachment]] = {}
-            for message_id, row in result.all():
-                out.setdefault(message_id, []).append(_attachment(row))
+            for row in result.scalars().all():
+                if row.message_id is not None:
+                    out.setdefault(row.message_id, []).append(_row_to_attachment(row))
             return out
 
     async def replace_chunks(self, attachment_id: str, chunks: list[FileChunk]) -> None:

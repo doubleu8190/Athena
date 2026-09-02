@@ -16,8 +16,7 @@ from .nodes import (
     create_execute_tools_and_llm_node,
     create_finalize_response_node,
     create_prepare_context_node,
-    create_prepare_request_node,
-    create_persist_message_and_attachments_node,
+    create_prepare_and_persist_request_node,
     create_process_attachments_node,
     create_retrieve_memory_node,
 )
@@ -41,10 +40,9 @@ def build_graph(
         运行时构建失败时传播 LangGraph 或依赖对象抛出的异常。
     """
     graph = StateGraph(AgentState)
-    graph.add_node("prepare_request", create_prepare_request_node(runtime))
     graph.add_node(
-        "persist_message_and_attachments",
-        create_persist_message_and_attachments_node(runtime),
+        "prepare_and_persist_request",
+        create_prepare_and_persist_request_node(runtime),
     )
     graph.add_node("process_attachments", create_process_attachments_node(runtime))
     graph.add_node("handle_file_failure", create_handle_file_failure_node())
@@ -54,9 +52,8 @@ def build_graph(
         "execute_tools_and_llm", create_execute_tools_and_llm_node(runtime)
     )
     graph.add_node("finalize_response", create_finalize_response_node())
-    graph.add_edge(START, "prepare_request")
-    graph.add_edge("prepare_request", "persist_message_and_attachments")
-    graph.add_edge("persist_message_and_attachments", "process_attachments")
+    graph.add_edge(START, "prepare_and_persist_request")
+    graph.add_edge("prepare_and_persist_request", "process_attachments")
     graph.add_conditional_edges(
         "process_attachments",
         check_file_results,

@@ -17,7 +17,7 @@ from agent_runtime.command_notifications import CommandNotifier
 from agent_runtime.transport import SessionEventBus
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
-from athena.contracts.events import ApplicationEvent
+from athena.contracts.events import ApplicationEvent, EventType
 from athena.contracts.ports import AgentCommandRecord, AgentRunRecord
 from athena.contracts.statuses import (
     AgentApprovalDecision,
@@ -621,7 +621,7 @@ class AgentStore:
                 )
                 if (
                     stream_cache_key is not None
-                    and event.event_type == "message.delta"
+                    and event.event_type == EventType.LLM_TOKEN
                     and event.chunk_id is None
                 ):
                     await self._cached_stream_chunk_id(
@@ -659,7 +659,7 @@ class AgentStore:
                 chunk_id = event.chunk_id
                 if (
                     event.stream_id
-                    and event.event_type == "message.delta"
+                    and event.event_type == EventType.LLM_TOKEN
                     and chunk_id is None
                 ):
                     chunk_id = self._stream_chunk_cache[

@@ -8,7 +8,7 @@ from typing import Any
 
 from agent_runtime.transport import RuntimeEventPublisher
 from athena.contracts.statuses import AgentApprovalDecision, AgentApprovalStatus
-from athena.contracts.events import ApplicationEvent, EventDurability
+from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.infrastructure.sqlite.agent_store import AgentStore
 from athena.infrastructure.sqlite.database import Database
 from athena.models.approval import ApprovalDecision, ApprovalRequest
@@ -94,7 +94,7 @@ class ApprovalManager:
         )
         await self._event_publisher.publish(
             ApplicationEvent(
-                event_type="approval.required",
+                event_type=EventType.APPROVAL_REQUIRED,
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=run_id,

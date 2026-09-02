@@ -6,7 +6,7 @@ import asyncio
 from typing import Any
 
 from athena.contracts.commands import CommandType
-from athena.contracts.events import ApplicationEvent, EventDurability
+from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import AgentCommandRecord, AgentStorePort
 from athena.contracts.statuses import (
     AgentApprovalDecision,
@@ -162,7 +162,7 @@ class CommandConsumer:
         await self._handle_run_state_change(
             command,
             status=AgentRunStatus.PAUSED,
-            event_type="run.paused",
+            event_type=EventType.RUN_PAUSED,
             pause=True,
         )
 
@@ -172,7 +172,7 @@ class CommandConsumer:
         await self._handle_run_state_change(
             command,
             status=AgentRunStatus.RUNNING,
-            event_type="run.resumed",
+            event_type=EventType.RUN_RESUMED,
             clear_pause=True,
         )
 
@@ -181,7 +181,7 @@ class CommandConsumer:
         command: AgentCommandRecord,
         *,
         status: AgentRunStatus,
-        event_type: str,
+        event_type: EventType,
         pause: bool = False,
         clear_pause: bool = False,
     ) -> None:
@@ -272,7 +272,7 @@ class CommandConsumer:
             return
 
         await self.store.update_run_status(run_id, AgentRunStatus.RUNNING)
-        await self._publish_run_event(command, "run.started")
+        await self._publish_run_event(command, EventType.RUN_STARTED)
         result = await invoke_graph(
             self.graph,
             session_id=command.session_id,
@@ -293,7 +293,7 @@ class CommandConsumer:
         self, command: AgentCommandRecord, run_id: str
     ) -> None:
         await self.store.update_run_status(run_id, AgentRunStatus.CANCELLED)
-        await self._publish_run_event(command, "run.cancelled")
+        await self._publish_run_event(command, EventType.RUN_CANCELLED)
         await self.store.complete(
             command.command_id,
             status=AgentCommandStatus.SUCCEEDED,
@@ -316,7 +316,7 @@ class CommandConsumer:
         )
         await self.store.publish(
             ApplicationEvent(
-                event_type="stream.snapshot",
+                event_type=EventType.STREAM_SNAPSHOT,
                 durability=EventDurability.SNAPSHOT,
                 session_id=command.session_id,
                 run_id=run_id,
@@ -337,7 +337,7 @@ class CommandConsumer:
                 },
             )
         )
-        await self._publish_run_event(command, "run.completed")
+        await self._publish_run_event(command, EventType.RUN_COMPLETED)
         await self.store.complete(
             command.command_id,
             status=AgentCommandStatus.SUCCEEDED,
@@ -356,7 +356,7 @@ class CommandConsumer:
         return str(result or "")
 
     async def _publish_run_event(
-        self, command: AgentCommandRecord, event_type: str
+        self, command: AgentCommandRecord, event_type: EventType
     ) -> None:
         await self.store.publish(
             ApplicationEvent(
@@ -393,7 +393,7 @@ class CommandConsumer:
             await self.store.update_run_status(run_id, AgentRunStatus.FAILED, str(exc))
             await self.store.publish(
                 ApplicationEvent(
-                    event_type="run.failed",
+                    event_type=EventType.RUN_FAILED,
                     durability=EventDurability.DURABLE,
                     session_id=command.session_id,
                     run_id=run_id,

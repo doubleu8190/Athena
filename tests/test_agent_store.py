@@ -10,10 +10,9 @@ import pytest
 from agent_runtime.command_notifications import CommandNotifier
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
-from athena.contracts.events import ApplicationEvent, EventDurability
+from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentRunStatus
 from agent_runtime.streaming import StreamCoalescer
-from agent_runtime.transport import RealtimeTransport
 from athena.infrastructure.sqlite.agent_store import AgentStore
 from athena.infrastructure.sqlite.database import Database
 from athena.utils.ids import generate_session_id
@@ -166,7 +165,7 @@ async def test_events_share_session_sequence_across_durability_levels(agent_stor
 
     first = await store.publish(
         ApplicationEvent(
-            event_type="message.delta",
+            event_type=EventType.LLM_TOKEN,
             durability=EventDurability.REALTIME,
             session_id=session.id,
             run_id="run-1",
@@ -178,7 +177,7 @@ async def test_events_share_session_sequence_across_durability_levels(agent_stor
     )
     second = await store.publish(
         ApplicationEvent(
-            event_type="tool.started",
+            event_type=EventType.TOOL_CALL_START,
             durability=EventDurability.DURABLE,
             session_id=session.id,
             run_id="run-1",
@@ -198,7 +197,7 @@ async def test_stream_chunk_is_idempotent_and_conflicts_are_rejected(agent_store
     session = await database.sessions.create(generate_session_id(), "Chunk")
     store = AgentStore()
     event = ApplicationEvent(
-        event_type="message.delta",
+        event_type=EventType.LLM_TOKEN,
         durability=EventDurability.REALTIME,
         session_id=session.id,
         run_id="run-1",
@@ -226,7 +225,7 @@ async def test_concurrent_event_publish_is_serialized(agent_store):
 
     events = [
         ApplicationEvent(
-            event_type="run.started",
+            event_type=EventType.RUN_STARTED,
             durability=EventDurability.DURABLE,
             session_id=session.id,
             run_id=f"run-{index}",

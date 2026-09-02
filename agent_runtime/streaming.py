@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
-from athena.contracts.events import ApplicationEvent, EventDurability
+from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 
 
 class StreamCoalescer:
@@ -108,7 +108,7 @@ class StreamCoalescer:
         self._last_flush = time.monotonic()
         await self.publish(
             ApplicationEvent(
-                event_type="message.delta",
+                event_type=EventType.LLM_TOKEN,
                 durability=EventDurability.REALTIME,
                 session_id=self.session_id,
                 run_id=self.run_id,

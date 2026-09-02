@@ -10,8 +10,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from time import perf_counter
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 from langchain_core.messages import HumanMessage
 
@@ -19,7 +18,6 @@ from athena.config.settings import Settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import TokenCounter
 from athena.core.memory.memory import MemoryManager
-from athena.core.retrieval.trace import RetrievalTrace
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
@@ -119,7 +117,6 @@ class HybridRetrievalManager:
         llm_provider: LLMProvider,
         memory_manager: MemoryManager,
         settings: Settings,
-        trace_sink: Callable[[RetrievalTrace], None] | None = None,
     ) -> None:
         """
 
@@ -127,8 +124,6 @@ class HybridRetrievalManager:
             llm_provider (LLMProvider): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             memory_manager (MemoryManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
-            trace_sink (Callable[[RetrievalTrace], None] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-
         返回值：
             None: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
@@ -153,8 +148,6 @@ class HybridRetrievalManager:
         self._keyword_weight = self._settings.keyword_weight
         self._rrf_k = self._settings.rrf_k
         self._ttl_days = self._settings.memory_ttl_days
-        self._trace_enabled = self._settings.retrieval_trace_enabled
-        self._trace_sink = trace_sink
 
     def record_selected_access(self, memory_ids: Iterable[str]) -> None:
         """记录已写入上下文的记忆访问。"""
@@ -173,81 +166,56 @@ class HybridRetrievalManager:
         记忆都可被召回；filter_params 为可选显式过滤（按需传入 category/
         type 等），产线不传即全库检索。
         """
-        trace = self._new_trace(query)
-        selected: list[SearchResult] = []
-        try:
-            # Corrected 模式并发启动原始向量和关键词路线；扩展 query 只作为
-            # 完成原始路线后的附加向量证据。
-            keyword_task = asyncio.create_task(
-                self._keyword_search(query, filter_params, trace, route="keyword")
+        # Corrected 模式并发启动原始向量和关键词路线；扩展 query 只作为
+        # 完成原始路线后的附加向量证据。
+        keyword_task = asyncio.create_task(
+            self._keyword_search(query, filter_params, route="keyword")
+        )
+        raw_vector_task = (
+            asyncio.create_task(
+                self._vector_search(query, filter_params, route="vector")
             )
-            raw_vector_task = (
-                asyncio.create_task(
-                    self._vector_search(query, filter_params, trace, route="vector")
+            if self._pipeline_mode == "corrected"
+            else None
+        )
+        expanded_query = await self._expand_query(query)
+        keyword_results = await keyword_task
+
+        vector_results = await raw_vector_task if raw_vector_task else []
+        if expanded_query and expanded_query.strip() != query.strip():
+            vector_results.extend(
+                await self._vector_search(
+                    expanded_query,
+                    filter_params,
+                    route="vector_rewrite",
                 )
-                if self._pipeline_mode == "corrected"
-                else None
             )
-            expanded_query = await self._expand_query(query, trace)
-            keyword_results = await keyword_task
 
-            vector_results = await raw_vector_task if raw_vector_task else []
-            if expanded_query and expanded_query.strip() != query.strip():
-                vector_results.extend(await self._vector_search(
-                    expanded_query, filter_params, trace,
-                    route="vector_rewrite", query_index=1,
-                ))
+        fused = self._reciprocal_rank_fusion(
+            vector_results,
+            keyword_results,
+        )
 
-            # RRF 只排序已经通过通道准入的候选，不承担相关性阈值判断。
-            fusion_started = perf_counter()
-            fused = self._reciprocal_rank_fusion(
-                vector_results,
-                keyword_results,
+        # 生命周期信号只作为同一相关度层内的 tie-break。
+        for r in fused:
+            r.rerank_score = r.fused_score
+        fused.sort(
+            key=lambda x: (
+                0 if x.exact_match else 1,
+                -float(x.fused_score or 0.0),
+                -self._lifecycle_score(x.metadata),
+                x.item_id,
             )
-            if trace is not None:
-                trace.set_fused_scores(
-                    {result.item_id: result.fused_score or 0.0 for result in fused}
-                )
-                trace.add_stage(
-                    stage="fusion",
-                    route="rrf",
-                    query_index=0,
-                    duration_ms=(perf_counter() - fusion_started) * 1000,
-                    result_count=len(fused),
-                )
+        )
+        selected = fused[: self._rerank_k][: self._context_k]
+        return selected
 
-            # 生命周期信号只作为同一相关度层内的 tie-break。
-            selection_started = perf_counter()
-            for r in fused:
-                r.rerank_score = r.fused_score
-            fused.sort(key=lambda x: (0 if x.exact_match else 1,
-                                       -float(x.fused_score or 0.0),
-                                       -self._lifecycle_score(x.metadata), x.item_id))
-            selected = fused[: self._rerank_k][: self._context_k]
-            if trace is not None:
-                trace.add_stage(
-                    stage="selection",
-                    route="memory",
-                    query_index=0,
-                    duration_ms=(perf_counter() - selection_started) * 1000,
-                    result_count=len(selected),
-                )
-            return selected
-        finally:
-            if trace is not None:
-                trace.mark_selected([result.chunk_id for result in selected])
-                trace.finish()
-                self._emit_trace(trace)
-
-    async def _expand_query(
-        self, query: str, trace: RetrievalTrace | None = None
-    ) -> str | None:
+    async def _expand_query(self, query: str) -> str | None:
         """使用 LLM 扩展查询.
 
         扩展结果仅用于向量语义检索（关键词检索使用原始查询走 FTS5），
         因此提示词明确语义检索目标、约束输出为单行语句。
         """
-        started = perf_counter()
         prompt = get_prompt("query_expansion").format(query=query)
         try:
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
@@ -256,72 +224,30 @@ class HybridRetrievalManager:
                 # 空响应（模型返回工具调用/错误/无文本）静默回落为 "None" 曾导致
                 # 下游检索被垃圾查询污染且无日志，这里显式记录并回退原查询。
                 logger.warning("query_expand_empty", query_length=len(query))
-                if trace is not None:
-                    trace.add_fallback("query_expand_empty")
-                    trace.add_stage(
-                        stage="query_expand",
-                        route="llm",
-                        query_index=0,
-                        duration_ms=(perf_counter() - started) * 1000,
-                        result_count=0,
-                        error_code="query_expand_empty",
-                    )
                 return None
-            if trace is not None:
-                trace.add_stage(
-                    stage="query_expand",
-                    route="llm",
-                    query_index=0,
-                    duration_ms=(perf_counter() - started) * 1000,
-                    result_count=1,
-                )
             return expanded
         except Exception as e:
             logger.warning("query_expand_failed", error=str(e))
-            if trace is not None:
-                trace.add_fallback("query_expand_failed")
-                trace.add_stage(
-                    stage="query_expand",
-                    route="llm",
-                    query_index=0,
-                    duration_ms=(perf_counter() - started) * 1000,
-                    result_count=0,
-                    error_code="query_expand_failed",
-                )
             return None
 
     async def _vector_search(
         self,
         query: str,
         filter_params: dict[str, Any] | None,
-        trace: RetrievalTrace | None = None,
         record_access: bool = False,
         *,
         route: str = "vector",
-        query_index: int = 0,
     ) -> list[SearchResult]:
         """向量检索（跨会话全库；filter_params 为可选显式过滤）."""
-        started = perf_counter()
         try:
             kwargs: dict[str, Any] = {
                 "query": query,
                 "n_results": self._candidate_k,
                 "where": filter_params,
             }
-            kwargs["record_access"] = False
             results = await self._memory.search(**kwargs)
         except Exception as e:
             logger.warning("vector_search_failed", error=str(e))
-            if trace is not None:
-                trace.add_fallback("vector_search_failed")
-                trace.add_stage(
-                    stage="candidate_retrieval",
-                    route=route,
-                    query_index=query_index,
-                    duration_ms=(perf_counter() - started) * 1000,
-                    result_count=0,
-                    error_code="vector_search_failed",
-                )
             return []
 
         out: list[SearchResult] = []
@@ -351,32 +277,15 @@ class HybridRetrievalManager:
                 for result in out
                 if (result.native_score or 0.0) >= self._vector_min_score
             ]
-        if trace is not None:
-            trace.add_stage(
-                stage="candidate_retrieval",
-                route=route,
-                query_index=query_index,
-                duration_ms=(perf_counter() - started) * 1000,
-                result_count=len(out),
-            )
-            for rank, result in enumerate(out, 1):
-                trace.add_candidate(
-                    item_id=result.chunk_id,
-                    route=route,
-                    rank=rank,
-                    native_score=result.native_score,
-                )
         return out
 
     async def _keyword_search(
         self,
         query: str,
         filter_params: dict[str, Any] | None,
-        trace: RetrievalTrace | None = None,
         record_access: bool = False,
         *,
         route: str = "keyword",
-        query_index: int = 0,
     ) -> list[SearchResult]:
         """关键词检索（SQLite FTS5 MATCH 全文检索）.
 
@@ -387,27 +296,15 @@ class HybridRetrievalManager:
         跨会话全库检索：不再按 session_id 过滤，跨会话的关键词命中也参与
         RRF 融合；filter_params 为可选显式过滤（仅支持 memories 表顶层列）。
         """
-        started = perf_counter()
         try:
             kwargs = {
                 "query": query,
                 "n_results": self._candidate_k,
                 "where": filter_params,
             }
-            kwargs["record_access"] = False
             results = await self._memory.keyword_search(**kwargs)
         except Exception as e:
             logger.warning("keyword_search_failed", error=str(e))
-            if trace is not None:
-                trace.add_fallback("keyword_search_failed")
-                trace.add_stage(
-                    stage="candidate_retrieval",
-                    route=route,
-                    query_index=query_index,
-                    duration_ms=(perf_counter() - started) * 1000,
-                    result_count=0,
-                    error_code="keyword_search_failed",
-                )
             return []
 
         out: list[SearchResult] = []
@@ -428,66 +325,7 @@ class HybridRetrievalManager:
         # （越大越相关），keyword_weight 统一在 RRF 融合处生效。上游已
         # ORDER BY rank(=bm25 升序) 返回，这里显式按 score 降序固化不变量。
         out.sort(key=lambda x: x.native_score or 0.0, reverse=True)
-        if trace is not None:
-            trace.add_stage(
-                stage="candidate_retrieval",
-                route=route,
-                query_index=query_index,
-                duration_ms=(perf_counter() - started) * 1000,
-                result_count=len(out),
-            )
-            for rank, result in enumerate(out, 1):
-                trace.add_candidate(
-                    item_id=result.chunk_id,
-                    route=route,
-                    rank=rank,
-                    native_score=result.native_score,
-                )
         return out
-
-    def _new_trace(
-        self,
-        query: str,
-    ) -> RetrievalTrace | None:
-        """
-
-        参数：
-            query (str): 检索或搜索文本；应为非空字符串。
-        返回值：
-            RetrievalTrace | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        if not self._trace_enabled:
-            return None
-        return RetrievalTrace(
-            source_scope="memory",
-            query=query,
-            query_hash_salt=self._settings.retrieval_trace_query_hash_salt,
-            include_raw_query=self._settings.retrieval_trace_include_raw_query,
-            query_labels=["memory"],
-            analyzer_mode=self._pipeline_mode,
-        )
-
-    def _emit_trace(self, trace: RetrievalTrace) -> None:
-        """
-
-        参数：
-            trace (RetrievalTrace): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-
-        返回值：
-            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        try:
-            if self._trace_sink is not None:
-                self._trace_sink(trace)
-            logger.info("retrieval_completed", **trace.as_log_fields())
-        except Exception:
-            logger.warning("retrieval_trace_emit_failed")
 
     def _reciprocal_rank_fusion(
         self,

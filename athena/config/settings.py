@@ -149,14 +149,6 @@ class Settings(BaseSettings):
     retrieval_pipeline_mode: Literal["corrected"] = "corrected"
     memory_max_tokens: int = 2000
 
-    # --- 检索可观测性 ---
-    # 默认关闭，避免在生产路径上产生额外日志和任何查询内容暴露。
-    retrieval_trace_enabled: bool = False
-    # 仅本地开发诊断时开启；生产环境应保持 false。
-    retrieval_trace_include_raw_query: bool = False
-    # 用于 query_hash 的部署级 salt，避免日志中的短查询被直接枚举。
-    retrieval_trace_query_hash_salt: str = ""
-
     # --- 上下文压缩 ---
     max_context_tokens: int = 128000
     compression_threshold: float = 0.8  # 上下文使用率阈值

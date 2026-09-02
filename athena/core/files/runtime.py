@@ -21,8 +21,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
-from time import perf_counter
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from chromadb import Collection
 from langchain_core.messages import HumanMessage
@@ -34,7 +33,6 @@ from athena.core.files.registry import AdapterRegistry
 from athena.infrastructure.sqlite.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
 from athena.core.llm.provider import LLMProvider
-from athena.core.retrieval.trace import RetrievalTrace
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.models.file import (
     Attachment,
@@ -92,7 +90,6 @@ class FileIntelligenceRuntime:
         *,
         settings: Settings,
         event_publisher: FileEventPublisher,
-        trace_sink: Callable[[RetrievalTrace], None] | None = None,
     ) -> None:
         """
 
@@ -102,7 +99,6 @@ class FileIntelligenceRuntime:
             secondary_llm (LLMProvider): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
             event_publisher: 应用事件发布器。
-            trace_sink (Callable[[RetrievalTrace], None] | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
             None: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -121,7 +117,6 @@ class FileIntelligenceRuntime:
         self._events = event_publisher
         self._chroma_client: ClientAPI | None = None
         self._collection: Collection | None = None
-        self._trace_sink = trace_sink
 
     @property
     def vector_index_ready(self) -> bool:
@@ -514,41 +509,30 @@ class FileIntelligenceRuntime:
             包含 query/results/score 的搜索结果字典。
         """
         attachment = await self.require_attachment(session_id, file_id)
-        trace = self._new_retrieval_trace(query, attachment.adapter_name)
         if attachment.status == AttachmentStatus.FAILED:
-            return self._failed_file_search_response(attachment, query, trace)
+            return self._failed_file_search_response(attachment, query)
 
-        selected_ids: list[str] = []
-        try:
-            limit = min(max(limit, 1), 50)
-            keyword = await self._search_file_keywords(file_id, query, limit, trace)
-            vector = await self._search_file_vectors(file_id, query, limit, trace)
-            ordered = self._fuse_file_results(keyword, vector, limit, trace)
-            selected_ids = [item["id"] for item in ordered]
-            response: dict[str, Any] = {"query": query, "results": ordered}
-            if not ordered and attachment.adapter_name == "image":
-                response["message"] = (
-                    "图片没有可搜索的 OCR 文本；搜索工具无法检索视觉元素，请改用 analyze_file。"
-                )
-            return response
-        finally:
-            if trace is not None:
-                trace.mark_selected(selected_ids)
-                trace.finish()
-                self._emit_retrieval_trace(trace)
+        limit = min(max(limit, 1), 50)
+        keyword = await self._search_file_keywords(file_id, query, limit)
+        vector = await self._search_file_vectors(file_id, query, limit)
+        ordered = self._fuse_file_results(keyword, vector, limit)
+        response: dict[str, Any] = {"query": query, "results": ordered}
+        if not ordered and attachment.adapter_name == "image":
+            response["message"] = (
+                "图片没有可搜索的 OCR 文本；搜索工具无法检索视觉元素，请改用 analyze_file。"
+            )
+        return response
 
     def _failed_file_search_response(
         self,
         attachment: Attachment,
         query: str,
-        trace: RetrievalTrace | None,
     ) -> dict[str, Any]:
         """
 
         参数：
             attachment (Attachment): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             query (str): 检索或搜索文本；应为非空字符串。
-            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
             dict[str, Any]: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -556,18 +540,6 @@ class FileIntelligenceRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        if trace is not None:
-            trace.add_stage(
-                stage="attachment_check",
-                route="file",
-                query_index=0,
-                duration_ms=0.0,
-                result_count=0,
-                error_code="attachment_failed",
-            )
-            trace.add_fallback("attachment_failed")
-            trace.finish()
-            self._emit_retrieval_trace(trace)
         return {
             "query": query,
             "results": [],
@@ -579,7 +551,6 @@ class FileIntelligenceRuntime:
         file_id: str,
         query: str,
         limit: int,
-        trace: RetrievalTrace | None,
     ) -> list[FileChunk]:
         """
 
@@ -587,36 +558,16 @@ class FileIntelligenceRuntime:
             file_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             query (str): 检索或搜索文本；应为非空字符串。
             limit (int): 最大返回数量；应为非负整数。
-            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-
         返回值：
             list[FileChunk]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        started = perf_counter()
         try:
             keyword = await self.repository.search_chunks(file_id, query, limit=limit)
         except Exception:
-            if trace is not None:
-                trace.add_fallback("file_keyword_search_failed")
-                trace.add_stage(
-                    stage="candidate_retrieval",
-                    route="keyword",
-                    query_index=0,
-                    duration_ms=(perf_counter() - started) * 1000,
-                    result_count=0,
-                    error_code="file_keyword_search_failed",
-                )
             raise
-        self._record_file_candidates(
-            trace,
-            route="keyword",
-            candidates=keyword,
-            native_score="native_score",
-            duration_ms=(perf_counter() - started) * 1000,
-        )
         return keyword
 
     async def _search_file_vectors(
@@ -624,7 +575,6 @@ class FileIntelligenceRuntime:
         file_id: str,
         query: str,
         limit: int,
-        trace: RetrievalTrace | None,
     ) -> list[dict[str, Any]]:
         """
 
@@ -632,15 +582,12 @@ class FileIntelligenceRuntime:
             file_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             query (str): 检索或搜索文本；应为非空字符串。
             limit (int): 最大返回数量；应为非负整数。
-            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-
         返回值：
             list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        started = perf_counter()
         vector: list[dict[str, Any]] = []
         if self._collection is not None:
             try:
@@ -656,24 +603,7 @@ class FileIntelligenceRuntime:
                 logger.warning(
                     "file_vector_search_failed", file_id=file_id, error=str(exc)
                 )
-                if trace is not None:
-                    trace.add_fallback("file_vector_search_failed")
-                    trace.add_stage(
-                        stage="candidate_retrieval",
-                        route="vector",
-                        query_index=0,
-                        duration_ms=(perf_counter() - started) * 1000,
-                        result_count=0,
-                        error_code="file_vector_search_failed",
-                    )
                 return vector
-        self._record_file_candidates(
-            trace,
-            route="vector",
-            candidates=vector,
-            native_score="score",
-            duration_ms=(perf_counter() - started) * 1000,
-        )
         return vector
 
     @staticmethod
@@ -707,65 +637,11 @@ class FileIntelligenceRuntime:
             )
         ]
 
-    def _record_file_candidates(
-        self,
-        trace: RetrievalTrace | None,
-        *,
-        route: str,
-        candidates: list[Any],
-        native_score: str | None,
-        duration_ms: float,
-    ) -> None:
-        """执行“记录文件候选项”操作。
-
-        参数：
-            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            route (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            candidates (list[Any]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            native_score (str | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            duration_ms (float): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-
-        返回值：
-            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        if trace is None:
-            return
-        trace.add_stage(
-            stage="candidate_retrieval",
-            route=route,
-            query_index=0,
-            duration_ms=duration_ms,
-            result_count=len(candidates),
-        )
-        for rank, candidate in enumerate(candidates, 1):
-            item_id = (
-                candidate.id if isinstance(candidate, FileChunk) else candidate["id"]
-            )
-            score = (
-                None
-                if native_score is None
-                else (
-                    getattr(candidate, native_score, None)
-                    if isinstance(candidate, FileChunk)
-                    else candidate.get(native_score)
-                )
-            )
-            trace.add_candidate(
-                item_id=item_id,
-                route=route,
-                rank=rank,
-                native_score=score,
-            )
-
     def _fuse_file_results(
         self,
         keyword: list[FileChunk],
         vector: list[dict[str, Any]],
         limit: int,
-        trace: RetrievalTrace | None,
     ) -> list[dict[str, Any]]:
         """
 
@@ -773,15 +649,12 @@ class FileIntelligenceRuntime:
             keyword (list[FileChunk]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             vector (list[dict[str, Any]]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             limit (int): 最大返回数量；应为非负整数。
-            trace (RetrievalTrace | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-
         返回值：
             list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        fusion_started = perf_counter()
         scores: dict[str, float] = {}
         values: dict[str, dict[str, Any]] = {}
         for rank, chunk in enumerate(keyword, 1):
@@ -804,74 +677,9 @@ class FileIntelligenceRuntime:
         ordered = sorted(
             values.values(), key=lambda item: scores[item["id"]], reverse=True
         )[:limit]
-        selection_started = perf_counter()
         for item in ordered:
             item["score"] = scores[item["id"]]
-        if trace is not None:
-            trace.set_fused_scores(scores)
-            trace.add_stage(
-                stage="fusion",
-                route="rrf",
-                query_index=0,
-                duration_ms=(perf_counter() - fusion_started) * 1000,
-                result_count=len(ordered),
-            )
-            trace.add_stage(
-                stage="selection",
-                route="file",
-                query_index=0,
-                duration_ms=(perf_counter() - selection_started) * 1000,
-                result_count=len(ordered),
-            )
         return ordered
-
-    def _new_retrieval_trace(
-        self,
-        query: str,
-        adapter_name: str | None,
-    ) -> RetrievalTrace | None:
-        """
-
-        参数：
-            query (str): 检索或搜索文本；应为非空字符串。
-            adapter_name (str | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-        返回值：
-            RetrievalTrace | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        if not self.settings.retrieval_trace_enabled:
-            return None
-        labels = ["file"]
-        if adapter_name:
-            labels.append(adapter_name)
-        return RetrievalTrace(
-            source_scope="file",
-            query=query,
-            query_hash_salt=self.settings.retrieval_trace_query_hash_salt,
-            include_raw_query=self.settings.retrieval_trace_include_raw_query,
-            query_labels=labels,
-        )
-
-    def _emit_retrieval_trace(self, trace: RetrievalTrace) -> None:
-        """
-
-        参数：
-            trace (RetrievalTrace): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-
-        返回值：
-            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        try:
-            if self._trace_sink is not None:
-                self._trace_sink(trace)
-            logger.info("retrieval_completed", **trace.as_log_fields())
-        except Exception:
-            logger.warning("retrieval_trace_emit_failed")
 
     async def extract_table(self, session_id: str, file_id: str) -> dict[str, Any]:
         """提取文件的表格数据（从解析阶段缓存的 artifact 读取）。"""

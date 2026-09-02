@@ -430,6 +430,9 @@ async def test_office_pdf_and_image_adapters_preserve_structure(tmp_path):
 
     settings = Settings(_env_file=None)
 
+    embedded_image_path = tmp_path / "embedded.png"
+    Image.new("RGB", (12, 8), "white").save(embedded_image_path)
+
     text_path = tmp_path / "sample.txt"
     text_path.write_text("hello\nworld\n", encoding="utf-8")
     text = await TextAdapter().extract(_context(text_path, tmp_path), settings)
@@ -443,10 +446,13 @@ async def test_office_pdf_and_image_adapters_preserve_structure(tmp_path):
     document = Document()
     document.add_heading("Title", level=1)
     document.add_paragraph("Body")
+    document.add_picture(str(embedded_image_path))
     docx_path = tmp_path / "sample.docx"
     document.save(docx_path)
     word = await WordAdapter().extract(_context(docx_path, tmp_path), settings)
     assert word.units[0].metadata["style"] == "Heading 1"
+    assert word.metadata["images"] == 1
+    assert any(unit.metadata.get("kind") == "image" for unit in word.units)
 
     workbook = Workbook()
     sheet = workbook.active

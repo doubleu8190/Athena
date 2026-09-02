@@ -143,7 +143,6 @@ class HybridRetrievalManager:
         self._vector_min_score = getattr(
             self._settings, "memory_vector_min_score", self._min_score
         )
-        self._pipeline_mode = "corrected"
         self._vector_weight = self._settings.vector_weight
         self._keyword_weight = self._settings.keyword_weight
         self._rrf_k = self._settings.rrf_k
@@ -166,22 +165,18 @@ class HybridRetrievalManager:
         记忆都可被召回；filter_params 为可选显式过滤（按需传入 category/
         type 等），产线不传即全库检索。
         """
-        # Corrected 模式并发启动原始向量和关键词路线；扩展 query 只作为
-        # 完成原始路线后的附加向量证据。
+        # 并发启动原始向量和关键词路线；扩展 query 只作为完成原始路线后的
+        # 附加向量证据。
         keyword_task = asyncio.create_task(
             self._keyword_search(query, filter_params, route="keyword")
         )
-        raw_vector_task = (
-            asyncio.create_task(
-                self._vector_search(query, filter_params, route="vector")
-            )
-            if self._pipeline_mode == "corrected"
-            else None
+        raw_vector_task = asyncio.create_task(
+            self._vector_search(query, filter_params, route="vector")
         )
         expanded_query = await self._expand_query(query)
-        keyword_results = await keyword_task
 
-        vector_results = await raw_vector_task if raw_vector_task else []
+        keyword_results = await keyword_task
+        vector_results = await raw_vector_task
         if expanded_query and expanded_query.strip() != query.strip():
             vector_results.extend(
                 await self._vector_search(
@@ -271,12 +266,11 @@ class HybridRetrievalManager:
             key=lambda x: x.native_score or 0.0,
             reverse=not has_raw_native_scores,
         )
-        if self._pipeline_mode == "corrected":
-            out = [
-                result
-                for result in out
-                if (result.native_score or 0.0) >= self._vector_min_score
-            ]
+        out = [
+            result
+            for result in out
+            if (result.native_score or 0.0) >= self._vector_min_score
+        ]
         return out
 
     async def _keyword_search(

@@ -45,7 +45,6 @@ class _Tokens:
 def _settings() -> Settings:
     return Settings(
         _env_file=None,
-        retrieval_pipeline_mode="corrected",
         retrieval_candidate_k=30,
         retrieval_rerank_k=10,
         retrieval_context_k=5,
@@ -54,7 +53,7 @@ def _settings() -> Settings:
 
 
 @pytest.mark.asyncio
-async def test_corrected_keeps_original_vector_query_and_filters_low_native_score():
+async def test_retrieval_keeps_original_vector_query_and_filters_low_native_score():
     memory = _Memory(
         {"original entity": [{"id": "weak", "content": "weak", "score": 0.69}]}
     )
@@ -65,7 +64,7 @@ async def test_corrected_keeps_original_vector_query_and_filters_low_native_scor
 
 
 @pytest.mark.asyncio
-async def test_corrected_adds_different_rewrite_and_retains_route_ranks():
+async def test_retrieval_adds_different_rewrite_and_retains_route_ranks():
     memory = _Memory(
         {
             "raw": [{"id": "same", "content": "same", "score": 0.9}],
@@ -83,7 +82,7 @@ async def test_corrected_adds_different_rewrite_and_retains_route_ranks():
 
 
 @pytest.mark.asyncio
-async def test_corrected_exact_keyword_hit_is_independent_of_vector_score():
+async def test_retrieval_exact_keyword_hit_is_independent_of_vector_score():
     memory = _Memory(
         {"ERR_NOT_FOUND": [{"id": "weak", "content": "weak", "score": 0.1}]},
         keyword=[

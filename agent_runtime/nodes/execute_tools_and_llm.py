@@ -34,24 +34,34 @@ async def execute_tools_and_llm(
         KeyError: 状态缺少运行前准备字段，或配置结构不符合预期时抛出。
         运行时异常: 附件等待、工具调用或 LLM 执行失败时传播底层异常。
     """
+    runtime.validate_state(state)
+    session_id = state.get("session_id", "")
+    run_id = state.get("run_id", "")
     attachment_refs = runtime.deserialize_attachment_refs(
         state.get("attachment_refs", [])
     )
-    messages = runtime.deserialize_messages(state["harness_messages"])
+    messages = runtime.deserialize_messages(state.get("harness_messages", []))
     stop_signal = config.get("configurable", {}).get("stop_signal")
-    runtime.set_stop_signal(state["session_id"], stop_signal)
+    runtime.set_stop_signal(session_id, stop_signal)
     try:
         result = await runtime.run_harness(
             messages=messages,
-            session_id=state["session_id"],
+            session_id=session_id,
             memory_context=state.get("memory_context", ""),
-            run_id=state["run_id"],
+            run_id=run_id,
             stop_signal=stop_signal,
         )
-        await runtime.post_process(state["session_id"], state["user_message"], result)
-        return {"result": runtime.result_payload(result, attachment_refs)}
+        await runtime.post_process(
+            session_id,
+            state.get("user_message", ""),
+            result,
+            turn_id=run_id,
+        )
+        return {
+            "result": runtime.result_payload(result, attachment_refs),
+        }
     finally:
-        runtime.set_stop_signal(state["session_id"], None)
+        runtime.set_stop_signal(session_id, None)
 
 
 def create_execute_tools_and_llm_node(

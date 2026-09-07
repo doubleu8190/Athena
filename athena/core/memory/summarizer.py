@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from athena.config.settings import Settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
+from athena.core.memory.contracts import CompletedTurn, MemoryCandidate
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
 from athena.utils.llm import extract_json_from_llm_response, extract_message_text
@@ -75,10 +76,10 @@ class FactExtractor:
     """从对话中提取原子事实并写入长期记忆。
 
     提取流程：
-    1. 以用户消息为查询，从 ``MemoryManager`` 召回相关已有记忆（语义去重）。
+    1. 接收由写入工作流构建的已完成对话轮次。
     2. 将用户消息 + 助手回复格式化为多轮对话文本。
-    3. 调用 LLM 按提取规则生成结构化 ``AtomicFact`` 列表。
-    4. 逐条写入 ``MemoryManager``，附带 session_id / category / confidence 元数据。
+    3. 调用 LLM 按提取规则生成结构化候选。
+    4. 返回候选，由 Resolver 和 Store 决定是否写入。
 
     设计约束：
         使用 ``ainvoke`` 而非 ``with_structured_output``，以兼容不支持
@@ -98,12 +99,11 @@ class FactExtractor:
 
     async def extract(
         self,
-        user_message: str,
-        assistant_reply: str,
-        session_id: str,
-        memory_manager: MemoryManager,
-    ) -> list[AtomicFact]:
-        """从对话中提取原子事实并写入长期记忆。
+        turn: CompletedTurn,
+        *,
+        existing_memories: str = "(无已有记忆)",
+    ) -> list[MemoryCandidate]:
+        """从完成的对话轮次提取候选；持久化由 ``MemoryWriteWorkflow`` 负责。
 
         将用户消息与助手回复格式化为多轮对话文本送入 LLM 提取，
         以捕获决策闭环（如用户采纳助手方案）。使用 ``user_message``
@@ -118,28 +118,20 @@ class FactExtractor:
         返回值：
             提取到的原子事实列表；提取失败或无有价值信息时为空列表。
         """
-        existing = await self._fetch_existing_memories(
-            memory_manager,
-            user_message,
-        )
-        conversation_text = self._format_conversation(user_message, assistant_reply)
-        facts = await self._extract_facts(conversation_text, existing)
-        for fact in facts:
-            content = f"{fact.key}: {fact.value}"
-            try:
-                await memory_manager.add_memory(
-                    content=content,
-                    metadata={
-                        "session_id": session_id,
-                        "type": "fact",
-                        "category": fact.category,
-                        "confidence": fact.confidence,
-                        "source": "extraction",
-                    },
-                )
-            except Exception as e:
-                logger.warning("fact_save_failed", error=str(e))
-        return facts
+        conversation_text = self._format_conversation(turn.user_text, turn.assistant_text)
+        facts = await self._extract_facts(conversation_text, existing_memories)
+        return [
+            MemoryCandidate(
+                content=f"{fact.key}: {fact.value}",
+                memory_type="fact",
+                category=fact.category,
+                confidence=fact.confidence,
+                source_turn_id=turn.turn_id,
+                evidence=[turn.user_text],
+            )
+            for fact in facts
+            if fact.confidence >= 0.6
+        ]
 
     @staticmethod
     def _format_conversation(user_message: str, assistant_reply: str) -> str:

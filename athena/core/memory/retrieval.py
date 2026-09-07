@@ -18,6 +18,7 @@ from athena.config.settings import Settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import TokenCounter
 from athena.core.memory.memory import MemoryManager
+from athena.core.memory.contracts import MemoryRetrievalRequest
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
@@ -513,3 +514,31 @@ class MemoryRetrievalService:
             self._manager.record_selected_access(selected_ids)
             return "\n".join(parts)
         return ""
+
+    async def get_context(self, request: MemoryRetrievalRequest) -> str:
+        """Retrieve and assemble context from an explicit runtime request."""
+        try:
+            results = await self._manager.retrieve(query=request.query)
+        except Exception as e:
+            logger.warning("memory_retrieve_failed", error=str(e))
+            return ""
+        return self._format_results(results)
+
+    def _format_results(self, results: list[SearchResult]) -> str:
+        if not results:
+            return ""
+        parts = ["[相关记忆]"]
+        total_tokens = 0
+        selected_ids: list[str] = []
+        for result in results:
+            content_tokens = self._token_counter.count_text_tokens(result.content)
+            if total_tokens + content_tokens > self._max_tokens:
+                break
+            parts.append(f"- {result.content}")
+            total_tokens += content_tokens
+            selected_ids.append(result.item_id)
+        if len(parts) == 1:
+            return ""
+        parts.append("[/相关记忆]")
+        self._manager.record_selected_access(selected_ids)
+        return "\n".join(parts)

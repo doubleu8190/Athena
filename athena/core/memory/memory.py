@@ -233,6 +233,7 @@ class MemoryManager:
             "access_count": 0,
             "pinned": pinned,
             "expires_at": expires_at or "",
+            "status": "active",
             **metadata,
         }
         try:
@@ -280,6 +281,8 @@ class MemoryManager:
             (results.get("metadatas") or [[]])[0],
             (results.get("distances") or [[]])[0],
         ):
+            if (metadata or {}).get("status", "active") != "active":
+                continue
             output.append(
                 {
                     "id": memory_id,
@@ -417,6 +420,16 @@ class MemoryManager:
             logger.exception("memory_update_vector_failed", memory_id=memory_id)
             raise
         return True
+
+    async def supersede(self, old_memory_id: str, new_memory_id: str) -> bool:
+        """Mark an active memory as superseded by a newly-created record."""
+        changed = await self._repository.mark_superseded(old_memory_id, new_memory_id)
+        if changed:
+            await self._vectors.update(
+                old_memory_id,
+                metadata={"status": "superseded", "superseded_by": new_memory_id},
+            )
+        return changed
 
     async def delete(self, memory_id: str) -> None:
         """删除数据。

@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from agent_runtime.graph_runtime import LangGraphRuntime
 from athena.config.settings import get_settings
 from athena.core.llm.provider import LLMProvider
 from athena.infrastructure.sqlite.database import Database
@@ -33,7 +34,6 @@ from agent_runtime import (
     RecoveryReconciler,
     build_graph,
     CancellationRegistry,
-    LangGraphRuntime,
 )
 from agent_runtime.command_notifications import CommandNotifier
 from agent_runtime.transport import SessionEventBus, RuntimeEventPublisher
@@ -143,6 +143,8 @@ async def lifespan(app: FastAPI):
 
     from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
     from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
+    from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
+    from athena.core.memory.job_worker import MemoryJobWorker
 
     memory_manager = MemoryManager(
         settings=settings,
@@ -179,6 +181,12 @@ async def lifespan(app: FastAPI):
     from athena.core.memory.summarizer import FactExtractor
 
     fact_extractor = FactExtractor(llm_secondary)
+    memory_job_repository = MemoryJobRepository()
+    memory_job_worker = MemoryJobWorker(
+        memory_job_repository,
+        # Workflow is created by LangGraphRuntime; worker is attached below.
+        None,
+    )
 
     # ── 5.3 上下文压缩 ──
     from athena.core.compression.compressor import ContextCompressor
@@ -203,7 +211,10 @@ async def lifespan(app: FastAPI):
         memory_manager=memory_manager,
         settings=settings,
         file_runtime=file_runtime,
+        memory_job_repository=memory_job_repository,
     )
+    memory_job_worker.configure_workflow(graph_runtime._memory_write_workflow)
+    await memory_job_worker.start()
     # 注册子 Agent 派生工具到工具管理器
     await tool_registry.install(graph_runtime.delegation_tool_specs())
 
@@ -223,15 +234,15 @@ async def lifespan(app: FastAPI):
         agent_store=agent_store,
         realtime_transport=realtime_transport,
     )
-    
+
     # 目的是将没来得及取消的run，在重启的时候取消掉
     await RecoveryReconciler(app.state.runtime.agent_store).reconcile()
-    
+
     # 初始化sqlite checkpointer，确保langgraph的状态可以在中断后恢复
     checkpoint_conn = await aiosqlite.connect(settings.sqlite_db_path)
     checkpointer = AsyncSqliteSaver(checkpoint_conn)
     await checkpointer.setup()
-    
+
     graph = build_graph(graph_runtime, checkpointer)
     command_consumer = CommandConsumer(
         app.state.runtime.agent_store,
@@ -251,6 +262,7 @@ async def lifespan(app: FastAPI):
         await command_consumer.stop()
     except Exception as e:
         logger.warning("command_consumer_shutdown_failed", error=str(e))
+    await memory_job_worker.stop()
     await checkpoint_conn.close()
     try:
         await approval_manager.cancel_all_pending("")

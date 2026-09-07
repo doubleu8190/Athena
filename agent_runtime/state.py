@@ -22,15 +22,16 @@ class AgentState(TypedDict, total=False):
     状态中的消息、附件和结果均使用 JSON 安全的字典结构，领域对象不应直接写入。
     """
 
-    session_id: Required[str]
-    run_id: Required[str]
+    session_id: str
+    run_id: str
     user_message: str
     attachment_ids: list[str]
-    message_id: Required[str]
+    message_id: str
     file_results: list[FileProcessResult]
     files_ready: bool
     file_error: str | None
     memory_context: str
+    memory_request: dict[str, Any] | None
     history: list[dict[str, Any]]
     requested_attachment_refs: list[dict[str, Any]]
     user_message_id: str

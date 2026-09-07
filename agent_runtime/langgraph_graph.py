@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING, Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from athena.utils.ids import generate_time_id
-
 from .nodes import (
     check_file_results,
+    decide_memory_request,
     create_handle_file_failure_node,
     create_execute_tools_and_llm_node,
     create_finalize_response_node,
@@ -19,6 +18,7 @@ from .nodes import (
     create_prepare_and_persist_request_node,
     create_process_attachments_node,
     create_retrieve_memory_node,
+    create_decide_memory_node,
 )
 from .state import AgentState
 
@@ -46,11 +46,10 @@ def build_graph(
     )
     graph.add_node("process_attachments", create_process_attachments_node(runtime))
     graph.add_node("handle_file_failure", create_handle_file_failure_node())
+    graph.add_node("decide_memory", create_decide_memory_node(runtime))
     graph.add_node("retrieve_memory", create_retrieve_memory_node(runtime))
     graph.add_node("prepare_context", create_prepare_context_node(runtime))
-    graph.add_node(
-        "execute_tools_and_llm", create_execute_tools_and_llm_node(runtime)
-    )
+    graph.add_node("execute_tools_and_llm", create_execute_tools_and_llm_node(runtime))
     graph.add_node("finalize_response", create_finalize_response_node())
     graph.add_edge(START, "prepare_and_persist_request")
     graph.add_edge("prepare_and_persist_request", "process_attachments")
@@ -58,11 +57,16 @@ def build_graph(
         "process_attachments",
         check_file_results,
         {
-            "retrieve_memory": "retrieve_memory",
+            "decide_memory": "decide_memory",
             "handle_file_failure": "handle_file_failure",
         },
     )
     graph.add_edge("handle_file_failure", "finalize_response")
+    graph.add_conditional_edges(
+        "decide_memory",
+        decide_memory_request,
+        {"retrieve_memory": "retrieve_memory", "prepare_context": "prepare_context"},
+    )
     graph.add_edge("retrieve_memory", "prepare_context")
     graph.add_edge("prepare_context", "execute_tools_and_llm")
     graph.add_edge("execute_tools_and_llm", "finalize_response")
@@ -77,8 +81,8 @@ async def invoke_graph(
     user_message: str,
     run_id: str = "",
     attachment_ids: list[str] | None = None,
-    message_id: str = "",
-    stop_signal: asyncio.Event | None = None,
+    message_id: str,
+    stop_signal: asyncio.Event,
 ) -> Any:
     """以指定会话配置执行已编译的 Agent 图。
 
@@ -101,7 +105,7 @@ async def invoke_graph(
     initial_state: AgentState = {
         "session_id": session_id,
         "run_id": run_id,
-        "message_id": message_id or generate_time_id(),
+        "message_id": message_id,
         "user_message": user_message,
         "attachment_ids": attachment_ids or [],
     }

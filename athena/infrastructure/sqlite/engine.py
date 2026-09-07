@@ -57,6 +57,43 @@ async def init_engine(db_path: str) -> None:
         await conn.execute(text("DROP TABLE IF EXISTS file_processing_tasks"))
         await conn.execute(text("DROP INDEX IF EXISTS uq_agent_runs_active_session"))
         await conn.run_sync(Base.metadata.create_all)
+        memory_columns = {
+            row[1] for row in (await conn.execute(text("PRAGMA table_info(memories)"))).all()
+        }
+        for name, ddl in {
+            "status": "VARCHAR NOT NULL DEFAULT 'active'",
+            "superseded_by": "VARCHAR",
+            "superseded_at": "VARCHAR",
+            "source_turn_id": "VARCHAR",
+            "last_observed_at": "VARCHAR",
+        }.items():
+            if name not in memory_columns:
+                await conn.execute(text(f"ALTER TABLE memories ADD COLUMN {name} {ddl}"))
+        await conn.execute(text("""CREATE TABLE IF NOT EXISTS memory_relations (
+            source_memory_id VARCHAR NOT NULL, target_memory_id VARCHAR NOT NULL,
+            relation_type VARCHAR NOT NULL, created_at VARCHAR NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (source_memory_id, target_memory_id, relation_type))"""))
+        await conn.execute(
+            text(
+                """CREATE TABLE IF NOT EXISTS memory_processing_jobs (
+                    job_id VARCHAR PRIMARY KEY,
+                    turn_id VARCHAR NOT NULL UNIQUE,
+                    session_id VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    available_at VARCHAR NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    result_json TEXT,
+                    error_json TEXT,
+                    created_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )"""
+            )
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS idx_memory_jobs_queue ON memory_processing_jobs(status, available_at)")
+        )
         # 兼容旧版本：附件关系已从中间表收敛到 attachments.message_id。
         legacy_link_table = await conn.execute(
             text(

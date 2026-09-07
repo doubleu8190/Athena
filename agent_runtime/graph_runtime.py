@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime
 from typing import Any
@@ -26,6 +27,11 @@ from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
 from athena.core.memory.retrieval import MemoryRetrievalService
 from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
+from athena.core.memory.contracts import CompletedTurn
+from athena.core.memory.workflow import MemoryWriteWorkflow
+from athena.core.memory.resolver import MemoryResolver
+from athena.core.memory.contracts import MemoryRetrievalRequest
+from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
@@ -329,6 +335,7 @@ class LangGraphRuntime:
         memory_manager: MemoryManager,
         settings: Settings,
         file_runtime: FileIntelligenceRuntime,
+        memory_job_repository: MemoryJobRepository,
     ) -> None:
         """
 
@@ -361,6 +368,17 @@ class LangGraphRuntime:
         self._memory_manager = memory_manager
         self._settings = settings
         self._file_runtime = file_runtime
+        # The runtime is also instantiated directly by tests and embedded
+        # callers, so the durable queue must have a default construction path.
+        # The repository is stateless; all instances share the initialized
+        # SQLite engine and therefore the same queue.
+        self._memory_job_repository = memory_job_repository
+        self._memory_write_workflow = MemoryWriteWorkflow(
+            fact_extractor,
+            memory_manager,
+            resolver=MemoryResolver(memory_manager, llm_provider=llm),
+        )
+        self._initialized = False
         self._file_parse_semaphore = asyncio.Semaphore(
             max(1, settings.file_parse_concurrency)
         )
@@ -369,6 +387,18 @@ class LangGraphRuntime:
         )
         # 会话级停止事件，由 gateway 层注入，透传给 Harness 及子 Agent。
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
+
+    @property
+    def memory_write_workflow(self) -> MemoryWriteWorkflow:
+        """Workflow owned by this runtime, for application lifecycle wiring."""
+        return self._memory_write_workflow
+
+    async def initialize(self) -> None:
+        """Initialize runtime-owned resources before the graph accepts work."""
+        if self._initialized:
+            return
+        await self._memory_manager.initialize()
+        self._initialized = True
 
     def set_stop_signal(
         self, session_id: str, stop_signal: asyncio.Event | None
@@ -384,6 +414,16 @@ class LangGraphRuntime:
             不抛出业务异常。
         """
         self._session_stop_signals[session_id] = stop_signal
+
+    def validate_state(self, state: AgentState) -> None:
+        """Validate that the provided state contains required fields.
+
+        Raises KeyError if any required field is missing.
+        """
+        required_fields = ["session_id", "run_id", "message_id", "user_message"]
+        for field in required_fields:
+            if field not in state or state[field] is None:
+                raise KeyError(f"Missing required field: {field}")
 
     def delegation_tool_specs(self):
         """构建供组合根注册的 Agent 委派工具声明。
@@ -433,7 +473,45 @@ class LangGraphRuntime:
             result.append(attachment)
         return result
 
-    async def retrieve_memory_context(self, session_id: str, user_message: str) -> str:
+    def build_memory_request(
+        self, session_id: str, user_message: str
+    ) -> MemoryRetrievalRequest | None:
+        """Create a retrieval request for turns that reference prior context."""
+        text = (user_message or "").strip()
+        if not text:
+            return None
+        low_value = ("你好", "谢谢", "感谢", "天气", "帮我算", "翻译")
+        if len("".join(text.split())) <= 12 and any(item in text for item in low_value):
+            return None
+        markers = (
+            "继续",
+            "刚才",
+            "之前",
+            "上次",
+            "这个项目",
+            "那个方案",
+            "按照",
+            "已有",
+            "记忆",
+        )
+        # Longer technical/project turns are eligible even without a marker;
+        # retrieval remains bounded by the existing top-k and token budget.
+        if not any(marker in text for marker in markers) and len(text) < 24:
+            return None
+        return MemoryRetrievalRequest(
+            session_id=session_id,
+            query=text,
+            task=text,
+            reason=(
+                "context_reference"
+                if any(m in text for m in markers)
+                else "substantive_task"
+            ),
+        )
+
+    async def retrieve_memory_context(
+        self, session_id: str, memory_request: dict[str, Any] | None
+    ) -> str:
         """检索与用户消息相关的长期记忆上下文。
 
         参数：
@@ -447,9 +525,10 @@ class LangGraphRuntime:
             不向主流程传播检索异常；失败仅记录警告并返回空字符串。
         """
         try:
-            context = await self._memory_retrieval.get_relevant_memories(
-                user_message=user_message
-            )
+            if not memory_request:
+                return ""
+            request = MemoryRetrievalRequest.model_validate(memory_request)
+            context = await self._memory_retrieval.get_context(request)
             logger.info(
                 "memory_injection_success",
                 session_id=session_id,
@@ -498,13 +577,13 @@ class LangGraphRuntime:
 
     async def persist_message_and_attachments(self, state: AgentState):
         """幂等持久化当前用户消息及其附件关系。"""
-        message_id = state.get("message_id")
+        message_id = state.get("message_id", "")
         message = Message(
             id=message_id,
-            session_id=state["session_id"],
+            session_id=state.get("session_id", ""),
             role=MessageRole.USER,
             content=state.get("user_message", ""),
-            run_id=state["run_id"],
+            run_id=state.get("run_id", ""),
             timestamp=datetime.now(),
         )
         persisted = await self._db.messages.create_message_with_attachments(
@@ -514,8 +593,8 @@ class LangGraphRuntime:
             ApplicationEvent(
                 event_type=EventType.MESSAGE_PERSISTED,
                 durability=EventDurability.DURABLE,
-                session_id=state["session_id"],
-                run_id=state["run_id"],
+                session_id=state.get("session_id", ""),
+                run_id=state.get("run_id", ""),
                 message_id=persisted.id,
                 payload={
                     "message_id": persisted.id,
@@ -568,11 +647,11 @@ class LangGraphRuntime:
                     "progress": 0.7,
                 },
             )
-            
+
             # 生成向量索引
             async with self._file_embedding_semaphore:
                 indexed = await self._file_runtime.index_attachment(attachment_id)
-            
+
             # 标记附件处理完成
             ready = await self._db.files.update_attachment(
                 attachment_id,
@@ -581,7 +660,7 @@ class LangGraphRuntime:
             )
             if ready is not None:
                 await self._file_runtime.emit_attachment(ready, run_id=run_id)
-                
+
             await self._file_runtime.emit(
                 EventType.FILE_INDEX_PROGRESS,
                 session_id,
@@ -664,9 +743,9 @@ class LangGraphRuntime:
         user_message: str,
         attachment_ids: list[str],
         history: list[Message],
-        run_id_override: str | None = None,
-        message_id_override: str | None = None,
-    ) -> tuple[Message, list[AttachmentRef], list[Message]]:
+        run_id: str,
+        message_id: str,
+    ) -> tuple[list[AttachmentRef], list[Message]]:
         """
 
         参数：
@@ -681,25 +760,24 @@ class LangGraphRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        run_id = run_id_override or generate_time_id()
         message = await self._get_or_create_user_message(
             session_id,
             user_message,
             run_id,
-            message_id_override,
+            message_id=message_id,
         )
         attachment_refs = await self._bind_message_attachments(
             session_id, message, attachment_ids
         )
         messages = self._build_harness_messages(history, message)
-        return message, attachment_refs, messages
+        return attachment_refs, messages
 
     async def _get_or_create_user_message(
         self,
         session_id: str,
         content: str,
         run_id: str,
-        message_id_override: str | None = None,
+        message_id: str,
     ) -> Message:
         """
 
@@ -714,22 +792,12 @@ class LangGraphRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        message_id = message_id_override
-        if message_id:
-            existing = await self._db.messages.get(str(message_id))
-            if existing is not None:
-                return existing
-            return Message(
-                id=str(message_id),
-                session_id=session_id,
-                role=MessageRole.USER,
-                content=content,
-                run_id=run_id,
-                timestamp=datetime.now(),
-            )
+        existing = await self._db.messages.get(message_id)
+        if existing is not None:
+            return existing
 
         message = Message(
-            id=generate_time_id(),
+            id=message_id,
             session_id=session_id,
             role=MessageRole.USER,
             content=content,
@@ -814,7 +882,7 @@ class LangGraphRuntime:
         session_id: str,
         memory_context: str,
         run_id: str,
-        stop_signal: asyncio.Event | None,
+        stop_signal: asyncio.Event,
     ) -> HarnessRunResult:
         """
 
@@ -823,7 +891,7 @@ class LangGraphRuntime:
             session_id (str): 会话唯一标识。
             memory_context (str): 检索得到的记忆上下文。
             run_id (str): 当前运行 ID。
-            stop_signal (asyncio.Event | None): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            stop_signal (asyncio.Event): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
             HarnessRunResult: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -857,7 +925,12 @@ class LangGraphRuntime:
         return result
 
     async def post_process(
-        self, session_id: str, user_message: str, result: HarnessRunResult
+        self,
+        session_id: str,
+        user_message: str,
+        result: HarnessRunResult,
+        *,
+        turn_id: str,
     ) -> None:
         """
 
@@ -872,9 +945,13 @@ class LangGraphRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        asyncio.create_task(
-            self._extract_facts_async(user_message, result.content, session_id)
+        turn = CompletedTurn(
+            turn_id=turn_id,
+            session_id=session_id,
+            user_text=user_message,
+            assistant_text=result.content,
         )
+        await self._memory_job_repository.enqueue(turn.model_dump(mode="json"))
         try:
             await self._conversation_summarizer.summarize_if_needed(
                 session_id=session_id, db=self._db
@@ -934,36 +1011,6 @@ class LangGraphRuntime:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         return [item.model_dump(mode="json") for item in refs]
-
-    async def _extract_facts_async(
-        self,
-        user_message: str,
-        assistant_reply: str,
-        session_id: str,
-    ) -> None:
-        """异步提取对话中的原子事实并写入长期记忆。
-
-        将用户消息与助手回复组合为对话文本进行提取，以捕获决策闭环
-        （如用户采纳助手建议的方案）。``user_message`` 单独用于记忆检索
-        的语义查询，确保召回与用户意图相关的已有记忆。
-
-        作为 ``asyncio.create_task`` 的目标运行，不阻塞主编排流程。
-        提取失败时仅记录警告日志，不影响主流程返回结果。
-
-        参数：
-            user_message: 用户消息的原始文本。
-            assistant_reply: 助手回复的文本内容；为空时退化为仅提取用户消息。
-            session_id: 当前会话 ID。
-        """
-        try:
-            await self._fact_extractor.extract(
-                user_message,
-                assistant_reply,
-                session_id,
-                self._memory_manager,
-            )
-        except Exception as e:
-            logger.warning("fact_extraction_failed", error=str(e))
 
     @staticmethod
     def _build_parallel_spawn_description() -> str:

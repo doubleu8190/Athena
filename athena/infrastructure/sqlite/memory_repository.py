@@ -18,7 +18,8 @@ _SYSTEM_KEYS = frozenset(
         "created_at",
         "last_accessed",
         "access_count",
-        "pinned",
+    "pinned",
+    "status",
         "expires_at",
     }
 )
@@ -46,6 +47,7 @@ def _metadata(row: Any) -> dict[str, Any]:
         "pinned": bool(row.pinned),
         "expires_at": row.expires_at or "",
         "session_id": row.session_id,
+        "status": getattr(row, "status", "active") or "active",
     }
     for key in ("type", "category", "confidence", "source"):
         value = getattr(row, key)
@@ -93,6 +95,8 @@ class SqliteMemoryRepository:
                         category=metadata.get("category"),
                         confidence=metadata.get("confidence"),
                         source=metadata.get("source"),
+                        source_turn_id=metadata.get("source_turn_id"),
+                        last_observed_at=record["created_at"],
                     )
                 )
                 await session.execute(
@@ -184,11 +188,12 @@ class SqliteMemoryRepository:
         sql = """
             SELECT m.id, m.content, m.metadata_json, m.session_id,
                    m.created_at, m.pinned, m.expires_at, m.last_accessed,
-                   m.access_count, m.type, m.category, m.confidence, m.source,
+                   m.access_count, m.type, m.category, m.confidence, m.source, m.status,
                    bm25(memory_fts) AS rank
             FROM memory_fts
             JOIN memories m ON memory_fts.memory_id = m.id
             WHERE memory_fts MATCH :match_expr AND m.deleted_time IS NULL
+              AND m.status = 'active'
         """
         params: dict[str, Any] = {"match_expr": " OR ".join(terms), "limit": limit}
         for key, value in (where or {}).items():
@@ -226,6 +231,8 @@ class SqliteMemoryRepository:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         stmt = select(MemoryModel).where(MemoryModel.deleted_time.is_(None))
+        if not filters.get("include_superseded"):
+            stmt = stmt.where(MemoryModel.status == "active")
         if filters.get("pinned_only"):
             stmt = stmt.where(MemoryModel.pinned == 1)
         if filters.get("expired_only"):
@@ -330,6 +337,24 @@ class SqliteMemoryRepository:
                     {"content": content, "id": memory_id},
                 )
                 return previous
+
+    async def mark_superseded(self, old_id: str, new_id: str) -> bool:
+        now = datetime.now().isoformat()
+        async with get_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(MemoryModel).where(
+                        MemoryModel.id == old_id, MemoryModel.deleted_time.is_(None)
+                    ).values(status="superseded", superseded_by=new_id, superseded_at=now)
+                )
+                if result.rowcount != 1:
+                    return False
+                await session.execute(text("""INSERT OR IGNORE INTO memory_relations
+                    (source_memory_id, target_memory_id, relation_type, created_at)
+                    VALUES (:source, :target, 'supersedes', :created)"""),
+                    {"source": new_id, "target": old_id, "created": now})
+                await session.execute(text("DELETE FROM memory_fts WHERE memory_id = :id"), {"id": old_id})
+                return True
 
     async def soft_delete(self, memory_ids: list[str]) -> None:
         """

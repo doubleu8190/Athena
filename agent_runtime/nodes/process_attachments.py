@@ -18,24 +18,19 @@ async def process_attachments(
     state: AgentState, *, runtime: LangGraphRuntime
 ) -> AgentState:
     """处理全部附件并将小型、可检查点化的结果写入 State。"""
-    message_id = state.get("message_id") or state.get("user_message_id")
-    if not message_id:
-        raise KeyError("message_id")
+    runtime.validate_state(state)
     results = await asyncio.gather(
         *(
             runtime.process_attachment(
                 attachment_id,
-                message_id,
-                state["session_id"],
-                state["run_id"],
+                state.get("message_id", ""),
+                state.get("session_id", ""),
+                state.get("run_id", ""),
             )
             for attachment_id in state.get("attachment_ids", [])
         )
     )
     return {
-        "session_id": state["session_id"],
-        "run_id": state["run_id"],
-        "message_id": message_id,
         "file_results": results,
         "files_ready": all(item["status"] == "ready" for item in results),
     }

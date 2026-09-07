@@ -29,16 +29,18 @@ async def prepare_and_persist_request(
         KeyError: ``state`` 缺少 ``session_id`` 时抛出。
         运行时异常: 附件或历史加载失败时传播底层运行时异常。
     """
+    runtime.validate_state(state)
+    session_id = state.get("session_id", "")
     message = state.get("user_message", "")
     attachment_ids = list(dict.fromkeys(state.get("attachment_ids", []) or []))
 
     requested_attachments = await runtime.load_banded_attachments(
-        state["session_id"], attachment_ids
+        session_id, attachment_ids
     )
-    history = await runtime.load_history(state["session_id"])
+    history = await runtime.load_history(session_id)
     prepared_state: AgentState = {
-        "session_id": state["session_id"],
-        "run_id": state["run_id"],
+        "session_id": session_id,
+        "run_id": state.get("run_id") or "",
         "user_message": message,
         "attachment_ids": attachment_ids,
         "message_id": str(state.get("message_id") or ""),

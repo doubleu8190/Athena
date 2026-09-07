@@ -31,30 +31,24 @@ async def prepare_context(
         KeyError: 状态缺少历史消息或请求字段时抛出。
         运行时异常: Harness 输入准备失败时传播底层异常。
     """
-    history = [Message.model_validate(item) for item in state.get("history", [])]
-    message_content = state.get("user_message")
-    if message_content is None:
-        raise KeyError("user_message")
 
-    message, attachment_refs, harness_messages = await runtime.prepare_run(
-        state["session_id"],
+    runtime.validate_state(state)
+    session_id = state.get("session_id", "")
+    run_id = state.get("run_id", "")
+    message_id = state.get("message_id", "")
+    message_content = state.get("user_message", "")
+    history = [Message.model_validate(item) for item in state.get("history", [])]
+    attachment_refs, harness_messages = await runtime.prepare_run(
+        session_id,
         message_content,
         state.get("attachment_ids", []),
         history,
-        run_id_override=state["run_id"],
-        message_id_override=state.get("message_id"),
+        run_id=run_id,
+        message_id=message_id,
     )
     return {
-        "session_id": state["session_id"],
-        "run_id": state["run_id"],
-        "user_message_id": message.id,
-        "message_id": message.id,
-        "attachment_refs": [
-            item.model_dump(mode="json") for item in attachment_refs
-        ],
-        "harness_messages": [
-            item.model_dump(mode="json") for item in harness_messages
-        ],
+        "attachment_refs": [item.model_dump(mode="json") for item in attachment_refs],
+        "harness_messages": [item.model_dump(mode="json") for item in harness_messages],
     }
 
 

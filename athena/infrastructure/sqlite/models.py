@@ -297,6 +297,11 @@ class SessionModel(Base):
     deleted_time: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="软删除时间（UTC）"
     )
+    status: Mapped[str] = mapped_column(String, default="active", comment="生命周期状态")
+    superseded_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    superseded_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_observed_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class MessageModel(Base):
@@ -456,6 +461,11 @@ class MemoryModel(Base):
         nullable=True,
         comment="记忆来源，例如 extraction、threshold 或 api",
     )
+    status: Mapped[str] = mapped_column(String, default="active", comment="生命周期状态")
+    superseded_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    superseded_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_observed_at: Mapped[str | None] = mapped_column(String, nullable=True)
     deleted_time: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="软删除时间（UTC）"
     )

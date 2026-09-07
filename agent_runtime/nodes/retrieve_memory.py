@@ -29,13 +29,11 @@ async def retrieve_memory(
         KeyError: ``state`` 缺少 ``session_id``，或请求准备节点未建立对应上下文时抛出。
         运行时异常: 记忆检索失败时传播底层运行时异常。
     """
+    runtime.validate_state(state)
     memory_context = await runtime.retrieve_memory_context(
-        state["session_id"], state.get("user_message", "")
+        state.get("session_id", ""), state.get("memory_request")
     )
     return {
-        "session_id": state["session_id"],
-        "run_id": state["run_id"],
-        "message_id": state.get("message_id"),
         "memory_context": memory_context,
     }
 

@@ -12,34 +12,18 @@ from athena.infrastructure.sqlite.models import (
 )
 from athena.models import Message
 
-from .converters import _row_to_message
-from .repository_utils import _json_dumps, _now_iso
+from .converters import _message_to_model, _row_to_message
+from .repository_utils import _now_iso
 
 
 class MessageRepository:
     """消息表 CRUD 操作。"""
 
-    @staticmethod
-    def _model(message: Message) -> MessageModel:
-        return MessageModel(
-            id=message.id,
-            session_id=message.session_id,
-            role=message.role.value,
-            content=message.content,
-            tool_calls_json=_json_dumps(message.tool_calls),
-            tool_call_id=message.tool_call_id,
-            run_id=message.run_id,
-            tool_call_record_id=message.tool_call_record_id,
-            tool_name=message.tool_name,
-            type=message.type,
-            timestamp=message.timestamp.isoformat(),
-        )
-
     async def save(self, message: Message) -> str:
         """保存消息并同步刷新会话的 updated_at。"""
         async with get_session() as session:
             async with session.begin():
-                session.add(self._model(message))
+                session.add(_message_to_model(message))
                 await session.execute(
                     update(SessionModel)
                     .where(
@@ -68,14 +52,15 @@ class MessageRepository:
             async with session.begin():
                 existing = await session.get(MessageModel, message.id)
                 if existing is None:
-                    session.add(self._model(message))
+                    session.add(_message_to_model(message))
                 elif (
                     existing.session_id != message.session_id
                     or existing.role != message.role.value
                     or existing.content != message.content
                 ):
                     raise ValueError("message_id 已关联其他消息")
-
+                
+                # 将附件绑定到消息，确保它们属于同一会话且未被其他消息占用
                 if ids:
                     attachments = (
                         (
@@ -96,6 +81,7 @@ class MessageRepository:
                         if attachment.message_id not in (None, message.id):
                             raise ValueError("附件已关联其他消息")
                         attachment.message_id = message.id
+                        
                 await session.execute(
                     update(SessionModel)
                     .where(

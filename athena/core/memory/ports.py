@@ -34,6 +34,10 @@ class MemoryRepository(Protocol):
 
     async def mark_superseded(self, old_id: str, new_id: str) -> bool: ...
 
+    async def add_relation(
+        self, source_id: str, target_id: str, relation_type: str
+    ) -> None: ...
+
     async def soft_delete(self, memory_ids: list[str]) -> None:
         """软删除指定记忆。"""
         ...

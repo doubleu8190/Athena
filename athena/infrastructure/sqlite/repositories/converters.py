@@ -32,7 +32,24 @@ from athena.models import (
 )
 from athena.models.json_models import FileMetadata, JsonSchema, ToolCall
 
-from .repository_utils import _json_loads, _json_loads_model
+from .repository_utils import _json_dumps, _json_loads, _json_loads_model
+
+
+def _message_to_model(message: Message) -> MessageModel:
+    """将领域消息转换为消息 ORM 行。"""
+    return MessageModel(
+        id=message.id,
+        session_id=message.session_id,
+        role=message.role.value,
+        content=message.content,
+        tool_calls_json=_json_dumps(message.tool_calls),
+        tool_call_id=message.tool_call_id,
+        run_id=message.run_id,
+        tool_call_record_id=message.tool_call_record_id,
+        tool_name=message.tool_name,
+        type=message.type,
+        timestamp=message.timestamp.isoformat(),
+    )
 
 
 def _row_to_session(row: SessionModel) -> Session:

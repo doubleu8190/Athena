@@ -17,8 +17,10 @@ if TYPE_CHECKING:
 
 async def decide_memory(state: AgentState, *, runtime: LangGraphRuntime) -> AgentState:
     runtime.validate_state(state)
-    request = runtime.build_memory_request(
-        state.get("session_id", ""), state.get("user_message", "")
+    request = await runtime.build_memory_request(
+        state.get("session_id", ""),
+        state.get("user_message", ""),
+        state.get("history", []),
     )
     return {"memory_request": request.model_dump(mode="json") if request else None}
 

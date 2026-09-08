@@ -81,8 +81,8 @@ async def invoke_graph(
     user_message: str,
     run_id: str = "",
     attachment_ids: list[str] | None = None,
-    message_id: str,
-    stop_signal: asyncio.Event,
+    message_id: str = "",
+    stop_signal: asyncio.Event | None = None,
 ) -> Any:
     """以指定会话配置执行已编译的 Agent 图。
 
@@ -101,6 +101,7 @@ async def invoke_graph(
     """
     if not run_id:
         raise ValueError("run_id is required for LangGraph checkpoint identity")
+    stop_signal = stop_signal or asyncio.Event()
 
     initial_state: AgentState = {
         "session_id": session_id,

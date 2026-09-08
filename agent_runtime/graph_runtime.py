@@ -14,10 +14,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from langchain_core.messages import HumanMessage
 
 from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
@@ -28,6 +30,7 @@ from athena.core.memory.memory import MemoryManager
 from athena.core.memory.retrieval import MemoryRetrievalService
 from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
 from athena.core.memory.contracts import CompletedTurn
+from athena.core.memory.trigger import MemoryTrigger
 from athena.core.memory.workflow import MemoryWriteWorkflow
 from athena.core.memory.resolver import MemoryResolver
 from athena.core.memory.contracts import MemoryRetrievalRequest
@@ -45,6 +48,7 @@ from athena.contracts.ports import EventPublisherPort
 from athena.utils.ids import generate_sub_run_id, generate_time_id
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
+from athena.utils.llm import extract_json_from_llm_response, extract_message_text
 
 from .state import AgentState, FileProcessResult
 
@@ -55,6 +59,43 @@ logger = get_logger(__name__)
 # 提示词内不再重复罗列工具列表。
 
 DEFAULT_SYSTEM_PROMPT = get_prompt("system")
+
+
+class _MemoryRetrievalPlan(BaseModel):
+    """Validated LLM output for refining an already-approved retrieval request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=500)
+    task: str = Field(default="", max_length=500)
+    limit: int = Field(default=8, ge=1, le=100)
+
+
+def _recent_history_by_turns(
+    history: list[dict[str, Any]],
+    keep_count: int = 6,
+) -> list[dict[str, Any]]:
+    """按 ``run_id`` 保留系统消息和最近若干个完整对话轮次。
+
+    一个 ``run_id`` 对应一轮，因此同一轮中的 user/assistant/tool 消息不会
+    被截断。没有 ``run_id`` 的消息（例如压缩摘要）作为前缀保留。
+    """
+    if not history or keep_count <= 0:
+        return []
+
+    turns_by_run_id: dict[str, list[dict[str, Any]]] = {}
+    run_order: list[str] = []
+
+    for message in history:
+        run_id = message.get("run_id")
+        run_id = str(run_id)
+        if run_id not in turns_by_run_id:
+            turns_by_run_id[run_id] = []
+            run_order.append(run_id)
+        turns_by_run_id[run_id].append(message)
+
+    recent = history[-keep_count:] if len(history) > keep_count else history
+    return recent
 
 
 class SubAgentResult(BaseModel):
@@ -376,6 +417,7 @@ class LangGraphRuntime:
         self._memory_write_workflow = MemoryWriteWorkflow(
             fact_extractor,
             memory_manager,
+            trigger=MemoryTrigger(),
             resolver=MemoryResolver(memory_manager, llm_provider=llm),
         )
         self._initialized = False
@@ -473,14 +515,18 @@ class LangGraphRuntime:
             result.append(attachment)
         return result
 
-    def build_memory_request(
-        self, session_id: str, user_message: str
+    async def build_memory_request(
+        self,
+        session_id: str,
+        user_message: str,
+        history: list[dict[str, Any]],
     ) -> MemoryRetrievalRequest | None:
-        """Create a retrieval request for turns that reference prior context."""
+        """Create a retrieval request, using LLM only for ambiguous complex turns."""
         text = (user_message or "").strip()
         if not text:
             return None
         low_value = ("你好", "谢谢", "感谢", "天气", "帮我算", "翻译")
+        # 极短的低价值问候/致谢（≤12 字符）
         if len("".join(text.split())) <= 12 and any(item in text for item in low_value):
             return None
         markers = (
@@ -494,11 +540,10 @@ class LangGraphRuntime:
             "已有",
             "记忆",
         )
-        # Longer technical/project turns are eligible even without a marker;
-        # retrieval remains bounded by the existing top-k and token budget.
+        # 长度不足 24 且无上下文标记的短消息
         if not any(marker in text for marker in markers) and len(text) < 24:
             return None
-        return MemoryRetrievalRequest(
+        request = MemoryRetrievalRequest(
             session_id=session_id,
             query=text,
             task=text,
@@ -508,6 +553,55 @@ class LangGraphRuntime:
                 else "substantive_task"
             ),
         )
+        # Deterministic routing handles ordinary requests. Complex, reference-
+        # heavy turns benefit from an LLM-generated compact query, but malformed
+        # or unavailable responses always fall back to the deterministic request.
+        ambiguous_references = (
+            "继续",
+            "这个",
+            "那个",
+            "它",
+            "上述",
+            "前面",
+            "之前",
+            "上次",
+            "刚才",
+        )
+        # 复杂情况满足以下任一条件：
+        # 1. 消息长度超过 120 字符（可能包含大量细节）。
+        # 2. 包含两个及以上的问号（可能表示多轮追问或复杂问题）。
+        # 3. 消息长度在 50 字符以内，但包含模糊指代词（如“这个”、“它”、“上面”等），这类消息高度依赖上下文，原始文本不足以作为检索查询。
+        complex_turn = (
+            len(text) > 120
+            or text.count("?") + text.count("？") > 1
+            or (len(text) < 50 and any(item in text for item in ambiguous_references))
+        )
+        if not complex_turn:
+            return request
+        try:
+            recent_history = json.dumps(
+                _recent_history_by_turns(history), ensure_ascii=False, default=str
+            )[-3000:]
+            prompt = get_prompt("memory_retrieval_request").format(
+                user_message=text,
+                recent_history=recent_history or "[]",
+            )
+            response = await self._llm.ainvoke([HumanMessage(content=prompt)])
+            data = extract_json_from_llm_response(extract_message_text(response)) or {}
+            plan = _MemoryRetrievalPlan.model_validate(data)
+            query = plan.query.strip()
+            if not query:
+                return request
+            return MemoryRetrievalRequest(
+                session_id=session_id,
+                query=query,
+                task=plan.task.strip() or text,
+                reason="llm_complex_request",
+                limit=plan.limit,
+            )
+        except Exception as exc:
+            logger.warning("memory_request_generation_failed", error=str(exc))
+            return request
 
     async def retrieve_memory_context(
         self, session_id: str, memory_request: dict[str, Any] | None
@@ -597,7 +691,6 @@ class LangGraphRuntime:
                 run_id=state.get("run_id", ""),
                 message_id=persisted.id,
                 payload={
-                    "message_id": persisted.id,
                     "attachment_ids": state.get("attachment_ids", []),
                 },
             )

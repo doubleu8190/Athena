@@ -24,17 +24,13 @@ class AgentState(TypedDict, total=False):
 
     session_id: str
     run_id: str
+    message_id: str
     user_message: str
     attachment_ids: list[str]
-    message_id: str
     file_results: list[FileProcessResult]
-    files_ready: bool
-    file_error: str | None
     memory_context: str
     memory_request: dict[str, Any] | None
     history: list[dict[str, Any]]
-    requested_attachment_refs: list[dict[str, Any]]
-    user_message_id: str
     attachment_refs: list[dict[str, Any]]
     harness_messages: list[dict[str, Any]]
     result: dict[str, Any] | None

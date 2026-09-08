@@ -522,7 +522,7 @@ class MemoryRetrievalService:
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))
             return ""
-        return self._format_results(results)
+        return self._format_results(results[: request.limit])
 
     def _format_results(self, results: list[SearchResult]) -> str:
         if not results:

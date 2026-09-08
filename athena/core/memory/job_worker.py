@@ -25,6 +25,7 @@ class MemoryJobWorker:
 
     async def start(self) -> None:
         if self._task is None:
+            await self._repository.recover_interrupted()
             self._stop.clear()
             self._task = asyncio.create_task(self.run(), name="athena-memory-worker")
 

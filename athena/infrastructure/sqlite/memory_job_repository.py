@@ -74,6 +74,23 @@ class MemoryJobRepository:
                 payload["attempt"] = int(row.attempt) + 1
                 return payload
 
+    async def recover_interrupted(self) -> int:
+        """Return jobs left running by a previous process to the retry queue."""
+        now = datetime.now().isoformat()
+        async with get_session() as session:
+            async with session.begin():
+                result = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        text("""UPDATE memory_processing_jobs
+                            SET status = 'retry', available_at = :now,
+                                error_json = 'process_interrupted', updated_at = :now
+                            WHERE status = 'running'"""),
+                        {"now": now},
+                    ),
+                )
+                return result.rowcount
+
     async def mark_succeeded(self, job_id: str) -> None:
         await self._mark(job_id, "succeeded", None, None)
 

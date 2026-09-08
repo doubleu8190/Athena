@@ -31,23 +31,16 @@ async def prepare_and_persist_request(
     """
     runtime.validate_state(state)
     session_id = state.get("session_id", "")
-    message = state.get("user_message", "")
-    attachment_ids = list(dict.fromkeys(state.get("attachment_ids", []) or []))
+    attachment_ids = state.get("attachment_ids", [])
 
-    requested_attachments = await runtime.load_banded_attachments(
-        session_id, attachment_ids
-    )
     history = await runtime.load_history(session_id)
     prepared_state: AgentState = {
         "session_id": session_id,
-        "run_id": state.get("run_id") or "",
-        "user_message": message,
-        "attachment_ids": attachment_ids,
+        "run_id": state.get("run_id", ""),
         "message_id": str(state.get("message_id") or ""),
+        "user_message": state.get("user_message", ""),
+        "attachment_ids": attachment_ids,
         "history": [item.model_dump(mode="json") for item in history],
-        "requested_attachment_refs": [
-            item.to_ref().model_dump(mode="json") for item in requested_attachments
-        ],
     }
     await runtime.persist_message_and_attachments(prepared_state)
     return prepared_state

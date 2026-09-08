@@ -5,7 +5,11 @@ import asyncio
 
 import pytest
 
-from agent_runtime.graph_runtime import DEFAULT_SYSTEM_PROMPT, LangGraphRuntime
+from agent_runtime.graph_runtime import (
+    DEFAULT_SYSTEM_PROMPT,
+    LangGraphRuntime,
+    _recent_history_by_turns,
+)
 from agent_runtime.langgraph_graph import invoke_graph
 from agent_runtime.nodes.prepare_request import prepare_and_persist_request
 from athena.models import Message, MessageRole
@@ -63,6 +67,113 @@ def test_build_system_prompt_uses_builtin_prompt_and_appends_memory():
 
 def test_build_system_prompt_falls_back_to_default():
     assert LangGraphRuntime.build_system_prompt("") == DEFAULT_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_simple_memory_request_does_not_call_llm():
+    class LLM:
+        async def ainvoke(self, messages):
+            raise AssertionError("simple requests must stay deterministic")
+
+    runtime = type("Runtime", (), {"_llm": LLM()})()
+    request = await LangGraphRuntime.build_memory_request(
+        runtime, "session-1", "请检查 Athena Candidate Resolver 的关系决策是否完整"
+    )
+
+    assert request is not None
+    assert request.query == "请检查 Athena Candidate Resolver 的关系决策是否完整"
+    assert request.reason == "substantive_task"
+
+
+@pytest.mark.asyncio
+async def test_complex_memory_request_uses_validated_llm_plan():
+    class LLM:
+        async def ainvoke(self, messages):
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"query":"Athena 记忆系统候选解析和检索共享设计",'
+                        '"task":"继续实现记忆系统", "limit":12}'
+                    )
+                },
+            )()
+
+    runtime = type("Runtime", (), {"_llm": LLM()})()
+    message = "继续完善 Athena"
+    request = await LangGraphRuntime.build_memory_request(
+        runtime,
+        "session-1",
+        message,
+        [{"role": "user", "content": "我们正在设计 Athena 的记忆系统"}],
+    )
+
+    assert request is not None
+    assert request.session_id == "session-1"
+    assert request.query == "Athena 记忆系统候选解析和检索共享设计"
+    assert request.limit == 12
+    assert request.reason == "llm_complex_request"
+
+
+def test_recent_history_keeps_six_complete_turns():
+    history = [{"role": "system", "content": "summary"}]
+    for index in range(1, 8):
+        history.extend(
+            [
+                {"role": "user", "content": f"user-{index}"},
+                {"role": "assistant", "content": f"assistant-{index}"},
+                {"role": "tool", "content": f"tool-{index}"},
+            ]
+        )
+
+    recent = _recent_history_by_turns(history)
+
+    assert recent[0] == {"role": "system", "content": "summary"}
+    assert [item["content"] for item in recent if item["role"] == "user"] == [
+        "user-2",
+        "user-3",
+        "user-4",
+        "user-5",
+        "user-6",
+        "user-7",
+    ]
+    assert [item["content"] for item in recent] == [
+        "summary",
+        "user-2",
+        "assistant-2",
+        "tool-2",
+        "user-3",
+        "assistant-3",
+        "tool-3",
+        "user-4",
+        "assistant-4",
+        "tool-4",
+        "user-5",
+        "assistant-5",
+        "tool-5",
+        "user-6",
+        "assistant-6",
+        "tool-6",
+        "user-7",
+        "assistant-7",
+        "tool-7",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_complex_memory_request_falls_back_on_invalid_llm_output():
+    class LLM:
+        async def ainvoke(self, messages):
+            return type("Response", (), {"content": '{"query":"ok","extra":true}'})()
+
+    runtime = type("Runtime", (), {"_llm": LLM()})()
+    message = "继续分析之前的系统设计和实现细节，并逐项对照尚未完成的工作、风险、测试覆盖和兼容性问题。" * 3
+    request = await LangGraphRuntime.build_memory_request(runtime, "session-1", message)
+
+    assert request is not None
+    assert request.query == message
+    assert request.reason == "context_reference"
 
 
 @pytest.mark.asyncio

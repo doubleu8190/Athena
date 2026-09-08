@@ -14,6 +14,8 @@ from athena.runtime import RuntimeContainer
 @dataclass
 class ApprovalResponse:
     future: asyncio.Future[bool]
+    id: str = "auto-approved"
+    timeout: float = 0
 
 
 class AutoApprove:
@@ -31,6 +33,9 @@ class AutoApprove:
         future = asyncio.get_running_loop().create_future()
         future.set_result(True)
         return ApprovalResponse(future=future)
+
+    async def wait_for_decision(self, approval_id: str, timeout: float) -> bool:
+        return True
 
 
 def make_tool_manager() -> UnifiedToolManager:

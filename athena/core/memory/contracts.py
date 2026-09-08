@@ -52,6 +52,12 @@ class ResolutionAction(StrEnum):
     IGNORE = "ignore"
 
 
+class MemoryRelationType(StrEnum):
+    SUPERSEDES = "supersedes"
+    CONTRADICTS = "contradicts"
+    SUPPORTS = "supports"
+
+
 class MemoryResolution(BaseModel):
     """A storage-neutral decision produced by the candidate resolver."""
 
@@ -60,6 +66,7 @@ class MemoryResolution(BaseModel):
     target_memory_id: str | None = None
     final_content: str | None = None
     reason: str = ""
+    relation_type: MemoryRelationType | None = None
 
 
 class MemoryRetrievalRequest(BaseModel):

@@ -32,27 +32,29 @@ class MemoryWriteWorkflow:
         extractor: FactExtractor,
         memory_manager: MemoryManager,
         *,
-        trigger=None,
-        resolver=None,
+        trigger: MemoryTrigger,
+        resolver: MemoryResolver,
     ) -> None:
         self._extractor = extractor
         self._memory = memory_manager
-        self._trigger = trigger or MemoryTrigger()
-        self._resolver = resolver or MemoryResolver(memory_manager)
+        self._trigger = trigger
+        self._resolver = resolver
 
     async def process_turn(self, turn: CompletedTurn) -> MemoryWriteOutcome:
         trigger = self._trigger.evaluate(turn)
         if not trigger.should_extract:
             return MemoryWriteOutcome(False, [], [])
-        existing_memories = await self._build_extraction_memories(turn)
+        existing_memories, related_memories = await self._build_extraction_context(turn)
         candidates = await self._extractor.extract(
             turn, existing_memories=existing_memories
         )
-        resolutions = await self._resolver.resolve(candidates)
+        resolutions = await self._resolver.resolve(
+            candidates, related_memories=related_memories
+        )
         for resolution in resolutions:
             if resolution.action is ResolutionAction.CREATE:
                 candidate = resolution.candidate
-                await self._memory.add_memory(
+                new_id = await self._memory.add_memory(
                     content=candidate.content,
                     metadata={
                         "session_id": turn.session_id,
@@ -63,6 +65,12 @@ class MemoryWriteWorkflow:
                         "source": "extraction",
                     },
                 )
+                if resolution.relation_type and resolution.target_memory_id:
+                    await self._memory.relate(
+                        new_id,
+                        resolution.target_memory_id,
+                        resolution.relation_type.value,
+                    )
             elif (
                 resolution.action is ResolutionAction.UPDATE
                 and resolution.target_memory_id
@@ -90,15 +98,17 @@ class MemoryWriteWorkflow:
                 await self._memory.supersede(resolution.target_memory_id, new_id)
         return MemoryWriteOutcome(True, candidates, resolutions)
 
-    async def _build_extraction_memories(self, turn: CompletedTurn) -> str:
-        """Build the real existing-memory section used by the extraction prompt."""
+    async def _build_extraction_context(
+        self, turn: CompletedTurn
+    ) -> tuple[str, list[dict]]:
+        """Retrieve once and share related memories with extraction and resolution."""
         query = "\n".join(filter(None, (turn.user_text, turn.assistant_text)))
         try:
             results = await self._memory.search(query, n_results=8, record_access=False)
         except Exception:
-            return "(无已有记忆)"
+            return "(无已有记忆)", []
         if not results:
-            return "(无已有记忆)"
+            return "(无已有记忆)", []
         lines: list[str] = []
         for item in results:
             content = str(item.get("content", "")).strip()
@@ -108,4 +118,4 @@ class MemoryWriteWorkflow:
             category = metadata.get("category") or metadata.get("type")
             suffix = f" (category: {category})" if category else ""
             lines.append(f"- {content}{suffix}")
-        return "\n".join(lines) or "(无已有记忆)"
+        return "\n".join(lines) or "(无已有记忆)", results

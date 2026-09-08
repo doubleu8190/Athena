@@ -431,6 +431,14 @@ class MemoryManager:
             )
         return changed
 
+    async def relate(
+        self, source_memory_id: str, target_memory_id: str, relation_type: str
+    ) -> None:
+        """Persist a semantic relation between two memories."""
+        await self._repository.add_relation(
+            source_memory_id, target_memory_id, relation_type
+        )
+
     async def delete(self, memory_id: str) -> None:
         """删除数据。
 

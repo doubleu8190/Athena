@@ -32,7 +32,6 @@ async def process_attachments(
     )
     return {
         "file_results": results,
-        "files_ready": all(item["status"] == "ready" for item in results),
     }
 
 

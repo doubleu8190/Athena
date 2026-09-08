@@ -1,6 +1,11 @@
 import pytest
 
-from athena.core.memory.contracts import CompletedTurn, MemoryCandidate, MemoryResolution
+from athena.core.memory.contracts import (
+    CompletedTurn,
+    MemoryCandidate,
+    MemoryRelationType,
+    MemoryResolution,
+)
 from athena.core.memory.trigger import MemoryTrigger
 from athena.core.memory.workflow import MemoryWriteWorkflow
 from athena.core.memory.resolver import MemoryResolver
@@ -122,6 +127,47 @@ async def test_write_workflow_persists_only_create_resolutions():
     assert len(memory.saved) == 1
     assert memory.saved[0]["metadata"]["source_turn_id"] == "t1"
     assert "已有相关偏好" in extractor.existing
+    assert memory.search_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("relation", "llm_response"),
+    [
+        (MemoryRelationType.CONTRADICTS, '{"action":"CREATE","relation":"contradicts"}'),
+        (MemoryRelationType.SUPPORTS, '{"action":"CREATE","relation":"supports"}'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_workflow_persists_create_relations(relation, llm_response):
+    class LLM:
+        async def ainvoke(self, messages):
+            return type("Response", (), {"content": llm_response})()
+
+    class Extractor:
+        async def extract(self, turn, *, existing_memories):
+            return [MemoryCandidate(content="新证据", source_turn_id=turn.turn_id)]
+
+    class Memory:
+        def __init__(self):
+            self.relations = []
+
+        async def search(self, *args, **kwargs):
+            return [{"id": "old-1", "content": "旧事实", "score": 0.8}]
+
+        async def add_memory(self, **kwargs):
+            return "new-1"
+
+        async def relate(self, source_id, target_id, relation_type):
+            self.relations.append((source_id, target_id, relation_type))
+
+    memory = Memory()
+    resolver = MemoryResolver(memory, llm_provider=LLM())
+    outcome = await MemoryWriteWorkflow(
+        Extractor(), memory, resolver=resolver
+    ).process_turn(CompletedTurn(turn_id="t1", session_id="s1", user_text="新证据"))
+
+    assert outcome.resolutions[0].relation_type is relation
+    assert memory.relations == [("new-1", "old-1", relation.value)]
 
 
 @pytest.mark.asyncio
@@ -131,7 +177,7 @@ async def test_workflow_applies_update_and_supersede_actions():
             return [MemoryCandidate(content="更新后的事实", source_turn_id=turn.turn_id)]
 
     class Resolver:
-        async def resolve(self, candidates):
+        async def resolve(self, candidates, *, related_memories):
             return [
                 MemoryResolution(
                     action=ResolutionAction.UPDATE,

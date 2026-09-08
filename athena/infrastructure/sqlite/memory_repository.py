@@ -356,6 +356,19 @@ class SqliteMemoryRepository:
                 await session.execute(text("DELETE FROM memory_fts WHERE memory_id = :id"), {"id": old_id})
                 return True
 
+    async def add_relation(
+        self, source_id: str, target_id: str, relation_type: str
+    ) -> None:
+        async with get_session() as session:
+            async with session.begin():
+                await session.execute(
+                    text("""INSERT OR IGNORE INTO memory_relations
+                        (source_memory_id, target_memory_id, relation_type, created_at)
+                        VALUES (:source, :target, :relation, :created)"""),
+                    {"source": source_id, "target": target_id,
+                     "relation": relation_type, "created": datetime.now().isoformat()},
+                )
+
     async def soft_delete(self, memory_ids: list[str]) -> None:
         """
 

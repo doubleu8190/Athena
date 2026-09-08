@@ -2,6 +2,7 @@
 
 from .approval_log_repository import ApprovalLogRepository
 from .converters import (
+    _message_to_model,
     _row_to_approval_log,
     _row_to_attachment,
     _row_to_mcp_server,
@@ -35,6 +36,7 @@ __all__ = [
     "_json_loads_model",
     "_now_iso",
     "_SENTINEL",
+    "_message_to_model",
     "_row_to_approval_log",
     "_row_to_attachment",
     "_row_to_mcp_server",

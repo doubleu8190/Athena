@@ -40,6 +40,10 @@ class AgentStorePort(Protocol):
         """按最早发布时间领取一条可执行命令；无命令时返回 ``None``。"""
         ...
 
+    async def reclaim_stale_commands(self, lease_seconds: int = 300) -> int:
+        """Requeue commands whose worker lease expired."""
+        ...
+
     async def complete(
         self,
         command_id: str,

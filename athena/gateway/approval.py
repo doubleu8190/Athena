@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-from agent_runtime.transport import RuntimeEventPublisher
+from athena.runtime.transport import RuntimeEventPublisher
 from athena.contracts.statuses import AgentApprovalDecision, AgentApprovalStatus
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.infrastructure.sqlite.agent_store import AgentStore

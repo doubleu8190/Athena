@@ -323,6 +323,7 @@ class CommandConsumer:
                 message_id=self._command_message_id(command),
                 stream_id=stream_id,
                 stream_type="answer",
+                transition_id=f"stream:{stream_id}:snapshot:1",
                 payload={
                     "session_id": command.session_id,
                     "run_id": run_id,
@@ -365,6 +366,11 @@ class CommandConsumer:
                 session_id=command.session_id,
                 run_id=command.run_id,
                 message_id=self._command_message_id(command),
+                transition_id=(
+                    f"run:{command.run_id}:{event_type.value}"
+                    if command.run_id
+                    else None
+                ),
                 payload={
                     "command_id": command.command_id,
                     "message_id": self._command_message_id(command),
@@ -398,6 +404,7 @@ class CommandConsumer:
                     session_id=command.session_id,
                     run_id=run_id,
                     message_id=self._command_message_id(command),
+                    transition_id=f"run:{run_id}:failed",
                     payload={
                         "command_id": command.command_id,
                         "message_id": self._command_message_id(command),

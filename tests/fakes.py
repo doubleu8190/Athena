@@ -8,7 +8,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from athena.core.tools.manager import UnifiedToolManager
-from athena.runtime import RuntimeContainer
+from athena.container import RuntimeContainer
 
 
 @dataclass

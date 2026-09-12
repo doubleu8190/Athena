@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from athena.utils.logging import get_logger
-from athena.runtime import runtime_from
+from athena.container import runtime_from
 from athena.contracts.errors import ErrorDetail
 
 if TYPE_CHECKING:

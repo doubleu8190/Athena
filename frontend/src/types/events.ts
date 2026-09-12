@@ -40,6 +40,7 @@ export interface ApplicationEventEnvelope {
   chunk_id?: number
   is_complete?: boolean
   parent_run_id?: string | null
+  transition_id?: string | null
   payload?: Record<string, unknown>
   occurred_at?: string
 }

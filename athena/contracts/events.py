@@ -19,13 +19,10 @@ class EventType(StrEnum):
 
     APPROVAL_REQUIRED = "approval.required"
     AGENT_WAITING_FILE = "agent.waiting_for_files"
-    PARALLEL_AGENTS_STARTED = "subagent.started"
     SUB_AGENT_COMPLETE = "subagent.completed"
     SUB_AGENT_FAILED = "subagent.failed"
     SUB_AGENT_SPAWNED = "subagent.started"
-    SYSTEM_MESSAGE = "message.system"
     BUDGET_EXCEEDED = "run.budget_exceeded"
-    ERROR = "run.failed"
     LLM_CALL_END = "llm.completed"
     LLM_CALL_START = "llm.started"
     LLM_TOKEN = "message.delta"
@@ -46,8 +43,6 @@ class EventType(StrEnum):
     RUN_FAILED = "run.failed"
     ATTACHMENT_UPDATED = "attachment_updated"
     FILE_PROCESSING_STARTED = "file_processing_started"
-    FILE_PROCESSING_PROGRESS = "file_processing_progress"
-    FILE_INDEX_PROGRESS = "file_index_progress"
     FILE_PROCESSING_COMPLETED = "file_processing_completed"
     FILE_PROCESSING_FAILED = "file_processing_failed"
 
@@ -70,5 +65,6 @@ class ApplicationEvent(BaseModel):
     chunk_id: int | None = Field(default=None, ge=1)
     is_complete: bool = False
     parent_run_id: str | None = None
+    transition_id: str | None = None
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     payload: dict[str, Any] = Field(default_factory=dict)

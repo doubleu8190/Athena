@@ -23,7 +23,6 @@ from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import (
-    AIMessage,
     AIMessageChunk,
     BaseMessage,
     SystemMessage,
@@ -35,7 +34,6 @@ from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.budget import Budget, BudgetExceeded
 from athena.core.harness.error_handler import ToolErrorHandler
 from athena.core.llm.provider import LLMProvider
-from athena.core.llm.tokens import token_usage_from_chunks
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole, ToolCallRecord
@@ -43,12 +41,11 @@ from athena.models.tool import ToolCallStatus
 from athena.contracts.events import EventType
 from athena.contracts.events import ApplicationEvent, EventDurability
 from athena.contracts.ports import EventPublisherPort
-from athena.contracts.statuses import StreamSnapshotStatus
 from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.message import dict_to_message, normalize_tool_calls
-from agent_runtime.streaming import StreamCoalescer
+from athena.runtime.streaming import StreamCoalescer
 
 logger = get_logger(__name__)
 
@@ -145,15 +142,13 @@ class Harness:
             tool_timeout=self._settings.tool_timeout,
             llm_stream_timeout=self._settings.llm_stream_timeout,
         )
-        self._stop_event = asyncio.Event()
         self._stop_signal: asyncio.Event | None = None
         self._allowed_tool_names: set[str] | None = None
         self._parent_run_id: str | None = None
         self._message_id: str | None = None
         self._answer_stream_id: str | None = None
         self._answer_stream: StreamCoalescer | None = None
-        self._thinking_chunk_id = 0
-        self._thinking_content = ""
+        self._stable_tool_ids = False
         self._register_default_routes()
 
     def _register_default_routes(self) -> None:
@@ -206,7 +201,7 @@ class Harness:
                 发布每个调用事件，使执行过程能显式追溯。
             tool_names: 可选工具白名单（子 Agent 使用），None 表示允许全部工具。
             stop_signal: 外部停止信号（会话级 stop 事件），由 gateway 层注入；
-                与 request_stop() 的 _stop_event 等价，任一置位即终止运行。
+                置位后终止当前运行。
 
         返回值：
             HarnessRunResult，包含最终文本、run_id、轮次、工具结果、错误和中断状态。
@@ -222,15 +217,12 @@ class Harness:
             max_turns=self._harness_settings.max_turns_per_run,
             retry_budget=self._harness_settings.retry_budget,
         )
-        self._stop_event.clear()
         self._stop_signal = stop_signal
 
         # 更新会话状态为 running
         await self._db.sessions.update(session_id, status="running", run_id=rid)
 
         self._answer_stream_id = f"answer-{rid}"
-        self._thinking_chunk_id = 0
-        self._thinking_content = ""
         self._answer_stream = StreamCoalescer(
             session_id=session_id,
             run_id=rid,
@@ -252,12 +244,18 @@ class Harness:
             rid,
         )
 
-        # 构建消息列表
-        lc_messages: list[BaseMessage] = []
-        if system_prompt:
-            lc_messages.append(SystemMessage(content=system_prompt))
+        # 压缩阶段使用领域消息；只有在调用 LLM 前才转换为 LangChain 消息。
+        domain_messages: list[Message] = []
         for m in messages:
-            lc_messages.append(dict_to_message(m))
+            if isinstance(m, Message):
+                domain_messages.append(m)
+                continue
+            payload = dict(m)
+            payload.setdefault("id", f"{rid}:message:{len(domain_messages)}")
+            payload.setdefault("session_id", session_id)
+            payload.setdefault("run_id", rid)
+            payload.setdefault("timestamp", datetime.now())
+            domain_messages.append(Message.model_validate(payload))
 
         # 绑定工具（子 Agent 按 tool_names 白名单过滤，None = 全部）
         self._allowed_tool_names = set(tool_names) if tool_names else None
@@ -272,12 +270,17 @@ class Harness:
         try:
             while not self._should_stop():
                 # 上下文压缩
-                compressed = await self._compressor.compress(
-                    lc_messages,
+                compressed_domain = await self._compressor.compress(
+                    domain_messages,
                     session_id=session_id,
                 )
-                if len(compressed) < len(lc_messages):
-                    lc_messages = compressed
+                if len(compressed_domain) < len(domain_messages):
+                    domain_messages = compressed_domain
+
+                lc_messages: list[BaseMessage] = []
+                if system_prompt:
+                    lc_messages.append(SystemMessage(content=system_prompt))
+                lc_messages.extend(dict_to_message(message) for message in domain_messages)
 
                 # LLM 调用事件使用稳定的调用 ID 关联生命周期。
                 llm_call_id = generate_time_id()
@@ -300,7 +303,7 @@ class Harness:
                 full_content = ""
                 stream_chunks: list[AIMessageChunk] = []
                 try:
-                    # 流式调用整体包超时兜底：流挂死时 stop 的 _should_stop() break
+                    # 流式调用整体包超时兜底：流挂死时无法依靠 stop_signal break
                     # 永远等不到 __anext__，只有超时能终态化当前 LLM 调用
                     async with asyncio.timeout(
                         self._harness_settings.llm_stream_timeout
@@ -320,7 +323,6 @@ class Harness:
                         merged_content, final_tc = self._assemble_response(
                             stream_chunks, full_content
                         )
-                        token_usage = token_usage_from_chunks(stream_chunks)
                     if merged_content:
                         full_content = merged_content
 
@@ -345,7 +347,7 @@ class Harness:
                             "llm_empty_response", run_id=rid, error=error_msg
                         )
                         await self._emit(
-                            EventType.ERROR,
+                            EventType.RUN_FAILED,
                             {
                                 "call_id": llm_call_id,
                                 "error": error_msg,
@@ -367,12 +369,17 @@ class Harness:
                             continue
                         break
 
-                    ai_message = (
-                        AIMessage(content=full_content, tool_calls=final_tc)
-                        if final_tc
-                        else AIMessage(content=full_content)
+                    domain_messages.append(
+                        Message(
+                            id=generate_time_id(),
+                            session_id=session_id,
+                            role=MessageRole.ASSISTANT,
+                            content=full_content,
+                            tool_calls=final_tc,
+                            run_id=rid,
+                            timestamp=datetime.now(),
+                        )
                     )
-                    lc_messages.append(ai_message)
                     last_content = full_content
                     error_msg = None
 
@@ -380,7 +387,7 @@ class Harness:
                     error_msg = f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）"
                     logger.warning("llm_stream_timeout", run_id=rid, error=error_msg)
                     await self._emit(
-                        EventType.ERROR,
+                        EventType.RUN_FAILED,
                         {
                             "call_id": llm_call_id,
                             "error": error_msg,
@@ -398,7 +405,7 @@ class Harness:
                     logger.error("llm_call_failed", error=str(e), run_id=rid)
                     error_msg = f"LLM 调用失败: {e}"
                     await self._emit(
-                        EventType.ERROR,
+                        EventType.RUN_FAILED,
                         {"call_id": llm_call_id, "error": str(e), "phase": "llm_call"},
                         session_id,
                         rid,
@@ -461,7 +468,17 @@ class Harness:
                 )
 
                 for tm in tool_messages:
-                    lc_messages.append(tm)
+                    domain_messages.append(
+                        Message(
+                            id=generate_time_id(),
+                            session_id=session_id,
+                            role=MessageRole.TOOL,
+                            content=str(tm.content),
+                            tool_call_id=tm.tool_call_id,
+                            run_id=rid,
+                            timestamp=datetime.now(),
+                        )
+                    )
 
                 # 工具调用成功 → 重置重试计数
                 budget.reset_retries()
@@ -483,7 +500,7 @@ class Harness:
             error_msg = f"Harness 执行异常: {e}"
             logger.exception("harness_failed", run_id=rid)
             await self._emit(
-                EventType.ERROR,
+                EventType.RUN_FAILED,
                 {"error": str(e), "phase": "harness"},
                 session_id,
                 rid,
@@ -560,11 +577,107 @@ class Harness:
             asyncio.gather 中的其他工具执行。
             """
             tool_name = tc.get("name", "")
-            args = tc.get("args", {}) or tc.get("arguments", {}) or {}
+            args = tc.get("args", {}) or {}
             tc_id = tc.get("id", generate_time_id())
 
+            def append_result(item: dict[str, Any]) -> None:
+                # ``tool_call_id`` is the stable projection key across a
+                # checkpoint replay. Older state entries may lack it, so they
+                # remain untouched while new entries become deduplicable.
+                if item.get("tool_call_id") and any(
+                    existing.get("tool_call_id") == item["tool_call_id"]
+                    for existing in tool_results_all
+                ):
+                    return
+                tool_results_all.append(item)
+
+            async def ensure_tool_message(content: str, record_id: str) -> None:
+                message_id = self._tool_message_id(run_id, record_id)
+                get_message = getattr(self._db.messages, "get", None)
+                if get_message is not None and await get_message(message_id) is not None:
+                    return
+                await self._db.messages.save(
+                    Message(
+                        id=message_id,
+                        session_id=session_id,
+                        role=MessageRole.TOOL,
+                        content=content,
+                        tool_call_id=tc_id,
+                        run_id=run_id,
+                        tool_call_record_id=record_id,
+                        tool_name=tool_name,
+                        timestamp=datetime.now(),
+                    )
+                )
+
             try:
-                tc_record_id = generate_time_id()
+                tc_record_id = self._tool_record_id(
+                    run_id=run_id,
+                    call_id=call_id,
+                    tool_call_id=tc_id,
+                    tool_name=tool_name,
+                    args=args,
+                )
+                get_record = getattr(self._db.tool_calls, "get", None)
+                existing_record = (
+                    await get_record(tc_record_id) if get_record is not None else None
+                )
+                if existing_record is not None:
+                    if existing_record.status == ToolCallStatus.SUCCESS:
+                        tool_content = existing_record.raw_output or ""
+                        append_result(
+                            {
+                                "tool_call_id": tc_id,
+                                "tool_name": tool_name,
+                                "arguments": args,
+                                "output": tool_content,
+                                "status": "success",
+                                "duration_ms": existing_record.duration_ms,
+                                "error": None,
+                            }
+                        )
+                        await ensure_tool_message(tool_content, tc_record_id)
+                        return ToolMessage(content=tool_content, tool_call_id=tc_id)
+                    if existing_record.status in {
+                        ToolCallStatus.FAILED,
+                        ToolCallStatus.DENIED,
+                        ToolCallStatus.TIMEOUT,
+                    }:
+                        error = existing_record.error_message or "工具调用已完成但失败"
+                        tool_content = f"[工具 {tool_name} 失败]: {error}"
+                        append_result(
+                            {
+                                "tool_call_id": tc_id,
+                                "tool_name": tool_name,
+                                "arguments": args,
+                                "output": existing_record.raw_output or "",
+                                "status": existing_record.status.value,
+                                "duration_ms": existing_record.duration_ms,
+                                "error": error,
+                            }
+                        )
+                        await ensure_tool_message(tool_content, tc_record_id)
+                        return ToolMessage(
+                            content=tool_content,
+                            tool_call_id=tc_id,
+                        )
+                    tool_content = f"[工具 {tool_name} 状态未确认，未自动重试]"
+                    append_result(
+                        {
+                            "tool_call_id": tc_id,
+                            "tool_name": tool_name,
+                            "arguments": args,
+                            "output": "",
+                            "status": "unknown",
+                            "duration_ms": existing_record.duration_ms,
+                            "error": "工具调用状态未确认",
+                        }
+                    )
+                    await ensure_tool_message(tool_content, tc_record_id)
+                    return ToolMessage(
+                        content=tool_content,
+                        tool_call_id=tc_id,
+                    )
                 await self._db.tool_calls.save(
                     ToolCallRecord(
                         id=tc_record_id,
@@ -631,8 +744,9 @@ class Harness:
                     run_id,
                 )
 
-                tool_results_all.append(
+                append_result(
                     {
+                        "tool_call_id": tc_id,
                         "tool_name": tool_name,
                         "arguments": args,
                         "output": result_content,
@@ -650,20 +764,7 @@ class Harness:
                     tool_content = f"[工具 {tool_name} 失败]: {error_msg}"
 
                 # 持久化 tool 消息
-                await self._db.messages.save(
-                    Message(
-                        id=generate_time_id(),
-                        session_id=session_id,
-                        role=MessageRole.TOOL,
-                        content=tool_content,
-                        tool_call_id=tc_id,
-                        run_id=run_id,
-                        tool_call_record_id=tc_record_id,
-                        # 前端据此给工具气泡标名（避免跨表 join）
-                        tool_name=tool_name,
-                        timestamp=datetime.now(),
-                    )
-                )
+                await ensure_tool_message(tool_content, tc_record_id)
 
                 return ToolMessage(content=tool_content, tool_call_id=tc_id)
 
@@ -856,27 +957,39 @@ class Harness:
         """将 langchain tool_calls 归一化为统一的内部格式."""
         return normalize_tool_calls(tool_calls)
 
+    def _tool_record_id(
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> str:
+        """返回工具账本 ID；逐轮执行器启用稳定 ID，旧 Harness 保持随机 ID。"""
+
+        if not self._stable_tool_ids:
+            return generate_time_id()
+        return f"{run_id}:tool-record:{call_id}:{tool_call_id}"
+
+    def _tool_message_id(self, run_id: str, tool_record_id: str) -> str:
+        """返回工具消息 ID；逐轮执行器恢复时可安全重放。"""
+
+        if not self._stable_tool_ids:
+            return generate_time_id()
+        return f"{run_id}:tool-message:{tool_record_id}"
+
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
-
-    def request_stop(self) -> None:
-        """请求停止当前运行（优雅退出）.
-
-        设置内部停止事件，主循环在下一个检查点检测到后终止。
-        与外部 stop_signal 等价，任一置位即终止。
-        """
-        self._stop_event.set()
 
     def _should_stop(self) -> bool:
         """检查是否应停止运行.
 
         返回值：
-            True 表示内部 request_stop() 或外部 stop_signal 任一已置位。
+            True 表示外部 stop_signal 已置位。
         """
-        return self._stop_event.is_set() or bool(
-            self._stop_signal is not None and self._stop_signal.is_set()
-        )
+        return self._stop_signal is not None and self._stop_signal.is_set()
 
     @staticmethod
     def _message_id_from_messages(
@@ -932,6 +1045,11 @@ class Harness:
                 stream_id=str(data["stream_id"]) if data.get("stream_id") else None,
                 stream_type=str(data["stream_type"]) if data.get("stream_type") else None,
                 parent_run_id=self._parent_run_id,
+                transition_id=(
+                    str(data["transition_id"])
+                    if data.get("transition_id")
+                    else self._event_transition_id(event_type, data)
+                ),
                 payload=data,
             ))
         except Exception as e:
@@ -946,17 +1064,12 @@ class Harness:
         session_id: str,
         run_id: str,
     ) -> None:
-        """发布受控的思考阶段摘要，不暴露模型隐藏推理内容。"""
+        """发布受控的思考阶段事件，不暴露模型隐藏推理内容。
+
+        thinking 只依赖 durable event 的会话序号来重放；它不属于可恢复的
+        Agent 执行状态，也不维护流快照。
+        """
         stream_id = f"thinking-{run_id}"
-        chunk_id: int | None = None
-        if event_type == EventType.THINKING_SUMMARY:
-            current = getattr(self, "_thinking_chunk_id", 0) + 1
-            self._thinking_chunk_id = current
-            chunk_id = current
-            self._thinking_content = (
-                f"{self._thinking_content}\n{content}" if self._thinking_content else content
-            )
-        snapshot_content = self._thinking_content
         try:
             await self._events.publish(
                 ApplicationEvent(
@@ -967,31 +1080,34 @@ class Harness:
                     message_id=self._message_id,
                     stream_id=stream_id,
                     stream_type="thinking",
-                    chunk_id=chunk_id,
+                    chunk_id=None,
+                    transition_id=(
+                        f"thinking:{run_id}:{event_type.value}"
+                        if event_type
+                        in {EventType.THINKING_STARTED, EventType.THINKING_COMPLETED}
+                        else None
+                    ),
                     payload={"content": content, "stream_id": stream_id},
                 )
             )
-            upsert_snapshot = getattr(self._events, "upsert_snapshot", None)
-            if upsert_snapshot is not None:
-                snapshot_version = max(self._thinking_chunk_id, 1)
-                if event_type == EventType.THINKING_COMPLETED:
-                    snapshot_version += 1
-                await upsert_snapshot(
-                    session_id,
-                    stream_id,
-                    snapshot_version,
-                    snapshot_content,
-                    run_id=run_id,
-                    stream_type="thinking",
-                    last_chunk_id=self._thinking_chunk_id,
-                    status=(
-                        StreamSnapshotStatus.COMPLETED
-                        if event_type == EventType.THINKING_COMPLETED
-                        else StreamSnapshotStatus.STREAMING
-                    ),
-                )
         except Exception as exc:
             logger.warning("emit_thinking_failed", event_type=str(event_type), error=str(exc))
+
+    @staticmethod
+    def _event_transition_id(
+        event_type: EventType, data: dict[str, Any]
+    ) -> str | None:
+        """Derive stable IDs for low-frequency lifecycle events."""
+        if event_type in {EventType.LLM_CALL_START, EventType.LLM_CALL_END}:
+            call_id = data.get("call_id")
+            return f"llm:{call_id}:{event_type.value}" if call_id else None
+        if event_type in {EventType.STREAM_START, EventType.STREAM_END}:
+            stream_id = data.get("stream_id")
+            return f"stream:{stream_id}:{event_type.value}" if stream_id else None
+        if event_type in {EventType.TOOL_CALL_START, EventType.TOOL_CALL_END}:
+            call_id = data.get("tool_call_id")
+            return f"tool:{call_id}:{event_type.value}" if call_id else None
+        return None
 
     async def _emit_llm_call_end(
         self,

@@ -87,11 +87,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         if (type === "stream.snapshot") {
           const version = Number(data.version || 0)
           if (data.stream_type === "thinking") {
-            setThinking({
-              active: data.status !== "completed",
-              content: String(data.content || ""),
-              messageId: streamId || null,
-            })
+            // Thinking is a durable event stream, never a recoverable snapshot.
             return
           }
           const stream = streamsRef.current.get(streamId) || {

@@ -23,6 +23,8 @@ class StreamCoalescer:
         message_id: str | None = None,
         interval_ms: int = 50,
         max_bytes: int = 512,
+        initial_version: int = 0,
+        initial_offset: int = 0,
     ) -> None:
         """创建一个流式增量合并器。
 
@@ -45,8 +47,8 @@ class StreamCoalescer:
         self.interval = interval_ms / 1000
         self.max_bytes = max_bytes
         self._buffer = ""
-        self._offset = 0
-        self._version = 0
+        self._offset = initial_offset
+        self._version = initial_version
         self._last_flush = time.monotonic()
         self._lock = asyncio.Lock()
 
@@ -54,6 +56,11 @@ class StreamCoalescer:
     def version(self) -> int:
         """已分配的最后一个 Chunk 序号。"""
         return self._version
+
+    @property
+    def offset(self) -> int:
+        """已发布文本的 UTF-8 字节偏移量。"""
+        return self._offset
 
     async def append(self, text: str) -> None:
         """追加文本，并在达到刷新条件时发布实时增量事件。

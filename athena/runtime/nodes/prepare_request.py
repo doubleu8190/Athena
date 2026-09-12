@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import TYPE_CHECKING
 
 from langgraph.graph.state import StateNode
@@ -10,17 +9,17 @@ from langgraph.graph.state import StateNode
 from ..state import AgentState
 
 if TYPE_CHECKING:
-    from ..graph_runtime import LangGraphRuntime
+    from ..services.request_service import RequestService
 
 
 async def prepare_and_persist_request(
-    state: AgentState, *, runtime: LangGraphRuntime
+    state: AgentState, *, request_service: RequestService
 ) -> AgentState:
     """规范化请求、加载上下文并持久化用户消息及附件关系。
 
     参数：
         state (AgentState): 至少包含非空 ``session_id``；可选提供消息、附件和续接数据。
-        runtime (LangGraphRuntime): 当前图实例的运行时依赖。
+        request_service (RequestService): 会话上下文服务。
 
     返回值：
         AgentState: 包含规范化请求数据和持久化消息 ID 的状态。
@@ -29,11 +28,15 @@ async def prepare_and_persist_request(
         KeyError: ``state`` 缺少 ``session_id`` 时抛出。
         运行时异常: 附件或历史加载失败时传播底层运行时异常。
     """
-    runtime.validate_state(state)
+    if not state.get("session_id"):
+        raise ValueError("AgentState missing required field: session_id")
     session_id = state.get("session_id", "")
-    attachment_ids = state.get("attachment_ids", [])
+    # Attachment IDs are a set-like request field; preserve first-seen order
+    # so retries produce the same durable message projection.
+    attachment_ids = list(dict.fromkeys(state.get("attachment_ids", [])))
+    attachments = await request_service.load_banded_attachments(session_id, attachment_ids)
 
-    history = await runtime.load_history(session_id)
+    history = await request_service.load_history(session_id)
     prepared_state: AgentState = {
         "session_id": session_id,
         "run_id": state.get("run_id", ""),
@@ -41,18 +44,23 @@ async def prepare_and_persist_request(
         "user_message": state.get("user_message", ""),
         "attachment_ids": attachment_ids,
         "history": [item.model_dump(mode="json") for item in history],
+        "requested_attachment_refs": [
+            item.to_ref().model_dump(mode="json") for item in attachments
+        ],
     }
-    await runtime.persist_message_and_attachments(prepared_state)
+    persisted = await request_service.persist_message_and_attachments(prepared_state)
+    if isinstance(persisted, dict):
+        prepared_state.update(persisted)
     return prepared_state
 
 
 def create_prepare_and_persist_request_node(
-    runtime: LangGraphRuntime,
+    request_service: RequestService,
 ) -> StateNode[AgentState, None]:
-    """创建绑定指定运行时的请求准备和持久化节点。
+    """创建绑定指定请求服务的请求准备和持久化节点。
 
     参数：
-        runtime (LangGraphRuntime): 要注入节点的运行时依赖。
+        request_service (RequestService): 要注入节点的请求服务。
 
     返回值：
         StateNode[AgentState, None]: 可注册到 LangGraph 的异步节点。
@@ -60,4 +68,7 @@ def create_prepare_and_persist_request_node(
     异常：
         不主动抛出异常；节点执行时的异常由 ``prepare_and_persist_request`` 传播。
     """
-    return partial(prepare_and_persist_request, runtime=runtime)
+    async def node(state: AgentState) -> AgentState:
+        return await prepare_and_persist_request(state, request_service=request_service)
+
+    return node

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from athena.config.settings import Settings
-from agent_runtime.graph_runtime import LangGraphRuntime
+from athena.runtime.graph_runtime import LangGraphRuntime
 from athena.core.files.adapters import (
     ExcelAdapter,
     ImageAdapter,

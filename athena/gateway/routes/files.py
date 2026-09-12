@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from athena.core.files.runtime import FileAccessError
 from athena.contracts.errors import ErrorDetail
-from athena.runtime import runtime_from
+from athena.container import runtime_from
 
 router = APIRouter(prefix="/sessions/{session_id}", tags=["files"])
 

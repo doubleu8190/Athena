@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from athena.core.tools.manager import UnifiedToolManager
 from athena.models.tool import RiskLevel
 from athena.utils.logging import get_logger
-from athena.runtime import runtime_from
+from athena.container import runtime_from
 from athena.contracts.errors import ErrorDetail
 
 logger = get_logger(__name__)

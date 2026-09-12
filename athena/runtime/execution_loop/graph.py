@@ -1,0 +1,169 @@
+"""构建可检查点化的 LLM ↔ 工具执行循环子图。"""
+
+from __future__ import annotations
+
+from functools import partial
+from typing import TYPE_CHECKING, Literal
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+
+from ..state import AgentExecutionState, AgentState
+
+from .initialize import initialize_execution
+from .llm_call import llm_call
+from .execute_tools import execute_tool_batch
+from .finish import finish_execution
+
+if TYPE_CHECKING:
+    from ..graph_runtime import LangGraphRuntime
+
+AgentLoopRoute = Literal["llm_call", "execute_tool_batch", "finish_execution"]
+
+# ── 主图适配器（包装 AgentExecutionState → AgentState 以兼容嵌套状态） ──
+
+
+async def _initialize_wrapper(
+    state: AgentState,
+    *,
+    graph_runtime: LangGraphRuntime,
+) -> AgentState:
+    """将主图状态映射为子图内部的执行状态。"""
+    exec_state: AgentExecutionState = state.get("execution", {})
+    return {
+        "execution": initialize_execution(
+            {
+                "session_id": state.get("session_id", exec_state.get("session_id", "")),
+                "run_id": state.get("run_id", exec_state.get("run_id", "")),
+                "message_id": state.get("message_id", exec_state.get("message_id", "")),
+                "user_message": state.get("user_message", exec_state.get("user_message", "")),
+                "memory_context": state.get("memory_context", exec_state.get("memory_context", "")),
+                "system_prompt": graph_runtime.build_system_prompt(
+                    state.get("memory_context", "")
+                ),
+                "messages": list(state.get("harness_messages", exec_state.get("messages", []))),
+                "attachment_refs": list(state.get("attachment_refs", exec_state.get("attachment_refs", []))),
+                "max_turns": graph_runtime._settings.max_turns_per_run,
+                "max_retries": graph_runtime._settings.retry_budget,
+            }
+        )
+    }
+
+
+async def _llm_wrapper(
+    state: AgentState,
+    config,
+    *,
+    graph_runtime: LangGraphRuntime,
+) -> AgentState:
+    return {
+        "execution": await llm_call(
+            state.get("execution", {}), config, graph_runtime=graph_runtime
+        )
+    }
+
+
+def _route_after_llm(state: AgentState) -> AgentLoopRoute:
+    exec_state: AgentExecutionState = state.get("execution", {})
+    if exec_state.get("interrupted"):
+        return "finish_execution"
+    if exec_state.get("pending_tool_calls"):
+        return "execute_tool_batch"
+    if exec_state.get("error"):
+        if int(exec_state.get("turn_count", 0)) < int(
+            exec_state.get("max_turns", 20)
+        ) and int(exec_state.get("retry_count", 0)) < int(
+            exec_state.get("max_retries", 3)
+        ):
+            return "llm_call"
+    return "finish_execution"
+
+
+async def _tools_wrapper(
+    state: AgentState,
+    config,
+    *,
+    graph_runtime: LangGraphRuntime,
+) -> AgentState:
+    return {
+        "execution": await execute_tool_batch(
+            state.get("execution", {}), config, graph_runtime=graph_runtime
+        )
+    }
+
+
+def _route_after_tools(state: AgentState) -> AgentLoopRoute:
+    exec_state: AgentExecutionState = state.get("execution", {})
+    return (
+        "finish_execution" if exec_state.get("interrupted") else "llm_call"
+    )
+
+
+async def _finish_wrapper(
+    state: AgentState,
+    config,
+    *,
+    graph_runtime: LangGraphRuntime,
+) -> AgentState:
+    result = await finish_execution(
+        state.get("execution", {}), config, graph_runtime=graph_runtime
+    )
+    return {
+        "execution": result,
+        "harness_result": result.get("harness_result"),
+    }
+
+
+# ── 公共路由辅助 ──
+
+
+def route_after_llm(state: AgentExecutionState) -> AgentLoopRoute:
+    """供外部使用的 LLM 后路由（包装单层状态）。"""
+    return _route_after_llm({"execution": state})
+
+
+def route_after_tools(state: AgentExecutionState) -> AgentLoopRoute:
+    """供外部使用的工具批后路由（包装单层状态）。"""
+    return _route_after_tools({"execution": state})
+
+
+# ── 图构建 ──
+
+
+def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
+    """构建可检查点化的 LLM/工具循环子图。
+
+    图结构：
+        START → initialize → llm_call ⇄ execute_tool_batch → finish → END
+    """
+    graph = StateGraph(AgentState)
+    graph.add_node(
+        "initialize_execution",
+        partial(_initialize_wrapper, graph_runtime=runtime),
+    )
+    graph.add_node("llm_call", partial(_llm_wrapper, graph_runtime=runtime))
+    graph.add_node(
+        "execute_tool_batch",
+        partial(_tools_wrapper, graph_runtime=runtime),
+    )
+    graph.add_node(
+        "finish_execution", partial(_finish_wrapper, graph_runtime=runtime)
+    )
+    graph.add_edge(START, "initialize_execution")
+    graph.add_edge("initialize_execution", "llm_call")
+    graph.add_conditional_edges(
+        "llm_call",
+        _route_after_llm,
+        {
+            "llm_call": "llm_call",
+            "execute_tool_batch": "execute_tool_batch",
+            "finish_execution": "finish_execution",
+        },
+    )
+    graph.add_conditional_edges(
+        "execute_tool_batch",
+        _route_after_tools,
+        {"llm_call": "llm_call", "finish_execution": "finish_execution"},
+    )
+    graph.add_edge("finish_execution", END)
+    return graph.compile()

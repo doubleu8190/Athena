@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from functools import partial
 from typing import TYPE_CHECKING
 
 from langgraph.graph.state import StateNode
@@ -38,4 +37,8 @@ async def process_attachments(
 def create_process_attachments_node(
     runtime: LangGraphRuntime,
 ) -> StateNode[AgentState, None]:
-    return partial(process_attachments, runtime=runtime)
+    # ``runtime`` is reserved by LangGraph for its own execution context.
+    async def node(state: AgentState) -> AgentState:
+        return await process_attachments(state, runtime=runtime)
+
+    return node

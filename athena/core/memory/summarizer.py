@@ -344,6 +344,22 @@ class ConversationSummarizer:
         if not summaries:
             return None
 
+        # ── 4. 先推进摘要进度指针（幂等令牌）──
+        # LangGraph 检查点恢复可能重放本节点。将指针写入置于记忆写入
+        # 之前：一旦指针推进，重放时读不到新消息，直接返回 None，避免
+        # 向长期记忆写入重复条目。若记忆写入失败，指针已推进，少写的
+        # 记忆条目会在下一轮再次触发时重新生成。
+        last_msg_id = all_msgs[-1].id
+        try:
+            await db.sessions.update(
+                session_id,
+                last_summarized_message_id=last_msg_id,
+            )
+        except Exception as e:
+            logger.warning("update_last_summarized_id_failed", error=str(e))
+            return None
+
+        # ── 5. 写入记忆条目 ──
         saved_texts: list[str] = []
         for s in summaries:
             content = f"{s.topic}: {s.content}"
@@ -363,17 +379,7 @@ class ConversationSummarizer:
             except Exception as e:
                 logger.warning("summary_save_failed", error=str(e))
 
-        # ── 5. 更新摘要进度指针 ──
-        if saved_texts and all_msgs:
-            last_msg_id = all_msgs[-1].id
-            try:
-                await db.sessions.update(
-                    session_id,
-                    last_summarized_message_id=last_msg_id,
-                )
-            except Exception as e:
-                logger.warning("update_last_summarized_id_failed", error=str(e))
-
+        if saved_texts:
             logger.info(
                 "conversation_summary_saved",
                 session_id=session_id,

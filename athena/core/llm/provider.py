@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from typing import Any, AsyncIterator, Protocol, cast, runtime_checkable
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessageChunk, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, StructuredTool
 
@@ -41,15 +41,13 @@ class LLMProviderProtocol(Protocol):
         """返回底层 LangChain 聊天模型。"""
         ...
 
-    async def ainvoke(
-        self, messages: list[BaseMessage], **kwargs: Any
-    ) -> BaseMessage:
+    async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> BaseMessage:
         """异步调用模型并返回消息结果。"""
         ...
 
     def astream(
         self, messages: list[BaseMessage], **kwargs: Any
-    ) -> AsyncIterator[BaseMessage]:
+    ) -> AsyncIterator[AIMessageChunk]:
         """以异步迭代器流式返回模型消息块。"""
         ...
 
@@ -140,7 +138,7 @@ class LLMProvider:
 
     async def _retry_astream(
         self, messages: list[BaseMessage], **kwargs: Any
-    ) -> AsyncIterator[BaseMessage]:
+    ) -> AsyncIterator[AIMessageChunk]:
         """带重试的流式输出.
 
         当 astream 创建 generator 失败时进行重试；

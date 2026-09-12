@@ -149,6 +149,30 @@ async def init_engine(db_path: str) -> None:
                 """
             )
         )
+        event_columns = {
+            row[1] for row in (await conn.execute(text("PRAGMA table_info(agent_events)"))).all()
+        }
+        if "transition_id" not in event_columns:
+            await conn.execute(
+                text("ALTER TABLE agent_events ADD COLUMN transition_id VARCHAR")
+            )
+        command_columns = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(agent_commands)"))).all()
+        }
+        if "claimed_at" not in command_columns:
+            await conn.execute(
+                text("ALTER TABLE agent_commands ADD COLUMN claimed_at VARCHAR")
+            )
+        await conn.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_events_transition
+                ON agent_events(session_id, transition_id)
+                WHERE transition_id IS NOT NULL
+                """
+            )
+        )
         # 兼容旧数据库：活跃 Run 唯一索引不再把 paused 状态视为占用执行槽。
         await conn.execute(text("DROP INDEX IF EXISTS uq_agent_runs_active_session"))
         await conn.execute(

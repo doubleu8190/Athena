@@ -23,20 +23,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from agent_runtime.graph_runtime import LangGraphRuntime
 from athena.config.settings import get_settings
 from athena.core.llm.provider import LLMProvider
 from athena.infrastructure.sqlite.database import Database
-from athena.runtime import RuntimeContainer
+from athena.container import RuntimeContainer, runtime_from
+from athena.runtime import CancellationRegistry, CommandConsumer, LangGraphRuntime, RecoveryReconciler, build_graph
 from athena.infrastructure.sqlite.agent_store import AgentStore
-from agent_runtime import (
-    CommandConsumer,
-    RecoveryReconciler,
-    build_graph,
-    CancellationRegistry,
-)
-from agent_runtime.command_notifications import CommandNotifier
-from agent_runtime.transport import SessionEventBus, RuntimeEventPublisher
+
+from athena.runtime.command_notifications import CommandNotifier
+from athena.runtime.transport import RuntimeEventPublisher, SessionEventBus
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from athena.gateway.auth.routes import is_authenticated
 from athena.contracts.errors import ErrorDetail
@@ -47,7 +42,6 @@ from athena.gateway.routes import api_router
 from athena.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -286,7 +280,6 @@ async def lifespan(app: FastAPI):
     await db.close()
     logger.info("athena_stopped")
 
-
 # ---------------------------------------------------------------------------
 # FastAPI 应用（仅创建、中间件、路由注册）
 # ---------------------------------------------------------------------------
@@ -297,7 +290,6 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
-
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
@@ -337,7 +329,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
         return await call_next(request)
 
-
 app.add_middleware(AuthMiddleware)
 
 app.add_middleware(
@@ -350,7 +341,6 @@ app.add_middleware(
 
 # 注册 REST API 路由（/api/*）；事件通过 SSE 提供。
 app.include_router(api_router)
-
 
 def run() -> None:
     """启动 uvicorn 服务器（命令行入口）。
@@ -387,7 +377,6 @@ def run() -> None:
         reload_dirs=reload_dirs,
         log_level="debug" if settings.debug else "info",
     )
-
 
 if __name__ == "__main__":
     run()

@@ -49,7 +49,10 @@ class RuntimeEventPublisher:
         last_chunk_id: int = 0,
         status: StreamSnapshotStatus = StreamSnapshotStatus.STREAMING,
     ) -> bool:
-        """将流状态快照委托给事件存储，供 Runtime 恢复思考状态。"""
+        """将可恢复的回答流快照委托给事件存储。
+
+        thinking 状态只通过 durable thinking 事件传输，不使用此快照接口。
+        """
         return await self.store.upsert_snapshot(
             session_id,
             stream_id,

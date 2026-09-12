@@ -26,7 +26,7 @@ class MemoryResolver:
         *,
         similarity_threshold: float = 0.92,
         related_threshold: float = 0.65,
-        llm_provider: LLMProvider,
+        llm_provider: LLMProvider | None = None,
     ) -> None:
         self._memory = memory_manager
         self._threshold = similarity_threshold

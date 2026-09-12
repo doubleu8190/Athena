@@ -42,6 +42,15 @@ class ToolCallRepository:
                     )
                 )
 
+    async def get(self, tool_call_id: str) -> ToolCallRecord | None:
+        """按稳定账本 ID 查询一次工具调用。"""
+
+        async with get_session() as session:
+            row = await session.get(ToolCallModel, tool_call_id)
+            if row is None or row.deleted_time is not None:
+                return None
+            return _row_to_tool_call(row)
+
     @staticmethod
     def _allowed_values(updates: dict[str, Any]) -> dict[str, Any]:
         allowed = {

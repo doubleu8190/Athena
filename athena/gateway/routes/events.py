@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.events import EventType
-from athena.runtime import runtime_from
+from athena.container import runtime_from
 from athena.infrastructure.sqlite.repositories import _json_loads
 
 router = APIRouter(prefix="/sessions", tags=["events"])
@@ -44,6 +44,7 @@ def _row_payload(row) -> dict:
         "chunk_id": row.chunk_id,
         "is_complete": bool(row.is_complete),
         "parent_run_id": row.parent_run_id,
+        "transition_id": row.transition_id,
         "payload": _json_loads(row.payload_json, {}),
         "occurred_at": row.occurred_at,
     }
@@ -101,6 +102,9 @@ async def session_events(
 
             # 快照用于修复客户端本地缺口；它不推进 Last-Event-ID。
             for snapshot in await agent_store.snapshots_for_session(session_id):
+                if snapshot.stream_type == "thinking":
+                    # thinking 只通过 durable 事件重放，不再暴露快照通道。
+                    continue
                 yield _sse(_snapshot_payload(snapshot), EventType.STREAM_SNAPSHOT)
 
             while True:

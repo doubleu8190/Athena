@@ -1,4 +1,8 @@
-"""附加到 ``FastAPI.app.state`` 的显式应用运行时依赖。"""
+"""应用级显式依赖容器，附加到 ``FastAPI.app.state``。
+
+将各子系统的运行时实例聚合到一个数据类中，供路由层通过
+``runtime_from()`` 透明获取。隔离了运行时执行逻辑与依赖组装。
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from starlette.requests import HTTPConnection
 
-from agent_runtime.transport import SessionEventBus, RuntimeEventPublisher
+from athena.runtime.transport import SessionEventBus, RuntimeEventPublisher
 from athena.infrastructure.sqlite.agent_store import AgentStore
 
 if TYPE_CHECKING:

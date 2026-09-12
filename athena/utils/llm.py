@@ -6,8 +6,10 @@ import json
 import re
 from typing import Any
 
+from langchain_core.messages import AIMessageChunk, BaseMessage
 
-def extract_message_text(response: Any) -> str:
+
+def extract_message_text(response: AIMessageChunk | BaseMessage) -> str:
     """从 LLM 响应（LangChain BaseMessage）中提取纯文本内容.
 
     兼容三种形态：

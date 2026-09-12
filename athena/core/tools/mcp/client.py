@@ -156,7 +156,7 @@ class MCPClient:
 
         try:
             await self._ready.wait()
-        except Base异常:
+        except BaseException:
             # connect 被取消 / 异常：终止后台任务，防止子进程 / 连接泄漏
             self._session_task.cancel()
             await asyncio.gather(self._session_task, return_exceptions=True)

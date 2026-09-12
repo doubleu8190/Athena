@@ -8,13 +8,13 @@ import hmac
 import os
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
-from agent_runtime.command_notifications import CommandNotifier
-from agent_runtime.transport import SessionEventBus
+from athena.runtime.command_notifications import CommandNotifier
+from athena.runtime.transport import SessionEventBus
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.events import ApplicationEvent, EventType
@@ -309,28 +309,38 @@ class AgentStore:
             数据库竞争或状态转换失败时传播 SQLAlchemy 异常。
         """
         async with get_session() as db:
-            row = await db.scalar(
-                select(AgentCommandModel)
-                .where(
-                    AgentCommandModel.status == AgentCommandStatus.PENDING.value,
-                    AgentCommandModel.available_at <= _now(),
+            # Serialize selection and mutation across workers. Without an
+            # immediate write lock two consumers can read the same pending row
+            # before either one commits its CLAIMED update.
+            await db.execute(text("BEGIN IMMEDIATE"))
+            try:
+                row = await db.scalar(
+                    select(AgentCommandModel)
+                    .where(
+                        AgentCommandModel.status == AgentCommandStatus.PENDING.value,
+                        AgentCommandModel.available_at <= _now(),
+                    )
+                    .order_by(AgentCommandModel.issued_at)
+                    .limit(1)
                 )
-                .order_by(AgentCommandModel.issued_at)
-                .limit(1)
-            )
-            if row is None:
-                return None
-            row.status = AgentCommandStatus.CLAIMED.value
-            row.attempt += 1
-            await db.commit()
-            return AgentCommandRecord(
-                command_id=row.command_id,
-                session_id=row.session_id,
-                run_id=row.run_id,
-                command_type=CommandType(row.command_type),
-                schema_version=row.schema_version,
-                payload_json=row.payload_json,
-            )
+                if row is None:
+                    await db.commit()
+                    return None
+                row.status = AgentCommandStatus.CLAIMED.value
+                row.attempt += 1
+                row.claimed_at = _now()
+                await db.commit()
+                return AgentCommandRecord(
+                    command_id=row.command_id,
+                    session_id=row.session_id,
+                    run_id=row.run_id,
+                    command_type=CommandType(row.command_type),
+                    schema_version=row.schema_version,
+                    payload_json=row.payload_json,
+                )
+            except Exception:
+                await db.rollback()
+                raise
 
     async def complete(
         self,
@@ -359,7 +369,29 @@ class AgentStore:
             row.status = status.value
             row.result_json = _json_dumps(result) if result is not None else None
             row.error_json = _json_dumps(error) if error is not None else None
+            row.claimed_at = None
             await db.commit()
+
+    async def reclaim_stale_commands(self, lease_seconds: int = 300) -> int:
+        """Return commands left claimed by a crashed worker to the queue."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)).isoformat()
+        async with get_session() as db:
+            result = await db.execute(
+                text(
+                    """UPDATE agent_commands
+                    SET status = :pending, available_at = :now, claimed_at = NULL
+                    WHERE status = :claimed
+                      AND (claimed_at IS NULL OR claimed_at < :cutoff)"""
+                ),
+                {
+                    "pending": AgentCommandStatus.PENDING.value,
+                    "claimed": AgentCommandStatus.CLAIMED.value,
+                    "now": _now(),
+                    "cutoff": cutoff,
+                },
+            )
+            await db.commit()
+            return int(result.rowcount or 0)
 
     async def get_command(self, command_id: str) -> AgentCommandModel | None:
         """按 ID 查询命令记录。
@@ -656,6 +688,30 @@ class AgentStore:
                             }
                         )
 
+                # Durable lifecycle events use a business transition key. A
+                # replay with the same key must return the original cursor and
+                # must not consume another session sequence number.
+                if event.transition_id is not None:
+                    existing = await db.scalar(
+                        select(AgentEventModel).where(
+                            AgentEventModel.session_id == event.session_id,
+                            AgentEventModel.transition_id == event.transition_id,
+                        )
+                    )
+                    if existing is not None:
+                        same = (
+                            existing.event_type == event.event_type
+                            and existing.run_id == event.run_id
+                            and existing.message_id == event.message_id
+                            and existing.attachment_id == event.attachment_id
+                            and existing.payload_json == payload_json
+                        )
+                        if not same:
+                            raise ValueError("event transition idempotency conflict")
+                        return event.model_copy(
+                            update={"session_seq": existing.session_seq}
+                        )
+
                 chunk_id = event.chunk_id
                 if (
                     event.stream_id
@@ -679,6 +735,7 @@ class AgentStore:
                     chunk_id=chunk_id,
                     is_complete=int(event.is_complete),
                     parent_run_id=event.parent_run_id,
+                    transition_id=event.transition_id,
                     payload_json=payload_json,
                     occurred_at=event.occurred_at.isoformat(),
                 )

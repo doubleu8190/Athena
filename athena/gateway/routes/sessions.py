@@ -17,7 +17,7 @@ from athena.infrastructure.sqlite.database import Database
 from athena.models import CommandPayload, Message, Session
 from athena.utils.ids import generate_session_id
 from athena.utils.logging import get_logger
-from athena.runtime import RuntimeContainer, runtime_from
+from athena.container import RuntimeContainer, runtime_from
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentCommandStatus

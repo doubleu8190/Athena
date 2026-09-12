@@ -1,6 +1,6 @@
 from __future__ import annotations
 from fastapi import APIRouter, Request, HTTPException
-from athena.runtime import runtime_from
+from athena.container import runtime_from
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentCommandStatus

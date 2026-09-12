@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 
+from athena.models import Message, MessageRole
 from athena.core.llm.provider import LLMProvider
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
@@ -91,7 +92,7 @@ class IncrementalSummarizer:
 
     async def update_summary(
         self,
-        old_turns: list[list[BaseMessage]],
+        old_turns: list[list[Message]],
         session_id: str | None = None,
     ) -> str:
         """增量更新摘要.
@@ -144,27 +145,27 @@ class IncrementalSummarizer:
         except Exception as e:
             logger.warning("summary_buffer_persist_failed", error=str(e), session_id=session_id)
 
-    def _format_turns_for_summary(self, turns: list[list[BaseMessage]]) -> str:
+    def _format_turns_for_summary(self, turns: list[list[Message]]) -> str:
         """将轮次格式化为摘要输入."""
         formatted: list[str] = []
         for i, turn in enumerate(turns, 1):
             turn_content: list[str] = []
             for msg in turn:
-                content = getattr(msg, "content", "") or ""
-                if isinstance(msg, HumanMessage):
+                content = msg.content or ""
+                if msg.role == MessageRole.USER:
                     turn_content.append(f"用户: {content}")
-                elif isinstance(msg, AIMessage):
-                    tool_calls = getattr(msg, "tool_calls", None) or []
+                elif msg.role == MessageRole.ASSISTANT:
+                    tool_calls = msg.tool_calls
                     if tool_calls:
                         calls_desc = "; ".join(
-                            f"{tc.get('name', '')}({json.dumps(tc.get('args', {}), ensure_ascii=False)})"
+                            f"{tc.name}({json.dumps(tc.args, ensure_ascii=False)})"
                             for tc in tool_calls
                         )
                         turn_content.append(f"助手: {content}\n  调用工具: {calls_desc}")
                     else:
                         turn_content.append(f"助手: {content}")
-                elif isinstance(msg, ToolMessage):
-                    tc_id = getattr(msg, "tool_call_id", "")
+                elif msg.role == MessageRole.TOOL:
+                    tc_id = msg.tool_call_id or ""
                     turn_content.append(f"工具结果 [{tc_id}]: {content[:500]}")
             formatted.append(f"--- 轮次 {i} ---\n" + "\n".join(turn_content))
         return "\n\n".join(formatted)

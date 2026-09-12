@@ -942,6 +942,11 @@ class FileIntelligenceRuntime:
                     else None
                 ),
                 run_id=str(data["run_id"]) if data.get("run_id") else None,
+                transition_id=(
+                    str(data["transition_id"])
+                    if data.get("transition_id")
+                    else None
+                ),
                 payload=data,
             )
         )
@@ -954,6 +959,10 @@ class FileIntelligenceRuntime:
         data["attachment_id"] = attachment.id
         if run_id:
             data["run_id"] = run_id
+        data["transition_id"] = (
+            f"attachment:{attachment.id}:status:{attachment.status.value}:"
+            f"run:{run_id or 'none'}"
+        )
         await self.emit(
             EventType.ATTACHMENT_UPDATED,
             attachment.session_id,

@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_runtime.command_notifications import CommandNotifier
+from athena.runtime.command_notifications import CommandNotifier
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentRunStatus
-from agent_runtime.streaming import StreamCoalescer
+from athena.runtime.streaming import StreamCoalescer
 from athena.infrastructure.sqlite.agent_store import AgentStore
 from athena.infrastructure.sqlite.database import Database
 from athena.utils.ids import generate_session_id
@@ -188,6 +188,30 @@ async def test_events_share_session_sequence_across_durability_levels(agent_stor
     assert (first.session_seq, second.session_seq) == (1, 2)
     rows = await store.events_after(session.id)
     assert [row.session_seq for row in rows] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_durable_event_transition_id_is_idempotent(agent_store):
+    database, _ = agent_store
+    session = await database.sessions.create(generate_session_id(), "事件幂等")
+    store = AgentStore()
+    event = ApplicationEvent(
+        event_type=EventType.RUN_STARTED,
+        durability=EventDurability.DURABLE,
+        session_id=session.id,
+        run_id="run-1",
+        transition_id="run:run-1:started",
+        payload={"message_id": "message-1"},
+    )
+
+    first = await store.publish(event)
+    retry = await store.publish(event)
+
+    assert retry.session_seq == first.session_seq
+    assert len(await store.events_after(session.id)) == 1
+
+    with pytest.raises(ValueError, match="transition idempotency conflict"):
+        await store.publish(event.model_copy(update={"payload": {"other": True}}))
 
 
 @pytest.mark.asyncio

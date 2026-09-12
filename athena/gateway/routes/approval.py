@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from athena.models import ApprovalLog
 from athena.utils.logging import get_logger
-from athena.runtime import runtime_from
+from athena.container import runtime_from
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentApprovalDecision

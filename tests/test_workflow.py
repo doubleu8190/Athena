@@ -5,13 +5,15 @@ import asyncio
 
 import pytest
 
-from agent_runtime.graph_runtime import (
+from athena.runtime.graph_runtime import (
     DEFAULT_SYSTEM_PROMPT,
     LangGraphRuntime,
+)
+from athena.runtime.services.memory_service import (
     _recent_history_by_turns,
 )
-from agent_runtime.langgraph_graph import invoke_graph
-from agent_runtime.nodes.prepare_request import prepare_and_persist_request
+from athena.runtime.langgraph_graph import invoke_graph
+from athena.runtime.nodes.prepare_request import prepare_and_persist_request
 from athena.models import Message, MessageRole
 from athena.models.file import Attachment, AttachmentRef, AttachmentStatus
 
@@ -59,25 +61,22 @@ async def test_invoke_graph_requires_run_id_for_checkpointing():
         )
 
 
-def test_build_system_prompt_uses_builtin_prompt_and_appends_memory():
-    prompt = LangGraphRuntime.build_system_prompt("memory context")
-
-    assert prompt == f"{DEFAULT_SYSTEM_PROMPT}\n\nmemory context"
-
-
-def test_build_system_prompt_falls_back_to_default():
-    assert LangGraphRuntime.build_system_prompt("") == DEFAULT_SYSTEM_PROMPT
-
-
 @pytest.mark.asyncio
 async def test_simple_memory_request_does_not_call_llm():
+    """Memory requests now go through MemoryService, not directly on LangGraphRuntime."""
+    from athena.runtime.services.memory_service import MemoryService
+
     class LLM:
         async def ainvoke(self, messages):
             raise AssertionError("simple requests must stay deterministic")
 
-    runtime = type("Runtime", (), {"_llm": LLM()})()
-    request = await LangGraphRuntime.build_memory_request(
-        runtime, "session-1", "请检查 Athena Candidate Resolver 的关系决策是否完整"
+    class RetrievalStub:
+        async def get_context(self, request):
+            return ""
+
+    service = MemoryService(llm=LLM(), memory_retrieval=RetrievalStub())
+    request = await service.build_memory_request(
+        "session-1", "请检查 Athena Candidate Resolver 的关系决策是否完整"
     )
 
     assert request is not None
@@ -87,6 +86,9 @@ async def test_simple_memory_request_does_not_call_llm():
 
 @pytest.mark.asyncio
 async def test_complex_memory_request_uses_validated_llm_plan():
+    """Memory requests now go through MemoryService."""
+    from athena.runtime.services.memory_service import MemoryService
+
     class LLM:
         async def ainvoke(self, messages):
             return type(
@@ -100,10 +102,13 @@ async def test_complex_memory_request_uses_validated_llm_plan():
                 },
             )()
 
-    runtime = type("Runtime", (), {"_llm": LLM()})()
+    class RetrievalStub:
+        async def get_context(self, request):
+            return ""
+
+    service = MemoryService(llm=LLM(), memory_retrieval=RetrievalStub())
     message = "继续完善 Athena"
-    request = await LangGraphRuntime.build_memory_request(
-        runtime,
+    request = await service.build_memory_request(
         "session-1",
         message,
         [{"role": "user", "content": "我们正在设计 Athena 的记忆系统"}],
@@ -163,13 +168,20 @@ def test_recent_history_keeps_six_complete_turns():
 
 @pytest.mark.asyncio
 async def test_complex_memory_request_falls_back_on_invalid_llm_output():
+    """Memory requests now go through MemoryService."""
+    from athena.runtime.services.memory_service import MemoryService
+
     class LLM:
         async def ainvoke(self, messages):
             return type("Response", (), {"content": '{"query":"ok","extra":true}'})()
 
-    runtime = type("Runtime", (), {"_llm": LLM()})()
+    class RetrievalStub:
+        async def get_context(self, request):
+            return ""
+
+    service = MemoryService(llm=LLM(), memory_retrieval=RetrievalStub())
     message = "继续分析之前的系统设计和实现细节，并逐项对照尚未完成的工作、风险、测试覆盖和兼容性问题。" * 3
-    request = await LangGraphRuntime.build_memory_request(runtime, "session-1", message)
+    request = await service.build_memory_request("session-1", message)
 
     assert request is not None
     assert request.query == message
@@ -178,9 +190,13 @@ async def test_complex_memory_request_falls_back_on_invalid_llm_output():
 
 @pytest.mark.asyncio
 async def test_prepare_and_persist_request_merges_prepared_and_persisted_state():
+    """Tests now use RequestService directly instead of LangGraphRuntime."""
     calls = []
 
-    class Runtime:
+    class RequestService:
+        def __init__(self):
+            pass
+
         async def load_banded_attachments(self, session_id, attachment_ids):
             calls.append(("load_attachments", session_id, attachment_ids))
             return [
@@ -213,7 +229,7 @@ async def test_prepare_and_persist_request_merges_prepared_and_persisted_state()
             "user_message": "read this",
             "attachment_ids": ["file-1", "file-1"],
         },
-        runtime=Runtime(),
+        request_service=RequestService(),
     )
 
     assert calls == [
@@ -227,6 +243,9 @@ async def test_prepare_and_persist_request_merges_prepared_and_persisted_state()
 
 
 def test_build_harness_messages_adds_attachment_context_without_mutating_message():
+    """_build_harness_messages moved to RequestService."""
+    from athena.runtime.services.request_service import RequestService
+
     attachment = AttachmentRef(
         id="file-1",
         filename="notes.txt",
@@ -243,7 +262,7 @@ def test_build_harness_messages_adds_attachment_context_without_mutating_message
         timestamp=datetime.now(),
     )
 
-    messages = LangGraphRuntime._build_harness_messages([], persisted_message)
+    messages = RequestService._build_harness_messages([], persisted_message)
 
     assert persisted_message.content == "read this"
     assert messages[0] is not persisted_message
@@ -255,6 +274,9 @@ def test_build_harness_messages_adds_attachment_context_without_mutating_message
 
 
 def test_build_harness_messages_does_not_change_non_user_messages():
+    """_build_harness_messages moved to RequestService."""
+    from athena.runtime.services.request_service import RequestService
+
     system_message = Message(
         id="message-1",
         session_id="session-1",
@@ -272,7 +294,7 @@ def test_build_harness_messages_does_not_change_non_user_messages():
         timestamp=datetime.now(),
     )
 
-    messages = LangGraphRuntime._build_harness_messages(
+    messages = RequestService._build_harness_messages(
         [system_message], system_message
     )
 
@@ -281,6 +303,9 @@ def test_build_harness_messages_does_not_change_non_user_messages():
 
 
 def test_deserialize_messages_restores_flat_checkpoint_field():
+    """deserialize_messages moved to ExecutionService."""
+    from athena.runtime.services.execution_service import ExecutionService
+
     message = Message(
         id="message-1",
         session_id="session-1",
@@ -289,7 +314,7 @@ def test_deserialize_messages_restores_flat_checkpoint_field():
         timestamp=datetime.now(),
     )
 
-    restored = LangGraphRuntime.deserialize_messages(
+    restored = ExecutionService.deserialize_messages(
         [message.model_dump(mode="json")]
     )
 

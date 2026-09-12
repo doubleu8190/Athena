@@ -18,7 +18,7 @@ from athena.core.tools.mcp.adapter import MCPToolAdapter
 from athena.core.tools.mcp.manager import MCPManager
 from athena.core.tools.providers.agents import build_agent_tool_specs
 from athena.gateway.approval import ApprovalManager
-from athena.runtime import RuntimeContainer
+from athena.container import RuntimeContainer
 
 ROOT = Path(__file__).resolve().parents[1]
 

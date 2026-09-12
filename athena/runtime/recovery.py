@@ -31,6 +31,8 @@ class RecoveryReconciler:
         异常:
             存储读写失败时传播底层异常。
         """
+        reclaim = getattr(self.store, "reclaim_stale_commands", None)
+        reclaimed = await reclaim() if reclaim is not None else 0
         cancelled = 0
         for run in await self.store.list_recoverable_runs():
             if (
@@ -39,4 +41,4 @@ class RecoveryReconciler:
             ):
                 await self.store.update_run_status(run.run_id, AgentRunStatus.CANCELLED)
                 cancelled += 1
-        return {"cancelled_runs": cancelled}
+        return {"reclaimed_commands": reclaimed, "cancelled_runs": cancelled}

@@ -8,7 +8,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from athena.models import Message
 from athena.utils.ids import generate_time_id
@@ -30,6 +36,8 @@ def dict_to_message(m: Message | dict[str, Any]) -> BaseMessage:
     meta: dict[str, Any] = {}
     if m.get("id"):
         meta["message_id"] = m["id"]
+    if m.get("run_id"):
+        meta["run_id"] = m["run_id"]
 
     if role == "user":
         return HumanMessage(content=content, metadata=meta)
@@ -38,13 +46,14 @@ def dict_to_message(m: Message | dict[str, Any]) -> BaseMessage:
     if role == "assistant":
         if tool_calls:
             lc_tcs = [
-                {**normalize_tool_call(tc), "type": "tool_call"}
-                for tc in tool_calls
+                {**normalize_tool_call(tc), "type": "tool_call"} for tc in tool_calls
             ]
             return AIMessage(content=content, tool_calls=lc_tcs, metadata=meta)
         return AIMessage(content=content, metadata=meta)
     if role == "tool":
-        return ToolMessage(content=content, tool_call_id=tool_call_id or "", metadata=meta)
+        return ToolMessage(
+            content=content, tool_call_id=tool_call_id or "", metadata=meta
+        )
     return HumanMessage(content=content, metadata=meta)
 
 
@@ -71,10 +80,16 @@ def message_to_dict(m: BaseMessage) -> dict[str, Any]:
     meta = getattr(m, "metadata", None) or {}
     if meta.get("message_id"):
         d["id"] = meta["message_id"]
+    if meta.get("run_id"):
+        d["run_id"] = meta["run_id"]
 
     if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
         d["tool_calls"] = [
-            {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}
+            {
+                "id": tc.get("id", ""),
+                "name": tc.get("name", ""),
+                "args": tc.get("args", {}),
+            }
             for tc in m.tool_calls
         ]
     if isinstance(m, ToolMessage):
@@ -85,8 +100,7 @@ def message_to_dict(m: BaseMessage) -> dict[str, Any]:
 def normalize_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
     """将 langchain tool_call 归一化为统一的内部格式.
 
-    统一处理 langchain 不同版本的字段差异（args vs arguments），
-    并为缺失 id 的工具调用自动生成。
+    按 LangChain 当前标准读取 ``args`` 字段，并为缺失 id 的工具调用自动生成。
 
     参数：
         tc: langchain 返回的原始 tool_call 字典。
@@ -97,7 +111,7 @@ def normalize_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": tc.get("id", generate_time_id()),
         "name": tc.get("name", ""),
-        "args": tc.get("args", {}) or tc.get("arguments", {}) or {},
+        "args": tc.get("args", {}) or {},
     }
 
 
@@ -106,7 +120,9 @@ def normalize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any
     return [normalize_tool_call(tc) for tc in tool_calls]
 
 
-def dicts_to_messages(messages: Sequence[Message | dict[str, Any]]) -> list[BaseMessage]:
+def dicts_to_messages(
+    messages: Sequence[Message | dict[str, Any]],
+) -> list[BaseMessage]:
     """批量转换：消息模型/字典列表 → BaseMessage 列表."""
     return [dict_to_message(m) for m in messages]
 

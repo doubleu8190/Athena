@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from athena.models.mcp import McpServerConfig
-from athena.runtime import runtime_from
+from athena.container import runtime_from
 from athena.contracts.errors import ErrorDetail
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])

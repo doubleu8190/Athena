@@ -37,28 +37,29 @@ async def execute_tools_and_llm(
     runtime.validate_state(state)
     session_id = state.get("session_id", "")
     run_id = state.get("run_id", "")
-    attachment_refs = runtime.deserialize_attachment_refs(
+    es = runtime.execution_service
+    attachment_refs = es.deserialize_attachment_refs(
         state.get("attachment_refs", [])
     )
-    messages = runtime.deserialize_messages(state.get("harness_messages", []))
+    messages = es.deserialize_messages(state.get("harness_messages", []))
     stop_signal = config.get("configurable", {}).get("stop_signal")
     runtime.set_stop_signal(session_id, stop_signal)
     try:
-        result = await runtime.run_harness(
+        result = await es.run_harness(
             messages=messages,
             session_id=session_id,
             memory_context=state.get("memory_context", ""),
             run_id=run_id,
             stop_signal=stop_signal,
         )
-        await runtime.post_process(
+        await es.post_process(
             session_id,
             state.get("user_message", ""),
             result,
             turn_id=run_id,
         )
         return {
-            "result": runtime.result_payload(result, attachment_refs),
+            "result": es.result_payload(result, attachment_refs),
         }
     finally:
         runtime.set_stop_signal(session_id, None)

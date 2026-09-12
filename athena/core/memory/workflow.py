@@ -32,13 +32,13 @@ class MemoryWriteWorkflow:
         extractor: FactExtractor,
         memory_manager: MemoryManager,
         *,
-        trigger: MemoryTrigger,
-        resolver: MemoryResolver,
+        trigger: MemoryTrigger | None = None,
+        resolver: MemoryResolver | None = None,
     ) -> None:
         self._extractor = extractor
         self._memory = memory_manager
-        self._trigger = trigger
-        self._resolver = resolver
+        self._trigger = trigger or MemoryTrigger()
+        self._resolver = resolver or MemoryResolver(memory_manager)
 
     async def process_turn(self, turn: CompletedTurn) -> MemoryWriteOutcome:
         trigger = self._trigger.evaluate(turn)

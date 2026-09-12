@@ -96,6 +96,9 @@ class AgentCommandModel(Base):
     attempt: Mapped[int] = mapped_column(
         Integer, default=0, comment="命令已尝试处理次数"
     )
+    claimed_at: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="命令领取时间（用于崩溃恢复）"
+    )
     available_at: Mapped[str] = mapped_column(
         String, comment="命令可被消费的时间（UTC）"
     )
@@ -152,6 +155,9 @@ class AgentEventModel(Base):
     )
     parent_run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="父运行标识"
+    )
+    transition_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="业务状态转换幂等键"
     )
     payload_json: Mapped[str] = mapped_column(
         Text, default="{}", comment="事件内容（JSON 格式）"

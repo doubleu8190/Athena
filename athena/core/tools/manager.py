@@ -218,6 +218,11 @@ class UnifiedToolManager:
         session_id: str,
         run_id: str,
         tool_call_id: str,
+        agent_role: str = "root",
+        plan_id: str | None = None,
+        task_id: str | None = None,
+        worker_run_id: str | None = None,
+        depth: int = 0,
     ) -> ToolResult:
         """统一工具调用入口，含审批检查.
 
@@ -232,6 +237,17 @@ class UnifiedToolManager:
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(status="failed", error=f"Tool '{name}' not registered")
+
+        # 委派能力只属于顶层规划者，Worker 即使伪造工具调用也不能递归派生。
+        from athena.runtime.orchestration import AgentRole, DELEGATION_TOOL_NAMES
+
+        if name in DELEGATION_TOOL_NAMES and (
+            agent_role == AgentRole.WORKER.value or depth > 0
+        ):
+            return ToolResult(
+                status="failed",
+                error="delegation_forbidden: worker agents cannot create sub-agents",
+            )
 
         # 停用检查
         if name in self._disabled:
@@ -248,6 +264,9 @@ class UnifiedToolManager:
                     session_id=session_id,
                     run_id=run_id,
                     tool_call_id=tool_call_id,
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    worker_run_id=worker_run_id,
                 )
                 approved = await self._approval_manager.wait_for_decision(
                     request.id, request.timeout
@@ -268,7 +287,16 @@ class UnifiedToolManager:
         if isinstance(tool, NativeTool):
             from athena.core.tools.spec import ToolContext, set_tool_context
 
-            context = ToolContext(session_id, run_id, tool_call_id)
+            context = ToolContext(
+                session_id=session_id,
+                run_id=run_id,
+                tool_call_id=tool_call_id,
+                agent_role=agent_role,
+                plan_id=plan_id,
+                task_id=task_id,
+                worker_run_id=worker_run_id,
+                depth=depth,
+            )
             token = set_tool_context(context)
         try:
             return await tool.execute(**params)
@@ -326,6 +354,11 @@ class UnifiedToolManager:
                 session_id=context.session_id,
                 run_id=context.run_id,
                 tool_call_id=context.tool_call_id,
+                agent_role=context.agent_role,
+                plan_id=context.plan_id,
+                task_id=context.task_id,
+                worker_run_id=context.worker_run_id,
+                depth=context.depth,
             )
             if result.status == "success":
                 return result.output or ""

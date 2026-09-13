@@ -566,10 +566,11 @@ class HarnessTurnExecutor(Harness):
             session_id,
             run_id,
         )
-        await self._db.sessions.update(
-            session_id,
-            status="interrupted" if interrupted or self._should_stop() else "idle",
-        )
+        if parent_run_id is None:
+            await self._db.sessions.update(
+                session_id,
+                status="interrupted" if interrupted or self._should_stop() else "idle",
+            )
 
     async def _persist_assistant_message(
         self,

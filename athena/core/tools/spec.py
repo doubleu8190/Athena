@@ -32,6 +32,11 @@ class ToolContext:
     session_id: str
     run_id: str
     tool_call_id: str
+    agent_role: str = "root"
+    plan_id: str | None = None
+    task_id: str | None = None
+    worker_run_id: str | None = None
+    depth: int = 0
 
 
 _current_context: ContextVar[ToolContext | None] = ContextVar(
@@ -100,4 +105,3 @@ class ToolSpec:
     require_approval: bool = False
     enabled: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
-

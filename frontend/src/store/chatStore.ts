@@ -10,6 +10,7 @@ import type {
   ThinkingState,
   AppView,
   Attachment,
+  OrchestrationTask,
 } from "../types"
 
 interface ChatStore {
@@ -69,6 +70,11 @@ interface ChatStore {
   thinking: ThinkingState | null
   setThinking: (thinking: ThinkingState) => void
   clearThinking: () => void
+
+  // 中心编排
+  orchestrationTasks: OrchestrationTask[]
+  upsertOrchestrationTask: (task: OrchestrationTask) => void
+  clearOrchestrationTasks: () => void
 
   // 错误
   error: string | null
@@ -190,6 +196,16 @@ export const useChatStore = create<ChatStore>((set) => ({
   thinking: null,
   setThinking: (thinking) => set({ thinking }),
   clearThinking: () => set({ thinking: null }),
+
+  // 中心编排
+  orchestrationTasks: [],
+  upsertOrchestrationTask: (task) =>
+    set((state) => ({
+      orchestrationTasks: state.orchestrationTasks.some((entry) => entry.task_id === task.task_id)
+        ? state.orchestrationTasks.map((entry) => entry.task_id === task.task_id ? task : entry)
+        : [...state.orchestrationTasks, task],
+    })),
+  clearOrchestrationTasks: () => set({ orchestrationTasks: [] }),
 
   // 错误
   error: null,

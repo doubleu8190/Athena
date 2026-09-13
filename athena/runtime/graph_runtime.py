@@ -33,6 +33,7 @@ from athena.models import Message, MessageRole
 from athena.models.file import AttachmentRef
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
+from athena.contracts.ports import AgentStorePort
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
 
@@ -43,6 +44,15 @@ from .sub_agent import SubAgentManager, SubAgentResult
 from .services.memory_service import MemoryService
 from .services.request_service import RequestService
 from .services.execution_service import ExecutionService
+from .orchestration.events import OrchestrationEventPublisher
+from .orchestration import (
+    Dispatcher,
+    PlanStatus,
+    Planner,
+    StructuredLLMService,
+    Synthesizer,
+    WorkerExecutor,
+)
 
 logger = get_logger(__name__)
 
@@ -79,6 +89,7 @@ class LangGraphRuntime:
         settings: Settings,
         file_runtime: FileIntelligenceRuntime,
         memory_job_repository: MemoryJobRepository,
+        agent_store: AgentStorePort,
     ) -> None:
         """组装所有聚焦服务并保留直接依赖。
 
@@ -97,12 +108,8 @@ class LangGraphRuntime:
             memory_job_repository: 记忆任务持久化仓库。
         """
         # ── 聚焦服务 ──
-        self._memory_service = MemoryService(
-            llm=llm, memory_retrieval=memory_retrieval
-        )
-        self._request_service = RequestService(
-            db=db, event_publisher=event_publisher
-        )
+        self._memory_service = MemoryService(llm=llm, memory_retrieval=memory_retrieval)
+        self._request_service = RequestService(db=db, event_publisher=event_publisher)
         self._execution_service = ExecutionService(
             llm=llm,
             tool_manager=tool_manager,
@@ -127,6 +134,7 @@ class LangGraphRuntime:
         self._settings = settings
         self._file_runtime = file_runtime
         self._memory_job_repository = memory_job_repository
+        self._agent_store = agent_store
 
         # ── 运行时状态 ──
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
@@ -135,6 +143,25 @@ class LangGraphRuntime:
         self._memory_trigger = MemoryTrigger()
         self._memory_resolver = MemoryResolver(self._memory_manager)
         self._memory_write_workflow: MemoryWriteWorkflow | None = None
+        structured_llm = StructuredLLMService(llm)
+        orchestration_events = OrchestrationEventPublisher(event_publisher)
+        self._orchestration_planner = Planner(structured_llm, db, orchestration_events)
+        self._orchestration_worker = WorkerExecutor(
+            llm=llm,
+            structured_llm=structured_llm,
+            tool_manager=tool_manager,
+            db=db,
+            compressor=compressor,
+            events=event_publisher,
+            agent_store=agent_store,
+            settings=settings,
+            root_run_id="",
+        )
+        self._orchestration_dispatcher = Dispatcher(
+            db, self._orchestration_worker, orchestration_events
+        )
+        self._orchestration_synthesizer = Synthesizer(llm)
+        self._orchestration_events = orchestration_events
 
     # ------------------------------------------------------------------
     # 属性暴露（供 langgraph_graph.py 注入到节点）
@@ -151,6 +178,169 @@ class LangGraphRuntime:
     @property
     def execution_service(self) -> ExecutionService:
         return self._execution_service
+
+    @property
+    def orchestration_planner(self) -> Planner:
+        return self._orchestration_planner
+
+    @property
+    def orchestration_dispatcher(self) -> Dispatcher:
+        return self._orchestration_dispatcher
+
+    @property
+    def orchestration_synthesizer(self) -> Synthesizer:
+        return self._orchestration_synthesizer
+
+    async def orchestrate(
+        self,
+        session_id: str,
+        root_run_id: str,
+        goal: str,
+        memory_context: str = "",
+        stop_signal: asyncio.Event | None = None,
+    ) -> dict[str, Any]:
+        """执行 Planner -> Dispatcher -> Synthesizer 的完整编排。"""
+        decision = await self._orchestration_planner.decide(
+            session_id=session_id,
+            root_run_id=root_run_id,
+            goal=goal,
+            available_tools=self._tool_manager.list_names(),
+            context=memory_context,
+        )
+
+        if decision.mode == "direct_answer":
+            return {
+                "content": decision.direct_answer,
+                "run_id": root_run_id,
+                "mode": "direct_answer",
+            }
+
+        if decision.plan is None:
+            raise ValueError("planner returned execute_plan without a plan")
+
+        plan = decision.plan
+        self._orchestration_dispatcher.register_session(plan.plan_id, session_id)
+        try:
+            await self._db.orchestration.set_plan_status(
+                plan.plan_id, PlanStatus.SYNTHESIZING.value
+            )
+            results = await self._orchestration_dispatcher.run(
+                plan=plan,
+                session_id=session_id,
+                stop_signal=stop_signal,
+            )
+            content = await self._orchestration_synthesizer.synthesize(plan, results)
+            await self._db.orchestration.set_plan_status(
+                plan.plan_id,
+                PlanStatus.COMPLETED.value,
+            )
+            await self._orchestration_events.publish_synthesis(
+                EventType.SYNTHESIS_COMPLETED,
+                session_id=session_id,
+                plan_id=plan.plan_id,
+                run_id=plan.root_run_id,
+                payload={"task_count": len(plan.tasks)},
+            )
+            return {
+                "content": content,
+                "run_id": root_run_id,
+                "mode": "execute_plan",
+                "plan_id": plan.plan_id,
+                "results": {
+                    task_id: result.model_dump(mode="json")
+                    for task_id, result in results.items()
+                },
+            }
+        except Exception as exc:
+            await self._db.orchestration.set_plan_status(
+                plan.plan_id,
+                PlanStatus.FAILED.value,
+                error={"message": str(exc)},
+            )
+            await self._orchestration_events.publish_synthesis(
+                EventType.PLAN_FAILED,
+                session_id=session_id,
+                plan_id=plan.plan_id,
+                run_id=plan.root_run_id,
+                payload={"error": str(exc)},
+            )
+            raise
+
+    async def orchestrate_decide(
+        self,
+        session_id: str,
+        root_run_id: str,
+        goal: str,
+        memory_context: str = "",
+    ):
+        """调用 Planner 生成直接回答或计划决策。"""
+        from .orchestration import PlanningDecision
+
+        return await self._orchestration_planner.decide(
+            session_id=session_id,
+            root_run_id=root_run_id,
+            goal=goal,
+            available_tools=self._tool_manager.list_names(),
+            context=memory_context,
+        )
+
+    async def execute_planned_orchestration(
+        self,
+        *,
+        plan_payload: dict[str, Any],
+        session_id: str,
+        stop_signal: asyncio.Event | None = None,
+    ) -> dict[str, Any]:
+        """执行已持久化的计划并返回汇总结果。"""
+        from .orchestration import ExecutionPlan
+
+        plan = ExecutionPlan.model_validate(plan_payload)
+        self._orchestration_dispatcher.register_session(plan.plan_id, session_id)
+        try:
+            await self._db.orchestration.set_plan_status(
+                plan.plan_id, PlanStatus.SYNTHESIZING.value
+            )
+            results = await self._orchestration_dispatcher.run(
+                plan=plan,
+                session_id=session_id,
+                stop_signal=stop_signal,
+            )
+            content = await self._orchestration_synthesizer.synthesize(plan, results)
+            await self._db.orchestration.set_plan_status(
+                plan.plan_id,
+                PlanStatus.COMPLETED.value,
+            )
+            await self._orchestration_events.publish_synthesis(
+                EventType.SYNTHESIS_COMPLETED,
+                session_id=session_id,
+                plan_id=plan.plan_id,
+                run_id=plan.root_run_id,
+                payload={"task_count": len(plan.tasks)},
+            )
+            return {
+                "content": content,
+                "run_id": plan.root_run_id,
+                "mode": "execute_plan",
+                "plan_id": plan.plan_id,
+                "results": {
+                    task_id: result.model_dump(mode="json")
+                    for task_id, result in results.items()
+                },
+            }
+        except Exception as exc:
+            await self._db.orchestration.set_plan_status(
+                plan.plan_id,
+                PlanStatus.FAILED.value,
+                error={"message": str(exc)},
+            )
+            await self._orchestration_events.publish_synthesis(
+                EventType.PLAN_FAILED,
+                session_id=session_id,
+                plan_id=plan.plan_id,
+                run_id=plan.root_run_id,
+                payload={"error": str(exc)},
+            )
+            raise
 
     # ------------------------------------------------------------------
     # MemoryService 委托
@@ -180,15 +370,10 @@ class LangGraphRuntime:
     async def load_history(self, session_id: str) -> list[Message]:
         return await self._request_service.load_history(session_id)
 
-    async def load_banded_attachments(
-        self, session_id: str, attachment_ids: list[str]
-    ):
+    async def load_banded_attachments(self, session_id: str, attachment_ids: list[str]):
         return await self._request_service.load_banded_attachments(
             session_id, attachment_ids
         )
-
-    async def persist_message_and_attachments(self, state: AgentState):
-        return await self._request_service.persist_message_and_attachments(state)
 
     async def prepare_run(
         self,
@@ -206,7 +391,6 @@ class LangGraphRuntime:
     # ------------------------------------------------------------------
     # ExecutionService 委托
     # ------------------------------------------------------------------
-
 
     @staticmethod
     def build_system_prompt(memory_context: str) -> str:
@@ -301,9 +485,7 @@ class LangGraphRuntime:
             "attachment_id": attachment_id,
             "status": "ready",
             "error": None,
-            "chunk_count": int(
-                metadata.get("chunk_count", indexed.get("chunks", 0))
-            ),
+            "chunk_count": int(metadata.get("chunk_count", indexed.get("chunks", 0))),
         }
 
     # ------------------------------------------------------------------
@@ -454,6 +636,7 @@ class LangGraphRuntime:
             memory_manager=self._memory_manager,
             settings=self._settings,
             main_run_id=main_run_id,
+            agent_store=self._agent_store,
         )
 
     # ------------------------------------------------------------------

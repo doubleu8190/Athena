@@ -22,6 +22,17 @@ export const ApplicationEventType = {
   THINKING_SUMMARY: "thinking.summary",
   THINKING_COMPLETED: "thinking.completed",
   STREAM_SNAPSHOT: "stream.snapshot",
+  PLAN_CREATED: "plan.created",
+  PLAN_COMPLETED: "plan.completed",
+  PLAN_FAILED: "plan.failed",
+  PLAN_CANCELLED: "plan.cancelled",
+  TASK_QUEUED: "task.queued",
+  TASK_STARTED: "task.started",
+  TASK_RETRIED: "task.retrying",
+  TASK_COMPLETED: "task.completed",
+  TASK_FAILED: "task.failed",
+  SYNTHESIS_STARTED: "synthesis.started",
+  SYNTHESIS_COMPLETED: "synthesis.completed",
 } as const
 
 export type ApplicationEventType = (typeof ApplicationEventType)[keyof typeof ApplicationEventType]

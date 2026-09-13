@@ -30,17 +30,7 @@ class Base(DeclarativeBase):
 
 class AgentRunModel(Base):
     __tablename__ = "agent_runs"
-    __table_args__ = (
-        Index("idx_agent_runs_session_status", "session_id", "status"),
-        Index(
-            "uq_agent_runs_active_session",
-            "session_id",
-            unique=True,
-            sqlite_where=text(
-                "status IN ('queued','running','cancel_requested','waiting_approval')"
-            ),
-        ),
-    )
+    __table_args__ = (Index("idx_agent_runs_session_status", "session_id", "status"),)
     run_id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="运行唯一标识"
     )
@@ -49,6 +39,27 @@ class AgentRunModel(Base):
     )
     created_by_command_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="创建该运行的命令标识"
+    )
+    parent_run_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="父运行标识；Root Run 为空"
+    )
+    root_run_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="所属 Root Run；Root Run 等于自身标识"
+    )
+    role: Mapped[str] = mapped_column(
+        String, default="root", comment="运行角色"
+    )
+    plan_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="所属执行计划"
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="Worker 执行的稳定任务标识"
+    )
+    attempt: Mapped[int] = mapped_column(
+        Integer, default=1, comment="同一任务的执行尝试序号"
+    )
+    depth: Mapped[int] = mapped_column(
+        Integer, default=0, comment="编排深度；Root 为 0，Worker 为 1"
     )
     status: Mapped[str] = mapped_column(
         String, default="queued", comment="运行状态"
@@ -109,6 +120,66 @@ class AgentCommandModel(Base):
         Text, nullable=True, comment="命令处理失败时的错误信息（JSON 格式）"
     )
     issued_at: Mapped[str] = mapped_column(String, comment="命令发出时间（UTC）")
+
+
+class AgentPlanModel(Base):
+    """中心编排计划的持久化记录。"""
+
+    __tablename__ = "agent_plans"
+    __table_args__ = (Index("idx_agent_plans_root_run", "root_run_id"),)
+    plan_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
+    root_run_id: Mapped[str] = mapped_column(String)
+    goal: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, default="planning")
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    plan_json: Mapped[str] = mapped_column(Text)
+    aggregation_strategy: Mapped[str] = mapped_column(String, default="synthesize")
+    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+
+
+class AgentTaskModel(Base):
+    """计划内稳定任务及其当前调度状态。"""
+
+    __tablename__ = "agent_tasks"
+    __table_args__ = (
+        Index("idx_agent_tasks_plan_status", "plan_id", "status"),
+        Index("idx_agent_tasks_queue", "status", "available_at"),
+    )
+    task_id: Mapped[str] = mapped_column(String, primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("agent_plans.plan_id"))
+    task_index: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String, default="queued")
+    task_json: Mapped[str] = mapped_column(Text)
+    worker_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[str] = mapped_column(String)
+    claimed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+
+
+class AgentTaskResultModel(Base):
+    """一次任务最终结果的幂等持久化记录。"""
+
+    __tablename__ = "agent_task_results"
+    __table_args__ = (Index("idx_agent_task_results_plan", "plan_id"),)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.task_id"), primary_key=True
+    )
+    plan_id: Mapped[str] = mapped_column(String)
+    worker_run_id: Mapped[str] = mapped_column(String, unique=True)
+    status: Mapped[str] = mapped_column(String)
+    result_json: Mapped[str] = mapped_column(Text)
+    output_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[str] = mapped_column(String)
+    completed_at: Mapped[str] = mapped_column(String)
 
 
 class AgentEventModel(Base):
@@ -205,6 +276,15 @@ class ApprovalRecordModel(Base):
         ForeignKey("sessions.id"), comment="所属会话标识"
     )
     run_id: Mapped[str] = mapped_column(String, comment="所属运行标识")
+    plan_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="审批所属执行计划"
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="审批所属任务"
+    )
+    worker_run_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="审批所属 Worker 尝试"
+    )
     tool_call_id: Mapped[str] = mapped_column(String, comment="待审批的工具调用标识")
     tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
     arguments_json: Mapped[str] = mapped_column(

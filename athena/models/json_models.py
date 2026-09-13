@@ -32,6 +32,9 @@ class CommandPayload(ExtensibleJsonModel):
     pinned: bool | None = None
     approval_id: str | None = None
     decision: str | None = None
+    plan_id: str | None = None
+    task_id: str | None = None
+    worker_run_id: str | None = None
 
 
 class ToolCall(ExtensibleJsonModel):

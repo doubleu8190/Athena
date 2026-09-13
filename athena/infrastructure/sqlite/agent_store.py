@@ -165,6 +165,7 @@ class AgentStore:
                 select(AgentRunModel)
                 .where(
                     AgentRunModel.session_id == session_id,
+                    AgentRunModel.parent_run_id.is_(None),
                     AgentRunModel.status.in_(
                         status.value
                         for status in (
@@ -179,6 +180,60 @@ class AgentStore:
                 .order_by(AgentRunModel.updated_at.desc())
                 .limit(1)
             )
+
+    async def create_worker_run(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        parent_run_id: str,
+        root_run_id: str,
+        plan_id: str | None,
+        task_id: str | None,
+        attempt: int,
+    ) -> None:
+        """创建独立 Worker Run，不改变会话当前 Root Run。
+
+        参数:
+            run_id: 本次 Worker 尝试的唯一标识。
+            session_id: Worker 所属用户会话。
+            parent_run_id: 创建该 Worker 的直接父运行。
+            root_run_id: 整个编排请求的 Root Run。
+            plan_id: 所属计划；旧委派路径可以为空。
+            task_id: 稳定任务标识；旧委派路径可以为空。
+            attempt: 同一任务从 1 开始的尝试序号。
+
+        返回值:
+            None: 记录成功提交。
+
+        异常:
+            ValueError: 标识为空、尝试序号非法或 run_id 已存在。
+        """
+
+        if not all((run_id, session_id, parent_run_id, root_run_id)):
+            raise ValueError("worker run identity fields must not be empty")
+        if attempt < 1:
+            raise ValueError("worker run attempt must be at least 1")
+        async with get_session() as db:
+            if await db.get(AgentRunModel, run_id) is not None:
+                raise ValueError(ErrorDetail.RUN_ID_CONFLICT)
+            db.add(
+                AgentRunModel(
+                    run_id=run_id,
+                    session_id=session_id,
+                    parent_run_id=parent_run_id,
+                    root_run_id=root_run_id,
+                    role="worker",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    attempt=attempt,
+                    depth=1,
+                    status=AgentRunStatus.QUEUED.value,
+                    created_at=_now(),
+                    updated_at=_now(),
+                )
+            )
+            await db.commit()
 
     async def update_run_status(
         self, run_id: str, status: AgentRunStatus, error: str | None = None
@@ -555,6 +610,7 @@ class AgentStore:
                         select(AgentRunModel)
                         .where(
                             AgentRunModel.session_id == command.session_id,
+                            AgentRunModel.parent_run_id.is_(None),
                             AgentRunModel.status.in_(
                                 status.value
                                 for status in (
@@ -579,6 +635,9 @@ class AgentStore:
                             run_id=run_id,
                             session_id=command.session_id,
                             created_by_command_id=command.command_id,
+                            root_run_id=run_id,
+                            role="root",
+                            depth=0,
                             status=AgentRunStatus.QUEUED.value,
                             created_at=_now(),
                             updated_at=_now(),
@@ -828,6 +887,9 @@ class AgentStore:
         tool_name: str,
         arguments: dict[str, Any],
         risk_level: RiskLevel,
+        plan_id: str | None = None,
+        task_id: str | None = None,
+        worker_run_id: str | None = None,
     ) -> None:
         """创建待审批记录并持久化工具参数。
 
@@ -850,6 +912,9 @@ class AgentStore:
                     approval_id=approval_id,
                     session_id=session_id,
                     run_id=run_id,
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    worker_run_id=worker_run_id,
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     arguments_json=_json_dumps(arguments),
@@ -871,6 +936,50 @@ class AgentStore:
         """
         async with get_session() as db:
             return await db.get(ApprovalRecordModel, approval_id)
+
+    async def resolve_approval_for_attempt(
+        self,
+        approval_id: str,
+        decision: AgentApprovalDecision,
+        *,
+        expected_run_id: str | None = None,
+        expected_worker_run_id: str | None = None,
+        expected_task_id: str | None = None,
+        expected_plan_id: str | None = None,
+    ) -> bool:
+        """原子解析审批，并校验其仍属于预期的编排尝试。
+
+        参数:
+            approval_id: 审批主键。
+            decision: 用户或系统作出的审批决定。
+            expected_run_id: 当前期望的 Root/Worker 运行标识。
+            expected_worker_run_id: 当前期望的 Worker 尝试标识。
+            expected_task_id: 当前期望的稳定任务标识。
+            expected_plan_id: 当前期望的执行计划标识。
+
+        返回值:
+            bool: 审批仍为待处理且运行归属匹配时返回 True；否则返回 False。
+
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            row = await db.get(ApprovalRecordModel, approval_id)
+            if row is None or row.status != AgentApprovalStatus.PENDING.value:
+                return False
+            if expected_run_id and row.run_id != expected_run_id:
+                return False
+            if expected_plan_id and row.plan_id != expected_plan_id:
+                return False
+            if expected_task_id and row.task_id != expected_task_id:
+                return False
+            if expected_worker_run_id and row.worker_run_id != expected_worker_run_id:
+                return False
+            row.status = AgentApprovalStatus.RESOLVED.value
+            row.decision = decision.value
+            row.decided_at = _now()
+            await db.commit()
+            return True
 
     async def pending_approvals(
         self, session_id: str | None = None

@@ -18,11 +18,13 @@ from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
 from athena.core.tools.manager import UnifiedToolManager
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
-from athena.contracts.ports import EventPublisherPort
+from athena.contracts.ports import AgentStorePort, EventPublisherPort
+from athena.contracts.statuses import AgentRunStatus
 from athena.infrastructure.sqlite.database import Database
 from athena.utils.ids import generate_sub_run_id
 from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
+from athena.runtime.orchestration import AgentRole, ToolPolicy
 
 logger = get_logger(__name__)
 
@@ -79,6 +81,7 @@ class SubAgentManager:
         memory_manager: MemoryManager,
         settings: Settings,
         main_run_id: str,
+        agent_store: AgentStorePort,
     ) -> None:
         """
 
@@ -106,6 +109,7 @@ class SubAgentManager:
         self._memory_manager = memory_manager
         self._settings = settings
         self._main_run_id = main_run_id
+        self._agent_store = agent_store
         self._sub_counter = 0
         self._lock = asyncio.Lock()
         self._parallel_semaphore = asyncio.Semaphore(6)
@@ -117,6 +121,7 @@ class SubAgentManager:
         allowed_tools: list[str] | None = None,
         max_turns: int = 5,
         stop_signal: asyncio.Event | None = None,
+        attempt: int = 1,
     ) -> SubAgentResult:
         """创建并执行一个子 Agent。
 
@@ -146,6 +151,19 @@ class SubAgentManager:
             if self._main_run_id
             else generate_sub_run_id("sub", index)
         )
+        sub_run_id = f"{sub_run_id}_{attempt}"
+        await self._agent_store.create_worker_run(
+            run_id=sub_run_id,
+            session_id=session_id,
+            parent_run_id=self._main_run_id,
+            root_run_id=self._main_run_id,
+            plan_id=None,
+            task_id=None,
+            attempt=attempt,
+        )
+        await self._agent_store.update_run_status(
+            sub_run_id, AgentRunStatus.RUNNING
+        )
 
         await self._events.publish(
             ApplicationEvent(
@@ -161,6 +179,9 @@ class SubAgentManager:
             )
         )
 
+        worker_policy = ToolPolicy.for_worker(
+            self._tool_manager.list_names(), allowed_tools
+        )
         sub_harness = Harness(
             llm=self._llm,
             tool_manager=self._tool_manager,
@@ -178,8 +199,10 @@ class SubAgentManager:
                 system_prompt=get_prompt("sub_agent"),
                 run_id=sub_run_id,
                 parent_run_id=self._main_run_id,
-                tool_names=allowed_tools,
+                tool_names=sorted(worker_policy.allowed_tools),
                 stop_signal=stop_signal,
+                agent_role=AgentRole.WORKER.value,
+                depth=1,
             )
             sub_result = SubAgentResult(
                 task=task,
@@ -188,6 +211,17 @@ class SubAgentManager:
                 tool_results=result.tool_results,
                 error=result.error,
                 run_id=sub_run_id,
+            )
+            await self._agent_store.update_run_status(
+                sub_run_id,
+                AgentRunStatus.CANCELLED
+                if result.interrupted
+                else (
+                    AgentRunStatus.FAILED
+                    if result.error
+                    else AgentRunStatus.COMPLETED
+                ),
+                result.error,
             )
             await self._events.publish(
                 ApplicationEvent(
@@ -205,6 +239,9 @@ class SubAgentManager:
             return sub_result
         except Exception as e:
             logger.exception("sub_agent_failed", sub_run_id=sub_run_id)
+            await self._agent_store.update_run_status(
+                sub_run_id, AgentRunStatus.FAILED, str(e)
+            )
             await self._events.publish(
                 ApplicationEvent(
                     event_type=EventType.SUB_AGENT_FAILED,

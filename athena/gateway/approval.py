@@ -52,6 +52,9 @@ class ApprovalManager:
         session_id: str,
         run_id: str,
         tool_call_id: str,
+        plan_id: str | None = None,
+        task_id: str | None = None,
+        worker_run_id: str | None = None,
     ) -> ApprovalRequest:
         """创建审批请求、持久化记录并发布待审批事件。
 
@@ -91,6 +94,9 @@ class ApprovalManager:
             tool_name=tool_name,
             arguments=arguments,
             risk_level=risk_level,
+            plan_id=plan_id,
+            task_id=task_id,
+            worker_run_id=worker_run_id,
         )
         await self._event_publisher.publish(
             ApplicationEvent(
@@ -105,6 +111,9 @@ class ApprovalManager:
                     "risk_level": risk_level.value,
                     "timeout": self._timeout,
                     "tool_call_id": tool_call_id,
+                    "plan_id": plan_id,
+                    "task_id": task_id,
+                    "worker_run_id": worker_run_id,
                 },
             )
         )

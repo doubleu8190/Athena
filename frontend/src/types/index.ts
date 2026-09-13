@@ -112,6 +112,18 @@ export interface ThinkingState {
   messageId: string | null
 }
 
+// ─── 中心编排相关 ────────────────────────────────────────────────
+
+export interface OrchestrationTask {
+  plan_id: string
+  task_id: string
+  title: string
+  status: "queued" | "claimed" | "running" | "waiting_approval" | "retry_wait" | "cancel_requested" | "completed" | "failed" | "timed_out" | "invalid_output" | "cancelled"
+  attempt?: number
+  worker_run_id?: string
+  error?: string
+}
+
 // ─── 会话相关 ───────────────────────────────────────────────────
 
 export interface Session {
@@ -173,6 +185,52 @@ export interface ApprovalRequest {
 export interface ApprovalResult {
   approval_id: string
   decision: "approved" | "denied" | "timeout"
+}
+
+// ─── 中心编排相关 ────────────────────────────────────────────────
+
+export interface OrchestrationTask {
+  plan_id: string
+  task_id: string
+  title: string
+  status:
+    | "queued"
+    | "claimed"
+    | "running"
+    | "waiting_approval"
+    | "retry_wait"
+    | "cancel_requested"
+    | "completed"
+    | "failed"
+    | "timed_out"
+    | "invalid_output"
+    | "cancelled"
+  attempt?: number
+  worker_run_id?: string
+  error?: string
+}
+
+// ─── 中心编排相关 ────────────────────────────────────────────────
+
+export interface OrchestrationTask {
+  plan_id: string
+  task_id: string
+  title: string
+  status:
+    | "queued"
+    | "claimed"
+    | "running"
+    | "waiting_approval"
+    | "retry_wait"
+    | "cancel_requested"
+    | "completed"
+    | "failed"
+    | "timed_out"
+    | "invalid_output"
+    | "cancelled"
+  attempt?: number
+  worker_run_id?: string
+  error?: string
 }
 
 // ─── 事件相关 ────────────────────────────────────────────────────

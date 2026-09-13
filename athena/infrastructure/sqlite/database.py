@@ -50,6 +50,11 @@ class Database:
         self.approval_logs = ApprovalLogRepository()
         self.mcp_servers = McpServerRepository()
         self.tools = ToolRepository()
+        from athena.infrastructure.sqlite.orchestration_repository import (
+            OrchestrationRepository,
+        )
+
+        self.orchestration = OrchestrationRepository()
         from athena.infrastructure.sqlite.file_repository import FileRepository
 
         self.files = FileRepository()

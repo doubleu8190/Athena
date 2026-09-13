@@ -149,6 +149,10 @@ class Harness:
         self._answer_stream_id: str | None = None
         self._answer_stream: StreamCoalescer | None = None
         self._stable_tool_ids = False
+        self._agent_role = "root"
+        self._plan_id: str | None = None
+        self._task_id: str | None = None
+        self._depth = 0
         self._register_default_routes()
 
     def _register_default_routes(self) -> None:
@@ -186,6 +190,10 @@ class Harness:
         parent_run_id: str | None = None,
         tool_names: list[str] | None = None,
         stop_signal: asyncio.Event | None = None,
+        agent_role: str = "root",
+        plan_id: str | None = None,
+        task_id: str | None = None,
+        depth: int = 0,
     ) -> HarnessRunResult:
         """执行单次 Agent 运行.
 
@@ -212,6 +220,10 @@ class Harness:
         """
         rid = run_id or generate_time_id()
         self._parent_run_id = parent_run_id
+        self._agent_role = agent_role
+        self._plan_id = plan_id
+        self._task_id = task_id
+        self._depth = depth
         self._message_id = self._message_id_from_messages(messages)
         budget = Budget(
             max_turns=self._harness_settings.max_turns_per_run,
@@ -220,7 +232,8 @@ class Harness:
         self._stop_signal = stop_signal
 
         # 更新会话状态为 running
-        await self._db.sessions.update(session_id, status="running", run_id=rid)
+        if parent_run_id is None:
+            await self._db.sessions.update(session_id, status="running", run_id=rid)
 
         self._answer_stream_id = f"answer-{rid}"
         self._answer_stream = StreamCoalescer(
@@ -532,9 +545,10 @@ class Harness:
             rid,
         )
 
-        await self._db.sessions.update(
-            session_id, status="idle" if not interrupted else "interrupted"
-        )
+        if parent_run_id is None:
+            await self._db.sessions.update(
+                session_id, status="idle" if not interrupted else "interrupted"
+            )
 
         return HarnessRunResult(
             content=last_content,
@@ -850,6 +864,11 @@ class Harness:
                         session_id=session_id,
                         run_id=run_id,
                         tool_call_id=tool_call_id,
+                        agent_role=self._agent_role,
+                        plan_id=self._plan_id,
+                        task_id=self._task_id,
+                        worker_run_id=(run_id if self._agent_role == "worker" else None),
+                        depth=self._depth,
                     ),
                     timeout=self._harness_settings.tool_timeout,
                 )
@@ -898,6 +917,13 @@ class Harness:
                                 session_id=session_id,
                                 run_id=run_id,
                                 tool_call_id=tool_call_id,
+                                agent_role=self._agent_role,
+                                plan_id=self._plan_id,
+                                task_id=self._task_id,
+                                worker_run_id=(
+                                    run_id if self._agent_role == "worker" else None
+                                ),
+                                depth=self._depth,
                             ),
                             timeout=self._harness_settings.tool_timeout,
                         )

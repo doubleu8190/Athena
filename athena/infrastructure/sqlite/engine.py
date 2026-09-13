@@ -125,6 +125,14 @@ async def init_engine(db_path: str) -> None:
         await conn.execute(
             text("UPDATE agent_runs SET status = 'failed', error = '旧文件任务已移除' WHERE status = 'waiting_files'")
         )
+        # Session 生命周期字段是后续新增的；旧数据库需要补充列。
+        session_columns = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(sessions)"))).all()
+        }
+        for name in ("superseded_by", "superseded_at", "source_turn_id", "last_observed_at"):
+            if name not in session_columns:
+                await conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {name} VARCHAR"))
         await conn.execute(
             text("UPDATE attachments SET status = 'uploaded' WHERE status = 'queued'")
         )
@@ -173,20 +181,35 @@ async def init_engine(db_path: str) -> None:
                 """
             )
         )
-        # 兼容旧数据库：活跃 Run 唯一索引不再把 paused 状态视为占用执行槽。
+        # Root Run 与多个 Worker Run 可以同时活跃，会话互斥由命令事务判断。
         await conn.execute(text("DROP INDEX IF EXISTS uq_agent_runs_active_session"))
+        run_columns = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(agent_runs)"))).all()
+        }
+        for name, ddl in {
+            "parent_run_id": "VARCHAR",
+            "root_run_id": "VARCHAR",
+            "role": "VARCHAR NOT NULL DEFAULT 'root'",
+            "plan_id": "VARCHAR",
+            "task_id": "VARCHAR",
+            "attempt": "INTEGER NOT NULL DEFAULT 1",
+            "depth": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in run_columns:
+                await conn.execute(text(f"ALTER TABLE agent_runs ADD COLUMN {name} {ddl}"))
         await conn.execute(
-            text(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_active_session
-                ON agent_runs(session_id)
-                WHERE status IN (
-                    'queued', 'running', 'cancel_requested',
-                    'waiting_approval'
-                )
-                """
-            )
+            text("UPDATE agent_runs SET root_run_id = run_id WHERE root_run_id IS NULL")
         )
+        approval_columns = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(approvals)"))).all()
+        }
+        for name in ("plan_id", "task_id", "worker_run_id"):
+            if name not in approval_columns:
+                await conn.execute(
+                    text(f"ALTER TABLE approvals ADD COLUMN {name} VARCHAR")
+                )
         # 创建 FTS5 虚拟表（ORM 不支持 FTS5，需原生 DDL）
         await conn.execute(text(MEMORY_FTS_DDL))
         await conn.execute(text(FILE_CHUNK_FTS_DDL))

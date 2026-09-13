@@ -34,6 +34,8 @@ function Chat({ sendEvent }: ChatProps) {
     clearSteps,
     clearToolCalls,
     clearApprovals,
+    orchestrationTasks,
+    clearOrchestrationTasks,
     setAgentStatus,
     clearThinking,
     setError,
@@ -116,13 +118,15 @@ function Chat({ sendEvent }: ChatProps) {
         }
         clearSteps()
         clearToolCalls()
+        clearOrchestrationTasks()
       }
     } catch {
       if (isCancelled?.()) return
       if (loadingSessionIdRef.current === sessionId) {
         clearMessages()
         clearSteps()
-        clearToolCalls()
+      clearToolCalls()
+      clearOrchestrationTasks()
         setError("Failed to load session history. Please try again.")
       }
     } finally {
@@ -740,6 +744,7 @@ function Chat({ sendEvent }: ChatProps) {
           messages={messages}
           toolCalls={toolCalls}
           steps={steps}
+          orchestrationTasks={orchestrationTasks}
           onClose={() => setShowActivity(false)}
         />
       )}

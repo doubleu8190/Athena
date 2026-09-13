@@ -96,6 +96,9 @@ async def respond_approval(
                     if req.action == "allow"
                     else AgentApprovalDecision.DENIED.value
                 ),
+                "plan_id": approval.plan_id,
+                "task_id": approval.task_id,
+                "worker_run_id": approval.worker_run_id,
             }
         ),
     )
@@ -119,7 +122,14 @@ async def cancel_approval(approval_id: str, request: Request) -> dict[str, Any]:
         command_type=CommandType.APPROVAL_CANCEL,
         session_id=approval.session_id,
         run_id=approval.run_id,
-        payload=CommandPayload.model_validate({"approval_id": approval_id}),
+        payload=CommandPayload.model_validate(
+            {
+                "approval_id": approval_id,
+                "plan_id": approval.plan_id,
+                "task_id": approval.task_id,
+                "worker_run_id": approval.worker_run_id,
+            }
+        ),
     )
     await runtime.agent_store.enqueue(command)
     return {

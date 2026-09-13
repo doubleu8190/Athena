@@ -29,6 +29,9 @@ class AutoApprove:
         session_id: str,
         run_id: str,
         tool_call_id: str,
+        plan_id: str | None = None,
+        task_id: str | None = None,
+        worker_run_id: str | None = None,
     ) -> ApprovalResponse:
         future = asyncio.get_running_loop().create_future()
         future.set_result(True)

@@ -8,7 +8,7 @@ import {
   X,
   XCircle,
 } from "lucide-react"
-import type { Message, Step, ToolCall } from "../types"
+import type { Message, OrchestrationTask, Step, ToolCall } from "../types"
 import {
   buildActivityGroups,
   type ActivityRequestGroup,
@@ -20,6 +20,7 @@ interface ActivityPanelProps {
   messages: Message[]
   toolCalls: ToolCall[]
   steps: Step[]
+  orchestrationTasks?: OrchestrationTask[]
   onClose: () => void
 }
 
@@ -31,6 +32,7 @@ export function ActivityPanel({
   messages,
   toolCalls,
   steps,
+  orchestrationTasks = [],
   onClose,
 }: ActivityPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -66,6 +68,7 @@ export function ActivityPanel({
 
   const totalToolCalls = groups.reduce((total, group) => total + toolCount(group), 0)
   const totalSteps = groups.reduce((total, group) => total + group.steps.length, 0)
+  const activeTasks = orchestrationTasks.filter((task) => !["completed", "failed", "cancelled", "timed_out", "invalid_output"].includes(task.status))
 
   return (
     <aside className="fixed inset-y-0 right-0 z-30 flex h-full w-[min(92vw,380px)] shrink-0 flex-col border-l border-athena-border bg-athena-surface shadow-2xl lg:relative lg:z-auto lg:w-[360px] lg:bg-athena-surface/40 lg:shadow-none">
@@ -73,6 +76,7 @@ export function ActivityPanel({
         <span className="text-sm font-semibold text-athena-text">Activity</span>
         <span className="text-xs text-athena-muted">
           {groups.length} request · {totalToolCalls} tool · {totalSteps} step
+          {orchestrationTasks.length > 0 && ` · ${activeTasks.length} agent task`}
         </span>
         <button
           type="button"
@@ -97,6 +101,30 @@ export function ActivityPanel({
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-3">
+        {orchestrationTasks.length > 0 && (
+          <div className="rounded-lg border border-athena-border bg-athena-bg/40 p-3 space-y-2">
+            <div className="text-xs font-semibold text-athena-text">Agent tasks</div>
+            {orchestrationTasks.map((task) => (
+              <div
+                key={`${task.plan_id}:${task.task_id}`}
+                className="flex items-start gap-2 text-xs"
+              >
+                <TaskStatusIcon status={task.status} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-athena-text">{task.title}</div>
+                  <div className="text-[11px] text-athena-muted">
+                    {task.status}
+                    {task.attempt ? ` · attempt ${task.attempt}` : ""}
+                  </div>
+                  {task.error && (
+                    <div className="mt-1 text-[11px] text-athena-danger">{task.error}</div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {groups.length === 0 && (
           <p className="text-xs text-athena-muted">No activity yet.</p>
         )}
@@ -197,6 +225,19 @@ function StatusIcon({ status }: { status: ActivityRequestGroup["status"] }) {
   }
   if (status === "completed") {
     return <CheckCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-athena-success" />
+  }
+  return <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-athena-muted" />
+}
+
+function TaskStatusIcon({ status }: { status: OrchestrationTask["status"] }) {
+  if (status === "running" || status === "claimed") {
+    return <Loader2 className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 animate-spin text-athena-accent" />
+  }
+  if (status === "completed") {
+    return <CheckCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-athena-success" />
+  }
+  if (["failed", "timed_out", "invalid_output"].includes(status)) {
+    return <XCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-athena-danger" />
   }
   return <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-athena-muted" />
 }

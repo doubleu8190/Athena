@@ -142,5 +142,7 @@ class AgentState(TypedDict, total=False):
     harness_messages: list[dict[str, Any]]
     execution: Annotated[AgentExecutionState, merge_execution_state]
     harness_result: dict[str, Any] | None
+    planning_decision: dict[str, Any] | None
+    orchestration_result: dict[str, Any] | None
     result: dict[str, Any] | None
     error: str

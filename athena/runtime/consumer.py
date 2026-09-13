@@ -219,12 +219,23 @@ class CommandConsumer:
         self, command: AgentCommandRecord, payload: CommandPayload
     ) -> None:
         approval_id = payload.approval_id or ""
+        expected_worker_run_id = payload.worker_run_id or None
+        expected_task_id = payload.task_id or None
+        expected_plan_id = payload.plan_id or None
+        expected_run_id = command.run_id
         decision = (
             AgentApprovalDecision.CANCELLED
             if command.command_type == CommandType.APPROVAL_CANCEL
             else AgentApprovalDecision(str(payload.decision))
         )
-        resolved = await self.store.resolve_approval(approval_id, decision)
+        resolved = await self.store.resolve_approval_for_attempt(
+            approval_id,
+            decision,
+            expected_run_id=expected_run_id,
+            expected_worker_run_id=expected_worker_run_id,
+            expected_task_id=expected_task_id,
+            expected_plan_id=expected_plan_id,
+        )
         if self.graph is not None and command.run_id and resolved:
             # 审批结果写入存储后，从 LangGraph 的持久化中断检查点继续执行。
             await self.graph.ainvoke(

@@ -207,6 +207,46 @@ class LLMProvider:
         """绑定结构化输出 schema，返回可调用的 runnable."""
         return self._model.with_structured_output(schema)
 
+    @property
+    def fallback_providers(self) -> list["LLMProvider"]:
+        """返回重试管理器注册的备用模型列表。"""
+        if self._retry_manager is None:
+            return []
+        return list(self._retry_manager._fallback_providers)
+
+    def supports_structured_output(self, schema: type) -> bool:
+        """探测底层模型是否能为指定 schema 提供原生结构化输出。
+
+        参数：
+            schema: Pydantic 模型或 JSON Schema。
+
+        返回值：
+            bool: 模型实现并成功构造结构化 Runnable 时返回 True。
+
+        异常：
+            不主动抛出业务异常；探测失败统一视为不支持。
+        """
+        try:
+            self._model.with_structured_output(schema)
+        except (NotImplementedError, ValueError, TypeError):
+            return False
+        return True
+
+    def structured_runnable(self, schema: type) -> Runnable:
+        """创建原生结构化输出 Runnable。
+
+        参数：
+            schema: Pydantic 模型或 JSON Schema。
+
+        返回值：
+            Runnable: 输出会解析为 ``schema`` 实例的调用链。
+
+        异常：
+            NotImplementedError: 底层模型不支持结构化输出。
+            ValueError: schema 或厂商参数不受支持。
+        """
+        return self._model.with_structured_output(schema)
+
     @classmethod
     def from_primary_settings(cls, settings: Settings) -> "LLMProvider":
         """根据配置创建主 Provider和副 Provider，并将 fallback 注入重试链.

@@ -312,6 +312,46 @@ async def test_parallel_handler_reports_partial_failures():
     assert output[1]["error"] == "LLM timeout"
 
 
+@pytest.mark.asyncio
+async def test_worker_cannot_invoke_delegation_tool() -> None:
+    """Runtime 必须拒绝 Worker 绕过 Prompt 递归派生。"""
+
+    invoked = False
+
+    async def handler(task: str) -> str:
+        nonlocal invoked
+        invoked = True
+        return task
+
+    manager = make_tool_manager()
+    manager.register(
+        ToolSpec(
+            name="spawn_sub_agent",
+            description="delegate",
+            handler=handler,
+            parameters={
+                "type": "object",
+                "properties": {"task": {"type": "string"}},
+                "required": ["task"],
+            },
+        )
+    )
+
+    result = await manager.call_tool(
+        "spawn_sub_agent",
+        {"task": "nested"},
+        session_id="session-1",
+        run_id="worker-1",
+        tool_call_id="call-1",
+        agent_role="worker",
+        depth=1,
+    )
+
+    assert result.status == "failed"
+    assert result.error and "delegation_forbidden" in result.error
+    assert invoked is False
+
+
 # ---------------------------------------------------------------------------
 # 文件分析工具测试
 # ---------------------------------------------------------------------------

@@ -49,7 +49,7 @@ PROJECT_ROOT="${SCRIPT_DIR}"
 
 # 各子路径常量
 BACKEND_DIR="${PROJECT_ROOT}"                              # 后端 Python 项目根
-FRONTEND_DIR="${PROJECT_ROOT}/desktop"                     # React Web 前端根目录
+FRONTEND_DIR="${PROJECT_ROOT}/frontend"                     # React Web 前端根目录
 RUN_DIR="${PROJECT_ROOT}/.run"                             # PID / 锁 / 临时文件
 LOG_DIR="${PROJECT_ROOT}/logs"                             # 运行日志
 ENV_FILE="${PROJECT_ROOT}/.env"                            # 用户环境变量
@@ -231,12 +231,25 @@ check_dependencies_frontend() {
 
 # LLM API Key 存在性提示（非阻塞）
 check_llm_key() {
-  if [[ -z "${LLM_API_KEY}" && "${LLM_PROVIDER}" != "ollama" ]]; then
-    log_warn "未设置 LLM_API_KEY（当前 Provider=${LLM_PROVIDER}）。"
-    log_warn "  建议复制 ${ENV_EXAMPLE} -> ${ENV_FILE} 并填入有效密钥。"
-    log_warn "  否则后端 LLM 调用将失败。"
+  # 兼容当前 LLM_PROVIDERS(JSON) 配置；非 ollama provider 至少需要有一个 api_key。
+  if "${PYTHON_BIN}" -c '
+import json, os, sys
+try:
+    providers = json.loads(os.environ.get("LLM_PROVIDERS", "[]"))
+except (TypeError, json.JSONDecodeError):
+    sys.exit(1)
+legacy_key = bool(os.environ.get("LLM_API_KEY"))
+has_key = legacy_key or any(
+    p.get("provider", "").lower() != "ollama" and bool(p.get("api_key"))
+    for p in providers
+)
+sys.exit(0 if has_key else 1)
+'; then
+    log_success "LLM 配置已提供 api_key"
   else
-    log_success "LLM 配置：Provider=${LLM_PROVIDER}, Model=${LLM_MODEL}"
+    log_warn "未配置 LLM provider api_key（请检查 LLM_PROVIDERS）。"
+    log_warn "  建议编辑 ${ENV_FILE} 的 LLM_PROVIDERS，为每个非 ollama provider 填入 api_key。"
+    log_warn "  否则后端启动时创建 LLM client 会失败。"
   fi
 }
 
@@ -434,7 +447,7 @@ start_frontend() {
 
   # 如果后端没启动，给出警告但不阻塞（允许用户分开启动）
   if ! backend_healthy; then
-    log_warn "后端尚未就绪（http://${HOST}:${PORT}/health 无响应）。"
+    log_warn "后端尚未就绪（http://${HOST}:${PORT}${BACKEND_HEALTH_PATH} 无响应）。"
     log_warn "  前端仍会启动，但 API 调用会失败，直到后端可用。"
   fi
 
@@ -446,7 +459,11 @@ start_frontend() {
       HOST="${HOST}" PORT="${PORT}" \
       npm run dev \
       >> "${LOG_FRONTEND}" 2>&1 &
-    echo $! > "${PID_FRONTEND}"
+    pid=$!
+    echo "${pid}" > "${PID_FRONTEND}"
+    if [[ "${pid}" != "$$" ]]; then
+      disown "${pid}" 2>/dev/null || true
+    fi
   )
 
   # 给前端最多 30 秒启动窗口：检查 Vite 端口是否打开

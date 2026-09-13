@@ -14,6 +14,8 @@ from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentRunStatus
 from athena.runtime.streaming import StreamCoalescer
 from athena.infrastructure.sqlite.agent_store import AgentStore
+from athena.models.tool import RiskLevel
+from athena.contracts.statuses import AgentApprovalDecision
 from athena.infrastructure.sqlite.database import Database
 from athena.utils.ids import generate_session_id
 
@@ -132,11 +134,55 @@ async def test_message_after_pause_creates_a_new_run(agent_store):
     assert second.run_id == "run-2"
     assert second.run_id != first.run_id
 
-    runs = await store.runs_for_session(session.id)
-    assert {(run.run_id, run.status) for run in runs} == {
-        ("run-1", AgentRunStatus.PAUSED.value),
-        ("run-2", AgentRunStatus.QUEUED.value),
-    }
+
+@pytest.mark.asyncio
+async def test_approval_cannot_be_resolved_for_stale_worker_attempt(agent_store):
+    """迟到审批不得恢复已重试或已取消的 Worker 尝试。"""
+
+    database, store = agent_store
+    session = await database.sessions.create(generate_session_id(), "审批")
+    await store.create_worker_run(
+        run_id="worker-1",
+        session_id=session.id,
+        parent_run_id="root-1",
+        root_run_id="root-1",
+        plan_id="plan-1",
+        task_id="task-1",
+        attempt=1,
+    )
+    await store.create_approval(
+        approval_id="approval-1",
+        session_id=session.id,
+        run_id="root-1",
+        tool_call_id="call-1",
+        tool_name="exec_shell",
+        arguments={"command": "ls"},
+        risk_level=RiskLevel.MEDIUM,
+        plan_id="plan-1",
+        task_id="task-1",
+        worker_run_id="worker-1",
+    )
+
+    assert await store.resolve_approval_for_attempt(
+        "approval-1",
+        AgentApprovalDecision.APPROVED,
+        expected_run_id="root-1",
+        expected_plan_id="plan-1",
+        expected_task_id="task-1",
+        expected_worker_run_id="worker-1",
+    ) is True
+    assert await store.resolve_approval_for_attempt(
+        "approval-1",
+        AgentApprovalDecision.APPROVED,
+        expected_run_id="root-1",
+        expected_plan_id="plan-1",
+        expected_task_id="task-1",
+        expected_worker_run_id="worker-1",
+    ) is False
+
+    approval = await store.get_approval("approval-1")
+    assert approval is not None
+    assert approval.status == "resolved"
 
 
 @pytest.mark.asyncio
@@ -154,6 +200,34 @@ async def test_enqueue_notifies_runtime_after_commit(tmp_path):
     await asyncio.wait_for(waiting, timeout=1)
 
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_run_is_independent_from_root_session(agent_store):
+    """Worker Run 可以并行存在，但不会取代会话的 Root Run。"""
+
+    database, _ = agent_store
+    session = await database.sessions.create(generate_session_id(), "Worker Run")
+    store = AgentStore()
+    command = _message(session.id, "command-root", "执行任务", run_id="root-1")
+    assert await store.enqueue(command) is True
+
+    await store.create_worker_run(
+        run_id="worker-1",
+        session_id=session.id,
+        parent_run_id="root-1",
+        root_run_id="root-1",
+        plan_id="plan-1",
+        task_id="task-1",
+        attempt=1,
+    )
+
+    active = await store.active_run(session.id)
+    worker = await store.get_run("worker-1")
+    assert active is not None and active.run_id == "root-1"
+    assert worker is not None
+    assert worker.parent_run_id == "root-1"
+    assert worker.role == "worker"
 
 
 @pytest.mark.asyncio

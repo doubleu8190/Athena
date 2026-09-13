@@ -114,6 +114,13 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     run_id VARCHAR PRIMARY KEY,
     session_id VARCHAR NOT NULL REFERENCES sessions(id),
     created_by_command_id VARCHAR,
+    parent_run_id VARCHAR,
+    root_run_id VARCHAR,
+    role VARCHAR NOT NULL DEFAULT 'root',
+    plan_id VARCHAR,
+    task_id VARCHAR,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    depth INTEGER NOT NULL DEFAULT 0,
     status VARCHAR NOT NULL DEFAULT 'queued',
     pause_requested INTEGER NOT NULL DEFAULT 0,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
@@ -122,8 +129,53 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     updated_at VARCHAR NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_session_status ON agent_runs(session_id, status);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_active_session ON agent_runs(session_id)
-WHERE status IN ('queued','running','cancel_requested','waiting_approval','waiting_files');
+
+CREATE TABLE IF NOT EXISTS agent_plans (
+    plan_id VARCHAR PRIMARY KEY,
+    session_id VARCHAR NOT NULL REFERENCES sessions(id),
+    root_run_id VARCHAR NOT NULL,
+    goal TEXT NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'planning',
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    plan_json TEXT NOT NULL,
+    aggregation_strategy VARCHAR NOT NULL DEFAULT 'synthesize',
+    error_json TEXT,
+    created_at VARCHAR NOT NULL,
+    updated_at VARCHAR NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_plans_root_run ON agent_plans(root_run_id);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    task_id VARCHAR PRIMARY KEY,
+    plan_id VARCHAR NOT NULL REFERENCES agent_plans(plan_id),
+    task_index INTEGER NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'queued',
+    task_json TEXT NOT NULL,
+    worker_run_id VARCHAR,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    available_at VARCHAR NOT NULL,
+    claimed_at VARCHAR,
+    started_at VARCHAR,
+    finished_at VARCHAR,
+    lease_owner VARCHAR,
+    error_json TEXT,
+    created_at VARCHAR NOT NULL,
+    updated_at VARCHAR NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_plan_status ON agent_tasks(plan_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_queue ON agent_tasks(status, available_at);
+
+CREATE TABLE IF NOT EXISTS agent_task_results (
+    task_id VARCHAR PRIMARY KEY REFERENCES agent_tasks(task_id),
+    plan_id VARCHAR NOT NULL,
+    worker_run_id VARCHAR NOT NULL UNIQUE,
+    status VARCHAR NOT NULL,
+    result_json TEXT NOT NULL,
+    output_hash VARCHAR NOT NULL,
+    created_at VARCHAR NOT NULL,
+    completed_at VARCHAR NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_task_results_plan ON agent_task_results(plan_id);
 
 CREATE TABLE IF NOT EXISTS agent_commands (
     command_id VARCHAR PRIMARY KEY,
@@ -177,6 +229,9 @@ CREATE TABLE IF NOT EXISTS approvals (
     approval_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id),
     run_id TEXT NOT NULL,
+    plan_id TEXT,
+    task_id TEXT,
+    worker_run_id TEXT,
     tool_call_id TEXT NOT NULL,
     tool_name TEXT NOT NULL,
     arguments_json TEXT NOT NULL DEFAULT '{}',

@@ -32,6 +32,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     setConnectionStatus, setAgentStatus, addMessage, updateMessage,
     addStep, updateStep, addToolCall, updateToolCall, addApproval, resolveApproval,
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError,
+    upsertOrchestrationTask, clearOrchestrationTasks,
   } = useChatStore()
 
   useEffect(() => {
@@ -43,6 +44,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     clearToolCalls()
     clearApprovals()
     clearThinking()
+    clearOrchestrationTasks()
     if (!sessionId) {
       setConnectionStatus("disconnected")
       return
@@ -160,6 +162,29 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           const approvalId = String(data.approval_id || "")
           if (approvalId) resolveApproval(approvalId, String(data.decision || "denied"))
         }
+        if (
+          type === "task.queued" ||
+          type === "task.started" ||
+          type === "task.retrying" ||
+          type === "task.completed" ||
+          type === "task.failed"
+        ) {
+          const status =
+            type === "task.queued" ? "queued"
+            : type === "task.started" ? "running"
+            : type === "task.retrying" ? "retry_wait"
+            : type === "task.completed" ? "completed"
+            : "failed"
+          upsertOrchestrationTask({
+            plan_id: String(data.plan_id || ""),
+            task_id: String(data.task_id || crypto.randomUUID()),
+            title: String(data.title || data.task_id || "Task"),
+            status,
+            attempt: data.attempt ? Number(data.attempt) : undefined,
+            worker_run_id: data.worker_run_id ? String(data.worker_run_id) : undefined,
+            error: data.error ? String(data.error) : undefined,
+          })
+        }
         if (type === "llm.started") {
           const stepId = String(data.call_id || crypto.randomUUID())
           addStep({ id: stepId, session_id: sessionId, run_id: runId, step_number: useChatStore.getState().steps.length + 1, step_type: "llm_call", status: "running", started_at: now, duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 })
@@ -186,9 +211,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       } catch { /* 单条事件格式错误不应中断 EventSource。 */ }
     }
 
-    ;["run.started", "run.resumed", "run.paused", "run.failed", "run.cancelled", "run.completed", "llm.started", "llm.completed", "tool.started", "tool.completed", "approval.required", "approval.resolved", "approval.expired", "message.started", "message.completed", "message.delta", "stream.snapshot", "thinking.started", "thinking.summary", "thinking.completed"].forEach((name) => source.addEventListener(name, parse))
+    ;["run.started", "run.resumed", "run.paused", "run.failed", "run.cancelled", "run.completed", "llm.started", "llm.completed", "tool.started", "tool.completed", "approval.required", "approval.resolved", "approval.expired", "message.started", "message.completed", "message.delta", "stream.snapshot", "thinking.started", "thinking.summary", "thinking.completed", "plan.created", "plan.completed", "plan.failed", "plan.cancelled", "task.queued", "task.started", "task.retrying", "task.completed", "task.failed", "synthesis.started", "synthesis.completed"].forEach((name) => source.addEventListener(name, parse))
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, resolveApproval, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, resolveApproval, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, upsertOrchestrationTask, clearOrchestrationTasks])
 
   return sourceRef
 }

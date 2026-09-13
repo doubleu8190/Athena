@@ -206,6 +206,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
         file_runtime=file_runtime,
         memory_job_repository=memory_job_repository,
+        agent_store=agent_store,
     )
     memory_job_worker.configure_workflow(graph_runtime._memory_write_workflow)
     await memory_job_worker.start()
@@ -230,7 +231,10 @@ async def lifespan(app: FastAPI):
     )
 
     # 目的是将没来得及取消的run，在重启的时候取消掉
-    await RecoveryReconciler(app.state.runtime.agent_store).reconcile()
+    await RecoveryReconciler(
+        app.state.runtime.agent_store,
+        orchestration=db.orchestration,
+    ).reconcile()
 
     # 初始化sqlite checkpointer，确保langgraph的状态可以在中断后恢复
     checkpoint_conn = await aiosqlite.connect(settings.sqlite_db_path)

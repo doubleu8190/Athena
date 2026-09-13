@@ -35,7 +35,31 @@ class AgentRunRecord:
     cancel_requested: int
 
 
+@dataclass(frozen=True, slots=True)
+class OrchestrationPlanRecord:
+    """启动恢复对账所需的计划轻量记录。"""
+
+    plan_id: str
+    session_id: str
+    root_run_id: str
+    status: str
+
+
 class AgentStorePort(Protocol):
+    async def create_worker_run(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        parent_run_id: str,
+        root_run_id: str,
+        plan_id: str | None,
+        task_id: str | None,
+        attempt: int,
+    ) -> None:
+        """创建一条独立 Worker Run 记录。"""
+        ...
+
     async def claim_pending(self) -> AgentCommandRecord | None:
         """按最早发布时间领取一条可执行命令；无命令时返回 ``None``。"""
         ...
@@ -100,6 +124,19 @@ class AgentStorePort(Protocol):
         self, approval_id: str, decision: AgentApprovalDecision
     ) -> bool:
         """原子解析审批记录；记录不存在或已处理时返回 ``False``。"""
+        ...
+
+    async def resolve_approval_for_attempt(
+        self,
+        approval_id: str,
+        decision: AgentApprovalDecision,
+        *,
+        expected_run_id: str | None = None,
+        expected_worker_run_id: str | None = None,
+        expected_task_id: str | None = None,
+        expected_plan_id: str | None = None,
+    ) -> bool:
+        """解析审批并校验其仍属于预期的运行归属。"""
         ...
 
 

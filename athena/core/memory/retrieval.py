@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
@@ -159,6 +160,7 @@ class HybridRetrievalManager:
         filter_params: dict[str, Any] | None = None,
         *,
         record_access: bool = True,
+        expand_query: bool = True,
     ) -> list[SearchResult]:
         """执行混合检索（默认跨会话全库）.
 
@@ -166,6 +168,7 @@ class HybridRetrievalManager:
         记忆都可被召回；filter_params 为可选显式过滤（按需传入 category/
         type 等），产线不传即全库检索。
         """
+        started = time.perf_counter()
         # 并发启动原始向量和关键词路线；扩展 query 只作为完成原始路线后的
         # 附加向量证据。
         keyword_task = asyncio.create_task(
@@ -174,11 +177,18 @@ class HybridRetrievalManager:
         raw_vector_task = asyncio.create_task(
             self._vector_search(query, filter_params, route="vector")
         )
-        expanded_query = await self._expand_query(query)
+        expansion_started = time.perf_counter()
+        expanded_query = await self._expand_query(query) if expand_query else None
+        logger.info(
+            "memory_retrieval_query_expansion_completed",
+            duration_ms=round((time.perf_counter() - expansion_started) * 1000),
+            enabled=expand_query,
+        )
 
         keyword_results = await keyword_task
         vector_results = await raw_vector_task
         if expanded_query and expanded_query.strip() != query.strip():
+            rewrite_started = time.perf_counter()
             vector_results.extend(
                 await self._vector_search(
                     expanded_query,
@@ -186,6 +196,18 @@ class HybridRetrievalManager:
                     route="vector_rewrite",
                 )
             )
+            logger.info(
+                "memory_retrieval_query_rewrite_completed",
+                duration_ms=round((time.perf_counter() - rewrite_started) * 1000),
+            )
+
+        logger.info(
+            "memory_retrieval_completed",
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            keyword_count=len(keyword_results),
+            vector_count=len(vector_results),
+            expanded=bool(expanded_query),
+        )
 
         fused = self._reciprocal_rank_fusion(
             vector_results,
@@ -518,7 +540,10 @@ class MemoryRetrievalService:
     async def get_context(self, request: MemoryRetrievalRequest) -> str:
         """Retrieve and assemble context from an explicit runtime request."""
         try:
-            results = await self._manager.retrieve(query=request.query)
+            results = await self._manager.retrieve(
+                query=request.query,
+                expand_query=request.reason == "llm_complex_request",
+            )
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))
             return ""

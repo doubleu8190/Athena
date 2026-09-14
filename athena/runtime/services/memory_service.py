@@ -9,6 +9,8 @@ LLM only for ambiguous, reference-heavy turns.
 from __future__ import annotations
 
 import json
+import asyncio
+import time
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -98,9 +100,15 @@ class MemoryService:
     the LLM is consulted only for ambiguous, reference-heavy turns.
     """
 
-    def __init__(self, llm: LLMProvider, memory_retrieval: MemoryRetrievalService):
+    def __init__(
+        self,
+        llm: LLMProvider,
+        memory_retrieval: MemoryRetrievalService,
+        retrieval_timeout_seconds: float = 3.0,
+    ):
         self._llm = llm
         self._memory_retrieval = memory_retrieval
+        self._retrieval_timeout_seconds = retrieval_timeout_seconds
 
     async def build_memory_request(
         self,
@@ -124,7 +132,6 @@ class MemoryService:
             "上次",
             "这个项目",
             "那个方案",
-            "按照",
             "已有",
             "记忆",
         )
@@ -174,7 +181,8 @@ class MemoryService:
                 user_message=text,
                 recent_history=recent_history or "[]",
             )
-            response = await self._llm.ainvoke([HumanMessage(content=prompt)])
+            async with asyncio.timeout(self._retrieval_timeout_seconds):
+                response = await self._llm.ainvoke([HumanMessage(content=prompt)])
             data = extract_json_from_llm_response(extract_message_text(response)) or {}
             plan = _MemoryRetrievalPlan.model_validate(data)
             query = plan.query.strip()
@@ -187,12 +195,27 @@ class MemoryService:
                 reason="llm_complex_request",
                 limit=plan.limit,
             )
+        except TimeoutError:
+            logger.warning(
+                "memory_request_generation_timeout",
+                session_id=session_id,
+                timeout_seconds=self._retrieval_timeout_seconds,
+            )
+            return request
         except Exception as exc:
-            logger.warning("memory_request_generation_failed", error=str(exc))
+            logger.warning(
+                "memory_request_generation_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
             return request
 
     async def retrieve_memory_context(
-        self, session_id: str, memory_request: dict[str, Any] | None
+        self,
+        session_id: str,
+        memory_request: dict[str, Any] | None,
+        *,
+        run_id: str = "",
     ) -> str:
         """检索与用户消息相关的长期记忆上下文。
 
@@ -206,17 +229,36 @@ class MemoryService:
         异常：
             不向主流程传播检索异常；失败仅记录警告并返回空字符串。
         """
+        started = time.perf_counter()
         try:
             if not memory_request:
                 return ""
             request = MemoryRetrievalRequest.model_validate(memory_request)
-            context = await self._memory_retrieval.get_context(request)
+            async with asyncio.timeout(self._retrieval_timeout_seconds):
+                context = await self._memory_retrieval.get_context(request)
             logger.info(
                 "memory_injection_success",
                 session_id=session_id,
+                run_id=run_id,
                 memory_context_length=len(context),
+                duration_ms=round((time.perf_counter() - started) * 1000),
             )
             return context
+        except TimeoutError:
+            logger.warning(
+                "memory_retrieval_timeout",
+                session_id=session_id,
+                run_id=run_id,
+                timeout_seconds=self._retrieval_timeout_seconds,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+            )
+            return ""
         except Exception as e:
-            logger.warning("memory_injection_failed", error=str(e))
+            logger.warning(
+                "memory_injection_failed",
+                session_id=session_id,
+                run_id=run_id,
+                error=str(e),
+                duration_ms=round((time.perf_counter() - started) * 1000),
+            )
             return ""

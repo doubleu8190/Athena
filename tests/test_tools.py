@@ -91,6 +91,36 @@ async def test_list_directory_tool(tmp_path):
     assert "subdir" in result
 
 
+@pytest.mark.asyncio
+async def test_tool_call_repository_persists_step_link(tmp_path):
+    """工具账本应在步骤表存在时成功写入并保留归属。"""
+    from datetime import datetime
+
+    from athena.infrastructure.sqlite.database import Database
+    from athena.models.tool import ToolCallRecord, ToolCallStatus
+
+    database = Database(str(tmp_path / "tool-call.db"))
+    await database.connect()
+    await database.sessions.create("session-1", "Tools")
+    await database.tool_calls.save(
+        ToolCallRecord(
+            id="tool-call-1",
+            session_id="session-1",
+            run_id="run-1",
+            step_id="step-1",
+            step_number=1,
+            tool_name="read_local_file",
+            status=ToolCallStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+    )
+
+    record = await database.tool_calls.get("tool-call-1")
+    assert record is not None
+    assert record.step_id == "step-1"
+    await database.close()
+
+
 def test_langchain_tools_conversion(manager: UnifiedToolManager):
     tools = manager.get_langchain_tools()
     assert len(tools) == 8

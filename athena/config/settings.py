@@ -148,6 +148,9 @@ class Settings(BaseSettings):
     retrieval_context_k: int = 5
     memory_vector_min_score: float = 0.70
     memory_max_tokens: int = 2000
+    # Memory is an optional enhancement. It must not hold the first answer
+    # indefinitely when the vector backend or embedding service is slow.
+    memory_retrieval_timeout_seconds: float = Field(default=3.0, ge=0.1, le=60.0)
 
     # --- 上下文压缩 ---
     max_context_tokens: int = 128000

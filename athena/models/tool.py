@@ -61,6 +61,9 @@ class ToolCallRecord(BaseModel):
 
     id: str
     session_id: str
+    step_id: str | None = None
+    run_id: str | None = None
+    step_number: int = 0
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     raw_output: str | None = None

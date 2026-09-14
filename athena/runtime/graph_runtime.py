@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from typing import Any
 
 from athena.config.settings import Settings
@@ -29,7 +28,7 @@ from athena.core.memory.resolver import MemoryResolver
 from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
-from athena.models import Message, MessageRole
+from athena.models import Message
 from athena.models.file import AttachmentRef
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
@@ -40,13 +39,14 @@ from athena.utils.prompts import get_prompt
 from .attachment_processor import AttachmentProcessContext, AttachmentProcessor
 from .processors import StaticProcessorProxy
 from .state import AgentState, FileProcessResult
-from .sub_agent import SubAgentManager, SubAgentResult
+from .sub_agent import SubAgentManager
 from .services.memory_service import MemoryService
 from .services.request_service import RequestService
 from .services.execution_service import ExecutionService
 from .orchestration.events import OrchestrationEventPublisher
 from .orchestration import (
     Dispatcher,
+    ExecutionPlan,
     PlanStatus,
     Planner,
     StructuredLLMService,
@@ -108,7 +108,11 @@ class LangGraphRuntime:
             memory_job_repository: 记忆任务持久化仓库。
         """
         # ── 聚焦服务 ──
-        self._memory_service = MemoryService(llm=llm, memory_retrieval=memory_retrieval)
+        self._memory_service = MemoryService(
+            llm=llm,
+            memory_retrieval=memory_retrieval,
+            retrieval_timeout_seconds=settings.memory_retrieval_timeout_seconds,
+        )
         self._request_service = RequestService(db=db, event_publisher=event_publisher)
         self._execution_service = ExecutionService(
             llm=llm,
@@ -145,7 +149,7 @@ class LangGraphRuntime:
         self._memory_write_workflow: MemoryWriteWorkflow | None = None
         structured_llm = StructuredLLMService(llm)
         orchestration_events = OrchestrationEventPublisher(event_publisher)
-        self._orchestration_planner = Planner(structured_llm, db, orchestration_events)
+        self._orchestration_planner = Planner(db, orchestration_events)
         self._orchestration_worker = WorkerExecutor(
             llm=llm,
             structured_llm=structured_llm,
@@ -191,97 +195,21 @@ class LangGraphRuntime:
     def orchestration_synthesizer(self) -> Synthesizer:
         return self._orchestration_synthesizer
 
-    async def orchestrate(
+    async def materialize_plan(
         self,
+        *,
         session_id: str,
         root_run_id: str,
-        goal: str,
-        memory_context: str = "",
-        stop_signal: asyncio.Event | None = None,
-    ) -> dict[str, Any]:
-        """执行 Planner -> Dispatcher -> Synthesizer 的完整编排。"""
-        decision = await self._orchestration_planner.decide(
+        user_goal: str,
+        submission: dict[str, Any],
+    ) -> ExecutionPlan:
+        """校验并持久化顶层 Agent LLM 提交的计划。"""
+        return await self._orchestration_planner.materialize_submission(
             session_id=session_id,
             root_run_id=root_run_id,
-            goal=goal,
+            user_goal=user_goal,
+            submission=submission,
             available_tools=self._tool_manager.list_names(),
-            context=memory_context,
-        )
-
-        if decision.mode == "direct_answer":
-            return {
-                "content": decision.direct_answer,
-                "run_id": root_run_id,
-                "mode": "direct_answer",
-            }
-
-        if decision.plan is None:
-            raise ValueError("planner returned execute_plan without a plan")
-
-        plan = decision.plan
-        self._orchestration_dispatcher.register_session(plan.plan_id, session_id)
-        try:
-            await self._db.orchestration.set_plan_status(
-                plan.plan_id, PlanStatus.SYNTHESIZING.value
-            )
-            results = await self._orchestration_dispatcher.run(
-                plan=plan,
-                session_id=session_id,
-                stop_signal=stop_signal,
-            )
-            content = await self._orchestration_synthesizer.synthesize(plan, results)
-            await self._db.orchestration.set_plan_status(
-                plan.plan_id,
-                PlanStatus.COMPLETED.value,
-            )
-            await self._orchestration_events.publish_synthesis(
-                EventType.SYNTHESIS_COMPLETED,
-                session_id=session_id,
-                plan_id=plan.plan_id,
-                run_id=plan.root_run_id,
-                payload={"task_count": len(plan.tasks)},
-            )
-            return {
-                "content": content,
-                "run_id": root_run_id,
-                "mode": "execute_plan",
-                "plan_id": plan.plan_id,
-                "results": {
-                    task_id: result.model_dump(mode="json")
-                    for task_id, result in results.items()
-                },
-            }
-        except Exception as exc:
-            await self._db.orchestration.set_plan_status(
-                plan.plan_id,
-                PlanStatus.FAILED.value,
-                error={"message": str(exc)},
-            )
-            await self._orchestration_events.publish_synthesis(
-                EventType.PLAN_FAILED,
-                session_id=session_id,
-                plan_id=plan.plan_id,
-                run_id=plan.root_run_id,
-                payload={"error": str(exc)},
-            )
-            raise
-
-    async def orchestrate_decide(
-        self,
-        session_id: str,
-        root_run_id: str,
-        goal: str,
-        memory_context: str = "",
-    ):
-        """调用 Planner 生成直接回答或计划决策。"""
-        from .orchestration import PlanningDecision
-
-        return await self._orchestration_planner.decide(
-            session_id=session_id,
-            root_run_id=root_run_id,
-            goal=goal,
-            available_tools=self._tool_manager.list_names(),
-            context=memory_context,
         )
 
     async def execute_planned_orchestration(
@@ -357,10 +285,14 @@ class LangGraphRuntime:
         )
 
     async def retrieve_memory_context(
-        self, session_id: str, memory_request: dict[str, Any] | None
+        self,
+        session_id: str,
+        memory_request: dict[str, Any] | None,
+        *,
+        run_id: str = "",
     ) -> str:
         return await self._memory_service.retrieve_memory_context(
-            session_id, memory_request
+            session_id, memory_request, run_id=run_id
         )
 
     # ------------------------------------------------------------------

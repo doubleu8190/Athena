@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 
 from athena.infrastructure.sqlite.engine import get_session
-from athena.infrastructure.sqlite.models import ToolCallModel
+from athena.infrastructure.sqlite.models import StepModel, ToolCallModel
 from athena.models import ToolCallRecord
 
 from .converters import _row_to_tool_call
@@ -22,10 +22,26 @@ class ToolCallRepository:
         """保存工具调用记录。"""
         async with get_session() as session:
             async with session.begin():
+                step_id = tool_call.step_id or f"{tool_call.id}:step"
+                existing_step = await session.get(StepModel, step_id)
+                if existing_step is None:
+                    session.add(
+                        StepModel(
+                            id=step_id,
+                            session_id=tool_call.session_id,
+                            run_id=tool_call.run_id or tool_call.session_id,
+                            step_number=tool_call.step_number,
+                            step_type="tool_call",
+                            status=tool_call.status.value,
+                            started_at=tool_call.started_at.isoformat(),
+                            duration_ms=tool_call.duration_ms,
+                        )
+                    )
                 session.add(
                     ToolCallModel(
                         id=tool_call.id,
                         session_id=tool_call.session_id,
+                        step_id=step_id,
                         tool_name=tool_call.tool_name,
                         arguments_json=_json_dumps(tool_call.arguments),
                         raw_output=tool_call.raw_output,
@@ -70,6 +86,7 @@ class ToolCallRepository:
             return
         async with get_session() as session:
             async with session.begin():
+                row = await session.get(ToolCallModel, tool_call_id)
                 await session.execute(
                     update(ToolCallModel)
                     .where(
@@ -78,6 +95,24 @@ class ToolCallRepository:
                     )
                     .values(**values)
                 )
+                if row is not None and row.step_id:
+                    step_values = {
+                        "status": updates.get("status"),
+                        "completed_at": updates.get("completed_at"),
+                        "duration_ms": updates.get("duration_ms"),
+                        "error_message": updates.get("error_message"),
+                    }
+                    step_values = {
+                        key: value
+                        for key, value in step_values.items()
+                        if value is not None
+                    }
+                    if step_values:
+                        await session.execute(
+                            update(StepModel)
+                            .where(StepModel.id == row.step_id)
+                            .values(**step_values)
+                        )
 
     async def query(
         self, session_id: str, status: str | None = None, include_deleted: bool = False

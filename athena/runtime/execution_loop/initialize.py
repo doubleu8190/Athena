@@ -38,4 +38,6 @@ def initialize_execution(state: AgentExecutionState) -> AgentExecutionState:
         "stream_version": int(state.get("stream_version", 0)),
         "stream_offset": int(state.get("stream_offset", 0)),
         "status": "running",
+        "route": state.get("route", "agent_loop"),
+        "plan_request": state.get("plan_request"),
     }

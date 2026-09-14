@@ -23,7 +23,9 @@ async def retrieve_memory(
     if not state.get("session_id"):
         raise ValueError("AgentState missing required field: session_id")
     memory_context = await memory_service.retrieve_memory_context(
-        state.get("session_id", ""), state.get("memory_request")
+        state.get("session_id", ""),
+        state.get("memory_request"),
+        run_id=state.get("run_id", ""),
     )
     return {"memory_context": memory_context}
 

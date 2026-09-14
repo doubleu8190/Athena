@@ -24,6 +24,7 @@ async def finish_execution(
 ) -> AgentExecutionState:
     """关闭流、发布终态事件并标记执行完成。"""
     harness = _executor(graph_runtime)
+    tool_results = state.get("tool_results", [])
     await harness.finish_execution(
         session_id=state.get("session_id", ""),
         run_id=state.get("run_id", ""),
@@ -42,7 +43,7 @@ async def finish_execution(
             "content": state.get("final_content", state.get("last_content", "")),
             "run_id": state.get("run_id", ""),
             "turn_count": state.get("turn_count", 0),
-            "tool_results": state.get("tool_results", []),
+            "tool_results": tool_results,
             "error": state.get("error"),
             "interrupted": state.get("interrupted", False),
         },

@@ -318,6 +318,35 @@ class CommandConsumer:
     async def _complete_message(
         self, command: AgentCommandRecord, run_id: str, result: Any
     ) -> None:
+        payload = result if isinstance(result, dict) else {"result": result}
+        error = str(payload.get("error") or "").strip()
+        if error:
+            await self.store.update_run_status(
+                run_id, AgentRunStatus.FAILED, error
+            )
+            await self.store.publish(
+                ApplicationEvent(
+                    event_type=EventType.RUN_FAILED,
+                    durability=EventDurability.DURABLE,
+                    session_id=command.session_id,
+                    run_id=run_id,
+                    message_id=self._command_message_id(command),
+                    transition_id=f"run:{run_id}:failed",
+                    payload={
+                        "command_id": command.command_id,
+                        "message_id": self._command_message_id(command),
+                        "error": error,
+                    },
+                )
+            )
+            await self.store.complete(
+                command.command_id,
+                status=AgentCommandStatus.FAILED,
+                error={"code": "run_failed", "message": error},
+                result=payload,
+            )
+            return
+
         await self.store.update_run_status(run_id, AgentRunStatus.COMPLETED)
         content = self._result_content(result)
         stream_id = f"answer-{run_id}"

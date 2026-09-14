@@ -67,25 +67,12 @@ async def test_runtime_orchestrate_runs_full_pipeline(tmp_path) -> None:
     from athena.runtime.orchestration.worker import WorkerExecutor
 
     structured = StructuredLLMService(fake_llm)
-    runtime._orchestration_planner = type(
-        "P",
-        (),
-        {
-            "plan": AsyncMock(
-                return_value=plan
-            ),
-            "decide": AsyncMock(
-                return_value=type(
-                    "Decision",
-                    (),
-                    {"mode": "execute_plan", "direct_answer": "", "plan": plan},
-                )()
-            ),
-        },
-    )()
-    runtime._orchestration_worker = _Worker()
     from athena.runtime.orchestration.events import OrchestrationEventPublisher
 
+    runtime._orchestration_planner = Planner(
+        database, OrchestrationEventPublisher(runtime._events)
+    )
+    runtime._orchestration_worker = _Worker()
     runtime._orchestration_dispatcher = Dispatcher(
         database,
         runtime._orchestration_worker,
@@ -94,7 +81,25 @@ async def test_runtime_orchestrate_runs_full_pipeline(tmp_path) -> None:
     runtime._orchestration_events = OrchestrationEventPublisher(runtime._events)
     runtime._orchestration_synthesizer = Synthesizer(fake_llm)
 
-    result = await runtime.orchestrate("session-1", "root-1", "检查模块")
+    materialized = await runtime.materialize_plan(
+        session_id="session-1",
+        root_run_id="root-1",
+        user_goal="检查模块",
+        submission={
+            "plan_id": "plan-1",
+            "tasks": [
+                {
+                    "task_id": "task-1",
+                    "title": "检查模块",
+                    "objective": "返回模块检查结果",
+                }
+            ],
+        },
+    )
+    result = await runtime.execute_planned_orchestration(
+        plan_payload=materialized.model_dump(mode="json"),
+        session_id="session-1",
+    )
 
     assert result["content"] == "汇总结果"
     assert result["plan_id"] == "plan-1"
@@ -121,4 +126,44 @@ async def test_main_graph_has_orchestration_branch() -> None:
 
     graph = build_graph(runtime)
     nodes = set(graph.get_graph().nodes)
-    assert {"plan_orchestration", "execute_plan", "synthesize_orchestration"} <= nodes
+    assert {
+        "agent_loop",
+        "materialize_plan",
+        "execute_plan",
+        "synthesize_orchestration",
+    } <= nodes
+    assert "plan_orchestration" not in nodes
+
+
+def test_first_agent_turn_has_three_routes() -> None:
+    from athena.runtime.execution_loop.graph import _route_after_llm
+
+    assert _route_after_llm({"execution": {"final_content": "回答"}}) == "finish_execution"
+    assert _route_after_llm({"execution": {"pending_tool_calls": [{"name": "x"}]}}) == "execute_tool_batch"
+    assert _route_after_llm({"execution": {"route": "plan_requested"}}) == "plan_requested"
+
+
+def test_plan_submission_is_exposed_on_every_top_level_turn() -> None:
+    from athena.core.harness.turn_executor import HarnessTurnExecutor
+    from athena.runtime.orchestration import PLAN_SUBMISSION_TOOL_NAME
+
+    executor = HarnessTurnExecutor.__new__(HarnessTurnExecutor)
+    executor._tool_manager = type(
+        "Tools",
+        (),
+        {"get_langchain_tools": lambda self, names=None: []},
+    )()
+
+    first_turn = executor._get_llm_tools(
+        tool_names=None, parent_run_id=None
+    )
+    later_turn = executor._get_llm_tools(
+        tool_names=None, parent_run_id=None
+    )
+    worker_turn = executor._get_llm_tools(
+        tool_names=None, parent_run_id="parent-run-1"
+    )
+
+    assert [tool.name for tool in first_turn] == [PLAN_SUBMISSION_TOOL_NAME]
+    assert [tool.name for tool in later_turn] == [PLAN_SUBMISSION_TOOL_NAME]
+    assert worker_turn == []

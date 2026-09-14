@@ -423,15 +423,15 @@ class AgentStore:
 
     async def reclaim_stale_commands(self, lease_seconds: int = 300) -> int:
         """Return commands left claimed by a crashed worker to the queue."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)).isoformat()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)
+        ).isoformat()
         async with get_session() as db:
             result = await db.execute(
-                text(
-                    """UPDATE agent_commands
+                text("""UPDATE agent_commands
                     SET status = :pending, available_at = :now, claimed_at = NULL
                     WHERE status = :claimed
-                      AND (claimed_at IS NULL OR claimed_at < :cutoff)"""
-                ),
+                      AND (claimed_at IS NULL OR claimed_at < :cutoff)"""),
                 {
                     "pending": AgentCommandStatus.PENDING.value,
                     "claimed": AgentCommandStatus.CLAIMED.value,
@@ -771,9 +771,10 @@ class AgentStore:
                     and event.event_type == EventType.LLM_TOKEN
                     and chunk_id is None
                 ):
-                    chunk_id = self._stream_chunk_cache[
-                        (event.session_id, event.stream_id)
-                    ] + 1
+                    chunk_id = (
+                        self._stream_chunk_cache[(event.session_id, event.stream_id)]
+                        + 1
+                    )
                 session_seq = current + 1
                 row = AgentEventModel(
                     session_id=event.session_id,

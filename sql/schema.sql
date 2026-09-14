@@ -81,9 +81,34 @@ CREATE TABLE messages (
 CREATE INDEX idx_messages_session ON messages (session_id);
 CREATE INDEX idx_messages_timestamp ON messages (timestamp);
 
+CREATE TABLE steps (
+	id VARCHAR NOT NULL,
+	session_id VARCHAR NOT NULL,
+	run_id VARCHAR NOT NULL,
+	step_number INTEGER NOT NULL,
+	step_type VARCHAR NOT NULL,
+	parent_step_id VARCHAR,
+	parent_run_id VARCHAR,
+	status VARCHAR NOT NULL,
+	started_at VARCHAR NOT NULL,
+	completed_at VARCHAR,
+	duration_ms FLOAT NOT NULL,
+	llm_input_tokens INTEGER NOT NULL,
+	llm_output_tokens INTEGER NOT NULL,
+	error_message TEXT,
+	deleted_time VARCHAR,
+	PRIMARY KEY (id),
+	FOREIGN KEY(session_id) REFERENCES sessions (id)
+);
+CREATE INDEX idx_steps_parent ON steps (parent_step_id);
+CREATE INDEX idx_steps_run ON steps (run_id);
+CREATE INDEX idx_steps_session ON steps (session_id);
+CREATE INDEX idx_steps_number ON steps (step_number);
+
 CREATE TABLE tool_call (
-	id VARCHAR NOT NULL, 
-	session_id VARCHAR NOT NULL, 
+	id VARCHAR NOT NULL,
+	session_id VARCHAR NOT NULL,
+	step_id VARCHAR,
 	tool_name VARCHAR NOT NULL, 
 	arguments_json TEXT NOT NULL, 
 	raw_output TEXT, 
@@ -95,10 +120,12 @@ CREATE TABLE tool_call (
 	error_stack TEXT, 
 	deleted_time VARCHAR, 
 	PRIMARY KEY (id), 
-	FOREIGN KEY(session_id) REFERENCES sessions (id)
+	FOREIGN KEY(session_id) REFERENCES sessions (id),
+	FOREIGN KEY(step_id) REFERENCES steps (id)
 );
 CREATE INDEX idx_tool_call_status ON tool_call (status);
 CREATE INDEX idx_tool_call_session ON tool_call (session_id);
+CREATE INDEX idx_tool_call_step ON tool_call (step_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     content,

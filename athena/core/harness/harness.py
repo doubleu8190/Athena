@@ -696,6 +696,9 @@ class Harness:
                     ToolCallRecord(
                         id=tc_record_id,
                         session_id=session_id,
+                        step_id=tc_record_id,
+                        run_id=run_id,
+                        step_number=turn_count,
                         tool_name=tool_name,
                         arguments=args,
                         status=ToolCallStatus.RUNNING,
@@ -785,6 +788,17 @@ class Harness:
             except Exception as e:
                 # 捕获未处理异常，保留原始 tc_id 以便 LLM 关联 tool_call → tool_message
                 logger.error("tool_execution_failed", tool=tool_name, error=str(e))
+                append_result(
+                    {
+                        "tool_call_id": tc_id,
+                        "tool_name": tool_name,
+                        "arguments": args,
+                        "output": "",
+                        "status": "failed",
+                        "duration_ms": 0,
+                        "error": str(e) or type(e).__name__,
+                    }
+                )
                 return ToolMessage(
                     content=f"[工具执行异常] {e}",
                     tool_call_id=tc_id,

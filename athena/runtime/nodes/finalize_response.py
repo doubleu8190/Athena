@@ -18,10 +18,22 @@ async def finalize_response(state: AgentState) -> AgentState:
     异常：
         运行时异常: 后处理或结果序列化失败时传播底层异常。
     """
+    result = state.get("result")
+    if result is None and state.get("error"):
+        result = {
+            "content": "",
+            "run_id": state["run_id"],
+            "turn_count": 0,
+            "tool_results": [],
+            "error": state["error"],
+            "interrupted": False,
+            "attachments": [],
+        }
     return {
         "session_id": state["session_id"],
         "run_id": state["run_id"],
         "message_id": state.get("message_id"),
+        "result": result,
     }
 
 

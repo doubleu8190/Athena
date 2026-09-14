@@ -22,9 +22,9 @@ from .nodes import (
     create_retrieve_memory_node,
     create_decide_memory_node,
     create_execute_plan_node,
-    create_plan_orchestration_node,
+    create_materialize_plan_node,
     create_synthesize_orchestration_node,
-    route_after_planning,
+    create_close_plan_stream_node,
 )
 from .state import AgentState
 
@@ -65,12 +65,13 @@ def build_graph(
     graph.add_node(
         "prepare_context", create_prepare_context_node(runtime.request_service)
     )
-    graph.add_node("plan_orchestration", create_plan_orchestration_node(runtime))
+    graph.add_node("materialize_plan", create_materialize_plan_node(runtime))
     graph.add_node("execute_plan", create_execute_plan_node(runtime))
     graph.add_node(
         "synthesize_orchestration",
         create_synthesize_orchestration_node(runtime),
     )
+    graph.add_node("close_plan_stream", create_close_plan_stream_node(runtime))
     # Agent 循环（LLM ↔ 工具）→ 使用完整 runtime
     graph.add_node("agent_loop", create_agent_loop_node(runtime))
     # 后处理 → 使用 ExecutionService
@@ -98,23 +99,20 @@ def build_graph(
         {"retrieve_memory": "retrieve_memory", "prepare_context": "prepare_context"},
     )
     graph.add_edge("retrieve_memory", "prepare_context")
-    graph.add_edge("prepare_context", "plan_orchestration")
-
-    graph.add_conditional_edges(
-        "plan_orchestration",
-        route_after_planning,
-        {"agent_loop": "agent_loop", "execute_plan": "execute_plan"},
-    )
+    graph.add_edge("prepare_context", "agent_loop")
     graph.add_conditional_edges(
         "agent_loop",
         route_after_agent_loop,
         {
             "post_process_turn": "post_process_turn",
+            "materialize_plan": "materialize_plan",
             "finalize_response": "finalize_response",
         },
     )
+    graph.add_edge("materialize_plan", "execute_plan")
     graph.add_edge("execute_plan", "synthesize_orchestration")
-    graph.add_edge("synthesize_orchestration", "finalize_response")
+    graph.add_edge("synthesize_orchestration", "close_plan_stream")
+    graph.add_edge("close_plan_stream", "finalize_response")
 
     graph.add_edge("post_process_turn", "finalize_response")
     graph.add_edge("finalize_response", END)

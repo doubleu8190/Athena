@@ -2,59 +2,32 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import StateNode
 
 from ..state import AgentState
+from ..execution_loop.finish import finish_execution
+from ..execution_loop._helpers import _stop_signal
 
 if TYPE_CHECKING:
     from ..graph_runtime import LangGraphRuntime
 
-
-async def plan_orchestration(
+async def materialize_plan(
     state: AgentState, *, runtime: LangGraphRuntime
 ) -> AgentState:
-    """请求 Planner 判断直接回答或生成执行计划。
-
-    参数：
-        state: 已完成上下文准备的主图状态。
-        runtime: 提供编排依赖的运行时。
-
-    返回值：
-        AgentState: 仅包含 ``planning_decision`` 字段。
-
-    异常：
-        ValueError: 状态缺少会话、运行标识或用户目标。
-    """
-    session_id = state.get("session_id", "")
-    run_id = state.get("run_id", "")
-    goal = state.get("user_message", "")
-    if not session_id or not run_id or not goal:
-        raise ValueError("orchestration requires session_id, run_id and user_message")
-
-    decision = await runtime.orchestrate_decide(
-        session_id=session_id,
-        root_run_id=run_id,
-        goal=goal,
-        memory_context=state.get("memory_context", ""),
+    """校验并持久化顶层 LLM 提交的计划，不再调用模型。"""
+    request = state.get("plan_request")
+    if not request:
+        raise ValueError("materialize_plan requires plan_request")
+    plan = await runtime.materialize_plan(
+        session_id=state.get("session_id", ""),
+        root_run_id=state.get("run_id", ""),
+        user_goal=state.get("user_message", ""),
+        submission=request,
     )
-    return {
-        "planning_decision": {
-            "mode": decision.mode,
-            "direct_answer": decision.direct_answer,
-            "plan": decision.plan.model_dump(mode="json") if decision.plan else None,
-        }
-    }
-
-
-def route_after_planning(
-    state: AgentState,
-) -> Literal["agent_loop", "execute_plan"]:
-    """按 Planner 决策选择旧 Agent 循环或中心编排。"""
-    decision = state.get("planning_decision") or {}
-    return "execute_plan" if decision.get("mode") == "execute_plan" else "agent_loop"
+    return {"execution_plan": plan.model_dump(mode="json")}
 
 
 async def execute_plan(
@@ -76,8 +49,7 @@ async def execute_plan(
     异常：
         ValueError: Planner 决策缺少计划。
     """
-    decision = state.get("planning_decision") or {}
-    plan_payload = decision.get("plan")
+    plan_payload = state.get("execution_plan")
     if plan_payload is None:
         raise ValueError("execute_plan route requires a persisted plan")
 
@@ -89,11 +61,19 @@ async def execute_plan(
     return {"orchestration_result": result}
 
 
-def _stop_signal(config: RunnableConfig):
-    """从 LangGraph 配置提取停止事件。"""
-    from ..execution_loop._helpers import _stop_signal as extract_stop_signal
-
-    return extract_stop_signal(config)
+async def close_plan_stream(
+    state: AgentState,
+    config: RunnableConfig,
+    *,
+    runtime: LangGraphRuntime,
+) -> AgentState:
+    """计划汇总完成后关闭顶层 Agent 决策打开的回答流。"""
+    execution = state.get("execution", {})
+    return {
+        "execution": await finish_execution(
+            execution, config, graph_runtime=runtime
+        )
+    }
 
 
 async def synthesize_orchestration(
@@ -130,13 +110,13 @@ async def synthesize_orchestration(
     }
 
 
-def create_plan_orchestration_node(
+def create_materialize_plan_node(
     runtime: LangGraphRuntime,
 ) -> StateNode[AgentState, None]:
-    """创建 Planner 决策节点。"""
+    """创建纯校验/持久化计划节点。"""
 
     async def node(state: AgentState) -> AgentState:
-        return await plan_orchestration(state, runtime=runtime)
+        return await materialize_plan(state, runtime=runtime)
 
     return node
 
@@ -148,6 +128,17 @@ def create_execute_plan_node(
 
     async def node(state: AgentState, config: RunnableConfig) -> AgentState:
         return await execute_plan(state, config, runtime=runtime)
+
+    return node
+
+
+def create_close_plan_stream_node(
+    runtime: LangGraphRuntime,
+) -> StateNode[AgentState, None]:
+    """创建计划分支的回答流收尾节点。"""
+
+    async def node(state: AgentState, config: RunnableConfig) -> AgentState:
+        return await close_plan_stream(state, config, runtime=runtime)
 
     return node
 

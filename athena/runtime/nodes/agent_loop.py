@@ -33,16 +33,14 @@ def create_agent_loop_node(runtime: LangGraphRuntime) -> CompiledStateGraph:
 
 def route_after_agent_loop(
     state: AgentState,
-) -> Literal["post_process_turn", "finalize_response"]:
+) -> Literal["post_process_turn", "materialize_plan", "finalize_response"]:
     """选择执行完成后的主图阶段。
 
     若子图产出了 ``harness_result`` 则进入后处理，否则直接收尾。
     """
-    return (
-        "post_process_turn"
-        if state.get("harness_result") is not None
-        else "finalize_response"
-    )
+    if state.get("plan_request") is not None:
+        return "materialize_plan"
+    return "post_process_turn" if state.get("harness_result") is not None else "finalize_response"
 
 
 async def post_process_turn(
@@ -71,12 +69,13 @@ async def post_process_turn(
     attachment_refs = ExecutionService.deserialize_attachment_refs(
         state.get("attachment_refs", [])
     )
-    await execution_service.post_process(
-        state.get("session_id", ""),
-        state.get("user_message", ""),
-        result,
-        turn_id=state.get("run_id", ""),
-    )
+    if result.error is None and not result.interrupted:
+        await execution_service.post_process(
+            state.get("session_id", ""),
+            state.get("user_message", ""),
+            result,
+            turn_id=state.get("run_id", ""),
+        )
     return {"result": ExecutionService.result_payload(result, attachment_refs)}
 
 

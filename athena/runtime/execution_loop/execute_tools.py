@@ -37,9 +37,18 @@ async def execute_tool_batch(
         parent_run_id=state.get("parent_run_id"),
         tool_names=state.get("tool_names"),
     )
+    failed_count = sum(
+        1
+        for item in outcome.tool_results
+        if item.get("status") not in {None, "success"}
+    )
+    error = None
+    if failed_count >= int(state.get("max_retries", 3)):
+        error = f"工具调用失败次数达到上限: {failed_count}/{state.get('max_retries', 3)}"
     return {
         "messages": outcome.messages,
         "tool_results": outcome.tool_results,
         "interrupted": outcome.interrupted,
+        "error": error,
         "status": "interrupted" if outcome.interrupted else "running",
     }

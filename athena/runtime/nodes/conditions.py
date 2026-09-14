@@ -20,4 +20,9 @@ def decide_memory_request(
     state: AgentState,
 ) -> Literal["retrieve_memory", "prepare_context"]:
     request = state.get("memory_request")
-    return "retrieve_memory" if request else "prepare_context"
+    return (
+        "retrieve_memory"
+        if request
+        and request.get("reason") in {"context_reference", "llm_complex_request"}
+        else "prepare_context"
+    )

@@ -62,6 +62,19 @@ async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
         await conn.execute(text("DROP TABLE IF EXISTS tool_executions"))
         await conn.execute(text("DROP INDEX IF EXISTS uq_agent_runs_active_session"))
         await conn.run_sync(Base.metadata.create_all)
+        # Reconcile databases from the intermediate step-observability schema
+        # with older databases before repositories write tool records.
+        tool_call_columns = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(tool_call)"))).all()
+        }
+        if "step_id" not in tool_call_columns:
+            await conn.execute(
+                text("ALTER TABLE tool_call ADD COLUMN step_id VARCHAR")
+            )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS idx_tool_call_step ON tool_call(step_id)")
+        )
         session_columns = {
             row[1]
             for row in (await conn.execute(text("PRAGMA table_info(sessions)"))).all()

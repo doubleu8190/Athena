@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, TypeVar
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -18,7 +20,7 @@ logger = get_logger(__name__)
 class StructuredLLMService:
     """使用模型原生 Structured Output 生成并校验 Pydantic 模型。"""
 
-    def __init__(self, primary: LLMProvider) -> None:
+    def __init__(self, primary: LLMProvider, timeout_seconds: float = 15.0) -> None:
         """绑定主模型。
 
         参数：
@@ -31,6 +33,7 @@ class StructuredLLMService:
             不主动抛出业务异常。
         """
         self._primary = primary
+        self._timeout_seconds = timeout_seconds
 
     def validate_primary(self, schema: type[ModelT]) -> None:
         """确保主模型和所有 fallback 模型都支持结构化输出。
@@ -83,8 +86,18 @@ class StructuredLLMService:
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_message),
         ]
+        started = time.perf_counter()
         try:
-            result: Any = await runnable.ainvoke(messages)
+            async with asyncio.timeout(self._timeout_seconds):
+                result: Any = await runnable.ainvoke(messages)
+        except TimeoutError:
+            logger.warning(
+                "structured_output_request_timeout",
+                schema=schema.__name__,
+                timeout_seconds=self._timeout_seconds,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+            )
+            raise
         except Exception as exc:
             detail = str(exc).strip() or type(exc).__name__
             logger.exception(
@@ -97,6 +110,11 @@ class StructuredLLMService:
                 f"{detail}。请确认 LLM_PROVIDERS 中的 base_url 指向支持 "
                 "OpenAI 兼容 JSON 和 structured output 的接口。"
             ) from exc
+        logger.info(
+            "structured_output_request_completed",
+            schema=schema.__name__,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+        )
         if result is None:
             raise ValueError("structured LLM returned no result")
         if isinstance(result, schema):

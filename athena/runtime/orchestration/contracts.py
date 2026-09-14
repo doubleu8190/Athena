@@ -176,49 +176,18 @@ class TaskDraft(StrictContract):
     retry_limit: int = Field(default=1, ge=0, le=3)
 
 
-class PlannerDecisionDraft(StrictContract):
-    """Planner 原生结构化输出的决策草稿。"""
+class PlanSubmission(StrictContract):
+    """顶层 Agent LLM 提交给运行时的执行计划。"""
 
     schema_version: Literal[1] = 1
-    mode: Literal["direct_answer", "execute_plan"]
-    direct_answer: str = ""
-    plan_id: str = ""
+    plan_id: str = Field(min_length=1)
     goal: str = ""
-    tasks: list[TaskDraft] = Field(default_factory=list, max_length=6)
+    tasks: list[TaskDraft] = Field(min_length=1, max_length=6)
     aggregation_strategy: Literal["synthesize", "first_success", "all"] = "synthesize"
     max_parallelism: int = Field(default=4, ge=1, le=6)
 
-    @model_validator(mode="after")
-    def validate_v1_decision(self) -> PlannerDecisionDraft:
-        """保证直接回答和计划执行两种模式互斥且完整。
 
-        返回值：
-            PlannerDecisionDraft: 校验通过的当前决策。
-
-        异常：
-            ValueError: 模式内容不完整或包含 V1 不支持的任务依赖。
-        """
-
-        if self.mode == "direct_answer":
-            if not self.direct_answer.strip():
-                raise ValueError("direct_answer mode requires direct_answer")
-            if self.tasks:
-                raise ValueError("direct_answer mode must not contain tasks")
-            return self
-
-        if not self.plan_id.strip():
-            raise ValueError("execute_plan mode requires plan_id")
-        if not self.tasks:
-            raise ValueError("execute_plan mode requires at least one task")
-        return self
-
-
-class PlanningDecision(StrictContract):
-    """Runtime 内部使用的规划结果，已绑定 Root Run。"""
-
-    mode: Literal["direct_answer", "execute_plan"]
-    direct_answer: str = ""
-    plan: ExecutionPlan | None = None
+PLAN_SUBMISSION_TOOL_NAME = "submit_plan"
 
 
 class WorkerResult(StrictContract):

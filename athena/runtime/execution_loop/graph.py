@@ -18,7 +18,9 @@ from .finish import finish_execution
 if TYPE_CHECKING:
     from ..graph_runtime import LangGraphRuntime
 
-AgentLoopRoute = Literal["llm_call", "execute_tool_batch", "finish_execution"]
+AgentLoopRoute = Literal[
+    "llm_call", "execute_tool_batch", "finish_execution", "plan_requested"
+]
 
 # ── 主图适配器（包装 AgentExecutionState → AgentState） ──
 
@@ -67,6 +69,8 @@ def _route_after_llm(state: AgentState) -> AgentLoopRoute:
     exec_state: AgentExecutionState = state.get("execution", {})
     if exec_state.get("interrupted"):
         return "finish_execution"
+    if exec_state.get("route") == "plan_requested":
+        return "plan_requested"
     if exec_state.get("pending_tool_calls"):
         return "execute_tool_batch"
     if exec_state.get("error"):
@@ -95,7 +99,9 @@ async def _tools_wrapper(
 def _route_after_tools(state: AgentState) -> AgentLoopRoute:
     exec_state: AgentExecutionState = state.get("execution", {})
     return (
-        "finish_execution" if exec_state.get("interrupted") else "llm_call"
+        "finish_execution"
+        if exec_state.get("interrupted") or exec_state.get("error")
+        else "llm_call"
     )
 
 
@@ -111,6 +117,21 @@ async def _finish_wrapper(
     return {
         "execution": result,
         "harness_result": result.get("harness_result"),
+        "error": (result.get("harness_result") or {}).get("error"),
+    }
+
+
+async def _plan_requested_wrapper(
+    state: AgentState,
+    config,
+    *,
+    graph_runtime: LangGraphRuntime,
+) -> AgentState:
+    """把顶层 Agent 的计划请求交回外层主图，计划分支统一负责收尾。"""
+    execution = state.get("execution", {})
+    return {
+        "execution": execution,
+        "plan_request": execution.get("plan_request"),
     }
 
 
@@ -136,6 +157,10 @@ def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
     graph.add_node(
         "finish_execution", partial(_finish_wrapper, graph_runtime=runtime)
     )
+    graph.add_node(
+        "plan_requested",
+        partial(_plan_requested_wrapper, graph_runtime=runtime),
+    )
     graph.add_edge(START, "initialize_execution")
     graph.add_edge("initialize_execution", "llm_call")
     graph.add_conditional_edges(
@@ -145,6 +170,7 @@ def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
             "llm_call": "llm_call",
             "execute_tool_batch": "execute_tool_batch",
             "finish_execution": "finish_execution",
+            "plan_requested": "plan_requested",
         },
     )
     graph.add_conditional_edges(
@@ -153,4 +179,5 @@ def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
         {"llm_call": "llm_call", "finish_execution": "finish_execution"},
     )
     graph.add_edge("finish_execution", END)
+    graph.add_edge("plan_requested", END)
     return graph.compile()

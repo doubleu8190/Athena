@@ -26,40 +26,6 @@ def _task(task_id: str = "task-1", plan_id: str = "plan-1") -> TaskSpec:
     )
 
 
-class _FakeStructuredLLM:
-    def validate_primary(self, schema: type) -> None:
-        return None
-
-    async def generate(self, schema: type, system_prompt: str, user_message: str):
-        if schema.__name__ == "PlannerDecisionDraft":
-            from athena.runtime.orchestration import PlannerDecisionDraft, TaskDraft
-
-            return PlannerDecisionDraft(
-                mode="execute_plan",
-                plan_id="plan-1",
-                goal=user_message,
-                tasks=[
-                    TaskDraft(
-                        task_id="task-1",
-                        title="检查模块",
-                        objective="返回模块检查结果",
-                        allowed_tools=["read_local_file"],
-                    )
-                ],
-            )
-        if schema.__name__ == "WorkerResult":
-            from athena.runtime.orchestration import WorkerResult
-
-            return WorkerResult(
-                plan_id="plan-1",
-                task_id="task-1",
-                run_id="worker-run",
-                status="completed",
-                output={"summary": "ok"},
-            )
-        raise AssertionError(f"unexpected schema {schema}")
-
-
 class _FakeWorker:
     async def execute(self, **kwargs):
         from athena.runtime.orchestration import WorkerResult
@@ -81,20 +47,28 @@ async def test_planner_persists_structured_plan(tmp_path) -> None:
 
     from athena.runtime.orchestration import OrchestrationEventPublisher
 
-    planner = Planner(
-        _FakeStructuredLLM(),
-        database,
-        OrchestrationEventPublisher(AsyncMock()),
-    )
-    plan = await planner.plan(
+    planner = Planner(database, OrchestrationEventPublisher(AsyncMock()))
+    plan = await planner.materialize_submission(
         session.id,
         "root-1",
         "检查模块",
+        {
+            "plan_id": "plan-1",
+            "tasks": [
+                {
+                    "task_id": "task-1",
+                    "title": "检查模块",
+                    "objective": "返回模块检查结果",
+                    "allowed_tools": ["read_local_file"],
+                }
+            ],
+        },
         ["read_local_file"],
     )
 
     assert plan.plan_id == "plan-1"
     assert plan.tasks[0].plan_id == "plan-1"
+    assert plan.tasks[0].allowed_tools == ["read_local_file"]
     await database.close()
 
 

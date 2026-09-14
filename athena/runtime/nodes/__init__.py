@@ -15,9 +15,9 @@ from .retrieve_memory import create_retrieve_memory_node
 from .decide_memory import create_decide_memory_node
 from .orchestration import (
     create_execute_plan_node,
-    create_plan_orchestration_node,
+    create_materialize_plan_node,
+    create_close_plan_stream_node,
     create_synthesize_orchestration_node,
-    route_after_planning,
 )
 
 __all__ = [
@@ -35,7 +35,7 @@ __all__ = [
     "create_retrieve_memory_node",
     "create_decide_memory_node",
     "create_execute_plan_node",
-    "create_plan_orchestration_node",
+    "create_materialize_plan_node",
+    "create_close_plan_stream_node",
     "create_synthesize_orchestration_node",
-    "route_after_planning",
 ]

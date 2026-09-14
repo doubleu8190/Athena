@@ -93,6 +93,7 @@ def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
     return ToolCallRecord(
         id=row.id,
         session_id=row.session_id,
+        step_id=row.step_id,
         tool_name=row.tool_name,
         arguments=_json_loads(row.arguments_json, {}),
         raw_output=row.raw_output,

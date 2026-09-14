@@ -46,9 +46,7 @@ class AgentRunModel(Base):
     root_run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="所属 Root Run；Root Run 等于自身标识"
     )
-    role: Mapped[str] = mapped_column(
-        String, default="root", comment="运行角色"
-    )
+    role: Mapped[str] = mapped_column(String, default="root", comment="运行角色")
     plan_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="所属执行计划"
     )
@@ -61,9 +59,7 @@ class AgentRunModel(Base):
     depth: Mapped[int] = mapped_column(
         Integer, default=0, comment="编排深度；Root 为 0，Worker 为 1"
     )
-    status: Mapped[str] = mapped_column(
-        String, default="queued", comment="运行状态"
-    )
+    status: Mapped[str] = mapped_column(String, default="queued", comment="运行状态")
     pause_requested: Mapped[int] = mapped_column(
         Integer, default=0, comment="是否请求暂停，0 表示否，1 表示是"
     )
@@ -250,9 +246,7 @@ class StreamSnapshotModel(Base):
     stream_type: Mapped[str] = mapped_column(
         String, default="answer", comment="流类型，例如 answer 或 thinking"
     )
-    version: Mapped[int] = mapped_column(
-        Integer, default=0, comment="快照版本号"
-    )
+    version: Mapped[int] = mapped_column(Integer, default=0, comment="快照版本号")
     last_chunk_id: Mapped[int] = mapped_column(
         Integer, default=0, comment="快照覆盖到的最后一个 Chunk 序号"
     )
@@ -293,9 +287,7 @@ class ApprovalRecordModel(Base):
     risk_level: Mapped[str] = mapped_column(
         String, default="low", comment="工具风险等级"
     )
-    status: Mapped[str] = mapped_column(
-        String, default="pending", comment="审批状态"
-    )
+    status: Mapped[str] = mapped_column(String, default="pending", comment="审批状态")
     decision: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="审批决定"
     )
@@ -310,9 +302,7 @@ class SessionModel(Base):
 
     __tablename__ = "sessions"
 
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="会话唯一标识"
-    )
+    id: Mapped[str] = mapped_column(String, primary_key=True, comment="会话唯一标识")
     title: Mapped[str] = mapped_column(
         String, default="New Session", comment="会话标题"
     )
@@ -335,6 +325,8 @@ class SessionModel(Base):
     deleted_time: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="软删除时间（UTC）"
     )
+
+
 class MessageModel(Base):
     """消息表模型."""
 
@@ -344,9 +336,7 @@ class MessageModel(Base):
         Index("idx_messages_timestamp", "timestamp"),
     )
 
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="消息唯一标识"
-    )
+    id: Mapped[str] = mapped_column(String, primary_key=True, comment="消息唯一标识")
     session_id: Mapped[str] = mapped_column(
         ForeignKey("sessions.id"), comment="所属会话标识"
     )
@@ -367,13 +357,39 @@ class MessageModel(Base):
     tool_name: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="工具名称"
     )
-    type: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="消息类型"
-    )
+    type: Mapped[str | None] = mapped_column(String, nullable=True, comment="消息类型")
     timestamp: Mapped[str] = mapped_column(String, comment="消息时间（UTC）")
     deleted_time: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="软删除时间（UTC）"
     )
+
+
+class StepModel(Base):
+    """可观测执行步骤，工具调用通过 step_id 归属到这里。"""
+
+    __tablename__ = "steps"
+    __table_args__ = (
+        Index("idx_steps_session", "session_id"),
+        Index("idx_steps_run", "run_id"),
+        Index("idx_steps_number", "step_number"),
+        Index("idx_steps_parent", "parent_step_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
+    run_id: Mapped[str] = mapped_column(String)
+    step_number: Mapped[int] = mapped_column(Integer)
+    step_type: Mapped[str] = mapped_column(String)
+    parent_step_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    parent_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String)
+    started_at: Mapped[str] = mapped_column(String)
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0)
+    llm_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    llm_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class ToolCallModel(Base):
@@ -382,6 +398,7 @@ class ToolCallModel(Base):
     __tablename__ = "tool_call"
     __table_args__ = (
         Index("idx_tool_call_session", "session_id"),
+        Index("idx_tool_call_step", "step_id"),
         Index("idx_tool_call_status", "status"),
     )
 
@@ -390,6 +407,12 @@ class ToolCallModel(Base):
     )
     session_id: Mapped[str] = mapped_column(
         ForeignKey("sessions.id"), comment="所属会话标识"
+    )
+    # Nullable keeps databases created before step observability readable;
+    # new writes always provide a step_id and the startup migration adds this
+    # column to legacy tool_call tables when it is missing.
+    step_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("steps.id"), nullable=True, comment="所属执行步骤"
     )
     tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
     arguments_json: Mapped[str] = mapped_column(
@@ -455,9 +478,7 @@ class MemoryModel(Base):
     __tablename__ = "memories"
     __table_args__ = (Index("idx_memories_session", "session_id"),)
 
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="记忆唯一标识"
-    )
+    id: Mapped[str] = mapped_column(String, primary_key=True, comment="记忆唯一标识")
     session_id: Mapped[str] = mapped_column(String, comment="所属会话标识")
     content: Mapped[str] = mapped_column(Text, comment="记忆内容")
     # 仅存任意用户扩展字段（系统/语义字段一律拆为独立列，避免双源真相）
@@ -474,9 +495,7 @@ class MemoryModel(Base):
     last_accessed: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="最后访问时间（UTC）"
     )
-    access_count: Mapped[int] = mapped_column(
-        Integer, default=0, comment="被访问次数"
-    )
+    access_count: Mapped[int] = mapped_column(Integer, default=0, comment="被访问次数")
     # 语义字段（平铺自 metadata_json，支持 SQL 过滤）
     type: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="记忆类型，例如 fact 或 summary"
@@ -492,7 +511,9 @@ class MemoryModel(Base):
         nullable=True,
         comment="记忆来源，例如 extraction、threshold 或 api",
     )
-    status: Mapped[str] = mapped_column(String, default="active", comment="生命周期状态")
+    status: Mapped[str] = mapped_column(
+        String, default="active", comment="生命周期状态"
+    )
     superseded_by: Mapped[str | None] = mapped_column(String, nullable=True)
     superseded_at: Mapped[str | None] = mapped_column(String, nullable=True)
     source_turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -573,9 +594,7 @@ class AttachmentModel(Base):
         Index("idx_attachments_status", "status"),
     )
 
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="附件唯一标识"
-    )
+    id: Mapped[str] = mapped_column(String, primary_key=True, comment="附件唯一标识")
     session_id: Mapped[str] = mapped_column(
         ForeignKey("sessions.id"), comment="所属会话标识"
     )
@@ -674,9 +693,7 @@ class AdapterRegistryModel(Base):
 
     __tablename__ = "adapter_registry"
 
-    name: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="适配器名称"
-    )
+    name: Mapped[str] = mapped_column(String, primary_key=True, comment="适配器名称")
     version: Mapped[str] = mapped_column(String, comment="适配器版本")
     mime_types_json: Mapped[str] = mapped_column(
         Text, default="[]", comment="支持的 MIME 类型列表（JSON 格式）"

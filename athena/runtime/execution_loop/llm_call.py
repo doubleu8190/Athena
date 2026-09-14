@@ -59,4 +59,6 @@ async def llm_call(
         "stream_version": outcome.stream_version,
         "stream_offset": outcome.stream_offset,
         "status": status,
+        "route": outcome.route,
+        "plan_request": outcome.plan_request,
     }

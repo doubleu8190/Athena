@@ -85,6 +85,66 @@ async def test_simple_memory_request_does_not_call_llm():
 
 
 @pytest.mark.asyncio
+async def test_substantive_memory_request_skips_retrieval() -> None:
+    from athena.runtime.nodes.conditions import decide_memory_request
+
+    assert decide_memory_request(
+        {"memory_request": {"reason": "substantive_task"}}
+    ) == "prepare_context"
+    assert decide_memory_request(
+        {"memory_request": {"reason": "context_reference"}}
+    ) == "retrieve_memory"
+    assert decide_memory_request(
+        {"memory_request": {"reason": "llm_complex_request"}}
+    ) == "retrieve_memory"
+
+    from athena.runtime.services.memory_service import MemoryService
+
+    service = MemoryService(llm=object(), memory_retrieval=object())
+    request = await service.build_memory_request(
+        "session-1", "请按照优先级修复问题"
+    )
+    assert request is None
+
+
+@pytest.mark.asyncio
+async def test_memory_retrieval_timeout_falls_back_without_context() -> None:
+    from athena.runtime.services.memory_service import MemoryService
+
+    class RetrievalStub:
+        async def get_context(self, request):
+            await asyncio.sleep(0.05)
+            return "should not be used"
+
+    service = MemoryService(
+        llm=object(), memory_retrieval=RetrievalStub(), retrieval_timeout_seconds=0.01
+    )
+    assert await service.retrieve_memory_context(
+        "session-1", {"session_id": "session-1", "query": "之前的设计"}
+    ) == ""
+
+
+@pytest.mark.asyncio
+async def test_complex_memory_request_timeout_falls_back_to_raw_query() -> None:
+    from athena.runtime.services.memory_service import MemoryService
+
+    class LLM:
+        async def ainvoke(self, messages):
+            await asyncio.sleep(0.05)
+
+    service = MemoryService(
+        llm=LLM(), memory_retrieval=object(), retrieval_timeout_seconds=0.01
+    )
+    request = await service.build_memory_request(
+        "session-1",
+        "继续分析之前的系统设计和实现细节，并逐项对照尚未完成的工作、风险、测试覆盖和兼容性问题。",
+    )
+    assert request is not None
+    assert request.query.startswith("继续分析之前")
+    assert request.reason == "context_reference"
+
+
+@pytest.mark.asyncio
 async def test_complex_memory_request_uses_validated_llm_plan():
     """Memory requests now go through MemoryService."""
     from athena.runtime.services.memory_service import MemoryService

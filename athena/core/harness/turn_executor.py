@@ -20,6 +20,7 @@ from langchain_core.messages import (
     BaseMessage,
     SystemMessage,
 )
+from langchain_core.tools import StructuredTool
 
 from athena.contracts.events import EventType
 from athena.core.harness.harness import Harness
@@ -27,6 +28,11 @@ from athena.models import Message, MessageRole
 from athena.utils.llm import extract_message_text
 from athena.utils.message import dict_to_message, message_to_dict
 from athena.runtime.streaming import StreamCoalescer
+from athena.runtime.orchestration import (
+    DELEGATION_TOOL_NAMES,
+    PLAN_SUBMISSION_TOOL_NAME,
+    PlanSubmission,
+)
 
 
 def _to_domain_messages(
@@ -66,6 +72,8 @@ class LlmTurnOutcome:
     stream_started: bool = False
     stream_version: int = 0
     stream_offset: int = 0
+    route: str = "agent_loop"
+    plan_request: dict[str, Any] | None = None
 
 
 @dataclass
@@ -226,6 +234,36 @@ class HarnessTurnExecutor(Harness):
             tool_calls.append(tool_call)
         return content, tool_calls
 
+    @staticmethod
+    async def _submit_plan_placeholder(**_: Any) -> str:
+        """仅用于向顶层 LLM 暴露控制协议，永远不会被执行。"""
+        raise RuntimeError("submit_plan is a runtime control tool")
+
+    def _get_llm_tools(
+        self,
+        *,
+        tool_names: list[str] | None,
+        parent_run_id: str | None,
+    ) -> list[StructuredTool]:
+        tools = [
+            tool
+            for tool in self._tool_manager.get_langchain_tools(names=tool_names)
+            if tool.name not in DELEGATION_TOOL_NAMES
+        ]
+        if parent_run_id is None:
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=self._submit_plan_placeholder,
+                    name=PLAN_SUBMISSION_TOOL_NAME,
+                    description=(
+                        "Submit a validated execution plan for independent subtasks. "
+                        "Use only when the request genuinely requires parallel work."
+                    ),
+                    args_schema=PlanSubmission,
+                )
+            )
+        return tools
+
     async def run_llm_turn(
         self,
         *,
@@ -312,7 +350,10 @@ class HarnessTurnExecutor(Harness):
         full_content = ""
         chunks: list[AIMessageChunk] = []
         started_at = time.time()
-        bound_tools = self._tool_manager.get_langchain_tools(names=tool_names)
+        bound_tools = self._get_llm_tools(
+            tool_names=tool_names,
+            parent_run_id=parent_run_id,
+        )
         bound_llm = self._llm.bind_tools(bound_tools) if bound_tools else self._llm
         try:
             async with asyncio.timeout(self._harness_settings.llm_stream_timeout):
@@ -322,10 +363,15 @@ class HarnessTurnExecutor(Harness):
                     if isinstance(chunk, AIMessageChunk):
                         chunks.append(chunk)
                     chunk_content = extract_message_text(chunk)
-                    if chunk_content:
+                    if chunk_content and not (
+                        next_turn == 1
+                        and parent_run_id is None
+                    ):
                         full_content += chunk_content
                         if self._answer_stream is not None:
                             await self._answer_stream.append(chunk_content)
+                    elif chunk_content:
+                        full_content += chunk_content
 
             content, tool_calls = self._assemble_stable_response(
                 chunks,
@@ -406,6 +452,63 @@ class HarnessTurnExecutor(Harness):
                 tool_calls=tool_calls,
             )
             if self._answer_stream is not None:
+                await self._answer_stream.flush()
+            plan_calls = [
+                call
+                for call in tool_calls
+                if call.get("name") == PLAN_SUBMISSION_TOOL_NAME
+            ]
+            if plan_calls:
+                if parent_run_id is not None:
+                    return self._llm_outcome(
+                        messages=message_dicts,
+                        content=full_content,
+                        error="submit_plan 只能由顶层 Agent 调用",
+                        retryable=False,
+                        stream_started=stream_started,
+                        turn_count=next_turn,
+                        retry_count=retry_count,
+                    )
+                if len(plan_calls) != 1 or len(plan_calls) != len(tool_calls):
+                    return self._llm_outcome(
+                        messages=message_dicts,
+                        content=full_content,
+                        error="submit_plan 不能与普通工具调用混用",
+                        retryable=False,
+                        stream_started=stream_started,
+                        turn_count=next_turn,
+                        retry_count=retry_count,
+                    )
+                try:
+                    plan_request = PlanSubmission.model_validate(
+                        plan_calls[0].get("args") or {}
+                    )
+                except Exception as exc:
+                    return self._llm_outcome(
+                        messages=message_dicts,
+                        content=full_content,
+                        error=f"submit_plan 参数无效: {exc}",
+                        retryable=False,
+                        stream_started=stream_started,
+                        turn_count=next_turn,
+                        retry_count=retry_count,
+                    )
+                return self._llm_outcome(
+                    messages=message_dicts,
+                    content=full_content,
+                    route="plan_requested",
+                    plan_request=plan_request.model_dump(mode="json"),
+                    stream_started=stream_started,
+                    turn_count=next_turn,
+                    retry_count=retry_count,
+                )
+            if (
+                full_content
+                and next_turn == 1
+                and parent_run_id is None
+                and self._answer_stream is not None
+            ):
+                await self._answer_stream.append(full_content)
                 await self._answer_stream.flush()
             return self._llm_outcome(
                 messages=message_dicts,

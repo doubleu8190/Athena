@@ -8,8 +8,8 @@ from .contracts import (
     TaskStatus,
     WorkerResult,
     WorkerResultStatus,
-    PlannerDecisionDraft,
-    PlanningDecision,
+    PlanSubmission,
+    PLAN_SUBMISSION_TOOL_NAME,
     TaskDraft,
 )
 from .policies import DELEGATION_TOOL_NAMES, ToolPolicy
@@ -36,7 +36,7 @@ __all__ = [
     "OrchestrationEventPublisher",
     "WorkerResult",
     "WorkerResultStatus",
-    "PlannerDecisionDraft",
-    "PlanningDecision",
+    "PlanSubmission",
+    "PLAN_SUBMISSION_TOOL_NAME",
     "TaskDraft",
 ]

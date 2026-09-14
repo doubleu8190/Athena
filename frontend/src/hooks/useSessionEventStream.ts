@@ -206,7 +206,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
         if (type === "run.started" || type === "run.resumed") setAgentStatus("running")
         else if (type === "run.paused" || type === "run.cancelled") { setAgentStatus("idle"); clearThinking() }
-        else if (type === "run.failed") { setAgentStatus("error"); setError(String(data.error || "Run failed")) }
+        else if (type === "run.failed") { setAgentStatus("error"); setError(String(data.error || data.message || "Run failed")) }
         else if (type === "run.completed") { setAgentStatus("idle"); clearThinking() }
       } catch { /* 单条事件格式错误不应中断 EventSource。 */ }
     }

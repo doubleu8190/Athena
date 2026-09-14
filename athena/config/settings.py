@@ -113,6 +113,8 @@ class Settings(BaseSettings):
 
     # --- 数据库 ---
     sqlite_db_path: str = "./data/athena.db"
+    sqlite_memory_db_path: str = "./data/memory.db"
+    sqlite_checkpoint_db_path: str = "./data/checkpoint.db"
     chromadb_path: str = "./data/chromadb"
 
     # --- 文件智能 ---
@@ -206,6 +208,16 @@ class Settings(BaseSettings):
     def db_path(self) -> Path:
         """SQLite 数据库文件路径。"""
         return Path(self.sqlite_db_path)
+
+    @property
+    def memory_db_path(self) -> Path:
+        """记忆任务数据库文件路径，未配置时由核心数据库路径派生。"""
+        return Path(self.sqlite_memory_db_path or self.db_path.with_name(f"{self.db_path.stem}-memory.db"))
+
+    @property
+    def checkpoint_db_path(self) -> Path:
+        """LangGraph 检查点数据库文件路径，未配置时由核心数据库路径派生。"""
+        return Path(self.sqlite_checkpoint_db_path or self.db_path.with_name(f"{self.db_path.stem}-checkpoints.db"))
 
     @property
     def chroma_path(self) -> Path:

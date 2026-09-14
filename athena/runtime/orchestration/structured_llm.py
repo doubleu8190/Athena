@@ -83,7 +83,20 @@ class StructuredLLMService:
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_message),
         ]
-        result: Any = await runnable.ainvoke(messages)
+        try:
+            result: Any = await runnable.ainvoke(messages)
+        except Exception as exc:
+            detail = str(exc).strip() or type(exc).__name__
+            logger.exception(
+                "structured_output_request_failed",
+                schema=schema.__name__,
+                error=detail,
+            )
+            raise RuntimeError(
+                "结构化 LLM 请求失败："
+                f"{detail}。请确认 LLM_PROVIDERS 中的 base_url 指向支持 "
+                "OpenAI 兼容 JSON 和 structured output 的接口。"
+            ) from exc
         if result is None:
             raise ValueError("structured LLM returned no result")
         if isinstance(result, schema):
@@ -95,4 +108,3 @@ class StructuredLLMService:
         raise ValueError(
             f"structured LLM returned unsupported type: {type(result).__name__}"
         )
-

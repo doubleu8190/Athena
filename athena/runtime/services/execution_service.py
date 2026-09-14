@@ -128,7 +128,11 @@ class ExecutionService:
             user_text=user_message,
             assistant_text=result.content,
         )
-        await self._memory_job_repository.enqueue(turn.model_dump(mode="json"))
+        try:
+            await self._memory_job_repository.enqueue(turn.model_dump(mode="json"))
+        except Exception as exc:
+            # 记忆属于回答后的增强流程，队列暂时不可用时不能回滚已经生成的回答。
+            logger.warning("memory_job_enqueue_failed", turn_id=turn_id, error=str(exc))
         try:
             await self._conversation_summarizer.summarize_if_needed(
                 session_id=session_id, db=self._db

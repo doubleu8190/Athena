@@ -849,6 +849,12 @@ class AgentStore:
                     stream_id=stream_id,
                     session_id=session_id,
                     stream_type=stream_type,
+                    version=version,
+                    last_chunk_id=last_chunk_id,
+                    content=content,
+                    content_length=len(content.encode("utf-8")),
+                    status=status.value,
+                    updated_at=_now(),
                 )
                 db.add(row)
             if last_chunk_id == 0:

@@ -59,9 +59,17 @@ class Database:
 
         self.files = FileRepository()
 
-    async def connect(self) -> None:
-        """建立连接并初始化表结构."""
-        await init_engine(self._db_path)
+    async def connect(self, memory_db_path: str | None = None) -> None:
+        """建立核心数据库连接，并按需初始化独立的记忆数据库。
+
+        参数:
+            memory_db_path: 记忆任务数据库路径；为空时与核心数据库共用连接。
+        返回:
+            None。
+        异常:
+            数据库初始化失败时传播底层异常。
+        """
+        await init_engine(self._db_path, memory_db_path=memory_db_path)
         logger.info("database_connected", db_path=self._db_path)
 
     async def close(self) -> None:

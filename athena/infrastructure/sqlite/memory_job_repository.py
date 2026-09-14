@@ -9,7 +9,7 @@ from typing import Any, cast
 from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.engine import get_memory_session
 
 
 class MemoryJobRepository:
@@ -17,7 +17,7 @@ class MemoryJobRepository:
 
     async def enqueue(self, payload: dict[str, Any]) -> bool:
         now = datetime.now().isoformat()
-        async with get_session() as session:
+        async with get_memory_session() as session:
             async with session.begin():
                 result = await session.execute(
                     text(
@@ -41,7 +41,7 @@ class MemoryJobRepository:
 
     async def claim_next(self, *, max_attempts: int = 5) -> dict[str, Any] | None:
         now = datetime.now().isoformat()
-        async with get_session() as session:
+        async with get_memory_session() as session:
             async with session.begin():
                 row = (
                     await session.execute(
@@ -77,7 +77,7 @@ class MemoryJobRepository:
     async def recover_interrupted(self) -> int:
         """Return jobs left running by a previous process to the retry queue."""
         now = datetime.now().isoformat()
-        async with get_session() as session:
+        async with get_memory_session() as session:
             async with session.begin():
                 result = cast(
                     CursorResult[Any],
@@ -103,7 +103,7 @@ class MemoryJobRepository:
     async def _mark(
         self, job_id: str, status: str, error: str | None, available: str | None
     ) -> None:
-        async with get_session() as session:
+        async with get_memory_session() as session:
             async with session.begin():
                 await session.execute(
                     text("""UPDATE memory_processing_jobs

@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
 
     # ── 1. 数据库 ──
     db = Database(settings.sqlite_db_path)
-    await db.connect()
+    await db.connect(memory_db_path=str(settings.memory_db_path))
     command_notifier = CommandNotifier()
     agent_store = AgentStore(command_notifier=command_notifier)
 
@@ -237,7 +237,9 @@ async def lifespan(app: FastAPI):
     ).reconcile()
 
     # 初始化sqlite checkpointer，确保langgraph的状态可以在中断后恢复
-    checkpoint_conn = await aiosqlite.connect(settings.sqlite_db_path)
+    checkpoint_conn = await aiosqlite.connect(str(settings.checkpoint_db_path), timeout=5)
+    await checkpoint_conn.execute("PRAGMA journal_mode=WAL")
+    await checkpoint_conn.execute("PRAGMA busy_timeout=5000")
     checkpointer = AsyncSqliteSaver(checkpoint_conn)
     await checkpointer.setup()
 

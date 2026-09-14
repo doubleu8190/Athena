@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from athena.contracts.commands import CommandType
@@ -16,10 +17,13 @@ from athena.contracts.statuses import (
 )
 from athena.models.json_models import CommandPayload
 from athena.core.memory.memory import MemoryManager
+from athena.utils.logging import get_logger
 from .command_notifications import CommandNotifier
 from .langgraph_graph import invoke_graph
 from .cancellation import CancellationRegistry
 from langgraph.graph.state import CompiledStateGraph
+
+logger = get_logger(__name__)
 
 
 class CommandConsumer:
@@ -401,13 +405,33 @@ class CommandConsumer:
     async def _handle_command_error(
         self, command: AgentCommandRecord, exc: Exception
     ) -> None:
+        """将命令执行异常记录为可向客户端显示的失败状态。
+
+        参数：
+            command: AgentCommandRecord，当前执行失败的命令。
+            exc: Exception，处理命令时捕获的异常。
+        返回值：
+            None。失败信息会写入 Run、事件和命令记录。
+        异常：
+            存储层写入失败时传播底层异常。
+        """
+        error_message = self._error_message(exc)
+        logger.exception(
+            "command_processing_failed",
+            command_id=command.command_id,
+            command_type=command.command_type,
+            run_id=command.run_id,
+            error=error_message,
+        )
         run_id = (
             command.run_id
             if command.command_type == CommandType.MESSAGE_SUBMIT
             else None
         )
         if run_id is not None:
-            await self.store.update_run_status(run_id, AgentRunStatus.FAILED, str(exc))
+            await self.store.update_run_status(
+                run_id, AgentRunStatus.FAILED, error_message
+            )
             await self.store.publish(
                 ApplicationEvent(
                     event_type=EventType.RUN_FAILED,
@@ -419,12 +443,25 @@ class CommandConsumer:
                     payload={
                         "command_id": command.command_id,
                         "message_id": self._command_message_id(command),
-                        "error": str(exc),
+                        "error": error_message,
                     },
                 )
             )
         await self.store.complete(
             command.command_id,
             status=AgentCommandStatus.FAILED,
-            error={"code": "command_failed", "message": str(exc)},
+            error={"code": "command_failed", "message": error_message},
         )
+
+    @staticmethod
+    def _error_message(exc: Exception) -> str:
+        """生成永不为空的异常描述，避免持久化空失败事件。
+
+        参数：
+            exc: Exception，需要转换为稳定错误文本的异常。
+        返回值：
+            str。优先返回异常消息；没有消息时返回异常类型名。
+        异常：
+            不主动抛出业务异常。
+        """
+        return str(exc).strip() or type(exc).__name__

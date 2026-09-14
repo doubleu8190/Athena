@@ -11,12 +11,14 @@ from athena.runtime.command_notifications import CommandNotifier
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
-from athena.contracts.statuses import AgentRunStatus
+from athena.contracts.statuses import AgentRunStatus, StreamSnapshotStatus
 from athena.runtime.streaming import StreamCoalescer
 from athena.infrastructure.sqlite.agent_store import AgentStore
 from athena.models.tool import RiskLevel
 from athena.contracts.statuses import AgentApprovalDecision
 from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.models import StreamSnapshotModel
 from athena.utils.ids import generate_session_id
 
 
@@ -68,10 +70,32 @@ def test_stream_chunk_cache_never_moves_backward():
 
     store._advance_stream_chunk_cache(cache_key, 3)
     assert store._stream_chunk_cache[cache_key] == 5
-
     store._advance_stream_chunk_cache(cache_key, 6)
     assert store._stream_chunk_cache[cache_key] == 6
 
+
+@pytest.mark.asyncio
+async def test_upsert_snapshot_initializes_required_fields_before_autoflush(agent_store):
+    """首次写入快照时，内部查询触发 autoflush 也不会提交空时间戳。"""
+    database, store = agent_store
+    session_id = generate_session_id()
+    await database.sessions.create(session_id)
+
+    assert await store.upsert_snapshot(
+        session_id,
+        "answer-stream",
+        0,
+        "",
+        run_id=None,
+        stream_type="answer",
+        last_chunk_id=0,
+        status=StreamSnapshotStatus.STREAMING,
+    ) is True
+
+    async with get_session() as db:
+        row = await db.get(StreamSnapshotModel, "answer-stream")
+    assert row is not None
+    assert row.updated_at
 
 @pytest.mark.asyncio
 async def test_message_enqueue_assigns_and_reuses_run_id(agent_store):

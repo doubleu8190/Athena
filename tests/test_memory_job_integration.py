@@ -6,7 +6,12 @@ import pytest
 from sqlalchemy import text
 
 from athena.core.memory.contracts import CompletedTurn
-from athena.infrastructure.sqlite.engine import close_engine, get_session, init_engine
+from athena.infrastructure.sqlite.engine import (
+    close_engine,
+    get_memory_session,
+    get_session,
+    init_engine,
+)
 from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
 
 
@@ -72,3 +77,26 @@ async def test_job_cannot_be_claimed_twice(jobs):
     await jobs.enqueue(payload())
     first, second = await asyncio.gather(jobs.claim_next(), jobs.claim_next())
     assert sum(item is not None for item in (first, second)) == 1
+
+
+@pytest.mark.asyncio
+async def test_jobs_use_separate_database_when_configured(tmp_path):
+    await init_engine(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
+    try:
+        assert await MemoryJobRepository().enqueue(payload("split-turn")) is True
+        async with get_session() as session:
+            core_count = (
+                await session.execute(
+                    text("SELECT count(*) FROM memory_processing_jobs")
+                )
+            ).scalar_one()
+        async with get_memory_session() as session:
+            memory_count = (
+                await session.execute(
+                    text("SELECT count(*) FROM memory_processing_jobs")
+                )
+            ).scalar_one()
+        assert core_count == 0
+        assert memory_count == 1
+    finally:
+        await close_engine()

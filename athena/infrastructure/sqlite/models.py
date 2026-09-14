@@ -305,54 +305,6 @@ class ApprovalRecordModel(Base):
     )
 
 
-class ToolExecutionModel(Base):
-    __tablename__ = "tool_executions"
-    __table_args__ = (
-        Index("idx_tool_executions_tool_call", "tool_call_id", "attempt"),
-        Index("idx_tool_executions_status", "status"),
-    )
-    tool_execution_id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="工具执行记录唯一标识"
-    )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
-    run_id: Mapped[str] = mapped_column(String, comment="所属运行标识")
-    tool_call_id: Mapped[str] = mapped_column(String, comment="工具调用标识")
-    attempt: Mapped[int] = mapped_column(
-        Integer, default=1, comment="当前工具调用尝试次数"
-    )
-    retry_of_execution_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="本次重试所基于的执行记录标识"
-    )
-    tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
-    arguments_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="工具参数（JSON 格式）"
-    )
-    arguments_fingerprint: Mapped[str] = mapped_column(
-        String, comment="工具参数指纹"
-    )
-    redaction_policy_version: Mapped[str] = mapped_column(
-        String, default="tool-args-v1", comment="参数脱敏策略版本"
-    )
-    fingerprint_key_version: Mapped[str] = mapped_column(
-        String, default="v1", comment="指纹密钥版本"
-    )
-    side_effect_class: Mapped[str] = mapped_column(
-        String, default="unknown", comment="工具副作用类别"
-    )
-    status: Mapped[str] = mapped_column(
-        String, default="pending", comment="工具执行状态"
-    )
-    error: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="工具执行错误信息"
-    )
-    created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
-    completed_at: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="完成时间（UTC）"
-    )
-
-
 class SessionModel(Base):
     """会话表模型."""
 
@@ -383,13 +335,6 @@ class SessionModel(Base):
     deleted_time: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="软删除时间（UTC）"
     )
-    status: Mapped[str] = mapped_column(String, default="active", comment="生命周期状态")
-    superseded_by: Mapped[str | None] = mapped_column(String, nullable=True)
-    superseded_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    source_turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_observed_at: Mapped[str | None] = mapped_column(String, nullable=True)
-
-
 class MessageModel(Base):
     """消息表模型."""
 

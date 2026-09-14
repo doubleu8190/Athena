@@ -30,7 +30,6 @@ def settings():
             ),
         ],
         host="0.0.0.0",
-        sandbox_enabled=True,
     )
 
 
@@ -53,7 +52,7 @@ def test_get_settings_readonly(client):
     body = resp.json()
     assert body["host"] == "0.0.0.0"
     assert body["port"] == 8000
-    assert body["sandbox_enabled"] is True
+    assert "sandbox_enabled" not in body
     assert body["llm_retry"]["max_attempts"] == 3
     assert body["llm_secondary_retry"]["max_attempts"] == 2
     # 绝不泄露 api_key

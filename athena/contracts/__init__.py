@@ -9,8 +9,6 @@ from .statuses import (
     AgentCommandStatus,
     AgentRunStatus,
     StreamSnapshotStatus,
-    ToolExecutionStatus,
-    ToolSideEffectClass,
 )
 
 __all__ = [
@@ -24,6 +22,4 @@ __all__ = [
     "ErrorDetail",
     "EventDurability",
     "StreamSnapshotStatus",
-    "ToolExecutionStatus",
-    "ToolSideEffectClass",
 ]

@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from athena.infrastructure.sqlite.engine import close_engine, init_engine
 from athena.infrastructure.sqlite.repositories import (
     ApprovalLogRepository,
@@ -18,7 +16,6 @@ from athena.infrastructure.sqlite.repositories import (
     ToolCallRepository,
     ToolRepository,
 )
-from athena.models.tool import ToolCallStatus
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -76,20 +73,3 @@ class Database:
         """关闭数据库连接."""
         await close_engine()
         logger.info("database_closed")
-
-    async def cleanup_interrupted_session(self, session_id: str) -> None:
-        """清理进程中断遗留的 running 步骤/工具调用，统一标记为 failed.
-
-        仅在服务启动恢复阶段调用（此时不存在运行中的 run）。
-        状态值必须使用合法的工具状态值。
-        """
-        now = datetime.now().isoformat()
-        err = "进程中断(服务重启)"
-        await self.tool_calls.update_running_by_session(
-            session_id,
-            {
-                "status": str(ToolCallStatus.FAILED),
-                "completed_at": now,
-                "error_message": err,
-            },
-        )

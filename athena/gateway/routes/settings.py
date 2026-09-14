@@ -47,11 +47,6 @@ class SettingsView(BaseModel):
     keep_recent_turns: int
     max_summary_tokens: int
 
-    # 沙箱
-    sandbox_enabled: bool
-    sandbox_image: str
-    sandbox_network_disabled: bool
-
     # 审批
     approval_batch_mode: str
     approval_keyboard_shortcuts: bool
@@ -85,9 +80,6 @@ async def get_settings_view() -> SettingsView:
         compression_threshold=s.compression_threshold,
         keep_recent_turns=s.keep_recent_turns,
         max_summary_tokens=s.max_summary_tokens,
-        sandbox_enabled=s.sandbox_enabled,
-        sandbox_image=s.sandbox_image,
-        sandbox_network_disabled=s.sandbox_network_disabled,
         approval_batch_mode=s.approval_batch_mode,
         approval_keyboard_shortcuts=s.approval_keyboard_shortcuts,
     )

@@ -79,25 +79,6 @@ class ToolCallRepository:
                     .values(**values)
                 )
 
-    async def update_running_by_session(
-        self, session_id: str, updates: dict[str, Any]
-    ) -> None:
-        """批量更新指定会话所有 running 工具调用。"""
-        values = self._allowed_values(updates)
-        if not values:
-            return
-        async with get_session() as session:
-            async with session.begin():
-                await session.execute(
-                    update(ToolCallModel)
-                    .where(
-                        ToolCallModel.session_id == session_id,
-                        ToolCallModel.status == "running",
-                        ToolCallModel.deleted_time.is_(None),
-                    )
-                    .values(**values)
-                )
-
     async def query(
         self, session_id: str, status: str | None = None, include_deleted: bool = False
     ) -> list[ToolCallRecord]:

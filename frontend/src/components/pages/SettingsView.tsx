@@ -71,15 +71,6 @@ const SECTIONS: { id: string; title: string; fields: Field[] }[] = [
     ],
   },
   {
-    id: "sandbox",
-    title: "沙箱",
-    fields: [
-      { key: "sandbox_enabled", label: "启用沙箱", type: "bool" },
-      { key: "sandbox_image", label: "沙箱镜像" },
-      { key: "sandbox_network_disabled", label: "禁用网络", type: "bool" },
-    ],
-  },
-  {
     id: "approval",
     title: "审批",
     fields: [

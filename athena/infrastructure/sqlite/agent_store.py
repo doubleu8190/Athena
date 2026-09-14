@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import hmac
-import os
 import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -25,8 +22,6 @@ from athena.contracts.statuses import (
     AgentCommandStatus,
     AgentRunStatus,
     StreamSnapshotStatus,
-    ToolExecutionStatus,
-    ToolSideEffectClass,
 )
 from athena.infrastructure.sqlite.engine import SQLITE_BUSY_TIMEOUT_MS, get_session
 from athena.infrastructure.sqlite.models import (
@@ -35,7 +30,6 @@ from athena.infrastructure.sqlite.models import (
     StreamSnapshotModel,
     AgentRunModel,
     ApprovalRecordModel,
-    ToolExecutionModel,
 )
 from athena.infrastructure.sqlite.repositories import _json_dumps
 from athena.models.tool import RiskLevel
@@ -1033,117 +1027,5 @@ class AgentStore:
             row.status = AgentApprovalStatus.RESOLVED.value
             row.decision = decision.value
             row.decided_at = _now()
-            await db.commit()
-            return True
-
-    async def begin_tool_execution(
-        self,
-        *,
-        session_id: str,
-        run_id: str,
-        tool_call_id: str,
-        tool_name: str,
-        arguments: dict[str, Any],
-        side_effect_class: ToolSideEffectClass = ToolSideEffectClass.UNKNOWN,
-        retry_of_execution_id: str | None = None,
-    ) -> str:
-        """记录一次工具执行并生成参数指纹。
-
-        参数:
-            session_id (str): 会话 ID。
-            run_id (str): 运行 ID。
-            tool_call_id (str): 工具调用 ID。
-            tool_name (str): 工具名称。
-            arguments (dict): 工具参数，可 JSON 序列化；敏感值不会明文写入审计字段。
-            side_effect_class (ToolSideEffectClass): 工具副作用分类。
-            retry_of_execution_id (str | None): 可选的前一次执行 ID。
-        返回值:
-            str: 新生成的工具执行 ID。
-        异常:
-            参数无法 JSON 序列化或数据库写入失败时传播相应异常。
-        """
-        execution_id = generate_time_id()
-        normalized = json.dumps(
-            arguments,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        sensitive = {
-            "api_key",
-            "apikey",
-            "password",
-            "token",
-            "secret",
-            "cookie",
-            "authorization",
-        }
-        argument_values = arguments
-        audit = {
-            key: ("[REDACTED]" if key.lower() in sensitive else value)
-            for key, value in argument_values.items()
-        }
-        audit_json = json.dumps(
-            audit, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        )[:16384]
-        secret = os.environ.get(
-            "ATHENA_TOOL_FINGERPRINT_KEY", "development-only-key"
-        ).encode()
-        fingerprint = hmac.new(secret, normalized.encode(), hashlib.sha256).hexdigest()
-        async with get_session() as db:
-            previous = (
-                await db.scalar(
-                    select(func.max(ToolExecutionModel.attempt)).where(
-                        ToolExecutionModel.tool_call_id == tool_call_id
-                    )
-                )
-                or 0
-            )
-            db.add(
-                ToolExecutionModel(
-                    tool_execution_id=execution_id,
-                    session_id=session_id,
-                    run_id=run_id,
-                    tool_call_id=tool_call_id,
-                    attempt=previous + 1,
-                    retry_of_execution_id=retry_of_execution_id,
-                    tool_name=tool_name,
-                    arguments_json=audit_json,
-                    arguments_fingerprint=fingerprint,
-                    redaction_policy_version="tool-args-v1",
-                    fingerprint_key_version="v1",
-                    side_effect_class=side_effect_class.value,
-                    created_at=_now(),
-                )
-            )
-            await db.commit()
-        return execution_id
-
-    async def finish_tool_execution(
-        self,
-        execution_id: str,
-        *,
-        status: ToolExecutionStatus,
-        error: str | None = None,
-    ) -> bool:
-        """将处于执行中的工具记录写入终态。
-
-        参数:
-            execution_id (str): 工具执行 ID。
-            status (ToolExecutionStatus): 目标执行状态。
-            error (str | None): 可选错误文本。
-        返回值:
-            bool: 记录存在且仍可结束时返回 ``True``，否则返回 ``False``。
-        异常:
-            数据库写入失败时传播 SQLAlchemy 异常。
-        """
-        async with get_session() as db:
-            row = await db.get(ToolExecutionModel, execution_id)
-            if row is None or row.status not in {
-                ToolExecutionStatus.PENDING.value,
-                ToolExecutionStatus.RUNNING.value,
-            }:
-                return False
-            row.status, row.error, row.completed_at = status.value, error, _now()
             await db.commit()
             return True

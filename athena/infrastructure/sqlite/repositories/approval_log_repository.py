@@ -50,20 +50,6 @@ class ApprovalLogRepository:
             result = await session.execute(stmt)
             return [_row_to_approval_log(row) for row in result.scalars().all()]
 
-    async def query_by_tool_call(
-        self, tool_call_id: str, include_deleted: bool = False
-    ) -> ApprovalLog | None:
-        """按 tool_call_id 查询审批日志。"""
-        async with get_session() as session:
-            stmt = select(ApprovalLogModel).where(
-                ApprovalLogModel.tool_call_id == tool_call_id
-            )
-            if not include_deleted:
-                stmt = stmt.where(ApprovalLogModel.deleted_time.is_(None))
-            result = await session.execute(stmt.limit(1))
-            row = result.scalar_one_or_none()
-            return None if row is None else _row_to_approval_log(row)
-
     async def list_all(
         self, limit: int = 50, offset: int = 0, session_id: str | None = None
     ) -> list[ApprovalLog]:

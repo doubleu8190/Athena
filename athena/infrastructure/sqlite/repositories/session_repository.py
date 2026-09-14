@@ -104,16 +104,6 @@ class SessionRepository:
                     .values(**values)
                 )
 
-    async def query_by_status(self, status_list: list[str]) -> list[Session]:
-        """按状态查询会话。"""
-        async with get_session() as session:
-            stmt = select(SessionModel).where(
-                SessionModel.status.in_(status_list),
-                SessionModel.deleted_time.is_(None),
-            )
-            result = await session.execute(stmt)
-            return [_row_to_session(row) for row in result.scalars().all()]
-
     async def delete(self, session_id: str) -> None:
         """软删除会话及其所有关联数据。"""
         now = _now_iso()

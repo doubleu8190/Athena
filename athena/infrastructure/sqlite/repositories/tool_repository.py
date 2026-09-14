@@ -73,17 +73,6 @@ class ToolRepository:
             )
             return [_row_to_tool_config(row) for row in result.scalars().all()]
 
-    async def list_by_server(self, server_name: str) -> list[ToolConfig]:
-        """按 MCP 服务端名称查询关联的工具配置。"""
-        async with get_session() as session:
-            stmt = (
-                select(ToolModel)
-                .where(ToolModel.server_name == server_name)
-                .order_by(ToolModel.created_at.asc())
-            )
-            result = await session.execute(stmt)
-            return [_row_to_tool_config(row) for row in result.scalars().all()]
-
     async def update(
         self,
         tool_name: str,
@@ -108,14 +97,4 @@ class ToolRepository:
                     update(ToolModel)
                     .where(ToolModel.tool_name == tool_name)
                     .values(**values)
-                )
-
-    async def delete_by_server(self, server_name: str) -> None:
-        """禁用指定 MCP 服务端关联的所有工具配置。"""
-        async with get_session() as session:
-            async with session.begin():
-                await session.execute(
-                    update(ToolModel)
-                    .where(ToolModel.server_name == server_name)
-                    .values(enabled=0)
                 )

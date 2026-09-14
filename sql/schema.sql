@@ -242,24 +242,3 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_session_status ON approvals(session_id, status);
-
-CREATE TABLE IF NOT EXISTS tool_executions (
-    tool_execution_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    run_id TEXT NOT NULL,
-    tool_call_id TEXT NOT NULL,
-    attempt INTEGER NOT NULL DEFAULT 1,
-    retry_of_execution_id TEXT,
-    tool_name TEXT NOT NULL,
-    arguments_json TEXT NOT NULL DEFAULT '{}',
-    arguments_fingerprint TEXT NOT NULL,
-    redaction_policy_version TEXT NOT NULL DEFAULT 'tool-args-v1',
-    fingerprint_key_version TEXT NOT NULL DEFAULT 'v1',
-    side_effect_class TEXT NOT NULL DEFAULT 'unknown',
-    status TEXT NOT NULL DEFAULT 'pending',
-    error TEXT,
-    created_at TEXT NOT NULL,
-    completed_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_tool_executions_tool_call ON tool_executions(tool_call_id, attempt);
-CREATE INDEX IF NOT EXISTS idx_tool_executions_status ON tool_executions(status);

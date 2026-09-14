@@ -143,17 +143,6 @@ class FileRepository:
                     )
                 )
 
-    async def orphan_storage_keys(self) -> list[str]:
-        """返回没有活动附件引用的 blob 键，供清理工作池使用。"""
-        async with get_session() as session:
-            rows = (
-                await session.execute(
-                    select(AttachmentModel.storage_key, AttachmentModel.deleted_time)
-                )
-            ).all()
-            live = {key for key, deleted_time in rows if deleted_time is None}
-            return sorted({key for key, _ in rows} - live)
-
     async def live_storage_keys(self) -> set[str]:
         """
 

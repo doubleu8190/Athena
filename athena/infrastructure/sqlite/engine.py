@@ -59,8 +59,16 @@ async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
         await conn.execute(text("DROP TABLE IF EXISTS agent_continuations"))
         await conn.execute(text("DROP TABLE IF EXISTS processing_tasks"))
         await conn.execute(text("DROP TABLE IF EXISTS file_processing_tasks"))
+        await conn.execute(text("DROP TABLE IF EXISTS tool_executions"))
         await conn.execute(text("DROP INDEX IF EXISTS uq_agent_runs_active_session"))
         await conn.run_sync(Base.metadata.create_all)
+        session_columns = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(sessions)"))).all()
+        }
+        for name in ("superseded_by", "superseded_at", "source_turn_id", "last_observed_at"):
+            if name in session_columns:
+                await conn.execute(text(f"ALTER TABLE sessions DROP COLUMN {name}"))
         memory_columns = {
             row[1] for row in (await conn.execute(text("PRAGMA table_info(memories)"))).all()
         }
@@ -129,14 +137,6 @@ async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
         await conn.execute(
             text("UPDATE agent_runs SET status = 'failed', error = '旧文件任务已移除' WHERE status = 'waiting_files'")
         )
-        # Session 生命周期字段是后续新增的；旧数据库需要补充列。
-        session_columns = {
-            row[1]
-            for row in (await conn.execute(text("PRAGMA table_info(sessions)"))).all()
-        }
-        for name in ("superseded_by", "superseded_at", "source_turn_id", "last_observed_at"):
-            if name not in session_columns:
-                await conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {name} VARCHAR"))
         await conn.execute(
             text("UPDATE attachments SET status = 'uploaded' WHERE status = 'queued'")
         )

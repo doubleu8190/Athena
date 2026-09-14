@@ -154,7 +154,3 @@ class SessionEventBus:
                 yield await queue.get()
         finally:
             await self.close_subscription(session_id, queue)
-
-
-class RealtimeTransport(SessionEventBus):
-    """旧名称兼容别名；新代码应使用 ``SessionEventBus``。"""

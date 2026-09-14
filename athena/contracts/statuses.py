@@ -40,14 +40,3 @@ class AgentApprovalDecision(StrEnum):
     DENIED = "denied"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
-
-
-class ToolExecutionStatus(StrEnum):
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class ToolSideEffectClass(StrEnum):
-    UNKNOWN = "unknown"

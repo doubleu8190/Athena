@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -29,8 +28,3 @@ class McpServer(BaseModel):
     config: McpServerConfig
     created_at: datetime
     deleted_time: datetime | None = None
-
-    @property
-    def config_dict(self) -> dict[str, Any]:
-        """配置的字典表示（command/args/env），用于 DB 序列化."""
-        return self.config.model_dump()

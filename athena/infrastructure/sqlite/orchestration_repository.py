@@ -16,7 +16,6 @@ from athena.infrastructure.sqlite.models import (
 )
 from athena.infrastructure.sqlite.repositories import _json_dumps, _now_iso
 from athena.runtime.orchestration import ExecutionPlan, TaskStatus, WorkerResult
-from athena.runtime.orchestration.contracts import PlanStatus
 from athena.runtime.orchestration.contracts import ensure_task_transition
 from datetime import datetime, timedelta
 
@@ -174,28 +173,6 @@ class OrchestrationRepository:
             await db.commit()
             return changed.rowcount == 1
 
-    async def set_plan_status_by_contract(
-        self,
-        plan_id: str,
-        status: PlanStatus,
-        *,
-        error: dict[str, Any] | None = None,
-    ) -> bool:
-        """按状态契约更新计划状态。
-
-        参数：
-            plan_id: 执行计划标识。
-            status: 合法的计划状态。
-            error: 计划失败时的结构化错误。
-
-        返回值：
-            bool: 计划存在并更新成功时返回 True。
-
-        异常：
-            数据库写入失败时传播 SQLAlchemy 异常。
-        """
-        return await self.set_plan_status(plan_id, status.value, error=error)
-
     async def save_result(self, result: WorkerResult) -> bool:
         """幂等保存通过 Structured Output 校验的 Worker 结果。
 
@@ -265,21 +242,6 @@ class OrchestrationRepository:
             )
             await db.commit()
             return changed.rowcount == 1
-
-    async def get_plan(self, plan_id: str) -> AgentPlanModel | None:
-        """按 ID 查询计划。
-
-        参数：
-            plan_id: 执行计划标识。
-
-        返回值：
-            AgentPlanModel | None: 计划记录；不存在时为空。
-
-        异常：
-            数据库查询失败时传播 SQLAlchemy 异常。
-        """
-        async with get_session() as db:
-            return await db.get(AgentPlanModel, plan_id)
 
     async def get_task(self, task_id: str) -> AgentTaskModel | None:
         """按 ID 查询任务。

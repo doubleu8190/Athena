@@ -20,15 +20,10 @@ from .orchestration import (
     route_after_planning,
 )
 
-# 向后兼容：从新的 execution_loop 模块重新导出
-from ..execution_loop import route_after_llm, route_after_tools
-
 __all__ = [
     "create_agent_loop_node",
     "create_post_process_turn_node",
     "route_after_agent_loop",
-    "route_after_llm",
-    "route_after_tools",
     "create_process_attachments_node",
     "check_file_results",
     "decide_memory_request",

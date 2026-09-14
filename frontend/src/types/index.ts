@@ -434,9 +434,6 @@ export interface SettingsView {
   compression_threshold: number
   keep_recent_turns: number
   max_summary_tokens: number
-  sandbox_enabled: boolean
-  sandbox_image: string
-  sandbox_network_disabled: boolean
   approval_batch_mode: string
   approval_keyboard_shortcuts: boolean
 }

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 AgentLoopRoute = Literal["llm_call", "execute_tool_batch", "finish_execution"]
 
-# ── 主图适配器（包装 AgentExecutionState → AgentState 以兼容嵌套状态） ──
+# ── 主图适配器（包装 AgentExecutionState → AgentState） ──
 
 
 async def _initialize_wrapper(
@@ -112,19 +112,6 @@ async def _finish_wrapper(
         "execution": result,
         "harness_result": result.get("harness_result"),
     }
-
-
-# ── 公共路由辅助 ──
-
-
-def route_after_llm(state: AgentExecutionState) -> AgentLoopRoute:
-    """供外部使用的 LLM 后路由（包装单层状态）。"""
-    return _route_after_llm({"execution": state})
-
-
-def route_after_tools(state: AgentExecutionState) -> AgentLoopRoute:
-    """供外部使用的工具批后路由（包装单层状态）。"""
-    return _route_after_tools({"execution": state})
 
 
 # ── 图构建 ──

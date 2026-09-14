@@ -157,16 +157,6 @@ class Settings(BaseSettings):
     summary_incremental: bool = True
     save_summary_to_memory: bool = True
 
-    # --- Docker 沙箱 ---
-    sandbox_enabled: bool = False
-    sandbox_image: str = "athena-sandbox:latest"
-    sandbox_network_disabled: bool = True
-    sandbox_memory_limit: str = "256m"
-    sandbox_cpu_limit: float = 0.5
-    sandbox_workspace_path: str = "/workspace"
-    sandbox_check_interval: int = 300  # 5 分钟
-    sandbox_allowed_paths: str = ""
-
     # --- 审批 ---
     approval_batch_mode: str = "sequential"  # 串行 / 批量
     approval_keyboard_shortcuts: bool = True
@@ -228,14 +218,6 @@ class Settings(BaseSettings):
     def files_path(self) -> Path:
         """文件存储根目录路径。"""
         return Path(self.file_storage_path)
-
-    @property
-    def allowed_paths_list(self) -> list[str]:
-        """沙箱允许的宿主机路径列表。"""
-        if not self.sandbox_allowed_paths:
-            return []
-        return [p.strip() for p in self.sandbox_allowed_paths.split(",") if p.strip()]
-
 
 @lru_cache
 def get_settings() -> Settings:

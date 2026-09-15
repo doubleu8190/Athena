@@ -21,7 +21,7 @@ class StreamCoalescer:
         publish: Callable[[ApplicationEvent], Awaitable[object]],
         stream_type: str = "answer",
         message_id: str | None = None,
-        interval_ms: int = 50,
+        interval_ms: int = 500,
         max_bytes: int = 512,
         initial_version: int = 0,
         initial_offset: int = 0,

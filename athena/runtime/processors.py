@@ -123,7 +123,7 @@ async def run_with_lifecycle(
     """Adapt plain callables to the processor contract."""
 
     class _CallableProcessor:
-        async def inspect(self, _context: None) -> ProcessDecision[ResultT]:
+        async def inspect(self, context: None) -> ProcessDecision[ResultT]:
             return (
                 await inspect()
                 if inspect is not None
@@ -131,18 +131,18 @@ async def run_with_lifecycle(
             )
 
         async def pre_process(
-            self, _context: None, decision: ProcessDecision[ResultT]
+            self, context: None, decision: ProcessDecision[ResultT]
         ) -> None:
             if pre_process is not None:
                 await pre_process(decision)
 
         async def process(
-            self, _context: None, _decision: ProcessDecision[ResultT]
+            self, context: None, decision: ProcessDecision[ResultT]
         ) -> ResultT:
             return await process()
 
         async def post_process(
-            self, _context: None, outcome: ProcessOutcome[ResultT]
+            self, context: None, outcome: ProcessOutcome[ResultT]
         ) -> None:
             if post_process is not None:
                 await post_process(outcome)

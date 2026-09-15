@@ -50,6 +50,7 @@ class ToolCallStatus(StrEnum):
     """
     PENDING = "pending"
     RUNNING = "running"
+    UNKNOWN = "unknown"
     SUCCESS = "success"
     FAILED = "failed"
     DENIED = "denied"
@@ -63,6 +64,8 @@ class ToolCallRecord(BaseModel):
     session_id: str
     step_id: str | None = None
     run_id: str | None = None
+    attempt_number: int = Field(default=1, ge=1)
+    approval_id: str | None = None
     step_number: int = 0
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)

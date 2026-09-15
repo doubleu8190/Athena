@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, Paperclip, Files, X, Trash2 } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
-import { ApprovalDialog } from "./ApprovalDialog"
+import { ApprovalCard } from "./ApprovalDialog"
 import { ActivityPanel } from "./ActivityPanel"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
@@ -609,6 +609,16 @@ function Chat({ sendEvent }: ChatProps) {
             </>
           )}
 
+          {pendingApprovals.length > 0 && (
+            <div className="my-4">
+              <ApprovalCard
+                requests={pendingApprovals}
+                onApprove={(approval) => handleApproval(approval, "allow")}
+                onDeny={(approval) => handleApproval(approval, "deny")}
+              />
+            </div>
+          )}
+
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -749,16 +759,6 @@ function Chat({ sendEvent }: ChatProps) {
         />
       )}
 
-      {/* 审批对话框 */}
-      {pendingApprovals.map((approval) => (
-        <ApprovalDialog
-          key={approval.approval_id}
-          request={approval}
-          onApprove={() => handleApproval(approval, "allow")}
-          onDeny={() => handleApproval(approval, "deny")}
-          onCancel={() => handleApproval(approval, "deny")}
-        />
-      ))}
     </div>
   )
 }

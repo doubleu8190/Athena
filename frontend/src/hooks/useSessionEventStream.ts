@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react"
 import { useChatStore } from "../store/chatStore"
+import { apiClient } from "../api/client"
 import type { ApplicationEventEnvelope } from "../types/events"
 import type { Message, ToolCall } from "../types"
 
@@ -30,7 +31,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
   const streamsRef = useRef(new Map<string, StreamProjection>())
   const {
     setConnectionStatus, setAgentStatus, addMessage, updateMessage,
-    addStep, updateStep, addToolCall, updateToolCall, addApproval, resolveApproval,
+    addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval,
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError,
     upsertOrchestrationTask, clearOrchestrationTasks,
   } = useChatStore()
@@ -54,8 +55,29 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     const source = new EventSource(url, { withCredentials: true })
     sourceRef.current = source
     setConnectionStatus("connecting")
-    source.onopen = () => setConnectionStatus("connected")
-    source.onerror = () => setConnectionStatus("error")
+    const syncPendingApprovals = () => {
+      void apiClient.listPendingApprovals(sessionId)
+        .then((approvals) => {
+          if (useChatStore.getState().activeSessionId !== sessionId) return
+          mergeApprovals(approvals.map((approval) => ({
+            ...approval,
+            timeout: approval.timeout || 120,
+            session_id: approval.session_id || sessionId,
+          })))
+        })
+        .catch(() => {
+          // API 暂时不可用时保留已有事件状态，等待下一次重连同步。
+        })
+    }
+    source.onopen = () => {
+      setConnectionStatus("connected")
+      syncPendingApprovals()
+    }
+    source.onerror = () => {
+      setConnectionStatus("error")
+      syncPendingApprovals()
+    }
+    syncPendingApprovals()
 
     const upsertAssistant = (runId: string, content: string, streamId?: string) => {
       if (!runId) return
@@ -213,7 +235,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
 
     ;["run.started", "run.resumed", "run.paused", "run.failed", "run.cancelled", "run.completed", "llm.started", "llm.completed", "tool.started", "tool.completed", "approval.required", "approval.resolved", "approval.expired", "message.started", "message.completed", "message.delta", "stream.snapshot", "thinking.started", "thinking.summary", "thinking.completed", "plan.created", "plan.completed", "plan.failed", "plan.cancelled", "task.queued", "task.started", "task.retrying", "task.completed", "task.failed", "synthesis.started", "synthesis.completed"].forEach((name) => source.addEventListener(name, parse))
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, resolveApproval, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, upsertOrchestrationTask, clearOrchestrationTasks])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, upsertOrchestrationTask, clearOrchestrationTasks])
 
   return sourceRef
 }

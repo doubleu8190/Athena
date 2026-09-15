@@ -48,9 +48,7 @@ async def prepare_and_persist_request(
             item.to_ref().model_dump(mode="json") for item in attachments
         ],
     }
-    persisted = await request_service.persist_message_and_attachments(prepared_state)
-    if isinstance(persisted, dict):
-        prepared_state.update(persisted)
+    await request_service.persist_message_and_attachments(prepared_state)
     return prepared_state
 
 

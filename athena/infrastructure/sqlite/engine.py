@@ -72,8 +72,20 @@ async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
             await conn.execute(
                 text("ALTER TABLE tool_call ADD COLUMN step_id VARCHAR")
             )
+        for name, ddl in {
+            "run_id": "VARCHAR",
+            "attempt_number": "INTEGER NOT NULL DEFAULT 1",
+            "approval_id": "VARCHAR",
+        }.items():
+            if name not in tool_call_columns:
+                await conn.execute(
+                    text(f"ALTER TABLE tool_call ADD COLUMN {name} {ddl}")
+                )
         await conn.execute(
             text("CREATE INDEX IF NOT EXISTS idx_tool_call_step ON tool_call(step_id)")
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS idx_tool_call_approval ON tool_call(approval_id)")
         )
         session_columns = {
             row[1]
@@ -222,7 +234,7 @@ async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
             row[1]
             for row in (await conn.execute(text("PRAGMA table_info(approvals)"))).all()
         }
-        for name in ("plan_id", "task_id", "worker_run_id"):
+        for name in ("plan_id", "task_id", "worker_run_id", "expires_at"):
             if name not in approval_columns:
                 await conn.execute(
                     text(f"ALTER TABLE approvals ADD COLUMN {name} VARCHAR")

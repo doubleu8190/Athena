@@ -10,12 +10,8 @@ from pydantic import BaseModel
 from athena.models import ApprovalLog
 from athena.utils.logging import get_logger
 from athena.container import runtime_from
-from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
-from athena.contracts.statuses import AgentApprovalDecision
-from athena.utils.ids import generate_time_id
 from athena.infrastructure.sqlite.repositories import _json_loads
-from athena.models.json_models import CommandPayload
 
 if TYPE_CHECKING:
     from athena.gateway.approval import ApprovalManager
@@ -54,7 +50,8 @@ async def list_pending_approvals(
     request: Request, session_id: str | None = None
 ) -> list[dict[str, Any]]:
     """列出待审批请求."""
-    rows = await runtime_from(request).agent_store.pending_approvals(session_id)
+    runtime = runtime_from(request)
+    rows = await runtime.agent_store.pending_approvals(session_id)
     return [
         {
             "approval_id": row.approval_id,
@@ -65,6 +62,8 @@ async def list_pending_approvals(
             "session_id": row.session_id,
             "run_id": row.run_id,
             "tool_call_id": row.tool_call_id,
+            "timeout": runtime.approval_manager.timeout,
+            "expires_at": row.expires_at,
             "resolved": False,
             "resolution": "pending",
         }
@@ -72,7 +71,7 @@ async def list_pending_approvals(
     ]
 
 
-@router.post("/{approval_id}/respond", status_code=202)
+@router.post("/{approval_id}/respond")
 async def respond_approval(
     approval_id: str, req: ApprovalResponseRequest, request: Request
 ) -> dict[str, Any]:
@@ -83,30 +82,12 @@ async def respond_approval(
     approval = await runtime.agent_store.get_approval(approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail=ErrorDetail.APPROVAL_NOT_FOUND)
-    command = Command(
-        command_id=f"cmd_{generate_time_id()}",
-        command_type=CommandType.APPROVAL_RESOLVE,
-        session_id=approval.session_id,
-        run_id=approval.run_id,
-        payload=CommandPayload.model_validate(
-            {
-                "approval_id": approval_id,
-                "decision": (
-                    AgentApprovalDecision.APPROVED.value
-                    if req.action == "allow"
-                    else AgentApprovalDecision.DENIED.value
-                ),
-                "plan_id": approval.plan_id,
-                "task_id": approval.task_id,
-                "worker_run_id": approval.worker_run_id,
-            }
-        ),
-    )
-    await runtime.agent_store.enqueue(command)
+    resolved = await runtime.approval_manager.respond_approval(approval_id, req.action)
+    if not resolved:
+        raise HTTPException(status_code=409, detail="approval_already_resolved")
     return {
-        "status": "pending",
+        "status": "resolved",
         "approval_id": approval_id,
-        "command_id": command.command_id,
     }
 
 
@@ -117,25 +98,12 @@ async def cancel_approval(approval_id: str, request: Request) -> dict[str, Any]:
     approval = await runtime.agent_store.get_approval(approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail=ErrorDetail.APPROVAL_NOT_FOUND)
-    command = Command(
-        command_id=f"cmd_{generate_time_id()}",
-        command_type=CommandType.APPROVAL_CANCEL,
-        session_id=approval.session_id,
-        run_id=approval.run_id,
-        payload=CommandPayload.model_validate(
-            {
-                "approval_id": approval_id,
-                "plan_id": approval.plan_id,
-                "task_id": approval.task_id,
-                "worker_run_id": approval.worker_run_id,
-            }
-        ),
-    )
-    await runtime.agent_store.enqueue(command)
+    resolved = await runtime.approval_manager.cancel_approval(approval_id)
+    if not resolved:
+        raise HTTPException(status_code=409, detail="approval_already_resolved")
     return {
-        "status": "pending",
+        "status": "resolved",
         "approval_id": approval_id,
-        "command_id": command.command_id,
     }
 
 

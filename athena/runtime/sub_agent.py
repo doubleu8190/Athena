@@ -189,7 +189,11 @@ class SubAgentManager:
             db=self._db,
             event_publisher=self._events,
             compressor=self._compressor,
-            harness_settings=HarnessSettings(max_turns_per_run=max_turns),
+            harness_settings=HarnessSettings(
+                max_turns_per_run=max_turns,
+                tool_timeout=self._settings.tool_timeout,
+                approval_timeout=self._settings.approval_timeout,
+            ),
         )
 
         try:

@@ -63,6 +63,7 @@ interface ChatStore {
   // 审批
   pendingApprovals: ApprovalRequest[]
   addApproval: (approval: ApprovalRequest) => void
+  mergeApprovals: (approvals: ApprovalRequest[]) => void
   resolveApproval: (approvalId: string, decision: string) => void
   clearApprovals: () => void
 
@@ -182,8 +183,18 @@ export const useChatStore = create<ChatStore>((set) => ({
   pendingApprovals: [],
   addApproval: (approval) =>
     set((state) => ({
-      pendingApprovals: [...state.pendingApprovals, approval],
+      pendingApprovals: state.pendingApprovals.some((item) => item.approval_id === approval.approval_id)
+        ? state.pendingApprovals.map((item) => item.approval_id === approval.approval_id ? { ...item, ...approval } : item)
+        : [...state.pendingApprovals, approval],
     })),
+  mergeApprovals: (approvals) =>
+    set((state) => {
+      const merged = new Map(
+        state.pendingApprovals.map((approval) => [approval.approval_id, approval]),
+      )
+      approvals.forEach((approval) => merged.set(approval.approval_id, approval))
+      return { pendingApprovals: Array.from(merged.values()) }
+    }),
   resolveApproval: (approvalId, _decision) =>
     set((state) => ({
       pendingApprovals: state.pendingApprovals.filter(

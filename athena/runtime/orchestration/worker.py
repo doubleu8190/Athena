@@ -127,7 +127,11 @@ class WorkerExecutor:
             db=self._db,
             compressor=self._compressor,
             event_publisher=self._events,
-            harness_settings=HarnessSettings(max_turns_per_run=task.max_turns),
+            harness_settings=HarnessSettings(
+                max_turns_per_run=task.max_turns,
+                tool_timeout=self._settings.tool_timeout,
+                approval_timeout=self._settings.approval_timeout,
+            ),
         )
         result = await harness.run(
             messages=[{"role": "user", "content": task.objective}],

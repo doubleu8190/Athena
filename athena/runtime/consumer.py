@@ -173,11 +173,24 @@ class CommandConsumer:
     async def _handle_run_resume(
         self, command: AgentCommandRecord, payload: CommandPayload
     ) -> None:
-        await self._handle_run_state_change(
-            command,
-            status=AgentRunStatus.RUNNING,
-            event_type=EventType.RUN_RESUMED,
-            clear_pause=True,
+        resumed = False
+        if command.run_id:
+            resume_run = getattr(self.store, "resume_run", None)
+            if resume_run is not None:
+                resumed = await resume_run(command.run_id)
+            if not resumed:
+                resumed = await self.store.update_run_control(
+                    command.run_id,
+                    clear_pause=True,
+                    status=AgentRunStatus.RUNNING,
+                )
+        # 只有这个显式控制命令才释放原 message.submit；启动对账不会触发
+        # 该分支，因此进程重启后不会自行再次进入 LangGraph。
+        await self._publish_run_event(command, EventType.RUN_RESUMED)
+        await self.store.complete(
+            command.command_id,
+            status=AgentCommandStatus.SUCCEEDED,
+            result={"status": AgentRunStatus.RUNNING.value, "resumed": resumed},
         )
 
     async def _handle_run_state_change(
@@ -240,12 +253,8 @@ class CommandConsumer:
             expected_task_id=expected_task_id,
             expected_plan_id=expected_plan_id,
         )
-        if self.graph is not None and command.run_id and resolved:
-            # 审批结果写入存储后，从 LangGraph 的持久化中断检查点继续执行。
-            await self.graph.ainvoke(
-                {"approval_id": approval_id, "decision": decision.value},
-                config={"configurable": {"thread_id": command.run_id}},
-            )
+        # 审批响应现在由 Gateway 直接写入 DB 并唤醒 Future。保留该 handler
+        # 仅用于兼容历史命令，不再发布重复事件或触发 LangGraph resume。
         await self.store.complete(
             command.command_id,
             status=(

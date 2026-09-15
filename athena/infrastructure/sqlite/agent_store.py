@@ -7,7 +7,7 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from athena.runtime.command_notifications import CommandNotifier
@@ -30,6 +30,9 @@ from athena.infrastructure.sqlite.models import (
     StreamSnapshotModel,
     AgentRunModel,
     ApprovalRecordModel,
+    SessionModel,
+    StepModel,
+    ToolCallModel,
 )
 from athena.infrastructure.sqlite.repositories import _json_dumps
 from athena.models.tool import RiskLevel
@@ -166,14 +169,199 @@ class AgentStore:
                             AgentRunStatus.QUEUED,
                             AgentRunStatus.RUNNING,
                             AgentRunStatus.PAUSED,
-                            AgentRunStatus.CANCEL_REQUESTED,
                             AgentRunStatus.WAITING_APPROVAL,
+                            AgentRunStatus.CANCEL_REQUESTED,
                         )
                     ),
                 )
                 .order_by(AgentRunModel.updated_at.desc())
                 .limit(1)
             )
+
+    async def prepare_runs_for_manual_recovery(self) -> dict[str, int]:
+        """暂停异常退出留下的运行，并把消息命令保持在队列外。
+
+        参数:
+            无。
+        返回值:
+            dict[str, int]: 被暂停的运行数和被挂起的消息命令数。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+
+        这里只做状态收敛，不执行 Graph，也不把消息命令重新放回消费队列。
+        用户显式调用恢复接口后，``resume_run`` 才会释放原消息命令。
+        """
+        recoverable_statuses = tuple(
+            status.value
+            for status in (
+                AgentRunStatus.QUEUED,
+                AgentRunStatus.RUNNING,
+                AgentRunStatus.PAUSED,
+                AgentRunStatus.WAITING_APPROVAL,
+                AgentRunStatus.CANCEL_REQUESTED,
+            )
+        )
+        now = _now()
+        async with get_session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            try:
+                run_rows = (
+                    await db.execute(
+                        select(AgentRunModel).where(
+                            AgentRunModel.status.in_(recoverable_statuses)
+                        )
+                    )
+                ).scalars().all()
+                active_runs = [
+                    row
+                    for row in run_rows
+                    if row.status != AgentRunStatus.CANCEL_REQUESTED.value
+                    and not row.cancel_requested
+                ]
+                run_ids = [row.run_id for row in active_runs]
+                session_ids = {row.session_id for row in active_runs}
+                paused = 0
+                if run_ids:
+                    changed = await db.execute(
+                        update(AgentRunModel)
+                        .where(AgentRunModel.run_id.in_(run_ids))
+                        .values(
+                            status=AgentRunStatus.PAUSED.value,
+                            pause_requested=1,
+                            updated_at=now,
+                        )
+                    )
+                    paused = int(changed.rowcount or 0)
+                if session_ids:
+                    await db.execute(
+                        update(SessionModel)
+                        .where(SessionModel.id.in_(session_ids))
+                        .values(status="interrupted", updated_at=now)
+                    )
+
+                held = 0
+                if run_ids:
+                    changed = await db.execute(
+                        update(AgentCommandModel)
+                        .where(
+                            AgentCommandModel.run_id.in_(run_ids),
+                            AgentCommandModel.command_type
+                            == CommandType.MESSAGE_SUBMIT.value,
+                            AgentCommandModel.status.in_(
+                                (
+                                    AgentCommandStatus.PENDING.value,
+                                    AgentCommandStatus.CLAIMED.value,
+                                )
+                            ),
+                        )
+                        .values(
+                            status=AgentCommandStatus.CLAIMED.value,
+                            claimed_at=now,
+                        )
+                    )
+                    held = int(changed.rowcount or 0)
+                await db.commit()
+                return {"paused_runs": paused, "held_commands": held}
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def resume_run(self, run_id: str) -> bool:
+        """在用户明确恢复后释放原消息命令。
+
+        参数:
+            run_id (str): 待恢复的 Root Run 标识。
+        返回值:
+            bool: 运行存在且完成恢复状态转换时返回 ``True``。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        now = _now()
+        should_notify = False
+        async with get_session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            try:
+                run = await db.get(AgentRunModel, run_id)
+                if run is None:
+                    await db.commit()
+                    return False
+                run.status = AgentRunStatus.RUNNING.value
+                run.pause_requested = 0
+                run.updated_at = now
+                await db.execute(
+                    update(SessionModel)
+                    .where(SessionModel.id == run.session_id)
+                    .values(status="running", updated_at=now)
+                )
+                command = await db.scalar(
+                    select(AgentCommandModel).where(
+                        AgentCommandModel.run_id == run_id,
+                        AgentCommandModel.command_type
+                        == CommandType.MESSAGE_SUBMIT.value,
+                        AgentCommandModel.status.in_(
+                            (
+                                AgentCommandStatus.PENDING.value,
+                                AgentCommandStatus.CLAIMED.value,
+                            )
+                        ),
+                    )
+                )
+                if command is not None:
+                    command.status = AgentCommandStatus.PENDING.value
+                    command.available_at = now
+                    command.claimed_at = None
+                    should_notify = True
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        if should_notify and self.command_notifier is not None:
+            await self.command_notifier.notify()
+        return True
+
+    async def mark_running_tool_calls_unknown(self) -> int:
+        """在启动阶段把上一个进程遗留的工具执行标记为未知。
+
+        参数:
+            无。
+        返回值:
+            int: 被标记的工具尝试数量。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        rows = (
+            await self._tool_call_rows_with_status("running")
+        )
+        if not rows:
+            return 0
+        async with get_session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            try:
+                changed = await db.execute(
+                    update(ToolCallModel)
+                    .where(ToolCallModel.status == "running")
+                    .values(status="unknown")
+                )
+                for row in rows:
+                    if row.step_id:
+                        await db.execute(
+                            update(StepModel)
+                            .where(StepModel.id == row.step_id)
+                            .values(status="unknown")
+                        )
+                await db.commit()
+                return int(changed.rowcount or 0)
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def _tool_call_rows_with_status(self, status: str) -> list[ToolCallModel]:
+        """读取指定状态的工具账本行，供启动状态收敛使用。"""
+        async with get_session() as db:
+            result = await db.execute(
+                select(ToolCallModel).where(ToolCallModel.status == status)
+            )
+            return list(result.scalars())
 
     async def create_worker_run(
         self,
@@ -335,6 +523,7 @@ class AgentStore:
                             AgentRunStatus.QUEUED,
                             AgentRunStatus.RUNNING,
                             AgentRunStatus.PAUSED,
+                            AgentRunStatus.WAITING_APPROVAL,
                             AgentRunStatus.CANCEL_REQUESTED,
                         )
                     )
@@ -891,7 +1080,8 @@ class AgentStore:
         plan_id: str | None = None,
         task_id: str | None = None,
         worker_run_id: str | None = None,
-    ) -> None:
+        expires_at: str | None = None,
+    ) -> bool:
         """创建待审批记录并持久化工具参数。
 
         参数:
@@ -902,28 +1092,54 @@ class AgentStore:
             tool_name (str): 工具名称。
             arguments (dict): 工具参数，可 JSON 序列化。
             risk_level (RiskLevel): 工具风险等级。
+            expires_at (str | None): 审批截止时间；恢复任务时沿用原截止时间。
         返回值:
-            None: 记录已提交。
+            bool: 首次插入返回 ``True``；同一工具尝试已有记录时返回 ``False``。
         异常:
             参数无法序列化或数据库约束不满足时传播相应异常。
         """
         async with get_session() as db:
-            db.add(
-                ApprovalRecordModel(
-                    approval_id=approval_id,
-                    session_id=session_id,
-                    run_id=run_id,
-                    plan_id=plan_id,
-                    task_id=task_id,
-                    worker_run_id=worker_run_id,
-                    tool_call_id=tool_call_id,
-                    tool_name=tool_name,
-                    arguments_json=_json_dumps(arguments),
-                    risk_level=risk_level.value,
-                    created_at=_now(),
+            await db.execute(text("BEGIN IMMEDIATE"))
+            try:
+                existing = await db.scalar(
+                    select(ApprovalRecordModel).where(
+                        ApprovalRecordModel.tool_call_id == tool_call_id
+                    )
                 )
-            )
-            await db.commit()
+                if existing is not None:
+                    await db.commit()
+                    return False
+                db.add(
+                    ApprovalRecordModel(
+                        approval_id=approval_id,
+                        session_id=session_id,
+                        run_id=run_id,
+                        plan_id=plan_id,
+                        task_id=task_id,
+                        worker_run_id=worker_run_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        arguments_json=_json_dumps(arguments),
+                        risk_level=risk_level.value,
+                        created_at=_now(),
+                        expires_at=expires_at,
+                    )
+                )
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                existing = await db.scalar(
+                    select(ApprovalRecordModel).where(
+                        ApprovalRecordModel.tool_call_id == tool_call_id
+                    )
+                )
+                if existing is None:
+                    raise
+                return False
+            except Exception:
+                await db.rollback()
+                raise
+            return True
 
     async def get_approval(self, approval_id: str) -> ApprovalRecordModel | None:
         """按 ID 查询审批记录。
@@ -937,6 +1153,26 @@ class AgentStore:
         """
         async with get_session() as db:
             return await db.get(ApprovalRecordModel, approval_id)
+
+    async def get_approval_for_tool_call(
+        self, tool_call_id: str
+    ) -> ApprovalRecordModel | None:
+        """按工具尝试 ID 查询其审批记录。
+
+        参数:
+            tool_call_id (str): 工具尝试账本 ID。
+        返回值:
+            ApprovalRecordModel | None: 已有关联审批时返回记录，否则返回 ``None``。
+        异常:
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            return await db.scalar(
+                select(ApprovalRecordModel)
+                .where(ApprovalRecordModel.tool_call_id == tool_call_id)
+                .order_by(ApprovalRecordModel.created_at.desc())
+                .limit(1)
+            )
 
     async def resolve_approval_for_attempt(
         self,

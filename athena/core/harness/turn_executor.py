@@ -85,6 +85,31 @@ class ToolBatchOutcome:
     interrupted: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _LlmTurnContext:
+    """单次 LLM 调用内部使用的上下文数据。"""
+
+    session_id: str
+    run_id: str
+    system_prompt: str
+    turn_count: int
+    retry_count: int
+    max_turns: int
+    max_retries: int
+    parent_run_id: str | None
+    stream_started: bool
+    compressed: list[BaseMessage]
+    llm_call_id: str
+    started_at: float
+    next_turn: int
+
+    @property
+    def duration_ms(self) -> float:
+        """返回当前调用从开始到读取该属性时经过的毫秒数。"""
+
+        return (time.time() - self.started_at) * 1000
+
+
 class HarnessTurnExecutor(Harness):
     """将旧 Harness 的一次调用拆成可检查点化的执行步骤。"""
 
@@ -176,6 +201,8 @@ class HarnessTurnExecutor(Harness):
         error: str | None = None,
         interrupted: bool = False,
         retryable: bool = False,
+        route: str = "agent_loop",
+        plan_request: dict[str, Any] | None = None,
     ) -> LlmTurnOutcome:
         """构造单轮结果并集中复制回答流的检查点状态。"""
 
@@ -195,6 +222,8 @@ class HarnessTurnExecutor(Harness):
             stream_started=stream_started,
             stream_version=self._answer_stream.version,
             stream_offset=self._answer_stream.offset,
+            route=route,
+            plan_request=plan_request,
         )
 
     @staticmethod
@@ -300,278 +329,329 @@ class HarnessTurnExecutor(Harness):
             stream_started=stream_started,
         )
 
-        domain_messages = _to_domain_messages(
+        compressed = await self._compress_messages(
             messages,
             session_id=session_id,
             run_id=run_id,
+            system_prompt=system_prompt,
+        )
+
+        context = _LlmTurnContext(
+            session_id=session_id,
+            run_id=run_id,
+            system_prompt=system_prompt,
+            turn_count=turn_count,
+            retry_count=retry_count,
+            max_turns=max_turns,
+            max_retries=max_retries,
+            parent_run_id=parent_run_id,
+            stream_started=stream_started,
+            compressed=compressed,
+            llm_call_id=f"{run_id}:llm:{turn_count + 1}",
+            started_at=time.time(),
+            next_turn=turn_count + 1,
+        )
+
+        budget_outcome = await self._turn_budget_outcome(context)
+        if budget_outcome is not None:
+            return budget_outcome
+
+        await self._emit_llm_call_started(context)
+        try:
+            content, tool_calls = self._assemble_stable_response(
+                await self._collect_llm_chunks(context, tool_names),
+                run_id=run_id,
+                turn_count=context.next_turn,
+            )
+
+            if self._should_stop():
+                return await self._interrupted_llm_outcome(context)
+            if not content.strip() and not tool_calls:
+                return await self._empty_llm_outcome(context)
+            return await self._complete_llm_outcome(context, content, tool_calls)
+        except TimeoutError:
+            return await self._failed_llm_outcome(
+                context,
+                f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）",
+            )
+        except Exception as exc:
+            return await self._failed_llm_outcome(
+                context, f"LLM 调用失败: {exc}", failure_detail=str(exc)
+            )
+
+    async def _compress_messages(
+        self,
+        messages: Sequence[Message | dict[str, Any]],
+        *,
+        session_id: str,
+        run_id: str,
+        system_prompt: str,
+    ) -> list[BaseMessage]:
+        """将 checkpoint 消息压缩为可发送给 LLM 的消息列表。"""
+
+        domain_messages = _to_domain_messages(
+            messages, session_id=session_id, run_id=run_id
         )
         compressed_domain = await self._compressor.compress(
-            domain_messages,
-            session_id=session_id,
+            domain_messages, session_id=session_id
         )
-        compressed: list[BaseMessage] = []
+        result: list[BaseMessage] = []
         if system_prompt:
-            compressed.append(SystemMessage(content=system_prompt))
-        compressed.extend(dict_to_message(message) for message in compressed_domain)
+            result.append(SystemMessage(content=system_prompt))
+        result.extend(dict_to_message(message) for message in compressed_domain)
+        return result
 
-        next_turn = turn_count + 1
-        if next_turn > max_turns:
-            error = f"轮次预算超限: {next_turn}/{max_turns}"
-            await self._emit(
-                EventType.BUDGET_EXCEEDED,
-                {"reason": error, "turn_count": turn_count},
-                session_id,
-                run_id,
-            )
-            return self._llm_outcome(
-                messages=self._conversation_dicts(
-                    compressed, system_prompt=system_prompt
-                ),
-                error=error,
-                stream_started=stream_started,
-                turn_count=turn_count,
-                retry_count=retry_count,
-            )
+    async def _turn_budget_outcome(
+        self, context: _LlmTurnContext
+    ) -> LlmTurnOutcome | None:
+        """检查轮次预算；超限时发布事件并返回失败结果，否则返回 None。"""
 
-        llm_call_id = f"{run_id}:llm:{next_turn}"
+        if context.next_turn <= context.max_turns:
+            return None
+        error = f"轮次预算超限: {context.next_turn}/{context.max_turns}"
+        await self._emit(
+            EventType.BUDGET_EXCEEDED,
+            {"reason": error, "turn_count": context.turn_count},
+            context.session_id,
+            context.run_id,
+        )
+        return self._llm_outcome(
+            messages=self._conversation_dicts(
+                context.compressed, system_prompt=context.system_prompt
+            ),
+            error=error,
+            stream_started=context.stream_started,
+            turn_count=context.turn_count,
+            retry_count=context.retry_count,
+        )
+
+    async def _emit_llm_call_started(self, context: _LlmTurnContext) -> None:
+        """发布单次 LLM 调用开始事件和状态提示。"""
+
         await self._emit(
             EventType.LLM_CALL_START,
-            {"call_id": llm_call_id, "turn": next_turn},
-            session_id,
-            run_id,
+            {"call_id": context.llm_call_id, "turn": context.next_turn},
+            context.session_id,
+            context.run_id,
         )
         await self._emit_thinking(
             EventType.THINKING_SUMMARY,
             "正在生成回答",
-            session_id,
-            run_id,
+            context.session_id,
+            context.run_id,
         )
 
-        full_content = ""
-        chunks: list[AIMessageChunk] = []
-        started_at = time.time()
+    async def _collect_llm_chunks(
+        self, context: _LlmTurnContext, tool_names: list[str] | None
+    ) -> list[AIMessageChunk]:
+        """在超时和停止信号约束下流式收集 LLM 响应块。"""
+
         bound_tools = self._get_llm_tools(
-            tool_names=tool_names,
-            parent_run_id=parent_run_id,
+            tool_names=tool_names, parent_run_id=context.parent_run_id
         )
         bound_llm = self._llm.bind_tools(bound_tools) if bound_tools else self._llm
-        try:
-            async with asyncio.timeout(self._harness_settings.llm_stream_timeout):
-                async for chunk in bound_llm.astream(compressed):
-                    if self._should_stop():
-                        break
-                    if isinstance(chunk, AIMessageChunk):
-                        chunks.append(chunk)
-                    chunk_content = extract_message_text(chunk)
-                    if chunk_content and not (
-                        next_turn == 1
-                        and parent_run_id is None
-                    ):
-                        full_content += chunk_content
-                        if self._answer_stream is not None:
-                            await self._answer_stream.append(chunk_content)
-                    elif chunk_content:
-                        full_content += chunk_content
+        chunks: list[AIMessageChunk] = []
+        async with asyncio.timeout(self._harness_settings.llm_stream_timeout):
+            async for chunk in bound_llm.astream(context.compressed):
+                if self._should_stop():
+                    break
+                if isinstance(chunk, AIMessageChunk):
+                    chunks.append(chunk)
+                chunk_content = extract_message_text(chunk)
+                if not chunk_content:
+                    continue
+                # 首轮顶层 Agent 的内容在完整响应生成后一次性写入流，
+                # 避免同一答案在流式边界中被重复展示。
+                if (
+                    not (context.next_turn == 1 and context.parent_run_id is None)
+                    and self._answer_stream is not None
+                ):
+                    await self._answer_stream.append(chunk_content)
+        return chunks
 
-            content, tool_calls = self._assemble_stable_response(
-                chunks,
-                run_id=run_id,
-                turn_count=next_turn,
-            )
-            if content:
-                full_content = content
+    async def _interrupted_llm_outcome(
+        self, context: _LlmTurnContext
+    ) -> LlmTurnOutcome:
+        """构造用户中断后的可恢复执行结果。"""
 
-            if self._should_stop():
-                await self._emit_llm_call_end(
-                    llm_call_id,
-                    status="failed",
-                    session_id=session_id,
-                    run_id=run_id,
-                )
-                if self._answer_stream is not None:
-                    await self._answer_stream.flush()
+        await self._emit_llm_call_end(
+            context.llm_call_id,
+            status="failed",
+            session_id=context.session_id,
+            run_id=context.run_id,
+        )
+        if self._answer_stream is not None:
+            await self._answer_stream.flush()
+        return self._llm_outcome(
+            messages=self._conversation_dicts(
+                context.compressed, system_prompt=context.system_prompt
+            ),
+            interrupted=True,
+            stream_started=context.stream_started,
+            turn_count=context.turn_count,
+            retry_count=context.retry_count,
+        )
 
-                return self._llm_outcome(
-                    messages=self._conversation_dicts(
-                        compressed, system_prompt=system_prompt
-                    ),
-                    interrupted=True,
-                    stream_started=stream_started,
-                    turn_count=turn_count,
-                    retry_count=retry_count,
-                )
+    async def _empty_llm_outcome(self, context: _LlmTurnContext) -> LlmTurnOutcome:
+        """构造空响应失败结果，并保留下一次重试机会。"""
 
-            if not full_content.strip() and not tool_calls:
-                error = "LLM 返回空响应（无内容且无工具调用）"
-                await self._emit(
-                    EventType.RUN_FAILED,
-                    {"call_id": llm_call_id, "error": error, "phase": "llm_call"},
-                    session_id,
-                    run_id,
-                )
-                await self._emit_llm_call_end(
-                    llm_call_id,
-                    status="failed",
-                    session_id=session_id,
-                    run_id=run_id,
-                )
-                if self._answer_stream is not None:
-                    await self._answer_stream.flush()
-                next_retry = retry_count + 1
-                return self._llm_outcome(
-                    messages=self._conversation_dicts(
-                        compressed, system_prompt=system_prompt
-                    ),
-                    error=error,
-                    retryable=next_retry <= max_retries,
-                    stream_started=stream_started,
-                    turn_count=next_turn,
-                    retry_count=next_retry,
-                )
+        error = "LLM 返回空响应（无内容且无工具调用）"
+        return await self._failed_llm_outcome(context, error)
 
-            ai_message = AIMessage(content=full_content, tool_calls=tool_calls)
-            message_dicts = self._conversation_dicts(
-                compressed,
-                system_prompt=system_prompt,
-            )
-            message_dicts.append(message_to_dict(ai_message))
-            await self._persist_assistant_message(
-                session_id=session_id,
-                run_id=run_id,
-                turn_count=next_turn,
-                content=full_content,
+    async def _failed_llm_outcome(
+        self,
+        context: _LlmTurnContext,
+        error: str,
+        *,
+        failure_detail: str | None = None,
+    ) -> LlmTurnOutcome:
+        """发布失败事件并构造按重试预算可重试的结果。"""
+
+        # 空响应的错误文本已经包含业务上下文；底层异常则发布更精确的原始异常。
+        await self._emit(
+            EventType.RUN_FAILED,
+            {
+                "call_id": context.llm_call_id,
+                "error": failure_detail or error,
+                "phase": "llm_call",
+            },
+            context.session_id,
+            context.run_id,
+        )
+        await self._emit_llm_call_end(
+            context.llm_call_id,
+            status="failed",
+            session_id=context.session_id,
+            run_id=context.run_id,
+        )
+        if self._answer_stream is not None:
+            await self._answer_stream.flush()
+        next_retry = context.retry_count + 1
+        return self._llm_outcome(
+            messages=self._conversation_dicts(
+                context.compressed, system_prompt=context.system_prompt
+            ),
+            error=error,
+            retryable=next_retry <= context.max_retries,
+            stream_started=context.stream_started,
+            turn_count=context.next_turn,
+            retry_count=next_retry,
+        )
+
+    async def _complete_llm_outcome(
+        self,
+        context: _LlmTurnContext,
+        content: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> LlmTurnOutcome:
+        """持久化成功响应、结束调用事件，并选择下一图节点路由。"""
+
+        message_dicts = self._conversation_dicts(
+            context.compressed, system_prompt=context.system_prompt
+        )
+        message_dicts.append(
+            message_to_dict(AIMessage(content=content, tool_calls=tool_calls))
+        )
+        await self._persist_assistant_message(
+            session_id=context.session_id,
+            run_id=context.run_id,
+            turn_count=context.next_turn,
+            content=content,
+            tool_calls=tool_calls,
+        )
+        await self._emit_llm_call_end(
+            context.llm_call_id,
+            status="completed",
+            session_id=context.session_id,
+            run_id=context.run_id,
+            duration_ms=context.duration_ms,
+            tool_calls_count=len(tool_calls),
+            tool_calls=tool_calls,
+        )
+        if self._answer_stream is not None:
+            await self._answer_stream.flush()
+        plan_calls = [
+            call for call in tool_calls if call.get("name") == PLAN_SUBMISSION_TOOL_NAME
+        ]
+        if plan_calls:
+            return self._plan_outcome(
+                context,
+                message_dicts=message_dicts,
+                content=content,
+                plan_calls=plan_calls,
                 tool_calls=tool_calls,
             )
-            await self._emit_llm_call_end(
-                llm_call_id,
-                status="completed",
-                session_id=session_id,
-                run_id=run_id,
-                duration_ms=(time.time() - started_at) * 1000,
-                tool_calls_count=len(tool_calls),
-                tool_calls=tool_calls,
-            )
-            if self._answer_stream is not None:
-                await self._answer_stream.flush()
-            plan_calls = [
-                call
-                for call in tool_calls
-                if call.get("name") == PLAN_SUBMISSION_TOOL_NAME
-            ]
-            if plan_calls:
-                if parent_run_id is not None:
-                    return self._llm_outcome(
-                        messages=message_dicts,
-                        content=full_content,
-                        error="submit_plan 只能由顶层 Agent 调用",
-                        retryable=False,
-                        stream_started=stream_started,
-                        turn_count=next_turn,
-                        retry_count=retry_count,
-                    )
-                if len(plan_calls) != 1 or len(plan_calls) != len(tool_calls):
-                    return self._llm_outcome(
-                        messages=message_dicts,
-                        content=full_content,
-                        error="submit_plan 不能与普通工具调用混用",
-                        retryable=False,
-                        stream_started=stream_started,
-                        turn_count=next_turn,
-                        retry_count=retry_count,
-                    )
-                try:
-                    plan_request = PlanSubmission.model_validate(
-                        plan_calls[0].get("args") or {}
-                    )
-                except Exception as exc:
-                    return self._llm_outcome(
-                        messages=message_dicts,
-                        content=full_content,
-                        error=f"submit_plan 参数无效: {exc}",
-                        retryable=False,
-                        stream_started=stream_started,
-                        turn_count=next_turn,
-                        retry_count=retry_count,
-                    )
-                return self._llm_outcome(
-                    messages=message_dicts,
-                    content=full_content,
-                    route="plan_requested",
-                    plan_request=plan_request.model_dump(mode="json"),
-                    stream_started=stream_started,
-                    turn_count=next_turn,
-                    retry_count=retry_count,
-                )
-            if (
-                full_content
-                and next_turn == 1
-                and parent_run_id is None
-                and self._answer_stream is not None
-            ):
-                await self._answer_stream.append(full_content)
-                await self._answer_stream.flush()
+        if (
+            content
+            and context.next_turn == 1
+            and context.parent_run_id is None
+            and self._answer_stream is not None
+        ):
+            await self._answer_stream.append(content)
+            await self._answer_stream.flush()
+        return self._llm_outcome(
+            messages=message_dicts,
+            content=content,
+            tool_calls=tool_calls,
+            stream_started=context.stream_started,
+            turn_count=context.next_turn,
+            retry_count=context.retry_count,
+        )
+
+    def _plan_outcome(
+        self,
+        context: _LlmTurnContext,
+        *,
+        message_dicts: list[dict[str, Any]],
+        content: str,
+        plan_calls: list[dict[str, Any]],
+        tool_calls: list[dict[str, Any]],
+    ) -> LlmTurnOutcome:
+        """校验计划提交协议并构造计划请求或协议错误结果。"""
+
+        if context.parent_run_id is not None:
             return self._llm_outcome(
                 messages=message_dicts,
-                content=full_content,
-                tool_calls=tool_calls,
-                stream_started=stream_started,
-                turn_count=next_turn,
-                retry_count=retry_count,
+                content=content,
+                error="submit_plan 只能由顶层 Agent 调用",
+                retryable=False,
+                stream_started=context.stream_started,
+                turn_count=context.next_turn,
+                retry_count=context.retry_count,
             )
-        except TimeoutError:
-            error = f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）"
-            await self._emit(
-                EventType.RUN_FAILED,
-                {"call_id": llm_call_id, "error": error, "phase": "llm_call"},
-                session_id,
-                run_id,
-            )
-            await self._emit_llm_call_end(
-                llm_call_id,
-                status="failed",
-                session_id=session_id,
-                run_id=run_id,
-            )
-            if self._answer_stream is not None:
-                await self._answer_stream.flush()
-            next_retry = retry_count + 1
+        if len(plan_calls) != 1 or len(plan_calls) != len(tool_calls):
             return self._llm_outcome(
-                messages=self._conversation_dicts(
-                    compressed, system_prompt=system_prompt
-                ),
-                error=error,
-                retryable=next_retry <= max_retries,
-                stream_started=stream_started,
-                turn_count=next_turn,
-                retry_count=next_retry,
+                messages=message_dicts,
+                content=content,
+                error="submit_plan 不能与普通工具调用混用",
+                retryable=False,
+                stream_started=context.stream_started,
+                turn_count=context.next_turn,
+                retry_count=context.retry_count,
+            )
+        try:
+            plan_request = PlanSubmission.model_validate(
+                plan_calls[0].get("args") or {}
             )
         except Exception as exc:
-            error = f"LLM 调用失败: {exc}"
-            await self._emit(
-                EventType.RUN_FAILED,
-                {"call_id": llm_call_id, "error": str(exc), "phase": "llm_call"},
-                session_id,
-                run_id,
-            )
-            await self._emit_llm_call_end(
-                llm_call_id,
-                status="failed",
-                session_id=session_id,
-                run_id=run_id,
-            )
-            if self._answer_stream is not None:
-                await self._answer_stream.flush()
-            next_retry = retry_count + 1
             return self._llm_outcome(
-                messages=self._conversation_dicts(
-                    compressed, system_prompt=system_prompt
-                ),
-                error=error,
-                retryable=next_retry <= max_retries,
-                stream_started=stream_started,
-                turn_count=next_turn,
-                retry_count=next_retry,
+                messages=message_dicts,
+                content=content,
+                error=f"submit_plan 参数无效: {exc}",
+                retryable=False,
+                stream_started=context.stream_started,
+                turn_count=context.next_turn,
+                retry_count=context.retry_count,
             )
+        return self._llm_outcome(
+            messages=message_dicts,
+            content=content,
+            route="plan_requested",
+            plan_request=plan_request.model_dump(mode="json"),
+            stream_started=context.stream_started,
+            turn_count=context.next_turn,
+            retry_count=context.retry_count,
+        )
 
     async def execute_tool_batch(
         self,
@@ -615,6 +695,7 @@ class HarnessTurnExecutor(Harness):
             tool_calls=planned,
             session_id=session_id,
             run_id=run_id,
+            turn_count=turn_count,
             tool_results_all=tool_results,
         )
         return ToolBatchOutcome(

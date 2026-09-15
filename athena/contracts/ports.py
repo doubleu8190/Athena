@@ -68,6 +68,18 @@ class AgentStorePort(Protocol):
         """Requeue commands whose worker lease expired."""
         ...
 
+    async def prepare_runs_for_manual_recovery(self) -> dict[str, int]:
+        """启动时暂停运行并阻止消息命令自动领取。"""
+        ...
+
+    async def resume_run(self, run_id: str) -> bool:
+        """用户明确恢复后释放对应的消息命令。"""
+        ...
+
+    async def mark_running_tool_calls_unknown(self) -> int:
+        """把重启前遗留的工具执行标记为未知。"""
+        ...
+
     async def complete(
         self,
         command_id: str,
@@ -124,6 +136,10 @@ class AgentStorePort(Protocol):
         self, approval_id: str, decision: AgentApprovalDecision
     ) -> bool:
         """原子解析审批记录；记录不存在或已处理时返回 ``False``。"""
+        ...
+
+    async def get_approval_for_tool_call(self, tool_call_id: str) -> Any | None:
+        """读取一次工具尝试关联的审批记录。"""
         ...
 
     async def resolve_approval_for_attempt(

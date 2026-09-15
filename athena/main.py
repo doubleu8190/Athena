@@ -264,10 +264,8 @@ async def lifespan(app: FastAPI):
         logger.warning("command_consumer_shutdown_failed", error=str(e))
     await memory_job_worker.stop()
     await checkpoint_conn.close()
-    try:
-        await approval_manager.cancel_all_pending("")
-    except Exception as e:
-        logger.warning("approval_cancel_pending_failed", error=str(e))
+    # 关闭不会取消持久化审批。审批记录和未完成工具尝试需要跨进程保留，
+    # 下次启动后由用户手动恢复任务，再按 DB 状态决定等待或执行。
     # 停掉后台看门狗，并落盘内存中未同步的访问统计
     memory_flush_task.cancel()
     try:

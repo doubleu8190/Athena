@@ -1,138 +1,121 @@
-import { AlertTriangle, Clock, X, Check, Shield } from "lucide-react"
-import { useState, useEffect } from "react"
+import { AlertTriangle, Check, Clock, Shield, X } from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
 import type { ApprovalRequest } from "../types"
 
-interface ApprovalDialogProps {
-  request: ApprovalRequest
-  onApprove: () => void
-  onDeny: () => void
-  onCancel: () => void
+interface ApprovalCardProps {
+  requests: ApprovalRequest[]
+  onApprove: (request: ApprovalRequest) => void
+  onDeny: (request: ApprovalRequest) => void
 }
 
-export function ApprovalDialog({
-  request,
-  onApprove,
-  onDeny,
-  onCancel,
-}: ApprovalDialogProps) {
-  const { tool_name, arguments: args, risk_level, timeout } = request
-  const [remaining, setRemaining] = useState(timeout)
-  const [collapsed, setCollapsed] = useState(false)
+function riskClass(risk: ApprovalRequest["risk_level"]): string {
+  if (risk === "high") return "text-red-400 bg-red-500/20 border-red-500/50"
+  if (risk === "medium") return "text-yellow-400 bg-yellow-500/20 border-yellow-500/50"
+  return "text-green-400 bg-green-500/20 border-green-500/50"
+}
+
+export function ApprovalCard({ requests, onApprove, onDeny }: ApprovalCardProps) {
+  const [resolving, setResolving] = useState<Set<string>>(new Set())
+  const [elapsed, setElapsed] = useState(0)
 
   useEffect(() => {
-    setRemaining(timeout)
-    const interval = setInterval(() => {
-      setRemaining((prev) => {
-        if (prev <= 1) {
-          clearInterval(interval)
-          return 0
-        }
-        return prev - 1
-      })
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [timeout])
+    setElapsed(0)
+    setResolving(new Set())
+    const interval = window.setInterval(() => setElapsed((value) => value + 1), 1000)
+    return () => window.clearInterval(interval)
+  }, [requests.length])
 
-  const riskColor =
-    risk_level === "high"
-      ? "text-red-400 bg-red-500/20 border-red-500/50"
-      : risk_level === "medium"
-        ? "text-yellow-400 bg-yellow-500/20 border-yellow-500/50"
-        : "text-green-400 bg-green-500/20 border-green-500/50"
+  const remaining = useMemo(
+    () => Math.max(0, Math.min(...requests.map((request) => request.timeout || 120)) - elapsed),
+    [elapsed, requests],
+  )
 
-  const urgencyClass =
-    remaining <= 10 ? "animate-pulse" : remaining <= 30 ? "animate-pulse-slow" : ""
+  const resolve = (request: ApprovalRequest, action: "allow" | "deny") => {
+    setResolving((current) => new Set(current).add(request.approval_id))
+    if (action === "allow") onApprove(request)
+    else onDeny(request)
+  }
+
+  const resolveAll = (action: "allow" | "deny") => {
+    requests.forEach((request) => {
+      if (!resolving.has(request.approval_id)) resolve(request, action)
+    })
+  }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div
-        className={`card w-full max-w-md shadow-2xl animate-slide-up ${urgencyClass}`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* 标题区域 */}
-        <div className="px-4 py-3 border-b border-athena-border flex items-center gap-3">
-          <div className={`p-2 rounded-lg ${riskColor} border`}>
-            <AlertTriangle className="w-5 h-5" />
-          </div>
-          <div>
-            <h3 className="font-semibold text-base flex items-center gap-2">
-              <Shield className="w-4 h-4" />
-              Approval Required
-            </h3>
-            <p className="text-xs text-athena-muted">
-              This action requires your confirmation
-            </p>
-          </div>
-          <button
-            onClick={onCancel}
-            className="ml-auto text-athena-muted hover:text-athena-text transition-colors"
-            title="Cancel"
-          >
-            <X className="w-5 h-5" />
-          </button>
+    <section className="card border-yellow-500/40 shadow-lg" aria-live="polite">
+      <div className="flex items-center gap-3 border-b border-athena-border px-4 py-3">
+        <div className="rounded-lg border border-yellow-500/50 bg-yellow-500/20 p-2 text-yellow-400">
+          <Shield className="h-5 w-5" />
         </div>
-
-        {/* 审批正文 */}
-        <div className="px-4 py-3 space-y-3">
-          <div className="flex items-center gap-3 text-sm">
-            <span className="text-athena-muted">Tool:</span>
-            <code className="bg-athena-bg px-2 py-0.5 rounded text-athena-accent">
-              {tool_name}
-            </code>
-            <span
-              className={`ml-auto px-2 py-0.5 rounded text-xs font-medium ${riskColor}`}
-            >
-              {risk_level.toUpperCase()} RISK
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-athena-text">
+            Approval required
+            <span className="rounded-full bg-athena-bg px-2 py-0.5 text-xs font-normal text-athena-muted">
+              {requests.length} {requests.length === 1 ? "request" : "requests"}
             </span>
-          </div>
-
-          {/* 工具参数 */}
-          <div>
-            <button
-              className="text-xs text-athena-muted hover:text-athena-text transition-colors flex items-center gap-1"
-              onClick={() => setCollapsed(!collapsed)}
-            >
-              {collapsed ? "▶" : "▼"} Arguments
-            </button>
-            {!collapsed && (
-              <pre className="mt-2 text-xs bg-athena-bg rounded p-3 overflow-x-auto text-athena-text/90 max-h-48 overflow-y-auto">
-                {JSON.stringify(args, null, 2)}
-              </pre>
-            )}
-          </div>
-
-          {/* 工具说明 */}
-          {request.description && (
-            <p className="text-sm text-athena-text/80 bg-athena-bg/50 rounded p-2">
-              {request.description}
-            </p>
-          )}
-
-          {/* 倒计时 */}
-          <div className="flex items-center gap-2 text-xs text-athena-muted">
-            <Clock className="w-3 h-3" />
-            <span
-              className={
-                remaining <= 10 ? "text-athena-danger font-medium" : ""
-              }
-            >
-              Timeout in {remaining}s
-            </span>
-          </div>
+          </h3>
+          <p className="text-xs text-athena-muted">Review these actions before Athena continues.</p>
         </div>
-
-        {/* 操作区域 */}
-        <div className="px-4 py-3 border-t border-athena-border flex gap-2 justify-end">
-          <button onClick={onDeny} className="btn-secondary">
-            <X className="w-4 h-4" />
-            Deny
-          </button>
-          <button onClick={onApprove} className="btn-primary">
-            <Check className="w-4 h-4" />
-            Allow
-          </button>
+        <div className={`ml-auto flex items-center gap-1 text-xs ${remaining <= 10 ? "text-athena-danger" : "text-athena-muted"}`}>
+          <Clock className="h-3.5 w-3.5" />
+          {remaining}s
         </div>
       </div>
-    </div>
+
+      <div className="divide-y divide-athena-border/70">
+        {requests.map((request) => {
+          const isResolving = resolving.has(request.approval_id)
+          return (
+            <div key={request.approval_id} className="px-4 py-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-yellow-400" />
+                <code className="text-sm text-athena-accent">{request.tool_name}</code>
+                <span className={`rounded border px-2 py-0.5 text-[11px] font-medium ${riskClass(request.risk_level)}`}>
+                  {request.risk_level.toUpperCase()}
+                </span>
+                <div className="ml-auto flex gap-2">
+                  <button
+                    type="button"
+                    className="btn-secondary px-2.5 py-1.5 text-xs"
+                    disabled={isResolving}
+                    onClick={() => resolve(request, "deny")}
+                  >
+                    <X className="h-3.5 w-3.5" /> Deny
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary px-2.5 py-1.5 text-xs"
+                    disabled={isResolving}
+                    onClick={() => resolve(request, "allow")}
+                  >
+                    <Check className="h-3.5 w-3.5" /> Allow
+                  </button>
+                </div>
+              </div>
+              <details className="mt-2">
+                <summary className="cursor-pointer text-xs text-athena-muted hover:text-athena-text">
+                  Arguments
+                </summary>
+                <pre className="mt-2 max-h-36 overflow-auto rounded bg-athena-bg p-2 text-xs text-athena-text/90">
+                  {JSON.stringify(request.arguments, null, 2)}
+                </pre>
+              </details>
+            </div>
+          )
+        })}
+      </div>
+
+      {requests.length > 1 && (
+        <div className="flex justify-end gap-2 border-t border-athena-border px-4 py-3">
+          <button type="button" className="btn-secondary text-xs" onClick={() => resolveAll("deny")}>
+            <X className="h-3.5 w-3.5" /> Deny all
+          </button>
+          <button type="button" className="btn-primary text-xs" onClick={() => resolveAll("allow")}>
+            <Check className="h-3.5 w-3.5" /> Allow all
+          </button>
+        </div>
+      )}
+    </section>
   )
 }

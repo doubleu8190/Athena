@@ -38,13 +38,21 @@ async def _initialize_wrapper(
                 "session_id": state.get("session_id", exec_state.get("session_id", "")),
                 "run_id": state.get("run_id", exec_state.get("run_id", "")),
                 "message_id": state.get("message_id", exec_state.get("message_id", "")),
-                "user_message": state.get("user_message", exec_state.get("user_message", "")),
-                "memory_context": state.get("memory_context", exec_state.get("memory_context", "")),
+                "user_message": state.get(
+                    "user_message", exec_state.get("user_message", "")
+                ),
+                "memory_context": state.get(
+                    "memory_context", exec_state.get("memory_context", "")
+                ),
                 "system_prompt": graph_runtime.build_system_prompt(
                     state.get("memory_context", "")
                 ),
-                "messages": list(state.get("harness_messages", exec_state.get("messages", []))),
-                "attachment_refs": list(state.get("attachment_refs", exec_state.get("attachment_refs", []))),
+                "messages": list(
+                    state.get("harness_messages", exec_state.get("messages", []))
+                ),
+                "attachment_refs": list(
+                    state.get("attachment_refs", exec_state.get("attachment_refs", []))
+                ),
                 "max_turns": graph_runtime._settings.max_turns_per_run,
                 "max_retries": graph_runtime._settings.retry_budget,
             }
@@ -154,9 +162,7 @@ def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
         "execute_tool_batch",
         partial(_tools_wrapper, graph_runtime=runtime),
     )
-    graph.add_node(
-        "finish_execution", partial(_finish_wrapper, graph_runtime=runtime)
-    )
+    graph.add_node("finish_execution", partial(_finish_wrapper, graph_runtime=runtime))
     graph.add_node(
         "plan_requested",
         partial(_plan_requested_wrapper, graph_runtime=runtime),

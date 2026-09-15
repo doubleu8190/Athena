@@ -76,6 +76,7 @@ class ExecutionService:
             max_turns_per_run=self._settings.max_turns_per_run,
             retry_budget=self._settings.retry_budget,
             tool_timeout=self._settings.tool_timeout,
+            approval_timeout=self._settings.approval_timeout,
         )
 
         system_prompt = self._build_system_prompt(memory_context)

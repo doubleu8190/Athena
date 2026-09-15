@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any, TYPE_CHECKING
 
 from langchain_core.tools import StructuredTool
@@ -223,6 +225,10 @@ class UnifiedToolManager:
         task_id: str | None = None,
         worker_run_id: str | None = None,
         depth: int = 0,
+        execution_timeout: float | None = None,
+        approval_id: str | None = None,
+        on_approval_created: Callable[[str], Awaitable[None]] | None = None,
+        on_execution_start: Callable[[], Awaitable[bool]] | None = None,
     ) -> ToolResult:
         """统一工具调用入口，含审批检查.
 
@@ -230,6 +236,10 @@ class UnifiedToolManager:
 
         session_id / run_id / tool_call_id 为必填：标识本次工具调用归属的会话、运行与
         具体工具调用，用于审批留痕与子代理父链上下文。
+
+        ``on_approval_created`` 用于把审批 ID 写回工具尝试账本；
+        ``on_execution_start`` 在真正调用工具前原子领取账本，返回 ``False`` 时
+        不会执行工具。
         """
         # 每次调用拥有独立的参数映射。并发会话可能调用同一个 NativeTool，
         # 因此上下文字段绝不能在会话之间泄漏。
@@ -257,17 +267,24 @@ class UnifiedToolManager:
         # 审批检查
         if tool.schema.require_approval:
             try:
+                approval_kwargs: dict[str, Any] = {
+                    "tool_name": name,
+                    "arguments": params,
+                    "risk_level": tool.schema.risk_level,
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "tool_call_id": tool_call_id,
+                    "plan_id": plan_id,
+                    "task_id": task_id,
+                    "worker_run_id": worker_run_id,
+                }
+                if approval_id is not None:
+                    approval_kwargs["approval_id"] = approval_id
                 request = await self._approval_manager.request_approval(
-                    tool_name=name,
-                    arguments=params,
-                    risk_level=tool.schema.risk_level,
-                    session_id=session_id,
-                    run_id=run_id,
-                    tool_call_id=tool_call_id,
-                    plan_id=plan_id,
-                    task_id=task_id,
-                    worker_run_id=worker_run_id,
+                    **approval_kwargs,
                 )
+                if on_approval_created is not None:
+                    await on_approval_created(request.id)
                 approved = await self._approval_manager.wait_for_decision(
                     request.id, request.timeout
                 )
@@ -280,6 +297,14 @@ class UnifiedToolManager:
             except Exception as e:
                 logger.error("approval_failed", tool=name, error=str(e))
                 return ToolResult(status="failed", error=f"审批流程异常: {e}")
+
+        if on_execution_start is not None:
+            claimed = await on_execution_start()
+            if not claimed:
+                return ToolResult(
+                    status="unknown",
+                    error="工具尝试未能原子领取，当前状态不允许自动执行",
+                )
 
         # 所有本地能力都从协程本地上下文读取可信的调用元数据，
         # 该元数据不会暴露为模型参数。
@@ -299,7 +324,10 @@ class UnifiedToolManager:
             )
             token = set_tool_context(context)
         try:
-            return await tool.execute(**params)
+            execution = tool.execute(**params)
+            if execution_timeout is not None:
+                return await asyncio.wait_for(execution, timeout=execution_timeout)
+            return await execution
         finally:
             if token is not None:
                 from athena.core.tools.spec import reset_tool_context

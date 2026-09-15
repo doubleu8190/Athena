@@ -65,6 +65,8 @@ def build_graph(
     graph.add_node(
         "prepare_context", create_prepare_context_node(runtime.request_service)
     )
+    # Agent 循环（LLM ↔ 工具）→ 使用完整 runtime
+    graph.add_node("agent_loop", create_agent_loop_node(runtime))
     graph.add_node("materialize_plan", create_materialize_plan_node(runtime))
     graph.add_node("execute_plan", create_execute_plan_node(runtime))
     graph.add_node(
@@ -72,8 +74,7 @@ def build_graph(
         create_synthesize_orchestration_node(runtime),
     )
     graph.add_node("close_plan_stream", create_close_plan_stream_node(runtime))
-    # Agent 循环（LLM ↔ 工具）→ 使用完整 runtime
-    graph.add_node("agent_loop", create_agent_loop_node(runtime))
+    
     # 后处理 → 使用 ExecutionService
     graph.add_node(
         "post_process_turn", create_post_process_turn_node(runtime.execution_service)

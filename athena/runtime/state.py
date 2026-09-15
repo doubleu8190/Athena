@@ -67,6 +67,7 @@ class AgentExecutionOutput(TypedDict, total=False):
     last_content: str
     final_content: str
     harness_result: dict[str, Any]
+    plan_request: dict[str, Any] | None
 
 
 class AgentExecutionStream(TypedDict, total=False):
@@ -83,6 +84,7 @@ class AgentExecutionLifecycle(TypedDict, total=False):
     error: str | None
     interrupted: bool
     status: AgentExecutionStatus
+    route: str
 
 
 class AgentExecutionState(
@@ -147,4 +149,4 @@ class AgentState(TypedDict, total=False):
     execution_plan: dict[str, Any] | None
     orchestration_result: dict[str, Any] | None
     result: dict[str, Any] | None
-    error: str
+    error: str | None

@@ -18,6 +18,8 @@ class EventType(StrEnum):
     """稳定的点分隔应用事件名称。"""
 
     APPROVAL_REQUIRED = "approval.required"
+    APPROVAL_RESOLVED = "approval.resolved"
+    APPROVAL_EXPIRED = "approval.expired"
     AGENT_WAITING_FILE = "agent.waiting_for_files"
     SUB_AGENT_COMPLETE = "subagent.completed"
     SUB_AGENT_FAILED = "subagent.failed"

@@ -292,6 +292,9 @@ class ApprovalRecordModel(Base):
         String, nullable=True, comment="审批决定"
     )
     created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
+    expires_at: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="审批截止时间（UTC）"
+    )
     decided_at: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="审批决定时间（UTC）"
     )
@@ -413,6 +416,15 @@ class ToolCallModel(Base):
     # column to legacy tool_call tables when it is missing.
     step_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("steps.id"), nullable=True, comment="所属执行步骤"
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="所属运行标识"
+    )
+    attempt_number: Mapped[int] = mapped_column(
+        Integer, default=1, comment="同一模型工具调用的尝试序号"
+    )
+    approval_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="本次尝试关联的审批记录"
     )
     tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
     arguments_json: Mapped[str] = mapped_column(

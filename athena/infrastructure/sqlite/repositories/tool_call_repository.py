@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import StepModel, ToolCallModel
@@ -21,7 +22,11 @@ class ToolCallRepository:
     async def save(self, tool_call: ToolCallRecord) -> None:
         """保存工具调用记录。"""
         async with get_session() as session:
-            async with session.begin():
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                if await session.get(ToolCallModel, tool_call.id) is not None:
+                    await session.commit()
+                    return
                 step_id = tool_call.step_id or f"{tool_call.id}:step"
                 existing_step = await session.get(StepModel, step_id)
                 if existing_step is None:
@@ -42,6 +47,9 @@ class ToolCallRepository:
                         id=tool_call.id,
                         session_id=tool_call.session_id,
                         step_id=step_id,
+                        run_id=tool_call.run_id,
+                        attempt_number=tool_call.attempt_number,
+                        approval_id=tool_call.approval_id,
                         tool_name=tool_call.tool_name,
                         arguments_json=_json_dumps(tool_call.arguments),
                         raw_output=tool_call.raw_output,
@@ -57,6 +65,14 @@ class ToolCallRepository:
                         error_stack=tool_call.error_stack,
                     )
                 )
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                if await session.get(ToolCallModel, tool_call.id) is None:
+                    raise
+            except Exception:
+                await session.rollback()
+                raise
 
     async def get(self, tool_call_id: str) -> ToolCallRecord | None:
         """按稳定账本 ID 查询一次工具调用。"""
@@ -70,6 +86,9 @@ class ToolCallRepository:
     @staticmethod
     def _allowed_values(updates: dict[str, Any]) -> dict[str, Any]:
         allowed = {
+            "run_id",
+            "attempt_number",
+            "approval_id",
             "raw_output",
             "status",
             "completed_at",
@@ -113,6 +132,98 @@ class ToolCallRepository:
                             .where(StepModel.id == row.step_id)
                             .values(**step_values)
                         )
+
+    async def claim_for_execution(self, tool_call_id: str) -> bool:
+        """原子领取一次待执行工具尝试。
+
+        参数:
+            tool_call_id (str): 工具尝试账本 ID。
+        返回值:
+            bool: 只有从 ``pending`` 成功转换为 ``running`` 时返回 ``True``。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                row = await session.scalar(
+                    select(ToolCallModel).where(
+                        ToolCallModel.id == tool_call_id,
+                        ToolCallModel.deleted_time.is_(None),
+                    )
+                )
+                if row is None or row.status != "pending":
+                    await session.commit()
+                    return False
+                started_at = datetime.now().isoformat()
+                changed = await session.execute(
+                    update(ToolCallModel)
+                    .where(
+                        ToolCallModel.id == tool_call_id,
+                        ToolCallModel.status == "pending",
+                        ToolCallModel.deleted_time.is_(None),
+                    )
+                    .values(status="running", started_at=started_at)
+                )
+                if changed.rowcount != 1:
+                    await session.rollback()
+                    return False
+                if row.step_id:
+                    await session.execute(
+                        update(StepModel)
+                        .where(StepModel.id == row.step_id)
+                        .values(status="running", started_at=started_at)
+                    )
+                await session.commit()
+                return True
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def mark_running_unknown(self) -> int:
+        """把进程重启前未完成的工具尝试标记为未知。
+
+        参数:
+            无。
+        返回值:
+            int: 本次被标记为 ``unknown`` 的工具尝试数量。
+        异常:
+            数据库写入失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                rows = (
+                    await session.execute(
+                        select(ToolCallModel.id, ToolCallModel.step_id).where(
+                            ToolCallModel.status == "running",
+                            ToolCallModel.deleted_time.is_(None),
+                        )
+                    )
+                ).all()
+                if not rows:
+                    await session.commit()
+                    return 0
+                changed = await session.execute(
+                    update(ToolCallModel)
+                    .where(
+                        ToolCallModel.status == "running",
+                        ToolCallModel.deleted_time.is_(None),
+                    )
+                    .values(status="unknown")
+                )
+                for _, step_id in rows:
+                    if step_id:
+                        await session.execute(
+                            update(StepModel)
+                            .where(StepModel.id == step_id)
+                            .values(status="unknown")
+                        )
+                await session.commit()
+                return int(changed.rowcount or 0)
+            except Exception:
+                await session.rollback()
+                raise
 
     async def query(
         self, session_id: str, status: str | None = None, include_deleted: bool = False

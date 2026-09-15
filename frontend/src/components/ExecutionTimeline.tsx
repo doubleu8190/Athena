@@ -1,8 +1,9 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
   Bot,
   CheckCircle,
   ChevronDown,
+  ChevronRight,
   Clock,
   FileText,
   Loader2,
@@ -15,10 +16,17 @@ import type { ExecutionTimelineEntry } from "../types"
 
 interface ExecutionTimelineProps {
   entries: ExecutionTimelineEntry[]
+  defaultExpanded?: boolean
 }
 
-export function ExecutionTimeline({ entries }: ExecutionTimelineProps) {
+export function ExecutionTimeline({ entries, defaultExpanded = false }: ExecutionTimelineProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const [isOpen, setIsOpen] = useState(defaultExpanded)
+
+  // 当前请求完成后自动收起；历史请求初始保持收起状态。
+  useEffect(() => {
+    setIsOpen(defaultExpanded)
+  }, [defaultExpanded])
 
   if (entries.length === 0) return null
 
@@ -33,13 +41,21 @@ export function ExecutionTimeline({ entries }: ExecutionTimelineProps) {
 
   return (
     <section className="my-5" aria-label="Execution progress">
-      <div className="phase-divider">
+      <button
+        type="button"
+        onClick={() => setIsOpen((value) => !value)}
+        aria-expanded={isOpen}
+        className="phase-divider w-full cursor-pointer"
+      >
         <span className="phase-label phase-processing">
-          <span className="dot"></span>
+          {isOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
           EXECUTION PROGRESS
         </span>
-      </div>
-      <div className="processing-group py-2">
+        <span className="text-xs text-athena-muted">
+          {entries.length} event{entries.length === 1 ? "" : "s"}
+        </span>
+      </button>
+      {isOpen && <div className="processing-group py-2">
         {entries.map((entry) => {
           const hasDetails = Boolean(entry.detail || entry.metadata)
           const isExpanded = expanded.has(entry.id)
@@ -81,7 +97,7 @@ export function ExecutionTimeline({ entries }: ExecutionTimelineProps) {
             </div>
           )
         })}
-      </div>
+      </div>}
     </section>
   )
 }

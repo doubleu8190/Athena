@@ -22,7 +22,6 @@ function Chat({ sendEvent }: ChatProps) {
   const {
     messages,
     steps,
-    toolCalls,
     activeSessionId,
     agentStatus,
     pendingApprovals,
@@ -35,7 +34,6 @@ function Chat({ sendEvent }: ChatProps) {
     clearSteps,
     clearToolCalls,
     clearApprovals,
-    orchestrationTasks,
     executionTimeline,
     setAgentStatus,
     clearThinking,
@@ -530,7 +528,10 @@ function Chat({ sendEvent }: ChatProps) {
                     {/* Agent 响应阶段 */}
                     {group.phase === "response" && (
                       <div className={isLastGroup && !isAgentActive ? "animate-fade-in" : ""}>
-                        <ExecutionTimeline entries={timelineEntriesForGroup(executionTimeline, group.messages)} />
+                        <ExecutionTimeline
+                          entries={timelineEntriesForGroup(executionTimeline, group.messages)}
+                          defaultExpanded={timelineEntriesForGroup(executionTimeline, group.messages).some((entry) => entry.status === "running" || entry.status === "waiting")}
+                        />
                         {group.messages.map((message) => (
                           <MessageBubble key={message.id} message={message} />
                         ))}
@@ -541,7 +542,10 @@ function Chat({ sendEvent }: ChatProps) {
               })}
 
               {!phaseGroups.some((group) => group.phase === "response") && (
-                <ExecutionTimeline entries={executionTimeline} />
+                <ExecutionTimeline
+                  entries={executionTimeline}
+                  defaultExpanded={executionTimeline.some((entry) => entry.status === "running" || entry.status === "waiting")}
+                />
               )}
 
               {/* 会话完成总结 — 原 EXECUTION TRACE 列表移入右侧 Activity 面板，
@@ -702,9 +706,7 @@ function Chat({ sendEvent }: ChatProps) {
       {showActivity && (
         <ActivityPanel
           messages={messages}
-          toolCalls={toolCalls}
-          steps={steps}
-          orchestrationTasks={orchestrationTasks}
+          agentStatus={agentStatus}
           onClose={() => setShowActivity(false)}
         />
       )}

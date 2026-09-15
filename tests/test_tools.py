@@ -58,6 +58,21 @@ def test_native_tool_schema_inferred():
     assert "encoding" not in params.required
 
 
+def test_native_tool_schema_resolves_postponed_boolean_annotation():
+    """启用 postponed annotations 时，布尔参数仍应生成 boolean schema。"""
+
+    async def sample_tool(include_hidden: bool = False) -> str:
+        return str(include_hidden)
+
+    tool = NativeTool(
+        name="sample_boolean",
+        description="sample boolean tool",
+        handler=sample_tool,
+    )
+
+    assert tool.schema.parameters.properties["include_hidden"].type == "boolean"
+
+
 @pytest.mark.asyncio
 async def test_call_unregistered_tool():
     m = make_tool_manager()

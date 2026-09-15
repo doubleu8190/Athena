@@ -36,6 +36,22 @@ def test_json_round_trip_uses_models_without_changing_storage_shape() -> None:
     assert restored.args["path"] == "README.md"
 
 
+def test_json_dump_recursively_serializes_nested_models() -> None:
+    calls = [
+        ToolCall(id="call-1", name="submit_plan", args={"plan_id": "p1"}),
+        ToolCall(id="call-2", name="read_file", args={"path": "README.md"}),
+    ]
+
+    raw = _json_dumps(calls)
+
+    assert raw == (
+        '[{"id": "call-1", "name": "submit_plan", '
+        '"args": {"plan_id": "p1"}}, '
+        '{"id": "call-2", "name": "read_file", '
+        '"args": {"path": "README.md"}}]'
+    )
+
+
 def test_json_schema_is_nested_and_attribute_accessible() -> None:
     schema = JsonSchema.model_validate(
         {

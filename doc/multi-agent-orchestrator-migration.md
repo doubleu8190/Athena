@@ -110,7 +110,6 @@ class ExecutionPlan(BaseModel):
     root_run_id: str
     goal: str
     tasks: list[TaskSpec]
-    aggregation_strategy: Literal["synthesize", "first_success", "all"] = "synthesize"
     max_parallelism: int = 4
 ```
 
@@ -198,7 +197,7 @@ planner_loop (planner tools / structured plan)
 ```text
 agent_plans
 - plan_id PK, session_id, root_run_id, goal, status
-- schema_version, plan_json, aggregation_strategy
+- schema_version, plan_json
 - created_at, updated_at, error_json
 
 agent_tasks

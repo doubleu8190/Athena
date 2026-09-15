@@ -17,6 +17,7 @@ from athena.core.memory.contracts import CompletedTurn
 from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
+from athena.contracts.ports import EventPublisherPort
 from athena.models import Message
 from athena.models.file import AttachmentRef
 from athena.utils.logging import get_logger
@@ -42,6 +43,7 @@ class ExecutionService:
         conversation_summarizer: ConversationSummarizer,
         memory_job_repository: MemoryJobRepository,
         settings: Settings,
+        event_publisher: EventPublisherPort,
     ) -> None:
         self._llm = llm
         self._tool_manager = tool_manager
@@ -51,6 +53,7 @@ class ExecutionService:
         self._conversation_summarizer = conversation_summarizer
         self._memory_job_repository = memory_job_repository
         self._settings = settings
+        self._events = event_publisher
 
     async def run_harness(
         self,
@@ -86,7 +89,7 @@ class ExecutionService:
             tool_manager=self._tool_manager,
             settings=self._settings,
             db=self._db,
-            event_publisher=None,
+            event_publisher=self._events,
             compressor=self._compressor,
             harness_settings=harness_settings,
         )
@@ -160,6 +163,7 @@ class ExecutionService:
             "turn_count": result.turn_count,
             "tool_results": result.tool_results,
             "error": result.error,
+            "error_detail": result.error_detail,
             "interrupted": result.interrupted,
             "attachments": cls._serialize_attachments(attachment_refs),
         }

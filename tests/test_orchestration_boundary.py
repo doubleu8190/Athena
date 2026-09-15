@@ -143,6 +143,31 @@ def test_first_agent_turn_has_three_routes() -> None:
     assert _route_after_llm({"execution": {"route": "plan_requested"}}) == "plan_requested"
 
 
+def test_non_retryable_llm_error_finishes_without_another_llm_call() -> None:
+    from athena.runtime.execution_loop.graph import _route_after_llm
+
+    assert _route_after_llm(
+        {"execution": {"error": "invalid submit_plan", "retryable": False}}
+    ) == "finish_execution"
+
+
+def test_retryable_llm_error_can_retry_within_budgets() -> None:
+    from athena.runtime.execution_loop.graph import _route_after_llm
+
+    assert _route_after_llm(
+        {
+            "execution": {
+                "error": "temporary failure",
+                "retryable": True,
+                "turn_count": 1,
+                "retry_count": 1,
+                "max_turns": 3,
+                "max_retries": 2,
+            }
+        }
+    ) == "llm_call"
+
+
 def test_plan_submission_is_exposed_on_every_top_level_turn() -> None:
     from athena.core.harness.turn_executor import HarnessTurnExecutor
     from athena.runtime.orchestration import PLAN_SUBMISSION_TOOL_NAME

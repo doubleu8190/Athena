@@ -138,7 +138,6 @@ class ExecutionPlan(StrictContract):
     root_run_id: str = Field(min_length=1)
     goal: str = Field(min_length=1)
     tasks: list[TaskSpec] = Field(min_length=1, max_length=6)
-    aggregation_strategy: Literal["synthesize", "first_success", "all"] = "synthesize"
     max_parallelism: int = Field(default=4, ge=1, le=6)
 
     @model_validator(mode="after")
@@ -183,7 +182,6 @@ class PlanSubmission(StrictContract):
     plan_id: str = Field(min_length=1)
     goal: str = ""
     tasks: list[TaskDraft] = Field(min_length=1, max_length=6)
-    aggregation_strategy: Literal["synthesize", "first_success", "all"] = "synthesize"
     max_parallelism: int = Field(default=4, ge=1, le=6)
 
 

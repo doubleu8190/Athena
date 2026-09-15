@@ -123,6 +123,7 @@ class LangGraphRuntime:
             conversation_summarizer=conversation_summarizer,
             memory_job_repository=memory_job_repository,
             settings=settings,
+            event_publisher=event_publisher,
         )
 
         # ── 直接依赖（用于附件处理、子 Agent、图组装） ──

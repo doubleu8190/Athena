@@ -13,6 +13,7 @@ from athena.contracts.errors import ErrorDetail
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentRunStatus, StreamSnapshotStatus
 from athena.runtime.streaming import StreamCoalescer
+from athena.runtime.transport import SessionEventBus
 from athena.infrastructure.sqlite.agent_store import AgentStore
 from athena.models.tool import RiskLevel
 from athena.contracts.statuses import AgentApprovalDecision
@@ -51,7 +52,7 @@ def _message(
 @pytest.mark.asyncio
 async def test_event_cursor_cache_initializes_each_maximum_once():
     """会话游标和流 Chunk 游标只从数据库初始化一次。"""
-    store = AgentStore()
+    store = AgentStore(transport=SessionEventBus())
     db = MagicMock()
     db.scalar = AsyncMock(side_effect=[7, 3])
 
@@ -255,13 +256,14 @@ async def test_worker_run_is_independent_from_root_session(agent_store):
 
 
 @pytest.mark.asyncio
-async def test_events_share_session_sequence_across_durability_levels(agent_store):
-    """Realtime 和 Durable 事件都使用同一个可恢复的会话游标。"""
+async def test_realtime_events_are_broadcast_without_persistence(agent_store):
+    """Realtime 事件只广播给在线订阅者，不占用会话游标。"""
     database, _ = agent_store
     session = await database.sessions.create(generate_session_id(), "事件")
-    store = AgentStore()
+    store = AgentStore(transport=SessionEventBus())
 
-    first = await store.publish(
+    queue, _ = await store.open_subscription(session.id)
+    first = await store.publish_realtime(
         ApplicationEvent(
             event_type=EventType.LLM_TOKEN,
             durability=EventDurability.REALTIME,
@@ -283,16 +285,18 @@ async def test_events_share_session_sequence_across_durability_levels(agent_stor
         )
     )
 
-    assert (first.session_seq, second.session_seq) == (1, 2)
+    assert first.session_seq is None
+    assert second.session_seq == 1
+    assert (await queue.get()).session_seq is None
     rows = await store.events_after(session.id)
-    assert [row.session_seq for row in rows] == [1, 2]
+    assert [row.session_seq for row in rows] == [1]
 
 
 @pytest.mark.asyncio
 async def test_durable_event_transition_id_is_idempotent(agent_store):
     database, _ = agent_store
     session = await database.sessions.create(generate_session_id(), "事件幂等")
-    store = AgentStore()
+    store = AgentStore(transport=SessionEventBus())
     event = ApplicationEvent(
         event_type=EventType.RUN_STARTED,
         durability=EventDurability.DURABLE,
@@ -317,7 +321,7 @@ async def test_stream_chunk_is_idempotent_and_conflicts_are_rejected(agent_store
     """重复 Chunk 不重复入库；相同幂等键的内容变化必须失败。"""
     database, _ = agent_store
     session = await database.sessions.create(generate_session_id(), "Chunk")
-    store = AgentStore()
+    store = AgentStore(transport=SessionEventBus())
     event = ApplicationEvent(
         event_type=EventType.LLM_TOKEN,
         durability=EventDurability.REALTIME,
@@ -329,13 +333,9 @@ async def test_stream_chunk_is_idempotent_and_conflicts_are_rejected(agent_store
         payload={"delta": "same"},
     )
 
-    first = await store.publish(event)
-    retry = await store.publish(event)
-    assert retry.session_seq == first.session_seq
-    assert len(await store.events_after(session.id)) == 1
-
-    with pytest.raises(ValueError, match="idempotency conflict"):
-        await store.publish(event.model_copy(update={"payload": {"delta": "other"}}))
+    await store.publish_realtime(event)
+    await store.publish_realtime(event.model_copy(update={"payload": {"delta": "other"}}))
+    assert len(await store.events_after(session.id)) == 0
 
 
 @pytest.mark.asyncio
@@ -362,22 +362,25 @@ async def test_concurrent_event_publish_is_serialized(agent_store):
 
 @pytest.mark.asyncio
 async def test_stream_coalescer_emits_chunk_protocol(agent_store):
-    """合并器生成连续的 Chunk 序号和 UTF-8 字节偏移。"""
+    """合并器生成实时 Chunk，并且不写入事件数据库。"""
     database, _ = agent_store
     session = await database.sessions.create(generate_session_id(), "流")
-    store = AgentStore()
+    transport = SessionEventBus()
+    store = AgentStore(transport=transport)
+    queue, _ = await store.open_subscription(session.id)
     coalescer = StreamCoalescer(
         session_id=session.id,
         run_id="run-1",
         stream_id="answer-run-1",
-        publish=store.publish,
+        publish_realtime=store.publish_realtime,
         max_bytes=1,
     )
 
     await coalescer.append("你")
     await coalescer.append("好")
-    rows = await store.events_after(session.id)
-    assert [(row.chunk_id, row.payload_json) for row in rows] == [
-        (1, '{"base_version": 0, "chunk_id": 1, "delta": "你", "end_offset": 3, "start_offset": 0, "stream_id": "answer-run-1"}'),
-        (2, '{"base_version": 1, "chunk_id": 2, "delta": "好", "end_offset": 6, "start_offset": 3, "stream_id": "answer-run-1"}'),
+    events = [await queue.get(), await queue.get()]
+    assert [(event.chunk_id, event.payload["delta"]) for event in events] == [
+        (1, "你"),
+        (2, "好"),
     ]
+    assert await store.events_after(session.id) == []

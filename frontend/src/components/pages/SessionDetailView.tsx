@@ -14,7 +14,6 @@ import { apiClient } from "../../api/client"
 import type { Message, Session } from "../../types"
 import { formatDateTime } from "../../utils/format"
 import { useChatStore } from "../../store/chatStore"
-import { useSessionEventStream } from "../../hooks/useSessionEventStream"
 import ViewShell from "./ViewShell"
 import SessionPicker from "../ctx/SessionPicker"
 import StatCard from "../ui/StatCard"
@@ -30,8 +29,6 @@ function SessionDetailView() {
   const [error, setError] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draftTitle, setDraftTitle] = useState("")
-
-  useSessionEventStream(sessionId, "")
 
   const reload = useCallback(async () => {
     if (!sessionId) return

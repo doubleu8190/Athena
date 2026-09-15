@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from typing import Any
 
 from athena.contracts.commands import CommandType
+from athena.contracts.errors import ExecutionError
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import AgentCommandRecord, AgentStorePort
 from athena.contracts.statuses import (
     AgentApprovalDecision,
     AgentCommandStatus,
     AgentRunStatus,
-    StreamSnapshotStatus,
 )
 from athena.models.json_models import CommandPayload
 from athena.core.memory.memory import MemoryManager
@@ -328,7 +329,13 @@ class CommandConsumer:
         self, command: AgentCommandRecord, run_id: str, result: Any
     ) -> None:
         payload = result if isinstance(result, dict) else {"result": result}
-        error = str(payload.get("error") or "").strip()
+        error_detail = ExecutionError.from_value(
+            payload.get("error_detail") or payload.get("error") or "",
+            code="run_failed",
+            retryable=False,
+            phase="runtime",
+        ) if payload.get("error") or payload.get("error_detail") else None
+        error = str(payload.get("error") or (error_detail.message if error_detail else "")).strip()
         if error:
             await self.store.update_run_status(
                 run_id, AgentRunStatus.FAILED, error
@@ -345,52 +352,19 @@ class CommandConsumer:
                         "command_id": command.command_id,
                         "message_id": self._command_message_id(command),
                         "error": error,
+                        "error_detail": error_detail.model_dump(mode="json") if error_detail else None,
                     },
                 )
             )
             await self.store.complete(
                 command.command_id,
                 status=AgentCommandStatus.FAILED,
-                error={"code": "run_failed", "message": error},
+                error=error_detail.model_dump(mode="json") if error_detail else {"code": "run_failed", "message": error},
                 result=payload,
             )
             return
 
         await self.store.update_run_status(run_id, AgentRunStatus.COMPLETED)
-        content = self._result_content(result)
-        stream_id = f"answer-{run_id}"
-        await self.store.upsert_snapshot(
-            command.session_id,
-            stream_id,
-            1,
-            content,
-            run_id=run_id,
-            status=StreamSnapshotStatus.COMPLETED,
-        )
-        await self.store.publish(
-            ApplicationEvent(
-                event_type=EventType.STREAM_SNAPSHOT,
-                durability=EventDurability.SNAPSHOT,
-                session_id=command.session_id,
-                run_id=run_id,
-                message_id=self._command_message_id(command),
-                stream_id=stream_id,
-                stream_type="answer",
-                transition_id=f"stream:{stream_id}:snapshot:1",
-                payload={
-                    "session_id": command.session_id,
-                    "run_id": run_id,
-                    "message_id": self._command_message_id(command),
-                    "stream_id": stream_id,
-                    "stream_type": "answer",
-                    "version": 1,
-                    "last_chunk_id": 0,
-                    "content": content,
-                    "content_length": len(content.encode("utf-8")),
-                    "status": StreamSnapshotStatus.COMPLETED.value,
-                },
-            )
-        )
         await self._publish_run_event(command, EventType.RUN_COMPLETED)
         await self.store.complete(
             command.command_id,
@@ -454,6 +428,13 @@ class CommandConsumer:
             存储层写入失败时传播底层异常。
         """
         error_message = self._error_message(exc)
+        error_detail = ExecutionError.from_exception(
+            exc,
+            code="command_failed",
+            retryable=False,
+            phase="command",
+            stack=traceback.format_exc(),
+        )
         logger.exception(
             "command_processing_failed",
             command_id=command.command_id,
@@ -482,13 +463,14 @@ class CommandConsumer:
                         "command_id": command.command_id,
                         "message_id": self._command_message_id(command),
                         "error": error_message,
+                        "error_detail": error_detail.model_dump(mode="json"),
                     },
                 )
             )
         await self.store.complete(
             command.command_id,
             status=AgentCommandStatus.FAILED,
-            error={"code": "command_failed", "message": error_message},
+            error=error_detail.model_dump(mode="json"),
         )
 
     @staticmethod

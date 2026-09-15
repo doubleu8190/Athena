@@ -3,10 +3,11 @@ import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, Paperc
 import { MessageBubble } from "./MessageBubble"
 import { ApprovalCard } from "./ApprovalDialog"
 import { ActivityPanel } from "./ActivityPanel"
+import { ExecutionTimeline } from "./ExecutionTimeline"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { ApprovalRequest, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
+import type { ApprovalRequest, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
 
 interface ChatProps {
   sendEvent: (type: string, data?: Record<string, unknown>) => boolean
@@ -35,7 +36,7 @@ function Chat({ sendEvent }: ChatProps) {
     clearToolCalls,
     clearApprovals,
     orchestrationTasks,
-    clearOrchestrationTasks,
+    executionTimeline,
     setAgentStatus,
     clearThinking,
     setError,
@@ -111,22 +112,26 @@ function Chat({ sendEvent }: ChatProps) {
       if (isCancelled?.()) return
       // 防止快速切换 session 导致的竞态：只在当前 session 仍匹配时应用结果
       if (loadingSessionIdRef.current === sessionId) {
-        if (history.length > 0) {
-          setMessages(history)
-        } else {
-          clearMessages()
+        // 历史请求与 SSE replay 可能并发完成。以消息 ID 和 run_id 合并，
+        // 保留已经由 SSE 构造出的实时 assistant 内容，禁止历史响应无条件清空。
+        const current = useChatStore.getState().messages
+        const merged = [...history]
+        for (const live of current) {
+          const same = merged.findIndex((item) =>
+            item.id === live.id ||
+            (item.role === "assistant" && live.role === "assistant" && item.run_id && item.run_id === live.run_id),
+          )
+          if (same >= 0) {
+            merged[same] = live.content.length >= merged[same].content.length ? live : merged[same]
+          } else {
+            merged.push(live)
+          }
         }
-        clearSteps()
-        clearToolCalls()
-        clearOrchestrationTasks()
+        setMessages(merged)
       }
     } catch {
       if (isCancelled?.()) return
       if (loadingSessionIdRef.current === sessionId) {
-        clearMessages()
-        clearSteps()
-      clearToolCalls()
-      clearOrchestrationTasks()
         setError("Failed to load session history. Please try again.")
       }
     } finally {
@@ -384,9 +389,6 @@ function Chat({ sendEvent }: ChatProps) {
     }
   }
 
-  // 记录是否已渲染处理阶段的起始节点，以便将工具消息和思考状态包裹在同一时间线上。
-  const hasProcessingPhase = phaseGroups.some((g) => g.phase === "processing")
-
   return (
     <div ref={rootRef} className="flex-1 flex flex-row min-w-0 min-h-0">
       <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
@@ -499,18 +501,20 @@ function Chat({ sendEvent }: ChatProps) {
                         </span>
                       </div>
                     )}
-                    {/* 阶段分隔线 */}
-                    <div className="phase-divider">
-                      <span className={`phase-label phase-${group.phase === "request" ? "request" : group.phase === "processing" ? "processing" : "response"}`}>
-                        <span className="dot"></span>
-                        {group.phase === "request" ? "USER REQUEST" : group.phase === "processing" ? "AGENT PROCESSING" : "AGENT RESPONSE"}
-                      </span>
-                      {group.messages[0] && (
-                        <span className="text-xs text-athena-muted font-mono">
-                          {formatTime(group.messages[0].timestamp)}
+                    {/* 请求和最终响应保留阶段分隔；执行过程由 EXECUTION PROGRESS 时间线统一呈现。 */}
+                    {group.phase !== "processing" && (
+                      <div className="phase-divider">
+                        <span className={`phase-label phase-${group.phase === "request" ? "request" : "response"}`}>
+                          <span className="dot"></span>
+                          {group.phase === "request" ? "USER REQUEST" : "AGENT RESPONSE"}
                         </span>
-                      )}
-                    </div>
+                        {group.messages[0] && (
+                          <span className="text-xs text-athena-muted font-mono">
+                            {formatTime(group.messages[0].timestamp)}
+                          </span>
+                        )}
+                      </div>
+                    )}
 
                     {/* 用户请求阶段 */}
                     {group.phase === "request" && (
@@ -521,21 +525,12 @@ function Chat({ sendEvent }: ChatProps) {
                       </div>
                     )}
 
-                    {/* Agent 处理阶段，渲染在处理时间线中 */}
-                    {group.phase === "processing" && (
-                      <div className={`processing-group py-2 ${isConversationCompleted ? "task-completed" : ""}`}>
-                        {group.messages.map((message, mi) => (
-                          <div key={message.id} className="timeline-node tool-node">
-                            <MessageBubble message={message} />
-                            {mi < group.messages.length - 1 && <div className="mb-3" />}
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    {/* 工具调用和工具结果已统一投影到 EXECUTION PROGRESS，避免重复渲染。 */}
 
                     {/* Agent 响应阶段 */}
                     {group.phase === "response" && (
                       <div className={isLastGroup && !isAgentActive ? "animate-fade-in" : ""}>
+                        <ExecutionTimeline entries={timelineEntriesForGroup(executionTimeline, group.messages)} />
                         {group.messages.map((message) => (
                           <MessageBubble key={message.id} message={message} />
                         ))}
@@ -545,53 +540,8 @@ function Chat({ sendEvent }: ChatProps) {
                 )
               })}
 
-              {/* 处理阶段内的思考/执行中指示器 */}
-              {!isLoadingHistory && (thinking?.active || (isAgentActive && !thinking)) && (
-                <>
-                  {/* 仅在当前没有处理阶段时添加分隔线 */}
-                  {!hasProcessingPhase && (
-                    <div className="phase-divider">
-                      <span className="phase-label phase-processing">
-                        <span className="dot"></span>
-                        AGENT PROCESSING
-                      </span>
-                    </div>
-                  )}
-                  <div className={`processing-group py-2 ${!hasProcessingPhase ? "" : ""}`}>
-                    <div className="timeline-node thinking-node">
-                      <div className="flex gap-3">
-                        <div className="w-8 h-8 rounded-full flex items-center justify-center bg-athena-surface border border-athena-border flex-shrink-0">
-                          <Loader2 className="w-4 h-4 text-athena-accent animate-spin" />
-                        </div>
-                        <div className="card px-4 py-3 flex-1">
-                          <div className="flex items-center gap-2 text-sm">
-                            <span className="font-medium text-athena-text">
-                              {thinking?.active ? "Thinking" : agentStatus === "waiting_approval" ? "Waiting for Approval" : "Processing"}
-                            </span>
-                            <span className="text-xs text-athena-muted ml-auto">
-                              {agentStatus === "waiting_approval" ? "Blocked" : "Running"}
-                            </span>
-                          </div>
-                          <div className="thinking-indicator mt-1">
-                            <span></span>
-                            <span></span>
-                            <span></span>
-                          </div>
-                          {thinking?.content && (
-                            <details className="mt-2" open>
-                              <summary className="cursor-pointer text-xs text-athena-muted hover:text-athena-text select-none">
-                                Thinking details
-                              </summary>
-                              <div className="mt-2 text-sm text-athena-text/80 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
-                                {thinking.content}
-                              </div>
-                            </details>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </>
+              {!phaseGroups.some((group) => group.phase === "response") && (
+                <ExecutionTimeline entries={executionTimeline} />
               )}
 
               {/* 会话完成总结 — 原 EXECUTION TRACE 列表移入右侧 Activity 面板，
@@ -819,4 +769,13 @@ function allToolResultsArrived(invocations: ToolCallInvocation[], messages: Mess
       (message.tool_call_id === invocation.id || message.tool_call_record_id === invocation.id)
     )),
   )
+}
+
+function timelineEntriesForGroup(
+  entries: ExecutionTimelineEntry[],
+  messages: Message[],
+): ExecutionTimelineEntry[] {
+  const runIds = new Set(messages.map((message) => message.run_id).filter(Boolean))
+  if (runIds.size === 0) return entries
+  return entries.filter((entry) => !entry.run_id || runIds.has(entry.run_id))
 }

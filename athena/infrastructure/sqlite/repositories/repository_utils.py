@@ -20,9 +20,23 @@ def _now_iso() -> str:
 
 
 def _json_dumps(value: Any) -> str:
-    """把值转换成 JSON 文本；Pydantic 模型会先转换成普通 JSON 数据。"""
-    if isinstance(value, BaseModel):
-        value = value.model_dump(mode="json", exclude_none=True)
+    """把值递归转换为 JSON 原生值后序列化。
+
+    Pydantic 模型经常嵌套在列表或字典中（例如 ``list[ToolCall]``）。
+    只处理顶层模型会触发 ``json.dumps(default=str)``，把嵌套模型保存成
+    ``"id='...' ..."`` 这样的不可恢复字符串。
+    """
+
+    def to_json_value(item: Any) -> Any:
+        if isinstance(item, BaseModel):
+            return to_json_value(item.model_dump(mode="json", exclude_none=True))
+        if isinstance(item, dict):
+            return {str(key): to_json_value(val) for key, val in item.items()}
+        if isinstance(item, (list, tuple, set, frozenset)):
+            return [to_json_value(val) for val in item]
+        return item
+
+    value = to_json_value(value)
     return json.dumps(value, ensure_ascii=False, default=str)
 
 

@@ -39,6 +39,7 @@ from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole, ToolCallRecord
 from athena.models.tool import ToolCallStatus
 from athena.contracts.events import EventType
+from athena.contracts.errors import ExecutionError
 from athena.contracts.events import ApplicationEvent, EventDurability
 from athena.contracts.ports import EventPublisherPort
 from athena.utils.ids import generate_time_id
@@ -88,6 +89,7 @@ class HarnessRunResult:
     turn_count: int
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    error_detail: dict[str, Any] | None = None
     interrupted: bool = False
 
 
@@ -244,7 +246,7 @@ class Harness:
             stream_id=self._answer_stream_id,
             stream_type="answer",
             message_id=self._message_id,
-            publish=self._events.publish,
+            publish_realtime=self._events.publish_realtime,
         )
         await self._emit(
             EventType.STREAM_START,
@@ -280,6 +282,7 @@ class Harness:
         tool_results_all: list[dict[str, Any]] = []
         last_content = ""
         error_msg: str | None = None
+        error_detail: ExecutionError | None = None
         interrupted = False
 
         try:
@@ -347,6 +350,13 @@ class Harness:
                     #   否则前端气泡无法结束）
                     if self._should_stop():
                         interrupted = True
+                        error_detail = ExecutionError(
+                            code="run_interrupted",
+                            message="运行被用户中断",
+                            error_type="CancelledError",
+                            retryable=True,
+                            phase="llm_call",
+                        )
                         await self._emit_llm_call_end(
                             llm_call_id,
                             status="failed",
@@ -358,6 +368,13 @@ class Harness:
                     # 空响应检测：无文本且无工具调用 → 不落库、有界重试
                     if not full_content.strip() and not final_tc:
                         error_msg = "LLM 返回空响应（无内容且无工具调用）"
+                        error_detail = ExecutionError(
+                            code="llm_empty_response",
+                            message=error_msg,
+                            error_type="LLMEmptyResponse",
+                            retryable=budget.remaining_retries() > 0,
+                            phase="llm_call",
+                        )
                         logger.warning(
                             "llm_empty_response", run_id=rid, error=error_msg
                         )
@@ -397,9 +414,17 @@ class Harness:
                     )
                     last_content = full_content
                     error_msg = None
+                    error_detail = None
 
                 except TimeoutError:
                     error_msg = f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）"
+                    error_detail = ExecutionError(
+                        code="llm_timeout",
+                        message=error_msg,
+                        error_type="TimeoutError",
+                        retryable=True,
+                        phase="llm_call",
+                    )
                     logger.warning("llm_stream_timeout", run_id=rid, error=error_msg)
                     await self._emit(
                         EventType.RUN_FAILED,
@@ -419,9 +444,21 @@ class Harness:
                 except Exception as e:
                     logger.error("llm_call_failed", error=str(e), run_id=rid)
                     error_msg = f"LLM 调用失败: {e}"
+                    error_detail = ExecutionError.from_exception(
+                        e,
+                        code="llm_call_failed",
+                        retryable=not isinstance(e, BudgetExceeded),
+                        phase="llm_call",
+                        stack=traceback.format_exc(),
+                    )
                     await self._emit(
                         EventType.RUN_FAILED,
-                        {"call_id": llm_call_id, "error": str(e), "phase": "llm_call"},
+                        {
+                            "call_id": llm_call_id,
+                            "error": str(e) or type(e).__name__,
+                            "error_detail": error_detail.model_dump(mode="json"),
+                            "phase": "llm_call",
+                        },
                         session_id,
                         rid,
                     )
@@ -504,7 +541,10 @@ class Harness:
                     break
 
         except BudgetExceeded as e:
-            error_msg = str(e)
+            error_msg = str(e) or type(e).__name__
+            error_detail = ExecutionError.from_exception(
+                e, code="budget_exceeded", retryable=False, phase="harness"
+            )
             logger.warning("budget_exceeded", run_id=rid, error=error_msg)
             await self._emit(
                 EventType.BUDGET_EXCEEDED,
@@ -513,11 +553,22 @@ class Harness:
                 rid,
             )
         except Exception as e:
-            error_msg = f"Harness 执行异常: {e}"
+            error_msg = f"Harness 执行异常: {e}" if str(e) else f"Harness 执行异常: {type(e).__name__}"
+            error_detail = ExecutionError.from_exception(
+                e,
+                code="harness_failed",
+                retryable=False,
+                phase="harness",
+                stack=traceback.format_exc(),
+            )
             logger.exception("harness_failed", run_id=rid)
             await self._emit(
                 EventType.RUN_FAILED,
-                {"error": str(e), "phase": "harness"},
+                {
+                    "error": error_msg,
+                    "error_detail": error_detail.model_dump(mode="json"),
+                    "phase": "harness",
+                },
                 session_id,
                 rid,
             )
@@ -542,6 +593,7 @@ class Harness:
                 "stream_id": self._answer_stream_id,
                 "stream_type": "answer",
                 "turn_count": budget.turn_count,
+                "content": full_content,
                 "error": error_msg,
             },
             session_id,
@@ -559,6 +611,7 @@ class Harness:
             turn_count=budget.turn_count,
             tool_results=tool_results_all,
             error=error_msg,
+            error_detail=error_detail.model_dump(mode="json") if error_detail else None,
             interrupted=interrupted,
         )
 
@@ -1167,6 +1220,16 @@ class Harness:
                 "status": status,
                 "output": output,
                 "error": error,
+                "error_detail": (
+                    ExecutionError.from_value(
+                        error,
+                        code="tool_timeout" if status == ToolCallStatus.TIMEOUT.value else "tool_failed",
+                        retryable=status == ToolCallStatus.TIMEOUT.value,
+                        phase="tool_execution",
+                    ).model_dump(mode="json")
+                    if error
+                    else None
+                ),
                 "duration_ms": duration_ms,
             },
             session_id,

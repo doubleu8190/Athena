@@ -18,7 +18,7 @@ class StreamCoalescer:
         session_id: str,
         run_id: str,
         stream_id: str,
-        publish: Callable[[ApplicationEvent], Awaitable[object]],
+        publish_realtime: Callable[[ApplicationEvent], Awaitable[object]],
         stream_type: str = "answer",
         message_id: str | None = None,
         interval_ms: int = 500,
@@ -32,7 +32,7 @@ class StreamCoalescer:
             session_id (str): 所属会话 ID，必须非空。
             run_id (str): 所属运行 ID，必须非空。
             stream_id (str): 流 ID，必须在同一流生命周期内保持稳定。
-            publish (Callable): 异步事件发布回调，接收 ``ApplicationEvent``。
+            publish_realtime (Callable): 只向在线客户端广播事件的异步回调。
             interval_ms (int): 最长合并间隔，单位为毫秒，必须大于等于 0。
             max_bytes (int): 单次增量达到该 UTF-8 字节数时立即刷新，必须为正数。
         返回值:
@@ -43,7 +43,7 @@ class StreamCoalescer:
         self.session_id, self.run_id, self.stream_id = session_id, run_id, stream_id
         self.stream_type = stream_type
         self.message_id = message_id
-        self.publish = publish
+        self.publish_realtime = publish_realtime
         self.interval = interval_ms / 1000
         self.max_bytes = max_bytes
         self._buffer = ""
@@ -113,7 +113,7 @@ class StreamCoalescer:
         self._version += 1
         self._buffer = ""
         self._last_flush = time.monotonic()
-        await self.publish(
+        await self.publish_realtime(
             ApplicationEvent(
                 event_type=EventType.LLM_TOKEN,
                 durability=EventDurability.REALTIME,

@@ -14,7 +14,7 @@ from athena.runtime.command_notifications import CommandNotifier
 from athena.runtime.transport import SessionEventBus
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
-from athena.contracts.events import ApplicationEvent, EventType
+from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import AgentCommandRecord, AgentRunRecord
 from athena.contracts.statuses import (
     AgentApprovalDecision,
@@ -997,6 +997,22 @@ class AgentStore:
                     # 只有提交成功后才广播；队列满时在这里背压，不丢事件。
                     await self.transport.publish(persisted)
                 return persisted
+
+    async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
+        """只广播实时事件，不写入 ``agent_events`` 或分配 ``session_seq``。
+
+        参数:
+            event (ApplicationEvent): 不需要断线重放的实时事件。
+        返回值:
+            ApplicationEvent: 原事件，保持无会话游标的实时语义。
+        异常:
+            实时队列写入失败时传播底层异步异常。
+        """
+        if event.durability != EventDurability.REALTIME:
+            raise ValueError("publish_realtime only accepts realtime events")
+        if self.transport is not None:
+            await self.transport.publish(event)
+        return event
 
     async def upsert_snapshot(
         self,

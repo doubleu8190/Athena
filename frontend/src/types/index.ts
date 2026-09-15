@@ -1,4 +1,6 @@
 import type { ApplicationEventType } from "./events"
+import type { ExecutionError } from "./events"
+export type { ExecutionError }
 
 // ─── 执行步骤相关 ───────────────────────────────────────────────
 
@@ -22,6 +24,7 @@ export interface Step {
   llm_input_tokens: number
   llm_output_tokens: number
   error_message?: string | null
+  error_detail?: ExecutionError | null
 }
 
 // ─── 消息相关 ───────────────────────────────────────────────────
@@ -112,6 +115,20 @@ export interface ThinkingState {
   messageId: string | null
 }
 
+export type ExecutionTimelineStatus = "running" | "completed" | "failed" | "waiting" | "info"
+
+export interface ExecutionTimelineEntry {
+  id: string
+  session_seq?: number
+  run_id?: string
+  event_type: string
+  label: string
+  detail?: string
+  status: ExecutionTimelineStatus
+  timestamp: string
+  metadata?: Record<string, unknown>
+}
+
 // ─── 中心编排相关 ────────────────────────────────────────────────
 
 export interface OrchestrationTask {
@@ -151,6 +168,7 @@ export interface ToolCall {
   output?: string
   error?: string
   error_stack?: string
+  error_detail?: ExecutionError | null
   risk_level: "low" | "medium" | "high"
   /** 实时流由 TOOL_CALL_START 事件补全，用于归组 */
   step_id?: string
@@ -185,52 +203,6 @@ export interface ApprovalRequest {
 export interface ApprovalResult {
   approval_id: string
   decision: "approved" | "denied" | "timeout"
-}
-
-// ─── 中心编排相关 ────────────────────────────────────────────────
-
-export interface OrchestrationTask {
-  plan_id: string
-  task_id: string
-  title: string
-  status:
-    | "queued"
-    | "claimed"
-    | "running"
-    | "waiting_approval"
-    | "retry_wait"
-    | "cancel_requested"
-    | "completed"
-    | "failed"
-    | "timed_out"
-    | "invalid_output"
-    | "cancelled"
-  attempt?: number
-  worker_run_id?: string
-  error?: string
-}
-
-// ─── 中心编排相关 ────────────────────────────────────────────────
-
-export interface OrchestrationTask {
-  plan_id: string
-  task_id: string
-  title: string
-  status:
-    | "queued"
-    | "claimed"
-    | "running"
-    | "waiting_approval"
-    | "retry_wait"
-    | "cancel_requested"
-    | "completed"
-    | "failed"
-    | "timed_out"
-    | "invalid_output"
-    | "cancelled"
-  attempt?: number
-  worker_run_id?: string
-  error?: string
 }
 
 // ─── 事件相关 ────────────────────────────────────────────────────

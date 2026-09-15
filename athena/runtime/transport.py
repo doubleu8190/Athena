@@ -37,6 +37,11 @@ class RuntimeEventPublisher:
         """
         return await self.store.publish(event)
 
+    async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
+        """广播不需要断线恢复的实时事件，不分配会话游标。"""
+        await self.store.publish_realtime(event)
+        return event
+
     async def upsert_snapshot(
         self,
         session_id: str,
@@ -51,7 +56,7 @@ class RuntimeEventPublisher:
     ) -> bool:
         """将可恢复的回答流快照委托给事件存储。
 
-        thinking 状态只通过 durable thinking 事件传输，不使用此快照接口。
+        当前回答流不再使用快照恢复；该接口保留用于兼容已有调用方。
         """
         return await self.store.upsert_snapshot(
             session_id,

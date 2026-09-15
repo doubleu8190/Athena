@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
-import type { ApplicationEventEnvelope } from "../types/events"
-import type { Message, ToolCall } from "../types"
+import type { ApplicationEventEnvelope, ExecutionError } from "../types/events"
+import type { ExecutionTimelineEntry, Message, ToolCall } from "../types"
 
 interface StreamProjection {
   nextChunkId: number
@@ -32,8 +32,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
   const {
     setConnectionStatus, setAgentStatus, addMessage, updateMessage,
     addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval,
-    clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError,
+    clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
     upsertOrchestrationTask, clearOrchestrationTasks,
+    upsertExecutionTimelineEntry, clearExecutionTimeline,
   } = useChatStore()
 
   useEffect(() => {
@@ -45,7 +46,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     clearToolCalls()
     clearApprovals()
     clearThinking()
+    clearErrorDetail()
     clearOrchestrationTasks()
+    clearExecutionTimeline()
     if (!sessionId) {
       setConnectionStatus("disconnected")
       return
@@ -99,14 +102,23 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         const envelope = JSON.parse(event.data) as ApplicationEventEnvelope
         const type = envelope.event_type || event.type
         const data: Record<string, unknown> = envelope.payload ?? (envelope as Record<string, unknown>)
+        const errorDetail = (data.error_detail || envelope.error_detail) as ExecutionError | undefined
         const sequence = envelope.session_seq
-        if (sequence !== undefined) {
+        if (typeof sequence === "number") {
           if (sequence <= lastSeqRef.current) return
           lastSeqRef.current = sequence
         }
         const runId = envelope.run_id || String(data.run_id || "")
         const streamId = envelope.stream_id || String(data.stream_id || (runId ? `answer-${runId}` : ""))
         const now = new Date().toISOString()
+        const timelineEntry = projectTimelineEvent({
+          type,
+          data,
+          envelope,
+          runId,
+          timestamp: envelope.occurred_at || now,
+        })
+        if (timelineEntry) upsertExecutionTimelineEntry(timelineEntry)
 
         if (type === "stream.snapshot") {
           const version = Number(data.version || 0)
@@ -213,7 +225,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           setAgentStatus("thinking")
         } else if (type === "llm.completed") {
           const stepId = String(data.call_id || "")
-          if (stepId) updateStep(stepId, { status: data.status === "failed" ? "failed" : "completed", completed_at: now, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null })
+          if (stepId) updateStep(stepId, { status: data.status === "failed" ? "failed" : "completed", completed_at: now, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
         } else if (type === "tool.started") {
           const toolId = String(data.tool_call_id || crypto.randomUUID())
           const stepId = String(data.call_id || crypto.randomUUID())
@@ -223,19 +235,125 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           const toolId = String(data.tool_call_id || "")
           const stepId = String(data.call_id || "")
           const status = data.status === "success" ? "success" : "failed"
-          if (toolId) updateToolCall(toolId, { status, completed_at: now, duration_ms: Number(data.duration_ms || 0), output: data.output ? String(data.output) : undefined, error: data.error ? String(data.error) : undefined })
-          if (stepId) updateStep(stepId, { status: status === "success" ? "completed" : "failed", completed_at: now, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null })
+          if (toolId) updateToolCall(toolId, { status, completed_at: now, duration_ms: Number(data.duration_ms || 0), output: data.output ? String(data.output) : undefined, error: data.error ? String(data.error) : undefined, error_detail: errorDetail || null })
+          if (stepId) updateStep(stepId, { status: status === "success" ? "completed" : "failed", completed_at: now, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
         }
         if (type === "run.started" || type === "run.resumed") setAgentStatus("running")
         else if (type === "run.paused" || type === "run.cancelled") { setAgentStatus("idle"); clearThinking() }
-        else if (type === "run.failed") { setAgentStatus("error"); setError(String(data.error || data.message || "Run failed")) }
+        else if (type === "run.failed") {
+          setAgentStatus("error")
+          setErrorDetail(errorDetail || null)
+          setError(String(errorDetail?.message || data.error || data.message || "Run failed"))
+        }
         else if (type === "run.completed") { setAgentStatus("idle"); clearThinking() }
       } catch { /* 单条事件格式错误不应中断 EventSource。 */ }
     }
 
-    ;["run.started", "run.resumed", "run.paused", "run.failed", "run.cancelled", "run.completed", "llm.started", "llm.completed", "tool.started", "tool.completed", "approval.required", "approval.resolved", "approval.expired", "message.started", "message.completed", "message.delta", "stream.snapshot", "thinking.started", "thinking.summary", "thinking.completed", "plan.created", "plan.completed", "plan.failed", "plan.cancelled", "task.queued", "task.started", "task.retrying", "task.completed", "task.failed", "synthesis.started", "synthesis.completed"].forEach((name) => source.addEventListener(name, parse))
+    ;[
+      "run.started", "run.resumed", "run.paused", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded",
+      "llm.started", "llm.completed", "tool.started", "tool.completed",
+      "approval.required", "approval.resolved", "approval.expired",
+      "message.started", "message.completed", "message.delta", "stream.snapshot",
+      "thinking.started", "thinking.summary", "thinking.completed",
+      "plan.created", "plan.completed", "plan.failed", "plan.cancelled",
+      "task.queued", "task.started", "task.retrying", "task.completed", "task.failed",
+      "synthesis.started", "synthesis.completed",
+      "subagent.started", "subagent.completed", "subagent.failed",
+      "agent.waiting_for_files", "attachment_updated",
+      "file_processing_started", "file_processing_completed", "file_processing_failed",
+    ].forEach((name) => source.addEventListener(name, parse))
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, upsertOrchestrationTask, clearOrchestrationTasks])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, upsertOrchestrationTask, clearOrchestrationTasks, upsertExecutionTimelineEntry, clearExecutionTimeline])
 
   return sourceRef
+}
+
+interface TimelineEventInput {
+  type: string
+  data: Record<string, unknown>
+  envelope: ApplicationEventEnvelope
+  runId: string
+  timestamp: string
+}
+
+function projectTimelineEvent({ type, data, envelope, runId, timestamp }: TimelineEventInput): ExecutionTimelineEntry | null {
+  const id = (suffix: string) => envelope.transition_id || `${suffix}:${envelope.session_seq ?? crypto.randomUUID()}`
+  const error = text(data.error) || text((data.error_detail as Record<string, unknown> | undefined)?.message)
+  const detail = error || undefined
+  const base = (entry: Omit<ExecutionTimelineEntry, "id" | "timestamp" | "run_id" | "event_type" | "session_seq"> & { id?: string }): ExecutionTimelineEntry => ({
+    id: entry.id || id(type),
+    session_seq: envelope.session_seq,
+    run_id: runId || undefined,
+    event_type: type,
+    timestamp,
+    ...entry,
+  })
+
+  if (type === "thinking.started" || type === "thinking.summary") {
+    return base({
+      id: `thinking:${envelope.session_seq ?? crypto.randomUUID()}`,
+      label: text(data.content) || "Preparing response",
+      status: "info",
+    })
+  }
+  if (type === "thinking.completed") return null
+
+  if (type === "run.started" || type === "run.resumed") return base({ id: `run:${runId}`, label: "Execution started", status: "running" })
+  if (type === "run.completed") return base({ id: `run:${runId}`, label: "Execution completed", status: "completed" })
+  if (type === "run.paused") return base({ id: `run:${runId}`, label: "Execution paused", status: "waiting" })
+  if (type === "run.cancelled") return base({ id: `run:${runId}`, label: "Execution stopped", status: "info" })
+  if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "Execution budget reached" : "Execution failed", detail, status: "failed" })
+
+  if (type === "llm.started") return base({ id: `llm:${text(data.call_id)}`, label: "Generating response", status: "running" })
+  if (type === "llm.completed") return base({ id: `llm:${text(data.call_id)}`, label: error ? "Response generation failed" : "Response generated", detail, status: error ? "failed" : "completed" })
+
+  if (type === "tool.started") return base({
+    id: `tool:${text(data.tool_call_id)}`,
+    label: `Using tool: ${text(data.tool_name) || "tool"}`,
+    status: "running",
+    metadata: data.arguments ? { arguments: data.arguments } : undefined,
+  })
+  if (type === "tool.completed") return base({
+    id: `tool:${text(data.tool_call_id)}`,
+    label: error ? `Tool failed: ${text(data.tool_name) || "tool"}` : `Tool completed: ${text(data.tool_name) || "tool"}`,
+    detail: error || text(data.output) || undefined,
+    status: error ? "failed" : "completed",
+  })
+
+  if (type === "approval.required") return base({ id: `approval:${text(data.approval_id)}`, label: `Approval required: ${text(data.tool_name) || "tool"}`, status: "waiting", metadata: data.arguments ? { arguments: data.arguments } : undefined })
+  if (type === "approval.resolved" || type === "approval.expired") return base({ id: `approval:${text(data.approval_id)}`, label: type === "approval.expired" ? "Approval expired" : "Approval resolved", status: type === "approval.expired" ? "failed" : "completed" })
+
+  if (type.startsWith("plan.")) {
+    const planId = text(data.plan_id)
+    const labels: Record<string, string> = { "plan.created": "Execution plan created", "plan.completed": "Execution plan completed", "plan.failed": "Execution plan failed", "plan.cancelled": "Execution plan cancelled" }
+    return base({ id: `plan:${planId}`, label: labels[type] || "Execution plan updated", detail: error || text(data.goal) || undefined, status: type === "plan.failed" ? "failed" : type === "plan.created" ? "running" : "completed" })
+  }
+  if (type.startsWith("task.")) {
+    const taskId = text(data.task_id)
+    const status = type === "task.failed" ? "failed" : type === "task.completed" ? "completed" : type === "task.started" ? "running" : "waiting"
+    return base({ id: `task:${taskId}`, label: `${type === "task.completed" ? "Task completed" : type === "task.failed" ? "Task failed" : type === "task.started" ? "Task started" : "Task queued"}: ${text(data.title) || taskId || "task"}`, detail, status })
+  }
+  if (type.startsWith("synthesis.")) return base({ id: `synthesis:${text(data.plan_id)}`, label: type === "synthesis.started" ? "Combining task results" : "Task results combined", status: type === "synthesis.started" ? "running" : "completed" })
+
+  if (type.startsWith("subagent.")) {
+    const subRunId = text(data.sub_run_id) || runId
+    const status = type === "subagent.failed" ? "failed" : type === "subagent.completed" ? "completed" : "running"
+    const label = type === "subagent.failed" ? "Sub-agent failed" : type === "subagent.completed" ? "Sub-agent completed" : "Sub-agent started"
+    return base({ id: `subagent:${subRunId}`, label, detail: error || text(data.task) || undefined, status })
+  }
+
+  if (type === "agent.waiting_for_files") return base({ id: `files:${runId}`, label: "Waiting for files to finish processing", status: "waiting" })
+  if (type.startsWith("file_processing")) {
+    const attachmentId = text(data.attachment_id)
+    const status = type.endsWith("failed") ? "failed" : type.endsWith("completed") ? "completed" : "running"
+    const label = type.endsWith("failed") ? "File processing failed" : type.endsWith("completed") ? "File processing completed" : "Processing file"
+    return base({ id: `file:${attachmentId}`, label, detail, status })
+  }
+  if (type === "attachment_updated") return base({ id: `attachment:${text(data.attachment_id)}`, label: "File status updated", status: "info" })
+
+  return null
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : ""
 }

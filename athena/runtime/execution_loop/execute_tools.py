@@ -44,9 +44,14 @@ async def execute_tool_batch(
     )
     error = None
     if failed_count >= int(state.get("max_retries", 3)):
-        error = f"工具调用失败次数达到上限: {failed_count}/{state.get('max_retries', 3)}"
+        error = (
+            f"工具调用失败次数达到上限: {failed_count}/{state.get('max_retries', 3)}"
+        )
+    # 工具节点返回的是消息增量；必须保留此前的用户消息和 assistant 工具调用，
+    # 否则下一轮 LLM 只能看到孤立的 ToolMessage，无法理解当前请求和调用关系。
+    messages = [*state.get("messages", []), *outcome.messages]
     return {
-        "messages": outcome.messages,
+        "messages": messages,
         "tool_results": outcome.tool_results,
         "interrupted": outcome.interrupted,
         "error": error,

@@ -82,6 +82,10 @@ def _route_after_llm(state: AgentState) -> AgentLoopRoute:
     if exec_state.get("pending_tool_calls"):
         return "execute_tool_batch"
     if exec_state.get("error"):
+        # 协议错误（例如无效的 submit_plan）明确不可重试；不能仅依据
+        # retry_count/max_retries 再次调用 LLM，否则模型可能继续产生错误调用。
+        if not exec_state.get("retryable", False):
+            return "finish_execution"
         if int(exec_state.get("turn_count", 0)) < int(
             exec_state.get("max_turns", 20)
         ) and int(exec_state.get("retry_count", 0)) < int(
@@ -126,6 +130,7 @@ async def _finish_wrapper(
         "execution": result,
         "harness_result": result.get("harness_result"),
         "error": (result.get("harness_result") or {}).get("error"),
+        "error_detail": (result.get("harness_result") or {}).get("error_detail"),
     }
 
 

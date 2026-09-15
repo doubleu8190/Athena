@@ -54,6 +54,8 @@ async def llm_call(
         "last_content": outcome.content,
         "final_content": outcome.content or state.get("final_content", ""),
         "error": outcome.error,
+        "error_detail": outcome.error_detail,
+        "retryable": outcome.retryable,
         "interrupted": outcome.interrupted,
         "stream_started": outcome.stream_started,
         "stream_version": outcome.stream_version,

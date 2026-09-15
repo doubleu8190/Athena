@@ -82,6 +82,8 @@ class AgentExecutionLifecycle(TypedDict, total=False):
     """Execution lifecycle."""
 
     error: str | None
+    error_detail: dict[str, Any] | None
+    retryable: bool
     interrupted: bool
     status: AgentExecutionStatus
     route: str
@@ -150,3 +152,4 @@ class AgentState(TypedDict, total=False):
     orchestration_result: dict[str, Any] | None
     result: dict[str, Any] | None
     error: str | None
+    error_detail: dict[str, Any] | None

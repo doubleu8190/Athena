@@ -130,7 +130,6 @@ class AgentPlanModel(Base):
     status: Mapped[str] = mapped_column(String, default="planning")
     schema_version: Mapped[int] = mapped_column(Integer, default=1)
     plan_json: Mapped[str] = mapped_column(Text)
-    aggregation_strategy: Mapped[str] = mapped_column(String, default="synthesize")
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)

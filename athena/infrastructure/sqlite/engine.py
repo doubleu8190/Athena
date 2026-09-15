@@ -230,6 +230,12 @@ async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
         await conn.execute(
             text("UPDATE agent_runs SET root_run_id = run_id WHERE root_run_id IS NULL")
         )
+        plan_columns = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(agent_plans)"))).all()
+        }
+        if "aggregation_strategy" in plan_columns:
+            await conn.execute(text("ALTER TABLE agent_plans DROP COLUMN aggregation_strategy"))
         approval_columns = {
             row[1]
             for row in (await conn.execute(text("PRAGMA table_info(approvals)"))).all()

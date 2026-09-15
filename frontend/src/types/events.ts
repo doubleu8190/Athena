@@ -40,6 +40,16 @@ export const ApplicationEventType = {
 
 export type ApplicationEventType = (typeof ApplicationEventType)[keyof typeof ApplicationEventType]
 
+export interface ExecutionError {
+  code: string
+  message: string
+  error_type: string
+  retryable: boolean
+  phase?: string | null
+  category?: string | null
+  stack?: string | null
+}
+
 export interface ApplicationEventEnvelope {
   schema_version?: number
   session_seq?: number
@@ -56,5 +66,6 @@ export interface ApplicationEventEnvelope {
   parent_run_id?: string | null
   transition_id?: string | null
   payload?: Record<string, unknown>
+  error_detail?: ExecutionError | null
   occurred_at?: string
 }

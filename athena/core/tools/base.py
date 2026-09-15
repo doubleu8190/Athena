@@ -9,7 +9,19 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any, TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkable
+from types import UnionType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Protocol,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    runtime_checkable,
+)
 
 from athena.models.tool import RiskLevel, ToolExecutionMode, ToolResult, ToolSchema
 from athena.utils.llm import extract_message_text
@@ -24,6 +36,45 @@ logger = get_logger(__name__)
 NativeHandler = Callable[..., Awaitable[Any]]
 
 
+def _json_type_for_annotation(annotation: object) -> str:
+    """将 Python 类型注解映射为工具参数使用的 JSON 类型。
+
+    参数：
+        annotation (object): 函数参数的解析后类型注解；缺失或无法识别时使用字符串。
+
+    返回值：
+        str: JSON Schema 支持的类型名称。
+
+    异常：
+        不主动抛出业务异常；无法识别的注解统一降级为 ``string``。
+    """
+    type_map = {
+        str: "string",
+        int: "integer",
+        float: "number",
+        bool: "boolean",
+        list: "array",
+        tuple: "array",
+        set: "array",
+        dict: "object",
+    }
+    if annotation is inspect.Parameter.empty:
+        return "string"
+    if annotation in type_map:
+        return type_map[annotation]
+
+    origin = get_origin(annotation)
+    if origin in type_map:
+        return type_map[origin]
+    if origin in (Union, UnionType):
+        non_none_args = [
+            item for item in get_args(annotation) if item is not type(None)
+        ]
+        if non_none_args:
+            return _json_type_for_annotation(non_none_args[0])
+    return "string"
+
+
 def _infer_parameters(handler: NativeHandler) -> dict[str, Any]:
     """从函数签名推断 JSON Schema 参数定义.
 
@@ -31,6 +82,11 @@ def _infer_parameters(handler: NativeHandler) -> dict[str, Any]:
     避免非注解属性错误。
     """
     sig = inspect.signature(handler)
+    try:
+        # 工具模块普遍启用了 postponed annotations；解析后才能正确识别 bool、list 等类型。
+        resolved_annotations = get_type_hints(handler)
+    except (NameError, TypeError):
+        resolved_annotations = {}
     properties: dict[str, Any] = {}
     required: list[str] = []
 
@@ -43,18 +99,8 @@ def _infer_parameters(handler: NativeHandler) -> dict[str, Any]:
         ):
             continue
 
-        annotation = param.annotation
-        type_map = {
-            str: "string",
-            int: "integer",
-            float: "number",
-            bool: "boolean",
-            list: "array",
-            dict: "object",
-        }
-        json_type = type_map.get(
-            annotation if annotation is not inspect.Parameter.empty else str, "string"
-        )
+        annotation = resolved_annotations.get(name, param.annotation)
+        json_type = _json_type_for_annotation(annotation)
 
         prop: dict[str, Any] = {"type": json_type}
         if param.default is not inspect.Parameter.empty:

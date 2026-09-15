@@ -11,6 +11,8 @@ import type {
   AppView,
   Attachment,
   OrchestrationTask,
+  ExecutionError,
+  ExecutionTimelineEntry,
 } from "../types"
 
 interface ChatStore {
@@ -72,6 +74,11 @@ interface ChatStore {
   setThinking: (thinking: ThinkingState) => void
   clearThinking: () => void
 
+  // 面向用户的受控执行过程时间线
+  executionTimeline: ExecutionTimelineEntry[]
+  upsertExecutionTimelineEntry: (entry: ExecutionTimelineEntry) => void
+  clearExecutionTimeline: () => void
+
   // 中心编排
   orchestrationTasks: OrchestrationTask[]
   upsertOrchestrationTask: (task: OrchestrationTask) => void
@@ -81,6 +88,9 @@ interface ChatStore {
   error: string | null
   setError: (error: string | null) => void
   clearError: () => void
+  errorDetail: ExecutionError | null
+  setErrorDetail: (error: ExecutionError | null) => void
+  clearErrorDetail: () => void
 
   attachments: Attachment[]
   setAttachments: (items: Attachment[]) => void
@@ -208,6 +218,26 @@ export const useChatStore = create<ChatStore>((set) => ({
   setThinking: (thinking) => set({ thinking }),
   clearThinking: () => set({ thinking: null }),
 
+  executionTimeline: [],
+  upsertExecutionTimelineEntry: (entry) =>
+    set((state) => {
+      const existingIndex = state.executionTimeline.findIndex((item) => item.id === entry.id)
+      if (existingIndex < 0) {
+        return { executionTimeline: [...state.executionTimeline, entry] }
+      }
+      const executionTimeline = [...state.executionTimeline]
+      executionTimeline[existingIndex] = {
+        ...executionTimeline[existingIndex],
+        ...entry,
+        metadata: {
+          ...executionTimeline[existingIndex].metadata,
+          ...entry.metadata,
+        },
+      }
+      return { executionTimeline }
+    }),
+  clearExecutionTimeline: () => set({ executionTimeline: [] }),
+
   // 中心编排
   orchestrationTasks: [],
   upsertOrchestrationTask: (task) =>
@@ -222,6 +252,9 @@ export const useChatStore = create<ChatStore>((set) => ({
   error: null,
   setError: (error) => set({ error }),
   clearError: () => set({ error: null }),
+  errorDetail: null,
+  setErrorDetail: (errorDetail) => set({ errorDetail }),
+  clearErrorDetail: () => set({ errorDetail: null }),
 
   attachments: [],
   setAttachments: (attachments) => set({ attachments }),

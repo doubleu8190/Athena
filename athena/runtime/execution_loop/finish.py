@@ -34,8 +34,10 @@ async def finish_execution(
         stream_offset=int(state.get("stream_offset", 0)),
         turn_count=int(state.get("turn_count", 0)),
         error=state.get("error"),
+        error_detail=state.get("error_detail"),
         interrupted=bool(state.get("interrupted", False)),
         parent_run_id=state.get("parent_run_id"),
+        content=state.get("final_content", state.get("last_content", "")),
     )
     return {
         "status": "completed" if not state.get("error") else "failed",
@@ -45,6 +47,7 @@ async def finish_execution(
             "turn_count": state.get("turn_count", 0),
             "tool_results": tool_results,
             "error": state.get("error"),
+            "error_detail": state.get("error_detail"),
             "interrupted": state.get("interrupted", False),
         },
     }

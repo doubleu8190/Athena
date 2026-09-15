@@ -23,6 +23,7 @@ from langchain_core.messages import (
 from langchain_core.tools import StructuredTool
 
 from athena.contracts.events import EventType
+from athena.contracts.errors import ExecutionError
 from athena.core.harness.harness import Harness
 from athena.models import Message, MessageRole
 from athena.utils.llm import extract_message_text
@@ -65,6 +66,7 @@ class LlmTurnOutcome:
     content: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    error_detail: dict[str, Any] | None = None
     interrupted: bool = False
     retryable: bool = False
     turn_count: int = 0
@@ -80,6 +82,7 @@ class LlmTurnOutcome:
 class ToolBatchOutcome:
     """一批并行工具调用的 JSON 边界结果。"""
 
+    # messages 只包含本批次新增的 ToolMessage，由执行节点追加到已有会话上下文。
     messages: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
     interrupted: bool = False
@@ -137,7 +140,7 @@ class HarnessTurnExecutor(Harness):
             stream_id=self._answer_stream_id,
             stream_type="answer",
             message_id=message_id,
-            publish=self._events.publish,
+            publish_realtime=self._events.publish_realtime,
             initial_version=stream_version,
             initial_offset=stream_offset,
         )
@@ -199,6 +202,7 @@ class HarnessTurnExecutor(Harness):
         content: str = "",
         tool_calls: list[dict[str, Any]] | None = None,
         error: str | None = None,
+        error_detail: ExecutionError | dict[str, Any] | None = None,
         interrupted: bool = False,
         retryable: bool = False,
         route: str = "agent_loop",
@@ -215,6 +219,11 @@ class HarnessTurnExecutor(Harness):
             content=content,
             tool_calls=tool_calls or [],
             error=error,
+            error_detail=(
+                error_detail.model_dump(mode="json")
+                if isinstance(error_detail, ExecutionError)
+                else error_detail
+            ),
             interrupted=interrupted,
             retryable=retryable,
             turn_count=turn_count,
@@ -373,10 +382,11 @@ class HarnessTurnExecutor(Harness):
             return await self._failed_llm_outcome(
                 context,
                 f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）",
+                failure_exception=TimeoutError("LLM stream timeout"),
             )
         except Exception as exc:
             return await self._failed_llm_outcome(
-                context, f"LLM 调用失败: {exc}", failure_detail=str(exc)
+                context, f"LLM 调用失败: {exc}", failure_detail=str(exc), failure_exception=exc
             )
 
     async def _compress_messages(
@@ -420,6 +430,13 @@ class HarnessTurnExecutor(Harness):
                 context.compressed, system_prompt=context.system_prompt
             ),
             error=error,
+            error_detail=ExecutionError(
+                code="budget_exceeded",
+                message=error,
+                error_type="BudgetExceeded",
+                retryable=False,
+                phase="llm_call",
+            ),
             stream_started=context.stream_started,
             turn_count=context.turn_count,
             retry_count=context.retry_count,
@@ -487,6 +504,13 @@ class HarnessTurnExecutor(Harness):
                 context.compressed, system_prompt=context.system_prompt
             ),
             interrupted=True,
+            error_detail=ExecutionError(
+                code="run_interrupted",
+                message="运行被用户中断",
+                error_type="CancelledError",
+                retryable=True,
+                phase="llm_call",
+            ),
             stream_started=context.stream_started,
             turn_count=context.turn_count,
             retry_count=context.retry_count,
@@ -504,15 +528,34 @@ class HarnessTurnExecutor(Harness):
         error: str,
         *,
         failure_detail: str | None = None,
+        failure_exception: BaseException | None = None,
     ) -> LlmTurnOutcome:
         """发布失败事件并构造按重试预算可重试的结果。"""
 
+        next_retry = context.retry_count + 1
+        retryable = next_retry <= context.max_retries
+        detail = (
+            ExecutionError.from_exception(
+                failure_exception,
+                code="llm_timeout" if isinstance(failure_exception, TimeoutError) else "llm_call_failed",
+                retryable=retryable,
+                phase="llm_call",
+            )
+            if failure_exception is not None
+            else ExecutionError.from_value(
+                failure_detail or error,
+                code="llm_empty_response" if "空响应" in error else "llm_call_failed",
+                retryable=retryable,
+                phase="llm_call",
+            )
+        )
         # 空响应的错误文本已经包含业务上下文；底层异常则发布更精确的原始异常。
         await self._emit(
             EventType.RUN_FAILED,
             {
                 "call_id": context.llm_call_id,
                 "error": failure_detail or error,
+                "error_detail": detail.model_dump(mode="json"),
                 "phase": "llm_call",
             },
             context.session_id,
@@ -526,13 +569,13 @@ class HarnessTurnExecutor(Harness):
         )
         if self._answer_stream is not None:
             await self._answer_stream.flush()
-        next_retry = context.retry_count + 1
         return self._llm_outcome(
             messages=self._conversation_dicts(
                 context.compressed, system_prompt=context.system_prompt
             ),
             error=error,
-            retryable=next_retry <= context.max_retries,
+            error_detail=detail,
+            retryable=retryable,
             stream_started=context.stream_started,
             turn_count=context.next_turn,
             retry_count=next_retry,
@@ -614,6 +657,7 @@ class HarnessTurnExecutor(Harness):
                 messages=message_dicts,
                 content=content,
                 error="submit_plan 只能由顶层 Agent 调用",
+                error_detail=ExecutionError(code="invalid_plan_submission", message="submit_plan 只能由顶层 Agent 调用", error_type="PlanProtocolError", retryable=False, phase="llm_call"),
                 retryable=False,
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,
@@ -624,6 +668,7 @@ class HarnessTurnExecutor(Harness):
                 messages=message_dicts,
                 content=content,
                 error="submit_plan 不能与普通工具调用混用",
+                error_detail=ExecutionError(code="invalid_plan_submission", message="submit_plan 不能与普通工具调用混用", error_type="PlanProtocolError", retryable=False, phase="llm_call"),
                 retryable=False,
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,
@@ -638,6 +683,7 @@ class HarnessTurnExecutor(Harness):
                 messages=message_dicts,
                 content=content,
                 error=f"submit_plan 参数无效: {exc}",
+                error_detail=ExecutionError.from_exception(exc, code="invalid_plan_submission", retryable=False, phase="llm_call"),
                 retryable=False,
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,
@@ -716,9 +762,11 @@ class HarnessTurnExecutor(Harness):
         turn_count: int,
         error: str | None,
         interrupted: bool,
+        error_detail: dict[str, Any] | None = None,
         parent_run_id: str | None = None,
+        content: str = "",
     ) -> None:
-        """关闭流、发布终态事件并更新会话运行状态。"""
+        """关闭流、发布带完整内容的终态事件并更新会话运行状态。"""
 
         self._configure_context(
             session_id=session_id,
@@ -745,7 +793,9 @@ class HarnessTurnExecutor(Harness):
                 "stream_id": self._answer_stream_id,
                 "stream_type": "answer",
                 "turn_count": turn_count,
+                "content": content,
                 "error": error,
+                "error_detail": error_detail,
             },
             session_id,
             run_id,

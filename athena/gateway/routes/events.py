@@ -10,7 +10,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from athena.contracts.errors import ErrorDetail
-from athena.contracts.events import EventType
 from athena.container import runtime_from
 from athena.infrastructure.sqlite.repositories import _json_loads
 
@@ -50,24 +49,6 @@ def _row_payload(row) -> dict:
     }
 
 
-def _snapshot_payload(snapshot) -> dict:
-    """将最新流快照编码为不占用 SSE 游标的恢复消息。"""
-    return {
-        "schema_version": 2,
-        "event_type": EventType.STREAM_SNAPSHOT.value,
-        "session_id": snapshot.session_id,
-        "run_id": snapshot.run_id,
-        "stream_id": snapshot.stream_id,
-        "stream_type": snapshot.stream_type,
-        "version": snapshot.version,
-        "last_chunk_id": snapshot.last_chunk_id,
-        "content": snapshot.content,
-        "content_length": snapshot.content_length,
-        "status": snapshot.status,
-        "updated_at": snapshot.updated_at,
-    }
-
-
 @router.get("/{session_id}/events")
 async def session_events(
     session_id: str, request: Request, after: int = 0
@@ -100,13 +81,6 @@ async def session_events(
                 cursor = seq
                 yield _sse(_row_payload(row), row.event_type, seq)
 
-            # 快照用于修复客户端本地缺口；它不推进 Last-Event-ID。
-            for snapshot in await agent_store.snapshots_for_session(session_id):
-                if snapshot.stream_type == "thinking":
-                    # thinking 只通过 durable 事件重放，不再暴露快照通道。
-                    continue
-                yield _sse(_snapshot_payload(snapshot), EventType.STREAM_SNAPSHOT)
-
             while True:
                 if await request.is_disconnected():
                     break
@@ -116,7 +90,11 @@ async def session_events(
                     yield ": heartbeat\n\n"
                     continue
                 seq = event.session_seq
-                if seq is None or seq <= cursor:
+                if seq is None:
+                    # Realtime delta 只存在于在线连接中，不参与 Last-Event-ID。
+                    yield _sse(event.model_dump(mode="json"), event.event_type)
+                    continue
+                if seq <= cursor:
                     continue
                 cursor = seq
                 yield _sse(event.model_dump(mode="json"), event.event_type, seq)

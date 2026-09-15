@@ -163,6 +163,10 @@ class EventPublisherPort(Protocol):
         """将事件发送到运行时事件接收端。"""
         ...
 
+    async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
+        """只向在线订阅者广播实时事件，不写入事件数据库。"""
+        ...
+
     async def upsert_snapshot(
         self,
         session_id: str,

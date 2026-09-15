@@ -26,6 +26,7 @@ async def finalize_response(state: AgentState) -> AgentState:
             "turn_count": 0,
             "tool_results": [],
             "error": state["error"],
+            "error_detail": state.get("error_detail"),
             "interrupted": False,
             "attachments": [],
         }

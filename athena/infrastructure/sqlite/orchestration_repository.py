@@ -48,7 +48,6 @@ class OrchestrationRepository:
                     status="running",
                     schema_version=plan.schema_version,
                     plan_json=_json_dumps(plan),
-                    aggregation_strategy=plan.aggregation_strategy,
                     created_at=now,
                     updated_at=now,
                 )

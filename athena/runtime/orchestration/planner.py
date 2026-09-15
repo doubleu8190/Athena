@@ -63,7 +63,6 @@ class Planner:
             root_run_id=root_run_id,
             goal=goal,
             tasks=normalized_tasks,
-            aggregation_strategy=draft.aggregation_strategy,
             max_parallelism=draft.max_parallelism,
         )
         await self._db.orchestration.create_plan(session_id, plan)

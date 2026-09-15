@@ -165,7 +165,6 @@ CREATE TABLE IF NOT EXISTS agent_plans (
     status VARCHAR NOT NULL DEFAULT 'planning',
     schema_version INTEGER NOT NULL DEFAULT 1,
     plan_json TEXT NOT NULL,
-    aggregation_strategy VARCHAR NOT NULL DEFAULT 'synthesize',
     error_json TEXT,
     created_at VARCHAR NOT NULL,
     updated_at VARCHAR NOT NULL

@@ -11,7 +11,12 @@ from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessSettings
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
-from athena.runtime.orchestration.contracts import AgentRole, TaskSpec, WorkerResult
+from athena.runtime.orchestration.contracts import (
+    AgentRole,
+    TaskSpec,
+    WorkerResult,
+    WorkerResultStatus,
+)
 from athena.runtime.orchestration.policies import ToolPolicy
 from athena.runtime.orchestration.structured_llm import StructuredLLMService
 from athena.utils.ids import generate_sub_run_id
@@ -148,14 +153,12 @@ class WorkerExecutor:
         )
 
         if result.interrupted:
-            await self._agent_store.update_run_status(
-                run_id, AgentRunStatus.CANCELLED
-            )
+            await self._agent_store.update_run_status(run_id, AgentRunStatus.CANCELLED)
             return WorkerResult(
                 plan_id=task.plan_id,
                 task_id=task.task_id,
                 run_id=run_id,
-                status="cancelled",
+                status=WorkerResultStatus.CANCELLED,
                 raw_text=result.content,
                 turn_count=result.turn_count,
                 tool_calls=result.tool_results,
@@ -171,7 +174,7 @@ class WorkerExecutor:
                 plan_id=task.plan_id,
                 task_id=task.task_id,
                 run_id=run_id,
-                status="failed",
+                status=WorkerResultStatus.FAILED,
                 raw_text=result.content,
                 turn_count=result.turn_count,
                 tool_calls=result.tool_results,
@@ -202,7 +205,7 @@ class WorkerExecutor:
             plan_id=task.plan_id,
             task_id=task.task_id,
             run_id=f"{task.plan_id}:{index}:cancelled",
-            status="cancelled",
+            status=WorkerResultStatus.CANCELLED,
             error_code="worker_cancelled",
             error_message="worker cancelled before start",
         )

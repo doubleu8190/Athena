@@ -33,6 +33,7 @@ def initialize_execution(state: AgentExecutionState) -> AgentExecutionState:
         "last_content": state.get("last_content", ""),
         "final_content": state.get("final_content", ""),
         "error": state.get("error"),
+        "retryable": bool(state.get("retryable", False)),
         "interrupted": bool(state.get("interrupted", False)),
         "stream_started": bool(state.get("stream_started", False)),
         "stream_version": int(state.get("stream_version", 0)),

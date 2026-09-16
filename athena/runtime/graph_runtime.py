@@ -29,7 +29,7 @@ from athena.infrastructure.sqlite.memory_job_repository import MemoryJobReposito
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message
-from athena.models.file import AttachmentRef
+from athena.models.file import Attachment, AttachmentRef
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
 from athena.contracts.ports import AgentStorePort
@@ -41,7 +41,7 @@ from .processors import StaticProcessorProxy
 from .state import AgentState, FileProcessResult
 from .sub_agent import SubAgentManager
 from .services.memory_service import MemoryService
-from .services.request_service import RequestService
+from .services.session_context_service import SessionContextService
 from .services.execution_service import ExecutionService
 from .orchestration.events import OrchestrationEventPublisher
 from .orchestration import (
@@ -66,7 +66,7 @@ class LangGraphRuntime:
     创建并持有所有聚焦服务，向 Graph Node 提供统一的委托入口。
     领域逻辑已拆分至：
     - ``MemoryService`` — 记忆请求构建与检索
-    - ``RequestService`` — 请求准备、消息持久化、附件绑定
+    - ``SessionContextService`` — 会话历史、消息持久化、附件绑定和 Harness 输入准备
     - ``ExecutionService`` — Harness 执行编排与后处理
 
     保留在运行时的职责：
@@ -113,7 +113,9 @@ class LangGraphRuntime:
             memory_retrieval=memory_retrieval,
             retrieval_timeout_seconds=settings.memory_retrieval_timeout_seconds,
         )
-        self._request_service = RequestService(db=db, event_publisher=event_publisher)
+        self._session_context_service = SessionContextService(
+            db=db, event_publisher=event_publisher
+        )
         self._execution_service = ExecutionService(
             llm=llm,
             tool_manager=tool_manager,
@@ -177,8 +179,8 @@ class LangGraphRuntime:
         return self._memory_service
 
     @property
-    def request_service(self) -> RequestService:
-        return self._request_service
+    def session_context_service(self) -> SessionContextService:
+        return self._session_context_service
 
     @property
     def execution_service(self) -> ExecutionService:
@@ -297,18 +299,20 @@ class LangGraphRuntime:
         )
 
     # ------------------------------------------------------------------
-    # RequestService 委托
+    # SessionContextService 委托
     # ------------------------------------------------------------------
 
     async def load_history(self, session_id: str) -> list[Message]:
-        return await self._request_service.load_history(session_id)
+        return await self._session_context_service.load_history(session_id)
 
-    async def load_banded_attachments(self, session_id: str, attachment_ids: list[str]):
-        return await self._request_service.load_banded_attachments(
+    async def load_and_validate_attachments(
+        self, session_id: str, attachment_ids: list[str]
+    ) -> list[Attachment]:
+        return await self._session_context_service.load_and_validate_attachments(
             session_id, attachment_ids
         )
 
-    async def prepare_run(
+    async def prepare_harness_input(
         self,
         session_id: str,
         user_message: str,
@@ -316,8 +320,8 @@ class LangGraphRuntime:
         history: list[Message],
         run_id: str = "",
         message_id: str = "",
-    ):
-        return await self._request_service.prepare_run(
+    ) -> tuple[list[AttachmentRef], list[Message]]:
+        return await self._session_context_service.prepare_harness_input(
             session_id, user_message, attachment_ids, history, run_id, message_id
         )
 

@@ -52,7 +52,7 @@ class RecoveryReconciler:
         reclaimed_tasks = 0
         if self._orchestration is not None:
             # 编排任务只重新置为可领取状态，不启动 Dispatcher；真正执行仍由
-            # 用户恢复后重新进入 checkpoint 的 execute_plan 节点触发。
+            # 用户恢复后重新进入 checkpoint 的 run_planned_orchestration 节点触发。
             reclaimed_tasks = await self._orchestration.requeue_stale_claimed_tasks()
         cancelled = 0
         for run in await self.store.list_recoverable_runs():

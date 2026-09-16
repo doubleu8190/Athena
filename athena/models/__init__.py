@@ -26,6 +26,7 @@ from athena.models.file import (
     AttachmentRef,
     AttachmentStatus,
     FileChunk,
+    KnowledgeBase,
 )
 from athena.models.message import Message, MessageRole
 from athena.models.session import Session, SessionStatus
@@ -68,6 +69,7 @@ __all__ = [
     "AttachmentRef",
     "AttachmentStatus",
     "FileChunk",
+    "KnowledgeBase",
     "FileArtifact",
     "FileLocator",
     "FileMetadata",

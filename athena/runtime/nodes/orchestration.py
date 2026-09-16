@@ -14,13 +14,13 @@ from ..execution_loop._helpers import _stop_signal
 if TYPE_CHECKING:
     from ..graph_runtime import LangGraphRuntime
 
-async def materialize_plan(
+async def materialize_execution_plan(
     state: AgentState, *, runtime: LangGraphRuntime
 ) -> AgentState:
     """校验并持久化顶层 LLM 提交的计划，不再调用模型。"""
     request = state.get("plan_request")
     if not request:
-        raise ValueError("materialize_plan requires plan_request")
+        raise ValueError("materialize_execution_plan requires plan_request")
     plan = await runtime.materialize_plan(
         session_id=state.get("session_id", ""),
         root_run_id=state.get("run_id", ""),
@@ -30,7 +30,7 @@ async def materialize_plan(
     return {"execution_plan": plan.model_dump(mode="json")}
 
 
-async def execute_plan(
+async def run_planned_orchestration(
     state: AgentState,
     config: RunnableConfig,
     *,
@@ -51,7 +51,7 @@ async def execute_plan(
     """
     plan_payload = state.get("execution_plan")
     if plan_payload is None:
-        raise ValueError("execute_plan route requires a persisted plan")
+        raise ValueError("run_planned_orchestration route requires a persisted plan")
 
     result = await runtime.execute_planned_orchestration(
         plan_payload=plan_payload,
@@ -61,7 +61,7 @@ async def execute_plan(
     return {"orchestration_result": result}
 
 
-async def close_plan_stream(
+async def close_execution_stream(
     state: AgentState,
     config: RunnableConfig,
     *,
@@ -76,14 +76,13 @@ async def close_plan_stream(
     }
 
 
-async def synthesize_orchestration(
-    state: AgentState, *, runtime: LangGraphRuntime
+async def build_orchestration_response(
+    state: AgentState,
 ) -> AgentState:
     """把 Worker 结果转换为最终响应 payload。
 
     参数：
         state: 包含 ``orchestration_result`` 的主图状态。
-        runtime: 提供编排依赖的运行时。
 
     返回值：
         AgentState: 包含最终 ``result`` 的 JSON 安全状态。
@@ -110,45 +109,43 @@ async def synthesize_orchestration(
     }
 
 
-def create_materialize_plan_node(
+def create_materialize_execution_plan_node(
     runtime: LangGraphRuntime,
 ) -> StateNode[AgentState, None]:
     """创建纯校验/持久化计划节点。"""
 
     async def node(state: AgentState) -> AgentState:
-        return await materialize_plan(state, runtime=runtime)
+        return await materialize_execution_plan(state, runtime=runtime)
 
     return node
 
 
-def create_execute_plan_node(
+def create_run_planned_orchestration_node(
     runtime: LangGraphRuntime,
 ) -> StateNode[AgentState, None]:
     """创建计划执行节点。"""
 
     async def node(state: AgentState, config: RunnableConfig) -> AgentState:
-        return await execute_plan(state, config, runtime=runtime)
+        return await run_planned_orchestration(state, config, runtime=runtime)
 
     return node
 
 
-def create_close_plan_stream_node(
+def create_close_execution_stream_node(
     runtime: LangGraphRuntime,
 ) -> StateNode[AgentState, None]:
     """创建计划分支的回答流收尾节点。"""
 
     async def node(state: AgentState, config: RunnableConfig) -> AgentState:
-        return await close_plan_stream(state, config, runtime=runtime)
+        return await close_execution_stream(state, config, runtime=runtime)
 
     return node
 
 
-def create_synthesize_orchestration_node(
-    runtime: LangGraphRuntime,
-) -> StateNode[AgentState, None]:
-    """创建编排汇总节点。"""
+def create_build_orchestration_response_node() -> StateNode[AgentState, None]:
+    """创建编排结果响应适配节点。"""
 
     async def node(state: AgentState) -> AgentState:
-        return await synthesize_orchestration(state, runtime=runtime)
+        return await build_orchestration_response(state)
 
     return node

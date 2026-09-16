@@ -67,7 +67,7 @@ async def list_attachments(session_id: str, request: Request) -> list[dict]:
     """列出会话的所有附件。"""
     await _ensure_session(session_id, request)
     runtime = _file_runtime(request)
-    return await runtime.list_files(session_id)
+    return await runtime.list_session_files(session_id)
 
 
 @router.get("/attachment-types")

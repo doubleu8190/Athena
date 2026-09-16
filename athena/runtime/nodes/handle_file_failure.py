@@ -5,8 +5,8 @@ from __future__ import annotations
 from ..state import AgentState
 
 
-async def handle_file_failure(state: AgentState) -> AgentState:
-    """返回文件错误结果；此节点不调用 Harness 或 LLM。"""
+async def handle_attachment_failure(state: AgentState) -> AgentState:
+    """返回附件错误结果；此节点不调用 Harness 或 LLM。"""
     failed = [
         item for item in state.get("file_results", []) if item.get("status") != "ready"
     ]
@@ -19,5 +19,5 @@ async def handle_file_failure(state: AgentState) -> AgentState:
     }
 
 
-def create_handle_file_failure_node():
-    return handle_file_failure
+def create_handle_attachment_failure_node():
+    return handle_attachment_failure

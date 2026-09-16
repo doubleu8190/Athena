@@ -15,6 +15,10 @@ from athena.gateway.routes.tools import router as tools_router
 from athena.gateway.routes.files import router as files_router
 from athena.gateway.routes.events import router as events_router
 from athena.gateway.routes.commands import router as commands_router, run_router
+from athena.gateway.routes.knowledge_bases import (
+    router as knowledge_bases_router,
+    session_router as session_knowledge_bases_router,
+)
 from athena.gateway.auth.routes import router as auth_router
 
 api_router = APIRouter(prefix="/api")
@@ -30,6 +34,8 @@ api_router.include_router(files_router)
 api_router.include_router(events_router)
 api_router.include_router(commands_router)
 api_router.include_router(run_router)
+api_router.include_router(knowledge_bases_router)
+api_router.include_router(session_knowledge_bases_router)
 api_router.include_router(auth_router)
 
 __all__ = ["api_router"]

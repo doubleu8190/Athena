@@ -13,7 +13,7 @@ from athena.runtime.services.memory_service import (
     _recent_history_by_turns,
 )
 from athena.runtime.langgraph_graph import invoke_graph
-from athena.runtime.nodes.prepare_request import prepare_and_persist_request
+from athena.runtime.nodes.prepare_request import prepare_request_and_persist_message
 from athena.models import Message, MessageRole
 from athena.models.file import Attachment, AttachmentRef, AttachmentStatus
 
@@ -85,16 +85,16 @@ async def test_simple_memory_request_does_not_call_llm():
 
 
 @pytest.mark.asyncio
-async def test_substantive_memory_request_skips_retrieval() -> None:
-    from athena.runtime.nodes.conditions import decide_memory_request
+async def test_substantive_memory_request_is_retrieved() -> None:
+    from athena.runtime.nodes.conditions import route_after_memory_request
 
-    assert decide_memory_request(
+    assert route_after_memory_request(
         {"memory_request": {"reason": "substantive_task"}}
-    ) == "prepare_context"
-    assert decide_memory_request(
+    ) == "retrieve_memory"
+    assert route_after_memory_request(
         {"memory_request": {"reason": "context_reference"}}
     ) == "retrieve_memory"
-    assert decide_memory_request(
+    assert route_after_memory_request(
         {"memory_request": {"reason": "llm_complex_request"}}
     ) == "retrieve_memory"
 
@@ -105,6 +105,29 @@ async def test_substantive_memory_request_skips_retrieval() -> None:
         "session-1", "请按照优先级修复问题"
     )
     assert request is None
+
+
+@pytest.mark.asyncio
+async def test_short_knowledge_query_is_retrieved() -> None:
+    """知识库短语不能被固定长度规则过滤。"""
+    from athena.runtime.services.memory_service import MemoryService
+
+    service = MemoryService(llm=object(), memory_retrieval=object())
+    request = await service.build_memory_request(
+        "session-1", "小学6年级的识字目标"
+    )
+
+    assert request is not None
+    assert request.query == "小学6年级的识字目标"
+    assert request.reason == "knowledge_query"
+
+
+def test_knowledge_query_routes_to_retrieval() -> None:
+    from athena.runtime.nodes.conditions import route_after_memory_request
+
+    assert route_after_memory_request(
+        {"memory_request": {"reason": "knowledge_query"}}
+    ) == "retrieve_memory"
 
 
 @pytest.mark.asyncio
@@ -249,15 +272,15 @@ async def test_complex_memory_request_falls_back_on_invalid_llm_output():
 
 
 @pytest.mark.asyncio
-async def test_prepare_and_persist_request_merges_prepared_and_persisted_state():
-    """Tests now use RequestService directly instead of LangGraphRuntime."""
+async def test_prepare_request_and_persist_message_merges_prepared_and_persisted_state():
+    """Tests now use SessionContextService directly instead of LangGraphRuntime."""
     calls = []
 
-    class RequestService:
+    class SessionContextService:
         def __init__(self):
             pass
 
-        async def load_banded_attachments(self, session_id, attachment_ids):
+        async def load_and_validate_attachments(self, session_id, attachment_ids):
             calls.append(("load_attachments", session_id, attachment_ids))
             return [
                 Attachment(
@@ -281,7 +304,7 @@ async def test_prepare_and_persist_request_merges_prepared_and_persisted_state()
             calls.append(("persist", state["message_id"], state["attachment_ids"]))
             return {"message_id": "message-1", "user_message_id": "message-1"}
 
-    result = await prepare_and_persist_request(
+    result = await prepare_request_and_persist_message(
         {
             "session_id": "session-1",
             "run_id": "run-1",
@@ -289,7 +312,7 @@ async def test_prepare_and_persist_request_merges_prepared_and_persisted_state()
             "user_message": "read this",
             "attachment_ids": ["file-1", "file-1"],
         },
-        request_service=RequestService(),
+        session_context_service=SessionContextService(),
     )
 
     assert calls == [
@@ -303,8 +326,8 @@ async def test_prepare_and_persist_request_merges_prepared_and_persisted_state()
 
 
 def test_build_harness_messages_adds_attachment_context_without_mutating_message():
-    """_build_harness_messages moved to RequestService."""
-    from athena.runtime.services.request_service import RequestService
+    """_build_harness_messages moved to SessionContextService."""
+    from athena.runtime.services.session_context_service import SessionContextService
 
     attachment = AttachmentRef(
         id="file-1",
@@ -322,7 +345,7 @@ def test_build_harness_messages_adds_attachment_context_without_mutating_message
         timestamp=datetime.now(),
     )
 
-    messages = RequestService._build_harness_messages([], persisted_message)
+    messages = SessionContextService._build_harness_messages([], persisted_message)
 
     assert persisted_message.content == "read this"
     assert messages[0] is not persisted_message
@@ -334,8 +357,8 @@ def test_build_harness_messages_adds_attachment_context_without_mutating_message
 
 
 def test_build_harness_messages_does_not_change_non_user_messages():
-    """_build_harness_messages moved to RequestService."""
-    from athena.runtime.services.request_service import RequestService
+    """_build_harness_messages moved to SessionContextService."""
+    from athena.runtime.services.session_context_service import SessionContextService
 
     system_message = Message(
         id="message-1",
@@ -354,7 +377,7 @@ def test_build_harness_messages_does_not_change_non_user_messages():
         timestamp=datetime.now(),
     )
 
-    messages = RequestService._build_harness_messages(
+    messages = SessionContextService._build_harness_messages(
         [system_message], system_message
     )
 

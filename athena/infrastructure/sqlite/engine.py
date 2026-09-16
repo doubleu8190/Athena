@@ -9,7 +9,12 @@ from __future__ import annotations
 import os
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from athena.infrastructure.sqlite.models import FILE_CHUNK_FTS_DDL, MEMORY_FTS_DDL, Base
 from athena.utils.logging import get_logger
@@ -24,6 +29,91 @@ _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 _memory_engine = None
 _memory_session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+async def _migrate_attachment_ownership(conn: AsyncConnection) -> None:
+    """把旧附件表升级为会话或知识库二选一的所有权模型。
+
+    参数：
+        conn (AsyncConnection): 当前数据库初始化事务中的异步连接。
+
+    返回值：
+        None: 新数据库或已升级数据库不会发生结构变更。
+
+    异常：
+        SQL 执行失败时传播底层异常，阻止应用在半迁移结构上启动。
+    """
+    columns = {
+        row[1]: row
+        for row in (await conn.execute(text("PRAGMA table_info(attachments)"))).all()
+    }
+    session_column = columns.get("session_id")
+    if "knowledge_base_id" in columns and session_column is not None and not session_column[3]:
+        return
+
+    # SQLite 不支持直接移除 NOT NULL；重建表以允许知识库文档没有 session_id。
+    await conn.execute(text("DROP TABLE IF EXISTS attachments_v2"))
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE attachments_v2 (
+                id VARCHAR PRIMARY KEY,
+                session_id VARCHAR REFERENCES sessions(id),
+                knowledge_base_id VARCHAR REFERENCES knowledge_bases(id),
+                message_id VARCHAR REFERENCES messages(id),
+                filename VARCHAR NOT NULL,
+                mime_type VARCHAR NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 VARCHAR NOT NULL,
+                storage_key VARCHAR NOT NULL,
+                adapter_name VARCHAR,
+                adapter_version VARCHAR,
+                status VARCHAR NOT NULL DEFAULT 'uploaded',
+                capabilities_json TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                error_message TEXT,
+                created_at VARCHAR NOT NULL,
+                updated_at VARCHAR NOT NULL,
+                deleted_time VARCHAR,
+                CONSTRAINT ck_attachment_single_owner CHECK (
+                    (session_id IS NOT NULL) != (knowledge_base_id IS NOT NULL)
+                )
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            INSERT INTO attachments_v2 (
+                id, session_id, knowledge_base_id, message_id, filename,
+                mime_type, size_bytes, sha256, storage_key, adapter_name,
+                adapter_version, status, capabilities_json, metadata_json,
+                error_message, created_at, updated_at, deleted_time
+            )
+            SELECT id, session_id, NULL, message_id, filename,
+                   mime_type, size_bytes, sha256, storage_key, adapter_name,
+                   adapter_version, status, capabilities_json, metadata_json,
+                   error_message, created_at, updated_at, deleted_time
+            FROM attachments
+            """
+        )
+    )
+    await conn.execute(text("DROP TABLE attachments"))
+    await conn.execute(text("ALTER TABLE attachments_v2 RENAME TO attachments"))
+    for index_name, columns_sql in {
+        "idx_attachments_session": "session_id",
+        "idx_attachments_knowledge_base": "knowledge_base_id",
+        "idx_attachments_message": "message_id",
+        "idx_attachments_hash": "sha256",
+        "idx_attachments_status": "status",
+    }.items():
+        await conn.execute(
+            text(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON attachments({columns_sql})"
+            )
+        )
 
 
 async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
@@ -62,6 +152,7 @@ async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
         await conn.execute(text("DROP TABLE IF EXISTS tool_executions"))
         await conn.execute(text("DROP INDEX IF EXISTS uq_agent_runs_active_session"))
         await conn.run_sync(Base.metadata.create_all)
+        await _migrate_attachment_ownership(conn)
         # Reconcile databases from the intermediate step-observability schema
         # with older databases before repositories write tool records.
         tool_call_columns = {

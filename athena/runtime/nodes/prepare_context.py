@@ -11,17 +11,17 @@ from athena.models import Message
 from ..state import AgentState
 
 if TYPE_CHECKING:
-    from ..services.request_service import RequestService
+    from ..services.session_context_service import SessionContextService
 
 
-async def prepare_context(
-    state: AgentState, *, request_service: RequestService
+async def prepare_harness_input(
+    state: AgentState, *, session_context_service: SessionContextService
 ) -> AgentState:
     """组合历史、附件和记忆，准备 Harness 输入。
 
     参数：
         state (AgentState): 必须对应已完成请求准备和记忆检索的状态。
-        request_service (RequestService): 会话上下文服务。
+        session_context_service (SessionContextService): 会话上下文服务。
 
     返回值：
         AgentState: 包含可检查点化的运行准备结果。
@@ -38,7 +38,7 @@ async def prepare_context(
     message_id = state.get("message_id", "")
     message_content = state.get("user_message", "")
     history = [Message.model_validate(item) for item in state.get("history", [])]
-    attachment_refs, harness_messages = await request_service.prepare_run(
+    attachment_refs, harness_messages = await session_context_service.prepare_harness_input(
         session_id,
         message_content,
         state.get("attachment_ids", []),
@@ -52,21 +52,23 @@ async def prepare_context(
     }
 
 
-def create_prepare_context_node(
-    request_service: RequestService,
+def create_prepare_harness_input_node(
+    session_context_service: SessionContextService,
 ) -> StateNode[AgentState, None]:
     """创建绑定指定请求服务的 Harness 上下文准备节点。
 
     参数：
-        request_service (RequestService): 要注入节点的请求服务。
+        session_context_service (SessionContextService): 要注入节点的会话上下文服务。
 
     返回值：
         StateNode[AgentState, None]: 可注册到 LangGraph 的异步节点。
 
     异常：
-        不主动抛出异常；节点执行时的异常由 ``prepare_context`` 传播。
+        不主动抛出异常；节点执行时的异常由 ``prepare_harness_input`` 传播。
     """
     async def node(state: AgentState) -> AgentState:
-        return await prepare_context(state, request_service=request_service)
+        return await prepare_harness_input(
+            state, session_context_service=session_context_service
+        )
 
     return node

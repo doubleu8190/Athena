@@ -121,7 +121,10 @@ class MemoryService:
         text = (user_message or "").strip()
         if not text:
             return None
-        low_value = ("你好", "谢谢", "感谢", "天气", "帮我算", "翻译")
+        low_value = (
+            "你好", "谢谢", "感谢", "天气", "帮我算", "翻译", "好的", "收到",
+            "明白", "可以", "行",
+        )
         # 极短的低价值问候/致谢（≤12 字符）
         if len("".join(text.split())) <= 12 and any(item in text for item in low_value):
             return None
@@ -135,8 +138,26 @@ class MemoryService:
             "已有",
             "记忆",
         )
-        # 长度不足 24 且无上下文标记的短消息
-        if not any(marker in text for marker in markers) and len(text) < 24:
+        knowledge_markers = (
+            "是什么", "什么是", "目标", "标准", "要求", "规范", "定义",
+            "原理", "原因", "区别", "对比", "方法", "步骤", "指南",
+            "知识", "概念", "课程", "教材", "识字", "年级", "如何",
+            "怎么", "为什么", "哪些", "多少", "清单", "规则", "政策",
+            "历史", "资料", "参考",
+        )
+        is_context_reference = any(marker in text for marker in markers)
+        is_knowledge_query = any(marker in text for marker in knowledge_markers)
+        is_question = text.endswith(("?", "？"))
+        # 知识库查询经常是一个短主题短语，不能再用固定长度直接过滤。
+        # 只有明确的执行指令才跳过；其它有内容的消息都先检索，再由
+        # 检索器根据结果为空与否决定是否向模型注入上下文。
+        imperative_markers = ("执行", "修复", "修改", "运行", "打开", "删除", "提交")
+        if (
+            not is_context_reference
+            and not is_knowledge_query
+            and not is_question
+            and any(marker in text for marker in imperative_markers)
+        ):
             return None
         request = MemoryRetrievalRequest(
             session_id=session_id,
@@ -144,7 +165,9 @@ class MemoryService:
             task=text,
             reason=(
                 "context_reference"
-                if any(m in text for m in markers)
+                if is_context_reference
+                else "knowledge_query"
+                if is_knowledge_query
                 else "substantive_task"
             ),
         )

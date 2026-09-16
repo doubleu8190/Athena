@@ -11,7 +11,7 @@ from datetime import datetime
 import re
 from typing import Any, Iterable, cast
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import SQLAlchemyError
@@ -24,6 +24,7 @@ from athena.infrastructure.sqlite.models import (
     CodeSymbolModel,
     FileArtifactModel,
     FileChunkModel,
+    SessionKnowledgeBaseModel,
 )
 from athena.infrastructure.sqlite.repositories import (
     _json_dumps,
@@ -93,6 +94,11 @@ class FileRepository:
                     .all()
                 )
                 if not attachment_ids:
+                    await session.execute(
+                        delete(SessionKnowledgeBaseModel).where(
+                            SessionKnowledgeBaseModel.session_id == session_id
+                        )
+                    )
                     return
                 chunk_ids = list(
                     (
@@ -142,6 +148,11 @@ class FileRepository:
                         CodeDependencyModel.attachment_id.in_(attachment_ids)
                     )
                 )
+                await session.execute(
+                    delete(SessionKnowledgeBaseModel).where(
+                        SessionKnowledgeBaseModel.session_id == session_id
+                    )
+                )
 
     async def live_storage_keys(self) -> set[str]:
         """
@@ -168,7 +179,8 @@ class FileRepository:
     async def create_attachment(
         self,
         *,
-        session_id: str,
+        session_id: str | None = None,
+        knowledge_base_id: str | None = None,
         message_id: str | None = None,
         filename: str,
         mime_type: str,
@@ -176,10 +188,11 @@ class FileRepository:
         sha256: str,
         storage_key: str,
     ) -> Attachment:
-        """创建附件记录（上传完成后调用）。
+        """创建会话附件或知识库文档记录（上传完成后调用）。
 
         参数：
-            session_id: 会话 ID。
+            session_id: 会话 ID；创建知识库文档时为空。
+            knowledge_base_id: 知识库 ID；创建会话附件时为空。
             message_id: 关联的用户消息 ID；multipart 消息提交时由 Gateway 预先分配。
             filename: 原始文件名。
             mime_type: MIME 类型。
@@ -190,10 +203,13 @@ class FileRepository:
         返回值：
             创建的 ``Attachment`` 实例。
         """
+        if (session_id is None) == (knowledge_base_id is None):
+            raise ValueError("附件必须且只能属于一个会话或知识库")
         now = _now().isoformat()
         row = AttachmentModel(
             id=generate_time_id(),
             session_id=session_id,
+            knowledge_base_id=knowledge_base_id,
             message_id=message_id,
             filename=filename,
             mime_type=mime_type,
@@ -288,6 +304,97 @@ class FileRepository:
                 .all()
             )
             return [_row_to_attachment(row) for row in rows]
+
+    async def list_accessible_attachments(self, session_id: str) -> list[Attachment]:
+        """列出会话直接附件以及绑定知识库中的全部文档。
+
+        参数：
+            session_id (str): 当前会话唯一标识。
+
+        返回值：
+            list[Attachment]: 当前会话有权访问的文件，按创建时间升序排列。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_session() as session:
+            knowledge_base_ids = select(
+                SessionKnowledgeBaseModel.knowledge_base_id
+            ).where(SessionKnowledgeBaseModel.session_id == session_id)
+            rows = (
+                await session.execute(
+                    select(AttachmentModel)
+                    .where(
+                        or_(
+                            AttachmentModel.session_id == session_id,
+                            AttachmentModel.knowledge_base_id.in_(knowledge_base_ids),
+                        ),
+                        AttachmentModel.deleted_time.is_(None),
+                    )
+                    .order_by(AttachmentModel.created_at.asc())
+                )
+            ).scalars().all()
+        return [_row_to_attachment(row) for row in rows]
+
+    async def get_accessible_attachment(
+        self, session_id: str, attachment_id: str
+    ) -> Attachment | None:
+        """读取会话直接拥有或通过知识库绑定获得权限的附件。
+
+        参数：
+            session_id (str): 当前会话唯一标识。
+            attachment_id (str): 目标附件唯一标识。
+
+        返回值：
+            Attachment | None: 无访问权限、已删除或不存在时返回 ``None``。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_session() as session:
+            knowledge_base_ids = select(
+                SessionKnowledgeBaseModel.knowledge_base_id
+            ).where(SessionKnowledgeBaseModel.session_id == session_id)
+            row = (
+                await session.execute(
+                    select(AttachmentModel).where(
+                        AttachmentModel.id == attachment_id,
+                        or_(
+                            AttachmentModel.session_id == session_id,
+                            AttachmentModel.knowledge_base_id.in_(knowledge_base_ids),
+                        ),
+                        AttachmentModel.deleted_time.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+        return _row_to_attachment(row) if row is not None else None
+
+    async def list_knowledge_base_attachments(
+        self, knowledge_base_id: str
+    ) -> list[Attachment]:
+        """列出知识库中的全部未删除文档。
+
+        参数：
+            knowledge_base_id (str): 知识库唯一标识。
+
+        返回值：
+            list[Attachment]: 按创建时间升序排列的知识库文档。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(AttachmentModel)
+                    .where(
+                        AttachmentModel.knowledge_base_id == knowledge_base_id,
+                        AttachmentModel.deleted_time.is_(None),
+                    )
+                    .order_by(AttachmentModel.created_at.asc())
+                )
+            ).scalars().all()
+        return [_row_to_attachment(row) for row in rows]
 
     async def update_attachment(
         self, attachment_id: str, **values: Any
@@ -394,6 +501,79 @@ class FileRepository:
                         CodeDependencyModel.attachment_id == attachment_id
                     )
                 )
+                return True
+
+    async def soft_delete_knowledge_base_attachment(
+        self, attachment_id: str, knowledge_base_id: str
+    ) -> bool:
+        """软删除知识库中的指定文档及其派生索引。
+
+        参数：
+            attachment_id (str): 文档附件唯一标识。
+            knowledge_base_id (str): 文档必须归属的知识库标识。
+
+        返回值：
+            bool: 找到并删除文档时为 ``True``。
+
+        异常：
+            数据库写入失败时传播底层异常。
+        """
+        return await self._soft_delete_owned_attachment(
+            attachment_id,
+            knowledge_base_id=knowledge_base_id,
+        )
+
+    async def _soft_delete_owned_attachment(
+        self,
+        attachment_id: str,
+        *,
+        knowledge_base_id: str,
+    ) -> bool:
+        """按知识库所有权软删除附件并清理 SQLite 派生数据。
+
+        参数：
+            attachment_id (str): 文档附件唯一标识。
+            knowledge_base_id (str): 文档所属知识库标识。
+
+        返回值：
+            bool: 发生删除时为 ``True``。
+
+        异常：
+            数据库写入失败时传播底层异常。
+        """
+        now = _now().isoformat()
+        async with get_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(AttachmentModel)
+                    .where(
+                        AttachmentModel.id == attachment_id,
+                        AttachmentModel.knowledge_base_id == knowledge_base_id,
+                        AttachmentModel.deleted_time.is_(None),
+                    )
+                    .values(
+                        status=AttachmentStatus.DELETED.value,
+                        deleted_time=now,
+                        updated_at=now,
+                    )
+                )
+                if not cast(CursorResult[Any], result).rowcount:
+                    return False
+                await session.execute(
+                    text(
+                        "DELETE FROM file_chunk_fts WHERE attachment_id = :attachment_id"
+                    ),
+                    {"attachment_id": attachment_id},
+                )
+                for model in (
+                    FileChunkModel,
+                    FileArtifactModel,
+                    CodeSymbolModel,
+                    CodeDependencyModel,
+                ):
+                    await session.execute(
+                        delete(model).where(model.attachment_id == attachment_id)
+                    )
                 return True
 
     async def bind_message(

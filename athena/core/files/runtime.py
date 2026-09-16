@@ -49,7 +49,7 @@ logger = get_logger(__name__)
 
 
 class FileAccessError(PermissionError):
-    """文件访问权限错误（文件不存在或不属于当前会话）。"""
+    """文件访问权限错误（文件不存在或当前会话没有直接或知识库权限）。"""
 
 
 class FileEventPublisher(Protocol):
@@ -156,7 +156,7 @@ class FileIntelligenceRuntime:
         return removed
 
     async def require_attachment(self, session_id: str, file_id: str) -> Attachment:
-        """获取附件并校验会话归属。
+        """获取附件并校验会话直接所有权或知识库授权。
 
         参数：
             session_id: 会话 ID。
@@ -166,11 +166,13 @@ class FileIntelligenceRuntime:
             ``Attachment`` 实例。
 
         异常：
-            FileAccessError: 附件不存在或不属于当前会话。
+            FileAccessError: 附件不存在或当前会话没有访问权限。
         """
-        attachment = await self.repository.get_attachment(file_id, session_id)
+        attachment = await self.repository.get_accessible_attachment(
+            session_id, file_id
+        )
         if attachment is None:
-            raise FileAccessError("文件不存在或不属于当前会话")
+            raise FileAccessError("文件不存在或当前会话没有访问权限")
         return attachment
 
     async def parse_attachment(
@@ -400,7 +402,24 @@ class FileIntelligenceRuntime:
         return best
 
     async def list_files(self, session_id: str) -> list[dict[str, Any]]:
-        """列出会话的所有附件（公开字段）。"""
+        """列出会话直接附件和已绑定知识库文档（公开字段）。"""
+        return [
+            _attachment_to_public(item)
+            for item in await self.repository.list_accessible_attachments(session_id)
+        ]
+
+    async def list_session_files(self, session_id: str) -> list[dict[str, Any]]:
+        """仅列出直接上传到会话的附件，供会话附件管理界面使用。
+
+        参数：
+            session_id (str): 会话唯一标识。
+
+        返回值：
+            list[dict[str, Any]]: 不包含知识库文档的公开附件列表。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
         return [
             _attachment_to_public(item)
             for item in await self.repository.list_attachments(session_id)
@@ -955,6 +974,9 @@ class FileIntelligenceRuntime:
         self, attachment: Attachment, *, run_id: str | None = None
     ) -> None:
         """推送附件状态更新事件。"""
+        # 知识库文档不属于单一会话，状态由知识库 API 查询，不写入会话 SSE。
+        if attachment.session_id is None:
+            return
         data = _attachment_to_public(attachment, True)
         data["attachment_id"] = attachment.id
         if run_id:

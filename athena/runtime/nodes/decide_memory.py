@@ -8,7 +8,7 @@ from ..state import AgentState
 from ..services.memory_service import MemoryService
 
 
-async def decide_memory(
+async def build_memory_request(
     state: AgentState, *, memory_service: MemoryService
 ) -> AgentState:
     if not state.get("session_id"):
@@ -21,10 +21,10 @@ async def decide_memory(
     return {"memory_request": request.model_dump(mode="json") if request else None}
 
 
-def create_decide_memory_node(
+def create_build_memory_request_node(
     memory_service: MemoryService,
 ) -> StateNode[AgentState, None]:
     async def node(state: AgentState) -> AgentState:
-        return await decide_memory(state, memory_service=memory_service)
+        return await build_memory_request(state, memory_service=memory_service)
 
     return node

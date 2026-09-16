@@ -50,12 +50,13 @@ class AttachmentRef(BaseModel):
 class Attachment(BaseModel):
     """附件完整领域模型。
 
-    表示用户上传的文件资产，关联到特定会话。``storage_key`` 字段
+    表示用户上传的文件资产，归属于特定会话或独立知识库。``storage_key`` 字段
     排除在 JSON 序列化之外（``exclude=True``），不暴露给前端。
 
     属性：
         id: 附件唯一标识（时间戳 ID）。
-        session_id: 所属会话 ID。
+        session_id: 所属会话 ID；知识库文档为空。
+        knowledge_base_id: 所属知识库 ID；会话附件为空。
         message_id: 关联的消息 ID（可选）。
         filename: 原始文件名。
         mime_type: MIME 类型。
@@ -74,7 +75,8 @@ class Attachment(BaseModel):
     """
 
     id: str
-    session_id: str
+    session_id: str | None = None
+    knowledge_base_id: str | None = None
     message_id: str | None = None
     filename: str
     mime_type: str
@@ -100,6 +102,30 @@ class Attachment(BaseModel):
             size_bytes=self.size_bytes,
             status=self.status,
         )
+
+
+class KnowledgeBase(BaseModel):
+    """可跨会话复用的独立知识库。
+
+    属性：
+        id: 知识库唯一标识。
+        name: 用户可见名称。
+        description: 知识库用途说明。
+        document_count: 当前未删除文档数量。
+        ready_document_count: 已完成索引、可以检索的文档数量。
+        total_size_bytes: 当前文档占用的原始文件字节数。
+        created_at: 创建时间。
+        updated_at: 最后更新时间。
+    """
+
+    id: str
+    name: str
+    description: str = ""
+    document_count: int = 0
+    ready_document_count: int = 0
+    total_size_bytes: int = 0
+    created_at: datetime
+    updated_at: datetime
 
 
 class FileChunk(BaseModel):

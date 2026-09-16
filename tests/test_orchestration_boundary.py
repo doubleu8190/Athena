@@ -117,7 +117,7 @@ async def test_main_graph_has_orchestration_branch() -> None:
     from athena.runtime.langgraph_graph import build_graph
 
     runtime = LangGraphRuntime.__new__(LangGraphRuntime)
-    runtime._request_service = MagicMock()
+    runtime._session_context_service = MagicMock()
     runtime._execution_service = MagicMock()
     runtime._memory_service = MagicMock()
     runtime._file_runtime = MagicMock()
@@ -127,12 +127,33 @@ async def test_main_graph_has_orchestration_branch() -> None:
     graph = build_graph(runtime)
     nodes = set(graph.get_graph().nodes)
     assert {
+        "prepare_request_and_persist_message",
+        "process_attachments",
+        "handle_attachment_failure",
+        "build_memory_request",
+        "retrieve_memory",
+        "prepare_harness_input",
         "agent_loop",
+        "materialize_execution_plan",
+        "run_planned_orchestration",
+        "build_orchestration_response",
+        "close_execution_stream",
+        "post_process_and_build_result",
+        "assemble_final_response",
+    } <= nodes
+    assert not {
+        "prepare_and_persist_request",
+        "handle_file_failure",
+        "decide_memory",
+        "prepare_context",
         "materialize_plan",
         "execute_plan",
         "synthesize_orchestration",
-    } <= nodes
-    assert "plan_orchestration" not in nodes
+        "close_plan_stream",
+        "post_process_turn",
+        "finalize_response",
+        "plan_orchestration",
+    } & nodes
 
 
 def test_first_agent_turn_has_three_routes() -> None:

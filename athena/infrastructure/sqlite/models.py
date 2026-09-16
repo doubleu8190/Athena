@@ -10,6 +10,7 @@ Repository 读取后，会把文本转换成 ``athena.models.json_models`` 中�
 from __future__ import annotations
 
 from sqlalchemy import (
+    CheckConstraint,
     Float,
     ForeignKey,
     Index,
@@ -594,20 +595,52 @@ class ToolModel(Base):
     updated_at: Mapped[str] = mapped_column(String, comment="最后更新时间（UTC）")
 
 
+class KnowledgeBaseModel(Base):
+    """独立知识库元数据。"""
+
+    __tablename__ = "knowledge_bases"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, comment="知识库唯一标识")
+    name: Mapped[str] = mapped_column(String, comment="知识库名称")
+    description: Mapped[str] = mapped_column(Text, default="", comment="知识库说明")
+    created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
+    updated_at: Mapped[str] = mapped_column(String, comment="最后更新时间（UTC）")
+    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True, comment="软删除时间（UTC）")
+
+
+class SessionKnowledgeBaseModel(Base):
+    """会话与可访问知识库的多对多绑定。"""
+
+    __tablename__ = "session_knowledge_bases"
+    __table_args__ = (Index("idx_session_knowledge_bases_kb", "knowledge_base_id"),)
+
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), primary_key=True)
+    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"), primary_key=True)
+    created_at: Mapped[str] = mapped_column(String, comment="绑定时间（UTC）")
+
+
 class AttachmentModel(Base):
-    """会话范围的文件资产元数据。原始字节存储在存储层。"""
+    """会话附件或独立知识库文档的元数据。原始字节存储在存储层。"""
 
     __tablename__ = "attachments"
     __table_args__ = (
         Index("idx_attachments_session", "session_id"),
+        Index("idx_attachments_knowledge_base", "knowledge_base_id"),
         Index("idx_attachments_message", "message_id"),
         Index("idx_attachments_hash", "sha256"),
         Index("idx_attachments_status", "status"),
+        CheckConstraint(
+            "(session_id IS NOT NULL) != (knowledge_base_id IS NOT NULL)",
+            name="ck_attachment_single_owner",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, comment="附件唯一标识")
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
+    session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sessions.id"), nullable=True, comment="所属会话标识"
+    )
+    knowledge_base_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_bases.id"), nullable=True, comment="所属知识库标识"
     )
     message_id: Mapped[str | None] = mapped_column(
         ForeignKey("messages.id"), nullable=True, comment="关联消息标识"

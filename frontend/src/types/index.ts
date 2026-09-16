@@ -93,7 +93,8 @@ export interface AttachmentRef {
 }
 
 export interface Attachment extends AttachmentRef {
-  session_id: string
+  session_id: string | null
+  knowledge_base_id?: string | null
   message_id?: string | null
   sha256: string
   adapter_name?: string | null
@@ -107,6 +108,17 @@ export interface Attachment extends AttachmentRef {
 
 export interface SupportedAttachmentTypes {
   extensions: string[]
+}
+
+export interface KnowledgeBase {
+  id: string
+  name: string
+  description: string
+  document_count: number
+  ready_document_count: number
+  total_size_bytes: number
+  created_at: string
+  updated_at: string
 }
 
 export interface ThinkingState {
@@ -246,6 +258,7 @@ export interface GetMessagesResponse {
 
 export type AppView =
   | "chat"
+  | "knowledge"
   | "memory"
   | "tools"
   | "approvals"

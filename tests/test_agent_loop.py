@@ -7,7 +7,7 @@ from athena.runtime.graph_runtime import DEFAULT_SYSTEM_PROMPT
 from athena.runtime.langgraph_graph import build_graph, invoke_graph
 from athena.runtime.sub_agent import SubAgentManager, SubAgentResult
 from athena.runtime.services.memory_service import MemoryService, _recent_history_by_turns, _MemoryRetrievalPlan
-from athena.runtime.services.request_service import RequestService
+from athena.runtime.services.session_context_service import SessionContextService
 from athena.runtime.services.execution_service import ExecutionService
 
 
@@ -29,9 +29,9 @@ class TestModuleStructure:
         assert MemoryService is not None
         assert callable(MemoryService.build_memory_request)
 
-    def test_request_service_exists(self):
-        assert RequestService is not None
-        assert hasattr(RequestService, "_build_harness_messages")
+    def test_session_context_service_exists(self):
+        assert SessionContextService is not None
+        assert hasattr(SessionContextService, "_build_harness_messages")
 
     def test_execution_service_exists(self):
         assert ExecutionService is not None

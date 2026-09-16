@@ -19,6 +19,7 @@ import type {
   McpServerListResponse,
   Attachment,
   SupportedAttachmentTypes,
+  KnowledgeBase,
 } from "../types"
 
 class ApiClient {
@@ -157,6 +158,61 @@ class ApiClient {
   /** 软删除会话附件。 */
   async deleteAttachment(sessionId: string, fileId: string): Promise<void> {
     await this.request(`/api/sessions/${sessionId}/attachments/${fileId}`, { method: "DELETE" })
+  }
+
+  // ─── 独立知识库 ───────────────────────────────────────────────
+
+  async listKnowledgeBases(): Promise<KnowledgeBase[]> {
+    return this.request<KnowledgeBase[]>("/api/knowledge-bases")
+  }
+
+  async createKnowledgeBase(name: string, description = ""): Promise<KnowledgeBase> {
+    return this.request<KnowledgeBase>("/api/knowledge-bases", {
+      method: "POST",
+      body: JSON.stringify({ name, description }),
+    })
+  }
+
+  async updateKnowledgeBase(id: string, name: string, description = ""): Promise<KnowledgeBase> {
+    return this.request<KnowledgeBase>(`/api/knowledge-bases/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name, description }),
+    })
+  }
+
+  async deleteKnowledgeBase(id: string): Promise<void> {
+    await this.request(`/api/knowledge-bases/${encodeURIComponent(id)}`, { method: "DELETE" })
+  }
+
+  async listKnowledgeDocuments(id: string): Promise<Attachment[]> {
+    return this.request<Attachment[]>(`/api/knowledge-bases/${encodeURIComponent(id)}/documents`)
+  }
+
+  async uploadKnowledgeDocuments(id: string, files: File[]): Promise<Attachment[]> {
+    const form = new FormData()
+    files.forEach((file) => form.append("files", file))
+    return this.request<Attachment[]>(`/api/knowledge-bases/${encodeURIComponent(id)}/documents`, {
+      method: "POST",
+      body: form,
+    })
+  }
+
+  async deleteKnowledgeDocument(knowledgeBaseId: string, fileId: string): Promise<void> {
+    await this.request(`/api/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(fileId)}`, { method: "DELETE" })
+  }
+
+  async getKnowledgeAttachmentTypes(): Promise<SupportedAttachmentTypes> {
+    return this.request<SupportedAttachmentTypes>("/api/knowledge-bases/attachment-types")
+  }
+
+  async listSessionKnowledgeBases(sessionId: string): Promise<KnowledgeBase[]> {
+    return this.request<KnowledgeBase[]>(`/api/sessions/${encodeURIComponent(sessionId)}/knowledge-bases`)
+  }
+
+  async setSessionKnowledgeBase(sessionId: string, knowledgeBaseId: string, enabled: boolean): Promise<void> {
+    await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}`, {
+      method: enabled ? "PUT" : "DELETE",
+    })
   }
 
   // ─── 审批管理 ─────────────────────────────────────────────────

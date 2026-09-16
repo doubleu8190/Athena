@@ -1,7 +1,7 @@
-"""Request context service extracted from LangGraphRuntime.
+"""Session context service extracted from LangGraphRuntime.
 
 Provides session history loading, attachment validation, message persistence,
-and run preparation — the request-side operations of the agent runtime.
+and Harness input preparation — the session-context operations of the agent runtime.
 """
 
 from __future__ import annotations
@@ -26,11 +26,11 @@ from ..state import AgentState
 logger = get_logger(__name__)
 
 
-class RequestService:
+class SessionContextService:
     """Session context operations extracted from LangGraphRuntime.
 
     Handles session history loading, attachment validation, message
-    persistence, and run preparation so the graph runtime can focus on
+    persistence, and Harness input preparation so the graph runtime can focus on
     orchestration.
     """
 
@@ -38,7 +38,7 @@ class RequestService:
         self._db = db
         self._events = event_publisher
 
-    async def load_banded_attachments(
+    async def load_and_validate_attachments(
         self,
         session_id: str,
         attachment_ids: list[str],
@@ -135,7 +135,7 @@ class RequestService:
             )
         )
 
-    async def prepare_run(
+    async def prepare_harness_input(
         self,
         session_id: str,
         user_message: str,
@@ -144,19 +144,21 @@ class RequestService:
         run_id: str,
         message_id: str,
     ) -> tuple[list[AttachmentRef], list[Message]]:
-        """
+        """根据会话消息和附件构造 Harness 输入。
 
         参数：
             session_id (str): 会话唯一标识。
-            user_message (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            attachment_ids (list[str]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            history (list[Message]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            user_message (str): 当前用户消息内容。
+            attachment_ids (list[str]): 当前消息关联的附件 ID 列表。
+            history (list[Message]): 已加载的会话历史消息。
+            run_id (str): 当前运行唯一标识。
+            message_id (str): 当前用户消息唯一标识。
 
         返回值：
-            tuple[Message, list[AttachmentRef], list[Message]]: 依次返回用户消息、附件引用和 Harness 消息。
+            tuple[list[AttachmentRef], list[Message]]: 附件轻量引用和 Harness 消息列表。
 
         异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
+            底层消息或附件持久化失败时，传播对应异常。
         """
         message = await self._get_or_create_user_message(
             session_id,

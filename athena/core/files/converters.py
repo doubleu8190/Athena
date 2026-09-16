@@ -14,6 +14,7 @@ def _attachment_to_public(
     data = {
         "id": attachment.id,
         "session_id": attachment.session_id,
+        "knowledge_base_id": attachment.knowledge_base_id,
         "message_id": attachment.message_id,
         "filename": attachment.filename,
         "mime_type": attachment.mime_type,

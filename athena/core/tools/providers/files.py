@@ -214,10 +214,13 @@ def build_file_tool_specs(runtime: FileIntelligenceRuntime) -> list[ToolSpec]:
         return await runtime.get_call_graph(session_id(), file_id, symbol, direction)
 
     file_id = {
-        "file_id": {"type": "string", "description": "Current session attachment ID."}
+        "file_id": {
+            "type": "string",
+            "description": "当前会话附件或已启用知识库文档的 ID。",
+        }
     }
     definitions: list[tuple[str, str, Any, dict[str, Any]]] = [
-        ("list_files", "列出当前会话可访问的文件资产及其解析状态。", list_files,
+        ("list_files", "列出当前会话附件及已启用知识库中的可访问文档。", list_files,
          {"type": "object", "properties": {}}),
         ("get_file_info", "获取指定会话附件的公开元数据、解析状态、能力和解析统计。", get_file_info,
          {"type": "object", "properties": file_id, "required": ["file_id"]}),

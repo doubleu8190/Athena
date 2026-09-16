@@ -162,31 +162,36 @@ ROLE_TOOLS = {
 
 ## 6. LangGraph 迁移后的流程
 
-现有 `prepare_context -> agent_loop` 改为：
+现有 `prepare_harness_input -> agent_loop` 改为：
 
 ```text
-prepare_context
+prepare_harness_input
       |
-planner_loop (planner tools / structured plan)
-      |-- direct_answer --> finalize_response
-      |-- execution_plan -> persist_plan -> dispatch_tasks
-                                      |
-                                  collect_results
-                                      |
-                              synthesize_loop
-                                      |
-                                post_process_turn
-                                      |
-                                finalize_response
+agent_loop (planner tools / structured plan)
+      |-- direct_answer --> assemble_final_response
+      |-- plan_request -> materialize_execution_plan
+                              |
+                      run_planned_orchestration
+                              |
+                   build_orchestration_response
+                              |
+                      close_execution_stream
+                              |
+                      assemble_final_response
+      `-- harness_result -> post_process_and_build_result
+                              |
+                      assemble_final_response
 ```
 
 节点职责：
 
-- `planner_loop`：调用主 agent，允许直接回答或生成 `ExecutionPlan`；不执行 worker。
-- `persist_plan`：事务性保存 plan/tasks，并发布 `plan.created`、`task.queued`。
-- `dispatch_tasks`：按依赖层级和 `max_parallelism` 领取任务；每个 task 由一个 `WorkerExecutor` 执行。
-- `collect_results`：等待所有终态，写入结果，汇总失败/超时/取消；不把 worker 结果直接拼进 LLM 字符串。
-- `synthesize_loop`：将结构化结果交给主 agent，主 agent 只负责证据整合和最终表达。
+- `agent_loop`：调用主 agent，允许直接回答或生成 `ExecutionPlan`；不执行 worker。
+- `materialize_execution_plan`：校验并持久化主 agent 提交的执行计划。
+- `run_planned_orchestration`：调度 worker、等待任务完成，并生成编排汇总结果。
+- `build_orchestration_response`：将编排汇总结果转换为主图的最终响应结构。
+- `close_execution_stream`：关闭计划分支由主 agent 打开的回答流。
+- `post_process_and_build_result`：执行普通 Harness 回合的记忆/摘要后处理，并构建结果。
+- `assemble_final_response`：统一组装成功或失败的最终响应状态。
 
 简单请求可由 planner 选择 `direct_answer`，避免所有请求都增加一次 worker 调用。需要用户审批的工具沿用现有 HITL 流程，但审批关联 `task_id` 和 `run_id`，暂停只影响对应 task 及其所属计划。
 

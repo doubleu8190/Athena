@@ -6,6 +6,7 @@ import ProvidersView from "./ProvidersView"
 import SessionDetailView from "./SessionDetailView"
 import SettingsView from "./SettingsView"
 import McpView from "./McpView"
+import KnowledgeBaseView from "./KnowledgeBaseView"
 
 interface PageViewProps {
   view: AppView
@@ -17,6 +18,8 @@ interface PageViewProps {
  */
 function PageView({ view }: PageViewProps) {
   switch (view) {
+    case "knowledge":
+      return <KnowledgeBaseView />
     case "memory":
       return <MemoryView />
     case "tools":

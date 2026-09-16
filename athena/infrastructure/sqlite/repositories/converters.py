@@ -162,6 +162,7 @@ def _row_to_attachment(row: AttachmentModel) -> Attachment:
     return Attachment(
         id=row.id,
         session_id=row.session_id,
+        knowledge_base_id=row.knowledge_base_id,
         message_id=row.message_id,
         filename=row.filename,
         mime_type=row.mime_type,

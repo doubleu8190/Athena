@@ -53,8 +53,12 @@ class Database:
 
         self.orchestration = OrchestrationRepository()
         from athena.infrastructure.sqlite.file_repository import FileRepository
+        from athena.infrastructure.sqlite.knowledge_base_repository import (
+            KnowledgeBaseRepository,
+        )
 
         self.files = FileRepository()
+        self.knowledge_bases = KnowledgeBaseRepository()
 
     async def connect(self, memory_db_path: str | None = None) -> None:
         """建立核心数据库连接，并按需初始化独立的记忆数据库。

@@ -1,6 +1,7 @@
 import {
   MessageSquare,
   Database,
+  LibraryBig,
   Cpu,
   ClipboardCheck,
   Server,
@@ -20,6 +21,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { view: "chat", label: "对话", icon: MessageSquare },
+  { view: "knowledge", label: "知识库", icon: LibraryBig },
   { view: "memory", label: "记忆管理", icon: Database },
   { view: "tools", label: "工具管理", icon: Cpu },
   { view: "approvals", label: "审批日志", icon: ClipboardCheck },

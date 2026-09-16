@@ -7,22 +7,19 @@ from typing import Literal
 from ..state import AgentState
 
 
-def check_file_results(
+def route_after_attachment_processing(
     state: AgentState,
-) -> Literal["decide_memory", "handle_file_failure"]:
+) -> Literal["build_memory_request", "handle_attachment_failure"]:
     """只有所有附件 READY 时才允许进入记忆检索。"""
     results = state.get("file_results", [])
     if all(item.get("status") == "ready" for item in results):
-        return "decide_memory"
-    return "handle_file_failure"
+        return "build_memory_request"
+    return "handle_attachment_failure"
 
-def decide_memory_request(
+def route_after_memory_request(
     state: AgentState,
-) -> Literal["retrieve_memory", "prepare_context"]:
+) -> Literal["retrieve_memory", "prepare_harness_input"]:
     request = state.get("memory_request")
-    return (
-        "retrieve_memory"
-        if request
-        and request.get("reason") in {"context_reference", "llm_complex_request"}
-        else "prepare_context"
-    )
+    # 检索是低风险的只读步骤：所有已经通过低价值/执行指令过滤的请求
+    # 都允许进入检索，避免依赖固定 reason 白名单漏掉新类型的知识问题。
+    return "retrieve_memory" if request else "prepare_harness_input"

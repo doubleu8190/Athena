@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from ..state import AgentExecutionState, AgentState
+from ..node_events import instrument_graph_node
 
 from .initialize import initialize_execution
 from .llm_call import llm_call
@@ -158,17 +159,32 @@ def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
         START → initialize → llm_call ⇄ execute_tool_batch → finish → END
     """
     graph = StateGraph(AgentState)
-    graph.add_node(
+    event_publisher = getattr(runtime, "_events", None)
+
+    def add_instrumented_node(node_name: str, node: object) -> None:
+        """注册一个带生命周期事件的执行循环节点。"""
+        graph.add_node(
+            node_name,
+            instrument_graph_node(
+                node_name,
+                node,  # type: ignore[arg-type]
+                event_publisher=event_publisher,
+            ),
+        )
+
+    add_instrumented_node(
         "initialize_execution",
         partial(_initialize_wrapper, graph_runtime=runtime),
     )
-    graph.add_node("llm_call", partial(_llm_wrapper, graph_runtime=runtime))
-    graph.add_node(
+    add_instrumented_node("llm_call", partial(_llm_wrapper, graph_runtime=runtime))
+    add_instrumented_node(
         "execute_tool_batch",
         partial(_tools_wrapper, graph_runtime=runtime),
     )
-    graph.add_node("finish_execution", partial(_finish_wrapper, graph_runtime=runtime))
-    graph.add_node(
+    add_instrumented_node(
+        "finish_execution", partial(_finish_wrapper, graph_runtime=runtime)
+    )
+    add_instrumented_node(
         "plan_requested",
         partial(_plan_requested_wrapper, graph_runtime=runtime),
     )

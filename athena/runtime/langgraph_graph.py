@@ -29,6 +29,7 @@ from .nodes import (
     create_close_execution_stream_node,
 )
 from .state import AgentState
+from .node_events import instrument_graph_node
 
 if TYPE_CHECKING:
     from .graph_runtime import LangGraphRuntime
@@ -48,55 +49,69 @@ def build_graph(
         CompiledStateGraph: 已连接并编译完成的 LangGraph 图对象。
     """
     graph = StateGraph(AgentState)
+    # 所有主图节点都在注册边界统一包装，保证普通节点和嵌套 Agent loop
+    # 具有一致的 started/completed/failed 事件生命周期。
+    event_publisher = getattr(runtime, "_events", None)
+
+    def add_instrumented_node(node_name: str, node: Any) -> None:
+        """注册一个带节点生命周期事件的主图节点。"""
+        graph.add_node(
+            node_name,
+            instrument_graph_node(
+                node_name,
+                node,
+                event_publisher=event_publisher,
+            ),
+        )
 
     # ── 节点：按执行顺序注册 ──
     # 请求准备并持久化消息 → 使用 SessionContextService
-    graph.add_node(
+    add_instrumented_node(
         "prepare_request_and_persist_message",
         create_prepare_request_and_persist_message_node(
             runtime.session_context_service
         ),
     )
     # 附件处理 → 使用完整 runtime（需要 FileIntelligenceRuntime 等）
-    graph.add_node("process_attachments", create_process_attachments_node(runtime))
+    add_instrumented_node("process_attachments", create_process_attachments_node(runtime))
     # 附件失败处理 → 无依赖
-    graph.add_node("handle_attachment_failure", create_handle_attachment_failure_node())
+    add_instrumented_node("handle_attachment_failure", create_handle_attachment_failure_node())
     # 构建记忆检索请求 → 使用 MemoryService
-    graph.add_node(
+    add_instrumented_node(
         "build_memory_request", create_build_memory_request_node(runtime.memory_service)
     )
     # 记忆检索 → 使用 MemoryService
-    graph.add_node(
+    add_instrumented_node(
         "retrieve_memory", create_retrieve_memory_node(runtime.memory_service)
     )
     # 准备 Harness 输入 → 使用 SessionContextService
-    graph.add_node(
+    add_instrumented_node(
         "prepare_harness_input",
         create_prepare_harness_input_node(runtime.session_context_service),
     )
     # Agent 循环（LLM ↔ 工具）→ 使用完整 runtime
-    graph.add_node("agent_loop", create_agent_loop_node(runtime))
-    graph.add_node(
+    add_instrumented_node("agent_loop", create_agent_loop_node(runtime))
+    add_instrumented_node(
         "materialize_execution_plan", create_materialize_execution_plan_node(runtime)
     )
-    graph.add_node(
+    add_instrumented_node(
         "run_planned_orchestration", create_run_planned_orchestration_node(runtime)
     )
-    graph.add_node(
+    add_instrumented_node(
         "build_orchestration_response",
         create_build_orchestration_response_node(),
     )
-    graph.add_node(
+    add_instrumented_node(
         "close_execution_stream", create_close_execution_stream_node(runtime)
     )
 
     # 后处理并组装 Harness 结果 → 使用 ExecutionService
-    graph.add_node(
+    add_instrumented_node(
         "post_process_and_build_result",
         create_post_process_and_build_result_node(runtime.execution_service),
     )
     # 组装最终响应 → 无依赖
-    graph.add_node("assemble_final_response", create_assemble_final_response_node())
+    add_instrumented_node("assemble_final_response", create_assemble_final_response_node())
 
     # ── 边 ──
     graph.add_edge(START, "prepare_request_and_persist_message")

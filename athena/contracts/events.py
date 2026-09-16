@@ -54,6 +54,11 @@ class EventType(StrEnum):
     RUN_CANCELLED = "run.cancelled"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
+    # LangGraph 节点生命周期事件。节点名和本次执行 ID 放在 payload 中，
+    # 事件本身仍沿用统一的 ApplicationEvent/SSE 契约。
+    NODE_STARTED = "node.started"
+    NODE_COMPLETED = "node.completed"
+    NODE_FAILED = "node.failed"
     ATTACHMENT_UPDATED = "attachment_updated"
     FILE_PROCESSING_STARTED = "file_processing_started"
     FILE_PROCESSING_COMPLETED = "file_processing_completed"

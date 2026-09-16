@@ -251,6 +251,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
 
     ;[
       "run.started", "run.resumed", "run.paused", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded",
+      "node.started", "node.completed", "node.failed",
       "llm.started", "llm.completed", "tool.started", "tool.completed",
       "approval.required", "approval.resolved", "approval.expired",
       "message.started", "message.completed", "message.delta", "stream.snapshot",
@@ -303,6 +304,20 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
   if (type === "run.paused") return base({ id: `run:${runId}`, label: "Execution paused", status: "waiting" })
   if (type === "run.cancelled") return base({ id: `run:${runId}`, label: "Execution stopped", status: "info" })
   if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "Execution budget reached" : "Execution failed", detail, status: "failed" })
+
+  if (type === "node.started" || type === "node.completed" || type === "node.failed") {
+    const nodeName = text(data.node_name) || "graph node"
+    const executionId = text(data.execution_id) || String(envelope.session_seq ?? crypto.randomUUID())
+    const status = type === "node.started" ? "running" : type === "node.failed" ? "failed" : "completed"
+    const label = type === "node.started" ? `Node started: ${nodeName}` : type === "node.failed" ? `Node failed: ${nodeName}` : `Node completed: ${nodeName}`
+    return base({
+      id: `node:${executionId}`,
+      label,
+      detail,
+      status,
+      metadata: data.duration_ms !== undefined ? { duration_ms: data.duration_ms, node_name: nodeName } : { node_name: nodeName },
+    })
+  }
 
   if (type === "llm.started") return base({ id: `llm:${text(data.call_id)}`, label: "Generating response", status: "running" })
   if (type === "llm.completed") return base({ id: `llm:${text(data.call_id)}`, label: error ? "Response generation failed" : "Response generated", detail, status: error ? "failed" : "completed" })

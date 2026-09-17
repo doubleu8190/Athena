@@ -51,7 +51,7 @@ async def list_pending_approvals(
 ) -> list[dict[str, Any]]:
     """列出待审批请求."""
     runtime = runtime_from(request)
-    rows = await runtime.agent_store.pending_approvals(session_id)
+    rows = await runtime.agent_store.list_pending_approvals(session_id)
     return [
         {
             "approval_id": row.approval_id,

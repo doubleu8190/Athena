@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import (
     ApprovalLogModel,
     MessageModel,
@@ -15,7 +15,7 @@ from athena.infrastructure.sqlite.models import (
 )
 from athena.models import Session, SessionStatus
 
-from .converters import _row_to_session
+from .model_converters import _row_to_session
 from .repository_utils import _SENTINEL, _now_iso
 
 
@@ -27,7 +27,7 @@ class SessionRepository:
         from datetime import datetime
 
         now = datetime.now()
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 session.add(
                     SessionModel(
@@ -50,7 +50,7 @@ class SessionRepository:
         self, session_id: str, include_deleted: bool = False
     ) -> Session | None:
         """获取单个会话。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = select(SessionModel).where(SessionModel.id == session_id)
             if not include_deleted:
                 stmt = stmt.where(SessionModel.deleted_time.is_(None))
@@ -60,7 +60,7 @@ class SessionRepository:
 
     async def list_all(self, include_deleted: bool = False) -> list[Session]:
         """列出所有会话。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = select(SessionModel).order_by(SessionModel.updated_at.desc())
             if not include_deleted:
                 stmt = stmt.where(SessionModel.deleted_time.is_(None))
@@ -93,7 +93,7 @@ class SessionRepository:
         if last_summarized_message_id is not _SENTINEL:
             values["last_summarized_message_id"] = last_summarized_message_id
 
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
                     update(SessionModel)
@@ -107,7 +107,7 @@ class SessionRepository:
     async def delete(self, session_id: str) -> None:
         """软删除会话及其所有关联数据。"""
         now = _now_iso()
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
                     update(SessionModel)

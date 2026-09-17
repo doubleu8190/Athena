@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import select, update
 
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import (
     AttachmentModel,
     MessageModel,
@@ -12,7 +12,7 @@ from athena.infrastructure.sqlite.models import (
 )
 from athena.models import Message
 
-from .converters import _message_to_model, _row_to_message
+from .model_converters import _message_to_model, _row_to_message
 from .repository_utils import _now_iso
 
 
@@ -21,7 +21,7 @@ class MessageRepository:
 
     async def save(self, message: Message) -> str:
         """保存消息并同步刷新会话的 updated_at。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 session.add(_message_to_model(message))
                 await session.execute(
@@ -36,7 +36,7 @@ class MessageRepository:
 
     async def get(self, message_id: str) -> Message | None:
         """按 ID 获取一条未删除消息。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             row = await session.get(MessageModel, message_id)
             if row is None or row.deleted_time is not None:
                 return None
@@ -48,7 +48,7 @@ class MessageRepository:
     ) -> Message:
         """幂等创建用户消息并在同一事务内绑定附件。"""
         ids = list(dict.fromkeys(attachment_ids))
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 existing = await session.get(MessageModel, message.id)
                 if existing is None:
@@ -91,7 +91,7 @@ class MessageRepository:
                     .values(updated_at=_now_iso())
                 )
 
-        from athena.infrastructure.sqlite.file_repository import FileRepository
+        from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
 
         refs_by_message = await FileRepository().attachments_for_messages([message.id])
         return message.model_copy(
@@ -107,7 +107,7 @@ class MessageRepository:
         """填充轻量级附件引用，不暴露存储键。"""
         if not messages:
             return messages
-        from athena.infrastructure.sqlite.file_repository import FileRepository
+        from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
 
         refs = await FileRepository().attachments_for_messages(
             [item.id for item in messages]
@@ -122,7 +122,7 @@ class MessageRepository:
         self, session_id: str, limit: int | None = None, include_deleted: bool = False
     ) -> list[Message]:
         """获取会话的消息列表。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = (
                 select(MessageModel)
                 .where(MessageModel.session_id == session_id)
@@ -141,7 +141,7 @@ class MessageRepository:
         self, session_id: str, after_id: str, include_deleted: bool = False
     ) -> list[Message]:
         """获取指定消息之后的消息列表。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = (
                 select(MessageModel)
                 .where(

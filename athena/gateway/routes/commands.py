@@ -35,7 +35,7 @@ async def cancel_run(run_id: str, request: Request) -> CancelCommandResponse:
         session_id=run.session_id,
         run_id=run_id,
     )
-    await store.enqueue(command)
+    await store.enqueue_command(command)
     return CancelCommandResponse(
         command_id=command.command_id,
         run_id=run_id,

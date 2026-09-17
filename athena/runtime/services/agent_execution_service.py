@@ -13,7 +13,7 @@ from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettin
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.distillation import ConversationSummarizer
 from athena.core.memory.contracts import CompletedTurn
-from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.contracts.ports import EventPublisherPort
@@ -168,7 +168,7 @@ class AgentExecutionService:
             assistant_text=result.content,
         )
         try:
-            await self._memory_job_repository.enqueue(turn.model_dump(mode="json"))
+            await self._memory_job_repository.enqueue_job(turn.model_dump(mode="json"))
         except Exception as exc:
             # 记忆属于回答后的增强流程，队列暂时不可用时不能回滚已经生成的回答。
             logger.warning("memory_job_enqueue_failed", turn_id=turn_id, error=str(exc))

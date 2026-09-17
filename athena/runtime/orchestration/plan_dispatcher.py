@@ -128,7 +128,7 @@ class PlanDispatcher:
                     stop_signal=stop_signal,
                     run_id=worker_run_id,
                 )
-                await self._db.orchestration.save_result(result)
+                await self._db.orchestration.save_task_result(result)
                 await self._db.orchestration.transition_task(
                     task.task_id,
                     TaskStatus.RUNNING,

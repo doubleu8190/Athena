@@ -104,7 +104,7 @@ class CommandConsumer:
             ``asyncio.CancelledError`` 会继续向上传播；普通命令异常会记录为失败状态。
         """
         while not self._stop.is_set():
-            command = await self.store.claim_pending()
+            command = await self.store.claim_next_command()
             if command is None:
                 await self._wait_for_command()
                 continue
@@ -128,7 +128,7 @@ class CommandConsumer:
     async def _process_command(self, command: AgentCommandRecord) -> None:
         """校验命令并分派到对应的命令处理器。"""
         if command.schema_version != 1:
-            await self.store.complete(
+            await self.store.complete_command(
                 command.command_id,
                 status=AgentCommandStatus.REJECTED,
                 error={
@@ -150,7 +150,7 @@ class CommandConsumer:
         }
         handler = handlers.get(command.command_type)
         if handler is None:
-            await self.store.complete(
+            await self.store.complete_command(
                 command.command_id,
                 status=AgentCommandStatus.REJECTED,
                 error={
@@ -188,7 +188,7 @@ class CommandConsumer:
         # 只有这个显式控制命令才释放原 message.submit；启动对账不会触发
         # 该分支，因此进程重启后不会自行再次进入 LangGraph。
         await self._publish_run_event(command, EventType.RUN_RESUMED)
-        await self.store.complete(
+        await self.store.complete_command(
             command.command_id,
             status=AgentCommandStatus.SUCCEEDED,
             result={"status": AgentRunStatus.RUNNING.value, "resumed": resumed},
@@ -211,7 +211,7 @@ class CommandConsumer:
                 status=status,
             )
         await self._publish_run_event(command, event_type)
-        await self.store.complete(
+        await self.store.complete_command(
             command.command_id,
             status=AgentCommandStatus.SUCCEEDED,
             result={"status": status.value},
@@ -227,7 +227,7 @@ class CommandConsumer:
                 cancel=True,
                 status=AgentRunStatus.CANCEL_REQUESTED,
             )
-        await self.store.complete(
+        await self.store.complete_command(
             command.command_id,
             status=AgentCommandStatus.SUCCEEDED,
             result={"status": AgentRunStatus.CANCEL_REQUESTED.value},
@@ -256,7 +256,7 @@ class CommandConsumer:
         )
         # 审批响应现在由 Gateway 直接写入 DB 并唤醒 Future。保留该 handler
         # 仅用于兼容历史命令，不再发布重复事件或触发 LangGraph resume。
-        await self.store.complete(
+        await self.store.complete_command(
             command.command_id,
             status=(
                 AgentCommandStatus.SUCCEEDED
@@ -275,7 +275,7 @@ class CommandConsumer:
             payload.metadata,
             bool(payload.pinned),
         )
-        await self.store.complete(
+        await self.store.complete_command(
             command.command_id,
             status=AgentCommandStatus.SUCCEEDED,
             result={"memory_id": memory_id},
@@ -317,7 +317,7 @@ class CommandConsumer:
     ) -> None:
         await self.store.update_run_status(run_id, AgentRunStatus.CANCELLED)
         await self._publish_run_event(command, EventType.RUN_CANCELLED)
-        await self.store.complete(
+        await self.store.complete_command(
             command.command_id,
             status=AgentCommandStatus.SUCCEEDED,
             result={"status": AgentRunStatus.CANCELLED.value},
@@ -354,7 +354,7 @@ class CommandConsumer:
                     },
                 )
             )
-            await self.store.complete(
+            await self.store.complete_command(
                 command.command_id,
                 status=AgentCommandStatus.FAILED,
                 error=error_detail.model_dump(mode="json") if error_detail else {"code": "run_failed", "message": error},
@@ -364,7 +364,7 @@ class CommandConsumer:
 
         await self.store.update_run_status(run_id, AgentRunStatus.COMPLETED)
         await self._publish_run_event(command, EventType.RUN_COMPLETED)
-        await self.store.complete(
+        await self.store.complete_command(
             command.command_id,
             status=AgentCommandStatus.SUCCEEDED,
             result=result if isinstance(result, dict) else {"result": result},
@@ -465,7 +465,7 @@ class CommandConsumer:
                     },
                 )
             )
-        await self.store.complete(
+        await self.store.complete_command(
             command.command_id,
             status=AgentCommandStatus.FAILED,
             error=error_detail.model_dump(mode="json"),

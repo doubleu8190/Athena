@@ -221,7 +221,7 @@ async def update_session(
 async def delete_session(session_id: str, request: Request) -> SessionDeletionResponse:
     """删除会话及其所有关联数据."""
     db = await _db_for(request)
-    await db.files.delete_session(session_id)
+    await db.files.soft_delete_session_attachments(session_id)
     await runtime_from(request).file_runtime.cleanup_unreferenced_blobs()
     await db.sessions.delete(session_id)
     return SessionDeletionResponse(status="deleted", session_id=session_id)
@@ -266,7 +266,7 @@ async def get_runs(session_id: str, request: Request) -> list[RunSummaryResponse
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
-        for row in await store.runs_for_session(session_id)
+        for row in await store.list_runs_for_session(session_id)
     ]
 
 
@@ -315,7 +315,7 @@ async def submit_run(session_id: str, request: Request) -> SubmitRunResponse:
         ),
     )
     try:
-        inserted = await runtime.agent_store.enqueue(command)
+        inserted = await runtime.agent_store.enqueue_command(command)
     except ValueError as exc:
         await _cleanup_uploaded_attachments(runtime, session_id, uploaded_ids)
         detail = str(exc)
@@ -370,14 +370,14 @@ async def _enqueue_control(
     if not await runtime.db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
     store = runtime.agent_store
-    active = await store.active_run(session_id)
+    active = await store.get_active_run(session_id)
     command = Command(
         command_id=f"cmd_{generate_time_id()}",
         command_type=command_type,
         session_id=session_id,
         run_id=active.run_id if active else None,
     )
-    await store.enqueue(command)
+    await store.enqueue_command(command)
     return ControlCommandResponse(
         command_id=command.command_id,
         status=AgentCommandStatus.PENDING,
@@ -420,7 +420,7 @@ async def cancel_run(
         session_id=session_id,
         run_id=run_id,
     )
-    await runtime.agent_store.enqueue(command)
+    await runtime.agent_store.enqueue_command(command)
     return CancelCommandResponse(
         command_id=command.command_id,
         run_id=run_id,

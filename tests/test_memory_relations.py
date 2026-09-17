@@ -3,15 +3,19 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
-from athena.infrastructure.sqlite.engine import close_engine, get_session, init_engine
-from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
+from athena.infrastructure.sqlite.engine import (
+    close_sqlite_engines,
+    get_core_session,
+    initialize_sqlite_engines,
+)
+from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
 
 
 @pytest.fixture
 async def repository(tmp_path):
-    await init_engine(str(tmp_path / "relations.db"))
-    yield SqliteMemoryRepository()
-    await close_engine()
+    await initialize_sqlite_engines(str(tmp_path / "relations.db"))
+    yield SQLiteMemoryRepository()
+    await close_sqlite_engines()
 
 
 @pytest.mark.parametrize("relation_type", ["contradicts", "supports"])
@@ -20,7 +24,7 @@ async def test_semantic_relation_is_persisted_idempotently(repository, relation_
     await repository.add_relation("new-memory", "existing-memory", relation_type)
     await repository.add_relation("new-memory", "existing-memory", relation_type)
 
-    async with get_session() as session:
+    async with get_core_session() as session:
         rows = (
             await session.execute(
                 text(

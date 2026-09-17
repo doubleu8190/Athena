@@ -74,7 +74,7 @@ async def session_events(
         queue, watermark = await agent_store.open_subscription(session_id)
         cursor = after
         try:
-            for row in await agent_store.events_between(session_id, after, watermark):
+            for row in await agent_store.list_events_between(session_id, after, watermark):
                 seq = row.session_seq
                 if seq <= cursor:
                     continue

@@ -8,9 +8,8 @@ from typing import Any
 from chromadb.api import ClientAPI
 
 
-class ChromaMemoryStore:
-    """表示 ChromaMemoryStore 组件，封装相关状态和行为。
-    """
+class ChromaMemoryVectorStore:
+    """基于 ChromaDB 的长期记忆向量存储适配器。"""
     def __init__(
         self,
         path: str,
@@ -39,7 +38,7 @@ class ChromaMemoryStore:
         path: str,
         client: ClientAPI,
         collection_name: str = "athena_memory",
-    ) -> "ChromaMemoryStore":
+    ) -> "ChromaMemoryVectorStore":
         """使用显式提供的 Chroma 客户端创建存储。"""
         store = cls(path=path, collection_name=collection_name)
         store._client = client
@@ -76,7 +75,7 @@ class ChromaMemoryStore:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         if self._collection is None:
-            raise RuntimeError("ChromaMemoryStore is not initialized")
+            raise RuntimeError("ChromaMemoryVectorStore is not initialized")
         return self._collection
 
     async def add(self, memory_id: str, content: str, metadata: dict[str, Any]) -> None:

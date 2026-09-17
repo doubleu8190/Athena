@@ -7,9 +7,15 @@
 
 from __future__ import annotations
 
-from athena.infrastructure.sqlite.engine import close_engine, init_engine
+from athena.infrastructure.sqlite.engine import (
+    close_sqlite_engines,
+    initialize_sqlite_engines,
+)
 from athena.infrastructure.sqlite.repositories import (
     ApprovalLogRepository,
+    FileRepository,
+    KnowledgeBaseRepository,
+    KnowledgeDocumentJobRepository,
     McpServerRepository,
     MessageRepository,
     SessionRepository,
@@ -47,18 +53,16 @@ class Database:
         self.approval_logs = ApprovalLogRepository()
         self.mcp_servers = McpServerRepository()
         self.tools = ToolRepository()
-        from athena.infrastructure.sqlite.orchestration_repository import (
+        # 编排仓库依赖 runtime.orchestration；延迟导入可避免 SQLite 门面和
+        # 编排包在模块加载阶段形成循环依赖。
+        from athena.infrastructure.sqlite.repositories.orchestration_repository import (
             OrchestrationRepository,
         )
 
         self.orchestration = OrchestrationRepository()
-        from athena.infrastructure.sqlite.file_repository import FileRepository
-        from athena.infrastructure.sqlite.knowledge_base_repository import (
-            KnowledgeBaseRepository,
-        )
-
         self.files = FileRepository()
         self.knowledge_bases = KnowledgeBaseRepository()
+        self.knowledge_document_jobs = KnowledgeDocumentJobRepository()
 
     async def connect(self, memory_db_path: str | None = None) -> None:
         """建立核心数据库连接，并按需初始化独立的记忆数据库。
@@ -70,10 +74,10 @@ class Database:
         异常:
             数据库初始化失败时传播底层异常。
         """
-        await init_engine(self._db_path, memory_db_path=memory_db_path)
+        await initialize_sqlite_engines(self._db_path, memory_db_path=memory_db_path)
         logger.info("database_connected", db_path=self._db_path)
 
     async def close(self) -> None:
         """关闭数据库连接."""
-        await close_engine()
+        await close_sqlite_engines()
         logger.info("database_closed")

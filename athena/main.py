@@ -28,7 +28,7 @@ from athena.core.llm.provider import LLMProvider
 from athena.infrastructure.sqlite.database import Database
 from athena.container import RuntimeContainer, runtime_from
 from athena.runtime import CancellationRegistry, CommandConsumer, LangGraphRuntime, RecoveryReconciler, build_graph
-from athena.infrastructure.sqlite.agent_store import AgentStore
+from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
 
 from athena.runtime.command_notifications import CommandNotifier
 from athena.runtime.transport import RuntimeEventPublisher, SessionEventBus
@@ -135,15 +135,15 @@ async def lifespan(app: FastAPI):
     # ── 5.2 记忆系统 ──
     from athena.core.memory.long_term_memory import LongTermMemoryService
 
-    from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
-    from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
-    from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
+    from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
+    from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
+    from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
     from athena.core.memory.write_job_worker import MemoryWriteJobWorker
 
     memory_manager = LongTermMemoryService(
         settings=settings,
-        repository=SqliteMemoryRepository(),
-        vector_store=ChromaMemoryStore(path=str(settings.chroma_path)),
+        repository=SQLiteMemoryRepository(),
+        vector_store=ChromaMemoryVectorStore(path=str(settings.chroma_path)),
     )
     try:
         await memory_manager.initialize()

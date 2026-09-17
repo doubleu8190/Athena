@@ -664,6 +664,27 @@ class AttachmentModel(Base):
     )
 
 
+class KnowledgeDocumentJobModel(Base):
+    """知识库文档解析和索引任务的持久化状态。"""
+
+    __tablename__ = "knowledge_document_jobs"
+    __table_args__ = (
+        Index("idx_knowledge_document_jobs_queue", "status", "available_at"),
+    )
+
+    job_id: Mapped[str] = mapped_column(String, primary_key=True)
+    attachment_id: Mapped[str] = mapped_column(
+        ForeignKey("attachments.id"), unique=True, comment="待处理知识库文档"
+    )
+    status: Mapped[str] = mapped_column(String, default="queued")
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[str] = mapped_column(String)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+
+
 class FileChunkModel(Base):
     """文件内容分块的 ORM 映射。"""
 

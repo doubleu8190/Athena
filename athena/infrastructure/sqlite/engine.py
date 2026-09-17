@@ -96,7 +96,9 @@ async def _create_memory_schema(conn: AsyncConnection) -> None:
     await conn.execute(text(MEMORY_FTS_DDL))
 
 
-async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
+async def initialize_sqlite_engines(
+    db_path: str, memory_db_path: str | None = None
+) -> None:
     """初始化核心库和可选的独立记忆库。
 
     参数：
@@ -168,7 +170,7 @@ async def init_engine(db_path: str, memory_db_path: str | None = None) -> None:
     )
 
 
-def get_session() -> AsyncSession:
+def get_core_session() -> AsyncSession:
     """获取核心数据库会话。
 
     参数：
@@ -181,11 +183,13 @@ def get_session() -> AsyncSession:
         RuntimeError: 引擎尚未初始化。
     """
     if _session_factory is None:
-        raise RuntimeError("Database engine not initialized. Call init_engine() first.")
+        raise RuntimeError(
+            "Database engine not initialized. Call initialize_sqlite_engines() first."
+        )
     return _session_factory()
 
 
-def get_memory_session() -> AsyncSession:
+def get_memory_database_session() -> AsyncSession:
     """获取记忆数据库会话。
 
     参数：
@@ -199,11 +203,13 @@ def get_memory_session() -> AsyncSession:
     """
     factory = _memory_session_factory or _session_factory
     if factory is None:
-        raise RuntimeError("Database engine not initialized. Call init_engine() first.")
+        raise RuntimeError(
+            "Database engine not initialized. Call initialize_sqlite_engines() first."
+        )
     return factory()
 
 
-async def close_engine() -> None:
+async def close_sqlite_engines() -> None:
     """关闭核心和记忆数据库引擎。
 
     参数：

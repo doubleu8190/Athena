@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from starlette.requests import HTTPConnection
 
 from athena.runtime.transport import SessionEventBus, RuntimeEventPublisher
-from athena.infrastructure.sqlite.agent_store import AgentStore
+from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
 
 if TYPE_CHECKING:
     from athena.core.files.runtime import FileIntelligenceRuntime

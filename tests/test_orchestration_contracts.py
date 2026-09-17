@@ -114,8 +114,8 @@ async def test_task_ledger_claims_and_saves_result(tmp_path) -> None:
         status="completed",
         output={"summary": "ok"},
     )
-    assert await database.orchestration.save_result(result) is True
-    assert await database.orchestration.save_result(result) is False
+    assert await database.orchestration.save_task_result(result) is True
+    assert await database.orchestration.save_task_result(result) is False
     assert await database.orchestration.transition_task(
         "task-1", TaskStatus.RUNNING, TaskStatus.COMPLETED
     )

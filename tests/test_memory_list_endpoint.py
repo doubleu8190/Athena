@@ -11,8 +11,8 @@ from fastapi.testclient import TestClient
 from athena.config.settings import Settings
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.sqlite.database import Database
-from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
-from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
+from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
+from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
 from tests.fakes import install_runtime
 
 
@@ -80,8 +80,8 @@ def manager(db):
     settings = Settings(_env_file=None)
     return LongTermMemoryService(
         settings=settings,
-        repository=SqliteMemoryRepository(),
-        vector_store=ChromaMemoryStore.with_client(
+        repository=SQLiteMemoryRepository(),
+        vector_store=ChromaMemoryVectorStore.with_client(
             path=str(settings.chroma_path),
             client=_FakeClient(),
         ),

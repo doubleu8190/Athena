@@ -9,13 +9,13 @@ from athena.config.settings import Settings
 from athena.core.memory.contracts import CompletedTurn
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.sqlite.engine import (
-    close_engine,
-    get_memory_session,
-    get_session,
-    init_engine,
+    close_sqlite_engines,
+    get_memory_database_session,
+    get_core_session,
+    initialize_sqlite_engines,
 )
-from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
-from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
+from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
 
 
 class _VectorStore:
@@ -28,10 +28,10 @@ class _VectorStore:
 
 @pytest.fixture
 async def jobs(tmp_path):
-    await init_engine(str(tmp_path / "jobs.db"))
+    await initialize_sqlite_engines(str(tmp_path / "jobs.db"))
     repository = MemoryJobRepository()
     yield repository
-    await close_engine()
+    await close_sqlite_engines()
 
 
 def payload(turn_id: str = "turn-1") -> dict:
@@ -41,7 +41,7 @@ def payload(turn_id: str = "turn-1") -> dict:
 
 
 async def status(turn_id: str) -> tuple[str, int]:
-    async with get_session() as session:
+    async with get_core_session() as session:
         row = (
             await session.execute(
                 text("SELECT status, attempt FROM memory_processing_jobs WHERE turn_id=:id"),
@@ -53,49 +53,51 @@ async def status(turn_id: str) -> tuple[str, int]:
 
 @pytest.mark.asyncio
 async def test_duplicate_enqueue_is_idempotent(jobs):
-    assert await jobs.enqueue(payload()) is True
-    assert await jobs.enqueue(payload()) is False
+    assert await jobs.enqueue_job(payload()) is True
+    assert await jobs.enqueue_job(payload()) is False
     assert await status("turn-1") == ("queued", 0)
 
 
 @pytest.mark.asyncio
 async def test_failed_job_can_be_retried(jobs):
-    await jobs.enqueue(payload())
-    claimed = await jobs.claim_next()
+    await jobs.enqueue_job(payload())
+    claimed = await jobs.claim_next_job()
     assert claimed and claimed["attempt"] == 1
-    await jobs.mark_failed("turn-1", "temporary", retry=True)
-    async with get_session() as session:
+    await jobs.mark_job_failed("turn-1", "temporary", retry=True)
+    async with get_core_session() as session:
         await session.execute(
             text("UPDATE memory_processing_jobs SET available_at='0001-01-01' WHERE turn_id='turn-1'")
         )
         await session.commit()
-    retried = await jobs.claim_next()
+    retried = await jobs.claim_next_job()
     assert retried and retried["attempt"] == 2
 
 
 @pytest.mark.asyncio
 async def test_running_job_is_recovered_after_crash(jobs):
-    await jobs.enqueue(payload())
-    assert await jobs.claim_next()
+    await jobs.enqueue_job(payload())
+    assert await jobs.claim_next_job()
     assert (await status("turn-1"))[0] == "running"
-    assert await jobs.recover_interrupted() == 1
+    assert await jobs.recover_interrupted_jobs() == 1
     assert (await status("turn-1"))[0] == "retry"
-    assert await jobs.claim_next()
+    assert await jobs.claim_next_job()
 
 
 @pytest.mark.asyncio
 async def test_job_cannot_be_claimed_twice(jobs):
-    await jobs.enqueue(payload())
-    first, second = await asyncio.gather(jobs.claim_next(), jobs.claim_next())
+    await jobs.enqueue_job(payload())
+    first, second = await asyncio.gather(
+        jobs.claim_next_job(), jobs.claim_next_job()
+    )
     assert sum(item is not None for item in (first, second)) == 1
 
 
 @pytest.mark.asyncio
 async def test_jobs_use_separate_database_when_configured(tmp_path):
-    await init_engine(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
+    await initialize_sqlite_engines(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
     try:
-        assert await MemoryJobRepository().enqueue(payload("split-turn")) is True
-        async with get_session() as session:
+        assert await MemoryJobRepository().enqueue_job(payload("split-turn")) is True
+        async with get_core_session() as session:
             core_memory_tables = (
                 await session.execute(
                     text(
@@ -104,7 +106,7 @@ async def test_jobs_use_separate_database_when_configured(tmp_path):
                     )
                 )
             ).scalars().all()
-        async with get_memory_session() as session:
+        async with get_memory_database_session() as session:
             memory_count = (
                 await session.execute(
                     text("SELECT count(*) FROM memory_processing_jobs")
@@ -113,25 +115,25 @@ async def test_jobs_use_separate_database_when_configured(tmp_path):
         assert core_memory_tables == []
         assert memory_count == 1
     finally:
-        await close_engine()
+        await close_sqlite_engines()
 
 
 @pytest.mark.asyncio
 async def test_memory_manager_writes_to_configured_memory_database(tmp_path):
-    await init_engine(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
+    await initialize_sqlite_engines(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
     try:
         manager = LongTermMemoryService(
             settings=Settings(),
-            repository=SqliteMemoryRepository(),
+            repository=SQLiteMemoryRepository(),
             vector_store=_VectorStore(),
         )
         await manager.add_memory("remember this", metadata={"session_id": "s1"})
 
-        async with get_memory_session() as session:
+        async with get_memory_database_session() as session:
             assert (
                 await session.execute(text("SELECT count(*) FROM memories"))
             ).scalar_one() == 1
-        async with get_session() as session:
+        async with get_core_session() as session:
             assert (
                 await session.execute(
                     text(
@@ -141,19 +143,19 @@ async def test_memory_manager_writes_to_configured_memory_database(tmp_path):
                 )
             ).scalar_one() == 0
     finally:
-        await close_engine()
+        await close_sqlite_engines()
 
 
 @pytest.mark.asyncio
 async def test_recover_retries_jobs_failed_by_unconfigured_worker(jobs):
-    await jobs.enqueue(payload())
-    await jobs.claim_next()
-    await jobs.mark_failed(
+    await jobs.enqueue_job(payload())
+    await jobs.claim_next_job()
+    await jobs.mark_job_failed(
         "turn-1", "memory job worker workflow is not configured", retry=False
     )
 
-    assert await jobs.recover_interrupted() == 1
-    recovered = await jobs.claim_next()
+    assert await jobs.recover_interrupted_jobs() == 1
+    recovered = await jobs.claim_next_job()
 
     assert recovered is not None
     assert recovered["attempt"] == 1
@@ -163,9 +165,9 @@ async def test_recover_retries_jobs_failed_by_unconfigured_worker(jobs):
 async def test_split_database_creates_only_final_memory_schema(tmp_path):
     core_path = str(tmp_path / "core.db")
     memory_path = str(tmp_path / "memory.db")
-    await init_engine(core_path, memory_path)
+    await initialize_sqlite_engines(core_path, memory_path)
     try:
-        async with get_memory_session() as session:
+        async with get_memory_database_session() as session:
             memory_tables = (
                 await session.execute(
                     text(
@@ -181,7 +183,7 @@ async def test_split_database_creates_only_final_memory_schema(tmp_path):
             "memory_processing_jobs",
             "memory_relations",
         ]
-        async with get_session() as session:
+        async with get_core_session() as session:
             core_memory_tables = (
                 await session.execute(
                     text(
@@ -192,4 +194,4 @@ async def test_split_database_creates_only_final_memory_schema(tmp_path):
             ).scalars().all()
         assert core_memory_tables == []
     finally:
-        await close_engine()
+        await close_sqlite_engines()

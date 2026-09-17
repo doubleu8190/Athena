@@ -8,11 +8,11 @@ from typing import Any
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import StepModel, ToolCallModel
 from athena.models import ToolCallRecord
 
-from .converters import _row_to_tool_call
+from .model_converters import _row_to_tool_call
 from .repository_utils import _json_dumps
 
 
@@ -21,7 +21,7 @@ class ToolCallRepository:
 
     async def save(self, tool_call: ToolCallRecord) -> None:
         """保存工具调用记录。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             await session.execute(text("BEGIN IMMEDIATE"))
             try:
                 if await session.get(ToolCallModel, tool_call.id) is not None:
@@ -77,7 +77,7 @@ class ToolCallRepository:
     async def get(self, tool_call_id: str) -> ToolCallRecord | None:
         """按稳定账本 ID 查询一次工具调用。"""
 
-        async with get_session() as session:
+        async with get_core_session() as session:
             row = await session.get(ToolCallModel, tool_call_id)
             if row is None or row.deleted_time is not None:
                 return None
@@ -103,7 +103,7 @@ class ToolCallRepository:
         values = self._allowed_values(updates)
         if not values:
             return
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 row = await session.get(ToolCallModel, tool_call_id)
                 await session.execute(
@@ -143,7 +143,7 @@ class ToolCallRepository:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             await session.execute(text("BEGIN IMMEDIATE"))
             try:
                 row = await session.scalar(
@@ -190,7 +190,7 @@ class ToolCallRepository:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             await session.execute(text("BEGIN IMMEDIATE"))
             try:
                 rows = (
@@ -229,7 +229,7 @@ class ToolCallRepository:
         self, session_id: str, status: str | None = None, include_deleted: bool = False
     ) -> list[ToolCallRecord]:
         """查询工具调用记录。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = (
                 select(ToolCallModel)
                 .where(ToolCallModel.session_id == session_id)
@@ -244,7 +244,7 @@ class ToolCallRepository:
 
     async def last_called_by_tool(self) -> dict[str, str]:
         """返回工具名到最近调用时间的映射。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = (
                 select(ToolCallModel.tool_name, func.max(ToolCallModel.started_at))
                 .where(ToolCallModel.deleted_time.is_(None))
@@ -255,7 +255,7 @@ class ToolCallRepository:
 
     async def count_calls_since(self, since: datetime) -> int:
         """统计指定时间点之后的工具调用次数。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = select(func.count(ToolCallModel.id)).where(
                 ToolCallModel.started_at >= since.isoformat(),
                 ToolCallModel.deleted_time.is_(None),

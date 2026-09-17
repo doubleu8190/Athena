@@ -1,7 +1,8 @@
 """SQLite 仓库公共导出。"""
 
+from .agent_store import AgentStore
 from .approval_log_repository import ApprovalLogRepository
-from .converters import (
+from .model_converters import (
     _message_to_model,
     _row_to_approval_log,
     _row_to_attachment,
@@ -13,6 +14,11 @@ from .converters import (
 )
 from .mcp_server_repository import McpServerRepository
 from .message_repository import MessageRepository
+from .file_repository import FileRepository
+from .knowledge_base_repository import KnowledgeBaseRepository
+from .knowledge_document_job_repository import KnowledgeDocumentJobRepository
+from .memory_job_repository import MemoryJobRepository
+from .memory_repository import SQLiteMemoryRepository
 from .repository_utils import (
     _SENTINEL,
     _json_dumps,
@@ -26,6 +32,12 @@ from .tool_repository import ToolRepository
 
 __all__ = [
     "ApprovalLogRepository",
+    "AgentStore",
+    "FileRepository",
+    "KnowledgeBaseRepository",
+    "KnowledgeDocumentJobRepository",
+    "MemoryJobRepository",
+    "SQLiteMemoryRepository",
     "McpServerRepository",
     "MessageRepository",
     "SessionRepository",

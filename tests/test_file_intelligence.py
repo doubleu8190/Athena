@@ -139,7 +139,7 @@ async def test_knowledge_base_documents_are_global_and_session_files_are_scoped(
             item.id for item in await db.files.list_global_knowledge_documents()
         ] == [document.id]
 
-        await db.files.delete_session("one")
+        await db.files.soft_delete_session_attachments("one")
         assert await db.files.get_attachment(
             attachment.id, include_deleted=True
         ) is not None

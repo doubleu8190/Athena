@@ -23,7 +23,10 @@ from athena.contracts.statuses import (
     AgentRunStatus,
     StreamSnapshotStatus,
 )
-from athena.infrastructure.sqlite.engine import SQLITE_BUSY_TIMEOUT_MS, get_session
+from athena.infrastructure.sqlite.engine import (
+    SQLITE_BUSY_TIMEOUT_MS,
+    get_core_session,
+)
 from athena.infrastructure.sqlite.models import (
     AgentCommandModel,
     AgentEventModel,
@@ -34,7 +37,7 @@ from athena.infrastructure.sqlite.models import (
     StepModel,
     ToolCallModel,
 )
-from athena.infrastructure.sqlite.repositories import _json_dumps
+from .repository_utils import _json_dumps
 from athena.models.tool import RiskLevel
 from athena.utils.ids import generate_time_id
 
@@ -147,7 +150,7 @@ class AgentStore:
             # 缓存记录的是已知最大值；乱序 Chunk 或重试不能把它覆盖成较小值。
             self._stream_chunk_cache[cache_key] = max(current, chunk_id)
 
-    async def active_run(self, session_id: str) -> AgentRunModel | None:
+    async def get_active_run(self, session_id: str) -> AgentRunModel | None:
         """查询会话最近的活跃运行，包括暂停中的运行。
 
         参数:
@@ -157,7 +160,7 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             return await db.scalar(
                 select(AgentRunModel)
                 .where(
@@ -202,7 +205,7 @@ class AgentStore:
             )
         )
         now = _now()
-        async with get_session() as db:
+        async with get_core_session() as db:
             await db.execute(text("BEGIN IMMEDIATE"))
             try:
                 run_rows = (
@@ -278,7 +281,7 @@ class AgentStore:
         """
         now = _now()
         should_notify = False
-        async with get_session() as db:
+        async with get_core_session() as db:
             await db.execute(text("BEGIN IMMEDIATE"))
             try:
                 run = await db.get(AgentRunModel, run_id)
@@ -334,7 +337,7 @@ class AgentStore:
         )
         if not rows:
             return 0
-        async with get_session() as db:
+        async with get_core_session() as db:
             await db.execute(text("BEGIN IMMEDIATE"))
             try:
                 changed = await db.execute(
@@ -357,7 +360,7 @@ class AgentStore:
 
     async def _tool_call_rows_with_status(self, status: str) -> list[ToolCallModel]:
         """读取指定状态的工具账本行，供启动状态收敛使用。"""
-        async with get_session() as db:
+        async with get_core_session() as db:
             result = await db.execute(
                 select(ToolCallModel).where(ToolCallModel.status == status)
             )
@@ -396,7 +399,7 @@ class AgentStore:
             raise ValueError("worker run identity fields must not be empty")
         if attempt < 1:
             raise ValueError("worker run attempt must be at least 1")
-        async with get_session() as db:
+        async with get_core_session() as db:
             if await db.get(AgentRunModel, run_id) is not None:
                 raise ValueError(ErrorDetail.RUN_ID_CONFLICT)
             db.add(
@@ -431,7 +434,7 @@ class AgentStore:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             row = await db.get(AgentRunModel, run_id)
             if row:
                 row.status, row.error, row.updated_at = status.value, error, _now()
@@ -459,7 +462,7 @@ class AgentStore:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             row = await db.get(AgentRunModel, run_id)
             if row is None:
                 return False
@@ -475,7 +478,7 @@ class AgentStore:
             await db.commit()
             return True
 
-    async def runs_for_session(self, session_id: str) -> list[AgentRunModel]:
+    async def list_runs_for_session(self, session_id: str) -> list[AgentRunModel]:
         """按创建时间返回会话的全部运行记录。
 
         参数:
@@ -485,7 +488,7 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             result = await db.execute(
                 select(AgentRunModel)
                 .where(AgentRunModel.session_id == session_id)
@@ -503,7 +506,7 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             return await db.get(AgentRunModel, run_id)
 
     async def list_recoverable_runs(self) -> list[AgentRunRecord]:
@@ -514,7 +517,7 @@ class AgentStore:
         异常:
             数据库查询或状态值转换失败时传播相应异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             result = await db.execute(
                 select(AgentRunModel).where(
                     AgentRunModel.status.in_(
@@ -538,7 +541,7 @@ class AgentStore:
                 for row in result.scalars()
             ]
 
-    async def claim_pending(self) -> AgentCommandRecord | None:
+    async def claim_next_command(self) -> AgentCommandRecord | None:
         """领取一条可执行命令并标记为处理中。
 
         返回值:
@@ -546,7 +549,7 @@ class AgentStore:
         异常:
             数据库竞争或状态转换失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             # Serialize selection and mutation across workers. Without an
             # immediate write lock two consumers can read the same pending row
             # before either one commits its CLAIMED update.
@@ -580,7 +583,7 @@ class AgentStore:
                 await db.rollback()
                 raise
 
-    async def complete(
+    async def complete_command(
         self,
         command_id: str,
         *,
@@ -600,7 +603,7 @@ class AgentStore:
         异常:
             结果无法序列化或数据库写入失败时传播相应异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             row = await db.get(AgentCommandModel, command_id)
             if row is None:
                 return
@@ -615,7 +618,7 @@ class AgentStore:
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)
         ).isoformat()
-        async with get_session() as db:
+        async with get_core_session() as db:
             result = await db.execute(
                 text("""UPDATE agent_commands
                     SET status = :pending, available_at = :now, claimed_at = NULL
@@ -641,10 +644,10 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             return await db.get(AgentCommandModel, command_id)
 
-    async def events_after(
+    async def list_events_after(
         self, session_id: str, after: int = 0
     ) -> list[AgentEventModel]:
         """查询会话中游标之后的持久化事件。
@@ -657,7 +660,7 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             result = await db.execute(
                 select(AgentEventModel)
                 .where(
@@ -668,11 +671,11 @@ class AgentStore:
             )
             return list(result.scalars())
 
-    async def events_between(
+    async def list_events_between(
         self, session_id: str, after: int = 0, upto: int | None = None
     ) -> list[AgentEventModel]:
         """查询指定会话游标区间内的事件，供 SSE watermark 重放使用。"""
-        async with get_session() as db:
+        async with get_core_session() as db:
             query = select(AgentEventModel).where(
                 AgentEventModel.session_id == session_id,
                 AgentEventModel.session_seq > after,
@@ -690,11 +693,13 @@ class AgentStore:
             raise RuntimeError("Realtime transport is not configured")
         async with self._event_locks[session_id]:
             queue = await self.transport.open_subscription(session_id)
-            async with get_session() as db:
+            async with get_core_session() as db:
                 watermark = await self._cached_session_seq(db, session_id)
             return queue, watermark
 
-    async def snapshots_for_session(self, session_id: str) -> list[StreamSnapshotModel]:
+    async def list_snapshots_for_session(
+        self, session_id: str
+    ) -> list[StreamSnapshotModel]:
         """查询会话的流快照，并按更新时间升序返回。
 
         参数:
@@ -704,7 +709,7 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             result = await db.execute(
                 select(StreamSnapshotModel)
                 .where(StreamSnapshotModel.session_id == session_id)
@@ -743,7 +748,7 @@ class AgentStore:
         command.run_id = existing.run_id
         return False
 
-    async def enqueue(self, command: Command) -> bool:
+    async def enqueue_command(self, command: Command) -> bool:
         """校验并幂等入队命令，必要时原子创建运行记录。
 
         参数:
@@ -760,7 +765,7 @@ class AgentStore:
             command.payload.model_dump(mode="json", exclude_none=True),
             sort_keys=True,
         )
-        async with get_session() as db:
+        async with get_core_session() as db:
             lock_timeout_changed = False
             try:
                 existing = await db.get(AgentCommandModel, command.command_id)
@@ -873,7 +878,7 @@ class AgentStore:
             事件 payload 无法序列化或数据库、实时传输失败时传播相应异常。
         """
         async with self._event_locks[event.session_id]:
-            async with get_session() as db:
+            async with get_core_session() as db:
                 # 进程内按会话串行，事务锁覆盖多进程/多实例下的 SQLite 竞争。
                 await db.execute(text("BEGIN IMMEDIATE"))
                 payload = {
@@ -1040,7 +1045,7 @@ class AgentStore:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             row = await db.get(StreamSnapshotModel, stream_id)
             if row and row.version >= version:
                 return False
@@ -1114,7 +1119,7 @@ class AgentStore:
         异常:
             参数无法序列化或数据库约束不满足时传播相应异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             await db.execute(text("BEGIN IMMEDIATE"))
             try:
                 existing = await db.scalar(
@@ -1167,7 +1172,7 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             return await db.get(ApprovalRecordModel, approval_id)
 
     async def get_approval_for_tool_call(
@@ -1182,7 +1187,7 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             return await db.scalar(
                 select(ApprovalRecordModel)
                 .where(ApprovalRecordModel.tool_call_id == tool_call_id)
@@ -1216,7 +1221,7 @@ class AgentStore:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             row = await db.get(ApprovalRecordModel, approval_id)
             if row is None or row.status != AgentApprovalStatus.PENDING.value:
                 return False
@@ -1234,7 +1239,7 @@ class AgentStore:
             await db.commit()
             return True
 
-    async def pending_approvals(
+    async def list_pending_approvals(
         self, session_id: str | None = None
     ) -> list[ApprovalRecordModel]:
         """查询待审批记录，可按会话过滤。
@@ -1246,7 +1251,7 @@ class AgentStore:
         异常:
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             query = select(ApprovalRecordModel).where(
                 ApprovalRecordModel.status == AgentApprovalStatus.PENDING.value
             )
@@ -1268,7 +1273,7 @@ class AgentStore:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_session() as db:
+        async with get_core_session() as db:
             row = await db.scalar(
                 select(ApprovalRecordModel).where(
                     ApprovalRecordModel.approval_id == approval_id,

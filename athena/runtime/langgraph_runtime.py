@@ -25,7 +25,7 @@ from athena.core.memory.distillation import ConversationSummarizer, FactExtracto
 from athena.core.memory.write_trigger import MemoryWriteTrigger
 from athena.core.memory.write_workflow import MemoryWriteWorkflow
 from athena.core.memory.candidate_resolver import MemoryCandidateResolver
-from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message
@@ -259,7 +259,7 @@ class LangGraphRuntime:
         plan = ExecutionPlan.model_validate(plan_payload)
         self._plan_dispatcher.register_plan_session(plan.plan_id, session_id)
         try:
-            await self._db.orchestration.set_plan_status(
+            await self._db.orchestration.update_plan_status(
                 plan.plan_id, PlanStatus.SYNTHESIZING.value
             )
             results = await self._plan_dispatcher.execute_plan(
@@ -268,7 +268,7 @@ class LangGraphRuntime:
                 stop_signal=stop_signal,
             )
             content = await self._plan_result_synthesizer.synthesize(plan, results)
-            await self._db.orchestration.set_plan_status(
+            await self._db.orchestration.update_plan_status(
                 plan.plan_id,
                 PlanStatus.COMPLETED.value,
             )
@@ -290,7 +290,7 @@ class LangGraphRuntime:
                 },
             }
         except Exception as exc:
-            await self._db.orchestration.set_plan_status(
+            await self._db.orchestration.update_plan_status(
                 plan.plan_id,
                 PlanStatus.FAILED.value,
                 error={"message": str(exc)},

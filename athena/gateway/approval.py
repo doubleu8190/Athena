@@ -8,7 +8,7 @@ from typing import Any
 
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentApprovalDecision, AgentApprovalStatus
-from athena.infrastructure.sqlite.agent_store import AgentStore
+from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
 from athena.infrastructure.sqlite.database import Database
 from athena.models.approval import ApprovalDecision, ApprovalRequest
 from athena.models.tool import RiskLevel
@@ -332,7 +332,7 @@ class ApprovalManager:
         异常:
             存储或事件发布失败时传播。
         """
-        pending = getattr(self._agent_store, "pending_approvals", None)
+        pending = getattr(self._agent_store, "list_pending_approvals", None)
         if pending is not None:
             rows = await pending(session_id or None)
             approval_ids = [row.approval_id for row in rows]

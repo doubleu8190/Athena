@@ -30,7 +30,7 @@ from athena.config.settings import Settings
 from athena.core.files.base import ExtractedUnit, ExtractionContext
 from athena.core.files.converters import _attachment_to_public
 from athena.core.files.registry import AdapterRegistry
-from athena.infrastructure.sqlite.file_repository import FileRepository
+from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
 from athena.core.llm.provider import LLMProvider
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
@@ -146,7 +146,7 @@ class FileIntelligenceRuntime:
         返回值：
             删除的 blob 数量。
         """
-        live = await self.repository.live_storage_keys()
+        live = await self.repository.list_live_storage_keys()
         removed = 0
         for key in self.storage.blob_keys():
             if key in live:
@@ -423,7 +423,7 @@ class FileIntelligenceRuntime:
         """
         return [
             _attachment_to_public(item)
-            for item in await self.repository.list_attachments(session_id)
+            for item in await self.repository.list_session_attachments(session_id)
         ]
 
     async def get_file_info(self, session_id: str, file_id: str) -> dict[str, Any]:

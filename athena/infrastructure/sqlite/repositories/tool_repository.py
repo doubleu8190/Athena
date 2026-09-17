@@ -6,11 +6,11 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import ToolModel
 from athena.models import ToolConfig
 
-from .converters import _row_to_tool_config
+from .model_converters import _row_to_tool_config
 from .repository_utils import _json_dumps, _now_iso
 
 
@@ -32,7 +32,7 @@ class ToolRepository:
         """插入或更新工具配置，保留已有治理参数。"""
         now = _now_iso()
         params_json = _json_dumps(parameters or {})
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 existing = await session.get(ToolModel, tool_name)
                 if existing is not None:
@@ -61,13 +61,13 @@ class ToolRepository:
 
     async def get(self, tool_name: str) -> ToolConfig | None:
         """获取单个工具配置。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             row = await session.get(ToolModel, tool_name)
             return None if row is None else _row_to_tool_config(row)
 
     async def list_all(self) -> list[ToolConfig]:
         """列出所有工具配置。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             result = await session.execute(
                 select(ToolModel).order_by(ToolModel.created_at.asc())
             )
@@ -91,7 +91,7 @@ class ToolRepository:
         if len(values) <= 1:
             return
 
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
                     update(ToolModel)

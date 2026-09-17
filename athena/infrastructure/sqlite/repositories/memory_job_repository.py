@@ -9,15 +9,17 @@ from typing import Any, cast
 from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 
-from athena.infrastructure.sqlite.engine import get_memory_session
+from athena.infrastructure.sqlite.engine import (
+    get_memory_database_session,
+)
 
 
 class MemoryJobRepository:
     """SQLite-backed, at-least-once queue keyed by ``turn_id``."""
 
-    async def enqueue(self, payload: dict[str, Any]) -> bool:
+    async def enqueue_job(self, payload: dict[str, Any]) -> bool:
         now = datetime.now().isoformat()
-        async with get_memory_session() as session:
+        async with get_memory_database_session() as session:
             async with session.begin():
                 result = await session.execute(
                     text(
@@ -39,9 +41,9 @@ class MemoryJobRepository:
                 )
                 return cast(CursorResult[Any], result).rowcount > 0
 
-    async def claim_next(self, *, max_attempts: int = 5) -> dict[str, Any] | None:
+    async def claim_next_job(self, *, max_attempts: int = 5) -> dict[str, Any] | None:
         now = datetime.now().isoformat()
-        async with get_memory_session() as session:
+        async with get_memory_database_session() as session:
             async with session.begin():
                 row = (
                     await session.execute(
@@ -74,10 +76,10 @@ class MemoryJobRepository:
                 payload["attempt"] = int(row.attempt) + 1
                 return payload
 
-    async def recover_interrupted(self) -> int:
+    async def recover_interrupted_jobs(self) -> int:
         """Return interrupted and previously misconfigured jobs to the retry queue."""
         now = datetime.now().isoformat()
-        async with get_memory_session() as session:
+        async with get_memory_database_session() as session:
             async with session.begin():
                 result = cast(
                     CursorResult[Any],
@@ -101,10 +103,10 @@ class MemoryJobRepository:
                 )
                 return result.rowcount
 
-    async def mark_succeeded(self, job_id: str) -> None:
+    async def mark_job_succeeded(self, job_id: str) -> None:
         await self._mark(job_id, "succeeded", None, None)
 
-    async def mark_failed(self, job_id: str, error: str, *, retry: bool) -> None:
+    async def mark_job_failed(self, job_id: str, error: str, *, retry: bool) -> None:
         available = (
             (datetime.now() + timedelta(seconds=30)).isoformat() if retry else None
         )
@@ -113,7 +115,7 @@ class MemoryJobRepository:
     async def _mark(
         self, job_id: str, status: str, error: str | None, available: str | None
     ) -> None:
-        async with get_memory_session() as session:
+        async with get_memory_database_session() as session:
             async with session.begin():
                 await session.execute(
                     text("""UPDATE memory_processing_jobs

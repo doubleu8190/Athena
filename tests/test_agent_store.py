@@ -14,11 +14,11 @@ from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentRunStatus, StreamSnapshotStatus
 from athena.runtime.stream_coalescer import StreamCoalescer
 from athena.runtime.transport import SessionEventBus
-from athena.infrastructure.sqlite.agent_store import AgentStore
+from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
 from athena.models.tool import RiskLevel
 from athena.contracts.statuses import AgentApprovalDecision
 from athena.infrastructure.sqlite.database import Database
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import StreamSnapshotModel
 from athena.utils.ids import generate_session_id
 
@@ -93,7 +93,7 @@ async def test_upsert_snapshot_initializes_required_fields_before_autoflush(agen
         status=StreamSnapshotStatus.STREAMING,
     ) is True
 
-    async with get_session() as db:
+    async with get_core_session() as db:
         row = await db.get(StreamSnapshotModel, "answer-stream")
     assert row is not None
     assert row.updated_at
@@ -105,11 +105,11 @@ async def test_message_enqueue_assigns_and_reuses_run_id(agent_store):
     session = await database.sessions.create(generate_session_id(), "测试")
 
     original = _message(session.id, "command-1", "你好")
-    assert await store.enqueue(original) is True
+    assert await store.enqueue_command(original) is True
     assert original.run_id
 
     retry = _message(session.id, "command-1", "你好", run_id="new-candidate")
-    assert await store.enqueue(retry) is False
+    assert await store.enqueue_command(retry) is False
     assert retry.run_id == original.run_id
 
 
@@ -120,12 +120,12 @@ async def test_same_command_id_with_different_schema_is_conflict(agent_store):
     session = await database.sessions.create(generate_session_id(), "测试")
 
     original = _message(session.id, "command-1", "你好")
-    assert await store.enqueue(original) is True
+    assert await store.enqueue_command(original) is True
 
     conflicting = _message(session.id, "command-1", "你好")
     conflicting.schema_version = 2
     with pytest.raises(ValueError, match=ErrorDetail.COMMAND_ID_CONFLICT):
-        await store.enqueue(conflicting)
+        await store.enqueue_command(conflicting)
 
 
 @pytest.mark.asyncio
@@ -135,11 +135,11 @@ async def test_message_run_id_does_not_bypass_session_busy(agent_store):
     session = await database.sessions.create(generate_session_id(), "测试")
 
     first = _message(session.id, "command-1", "第一条", run_id="run-1")
-    assert await store.enqueue(first) is True
+    assert await store.enqueue_command(first) is True
 
     second = _message(session.id, "command-2", "第二条", run_id="run-2")
     with pytest.raises(ValueError, match=ErrorDetail.SESSION_BUSY):
-        await store.enqueue(second)
+        await store.enqueue_command(second)
 
 
 @pytest.mark.asyncio
@@ -149,13 +149,13 @@ async def test_message_after_pause_creates_a_new_run(agent_store):
     session = await database.sessions.create(generate_session_id(), "测试")
 
     first = _message(session.id, "command-1", "第一条", run_id="run-1")
-    assert await store.enqueue(first) is True
+    assert await store.enqueue_command(first) is True
     await store.update_run_control(
         first.run_id, pause=True, status=AgentRunStatus.PAUSED
     )
 
     second = _message(session.id, "command-2", "第二条", run_id="run-2")
-    assert await store.enqueue(second) is True
+    assert await store.enqueue_command(second) is True
     assert second.run_id == "run-2"
     assert second.run_id != first.run_id
 
@@ -221,7 +221,7 @@ async def test_enqueue_notifies_runtime_after_commit(tmp_path):
 
     waiting = asyncio.create_task(notifier.wait())
     command = _message(session.id, "command-1", "你好")
-    assert await store.enqueue(command) is True
+    assert await store.enqueue_command(command) is True
     await asyncio.wait_for(waiting, timeout=1)
 
     await database.close()
@@ -235,7 +235,7 @@ async def test_worker_run_is_independent_from_root_session(agent_store):
     session = await database.sessions.create(generate_session_id(), "Worker Run")
     store = AgentStore()
     command = _message(session.id, "command-root", "执行任务", run_id="root-1")
-    assert await store.enqueue(command) is True
+    assert await store.enqueue_command(command) is True
 
     await store.create_worker_run(
         run_id="worker-1",
@@ -247,7 +247,7 @@ async def test_worker_run_is_independent_from_root_session(agent_store):
         attempt=1,
     )
 
-    active = await store.active_run(session.id)
+    active = await store.get_active_run(session.id)
     worker = await store.get_run("worker-1")
     assert active is not None and active.run_id == "root-1"
     assert worker is not None
@@ -288,7 +288,7 @@ async def test_realtime_events_are_broadcast_without_persistence(agent_store):
     assert first.session_seq is None
     assert second.session_seq == 1
     assert (await queue.get()).session_seq is None
-    rows = await store.events_after(session.id)
+    rows = await store.list_events_after(session.id)
     assert [row.session_seq for row in rows] == [1]
 
 
@@ -310,7 +310,7 @@ async def test_durable_event_transition_id_is_idempotent(agent_store):
     retry = await store.publish(event)
 
     assert retry.session_seq == first.session_seq
-    assert len(await store.events_after(session.id)) == 1
+    assert len(await store.list_events_after(session.id)) == 1
 
     with pytest.raises(ValueError, match="transition idempotency conflict"):
         await store.publish(event.model_copy(update={"payload": {"other": True}}))
@@ -335,7 +335,7 @@ async def test_stream_chunk_is_idempotent_and_conflicts_are_rejected(agent_store
 
     await store.publish_realtime(event)
     await store.publish_realtime(event.model_copy(update={"payload": {"delta": "other"}}))
-    assert len(await store.events_after(session.id)) == 0
+    assert len(await store.list_events_after(session.id)) == 0
 
 
 @pytest.mark.asyncio
@@ -383,4 +383,4 @@ async def test_stream_coalescer_emits_chunk_protocol(agent_store):
         (1, "你"),
         (2, "好"),
     ]
-    assert await store.events_after(session.id) == []
+    assert await store.list_events_after(session.id) == []

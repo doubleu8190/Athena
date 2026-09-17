@@ -16,7 +16,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import SQLAlchemyError
 
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import (
     AdapterRegistryModel,
     AttachmentModel,
@@ -25,12 +25,12 @@ from athena.infrastructure.sqlite.models import (
     FileArtifactModel,
     FileChunkModel,
 )
-from athena.infrastructure.sqlite.repositories import (
+from .repository_utils import (
     _json_dumps,
     _json_loads,
     _json_loads_model,
 )
-from athena.infrastructure.sqlite.repositories.converters import _row_to_attachment
+from .model_converters import _row_to_attachment
 from athena.models.file import (
     AdapterInfo,
     Attachment,
@@ -75,10 +75,10 @@ class FileRepository:
     所有写入方法使用事务保证原子性。
     """
 
-    async def delete_session(self, session_id: str) -> None:
-        """软删除会话的所有文件记录。"""
+    async def soft_delete_session_attachments(self, session_id: str) -> None:
+        """软删除会话的全部附件，并清理其派生索引和产物。"""
         now = _now().isoformat()
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 attachment_ids = list(
                     (
@@ -142,7 +142,7 @@ class FileRepository:
                         CodeDependencyModel.attachment_id.in_(attachment_ids)
                     )
                 )
-    async def live_storage_keys(self) -> set[str]:
+    async def list_live_storage_keys(self) -> set[str]:
         """
 
         返回值：
@@ -151,7 +151,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             return set(
                 (
                     await session.execute(
@@ -208,7 +208,7 @@ class FileRepository:
             created_at=now,
             updated_at=now,
         )
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 session.add(row)
         return _row_to_attachment(row)
@@ -233,7 +233,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = select(AttachmentModel).where(AttachmentModel.id == attachment_id)
             if session_id is not None:
                 stmt = stmt.where(AttachmentModel.session_id == session_id)
@@ -253,7 +253,7 @@ class FileRepository:
         ids = list(dict.fromkeys(attachment_ids))
         if not ids:
             return []
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = select(AttachmentModel).where(
                 AttachmentModel.session_id == session_id,
                 AttachmentModel.id.in_(ids),
@@ -263,35 +263,6 @@ class FileRepository:
             rows = (await session.execute(stmt)).scalars().all()
         # IN 查询不保证返回顺序；当前调用方会自行按 ID 查找或重排，因此无需构建索引。
         return [_row_to_attachment(row) for row in rows]
-
-    async def list_attachments(self, session_id: str) -> list[Attachment]:
-        """
-
-        参数：
-            session_id (str): 会话唯一标识。
-
-        返回值：
-            list[Attachment]: 返回该方法声明类型的业务结果，内容由方法职责确定。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        async with get_session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(AttachmentModel)
-                        .where(
-                            AttachmentModel.session_id == session_id,
-                            AttachmentModel.deleted_time.is_(None),
-                        )
-                        .order_by(AttachmentModel.created_at.asc())
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            return [_row_to_attachment(row) for row in rows]
 
     async def list_session_attachments(self, session_id: str) -> list[Attachment]:
         """列出直接上传到当前会话的附件。
@@ -305,7 +276,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             rows = (
                 await session.execute(
                     select(AttachmentModel)
@@ -327,7 +298,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             rows = (
                 await session.execute(
                     select(AttachmentModel)
@@ -355,7 +326,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             row = (
                 await session.execute(
                     select(AttachmentModel).where(
@@ -384,7 +355,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             rows = (
                 await session.execute(
                     select(AttachmentModel)
@@ -426,7 +397,7 @@ class FileRepository:
         if "metadata" in values:
             payload["metadata_json"] = _json_dumps(values["metadata"])
         payload["updated_at"] = _now().isoformat()
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
                     update(AttachmentModel)
@@ -459,7 +430,7 @@ class FileRepository:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         now = _now().isoformat()
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 result = await session.execute(
                     update(AttachmentModel)
@@ -543,7 +514,7 @@ class FileRepository:
             数据库写入失败时传播底层异常。
         """
         now = _now().isoformat()
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 result = await session.execute(
                     update(AttachmentModel)
@@ -596,7 +567,7 @@ class FileRepository:
         ids = list(dict.fromkeys(attachment_ids))
         if not ids:
             return []
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 rows = (
                     (
@@ -636,7 +607,7 @@ class FileRepository:
         ids = list(message_ids)
         if not ids:
             return {}
-        async with get_session() as session:
+        async with get_core_session() as session:
             result = await session.execute(
                 select(AttachmentModel).where(
                     AttachmentModel.message_id.in_(ids),
@@ -662,7 +633,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 existing_ids = (
                     (
@@ -730,7 +701,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             rows = (
                 (
                     await session.execute(
@@ -777,7 +748,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             rows = []
             ranks: dict[str, float] = {}
             fts_succeeded = False
@@ -868,7 +839,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             row = (
                 await session.execute(
                     select(FileArtifactModel).where(
@@ -911,7 +882,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
                     sqlite_insert(FileArtifactModel)
@@ -949,7 +920,7 @@ class FileRepository:
         items = list(adapters)
         names = [item.name for item in items]
         now = _now().isoformat()
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 if names:
                     await session.execute(
@@ -991,7 +962,7 @@ class FileRepository:
         dependencies: list[dict[str, Any]],
     ) -> None:
         """替换附件的代码索引（先删后增，同一事务内完成）。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
                     delete(CodeSymbolModel).where(
@@ -1034,7 +1005,7 @@ class FileRepository:
         返回值：
             符号信息列表（含 name/qualified_name/kind/path/language 等字段）。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             rows = (
                 (
                     await session.execute(
@@ -1077,7 +1048,7 @@ class FileRepository:
         返回值：
             依赖关系列表（含 source/target/kind/metadata 字段）。
         """
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = select(CodeDependencyModel).where(
                 CodeDependencyModel.attachment_id == attachment_id
             )

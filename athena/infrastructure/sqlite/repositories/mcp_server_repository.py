@@ -5,11 +5,11 @@ from __future__ import annotations
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import McpServerModel
 from athena.models import McpServer, McpServerConfig
 
-from .converters import _row_to_mcp_server
+from .model_converters import _row_to_mcp_server
 from .repository_utils import _json_dumps, _now_iso
 
 
@@ -20,7 +20,7 @@ class McpServerRepository:
         """插入或覆盖 MCP 服务器配置，并复活软删除记录。"""
         now = _now_iso()
         config_json = _json_dumps(config.model_dump())
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 stmt = sqlite_insert(McpServerModel).values(
                     name=name,
@@ -39,7 +39,7 @@ class McpServerRepository:
 
     async def get(self, name: str, include_deleted: bool = False) -> McpServer | None:
         """获取单个 MCP 服务器配置。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = select(McpServerModel).where(McpServerModel.name == name)
             if not include_deleted:
                 stmt = stmt.where(McpServerModel.deleted_time.is_(None))
@@ -49,7 +49,7 @@ class McpServerRepository:
 
     async def list_all(self, include_deleted: bool = False) -> list[McpServer]:
         """列出所有 MCP 服务器配置。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             stmt = select(McpServerModel).order_by(McpServerModel.created_at.asc())
             if not include_deleted:
                 stmt = stmt.where(McpServerModel.deleted_time.is_(None))
@@ -58,7 +58,7 @@ class McpServerRepository:
 
     async def soft_delete(self, name: str) -> None:
         """软删除 MCP 服务器配置。"""
-        async with get_session() as session:
+        async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
                     update(McpServerModel)

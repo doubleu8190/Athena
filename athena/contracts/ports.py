@@ -60,7 +60,7 @@ class AgentStorePort(Protocol):
         """创建一条独立 Worker Run 记录。"""
         ...
 
-    async def claim_pending(self) -> AgentCommandRecord | None:
+    async def claim_next_command(self) -> AgentCommandRecord | None:
         """按最早发布时间领取一条可执行命令；无命令时返回 ``None``。"""
         ...
 
@@ -80,7 +80,7 @@ class AgentStorePort(Protocol):
         """把重启前遗留的工具执行标记为未知。"""
         ...
 
-    async def complete(
+    async def complete_command(
         self,
         command_id: str,
         *,

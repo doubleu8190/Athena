@@ -1,7 +1,7 @@
 """记忆管理测试 — 访问追踪、滑动 TTL、记忆度加权.
 
 用 FakeChromaClient 替代真实 ChromaDB（真实默认 embedding 需下载 ONNX 模型，
-网络不稳定且现有测试从不触碰 Chroma）；SQLite 走真实 init_engine + FTS5。
+网络不稳定且现有测试从不触碰 Chroma）；SQLite 走真实 initialize_sqlite_engines + FTS5。
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from sqlalchemy import select, update
 from athena.config.settings import Settings
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalResult
-from athena.infrastructure.sqlite.engine import close_engine, get_session, init_engine
+from athena.infrastructure.sqlite.engine import close_sqlite_engines, get_core_session, initialize_sqlite_engines
 from athena.infrastructure.sqlite.models import MemoryModel
-from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
-from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
+from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
+from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ def _make_settings(**overrides: Any) -> Settings:
 
 @pytest.fixture
 def vector_store(tmp_path):
-    return ChromaMemoryStore.with_client(
+    return ChromaMemoryVectorStore.with_client(
         path=str(tmp_path / "chroma"),
         client=_FakeChromaClient(),
     )
@@ -155,19 +155,19 @@ def vector_store(tmp_path):
 
 @pytest.fixture
 async def mm(tmp_path, vector_store):
-    await init_engine(str(tmp_path / "test.db"))
+    await initialize_sqlite_engines(str(tmp_path / "test.db"))
     manager = LongTermMemoryService(
         settings=_make_settings(),
-        repository=SqliteMemoryRepository(),
+        repository=SQLiteMemoryRepository(),
         vector_store=vector_store,
     )
     await manager.initialize()
     yield manager
-    await close_engine()
+    await close_sqlite_engines()
 
 
 async def _get_row(memory_id: str) -> MemoryModel | None:
-    async with get_session() as session:
+    async with get_core_session() as session:
         result = await session.execute(
             select(MemoryModel).where(MemoryModel.id == memory_id)
         )
@@ -192,7 +192,7 @@ async def test_reads_record_access_in_memory(mm: LongTermMemoryService):
 
 @pytest.mark.asyncio
 async def test_flush_updates_sqlite_and_chroma(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryStore
+    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
 ):
     mid = await mm.add_memory(
         content="技术决策：采用微服务架构", metadata={"session_id": "s1"}
@@ -218,7 +218,7 @@ async def test_flush_updates_sqlite_and_chroma(
 
 @pytest.mark.asyncio
 async def test_flush_pinned_keeps_expires_at(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryStore
+    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
 ):
     mid = await mm.add_memory(
         content="固定记忆", metadata={"session_id": "s1"}, pinned=True
@@ -239,7 +239,7 @@ async def test_flush_pinned_keeps_expires_at(
 
 @pytest.mark.asyncio
 async def test_flush_after_delete_is_safe(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryStore
+    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
 ):
     mid = await mm.add_memory(content="将被删除的记忆", metadata={"session_id": "s1"})
     await mm.search(query="删除", where={"session_id": "s1"})  # 记录访问
@@ -259,7 +259,7 @@ async def test_flush_empty_stats_noop(mm: LongTermMemoryService):
 
 @pytest.mark.asyncio
 async def test_clear_all_removes_sqlite_and_vector_records(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryStore
+    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
 ):
     await mm.add_memory(content="第一条记忆", metadata={"session_id": "s1"})
     await mm.add_memory(content="第二条记忆", metadata={"session_id": "s1"})
@@ -280,7 +280,7 @@ async def test_sliding_ttl_refreshes_on_access(mm: LongTermMemoryService):
     mid = await mm.add_memory(content="过期测试记忆", metadata={"session_id": "s1"})
     # 强制到期（模拟创建久远、TTL 已过）
     past = (datetime.now() - timedelta(days=1)).isoformat()
-    async with get_session() as session:
+    async with get_core_session() as session:
         async with session.begin():
             await session.execute(
                 update(MemoryModel)
@@ -301,12 +301,12 @@ async def test_sliding_ttl_refreshes_on_access(mm: LongTermMemoryService):
 
 @pytest.mark.asyncio
 async def test_cleanup_expired_respects_expires_at(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryStore
+    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
 ):
     expired_mid = await mm.add_memory(content="过期记忆", metadata={"session_id": "s1"})
     keep_mid = await mm.add_memory(content="保留记忆", metadata={"session_id": "s1"})
     past = (datetime.now() - timedelta(days=1)).isoformat()
-    async with get_session() as session:
+    async with get_core_session() as session:
         async with session.begin():
             await session.execute(
                 update(MemoryModel)

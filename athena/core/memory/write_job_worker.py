@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
 from .contracts import CompletedTurn
 from .write_workflow import MemoryWriteWorkflow
 
@@ -25,7 +25,7 @@ class MemoryWriteJobWorker:
 
     async def start(self) -> None:
         if self._task is None:
-            await self._repository.recover_interrupted()
+            await self._repository.recover_interrupted_jobs()
             self._stop.clear()
             self._task = asyncio.create_task(self.run(), name="athena-memory-worker")
 
@@ -41,7 +41,7 @@ class MemoryWriteJobWorker:
 
     async def run(self) -> None:
         while not self._stop.is_set():
-            job = await self._repository.claim_next()
+            job = await self._repository.claim_next_job()
             if job is None:
                 try:
                     await asyncio.wait_for(
@@ -55,9 +55,9 @@ class MemoryWriteJobWorker:
                     raise RuntimeError("memory job worker workflow is not configured")
                 turn = CompletedTurn.model_validate(job)
                 await self._workflow.process_turn(turn)
-                await self._repository.mark_succeeded(turn.turn_id)
+                await self._repository.mark_job_succeeded(turn.turn_id)
             except Exception as exc:
                 attempt = int(job.get("attempt", 1))
-                await self._repository.mark_failed(
+                await self._repository.mark_job_failed(
                     job["turn_id"], str(exc), retry=attempt < 5
                 )

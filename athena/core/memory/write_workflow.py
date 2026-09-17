@@ -71,22 +71,17 @@ class MemoryWriteWorkflow:
                         resolution.target_memory_id,
                         resolution.relation_type.value,
                     )
-            elif (
-                resolution.action is ResolutionAction.UPDATE
-                and resolution.target_memory_id
-            ):
-                await self._memory.update_memory(
-                    resolution.target_memory_id,
-                    resolution.final_content or resolution.candidate.content,
-                )
-            elif (
-                resolution.action is ResolutionAction.SUPERSEDE
-                and resolution.target_memory_id
-            ):
+            elif resolution.action in {
+                ResolutionAction.UPDATE,
+                ResolutionAction.SUPERSEDE,
+            } and resolution.target_memory_id:
                 candidate = resolution.candidate
-                new_id = await self._memory.add_memory(
-                    content=resolution.final_content or candidate.content,
-                    metadata={
+                # 自动更新从不覆写旧文本。即使解析器给出 UPDATE，也以新版本
+                # supersede 旧版本，保留冲突判断、回滚和审计所需的历史。
+                await self._memory.revise_memory(
+                    resolution.target_memory_id,
+                    resolution.final_content or candidate.content,
+                    metadata_overrides={
                         "session_id": turn.session_id,
                         "source_turn_id": turn.turn_id,
                         "type": candidate.memory_type,
@@ -94,9 +89,6 @@ class MemoryWriteWorkflow:
                         "confidence": candidate.confidence,
                         "source": "extraction",
                     },
-                )
-                await self._memory.supersede_memory(
-                    resolution.target_memory_id, new_id
                 )
         return MemoryWriteOutcome(True, candidates, resolutions)
 

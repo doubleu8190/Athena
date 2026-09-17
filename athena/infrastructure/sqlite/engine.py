@@ -94,6 +94,21 @@ async def _create_memory_schema(conn: AsyncConnection) -> None:
     await conn.execute(text(MEMORY_JOBS_DDL))
     await conn.execute(text(MEMORY_JOBS_INDEX_DDL))
     await conn.execute(text(MEMORY_FTS_DDL))
+    # create_all 不会向已存在的 SQLite 表补列。这里仅做可前向兼容的增列，
+    # 让已安装实例也获得独立的事实有效性和修订字段。
+    columns = {
+        row[1]
+        for row in (await conn.execute(text("PRAGMA table_info(memories)"))).fetchall()
+    }
+    migrations = {
+        "validity_status": "ALTER TABLE memories ADD COLUMN validity_status VARCHAR NOT NULL DEFAULT 'valid'",
+        "valid_until": "ALTER TABLE memories ADD COLUMN valid_until VARCHAR",
+        "revision_of": "ALTER TABLE memories ADD COLUMN revision_of VARCHAR",
+        "revision": "ALTER TABLE memories ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
+    }
+    for name, statement in migrations.items():
+        if name not in columns:
+            await conn.execute(text(statement))
 
 
 async def initialize_sqlite_engines(

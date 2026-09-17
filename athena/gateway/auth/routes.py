@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import base64, hashlib, hmac, json, time
+import base64
+import hashlib
+import hmac
+import json
+import time
 from fastapi import APIRouter, HTTPException, Response, Request
 from pydantic import BaseModel
 from athena.config.settings import get_settings
 from athena.contracts.errors import ErrorDetail
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-COOKIE = "athena_session"
+SESSION_COOKIE_NAME = "athena_session"
+
 
 class LoginRequest(BaseModel):
     """登录请求体。"""
@@ -15,7 +20,8 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
-def _sign(payload: str, secret: str) -> str:
+
+def _sign_session_token_payload(payload: str, secret: str) -> str:
     """使用服务端密钥为令牌载荷生成 HMAC-SHA256 签名。
 
     参数:
@@ -28,7 +34,8 @@ def _sign(payload: str, secret: str) -> str:
     """
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-def _token(username: str, secret: str, ttl: int) -> str:
+
+def _create_session_token(username: str, secret: str, ttl: int) -> str:
     """生成包含用户名和过期时间的无状态会话令牌。
 
     参数:
@@ -40,8 +47,17 @@ def _token(username: str, secret: str, ttl: int) -> str:
     异常:
         JSON 序列化失败时传播 ``TypeError``。
     """
-    body = base64.urlsafe_b64encode(json.dumps({"u": username, "exp": int(time.time()) + ttl}, separators=(",", ":")).encode()).decode().rstrip("=")
-    return body + "." + _sign(body, secret)
+    body = (
+        base64.urlsafe_b64encode(
+            json.dumps(
+                {"u": username, "exp": int(time.time()) + ttl}, separators=(",", ":")
+            ).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
+    return body + "." + _sign_session_token_payload(body, secret)
+
 
 def is_authenticated(request: Request) -> bool:
     """校验请求是否携带有效的认证 Cookie。
@@ -56,11 +72,13 @@ def is_authenticated(request: Request) -> bool:
     settings = get_settings()
     if not settings.auth_enabled:
         return True
-    raw = request.cookies.get(COOKIE, "")
+    raw = request.cookies.get(SESSION_COOKIE_NAME, "")
     if "." not in raw or not settings.auth_session_secret:
         return False
     body, sig = raw.rsplit(".", 1)
-    if not hmac.compare_digest(sig, _sign(body, settings.auth_session_secret)):
+    if not hmac.compare_digest(
+        sig, _sign_session_token_payload(body, settings.auth_session_secret)
+    ):
         return False
     try:
         padded = body + "=" * (-len(body) % 4)
@@ -68,8 +86,11 @@ def is_authenticated(request: Request) -> bool:
     except Exception:
         return False
 
+
 @router.post("/login")
-async def login(req: LoginRequest, response: Response, request: Request) -> dict[str, str]:
+async def login(
+    req: LoginRequest, response: Response, request: Request
+) -> dict[str, str]:
     """验证凭据并写入 HttpOnly 会话 Cookie。
 
     参数:
@@ -82,14 +103,29 @@ async def login(req: LoginRequest, response: Response, request: Request) -> dict
         HTTP异常: 凭据错误时返回 401，认证密钥不安全时返回 503。
     """
     settings = get_settings()
-    if not hmac.compare_digest(req.username, settings.auth_username) or not hmac.compare_digest(req.password, settings.auth_password):
+    if not hmac.compare_digest(
+        req.username, settings.auth_username
+    ) or not hmac.compare_digest(req.password, settings.auth_password):
         raise HTTPException(status_code=401, detail=ErrorDetail.INVALID_CREDENTIALS)
     if settings.auth_enabled and len(settings.auth_session_secret) < 32:
         raise HTTPException(
             status_code=503, detail=ErrorDetail.AUTH_SECRET_NOT_CONFIGURED
         )
-    response.set_cookie(COOKIE, _token(req.username, settings.auth_session_secret or "disabled", settings.auth_session_ttl_hours * 3600), httponly=True, samesite="strict", secure=request.url.scheme == "https", max_age=settings.auth_session_ttl_hours * 3600, path="/")
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        _create_session_token(
+            req.username,
+            settings.auth_session_secret or "disabled",
+            settings.auth_session_ttl_hours * 3600,
+        ),
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+        max_age=settings.auth_session_ttl_hours * 3600,
+        path="/",
+    )
     return {"status": "ok"}
+
 
 @router.post("/logout")
 async def logout(response: Response) -> dict[str, str]:
@@ -102,5 +138,5 @@ async def logout(response: Response) -> dict[str, str]:
     异常:
         不抛出业务异常。
     """
-    response.delete_cookie(COOKIE, path="/")
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return {"status": "ok"}

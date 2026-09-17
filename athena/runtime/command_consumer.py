@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import traceback
 from typing import Any
 
@@ -327,7 +326,7 @@ class CommandConsumer:
         self, command: AgentCommandRecord, run_id: str, result: Any
     ) -> None:
         payload = result if isinstance(result, dict) else {"result": result}
-        error_detail = ExecutionError.from_value(
+        error_detail = ExecutionError.from_legacy_value(
             payload.get("error_detail") or payload.get("error") or "",
             code="run_failed",
             retryable=False,

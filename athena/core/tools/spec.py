@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
-from athena.core.tools.base import NativeHandler
+from athena.core.tools.tool_definitions import NativeHandler
 from athena.models.tool import RiskLevel
 
 

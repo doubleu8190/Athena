@@ -47,7 +47,7 @@ async def prepare_request_and_persist_message(
         "attachment_ids": attachment_ids,
         "history": [item.model_dump(mode="json") for item in history],
         "requested_attachment_refs": [
-            item.to_ref().model_dump(mode="json") for item in attachments
+            item.to_reference().model_dump(mode="json") for item in attachments
         ],
     }
     await session_context_service.persist_message_and_attachments(prepared_state)

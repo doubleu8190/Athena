@@ -10,7 +10,7 @@ from athena.models.approval import (
     ApprovalLog,
     ApprovalRequest,
 )
-from athena.models.mcp import McpServer, McpServerConfig
+from athena.models.mcp import MCPServer, MCPServerConfig
 from athena.models.json_models import (
     CommandPayload,
     ExtensibleJsonModel,
@@ -62,8 +62,8 @@ __all__ = [
     "ApprovalLog",
     "ApprovalRequest",
     # MCP
-    "McpServer",
-    "McpServerConfig",
+    "MCPServer",
+    "MCPServerConfig",
     "AdapterInfo",
     "Attachment",
     "AttachmentRef",

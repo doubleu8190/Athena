@@ -70,7 +70,6 @@ class PlanResultSynthesizer:
                 {"role": "user", "content": content},
             ]
         )
-        from athena.utils.llm import extract_message_text
+        from athena.utils.llm_response import extract_message_text
 
         return extract_message_text(response)
-

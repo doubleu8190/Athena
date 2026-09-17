@@ -530,12 +530,26 @@ class MemoryModel(Base):
     superseded_at: Mapped[str | None] = mapped_column(String, nullable=True)
     source_turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
     last_observed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 事实有效性不等同于保留期限或访问热度。invalid 记录保留用于历史追溯，
+    # 但不会进入检索上下文。
+    validity_status: Mapped[str] = mapped_column(
+        String, default="valid", comment="事实有效性：valid、uncertain 或 invalid"
+    )
+    valid_until: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="事实确认的有效截止时间（UTC）"
+    )
+    revision_of: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="被本条修订替代的上一版本记忆 ID"
+    )
+    revision: Mapped[int] = mapped_column(
+        Integer, default=1, comment="同一记忆版本链中的修订序号"
+    )
     deleted_time: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="软删除时间（UTC）"
     )
 
 
-class McpServerModel(Base):
+class MCPServerModel(Base):
     """MCP 服务器注册表 — 持久化用户注册的 MCP 服务端 配置.
 
     config_json 存完整配置 {command, args, env}，env 含密钥（如 SERVER_KEY），

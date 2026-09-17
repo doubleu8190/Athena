@@ -56,7 +56,7 @@ def install_runtime(app: Any, **overrides: Any) -> RuntimeContainer:
         "mcp_manager": MagicMock(),
         "llm": MagicMock(),
         "file_runtime": MagicMock(),
-        "memory_manager": MagicMock(),
+        "memory_service": MagicMock(),
         "agent_store": MagicMock(),
         "realtime_transport": MagicMock(),
     }

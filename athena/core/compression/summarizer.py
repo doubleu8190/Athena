@@ -14,9 +14,9 @@ from langchain_core.messages import HumanMessage
 
 from athena.models import Message, MessageRole
 from athena.core.llm.provider import LLMProvider
-from athena.utils.llm import extract_message_text
+from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
-from athena.utils.prompts import get_prompt
+from athena.utils.prompt_loader import get_prompt
 
 if TYPE_CHECKING:
     from athena.infrastructure.sqlite.database import Database

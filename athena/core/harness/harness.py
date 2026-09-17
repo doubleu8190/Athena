@@ -42,10 +42,10 @@ from athena.contracts.events import EventType
 from athena.contracts.errors import ExecutionError
 from athena.contracts.events import ApplicationEvent, EventDurability
 from athena.contracts.ports import EventPublisherPort
-from athena.utils.ids import generate_time_id
-from athena.utils.llm import extract_message_text
+from athena.utils.id_generation import generate_time_id
+from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
-from athena.utils.message import dict_to_message, normalize_tool_calls
+from athena.utils.message_conversion import dict_to_message, normalize_tool_calls
 from athena.runtime.stream_coalescer import StreamCoalescer
 
 logger = get_logger(__name__)
@@ -1221,7 +1221,7 @@ class Harness:
                 "output": output,
                 "error": error,
                 "error_detail": (
-                    ExecutionError.from_value(
+                    ExecutionError.from_legacy_value(
                         error,
                         code="tool_timeout" if status == ToolCallStatus.TIMEOUT.value else "tool_failed",
                         retryable=status == ToolCallStatus.TIMEOUT.value,

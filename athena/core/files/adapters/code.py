@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from athena.config.settings import Settings
-from athena.core.files.base import ExtractedUnit, ExtractionContext, ExtractionResult
+from athena.core.files.extraction import (
+    ExtractedUnit,
+    ExtractionContext,
+    ExtractionResult,
+)
 from athena.models.file import AdapterInfo
 
 from .common import CODE_EXTENSIONS, _decode, logger
@@ -24,7 +28,12 @@ class CodeAdapter:
         mime_types=["text/x-python", "application/javascript", "text/x-java-source"],
         extensions=sorted(CODE_EXTENSIONS),
         capabilities=[
-            "read", "search", "summarize", "analyze", "symbols", "references",
+            "read",
+            "search",
+            "summarize",
+            "analyze",
+            "symbols",
+            "references",
             "call_graph",
         ],
     )
@@ -126,9 +135,15 @@ def _tree_sitter_index(
         symbols: list[dict[str, Any]] = []
         dependencies: list[dict[str, Any]] = []
         interesting = {
-            "function_definition", "function_declaration", "method_definition",
-            "class_definition", "class_declaration", "struct_declaration",
-            "interface_declaration", "enum_declaration", "function_item",
+            "function_definition",
+            "function_declaration",
+            "method_definition",
+            "class_definition",
+            "class_declaration",
+            "struct_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "function_item",
         }
         stack = [tree.root_node]
         while stack:

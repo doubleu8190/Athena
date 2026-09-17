@@ -14,7 +14,7 @@ from athena.runtime.task_understanding.contracts import (
 )
 from athena.runtime.task_understanding.fast_path import build_fast_path_task
 from athena.utils.logging import get_logger
-from athena.utils.prompts import get_prompt
+from athena.utils.prompt_loader import get_prompt
 
 logger = get_logger(__name__)
 
@@ -162,12 +162,13 @@ class TaskUnderstandingService:
             f"status={ref.get('status', '')}"
             for ref in attachment_refs
         ) or "无"
+        available_tools = "\n".join(f"- {name}" for name in tool_names) or "无"
         return (
             f"[用户消息]\n{user_message}\n\n"
             f"[最近会话上下文]\n{history_text[-3000:]}\n\n"
             f"[当前附件]\n{attachments}\n\n"
             f"[全局知识库]\n文档数量={knowledge_document_count}\n\n"
-            f"[可用工具]\n{'\n'.join(f'- {name}' for name in tool_names) or '无'}"
+            f"[可用工具]\n{available_tools}"
         )
 
     @staticmethod

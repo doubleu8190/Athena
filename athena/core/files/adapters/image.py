@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from athena.config.settings import Settings
-from athena.core.files.base import ExtractedUnit, ExtractionContext, ExtractionResult
+from athena.core.files.extraction import (
+    ExtractedUnit,
+    ExtractionContext,
+    ExtractionResult,
+)
 from athena.models.file import AdapterInfo
 
 from .common import _rapidocr_text, logger

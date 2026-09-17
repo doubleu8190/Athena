@@ -8,7 +8,7 @@
 5. 注册 REST API 与 SSE 路由
 
 业务逻辑已剥离至：
-- agent_runtime — 命令消费、LangGraph 与恢复协调
+- athena.runtime — 命令消费、LangGraph 与恢复协调
 """
 
 from __future__ import annotations
@@ -20,28 +20,29 @@ from pathlib import Path
 import aiosqlite
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from athena.config.settings import get_settings
+from athena.container import RuntimeContainer
 from athena.core.llm.provider import LLMProvider
-from athena.infrastructure.sqlite.database import Database
-from athena.container import RuntimeContainer, runtime_from
-from athena.runtime import CancellationRegistry, CommandConsumer, LangGraphRuntime, RecoveryReconciler, build_graph
-from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
-
-from athena.runtime.command_notifications import CommandNotifier
-from athena.runtime.transport import RuntimeEventPublisher, SessionEventBus
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from athena.gateway.auth.routes import is_authenticated
-from athena.contracts.errors import ErrorDetail
-
+from athena.gateway.auth.middleware import AuthenticationMiddleware
 from athena.gateway.approval import ApprovalManager
 from athena.gateway.routes import api_router
-
+from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
+from athena.runtime import (
+    CancellationRegistry,
+    CommandConsumer,
+    LangGraphRuntime,
+    RecoveryReconciler,
+    build_graph,
+)
+from athena.runtime.command_notifications import CommandNotifier
+from athena.runtime.transport import RuntimeEventPublisher, SessionEventBus
 from athena.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -127,10 +128,19 @@ async def lifespan(app: FastAPI):
     )
     await file_runtime.initialize()
 
+    from athena.core.files.knowledge_document_worker import KnowledgeDocumentWorker
+    from athena.infrastructure.sqlite.repositories.knowledge_document_job_repository import (
+        KnowledgeDocumentJobRepository,
+    )
+
+    knowledge_document_worker = KnowledgeDocumentWorker(
+        KnowledgeDocumentJobRepository(), file_runtime
+    )
+
     # 注册文件能力工具到工具管理器
     tool_registry = ToolRegistry(tool_manager, tool_catalog)
-    toolSpecList: list = build_file_tool_specs(file_runtime)
-    await tool_registry.install(toolSpecList)
+    tool_specs = build_file_tool_specs(file_runtime)
+    await tool_registry.install(tool_specs)
 
     # ── 5.2 记忆系统 ──
     from athena.core.memory.long_term_memory import LongTermMemoryService
@@ -140,19 +150,19 @@ async def lifespan(app: FastAPI):
     from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
     from athena.core.memory.write_job_worker import MemoryWriteJobWorker
 
-    memory_manager = LongTermMemoryService(
+    memory_service = LongTermMemoryService(
         settings=settings,
         repository=SQLiteMemoryRepository(),
         vector_store=ChromaMemoryVectorStore(path=str(settings.chroma_path)),
     )
     try:
-        await memory_manager.initialize()
+        await memory_service.initialize()
     except Exception as e:
         logger.warning("memory_init_skipped", error=str(e))
         raise e
 
     # 后台看门狗：周期 flush 访问统计 + 清理过期记忆
-    memory_flush_task = asyncio.create_task(memory_manager.run_periodic_flush())
+    memory_flush_task = asyncio.create_task(memory_service.run_periodic_flush())
 
     from athena.core.memory.retrieval import (
         HybridMemoryRetriever,
@@ -161,7 +171,7 @@ async def lifespan(app: FastAPI):
 
     retrieval_manager = HybridMemoryRetriever(
         llm_secondary,
-        memory_manager,
+        memory_service,
         settings=settings,
     )
     memory_retrieval = MemoryRetrievalService(retrieval_manager, llm_primary, settings)
@@ -169,7 +179,7 @@ async def lifespan(app: FastAPI):
     from athena.core.memory.distillation import ConversationSummarizer
 
     conversation_summarizer = ConversationSummarizer(
-        llm_secondary, memory_manager, settings=settings
+        llm_secondary, memory_service, settings=settings
     )
 
     from athena.core.memory.distillation import FactExtractor
@@ -202,7 +212,7 @@ async def lifespan(app: FastAPI):
         memory_retrieval=memory_retrieval,
         conversation_summarizer=conversation_summarizer,
         fact_extractor=fact_extractor,
-        memory_service=memory_manager,
+        memory_service=memory_service,
         settings=settings,
         file_runtime=file_runtime,
         memory_job_repository=memory_job_repository,
@@ -228,7 +238,7 @@ async def lifespan(app: FastAPI):
         mcp_manager=mcp_manager,
         llm=llm_primary,
         file_runtime=file_runtime,
-        memory_manager=memory_manager,
+        memory_service=memory_service,
         agent_store=agent_store,
         realtime_transport=realtime_transport,
     )
@@ -252,15 +262,18 @@ async def lifespan(app: FastAPI):
         notifier=command_notifier,
         graph=graph,
         cancellation_registry=CancellationRegistry(),
-        memory_service=memory_manager,
+        memory_service=memory_service,
     )
     await command_consumer.start()
+    # 所有运行时依赖和路由容器均就绪后，再开始领取持久化知识库任务。
+    await knowledge_document_worker.start()
 
     logger.info("athena_started")
     yield
 
     # ── 关闭清理（按初始化逆序释放资源） ──
     logger.info("athena_shutting_down")
+    await knowledge_document_worker.stop()
     try:
         await command_consumer.stop()
     except Exception as e:
@@ -276,7 +289,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     try:
-        await memory_manager.flush_access_stats()
+        await memory_service.flush_access_stats()
     except Exception as e:
         logger.warning("memory_final_flush_failed", error=str(e))
     # 断开所有 MCP 服务端 连接，防子进程泄漏
@@ -298,45 +311,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-class AuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        """校验写请求来源和受保护接口的认证状态。
 
-        参数:
-            request (Request): 当前 HTTP 请求。
-            call_next (Callable): 下一个中间件或路由处理器。
-        返回值:
-            Response: 下游响应，或认证失败时的 JSON 错误响应。
-        异常:
-            下游处理器抛出的异常由中间件链继续传播。
-        """
-        settings = get_settings()
-        if (
-            settings.auth_enabled
-            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
-            and request.url.path not in {"/api/auth/login", "/api/auth/logout"}
-        ):
-            origin = request.headers.get("origin")
-            if origin and origin not in {
-                f"http://{settings.host}:{settings.port}",
-                "http://localhost:5173",
-                "http://127.0.0.1:5173",
-            }:
-                return JSONResponse(
-                    {"detail": ErrorDetail.INVALID_ORIGIN}, status_code=403
-                )
-        if (
-            settings.auth_enabled
-            and request.url.path
-            not in {"/api/auth/login", "/api/auth/logout", "/api/health", "/health"}
-            and not is_authenticated(request)
-        ):
-            return JSONResponse(
-                {"detail": ErrorDetail.AUTHENTICATION_REQUIRED}, status_code=401
-            )
-        return await call_next(request)
-
-app.add_middleware(AuthMiddleware)
+app.add_middleware(AuthenticationMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -348,6 +324,7 @@ app.add_middleware(
 
 # 注册 REST API 路由（/api/*）；事件通过 SSE 提供。
 app.include_router(api_router)
+
 
 def run() -> None:
     """启动 uvicorn 服务器（命令行入口）。

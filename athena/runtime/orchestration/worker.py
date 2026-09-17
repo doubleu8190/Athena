@@ -19,9 +19,9 @@ from athena.runtime.orchestration.contracts import (
 )
 from athena.runtime.orchestration.policies import ToolPolicy
 from athena.runtime.orchestration.structured_llm import StructuredLLMService
-from athena.utils.ids import generate_sub_run_id
+from athena.utils.id_generation import generate_sub_run_id
 from athena.utils.logging import get_logger
-from athena.utils.prompts import get_prompt
+from athena.utils.prompt_loader import get_prompt
 
 logger = get_logger(__name__)
 

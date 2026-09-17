@@ -39,7 +39,7 @@ from athena.infrastructure.sqlite.models import (
 )
 from .repository_utils import _json_dumps
 from athena.models.tool import RiskLevel
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 
 
 def _now() -> str:

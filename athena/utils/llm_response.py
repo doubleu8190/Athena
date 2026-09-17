@@ -1,4 +1,4 @@
-"""LLM 响应工具 — 从 BaseMessage 中安全提取文本内容."""
+"""LLM 响应解析工具 — 安全提取文本或 JSON 内容。"""
 
 from __future__ import annotations
 

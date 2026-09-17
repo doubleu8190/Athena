@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from athena.core.tools.base import NativeTool
+from athena.core.tools.tool_definitions import NativeTool
 from athena.core.tools.builtin.shell_tools import exec_shell
 
 
@@ -40,7 +40,7 @@ async def test_exec_shell_success_returns_output():
 @pytest.mark.asyncio
 async def test_exec_shell_nonzero_exit_raises():
     with pytest.raises(Exception) as excinfo:
-        await exec_shell("python3 -c \"import sys; sys.exit(3)\"", timeout=10)
+        await exec_shell('python3 -c "import sys; sys.exit(3)"', timeout=10)
     assert "exited with code 3" in str(excinfo.value)
 
 
@@ -48,7 +48,7 @@ async def test_exec_shell_nonzero_exit_raises():
 async def test_exec_shell_check_false_allows_nonzero():
     """check=False 时保留旧行为：非零退出码只返回输出，不报错."""
     result = await exec_shell(
-        "python3 -c \"import sys; sys.exit(3)\"", timeout=10, check=False
+        'python3 -c "import sys; sys.exit(3)"', timeout=10, check=False
     )
     assert "[exit_code=3]" in result
 
@@ -57,7 +57,7 @@ async def test_exec_shell_check_false_allows_nonzero():
 async def test_native_tool_reports_failed_on_nonzero_exit():
     """非零退出码经 NativeTool 包装后应为 failed（修复前是 success）."""
     tool = _make_shell_tool()
-    result = await tool.execute(command="python3 -c \"import sys; sys.exit(3)\"")
+    result = await tool.execute(command='python3 -c "import sys; sys.exit(3)"')
     assert result.status == "failed"
     assert "exited with code 3" in (result.error or "")
 
@@ -73,4 +73,4 @@ async def test_native_tool_reports_success_on_zero_exit():
 @pytest.mark.asyncio
 async def test_exec_shell_timeout_raises():
     with pytest.raises(TimeoutError):
-        await exec_shell("python3 -c \"import time; time.sleep(30)\"", timeout=1)
+        await exec_shell('python3 -c "import time; time.sleep(30)"', timeout=1)

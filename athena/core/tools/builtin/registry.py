@@ -27,14 +27,15 @@ from athena.core.tools.builtin.file_tools import (
     write_file,
 )
 from athena.core.tools.builtin.shell_tools import exec_shell
-from athena.core.tools.base import NativeHandler
+from athena.core.tools.tool_definitions import NativeHandler
 from athena.core.tools.manager import UnifiedToolManager
 from athena.core.tools.spec import ToolSpec
 from athena.models.tool import RiskLevel
 
+
 class BuiltinToolDefinition(TypedDict):
-    """表示 BuiltinToolDefinition 组件，封装相关状态和行为。
-    """
+    """表示 BuiltinToolDefinition 组件，封装相关状态和行为。"""
+
     name: str
     description: str
     handler: NativeHandler

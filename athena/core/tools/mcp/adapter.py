@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from athena.core.tools.base import MCPTool
+from athena.core.tools.tool_definitions import MCPTool
 from athena.core.tools.mcp.client import MCPClient
 from athena.core.tools.catalog import ToolCatalogService
 from athena.models.tool import RiskLevel

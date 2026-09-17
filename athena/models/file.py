@@ -93,8 +93,8 @@ class Attachment(BaseModel):
     updated_at: datetime
     deleted_time: datetime | None = None
 
-    def to_ref(self) -> AttachmentRef:
-        """转换为轻量引用（用于消息关联）。"""
+    def to_reference(self) -> AttachmentRef:
+        """转换为轻量附件引用，用于消息关联。"""
         return AttachmentRef(
             id=self.id,
             filename=self.filename,

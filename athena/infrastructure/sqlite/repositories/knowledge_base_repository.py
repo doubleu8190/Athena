@@ -12,7 +12,7 @@ from athena.infrastructure.sqlite.models import (
     KnowledgeBaseModel,
 )
 from athena.models.file import AttachmentStatus, KnowledgeBase
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 
 
 def _now_iso() -> str:

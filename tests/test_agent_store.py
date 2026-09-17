@@ -20,7 +20,7 @@ from athena.contracts.statuses import AgentApprovalDecision
 from athena.infrastructure.sqlite.database import Database
 from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import StreamSnapshotModel
-from athena.utils.ids import generate_session_id
+from athena.utils.id_generation import generate_session_id
 
 
 @pytest.fixture

@@ -9,7 +9,9 @@ from athena.models import Message
 class MessagePairer:
     """将扁平消息列表分割为完整对话轮次."""
 
-    def identify_turns(self, messages: list[Message | BaseMessage]) -> list[list[Message | BaseMessage]]:
+    def identify_turns(
+        self, messages: list[Message | BaseMessage]
+    ) -> list[list[Message | BaseMessage]]:
         """按 ``run_id``（缺失时按用户消息）分割完整对话轮次.
 
         返回值：
@@ -23,12 +25,21 @@ class MessagePairer:
             run_id = getattr(msg, "run_id", None)
             if run_id is None and isinstance(msg, BaseMessage):
                 run_id = (msg.additional_kwargs or {}).get("run_id")
-            is_system = isinstance(msg, SystemMessage) or getattr(msg, "role", None) == "system"
-            is_user = isinstance(msg, HumanMessage) or getattr(msg, "role", None) == "user"
+            is_system = (
+                isinstance(msg, SystemMessage) or getattr(msg, "role", None) == "system"
+            )
+            is_user = (
+                isinstance(msg, HumanMessage) or getattr(msg, "role", None) == "user"
+            )
             if is_system and not current_turn:
                 turns.append([msg])
                 continue
-            if current_turn and run_id and current_run_id and str(run_id) != current_run_id:
+            if (
+                current_turn
+                and run_id
+                and current_run_id
+                and str(run_id) != current_run_id
+            ):
                 turns.append(current_turn)
                 current_turn = []
             elif current_turn and not run_id and is_user:
@@ -43,7 +54,7 @@ class MessagePairer:
 
         return turns
 
-    def get_recent_turns(
+    def split_recent_turns(
         self,
         turns: list[list[Message | BaseMessage]],
         keep_count: int,

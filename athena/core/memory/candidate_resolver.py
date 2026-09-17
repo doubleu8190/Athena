@@ -8,8 +8,8 @@ from langchain_core.messages import HumanMessage
 
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.long_term_memory import LongTermMemoryService
-from athena.utils.llm import extract_json_from_llm_response, extract_message_text
-from athena.utils.prompts import get_prompt
+from athena.utils.llm_response import extract_json_from_llm_response, extract_message_text
+from athena.utils.prompt_loader import get_prompt
 
 from .contracts import (
     MemoryCandidate,
@@ -123,26 +123,9 @@ class MemoryCandidateResolver:
                 closest = max(
                     related, key=lambda item: float(item.get("score", 0.0) or 0.0)
                 )
-                # 基于规则的初步决策：若候选记忆内容中包含明显的替代、更新或矛盾标记词，则倾向于 SUPERSEDE 或 UPDATE；否则默认 UPDATE
-                action = (
-                    ResolutionAction.SUPERSEDE
-                    if any(
-                        marker in candidate.content.casefold()
-                        for marker in (
-                            "was ",
-                            "改成",
-                            "换回",
-                            "换成",
-                            "改为",
-                            "替代",
-                            "取代",
-                            "更新",
-                            "现在使用",
-                            "不再使用",
-                        )
-                    )
-                    else ResolutionAction.UPDATE
-                )
+                # 非完全重复的高相关事实一律生成新版本。不能从相似度推断
+                # 同义改写还是事实冲突，因此保留旧版本比原地覆盖更可靠。
+                action = ResolutionAction.SUPERSEDE
                 reason = "rule_based_resolution"
                 relation_type = (
                     MemoryRelationType.SUPERSEDES
@@ -150,7 +133,7 @@ class MemoryCandidateResolver:
                     else None
                 )
                 # 如果配置了 LLM 提供者，则调用 LLM 进行更复杂的语义判断，以决定是否更新、替代或忽略现有记忆
-                if self._llm is not None and action is ResolutionAction.UPDATE:
+                if self._llm is not None:
                     action, relation_type = await self._llm_resolution(
                         candidate, closest
                     )
@@ -205,4 +188,4 @@ class MemoryCandidateResolver:
                 )
             return action, relation
         except Exception:
-            return ResolutionAction.UPDATE, None
+            return ResolutionAction.SUPERSEDE, MemoryRelationType.SUPERSEDES

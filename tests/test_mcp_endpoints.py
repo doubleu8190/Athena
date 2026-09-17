@@ -21,7 +21,7 @@ from athena.core.tools.manager import UnifiedToolManager
 from athena.core.tools.mcp.adapter import MCPToolAdapter
 from athena.core.tools.mcp.manager import MCPManager
 from athena.infrastructure.sqlite.database import Database
-from athena.models.mcp import McpServerConfig
+from athena.models.mcp import MCPServerConfig
 from tests.fakes import install_runtime, make_tool_manager
 
 STUB_PATH = Path(__file__).resolve().parent / "fixtures" / "mcp_stub.py"
@@ -180,7 +180,7 @@ async def test_load_persisted_recovers(db, mcp_manager, manager):
     """
     result = await mcp_manager.register_server(
         "persist-me",
-        McpServerConfig(command=sys.executable, args=[str(STUB_PATH)]),
+        MCPServerConfig(command=sys.executable, args=[str(STUB_PATH)]),
     )
     assert result["status"] == "connected"
     assert len(await db.mcp_servers.list_all()) == 1

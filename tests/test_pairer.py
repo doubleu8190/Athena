@@ -40,7 +40,9 @@ def test_identify_turns_with_tool_calls():
     pairer = MessagePairer()
     msgs = [
         _human("read file"),
-        _assistant("let me read the file", [{"id": "tc1", "name": "read_file", "args": {}}]),
+        _assistant(
+            "let me read the file", [{"id": "tc1", "name": "read_file", "args": {}}]
+        ),
         _tool("file content", "tc1"),
         _assistant("here is the file"),
     ]
@@ -53,7 +55,9 @@ def test_identify_turns_tool_calls_included_in_assistant():
     pairer = MessagePairer()
     msgs = [
         _human("read file"),
-        _assistant("I will read the file", [{"id": "tc1", "name": "read_file", "args": {}}]),
+        _assistant(
+            "I will read the file", [{"id": "tc1", "name": "read_file", "args": {}}]
+        ),
         _tool("file content", "tc1"),
         _assistant("I have processed the file"),
     ]
@@ -79,26 +83,23 @@ def test_identify_turns_multiple_rounds():
     assert isinstance(turns[2][0], HumanMessage)
 
 
-def test_get_recent_turns_separation():
+def test_split_recent_turns_separation():
     pairer = MessagePairer()
-    dialogue = [
-        [_human(f"q{i}"), _assistant(f"a{i}")]
-        for i in range(5)
-    ]
+    dialogue = [[_human(f"q{i}"), _assistant(f"a{i}")] for i in range(5)]
     turns = [[_system("sys")]] + dialogue
-    old, recent = pairer.get_recent_turns(turns, keep_count=2)
+    old, recent = pairer.split_recent_turns(turns, keep_count=2)
     assert len(old) == 3
     # recent 包含 system 段 + 2 个最近轮次
     assert len(recent) == 3
     assert isinstance(recent[0][0], SystemMessage)
 
 
-def test_get_recent_turns_insufficient():
+def test_split_recent_turns_insufficient():
     pairer = MessagePairer()
     turns = [
         [_human("q1"), _assistant("a1")],
     ]
-    old, recent = pairer.get_recent_turns(turns, keep_count=3)
+    old, recent = pairer.split_recent_turns(turns, keep_count=3)
     assert old == []
     assert recent == turns
 

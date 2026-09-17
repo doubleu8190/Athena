@@ -16,7 +16,7 @@ from athena.runtime.orchestration.contracts import (
 from athena.runtime.orchestration.worker import WorkerExecutor
 from athena.runtime.orchestration.events import OrchestrationEventPublisher
 from athena.contracts.events import EventType
-from athena.utils.ids import generate_sub_run_id
+from athena.utils.id_generation import generate_sub_run_id
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)

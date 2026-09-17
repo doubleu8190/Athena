@@ -7,8 +7,6 @@ and Harness input preparation — the session-context operations of the agent ru
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
-
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
 from athena.models.file import (
@@ -18,7 +16,7 @@ from athena.models.file import (
 )
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 from athena.utils.logging import get_logger
 
 from ..state import AgentState
@@ -231,7 +229,7 @@ class SessionContextService:
         attachments = await self._db.files.bind_message(
             session_id, message.id, attachment_ids
         )
-        refs = [item.to_ref() for item in attachments]
+        refs = [item.to_reference() for item in attachments]
         message.attachments = refs
         return refs
 

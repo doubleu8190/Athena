@@ -29,12 +29,12 @@ from athena.infrastructure.sqlite.repositories.memory_job_repository import Memo
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message
-from athena.models.file import Attachment, AttachmentRef, AttachmentStatus
+from athena.models.file import Attachment, AttachmentRef
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
 from athena.contracts.ports import AgentStorePort
 from athena.utils.logging import get_logger
-from athena.utils.prompts import get_prompt
+from athena.utils.prompt_loader import get_prompt
 
 from .attachment_processor import AttachmentProcessContext, AttachmentProcessor
 from .processor_lifecycle import ProcessorLifecycleRunner

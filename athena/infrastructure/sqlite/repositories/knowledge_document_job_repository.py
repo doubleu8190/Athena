@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 
 from athena.infrastructure.sqlite.engine import get_core_session
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 
 
 class KnowledgeDocumentJobRepository:
@@ -113,7 +113,7 @@ class KnowledgeDocumentJobRepository:
         异常：
             SQLite 更新失败时向上抛出异常。
         """
-        await self._mark(job_id, "succeeded", result=result)
+        await self._mark(job_id, "succeeded", result=result, only_running=True)
 
     async def mark_failed(self, job_id: str, error: str, *, retry: bool) -> None:
         """记录任务失败，并根据重试策略更新状态。
@@ -137,6 +137,7 @@ class KnowledgeDocumentJobRepository:
             "retry" if retry else "failed",
             error=error,
             available_at=available_at,
+            only_running=True,
         )
 
     async def cancel_attachment_job(self, attachment_id: str) -> None:
@@ -158,10 +159,25 @@ class KnowledgeDocumentJobRepository:
                         """UPDATE knowledge_document_jobs
                         SET status = 'cancelled', updated_at = :now
                         WHERE attachment_id = :attachment_id
-                          AND status IN ('queued', 'retry')"""
+                          AND status IN ('queued', 'retry', 'running')"""
                     ),
                     {"attachment_id": attachment_id, "now": datetime.now().isoformat()},
                 )
+
+    async def mark_cancelled(self, job_id: str, reason: str) -> None:
+        """将已取消或已删除附件对应的任务固定为取消态。
+
+        参数：
+            job_id：任务唯一标识。
+            reason：取消原因，供任务诊断页面显示。
+
+        返回：
+            None。
+
+        异常：
+            SQLite 更新失败时向上抛出异常。
+        """
+        await self._mark(job_id, "cancelled", error=reason)
 
     async def recover_interrupted_jobs(self) -> int:
         """将进程退出时处于运行态的任务恢复为可重试状态。
@@ -197,6 +213,7 @@ class KnowledgeDocumentJobRepository:
         result: dict[str, Any] | None = None,
         error: str | None = None,
         available_at: str | None = None,
+        only_running: bool = False,
     ) -> None:
         """写入任务终态或重试态。
 
@@ -222,7 +239,8 @@ class KnowledgeDocumentJobRepository:
                             error_json = :error_json,
                             available_at = COALESCE(:available_at, available_at),
                             updated_at = :updated_at
-                        WHERE job_id = :job_id"""
+                        WHERE job_id = :job_id
+                        AND (:only_running = 0 OR status = 'running')"""
                     ),
                     {
                         "job_id": job_id,
@@ -233,5 +251,6 @@ class KnowledgeDocumentJobRepository:
                         "error_json": error,
                         "available_at": available_at,
                         "updated_at": datetime.now().isoformat(),
+                        "only_running": 1 if only_running else 0,
                     },
                 )

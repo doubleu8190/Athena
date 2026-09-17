@@ -20,9 +20,9 @@ from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import TokenCounter
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.contracts import MemoryRetrievalRequest
-from athena.utils.llm import extract_message_text
+from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
-from athena.utils.prompts import get_prompt
+from athena.utils.prompt_loader import get_prompt
 
 logger = get_logger(__name__)
 
@@ -98,7 +98,7 @@ class HybridMemoryRetriever:
         query: str,
         filter_params: dict[str, Any] | None = None,
         *,
-        record_access: bool = True,
+        record_access: bool = False,
         expand_query: bool = True,
     ) -> list[MemoryRetrievalResult]:
         """执行混合检索（默认跨会话全库）.

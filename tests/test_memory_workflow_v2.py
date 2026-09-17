@@ -171,7 +171,7 @@ async def test_workflow_persists_create_relations(relation, llm_response):
 
 
 @pytest.mark.asyncio
-async def test_workflow_applies_update_and_supersede_actions():
+async def test_workflow_creates_revision_for_update_action():
     class Extractor:
         async def extract(self, turn, *, existing_memories):
             return [MemoryCandidate(content="更新后的事实", source_turn_id=turn.turn_id)]
@@ -191,12 +191,13 @@ async def test_workflow_applies_update_and_supersede_actions():
         async def search(self, *args, **kwargs):
             return []
 
-        async def update_memory(self, memory_id, content):
-            self.updated = (memory_id, content)
-            return True
+        async def revise_memory(self, memory_id, content, *, metadata_overrides):
+            self.revision = (memory_id, content, metadata_overrides)
+            return "m-revision"
 
     memory = Memory()
     await MemoryWriteWorkflow(Extractor(), memory, resolver=Resolver()).process_turn(
         CompletedTurn(turn_id="t1", session_id="s1", user_text="更新")
     )
-    assert memory.updated == ("m-update", "更新后的事实")
+    assert memory.revision[0:2] == ("m-update", "更新后的事实")
+    assert memory.revision[2]["source_turn_id"] == "t1"

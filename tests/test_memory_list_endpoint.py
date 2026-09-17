@@ -94,7 +94,7 @@ def client(manager):
 
     app = FastAPI()
     app.include_router(router)
-    install_runtime(app, memory_manager=manager)
+    install_runtime(app, memory_service=manager)
 
     yield TestClient(app)
 
@@ -156,8 +156,10 @@ async def test_patch_memory_updates_content(manager, client):
     resp = client.patch(f"/memory/{memory_id}", json={"content": "新内容"})
     assert resp.status_code == 200
     assert resp.json()["status"] == "updated"
+    revised_memory_id = resp.json()["memory_id"]
+    assert resp.json()["revised_from"] == memory_id
 
-    fetched = await manager.get_memory(memory_id)
+    fetched = await manager.get_memory(revised_memory_id)
     assert fetched is not None
     assert fetched["content"] == "新内容"
 

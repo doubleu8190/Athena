@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
-
 from athena.core.files.runtime import FileIntelligenceRuntime
 from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
 from athena.models.file import AttachmentStatus
@@ -75,73 +73,42 @@ class KnowledgeContextProvider:
         started = time.perf_counter()
         query = plan.knowledge_query or task.goal
         try:
+            async with asyncio.timeout(self._timeout_seconds):
+                results = await self._file_runtime.search_knowledge(
+                    query, plan.max_items
+                )
             documents = await self._repository.list_global_knowledge_documents()
         except Exception as exc:
-            logger.warning("knowledge_context_provider_list_failed", error=str(exc))
+            logger.warning("knowledge_context_provider_search_failed", error=str(exc))
             return ProviderResult(
                 provider=self.name,
                 status="failed",
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 error_message=str(exc),
             )
-        ready_documents = [
-            document
-            for document in documents
-            if document.status == AttachmentStatus.READY
-        ][: plan.max_files]
-        if not ready_documents:
-            return ProviderResult(
-                provider=self.name,
-                status="succeeded",
-                duration_ms=round((time.perf_counter() - started) * 1000),
+        documents_by_id = {document.id: document for document in documents}
+        items = []
+        for result in results:
+            attachment_id = str(result.get("attachment_id", ""))
+            document = documents_by_id.get(attachment_id)
+            if document is None or document.status != AttachmentStatus.READY:
+                continue
+            items.append(
+                ContextItem(
+                    provider=self.name,
+                    content=str(result.get("content", "")),
+                    source_id=document.id,
+                    title=document.filename,
+                    locator=result.get("locator", {}),
+                    score=result.get("score"),
+                    metadata={"knowledge_base_id": document.knowledge_base_id},
+                )
             )
-        semaphore = asyncio.Semaphore(self._concurrency)
-
-        async def search_one(document) -> list[dict[str, Any]]:
-            """检索单个文档并限制并发。"""
-            async with semaphore:
-                try:
-                    async with asyncio.timeout(self._timeout_seconds):
-                        response = await self._file_runtime.search_file(
-                            session_id,
-                            document.id,
-                            query,
-                            plan.limit_per_file,
-                        )
-                    return list(response.get("results", []))
-                except Exception as exc:
-                    logger.warning(
-                        "knowledge_context_provider_document_failed",
-                        file_id=document.id,
-                        error=str(exc),
-                    )
-                    return []
-
-        result_groups = await asyncio.gather(
-            *(search_one(document) for document in ready_documents)
-        )
-        candidates: list[tuple[float, dict[str, Any], Any]] = []
-        for document, results in zip(ready_documents, result_groups):
-            for rank, result in enumerate(results, 1):
-                candidates.append((1 / (60 + rank), result, document))
-        candidates.sort(key=lambda value: value[0], reverse=True)
-        items = [
-            ContextItem(
-                provider=self.name,
-                content=result.get("content", ""),
-                source_id=document.id,
-                title=document.filename,
-                locator=result.get("locator", {}),
-                score=rrf_score,
-                metadata={"knowledge_base_id": document.knowledge_base_id},
-            )
-            for rrf_score, result, document in candidates[: plan.max_items]
-        ]
         return ProviderResult(
             provider=self.name,
             status="succeeded",
             items=items,
-            candidate_count=len(candidates),
+            candidate_count=len(results),
             result_count=len(items),
             duration_ms=round((time.perf_counter() - started) * 1000),
         )

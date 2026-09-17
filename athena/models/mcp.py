@@ -7,7 +7,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
-class McpServerConfig(BaseModel):
+class MCPServerConfig(BaseModel):
     """单个 MCP 服务端 的注册配置（与用户输入的 mcp服务端s 项一致）.
 
     属性：
@@ -21,10 +21,10 @@ class McpServerConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
-class McpServer(BaseModel):
+class MCPServer(BaseModel):
     """已持久化的 MCP 服务器记录."""
 
     name: str
-    config: McpServerConfig
+    config: MCPServerConfig
     created_at: datetime
     deleted_time: datetime | None = None

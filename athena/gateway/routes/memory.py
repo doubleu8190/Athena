@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from athena.utils.logging import get_logger
-from athena.container import runtime_from
+from athena.container import get_runtime_container
 from athena.contracts.errors import ErrorDetail
 
 if TYPE_CHECKING:
@@ -19,8 +19,9 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/memory", tags=["memory"])
 
 
-class SaveMemoryRequest(BaseModel):
+class CreateMemoryRequest(BaseModel):
     """主动保存记忆的请求体。"""
+
     content: str
     session_id: str
     metadata: dict[str, Any] | None = None
@@ -29,6 +30,7 @@ class SaveMemoryRequest(BaseModel):
 
 class SearchMemoryRequest(BaseModel):
     """记忆检索请求体。"""
+
     query: str
     where: dict[str, Any] | None = None
     n_results: int = 5
@@ -36,7 +38,15 @@ class SearchMemoryRequest(BaseModel):
 
 class UpdateMemoryRequest(BaseModel):
     """修改记忆正文的请求体。"""
+
     content: str
+
+
+class MemoryValidityRequest(BaseModel):
+    """更新事实有效性的请求体。"""
+
+    validity_status: Literal["valid", "uncertain", "invalid"]
+    valid_until: str | None = None
 
 
 async def _get_memory_service(request: Request) -> LongTermMemoryService:
@@ -51,11 +61,11 @@ async def _get_memory_service(request: Request) -> LongTermMemoryService:
     异常：
         RuntimeError: 应用运行时未初始化。
     """
-    return runtime_from(request).memory_manager
+    return get_runtime_container(request).memory_service
 
 
 @router.post("/save")
-async def save_memory(req: SaveMemoryRequest, request: Request) -> dict[str, Any]:
+async def create_memory(req: CreateMemoryRequest, request: Request) -> dict[str, Any]:
     """主动保存记忆条目."""
     service = await _get_memory_service(request)
     try:
@@ -72,7 +82,9 @@ async def save_memory(req: SaveMemoryRequest, request: Request) -> dict[str, Any
 
 
 @router.post("/search")
-async def search_memory(req: SearchMemoryRequest, request: Request) -> list[dict[str, Any]]:
+async def search_memory(
+    req: SearchMemoryRequest, request: Request
+) -> list[dict[str, Any]]:
     """检索记忆."""
     service = await _get_memory_service(request)
     try:
@@ -135,22 +147,52 @@ async def update_memory(
     if not content:
         raise HTTPException(status_code=400, detail=ErrorDetail.CONTENT_EMPTY)
     service = await _get_memory_service(request)
-    updated = await service.update_memory(memory_id, content)
-    if not updated:
+    new_memory_id = await service.update_memory(memory_id, content)
+    if new_memory_id is None:
         raise HTTPException(status_code=404, detail=ErrorDetail.MEMORY_NOT_FOUND)
-    return {"status": "updated", "memory_id": memory_id}
+    return {
+        "status": "updated",
+        "memory_id": new_memory_id,
+        "revised_from": memory_id,
+    }
 
 
 @router.post("/{memory_id}/pin")
-async def pin_memory(memory_id: str, request: Request, pinned: bool = True) -> dict[str, Any]:
+async def set_memory_pinned(
+    memory_id: str, request: Request, pinned: bool = True
+) -> dict[str, Any]:
     """固定/取消固定记忆."""
     service = await _get_memory_service(request)
     await service.set_memory_pinned(memory_id, pinned=pinned)
     return {"status": "pinned" if pinned else "unpinned", "memory_id": memory_id}
 
 
+@router.patch("/{memory_id}/validity")
+async def set_memory_validity(
+    memory_id: str, req: MemoryValidityRequest, request: Request
+) -> dict[str, Any]:
+    """更新记忆的事实有效性，不影响访问热度和保留期限。"""
+    service = await _get_memory_service(request)
+    try:
+        updated = await service.set_memory_validity(
+            memory_id,
+            req.validity_status,
+            valid_until=req.valid_until,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail=ErrorDetail.MEMORY_NOT_FOUND)
+    return {
+        "status": "updated",
+        "memory_id": memory_id,
+        "validity_status": req.validity_status,
+        "valid_until": req.valid_until,
+    }
+
+
 @router.post("/cleanup")
-async def cleanup_expired(request: Request) -> dict[str, Any]:
+async def cleanup_expired_memories(request: Request) -> dict[str, Any]:
     """清理过期记忆（手动触发）."""
     service = await _get_memory_service(request)
     count = await service.cleanup_expired()

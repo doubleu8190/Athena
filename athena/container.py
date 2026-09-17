@@ -1,7 +1,7 @@
 """应用级显式依赖容器，附加到 ``FastAPI.app.state``。
 
 将各子系统的运行时实例聚合到一个数据类中，供路由层通过
-``runtime_from()`` 透明获取。隔离了运行时执行逻辑与依赖组装。
+``get_runtime_container()`` 透明获取。隔离了运行时执行逻辑与依赖组装。
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 @dataclass
 class RuntimeContainer:
     """应用运行期间共享的显式依赖集合。"""
+
     db: Database
     event_publisher: RuntimeEventPublisher
     approval_manager: ApprovalManager
@@ -36,12 +37,12 @@ class RuntimeContainer:
     mcp_manager: MCPManager
     llm: LLMProvider
     file_runtime: FileIntelligenceRuntime
-    memory_manager: LongTermMemoryService
+    memory_service: LongTermMemoryService
     agent_store: AgentStore
     realtime_transport: SessionEventBus
 
 
-def runtime_from(connection: HTTPConnection) -> RuntimeContainer:
+def get_runtime_container(connection: HTTPConnection) -> RuntimeContainer:
     """从 HTTP 连接的应用状态读取已初始化的运行时容器。
 
     参数:

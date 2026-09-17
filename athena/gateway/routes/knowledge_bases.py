@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from athena.container import RuntimeContainer, runtime_from
-from athena.core.files.converters import _attachment_to_public
-from athena.models.file import Attachment, AttachmentStatus, KnowledgeBase
+from athena.container import RuntimeContainer, get_runtime_container
+from athena.core.files.attachment_serialization import attachment_to_payload
+from athena.models.file import Attachment, KnowledgeBase
+from athena.utils.logging import get_logger
 
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
+logger = get_logger(__name__)
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -48,35 +50,6 @@ async def _require_knowledge_base(
     if knowledge_base is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
     return knowledge_base
-
-
-async def _process_document(runtime: RuntimeContainer, attachment_id: str) -> None:
-    """在请求返回后解析并索引一个知识库文档。
-
-    参数：
-        runtime (RuntimeContainer): 当前应用运行时容器。
-        attachment_id (str): 待处理文档的附件标识。
-
-    返回值：
-        None: 最终结果写回附件状态。
-
-    异常：
-        处理错误会被转换为 ``failed`` 状态，不向后台任务调度器传播。
-    """
-    try:
-        await runtime.file_runtime.parse_attachment(attachment_id)
-        await runtime.file_runtime.index_attachment(attachment_id)
-        await runtime.db.files.update_attachment(
-            attachment_id,
-            status=AttachmentStatus.READY.value,
-            error_message=None,
-        )
-    except Exception as exc:
-        await runtime.db.files.update_attachment(
-            attachment_id,
-            status=AttachmentStatus.FAILED.value,
-            error_message=str(exc),
-        )
 
 
 async def _store_document(
@@ -132,7 +105,7 @@ async def _store_document(
 @router.get("")
 async def list_knowledge_bases(request: Request) -> list[KnowledgeBase]:
     """列出全部独立知识库。"""
-    return await runtime_from(request).db.knowledge_bases.list_all()
+    return await get_runtime_container(request).db.knowledge_bases.list_all()
 
 
 @router.post("", status_code=201)
@@ -143,7 +116,7 @@ async def create_knowledge_base(
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="知识库名称不能为空")
-    return await runtime_from(request).db.knowledge_bases.create(
+    return await get_runtime_container(request).db.knowledge_bases.create(
         name, body.description.strip()
     )
 
@@ -153,7 +126,7 @@ async def get_knowledge_base_attachment_types(
     request: Request,
 ) -> dict[str, list[str]]:
     """返回知识库文档导入支持的扩展名。"""
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     return {"extensions": runtime.file_runtime.adapter_registry.supported_extensions()}
 
 
@@ -167,7 +140,7 @@ async def update_knowledge_base(
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="知识库名称不能为空")
-    updated = await runtime_from(request).db.knowledge_bases.update(
+    updated = await get_runtime_container(request).db.knowledge_bases.update(
         knowledge_base_id, name, body.description.strip()
     )
     if updated is None:
@@ -180,13 +153,14 @@ async def delete_knowledge_base(
     knowledge_base_id: str, request: Request
 ) -> dict[str, str]:
     """删除知识库及其全部文档。"""
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     await _require_knowledge_base(runtime, knowledge_base_id)
     documents = await runtime.db.files.list_knowledge_base_attachments(
         knowledge_base_id
     )
     for document in documents:
-        await runtime.db.files.soft_delete_knowledge_base_attachment(
+        await runtime.db.knowledge_document_jobs.cancel_attachment_job(document.id)
+        await runtime.file_runtime.delete_knowledge_document(
             document.id, knowledge_base_id
         )
     await runtime.db.knowledge_bases.soft_delete(knowledge_base_id)
@@ -199,10 +173,10 @@ async def list_documents(
     knowledge_base_id: str, request: Request
 ) -> list[dict[str, object]]:
     """列出知识库中的全部文档及处理状态。"""
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     await _require_knowledge_base(runtime, knowledge_base_id)
     return [
-        _attachment_to_public(document, include_metadata=True)
+        attachment_to_payload(document, include_metadata=True)
         for document in await runtime.db.files.list_knowledge_base_attachments(
             knowledge_base_id
         )
@@ -213,33 +187,43 @@ async def list_documents(
 async def upload_documents(
     knowledge_base_id: str,
     request: Request,
-    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
 ) -> list[dict[str, object]]:
     """上传文档，并在响应后异步完成解析和索引。"""
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     await _require_knowledge_base(runtime, knowledge_base_id)
     if not files:
         raise HTTPException(status_code=400, detail="至少选择一个文件")
     created: list[Attachment] = []
     try:
         for upload in files:
-            created.append(
-                await _store_document(runtime, knowledge_base_id, upload)
-            )
+            attachment = await _store_document(runtime, knowledge_base_id, upload)
+            created.append(attachment)
+            # 逐个入队，保证只要接口返回的附件存在，就一定有对应的持久任务。
+            # 任一入队失败时，下面的补偿路径会撤销已经保存的附件和 blob。
+            await runtime.db.knowledge_document_jobs.enqueue_job(attachment.id)
     except Exception:
         for attachment in created:
-            await runtime.db.files.soft_delete_knowledge_base_attachment(
-                attachment.id, knowledge_base_id
-            )
-        await runtime.file_runtime.cleanup_unreferenced_blobs()
+            await runtime.db.knowledge_document_jobs.cancel_attachment_job(attachment.id)
+            try:
+                await runtime.file_runtime.delete_knowledge_document(
+                    attachment.id, knowledge_base_id
+                )
+            except Exception:
+                # 保留首个入队/保存错误，避免补偿异常掩盖真正的 HTTP 错误。
+                logger.exception(
+                    "knowledge_document_upload_compensation_failed",
+                    attachment_id=attachment.id,
+                )
+        try:
+            await runtime.file_runtime.cleanup_unreferenced_blobs()
+        except Exception:
+            logger.exception("knowledge_document_upload_blob_cleanup_failed")
         raise
     finally:
         for upload in files:
             await upload.close()
-    for attachment in created:
-        background_tasks.add_task(_process_document, runtime, attachment.id)
-    return [_attachment_to_public(attachment) for attachment in created]
+    return [attachment_to_payload(attachment) for attachment in created]
 
 
 @router.delete("/{knowledge_base_id}/documents/{attachment_id}")
@@ -247,9 +231,10 @@ async def delete_document(
     knowledge_base_id: str, attachment_id: str, request: Request
 ) -> dict[str, str]:
     """删除知识库中的指定文档及其索引。"""
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     await _require_knowledge_base(runtime, knowledge_base_id)
-    deleted = await runtime.db.files.soft_delete_knowledge_base_attachment(
+    await runtime.db.knowledge_document_jobs.cancel_attachment_job(attachment_id)
+    deleted = await runtime.file_runtime.delete_knowledge_document(
         attachment_id, knowledge_base_id
     )
     if not deleted:

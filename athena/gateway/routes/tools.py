@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from athena.core.tools.manager import UnifiedToolManager
 from athena.models.tool import RiskLevel
 from athena.utils.logging import get_logger
-from athena.container import runtime_from
+from athena.container import get_runtime_container
 from athena.contracts.errors import ErrorDetail
 
 logger = get_logger(__name__)
@@ -42,7 +42,7 @@ class UpdateToolRequest(BaseModel):
 
 def _manager_or_503(request: Request) -> UnifiedToolManager:
     """获取应用启动时注入的工具管理器."""
-    return runtime_from(request).tool_manager
+    return get_runtime_container(request).tool_manager
 
 
 @router.get("")
@@ -50,7 +50,7 @@ async def list_tools(request: Request) -> dict[str, Any]:
     """列出全部工具（含停用），附带治理信息与最近调用时间、今日调用统计."""
     manager = _manager_or_503(request)
 
-    db = runtime_from(request).db
+    db = get_runtime_container(request).db
     last_called = await db.tool_calls.last_called_by_tool()
     calls_today = await db.tool_calls.count_calls_since(
         datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -114,7 +114,7 @@ async def update_tool(name: str, req: UpdateToolRequest, request: Request) -> di
                 ),
             )
 
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     catalog = runtime.tool_catalog
     await catalog.update_governance(
         manager,

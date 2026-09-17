@@ -1,4 +1,4 @@
-"""消息类型转换工具 — 消息模型/dict ↔ BaseMessage 双向转换.
+"""消息类型转换工具 — 消息模型、字典与 BaseMessage 之间的双向转换。
 
 集中管理转换逻辑，避免各模块重复实现。
 """
@@ -17,7 +17,7 @@ from langchain_core.messages import (
 )
 
 from athena.models import Message
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 
 
 def dict_to_message(m: Message | dict[str, Any]) -> BaseMessage:

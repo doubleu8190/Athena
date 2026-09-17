@@ -2,7 +2,7 @@
 
 from langchain_core.messages import AIMessage
 
-from athena.utils.llm import extract_message_text
+from athena.utils.llm_response import extract_message_text
 
 
 def test_str_content() -> None:

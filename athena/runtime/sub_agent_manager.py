@@ -13,16 +13,16 @@ from pydantic import BaseModel, Field
 
 from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
-from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
+from athena.core.harness.harness import Harness, HarnessSettings
 from athena.core.llm.provider import LLMProvider
 from athena.core.tools.manager import UnifiedToolManager
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import AgentStorePort, EventPublisherPort
 from athena.contracts.statuses import AgentRunStatus
 from athena.infrastructure.sqlite.database import Database
-from athena.utils.ids import generate_sub_run_id
+from athena.utils.id_generation import generate_sub_run_id
 from athena.utils.logging import get_logger
-from athena.utils.prompts import get_prompt
+from athena.utils.prompt_loader import get_prompt
 from athena.runtime.orchestration import AgentRole, ToolPolicy
 
 logger = get_logger(__name__)

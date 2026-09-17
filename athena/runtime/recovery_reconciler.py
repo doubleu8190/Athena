@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from athena.contracts.ports import AgentStorePort
-from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentRunStatus
 
 

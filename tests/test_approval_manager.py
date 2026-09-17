@@ -68,4 +68,4 @@ async def test_cancelled_approval_is_expired_and_not_left_pending() -> None:
 
     assert store.resolutions == [(request.id, AgentApprovalDecision.EXPIRED)]
     assert publisher.events[-1].event_type == EventType.APPROVAL_EXPIRED
-    assert manager.get_pending("session-1") == []
+    assert manager.list_pending_approvals("session-1") == []

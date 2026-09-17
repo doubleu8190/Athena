@@ -246,3 +246,19 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_session_status ON approvals(session_id, status);
+
+-- 知识库文档的持久解析/索引队列。运行态任务在应用启动时恢复为 retry；
+-- 附件删除时会转为 cancelled，避免 worker 在删除后重新写入索引。
+CREATE TABLE IF NOT EXISTS knowledge_document_jobs (
+    job_id VARCHAR NOT NULL PRIMARY KEY,
+    attachment_id VARCHAR NOT NULL UNIQUE REFERENCES attachments(id),
+    status VARCHAR NOT NULL DEFAULT 'queued',
+    attempt INTEGER NOT NULL DEFAULT 0,
+    available_at VARCHAR NOT NULL,
+    result_json TEXT,
+    error_json TEXT,
+    created_at VARCHAR NOT NULL,
+    updated_at VARCHAR NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_document_jobs_queue
+ON knowledge_document_jobs(status, available_at);

@@ -1,10 +1,10 @@
 from __future__ import annotations
 from fastapi import APIRouter, Request, HTTPException
-from athena.container import runtime_from
+from athena.container import get_runtime_container
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentCommandStatus
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 from athena.gateway.routes.schemas import CancelCommandResponse, CommandStatusResponse
 from athena.infrastructure.sqlite.repositories import _json_loads
 
@@ -24,7 +24,7 @@ async def cancel_run(run_id: str, request: Request) -> CancelCommandResponse:
     异常:
         HTTP异常: 运行不存在时返回 404。
     """
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     store = runtime.agent_store
     run = await store.get_run(run_id)
     if run is None:
@@ -58,7 +58,7 @@ async def get_command(command_id: str, request: Request) -> CommandStatusRespons
     异常:
         HTTP异常: 命令不存在时返回 404。
     """
-    store = runtime_from(request).agent_store
+    store = get_runtime_container(request).agent_store
     row = await store.get_command(command_id)
     if row is None:
         raise HTTPException(status_code=404, detail=ErrorDetail.COMMAND_NOT_FOUND)

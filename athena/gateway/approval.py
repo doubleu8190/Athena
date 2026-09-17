@@ -13,7 +13,7 @@ from athena.infrastructure.sqlite.database import Database
 from athena.models.approval import ApprovalDecision, ApprovalRequest
 from athena.models.tool import RiskLevel
 from athena.runtime.transport import RuntimeEventPublisher
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 
 
 class ApprovalManager:
@@ -244,12 +244,10 @@ class ApprovalManager:
             self._mark_request(request, AgentApprovalDecision.EXPIRED)
         await self._wake(approval_id, AgentApprovalDecision.EXPIRED)
         if record is not None:
-            await self._publish_resolution_event(
-                request, AgentApprovalDecision.EXPIRED
-            )
+            await self._publish_resolution_event(request, AgentApprovalDecision.EXPIRED)
         return True
 
-    async def respond_approval(self, approval_id: str, action: str) -> bool:
+    async def submit_approval_decision(self, approval_id: str, action: str) -> bool:
         """原子写入外部审批决定，并唤醒当前进程中的等待 Future。
 
         参数:
@@ -309,9 +307,7 @@ class ApprovalManager:
             )
         )
 
-    async def _wake(
-        self, approval_id: str, decision: AgentApprovalDecision
-    ) -> None:
+    async def _wake(self, approval_id: str, decision: AgentApprovalDecision) -> None:
         """完成当前进程中指定审批的 Future。"""
         async with self._waiters_lock:
             waiter = self._waiters.get(approval_id)
@@ -320,9 +316,9 @@ class ApprovalManager:
 
     async def cancel_approval(self, approval_id: str) -> bool:
         """取消一个审批请求，并写入 ``cancelled`` 决定。"""
-        return await self.respond_approval(approval_id, "cancel")
+        return await self.submit_approval_decision(approval_id, "cancel")
 
-    async def cancel_all_pending(self, session_id: str) -> None:
+    async def cancel_pending_approvals(self, session_id: str) -> None:
         """从数据库扫描并取消指定会话的全部待审批记录。
 
         参数:
@@ -345,7 +341,9 @@ class ApprovalManager:
         for approval_id in approval_ids:
             await self.cancel_approval(approval_id)
 
-    def get_pending(self, session_id: str | None = None) -> list[dict[str, Any]]:
+    def list_pending_approvals(
+        self, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """返回当前进程已索引的未解决审批请求。
 
         参数:
@@ -427,9 +425,15 @@ class ApprovalManager:
     @staticmethod
     def _record_decision(record: Any) -> AgentApprovalDecision | None:
         """读取已解析记录的标准决定；pending 返回 ``None``。"""
-        if record is None or getattr(record, "status", None) == AgentApprovalStatus.PENDING.value:
+        if (
+            record is None
+            or getattr(record, "status", None) == AgentApprovalStatus.PENDING.value
+        ):
             return None
-        return _decision_from_value(getattr(record, "decision", None)) or AgentApprovalDecision.DENIED
+        return (
+            _decision_from_value(getattr(record, "decision", None))
+            or AgentApprovalDecision.DENIED
+        )
 
     def _remember_record_decision(
         self,
@@ -476,7 +480,9 @@ def _parse_optional_datetime(value: Any) -> datetime | None:
             parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        return (
+            parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        )
     return None
 
 

@@ -27,8 +27,8 @@ from chromadb import Collection
 from langchain_core.messages import HumanMessage
 
 from athena.config.settings import Settings
-from athena.core.files.base import ExtractedUnit, ExtractionContext
-from athena.core.files.converters import _attachment_to_public
+from athena.core.files.extraction import ExtractedUnit, ExtractionContext
+from athena.core.files.attachment_serialization import attachment_to_payload
 from athena.core.files.registry import AdapterRegistry
 from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
@@ -40,8 +40,8 @@ from athena.models.file import (
     FileChunk,
 )
 from athena.models.json_models import FileLocator, FileMetadata
-from athena.utils.ids import generate_time_id
-from athena.utils.llm import extract_message_text
+from athena.utils.id_generation import generate_time_id
+from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
 from chromadb.api import ClientAPI
 
@@ -117,6 +117,7 @@ class FileIntelligenceRuntime:
         self._events = event_publisher
         self._chroma_client: ClientAPI | None = None
         self._collection: Collection | None = None
+        self._knowledge_document_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def vector_index_ready(self) -> bool:
@@ -247,9 +248,7 @@ class FileIntelligenceRuntime:
         finally:
             self.storage.cleanup_workspace(workspace)
 
-    async def index_attachment(
-        self, attachment_id: str
-    ) -> dict[str, Any]:
+    async def index_attachment(self, attachment_id: str) -> dict[str, Any]:
         """将附件分块写入 ChromaDB 向量索引。
 
         按 100 个分块一批写入；失败时抛出异常，由调用方统一更新附件状态。
@@ -297,6 +296,118 @@ class FileIntelligenceRuntime:
                 )
                 raise
         return {"chunks": len(chunks), "vector_indexed": self._collection is not None}
+
+    async def process_knowledge_document(self, attachment_id: str) -> dict[str, Any]:
+        """幂等完成知识库文档解析和向量索引。
+
+        参数：
+            attachment_id：知识库文档附件 ID。
+
+        返回：
+            解析和索引阶段的统计信息。
+
+        异常：
+            解析、SQLite 写入或向量索引失败时向上抛出，由任务 worker 负责重试。
+        """
+        async with self._knowledge_lock(attachment_id):
+            await self.initialize()
+            attachment = await self.repository.get_attachment(attachment_id)
+            if attachment is None or attachment.knowledge_base_id is None:
+                raise FileNotFoundError("知识库文档不存在")
+            metadata = await self.parse_attachment(attachment_id)
+            # 删除请求可能在解析耗时阶段完成。再次读取附件能阻止后续向量
+            # 写入，并由删除路径清理本轮已经生成的 SQLite 派生数据。
+            attachment = await self.repository.get_attachment(attachment_id)
+            if attachment is None or attachment.knowledge_base_id is None:
+                raise FileNotFoundError("知识库文档已删除")
+            indexed = await self.index_attachment(attachment_id)
+            updated = await self.repository.update_attachment(
+                attachment_id,
+                status=AttachmentStatus.READY.value,
+                error_message=None,
+            )
+            if updated is None:
+                await self.delete_attachment_vectors(attachment_id)
+                raise FileNotFoundError("知识库文档已删除")
+            return {**metadata, **indexed}
+
+    async def delete_knowledge_document(
+        self, attachment_id: str, knowledge_base_id: str
+    ) -> bool:
+        """删除知识库文档的向量索引和 SQLite 派生数据。
+
+        参数：
+            attachment_id：要删除的知识库文档附件 ID。
+            knowledge_base_id：目标文档所属的知识库 ID。
+
+        返回：
+            成功删除时返回 ``True``；文档不存在或不属于该知识库时返回 ``False``。
+
+        异常：
+            Chroma 删除失败时不会继续删除 SQLite 数据，避免留下无法重建的状态。
+        """
+        async with self._knowledge_lock(attachment_id):
+            attachment = await self.repository.get_attachment(attachment_id)
+            if attachment is None or attachment.knowledge_base_id != knowledge_base_id:
+                return False
+            await self.initialize()
+            try:
+                await self.delete_attachment_vectors(attachment_id)
+                deleted = await self.repository.soft_delete_knowledge_base_attachment(
+                    attachment_id, knowledge_base_id
+                )
+            except Exception:
+                # Chroma 先于 SQLite 清理；SQLite 失败时以仍在库中的分块重建向量。
+                try:
+                    current = await self.repository.get_attachment(
+                        attachment_id, include_deleted=True
+                    )
+                    if current is not None and current.deleted_time is None:
+                        await self.index_attachment(attachment_id)
+                except Exception:
+                    logger.exception(
+                        "knowledge_delete_vector_compensation_failed",
+                        attachment_id=attachment_id,
+                    )
+                raise
+            if not deleted:
+                current = await self.repository.get_attachment(
+                    attachment_id, include_deleted=True
+                )
+                if current is not None and current.deleted_time is None:
+                    await self.index_attachment(attachment_id)
+            return deleted
+
+    async def delete_attachment_vectors(self, attachment_id: str) -> None:
+        """删除某附件在 Chroma 中的全部向量。
+
+        参数：
+            attachment_id：附件唯一标识。
+
+        返回：
+            None。
+
+        异常：
+            Chroma 删除失败时向上抛出异常。
+        """
+        if self._collection is not None:
+            await asyncio.to_thread(
+                self._collection.delete, where={"attachment_id": attachment_id}
+            )
+
+    def _knowledge_lock(self, attachment_id: str) -> asyncio.Lock:
+        """返回同一知识库文档共享的异步互斥锁。
+
+        参数：
+            attachment_id：附件唯一标识。
+
+        返回：
+            当前进程内用于串行化解析和删除的锁。
+
+        异常：
+            不主动抛出业务异常。
+        """
+        return self._knowledge_document_locks.setdefault(attachment_id, asyncio.Lock())
 
     def _chunk_units(
         self, attachment_id: str, units: list[ExtractedUnit]
@@ -406,7 +517,8 @@ class FileIntelligenceRuntime:
         session_files = await self.repository.list_session_attachments(session_id)
         knowledge_documents = await self.repository.list_global_knowledge_documents()
         return [
-            _attachment_to_public(item) for item in [*session_files, *knowledge_documents]
+            attachment_to_payload(item)
+            for item in [*session_files, *knowledge_documents]
         ]
 
     async def list_session_files(self, session_id: str) -> list[dict[str, Any]]:
@@ -422,13 +534,13 @@ class FileIntelligenceRuntime:
             数据库读取失败时传播底层异常。
         """
         return [
-            _attachment_to_public(item)
+            attachment_to_payload(item)
             for item in await self.repository.list_session_attachments(session_id)
         ]
 
     async def get_file_info(self, session_id: str, file_id: str) -> dict[str, Any]:
         """获取附件详情（含元数据）。"""
-        return _attachment_to_public(
+        return attachment_to_payload(
             await self.require_attachment(session_id, file_id), include_metadata=True
         )
 
@@ -456,7 +568,7 @@ class FileIntelligenceRuntime:
         attachment = await self.require_attachment(session_id, file_id)
         if attachment.status == AttachmentStatus.FAILED:
             return {
-                "file": _attachment_to_public(attachment),
+                "file": attachment_to_payload(attachment),
                 "waiting": False,
                 "error": attachment.error_message or "文件处理失败",
                 "message": "文件处理失败，无法读取内容。请重新上传或重试处理。",
@@ -472,7 +584,7 @@ class FileIntelligenceRuntime:
                 },
             )
             return {
-                "file": _attachment_to_public(attachment),
+                "file": attachment_to_payload(attachment),
                 "waiting": True,
                 "message": "文件仍在处理中，请稍后再次读取。",
             }
@@ -482,7 +594,7 @@ class FileIntelligenceRuntime:
         )
         if not chunks and attachment.adapter_name == "image":
             return {
-                "file": _attachment_to_public(attachment),
+                "file": attachment_to_payload(attachment),
                 "chunks": [],
                 "message": "图片未识别出可读取的 OCR 文本；如需描述图片画面，请使用 analyze_file，并确保视觉模型能力已启用。",
             }
@@ -496,7 +608,7 @@ class FileIntelligenceRuntime:
                 ]
         chunks = chunks[:limit]
         return {
-            "file": _attachment_to_public(attachment),
+            "file": attachment_to_payload(attachment),
             "chunks": [
                 {
                     "content": c.content,
@@ -542,6 +654,45 @@ class FileIntelligenceRuntime:
                 "图片没有可搜索的 OCR 文本；搜索工具无法检索视觉元素，请改用 analyze_file。"
             )
         return response
+
+    async def search_knowledge(
+        self, query: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """在全部未删除知识库文档的分块上执行一次全局混合检索。
+
+        参数：
+            query：用户检索文本。
+            limit：最多返回的分块数量，范围为 1-50。
+
+        返回：
+            带文档 ID、定位器和融合分数的分块结果。
+
+        异常：
+            SQLite 读取失败时向上抛出；向量检索失败时降级为关键词结果。
+        """
+        limit = min(max(limit, 1), 50)
+        keyword = await self.repository.search_knowledge_chunks(query, limit)
+        vector: list[dict[str, Any]] = []
+        if self._collection is not None:
+            try:
+                result = await asyncio.to_thread(
+                    self._collection.query,
+                    query_texts=[query],
+                    n_results=max(limit * 3, limit),
+                    include=["documents", "metadatas", "distances"],
+                )
+                vector = self._vector_items(result)
+            except Exception as exc:
+                logger.warning("knowledge_vector_search_failed", error=str(exc))
+        live_ids = {
+            document.id
+            for document in await self.repository.list_global_knowledge_documents()
+            if document.status == AttachmentStatus.READY
+        }
+        vector = [
+            item for item in vector if str(item.get("attachment_id", "")) in live_ids
+        ]
+        return self._fuse_file_results(keyword, vector, limit)
 
     def _failed_file_search_response(
         self,
@@ -646,6 +797,7 @@ class FileIntelligenceRuntime:
                 "locator": FileLocator.model_validate_json(
                     (metadata or {}).get("locator_json", "{}")
                 ).model_dump(mode="json", exclude_none=True),
+                "attachment_id": (metadata or {}).get("attachment_id", ""),
                 "score": max(0.0, 1 - float(distance) / 2),
                 "native_score": max(0.0, 1 - float(distance) / 2),
             }
@@ -682,6 +834,7 @@ class FileIntelligenceRuntime:
             values[chunk.id] = {
                 "id": chunk.id,
                 "content": chunk.content,
+                "attachment_id": chunk.attachment_id,
                 "locator": chunk.locator.model_dump(mode="json", exclude_none=True),
                 "native_score": chunk.native_score,
             }
@@ -826,7 +979,7 @@ class FileIntelligenceRuntime:
         """分析代码项目：返回语言分布、文件数、符号数和依赖数。"""
         attachment = await self.require_attachment(session_id, file_id)
         return {
-            "file": _attachment_to_public(attachment),
+            "file": attachment_to_payload(attachment),
             "languages": attachment.metadata.languages,
             "files": attachment.metadata.files or 1,
             "symbols": attachment.metadata.symbol_count or 0,
@@ -963,9 +1116,7 @@ class FileIntelligenceRuntime:
                 ),
                 run_id=str(data["run_id"]) if data.get("run_id") else None,
                 transition_id=(
-                    str(data["transition_id"])
-                    if data.get("transition_id")
-                    else None
+                    str(data["transition_id"]) if data.get("transition_id") else None
                 ),
                 payload=data,
             )
@@ -978,7 +1129,7 @@ class FileIntelligenceRuntime:
         # 知识库文档不属于单一会话，状态由知识库 API 查询，不写入会话 SSE。
         if attachment.session_id is None:
             return
-        data = _attachment_to_public(attachment, True)
+        data = attachment_to_payload(attachment, True)
         data["attachment_id"] = attachment.id
         if run_id:
             data["run_id"] = run_id

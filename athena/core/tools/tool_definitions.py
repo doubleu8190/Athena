@@ -1,4 +1,4 @@
-"""工具基类 — Native 与 MCP 工具的统一抽象.
+"""工具定义 — Native 与 MCP 工具的统一抽象。
 
 管理层统一（MCP 风格 Schema），执行层分离（Native / MCP）。
 - NativeTool: 直接 Python 函数调用，适合高频轻量操作
@@ -24,7 +24,7 @@ from typing import (
 )
 
 from athena.models.tool import RiskLevel, ToolExecutionMode, ToolResult, ToolSchema
-from athena.utils.llm import extract_message_text
+from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:

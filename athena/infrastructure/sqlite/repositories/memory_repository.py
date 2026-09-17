@@ -20,13 +20,26 @@ _SYSTEM_KEYS = frozenset(
         "created_at",
         "last_accessed",
         "access_count",
-    "pinned",
-    "status",
+        "pinned",
+        "status",
         "expires_at",
+        "last_observed_at",
+        "validity_status",
+        "valid_until",
+        "revision_of",
+        "revision",
     }
 )
 _FILTER_COLUMNS = frozenset(
-    {"session_id", "type", "category", "confidence", "source", "pinned"}
+    {
+        "session_id",
+        "type",
+        "category",
+        "confidence",
+        "source",
+        "pinned",
+        "validity_status",
+    }
 )
 
 
@@ -48,6 +61,11 @@ def _metadata(row: Any) -> dict[str, Any]:
         "access_count": row.access_count,
         "pinned": bool(row.pinned),
         "expires_at": row.expires_at or "",
+        "last_observed_at": row.last_observed_at or "",
+        "validity_status": row.validity_status or "valid",
+        "valid_until": row.valid_until or "",
+        "revision_of": row.revision_of or "",
+        "revision": row.revision,
         "session_id": row.session_id,
         "status": getattr(row, "status", "active") or "active",
     }
@@ -97,7 +115,13 @@ class SQLiteMemoryRepository:
                         confidence=metadata.get("confidence"),
                         source=metadata.get("source"),
                         source_turn_id=metadata.get("source_turn_id"),
-                        last_observed_at=record["created_at"],
+                        last_observed_at=metadata.get(
+                            "last_observed_at", record["created_at"]
+                        ),
+                        validity_status=metadata.get("validity_status", "valid"),
+                        valid_until=metadata.get("valid_until"),
+                        revision_of=metadata.get("revision_of"),
+                        revision=int(metadata.get("revision", 1)),
                     )
                 )
                 await session.execute(
@@ -130,14 +154,11 @@ class SQLiteMemoryRepository:
                 await session.execute(text("DELETE FROM memory_processing_jobs"))
         return int(memory_count)
 
-    async def flush_access_stats(
-        self, stats: dict[str, Any], expires_at: str
-    ) -> list[dict[str, Any]]:
+    async def flush_access_stats(self, stats: dict[str, Any]) -> list[dict[str, Any]]:
         """
 
         参数：
             stats (dict[str, Any]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            expires_at (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
             list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -166,10 +187,6 @@ class SQLiteMemoryRepository:
                                 (MemoryModel.id == mid, value.count)
                                 for mid, value in stats.items()
                             ]
-                        ),
-                        expires_at=case(
-                            (MemoryModel.pinned == 0, expires_at),
-                            else_=MemoryModel.expires_at,
                         ),
                     )
                     .returning(
@@ -213,13 +230,21 @@ class SQLiteMemoryRepository:
             SELECT m.id, m.content, m.metadata_json, m.session_id,
                    m.created_at, m.pinned, m.expires_at, m.last_accessed,
                    m.access_count, m.type, m.category, m.confidence, m.source, m.status,
+                   m.last_observed_at, m.validity_status, m.valid_until,
+                   m.revision_of, m.revision,
                    bm25(memory_fts) AS rank
             FROM memory_fts
             JOIN memories m ON memory_fts.memory_id = m.id
             WHERE memory_fts MATCH :match_expr AND m.deleted_time IS NULL
               AND m.status = 'active'
+              AND m.validity_status != 'invalid'
+              AND (m.valid_until IS NULL OR m.valid_until >= :now)
         """
-        params: dict[str, Any] = {"match_expr": " OR ".join(terms), "limit": limit}
+        params: dict[str, Any] = {
+            "match_expr": " OR ".join(terms),
+            "limit": limit,
+            "now": datetime.now().isoformat(),
+        }
         for key, value in (where or {}).items():
             if key not in _FILTER_COLUMNS:
                 raise ValueError(f"Unsupported memory filter: {key}")
@@ -284,6 +309,10 @@ class SQLiteMemoryRepository:
                 "created_at": row.created_at,
                 "last_accessed": row.last_accessed,
                 "access_count": row.access_count,
+                "validity_status": row.validity_status,
+                "valid_until": row.valid_until,
+                "revision_of": row.revision_of,
+                "revision": row.revision,
             }
             for row in rows
         ]
@@ -362,13 +391,46 @@ class SQLiteMemoryRepository:
                 )
                 return previous
 
+    async def get_active_memory(self, memory_id: str) -> dict[str, Any] | None:
+        """读取一条可被修订的活跃记忆及其结构化元数据。
+
+        参数：
+            memory_id：目标记忆 ID。
+
+        返回：
+            活跃记录存在时返回内容、固定状态和元数据；否则返回 None。
+
+        异常：
+            SQLite 查询失败时向上抛出异常。
+        """
+        async with get_memory_database_session() as session:
+            row = (
+                await session.execute(
+                    select(MemoryModel).where(
+                        MemoryModel.id == memory_id,
+                        MemoryModel.status == "active",
+                        MemoryModel.deleted_time.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "content": row.content,
+            "pinned": bool(row.pinned),
+            "metadata": _metadata(row),
+        }
+
     async def mark_superseded(self, old_id: str, new_id: str) -> bool:
         now = datetime.now().isoformat()
         async with get_memory_database_session() as session:
             async with session.begin():
                 result = await session.execute(
                     update(MemoryModel).where(
-                        MemoryModel.id == old_id, MemoryModel.deleted_time.is_(None)
+                        MemoryModel.id == old_id,
+                        MemoryModel.status == "active",
+                        MemoryModel.deleted_time.is_(None),
                     ).values(status="superseded", superseded_by=new_id, superseded_at=now)
                 )
                 if result.rowcount != 1:
@@ -379,6 +441,97 @@ class SQLiteMemoryRepository:
                     {"source": new_id, "target": old_id, "created": now})
                 await session.execute(text("DELETE FROM memory_fts WHERE memory_id = :id"), {"id": old_id})
                 return True
+
+    async def restore_active(self, memory_id: str) -> None:
+        """回滚 supersede 后的旧记忆状态并恢复关键词索引。
+
+        参数：
+            memory_id：需要重新激活的旧版本 ID。
+
+        返回：
+            None。
+
+        异常：
+            SQLite 更新失败时向上抛出异常。
+        """
+        async with get_memory_database_session() as session:
+            async with session.begin():
+                row = await session.get(MemoryModel, memory_id)
+                if row is None:
+                    return
+                row.status = "active"
+                row.superseded_by = None
+                row.superseded_at = None
+                await session.execute(
+                    text("DELETE FROM memory_fts WHERE memory_id = :id"),
+                    {"id": memory_id},
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :id)"
+                    ),
+                    {"content": row.content, "id": memory_id},
+                )
+
+    async def set_validity(
+        self,
+        memory_id: str,
+        validity_status: str,
+        valid_until: str | None,
+        last_observed_at: str | None,
+    ) -> dict[str, Any] | None:
+        """更新活跃记忆的事实有效性并同步 FTS 索引。
+
+        参数：
+            memory_id：目标活跃记忆 ID。
+            validity_status：事实有效性状态。
+            valid_until：事实有效截止时间。
+            last_observed_at：本次事实观测时间。
+
+        返回：
+            更新前的有效性字段；记录不存在时返回 None。
+
+        异常：
+            SQLite 事务失败时向上抛出异常。
+        """
+        async with get_memory_database_session() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(MemoryModel).where(
+                            MemoryModel.id == memory_id,
+                            MemoryModel.status == "active",
+                            MemoryModel.deleted_time.is_(None),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    return None
+                previous = {
+                    "validity_status": row.validity_status,
+                    "valid_until": row.valid_until,
+                    "last_observed_at": row.last_observed_at,
+                }
+                row.validity_status = validity_status
+                row.valid_until = valid_until
+                row.last_observed_at = last_observed_at
+                if validity_status == "invalid":
+                    await session.execute(
+                        text("DELETE FROM memory_fts WHERE memory_id = :id"),
+                        {"id": memory_id},
+                    )
+                else:
+                    await session.execute(
+                        text("DELETE FROM memory_fts WHERE memory_id = :id"),
+                        {"id": memory_id},
+                    )
+                    await session.execute(
+                        text(
+                            "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :id)"
+                        ),
+                        {"content": row.content, "id": memory_id},
+                    )
+                return previous
 
     async def add_relation(
         self, source_id: str, target_id: str, relation_type: str

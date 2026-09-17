@@ -9,22 +9,22 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from athena.models.mcp import McpServerConfig
-from athena.container import runtime_from
+from athena.models.mcp import MCPServerConfig
+from athena.container import get_runtime_container
 from athena.contracts.errors import ErrorDetail
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 
-class McpServersPayload(BaseModel):
+class MCPServersRequest(BaseModel):
     """注册请求体 — 与用户输入的 mcp服务端s 格式一致."""
 
-    mcpServers: dict[str, McpServerConfig]
+    mcp_servers: dict[str, MCPServerConfig] = Field(alias="mcpServers")
 
 
-class McpServerView(BaseModel):
+class MCPServerView(BaseModel):
     """已注册服务器视图（env 仅掩码，绝不返回原文）. 仅供展示."""
 
     name: str
@@ -37,7 +37,7 @@ class McpServerView(BaseModel):
     created_at: str
 
 
-class McpRegisterResult(BaseModel):
+class MCPRegisterResult(BaseModel):
     """单台服务器注册结果."""
 
     name: str
@@ -49,22 +49,24 @@ class McpRegisterResult(BaseModel):
 @router.get("/servers")
 async def list_mcp_servers(request: Request) -> dict[str, Any]:
     """列出所有已持久化的 MCP 服务器，附实时连接状态."""
-    manager = runtime_from(request).mcp_manager
+    manager = get_runtime_container(request).mcp_manager
     items = await manager.list_servers()
     return {"items": items, "total": len(items)}
 
 
 @router.post("/servers")
-async def register_mcp_servers(payload: McpServersPayload, request: Request) -> dict[str, Any]:
+async def register_mcp_servers(
+    payload: MCPServersRequest, request: Request
+) -> dict[str, Any]:
     """注册 MCP 服务器（可一次注册多个）.
 
     逐台注册，单台失败不影响其它；始终返回 HTTP 200，状态在 results 中逐台体现。
     """
-    manager = runtime_from(request).mcp_manager
-    results: list[McpRegisterResult] = []
-    for name, config in payload.mcpServers.items():
+    manager = get_runtime_container(request).mcp_manager
+    results: list[MCPRegisterResult] = []
+    for name, config in payload.mcp_servers.items():
         result = await manager.register_server(name, config)
-        results.append(McpRegisterResult(**result))
+        results.append(MCPRegisterResult(**result))
 
     registered = sum(1 for r in results if r.status == "connected")
     return {
@@ -81,7 +83,7 @@ async def unregister_mcp_server(name: str, request: Request) -> dict[str, Any]:
 
     {name:path} 用于处理含 / 或 @ 的服务器名（客户端需 URL 编码）。
     """
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     manager = runtime.mcp_manager
     db = runtime.db
     if await db.mcp_servers.get(name) is None:

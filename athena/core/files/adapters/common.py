@@ -11,15 +11,37 @@ from athena.utils.logging import get_logger
 logger = get_logger(__name__)
 
 TEXT_EXTENSIONS = {
-    ".txt", ".md", ".rst", ".json", ".yaml", ".yml", ".toml", ".xml",
-    ".html", ".css", ".sql", ".log", ".ini", ".cfg",
+    ".txt",
+    ".md",
+    ".rst",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".html",
+    ".css",
+    ".sql",
+    ".log",
+    ".ini",
+    ".cfg",
 }
 
 CODE_EXTENSIONS = {
-    ".py": "python", ".js": "javascript", ".jsx": "javascript",
-    ".ts": "typescript", ".tsx": "typescript", ".java": "java",
-    ".go": "go", ".rs": "rust", ".c": "c", ".h": "c", ".cc": "cpp",
-    ".cpp": "cpp", ".hpp": "cpp", ".cs": "c_sharp",
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".cs": "c_sharp",
 }
 
 

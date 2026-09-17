@@ -15,9 +15,9 @@ from pydantic import BaseModel
 
 from athena.infrastructure.sqlite.database import Database
 from athena.models import CommandPayload, Message, Session
-from athena.utils.ids import generate_session_id
+from athena.utils.id_generation import generate_session_id
 from athena.utils.logging import get_logger
-from athena.container import RuntimeContainer, runtime_from
+from athena.container import RuntimeContainer, get_runtime_container
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentCommandStatus
@@ -28,7 +28,7 @@ from athena.gateway.routes.schemas import (
     SessionDeletionResponse,
     SubmitRunResponse,
 )
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 
 logger = get_logger(__name__)
 
@@ -49,7 +49,7 @@ class SendMessageRequest(BaseModel):
 
 
 @dataclass
-class ParsedSubmitRun:
+class ParsedRunSubmission:
     """已解析的消息提交请求及本次请求产生的附件。"""
 
     message: str
@@ -68,9 +68,9 @@ def _is_upload_file(value: object) -> TypeGuard[UploadFile]:
     )
 
 
-async def _db_for(request: Request) -> Database:
+def _get_database(request: Request) -> Database:
     """从请求上下文获取数据库实例。"""
-    return runtime_from(request).db
+    return get_runtime_container(request).db
 
 
 async def _cleanup_uploaded_attachments(
@@ -85,30 +85,26 @@ async def _cleanup_uploaded_attachments(
         await runtime.file_runtime.cleanup_unreferenced_blobs()
 
 
-async def _parse_json_run_request(request: Request) -> ParsedSubmitRun:
+async def _parse_json_run_submission(request: Request) -> ParsedRunSubmission:
     """解析 JSON 消息提交请求。"""
     try:
         req = SendMessageRequest.model_validate(await request.json())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return ParsedSubmitRun(message=req.message, command_id=req.command_id)
+    return ParsedRunSubmission(message=req.message, command_id=req.command_id)
 
 
-async def _parse_multipart_run_request(
+async def _parse_multipart_run_submission(
     session_id: str,
     request: Request,
     runtime: RuntimeContainer,
     message_id: str,
-) -> ParsedSubmitRun:
+) -> ParsedRunSubmission:
     """解析 multipart 消息提交请求并保存附件。"""
     form = await request.form()
     message = str(form.get("message") or "")
     command_id = str(form.get("command_id") or "")
-    upload_files = [
-        item
-        for item in form.getlist("files")
-        if _is_upload_file(item)
-    ]
+    upload_files = [item for item in form.getlist("files") if _is_upload_file(item)]
     if not command_id:
         for file in upload_files:
             await file.close()
@@ -159,7 +155,7 @@ async def _parse_multipart_run_request(
         finally:
             await file.close()
 
-    return ParsedSubmitRun(
+    return ParsedRunSubmission(
         message=message,
         command_id=command_id,
         attachment_ids=attachment_ids,
@@ -170,7 +166,7 @@ async def _parse_multipart_run_request(
 @router.post("")
 async def create_session(req: CreateSessionRequest, request: Request) -> Session:
     """创建新会话."""
-    db = await _db_for(request)
+    db = _get_database(request)
     session_id = generate_session_id()
     session = await db.sessions.create(session_id, title=req.title)
     return session
@@ -179,14 +175,14 @@ async def create_session(req: CreateSessionRequest, request: Request) -> Session
 @router.get("")
 async def list_sessions(request: Request) -> list[Session]:
     """列出所有会话."""
-    db = await _db_for(request)
+    db = _get_database(request)
     return await db.sessions.list_all()
 
 
 @router.get("/{session_id}")
 async def get_session(session_id: str, request: Request) -> Session:
     """获取会话详情."""
-    db = await _db_for(request)
+    db = _get_database(request)
     session = await db.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
@@ -207,7 +203,7 @@ async def update_session(
     title = req.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail=ErrorDetail.TITLE_EMPTY)
-    db = await _db_for(request)
+    db = _get_database(request)
     session = await db.sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
@@ -220,26 +216,28 @@ async def update_session(
 @router.delete("/{session_id}")
 async def delete_session(session_id: str, request: Request) -> SessionDeletionResponse:
     """删除会话及其所有关联数据."""
-    db = await _db_for(request)
+    db = _get_database(request)
     await db.files.soft_delete_session_attachments(session_id)
-    await runtime_from(request).file_runtime.cleanup_unreferenced_blobs()
+    await get_runtime_container(request).file_runtime.cleanup_unreferenced_blobs()
     await db.sessions.delete(session_id)
     return SessionDeletionResponse(status="deleted", session_id=session_id)
 
 
 @router.get("/{session_id}/messages")
-async def get_messages(
+async def list_session_messages(
     session_id: str, request: Request, limit: int | None = None
 ) -> list[Message]:
     """获取会话消息列表."""
-    db = await _db_for(request)
+    db = _get_database(request)
     if not await db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
     return await db.messages.get_by_session(session_id, limit=limit)
 
 
 @router.get("/{session_id}/runs")
-async def get_runs(session_id: str, request: Request) -> list[RunSummaryResponse]:
+async def list_session_runs(
+    session_id: str, request: Request
+) -> list[RunSummaryResponse]:
     """列出会话的运行记录及暂停、取消标志。
 
     参数:
@@ -250,7 +248,7 @@ async def get_runs(session_id: str, request: Request) -> list[RunSummaryResponse
     异常:
         HTTP异常: 会话不存在时返回 404。
     """
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     if not await runtime.db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
     store = runtime.agent_store
@@ -283,18 +281,18 @@ async def submit_run(session_id: str, request: Request) -> SubmitRunResponse:
     异常:
         HTTP异常: 会话不存在、命令冲突或会话已有不可并行运行时抛出。
     """
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     if not await runtime.db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
 
     message_id = generate_time_id()
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("multipart/"):
-        parsed = await _parse_multipart_run_request(
+        parsed = await _parse_multipart_run_submission(
             session_id, request, runtime, message_id
         )
     else:
-        parsed = await _parse_json_run_request(request)
+        parsed = await _parse_json_run_submission(request)
 
     message = parsed.message
     command_id = parsed.command_id
@@ -352,7 +350,7 @@ async def submit_run(session_id: str, request: Request) -> SubmitRunResponse:
     )
 
 
-async def _enqueue_control(
+async def _enqueue_session_run_control(
     session_id: str, command_type: CommandType, request: Request
 ) -> ControlCommandResponse:
     """将暂停、恢复或其他控制命令写入命令队列。
@@ -366,7 +364,7 @@ async def _enqueue_control(
     异常:
         HTTP异常: 会话不存在时返回 404；入队失败时传播对应错误。
     """
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     if not await runtime.db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
     store = runtime.agent_store
@@ -387,13 +385,17 @@ async def _enqueue_control(
 @router.post("/{session_id}/pause", status_code=202)
 async def pause_run(session_id: str, request: Request) -> ControlCommandResponse:
     """提交暂停会话的控制命令。"""
-    return await _enqueue_control(session_id, CommandType.RUN_PAUSE, request)
+    return await _enqueue_session_run_control(
+        session_id, CommandType.RUN_PAUSE, request
+    )
 
 
 @router.post("/{session_id}/resume", status_code=202)
 async def resume_run(session_id: str, request: Request) -> ControlCommandResponse:
     """提交恢复会话的控制命令。"""
-    return await _enqueue_control(session_id, CommandType.RUN_RESUME, request)
+    return await _enqueue_session_run_control(
+        session_id, CommandType.RUN_RESUME, request
+    )
 
 
 @router.post("/{session_id}/cancel", status_code=202)
@@ -411,7 +413,7 @@ async def cancel_run(
     异常:
         HTTP异常: 会话不存在或命令入队失败时抛出。
     """
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     if not await runtime.db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
     command = Command(

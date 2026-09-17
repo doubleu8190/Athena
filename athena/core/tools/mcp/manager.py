@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from athena.core.tools.mcp.adapter import MCPToolAdapter
-from athena.models.mcp import McpServerConfig
+from athena.models.mcp import MCPServerConfig
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -70,7 +70,7 @@ class MCPManager:
     # ------------------------------------------------------------------
 
     async def register_server(
-        self, name: str, config: McpServerConfig
+        self, name: str, config: MCPServerConfig
     ) -> dict[str, Any]:
         """注册一个 MCP 服务端：持久化配置 + 连接 + 注册工具.
 

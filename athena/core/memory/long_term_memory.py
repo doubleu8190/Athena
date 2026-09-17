@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 from athena.config.settings import Settings
 from athena.core.memory.ports import MemoryRepository, MemoryVectorStore
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -133,11 +133,8 @@ class LongTermMemoryService:
         self._access_stats.clear()
         if not stats:
             return 0
-        expires_at = (
-            datetime.now() + timedelta(days=self._settings.memory_ttl_days)
-        ).isoformat()
         try:
-            rows = await self._repository.flush_access_stats(stats, expires_at)
+            rows = await self._repository.flush_access_stats(stats)
         except Exception:
             self._access_stats.update(stats)
             logger.exception("memory_flush_sqlite_failed")
@@ -149,9 +146,6 @@ class LongTermMemoryService:
                     metadata={
                         "last_accessed": row["last_accessed"],
                         "access_count": row["access_count"],
-                        "expires_at": (
-                            "" if row["pinned"] else (row["expires_at"] or "")
-                        ),
                     },
                 )
         except Exception:
@@ -199,21 +193,50 @@ class LongTermMemoryService:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await self.initialize()
-        metadata = metadata or {}
-        if not metadata.get("session_id"):
+        input_metadata = dict(metadata or {})
+        if not input_metadata.get("session_id"):
             logger.warning("add_memory_missing_session_id")
+        validity_status = str(input_metadata.get("validity_status", "valid"))
+        if validity_status not in {"valid", "uncertain", "invalid"}:
+            raise ValueError("validity_status must be valid, uncertain, or invalid")
+        valid_until = input_metadata.get("valid_until")
+        if valid_until is not None:
+            try:
+                datetime.fromisoformat(str(valid_until))
+            except ValueError as exc:
+                raise ValueError("valid_until must be an ISO-8601 datetime") from exc
+        revision_of = input_metadata.get("revision_of")
+        revision = int(input_metadata.get("revision", 1))
+        last_observed_at = (
+            input_metadata.get("last_observed_at") or datetime.now().isoformat()
+        )
         reserved = {
             "created_at",
             "last_accessed",
             "access_count",
             "pinned",
             "expires_at",
+            "status",
+            "last_observed_at",
+            "validity_status",
+            "valid_until",
+            "revision_of",
+            "revision",
         }
         metadata = {
-            key: value for key, value in metadata.items() if key not in reserved
+            key: value for key, value in input_metadata.items() if key not in reserved
         }
         memory_id = generate_time_id()
         now = datetime.now().isoformat()
+        metadata.update(
+            {
+                "validity_status": validity_status,
+                "valid_until": valid_until,
+                "revision_of": revision_of,
+                "revision": revision,
+                "last_observed_at": last_observed_at,
+            }
+        )
         expires_at = (
             None
             if pinned
@@ -236,8 +259,13 @@ class LongTermMemoryService:
             "access_count": 0,
             "pinned": pinned,
             "expires_at": expires_at or "",
+            "last_observed_at": last_observed_at,
+            "validity_status": validity_status,
+            "valid_until": valid_until or "",
+            "revision_of": revision_of or "",
+            "revision": revision,
             "status": "active",
-            **metadata,
+            **{key: value for key, value in metadata.items() if value is not None},
         }
         try:
             await self._vectors.add(memory_id, content, vector_metadata)
@@ -252,7 +280,7 @@ class LongTermMemoryService:
         query: str,
         n_results: int = 5,
         where: dict[str, Any] | None = None,
-        record_access: bool = True,
+        record_access: bool = False,
     ) -> list[dict[str, Any]]:
         """执行搜索。
 
@@ -284,7 +312,13 @@ class LongTermMemoryService:
             (results.get("metadatas") or [[]])[0],
             (results.get("distances") or [[]])[0],
         ):
-            if (metadata or {}).get("status", "active") != "active":
+            result_metadata = metadata or {}
+            if result_metadata.get("status", "active") != "active":
+                continue
+            if result_metadata.get("validity_status", "valid") == "invalid":
+                continue
+            valid_until = result_metadata.get("valid_until")
+            if valid_until and valid_until < datetime.now().isoformat():
                 continue
             output.append(
                 {
@@ -304,7 +338,7 @@ class LongTermMemoryService:
         query: str,
         n_results: int = 10,
         where: dict[str, Any] | None = None,
-        record_access: bool = True,
+        record_access: bool = False,
     ) -> list[dict[str, Any]]:
         """
 
@@ -331,13 +365,14 @@ class LongTermMemoryService:
         return results
 
     async def get_memory(self, memory_id: str) -> dict[str, Any] | None:
-        """按 ID 从向量索引读取一条长期记忆并记录访问。
+        """按 ID 从向量索引读取一条长期记忆。
 
         参数：
             memory_id: 长期记忆唯一标识。
 
         返回值：
             找到时返回正文和元数据；记录不存在或向量索引读取失败时返回 ``None``。
+            管理页面读取不会改变记忆热度。
 
         异常：
             不主动抛出业务异常。
@@ -350,7 +385,6 @@ class LongTermMemoryService:
             return None
         if not result or not result.get("ids"):
             return None
-        self._record_access(memory_id)
         return {
             "id": result["ids"][0],
             "content": (result.get("documents") or [""])[0],
@@ -399,7 +433,7 @@ class LongTermMemoryService:
         """
         return await self._repository.counts()
 
-    async def update_memory(self, memory_id: str, content: str) -> bool:
+    async def update_memory(self, memory_id: str, content: str) -> str | None:
         """
 
         参数：
@@ -407,20 +441,133 @@ class LongTermMemoryService:
             content (str): 待保存或处理的内容。
 
         返回值：
-            bool: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            str | None: 新修订版 ID；目标不存在或已不是活跃版本时返回 None。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
+        return await self.revise_memory(memory_id, content)
+
+    async def revise_memory(
+        self,
+        memory_id: str,
+        content: str,
+        *,
+        metadata_overrides: dict[str, Any] | None = None,
+    ) -> str | None:
+        """以不可变修订版替换一条活跃记忆。
+
+        参数：
+            memory_id：待替代的活跃记忆 ID。
+            content：新修订版的记忆正文。
+            metadata_overrides：本次观测提供的来源、分类和置信度等元数据。
+
+        返回：
+            新修订版 ID；旧记录不存在或已失效时返回 None。
+
+        异常：
+            双写或版本切换失败时向上抛出异常，并清理新建记录。
+        """
         await self.initialize()
-        previous = await self._repository.update_content(memory_id, content)
+        previous = await self._repository.get_active_memory(memory_id)
+        if previous is None:
+            return None
+        old_metadata = dict(previous["metadata"])
+        overrides = metadata_overrides or {}
+        revision = int(old_metadata.get("revision", 1)) + 1
+        revision_metadata = {
+            key: old_metadata[key]
+            for key in ("session_id", "type", "category", "confidence", "source")
+            if old_metadata.get(key) is not None
+        }
+        revision_metadata.update(overrides)
+        revision_metadata.update(
+            {
+                "revision_of": memory_id,
+                "revision": revision,
+                # 只有新的事实观测才更新该时间；纯访问不会影响它。
+                "last_observed_at": datetime.now().isoformat(),
+                "validity_status": overrides.get(
+                    "validity_status", old_metadata.get("validity_status", "valid")
+                ),
+                "valid_until": overrides.get(
+                    "valid_until", old_metadata.get("valid_until") or None
+                ),
+            }
+        )
+        valid_until = revision_metadata.get("valid_until")
+        if valid_until:
+            try:
+                datetime.fromisoformat(str(valid_until))
+            except ValueError as exc:
+                raise ValueError("valid_until must be an ISO-8601 datetime") from exc
+        new_memory_id = await self.add_memory(
+            content=content,
+            metadata=revision_metadata,
+            pinned=bool(previous["pinned"]),
+        )
+        try:
+            if not await self.supersede_memory(memory_id, new_memory_id):
+                await self.delete_memory(new_memory_id)
+                return None
+        except Exception:
+            await self.delete_memory(new_memory_id)
+            raise
+        return new_memory_id
+
+    async def set_memory_validity(
+        self,
+        memory_id: str,
+        validity_status: str,
+        *,
+        valid_until: str | None = None,
+    ) -> bool:
+        """更新当前记忆的事实有效性，不改变访问热度或保留期限。
+
+        参数：
+            memory_id：目标活跃记忆 ID。
+            validity_status：``valid``、``uncertain`` 或 ``invalid``。
+            valid_until：事实有效截止时间，必须是 ISO-8601 时间或 None。
+
+        返回：
+            记录成功更新时返回 True；目标不存在或不是当前版本时返回 False。
+
+        异常：
+            SQLite 或向量同步失败时向上抛出异常，并尽力恢复旧状态。
+        """
+        if validity_status not in {"valid", "uncertain", "invalid"}:
+            raise ValueError("validity_status must be valid, uncertain, or invalid")
+        if valid_until is not None:
+            try:
+                datetime.fromisoformat(valid_until)
+            except ValueError as exc:
+                raise ValueError("valid_until must be an ISO-8601 datetime") from exc
+        observed_at = datetime.now().isoformat()
+        previous = await self._repository.set_validity(
+            memory_id,
+            validity_status,
+            valid_until,
+            observed_at,
+        )
         if previous is None:
             return False
         try:
-            await self._vectors.update(memory_id, content=content)
+            await self._vectors.update(
+                memory_id,
+                metadata={
+                    "validity_status": validity_status,
+                    "valid_until": valid_until or "",
+                    "last_observed_at": observed_at,
+                },
+            )
         except Exception:
-            await self._repository.update_content(memory_id, previous)
-            logger.exception("memory_update_vector_failed", memory_id=memory_id)
+            await self._repository.set_validity(
+                memory_id,
+                previous["validity_status"],
+                previous["valid_until"],
+                previous["last_observed_at"],
+            )
+            logger.exception("memory_validity_vector_failed", memory_id=memory_id)
             raise
         return True
 
@@ -439,10 +586,14 @@ class LongTermMemoryService:
         """
         changed = await self._repository.mark_superseded(old_memory_id, new_memory_id)
         if changed:
-            await self._vectors.update(
-                old_memory_id,
-                metadata={"status": "superseded", "superseded_by": new_memory_id},
-            )
+            try:
+                await self._vectors.update(
+                    old_memory_id,
+                    metadata={"status": "superseded", "superseded_by": new_memory_id},
+                )
+            except Exception:
+                await self._repository.restore_active(old_memory_id)
+                raise
         return changed
 
     async def add_memory_relation(

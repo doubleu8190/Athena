@@ -16,7 +16,7 @@ from athena.core.files.adapters import (
     TextAdapter,
     WordAdapter,
 )
-from athena.core.files.base import ExtractedUnit, ExtractionContext
+from athena.core.files.extraction import ExtractedUnit, ExtractionContext
 from athena.core.files.registry import AdapterRegistry
 from athena.core.files.runtime import FileAccessError, FileIntelligenceRuntime
 from athena.core.files.storage import FileTooLargeError, StorageLayer
@@ -46,7 +46,7 @@ def _make_runtime(repository, settings: Settings) -> FileIntelligenceRuntime:
         _FakeLLM(),
         _FakeLLM(),
         settings=settings,
-            event_publisher=AsyncMock(),
+        event_publisher=AsyncMock(),
     )
 
 
@@ -55,8 +55,15 @@ async def _chunks(*values: bytes):
         yield value
 
 
-def _context(path, workspace, filename: str | None = None, mime_type: str = "") -> ExtractionContext:
-    return ExtractionContext(path=path, workspace=workspace, filename=filename or path.name, mime_type=mime_type)
+def _context(
+    path, workspace, filename: str | None = None, mime_type: str = ""
+) -> ExtractionContext:
+    return ExtractionContext(
+        path=path,
+        workspace=workspace,
+        filename=filename or path.name,
+        mime_type=mime_type,
+    )
 
 
 @pytest.mark.asyncio
@@ -87,8 +94,12 @@ async def test_parse_search_message_binding_and_session_isolation(tmp_path):
         runtime = _make_runtime(db.files, settings)
         blob = await runtime.storage.save_stream(_chunks(b"alpha beta\nsecond line\n"))
         attachment = await db.files.create_attachment(
-            session_id="one", filename="notes.txt", mime_type="text/plain",
-            size_bytes=blob.size_bytes, sha256=blob.sha256, storage_key=blob.storage_key,
+            session_id="one",
+            filename="notes.txt",
+            mime_type="text/plain",
+            size_bytes=blob.size_bytes,
+            sha256=blob.sha256,
+            storage_key=blob.storage_key,
         )
         parsed = await runtime.parse_attachment(attachment.id)
         await runtime.index_attachment(attachment.id)
@@ -103,7 +114,9 @@ async def test_parse_search_message_binding_and_session_isolation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_knowledge_base_documents_are_global_and_session_files_are_scoped(tmp_path):
+async def test_knowledge_base_documents_are_global_and_session_files_are_scoped(
+    tmp_path,
+):
     """知识库文档默认全局可见，会话附件只属于当前会话。"""
     db = Database(str(tmp_path / "knowledge-base.db"))
     await db.connect()
@@ -132,17 +145,18 @@ async def test_knowledge_base_documents_are_global_and_session_files_are_scoped(
         assert await db.files.get_accessible_attachment("one", document.id) is not None
         assert await db.files.get_accessible_attachment("two", document.id) is not None
         assert await db.files.get_accessible_attachment("two", attachment.id) is None
-        assert [
-            item.id for item in await db.files.list_session_attachments("one")
-        ] == [attachment.id]
+        assert [item.id for item in await db.files.list_session_attachments("one")] == [
+            attachment.id
+        ]
         assert [
             item.id for item in await db.files.list_global_knowledge_documents()
         ] == [document.id]
 
         await db.files.soft_delete_session_attachments("one")
-        assert await db.files.get_attachment(
-            attachment.id, include_deleted=True
-        ) is not None
+        assert (
+            await db.files.get_attachment(attachment.id, include_deleted=True)
+            is not None
+        )
         assert await db.files.get_attachment(document.id) is not None
     finally:
         await db.close()
@@ -184,12 +198,20 @@ async def test_process_attachment_index_failure_marks_attachment_failed(tmp_path
         )
         runtime = _make_runtime(db.files, settings)
         attachment = await db.files.create_attachment(
-            session_id="session", filename="notes.txt", mime_type="text/plain",
-            size_bytes=1, sha256="5" * 64, storage_key="blobs/55/placeholder",
+            session_id="session",
+            filename="notes.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            sha256="5" * 64,
+            storage_key="blobs/55/placeholder",
         )
         await db.files.replace_chunks(
             attachment.id,
-            [FileChunk(id="chunk", attachment_id=attachment.id, ordinal=0, content="text")],
+            [
+                FileChunk(
+                    id="chunk", attachment_id=attachment.id, ordinal=0, content="text"
+                )
+            ],
         )
 
         class BrokenCollection:
@@ -236,8 +258,12 @@ async def test_attachment_cannot_be_bound_to_different_messages(tmp_path):
                 )
             )
         attachment = await db.files.create_attachment(
-            session_id="session", filename="notes.txt", mime_type="text/plain",
-            size_bytes=1, sha256="6" * 64, storage_key="blobs/66/placeholder",
+            session_id="session",
+            filename="notes.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            sha256="6" * 64,
+            storage_key="blobs/66/placeholder",
         )
 
         await db.files.bind_message("session", "message-1", [attachment.id])
@@ -261,10 +287,16 @@ async def test_parse_csv_preserves_suffix_for_table_artifact(tmp_path):
             file_storage_path=str(tmp_path / "storage"),
         )
         runtime = _make_runtime(db.files, settings)
-        blob = await runtime.storage.save_stream(_chunks(b"name,value\nalpha,1\nbeta,2\n"))
+        blob = await runtime.storage.save_stream(
+            _chunks(b"name,value\nalpha,1\nbeta,2\n")
+        )
         attachment = await db.files.create_attachment(
-            session_id="session", filename="data.csv", mime_type="text/csv",
-            size_bytes=blob.size_bytes, sha256=blob.sha256, storage_key=blob.storage_key,
+            session_id="session",
+            filename="data.csv",
+            mime_type="text/csv",
+            size_bytes=blob.size_bytes,
+            sha256=blob.sha256,
+            storage_key=blob.storage_key,
         )
 
         parsed = await runtime.parse_attachment(attachment.id)
@@ -300,22 +332,40 @@ async def test_soft_delete_removes_parsed_file_data(tmp_path):
         )
         await db.messages.save(message)
         attachment = await db.files.create_attachment(
-            session_id="session", filename="a.txt", mime_type="text/plain",
-            size_bytes=1, sha256="2" * 64, storage_key="blobs/22/placeholder",
+            session_id="session",
+            filename="a.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            sha256="2" * 64,
+            storage_key="blobs/22/placeholder",
         )
         await db.files.bind_message("session", message.id, [attachment.id])
         await db.files.replace_chunks(
             attachment.id,
-            [FileChunk(id="chunk", attachment_id=attachment.id, ordinal=0, content="secret text")],
+            [
+                FileChunk(
+                    id="chunk",
+                    attachment_id=attachment.id,
+                    ordinal=0,
+                    content="secret text",
+                )
+            ],
         )
         await db.files.put_artifact(attachment.id, "summary", "cache", "secret summary")
         await db.files.replace_code_index(
             attachment.id,
-            [{
-                "path": "a.py", "language": "python", "name": "f",
-                "qualified_name": "f", "kind": "function",
-                "start_line": 1, "end_line": 1, "signature": "def f()",
-            }],
+            [
+                {
+                    "path": "a.py",
+                    "language": "python",
+                    "name": "f",
+                    "qualified_name": "f",
+                    "kind": "function",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "signature": "def f()",
+                }
+            ],
             [],
         )
 
@@ -344,10 +394,16 @@ async def test_read_failed_attachment_is_not_reported_as_waiting(tmp_path):
         )
         runtime = _make_runtime(db.files, settings)
         attachment = await db.files.create_attachment(
-            session_id="session", filename="a.txt", mime_type="text/plain",
-            size_bytes=1, sha256="3" * 64, storage_key="blobs/33/placeholder",
+            session_id="session",
+            filename="a.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            sha256="3" * 64,
+            storage_key="blobs/33/placeholder",
         )
-        await db.files.update_attachment(attachment.id, status="failed", error_message="parse failed")
+        await db.files.update_attachment(
+            attachment.id, status="failed", error_message="parse failed"
+        )
 
         result = await runtime.read_file("session", attachment.id)
 
@@ -371,10 +427,16 @@ async def test_empty_ocr_image_summary_does_not_fail_attachment(tmp_path):
         )
         runtime = _make_runtime(db.files, settings)
         attachment = await db.files.create_attachment(
-            session_id="session", filename="shot.png", mime_type="image/png",
-            size_bytes=1, sha256="4" * 64, storage_key="blobs/44/placeholder",
+            session_id="session",
+            filename="shot.png",
+            mime_type="image/png",
+            size_bytes=1,
+            sha256="4" * 64,
+            storage_key="blobs/44/placeholder",
         )
-        await db.files.update_attachment(attachment.id, status="ready", adapter_name="image")
+        await db.files.update_attachment(
+            attachment.id, status="ready", adapter_name="image"
+        )
 
         summary = await runtime.summarize_file("session", attachment.id)
         current = await db.files.get_attachment(attachment.id, "session")
@@ -403,7 +465,9 @@ async def test_image_adapter_passes_path_to_rapidocr(tmp_path, monkeypatch):
     image_path = tmp_path / "sample.png"
     Image.new("RGB", (12, 8), "white").save(image_path)
 
-    result = await ImageAdapter().extract(_context(image_path, tmp_path), Settings(_env_file=None))
+    result = await ImageAdapter().extract(
+        _context(image_path, tmp_path), Settings(_env_file=None)
+    )
 
     assert seen["img_content"] == image_path
     assert result.units[0].content == "hello"
@@ -437,11 +501,17 @@ async def test_image_analysis_uses_ocr_fallback_without_vision(tmp_path, monkeyp
         Image.new("RGB", (12, 8), "white").save(image_path)
         blob = await runtime.storage.save_stream(_chunks(image_path.read_bytes()))
         attachment = await db.files.create_attachment(
-            session_id="session", filename="sample.png", mime_type="image/png",
-            size_bytes=blob.size_bytes, sha256=blob.sha256, storage_key=blob.storage_key,
+            session_id="session",
+            filename="sample.png",
+            mime_type="image/png",
+            size_bytes=blob.size_bytes,
+            sha256=blob.sha256,
+            storage_key=blob.storage_key,
         )
 
-        result = await runtime.analyze_file("session", attachment.id, "读取图片里的文字")
+        result = await runtime.analyze_file(
+            "session", attachment.id, "读取图片里的文字"
+        )
 
         assert result["can_describe_visual_content"] is False
         assert result["analysis_source"] == "ocr"
@@ -511,7 +581,9 @@ async def test_file_capability_governance_is_applied_to_runtime_manager(tmp_path
         manager = make_tool_manager()
         catalog = ToolCatalogService(db.tools)
         await ToolRegistry(manager, catalog).install(build_file_tool_specs(runtime))
-        await db.tools.update("read_file", enabled=False, risk_level="high", require_approval=True)
+        await db.tools.update(
+            "read_file", enabled=False, risk_level="high", require_approval=True
+        )
 
         restarted = make_tool_manager()
         await ToolRegistry(restarted, catalog).install(build_file_tool_specs(runtime))
@@ -523,12 +595,13 @@ async def test_file_capability_governance_is_applied_to_runtime_manager(tmp_path
         await db.close()
 
 
-
 def test_adapter_registry_excludes_archive_formats():
     registry = AdapterRegistry()
 
     assert "archive" not in {adapter.info.name for adapter in registry.list()}
-    assert not {".zip", ".tar", ".tgz", ".tar.gz"} & set(registry.supported_extensions())
+    assert not {".zip", ".tar", ".tgz", ".tar.gz"} & set(
+        registry.supported_extensions()
+    )
     with pytest.raises(ValueError, match="不支持的文件类型"):
         registry.select("project.zip", "application/zip")
 
@@ -559,14 +632,28 @@ def test_cache_key_changes_with_every_version_dimension(tmp_path):
     from athena.models.file import Attachment
 
     attachment = Attachment(
-        id="f", session_id="s", filename="a.txt", mime_type="text/plain",
-        size_bytes=1, sha256="a" * 64, storage_key="blobs/aa/hash",
-        created_at=datetime.now(), updated_at=datetime.now(),
+        id="f",
+        session_id="s",
+        filename="a.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        sha256="a" * 64,
+        storage_key="blobs/aa/hash",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
     )
-    base = FileIntelligenceRuntime.cache_key(attachment, "summary", {"kind": "short"}, "1", "m1", "p1")
-    assert base != FileIntelligenceRuntime.cache_key(attachment, "summary", {"kind": "short"}, "2", "m1", "p1")
-    assert base != FileIntelligenceRuntime.cache_key(attachment, "summary", {"kind": "short"}, "1", "m2", "p1")
-    assert base != FileIntelligenceRuntime.cache_key(attachment, "summary", {"kind": "short"}, "1", "m1", "p2")
+    base = FileIntelligenceRuntime.cache_key(
+        attachment, "summary", {"kind": "short"}, "1", "m1", "p1"
+    )
+    assert base != FileIntelligenceRuntime.cache_key(
+        attachment, "summary", {"kind": "short"}, "2", "m1", "p1"
+    )
+    assert base != FileIntelligenceRuntime.cache_key(
+        attachment, "summary", {"kind": "short"}, "1", "m2", "p1"
+    )
+    assert base != FileIntelligenceRuntime.cache_key(
+        attachment, "summary", {"kind": "short"}, "1", "m1", "p2"
+    )
 
 
 @pytest.mark.asyncio
@@ -610,7 +697,9 @@ async def test_office_pdf_and_image_adapters_preserve_structure(tmp_path):
     workbook.save(xlsx_path)
     workbook.close()
     excel = await ExcelAdapter().extract(_context(xlsx_path, tmp_path), settings)
-    assert excel.metadata["sheets"][0]["formulas"] == [{"cell": "A2", "formula": "=A1*2"}]
+    assert excel.metadata["sheets"][0]["formulas"] == [
+        {"cell": "A2", "formula": "=A1*2"}
+    ]
 
     image_path = tmp_path / "sample.png"
     Image.new("RGB", (12, 8), "white").save(image_path)

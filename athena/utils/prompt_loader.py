@@ -1,4 +1,4 @@
-"""提示词加载器 — 从 prompt/ 目录加载 markdown 文件.
+"""提示词加载器 — 从 prompt/ 目录加载 Markdown 文件。
 
 所有 LLM 提示词统一存放在项目根目录的 prompt/ 文件夹中，
 以 markdown 格式存储，便于非工程师编辑和版本管理。

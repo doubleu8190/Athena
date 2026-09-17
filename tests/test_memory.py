@@ -179,13 +179,13 @@ async def _get_row(memory_id: str) -> MemoryModel | None:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_reads_record_access_in_memory(mm: LongTermMemoryService):
+async def test_only_selected_context_records_access(mm: LongTermMemoryService):
     mid = await mm.add_memory(content="用户偏好简洁回答", metadata={"session_id": "s1"})
-    await mm.search(query="偏好", where={"session_id": "s1"})
+    mm.record_selected_access([mid])
     await mm.get_memory(mid)
     st = mm._access_stats.get(mid)
     assert st is not None
-    assert st.count == 2
+    assert st.count == 1
     # last_accessed 必须可解析为 isoformat
     datetime.fromisoformat(st.last_accessed)
 
@@ -197,8 +197,8 @@ async def test_flush_updates_sqlite_and_chroma(
     mid = await mm.add_memory(
         content="技术决策：采用微服务架构", metadata={"session_id": "s1"}
     )
-    await mm.search(query="微服务", where={"session_id": "s1"})
-    await mm.search(query="微服务", where={"session_id": "s1"})
+    mm.record_selected_access([mid])
+    mm.record_selected_access([mid])
 
     assert await mm.flush_access_stats() == 1
     assert mm._access_stats == {}
@@ -212,7 +212,7 @@ async def test_flush_updates_sqlite_and_chroma(
     meta = vector_store.collection._items[mid]["metadata"]
     assert meta["access_count"] == 2
     assert meta["last_accessed"] is not None
-    # 非 pinned：expires_at 已滑动到 now + ttl
+    # 访问热度不会改变事实有效期。
     assert datetime.fromisoformat(meta["expires_at"]) > datetime.now() + timedelta(days=89)
 
 
@@ -223,7 +223,7 @@ async def test_flush_pinned_keeps_expires_at(
     mid = await mm.add_memory(
         content="固定记忆", metadata={"session_id": "s1"}, pinned=True
     )
-    await mm.search(query="固定", where={"session_id": "s1"})
+    mm.record_selected_access([mid])
     await mm.flush_access_stats()
 
     row = await _get_row(mid)
@@ -242,7 +242,7 @@ async def test_flush_after_delete_is_safe(
     mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
 ):
     mid = await mm.add_memory(content="将被删除的记忆", metadata={"session_id": "s1"})
-    await mm.search(query="删除", where={"session_id": "s1"})  # 记录访问
+    mm.record_selected_access([mid])
     await mm.delete_memory(mid)
     # 已删除记忆的统计落盘不应抛异常
     assert await mm.flush_access_stats() == 1
@@ -276,7 +276,7 @@ async def test_clear_all_removes_sqlite_and_vector_records(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_sliding_ttl_refreshes_on_access(mm: LongTermMemoryService):
+async def test_access_does_not_refresh_fact_validity(mm: LongTermMemoryService):
     mid = await mm.add_memory(content="过期测试记忆", metadata={"session_id": "s1"})
     # 强制到期（模拟创建久远、TTL 已过）
     past = (datetime.now() - timedelta(days=1)).isoformat()
@@ -287,16 +287,77 @@ async def test_sliding_ttl_refreshes_on_access(mm: LongTermMemoryService):
                 .where(MemoryModel.id == mid)
                 .values(expires_at=past)
             )
-    # 访问 → flush 滑动 TTL
-    await mm.search(query="过期", where={"session_id": "s1"})
+    # 最终注入上下文只增加热度，不会把事实重新判定为有效。
+    mm.record_selected_access([mid])
     await mm.flush_access_stats()
 
     row = await _get_row(mid)
     assert row is not None
-    assert datetime.fromisoformat(row.expires_at) > datetime.now()
-    # 已滑动的记忆不会被清理
-    assert await mm.cleanup_expired() == 0
-    assert await mm.get_memory(mid) is not None
+    assert row.expires_at == past
+    assert row.access_count == 1
+    assert await mm.cleanup_expired() == 1
+    assert await mm.get_memory(mid) is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_fact_is_not_retrieved_but_is_retained(mm: LongTermMemoryService):
+    mid = await mm.add_memory(
+        content="用户当前所在地是上海",
+        metadata={"session_id": "s1", "validity_status": "invalid"},
+    )
+
+    assert await mm.search("当前所在地", n_results=5) == []
+    row = await _get_row(mid)
+    assert row is not None
+    assert row.validity_status == "invalid"
+    assert row.deleted_time is None
+
+
+@pytest.mark.asyncio
+async def test_fact_validity_can_be_changed_without_touching_retention_or_heat(
+    mm: LongTermMemoryService,
+):
+    mid = await mm.add_memory(
+        content="用户当前使用 PostgreSQL",
+        metadata={"session_id": "s1"},
+    )
+    row_before = await _get_row(mid)
+    assert row_before is not None
+    expires_at = row_before.expires_at
+
+    assert await mm.set_memory_validity(mid, "invalid") is True
+    assert await mm.search("当前使用", n_results=5) == []
+    row_invalid = await _get_row(mid)
+    assert row_invalid is not None
+    assert row_invalid.validity_status == "invalid"
+    assert row_invalid.expires_at == expires_at
+    assert row_invalid.access_count == 0
+
+    assert await mm.set_memory_validity(mid, "valid") is True
+    results = await mm.search("当前使用", n_results=5)
+    assert results and results[0]["id"] == mid
+
+
+@pytest.mark.asyncio
+async def test_memory_update_creates_revision_and_preserves_old_content(
+    mm: LongTermMemoryService,
+):
+    old_id = await mm.add_memory(
+        content="后端使用 Python", metadata={"session_id": "s1", "type": "fact"}
+    )
+
+    assert await mm.update_memory(old_id, "后端使用 Rust") is not None
+
+    old_row = await _get_row(old_id)
+    assert old_row is not None
+    assert old_row.content == "后端使用 Python"
+    assert old_row.status == "superseded"
+    assert old_row.superseded_by
+    new_row = await _get_row(old_row.superseded_by)
+    assert new_row is not None
+    assert new_row.content == "后端使用 Rust"
+    assert new_row.revision_of == old_id
+    assert new_row.revision == 2
 
 
 @pytest.mark.asyncio
@@ -327,7 +388,7 @@ async def test_cleanup_expired_respects_expires_at(
 @pytest.mark.asyncio
 async def test_keyword_search_returns_fresh_access_fields(mm: LongTermMemoryService):
     mid = await mm.add_memory(content="weather in shanghai is humid", metadata={"session_id": "s1"})
-    await mm.search(query="weather", where={"session_id": "s1"})  # 记录访问
+    mm.record_selected_access([mid])
     await mm.flush_access_stats()
 
     results = await mm.keyword_search(query="shanghai", where={"session_id": "s1"})

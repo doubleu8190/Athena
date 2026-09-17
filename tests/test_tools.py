@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from athena.core.tools.base import MCPTool, NativeTool
+from athena.core.tools.tool_definitions import MCPTool, NativeTool
 from athena.core.tools.builtin.registry import register_builtin_tools
 from athena.core.tools.manager import UnifiedToolManager
 from athena.core.tools.spec import ToolSpec, get_tool_context
@@ -298,7 +298,9 @@ async def test_parallel_handler_aggregates_results():
 
     # 模拟 SubAgentResult
     class FakeResult:
-        def __init__(self, task: str, content: str, error: str | None = None, turn_count: int = 1):
+        def __init__(
+            self, task: str, content: str, error: str | None = None, turn_count: int = 1
+        ):
             self.task = task
             self.content = content
             self.error = error
@@ -330,8 +332,11 @@ async def test_parallel_handler_aggregates_results():
 @pytest.mark.asyncio
 async def test_parallel_handler_reports_partial_failures():
     """部分子任务失败时，成功的任务结果仍然应被返回。"""
+
     class FakeResult:
-        def __init__(self, task: str, content: str, error: str | None = None, turn_count: int = 1):
+        def __init__(
+            self, task: str, content: str, error: str | None = None, turn_count: int = 1
+        ):
             self.task = task
             self.content = content
             self.error = error

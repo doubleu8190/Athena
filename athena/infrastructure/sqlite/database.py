@@ -16,7 +16,7 @@ from athena.infrastructure.sqlite.repositories import (
     FileRepository,
     KnowledgeBaseRepository,
     KnowledgeDocumentJobRepository,
-    McpServerRepository,
+    MCPServerRepository,
     MessageRepository,
     SessionRepository,
     ToolCallRepository,
@@ -51,7 +51,7 @@ class Database:
         self.messages = MessageRepository()
         self.tool_calls = ToolCallRepository()
         self.approval_logs = ApprovalLogRepository()
-        self.mcp_servers = McpServerRepository()
+        self.mcp_servers = MCPServerRepository()
         self.tools = ToolRepository()
         # 编排仓库依赖 runtime.orchestration；延迟导入可避免 SQLite 门面和
         # 编排包在模块加载阶段形成循环依赖。

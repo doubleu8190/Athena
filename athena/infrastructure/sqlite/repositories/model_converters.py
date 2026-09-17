@@ -7,7 +7,7 @@ from datetime import datetime
 from athena.infrastructure.sqlite.models import (
     ApprovalLogModel,
     AttachmentModel,
-    McpServerModel,
+    MCPServerModel,
     MessageModel,
     SessionModel,
     ToolCallModel,
@@ -18,8 +18,8 @@ from athena.models import (
     ApprovalLog,
     Attachment,
     AttachmentStatus,
-    McpServer,
-    McpServerConfig,
+    MCPServer,
+    MCPServerConfig,
     Message,
     MessageRole,
     RiskLevel,
@@ -126,12 +126,12 @@ def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
     )
 
 
-def _row_to_mcp_server(row: McpServerModel) -> McpServer:
+def _row_to_mcp_server(row: MCPServerModel) -> MCPServer:
     """将 MCP 服务端 ORM 行转换为领域模型。"""
-    return McpServer(
+    return MCPServer(
         name=row.name,
         config=_json_loads_model(
-            row.config_json, McpServerConfig, McpServerConfig(command="")
+            row.config_json, MCPServerConfig, MCPServerConfig(command="")
         ),
         created_at=datetime.fromisoformat(row.created_at),
         deleted_time=(

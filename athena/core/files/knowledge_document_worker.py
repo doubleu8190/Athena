@@ -121,14 +121,24 @@ class KnowledgeDocumentWorker:
         job_id = str(job["job_id"])
         attachment_id = str(job["attachment_id"])
         attempt = int(job["attempt"])
-        attachment = await self._file_runtime.repository.get_attachment(attachment_id)
-        if attachment is None:
-            await self._repository.mark_succeeded(job_id, {"status": "deleted"})
-            return
         try:
+            attachment = await self._file_runtime.repository.get_attachment(attachment_id)
+            if attachment is None:
+                await self._repository.mark_cancelled(job_id, "attachment_deleted")
+                return
             result = await self._file_runtime.process_knowledge_document(attachment_id)
             await self._repository.mark_succeeded(job_id, result)
         except Exception as exc:
+            # 每次失败均清掉本轮可能已经写入的向量。SQLite 分块会被下一次解析
+            # 原子替换，向量则必须显式删除，避免半索引被误召回。
+            try:
+                await self._file_runtime.delete_attachment_vectors(attachment_id)
+            except Exception:
+                # 原始处理错误决定重试状态；向量清理失败本身不能杀掉 worker。
+                logger.exception(
+                    "knowledge_document_job_vector_cleanup_failed",
+                    attachment_id=attachment_id,
+                )
             retry = attempt < self._max_attempts
             await self._repository.mark_failed(job_id, str(exc), retry=retry)
             if not retry:

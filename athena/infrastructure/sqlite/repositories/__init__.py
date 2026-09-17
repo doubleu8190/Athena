@@ -12,7 +12,7 @@ from .model_converters import (
     _row_to_tool_call,
     _row_to_tool_config,
 )
-from .mcp_server_repository import McpServerRepository
+from .mcp_server_repository import MCPServerRepository
 from .message_repository import MessageRepository
 from .file_repository import FileRepository
 from .knowledge_base_repository import KnowledgeBaseRepository
@@ -38,7 +38,7 @@ __all__ = [
     "KnowledgeDocumentJobRepository",
     "MemoryJobRepository",
     "SQLiteMemoryRepository",
-    "McpServerRepository",
+    "MCPServerRepository",
     "MessageRepository",
     "SessionRepository",
     "ToolCallRepository",

@@ -123,7 +123,7 @@ class ContextCompressor:
             return messages
 
         # 4. 分离旧轮次和最近轮次
-        old_turns, recent_turns = self._pairer.get_recent_turns(
+        old_turns, recent_turns = self._pairer.split_recent_turns(
             turns, self._keep_recent_turns
         )
         if not old_turns:

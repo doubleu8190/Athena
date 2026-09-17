@@ -42,7 +42,7 @@ from athena.models.json_models import (
     FileLocator,
     FileMetadata,
 )
-from athena.utils.ids import generate_time_id
+from athena.utils.id_generation import generate_time_id
 
 _FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*|[\u4e00-\u9fff]+")
 
@@ -495,6 +495,34 @@ class FileRepository:
             knowledge_base_id=knowledge_base_id,
         )
 
+    async def delete_knowledge_base_derived_data(self, attachment_id: str) -> None:
+        """删除知识库文档的 SQLite 分块、FTS、产物和代码索引。
+
+        参数：
+            attachment_id：目标附件 ID。
+
+        返回：
+            None。
+
+        异常：
+            SQLite 删除失败时事务回滚并向上抛出异常。
+        """
+        async with get_core_session() as session:
+            async with session.begin():
+                await session.execute(
+                    text("DELETE FROM file_chunk_fts WHERE attachment_id = :attachment_id"),
+                    {"attachment_id": attachment_id},
+                )
+                for model in (
+                    FileChunkModel,
+                    FileArtifactModel,
+                    CodeSymbolModel,
+                    CodeDependencyModel,
+                ):
+                    await session.execute(
+                        delete(model).where(model.attachment_id == attachment_id)
+                    )
+
     async def _soft_delete_owned_attachment(
         self,
         attachment_id: str,
@@ -826,6 +854,53 @@ class FileRepository:
                 )
                 for r in rows
             ]
+
+    async def search_knowledge_chunks(self, query: str, limit: int = 10) -> list[FileChunk]:
+        """跨全部未删除知识库文档执行 FTS5 分块检索。
+
+        参数：
+            query：FTS5 查询文本。
+            limit：最大结果数。
+
+        返回：
+            按 BM25 相关度排序的文件分块。
+
+        异常：
+            SQLite 读取失败时向上抛出异常；无有效 FTS token 时返回空列表。
+        """
+        match_expr = _fts_match_expression(query)
+        if match_expr is None:
+            return []
+        async with get_core_session() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        """SELECT c.* FROM file_chunk_fts f
+                        JOIN file_chunks c ON c.id = f.chunk_id
+                        JOIN attachments a ON a.id = c.attachment_id
+                        WHERE file_chunk_fts MATCH :match_expr
+                          AND a.knowledge_base_id IS NOT NULL
+                          AND a.deleted_time IS NULL
+                          AND a.status = 'ready'
+                        ORDER BY bm25(f.file_chunk_fts)
+                        LIMIT :limit"""
+                    ),
+                    {"match_expr": match_expr, "limit": limit},
+                )
+            ).mappings().all()
+        return [
+            FileChunk(
+                id=row["id"],
+                attachment_id=row["attachment_id"],
+                ordinal=row["ordinal"],
+                content=row["content"],
+                token_count=row["token_count"],
+                locator=_json_loads_model(row["locator_json"], FileLocator, FileLocator()),
+                metadata=_json_loads_model(row["metadata_json"], FileMetadata, FileMetadata()),
+                native_score=1.0,
+            )
+            for row in rows
+        ]
 
     async def get_artifact(self, cache_key: str) -> FileArtifact | None:
         """

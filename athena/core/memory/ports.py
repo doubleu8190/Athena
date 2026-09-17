@@ -12,8 +12,8 @@ class MemoryRepository(Protocol):
         """写入一条记忆记录。"""
         ...
 
-    async def flush_access_stats(self, stats: dict[str, Any], expires_at: str) -> list[dict[str, Any]]:
-        """批量持久化访问统计并返回更新后的记录。"""
+    async def flush_access_stats(self, stats: dict[str, Any]) -> list[dict[str, Any]]:
+        """批量持久化最终注入上下文的访问统计并返回更新后的记录。"""
         ...
 
     async def keyword_search(self, query: str, limit: int, where: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -32,7 +32,25 @@ class MemoryRepository(Protocol):
         """更新记忆内容并返回旧内容；记录不存在时返回 ``None``。"""
         ...
 
+    async def get_active_memory(self, memory_id: str) -> dict[str, Any] | None:
+        """读取一条可以建立新修订版本的活跃记忆。"""
+        ...
+
     async def mark_superseded(self, old_id: str, new_id: str) -> bool: ...
+
+    async def restore_active(self, memory_id: str) -> None:
+        """在向量更新失败时恢复旧记忆的活跃状态。"""
+        ...
+
+    async def set_validity(
+        self,
+        memory_id: str,
+        validity_status: str,
+        valid_until: str | None,
+        last_observed_at: str | None,
+    ) -> dict[str, Any] | None:
+        """更新事实有效性，并返回更新前的字段用于双写补偿。"""
+        ...
 
     async def add_relation(
         self, source_id: str, target_id: str, relation_type: str

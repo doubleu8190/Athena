@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 
-from athena.utils.ids import (
+from athena.utils.id_generation import (
     generate_session_id,
     generate_sub_run_id,
     generate_time_id,

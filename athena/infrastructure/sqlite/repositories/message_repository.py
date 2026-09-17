@@ -97,7 +97,7 @@ class MessageRepository:
         return message.model_copy(
             update={
                 "attachments": [
-                    attachment.to_ref()
+                    attachment.to_reference()
                     for attachment in refs_by_message.get(message.id, [])
                 ]
             }
@@ -114,7 +114,7 @@ class MessageRepository:
         )
         for item in messages:
             item.attachments = [
-                attachment.to_ref() for attachment in refs.get(item.id, [])
+                attachment.to_reference() for attachment in refs.get(item.id, [])
             ]
         return messages
 

@@ -205,16 +205,6 @@ class ApiClient {
     return this.request<SupportedAttachmentTypes>("/api/knowledge-bases/attachment-types")
   }
 
-  async listSessionKnowledgeBases(sessionId: string): Promise<KnowledgeBase[]> {
-    return this.request<KnowledgeBase[]>(`/api/sessions/${encodeURIComponent(sessionId)}/knowledge-bases`)
-  }
-
-  async setSessionKnowledgeBase(sessionId: string, knowledgeBaseId: string, enabled: boolean): Promise<void> {
-    await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}`, {
-      method: enabled ? "PUT" : "DELETE",
-    })
-  }
-
   // ─── 审批管理 ─────────────────────────────────────────────────
 
   /** 查询待处理审批，可按会话过滤。 */
@@ -348,10 +338,25 @@ class ApiClient {
   async updateMemory(
     memoryId: string,
     content: string,
-  ): Promise<{ status: string; memory_id: string }> {
-    return this.request<{ status: string; memory_id: string }>(
+  ): Promise<{ status: string; memory_id: string; revised_from: string }> {
+    return this.request<{ status: string; memory_id: string; revised_from: string }>(
       `/api/memory/${memoryId}`,
       { method: "PATCH", body: JSON.stringify({ content }) },
+    )
+  }
+
+  /** 更新记忆的事实有效性，不影响访问热度和保留期限。 */
+  async setMemoryValidity(
+    memoryId: string,
+    validityStatus: "valid" | "uncertain" | "invalid",
+    validUntil?: string | null,
+  ): Promise<{ status: string; memory_id: string; validity_status: string; valid_until: string | null }> {
+    return this.request(
+      `/api/memory/${memoryId}/validity`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ validity_status: validityStatus, valid_until: validUntil ?? null }),
+      },
     )
   }
 

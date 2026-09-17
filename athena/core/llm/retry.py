@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TYPE_CHECKING, Awaitable, Callable
 
@@ -116,8 +116,6 @@ def categorize_error(error: Exception) -> ErrorCategory:
         错误类别枚举值。
     """
     error_str = str(error).lower()
-    error_type = type(error).__name__.lower()
-
     # 网络/超时错误
     if isinstance(error, (TimeoutError, ConnectionError, ConnectionResetError)):
         return ErrorCategory.TRANSIENT
@@ -235,6 +233,7 @@ async def retry_with_backoff(
         retry_config = RetryConfig(max_attempts=1)
 
     if on_retry is None:
+
         async def _default_on_retry(
             attempt: int, error: Exception, delay_s: float
         ) -> None:

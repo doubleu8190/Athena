@@ -4,48 +4,52 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from athena.contracts.errors import ErrorDetail
-from athena.container import runtime_from
+from athena.container import get_runtime_container
 from athena.infrastructure.sqlite.repositories import _json_loads
 
 router = APIRouter(prefix="/sessions", tags=["events"])
 
 
-def _sse(data: dict, event: str | None = None, session_seq: int | None = None) -> str:
+def _format_sse_event(
+    payload: dict[str, Any],
+    event_type: str | None = None,
+    session_seq: int | None = None,
+) -> str:
     """编码单条 SSE 帧，并将会话序号写入 SSE id。"""
     lines: list[str] = []
     if session_seq is not None:
         lines.append(f"id: {session_seq}")
-    if event:
-        lines.append(f"event: {event}")
-    lines.append("data: " + json.dumps(data, ensure_ascii=False))
+    if event_type:
+        lines.append(f"event: {event_type}")
+    lines.append("data: " + json.dumps(payload, ensure_ascii=False))
     return "\n".join(lines) + "\n\n"
 
 
-def _row_payload(row) -> dict:
+def _event_record_to_payload(record: Any) -> dict[str, Any]:
     """将数据库事件转换为稳定的 v2 Envelope。"""
     return {
         "schema_version": 2,
-        "session_seq": row.session_seq,
-        "event_type": row.event_type,
-        "durability": row.durability,
-        "session_id": row.session_id,
-        "run_id": row.run_id,
-        "message_id": row.message_id,
-        "attachment_id": row.attachment_id,
-        "stream_id": row.stream_id,
-        "stream_type": row.stream_type,
-        "chunk_id": row.chunk_id,
-        "is_complete": bool(row.is_complete),
-        "parent_run_id": row.parent_run_id,
-        "transition_id": row.transition_id,
-        "payload": _json_loads(row.payload_json, {}),
-        "occurred_at": row.occurred_at,
+        "session_seq": record.session_seq,
+        "event_type": record.event_type,
+        "durability": record.durability,
+        "session_id": record.session_id,
+        "run_id": record.run_id,
+        "message_id": record.message_id,
+        "attachment_id": record.attachment_id,
+        "stream_id": record.stream_id,
+        "stream_type": record.stream_type,
+        "chunk_id": record.chunk_id,
+        "is_complete": bool(record.is_complete),
+        "parent_run_id": record.parent_run_id,
+        "transition_id": record.transition_id,
+        "payload": _json_loads(record.payload_json, {}),
+        "occurred_at": record.occurred_at,
     }
 
 
@@ -54,7 +58,7 @@ async def session_events(
     session_id: str, request: Request, after: int = 0
 ) -> StreamingResponse:
     """先重放 watermark 之前的事件，再消费同一总线的实时通知。"""
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     agent_store = runtime.agent_store
     transport = runtime.realtime_transport
     if agent_store is None:
@@ -74,12 +78,16 @@ async def session_events(
         queue, watermark = await agent_store.open_subscription(session_id)
         cursor = after
         try:
-            for row in await agent_store.list_events_between(session_id, after, watermark):
+            for row in await agent_store.list_events_between(
+                session_id, after, watermark
+            ):
                 seq = row.session_seq
                 if seq <= cursor:
                     continue
                 cursor = seq
-                yield _sse(_row_payload(row), row.event_type, seq)
+                yield _format_sse_event(
+                    _event_record_to_payload(row), row.event_type, seq
+                )
 
             while True:
                 if await request.is_disconnected():
@@ -92,12 +100,16 @@ async def session_events(
                 seq = event.session_seq
                 if seq is None:
                     # Realtime delta 只存在于在线连接中，不参与 Last-Event-ID。
-                    yield _sse(event.model_dump(mode="json"), event.event_type)
+                    yield _format_sse_event(
+                        event.model_dump(mode="json"), event.event_type
+                    )
                     continue
                 if seq <= cursor:
                     continue
                 cursor = seq
-                yield _sse(event.model_dump(mode="json"), event.event_type, seq)
+                yield _format_sse_event(
+                    event.model_dump(mode="json"), event.event_type, seq
+                )
         finally:
             await transport.close_subscription(session_id, queue)
 

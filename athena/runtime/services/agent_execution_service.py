@@ -20,7 +20,7 @@ from athena.contracts.ports import EventPublisherPort
 from athena.models import Message
 from athena.models.file import AttachmentRef
 from athena.utils.logging import get_logger
-from athena.utils.prompts import get_prompt
+from athena.utils.prompt_loader import get_prompt
 
 logger = get_logger(__name__)
 
@@ -134,9 +134,8 @@ class AgentExecutionService:
                 locator_text = (
                     f" locator={locator}" if locator else ""
                 )
-                sections.setdefault(provider, []).append(
-                    f"- {f'source: {source}{locator_text}\\n  ' if source else ''}{content}"
-                )
+                source_prefix = f"source: {source}{locator_text}\n  " if source else ""
+                sections.setdefault(provider, []).append(f"- {source_prefix}{content}")
             blocks = []
             for provider, lines in sections.items():
                 if lines:

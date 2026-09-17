@@ -70,7 +70,7 @@ class ExecutionError(BaseModel):
         )
 
     @classmethod
-    def from_value(
+    def from_legacy_value(
         cls,
         value: Any,
         *,

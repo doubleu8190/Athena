@@ -25,10 +25,10 @@ from athena.core.memory.contracts import CompletedTurn, MemoryCandidate
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
-from athena.utils.llm import extract_json_from_llm_response, extract_message_text
-from athena.utils.message import format_messages_brief
+from athena.utils.llm_response import extract_json_from_llm_response, extract_message_text
+from athena.utils.message_conversion import format_messages_brief
 from athena.utils.logging import get_logger
-from athena.utils.prompts import get_prompt
+from athena.utils.prompt_loader import get_prompt
 
 logger = get_logger(__name__)
 

@@ -15,7 +15,7 @@ from typing import Any, TYPE_CHECKING
 from langchain_core.tools import StructuredTool
 from pydantic import create_model
 
-from athena.core.tools.base import (
+from athena.core.tools.tool_definitions import (
     MCPTool,
     NativeTool,
     ToolProtocol,

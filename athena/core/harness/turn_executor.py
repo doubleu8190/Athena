@@ -26,8 +26,8 @@ from athena.contracts.events import EventType
 from athena.contracts.errors import ExecutionError
 from athena.core.harness.harness import Harness
 from athena.models import Message, MessageRole
-from athena.utils.llm import extract_message_text
-from athena.utils.message import dict_to_message, message_to_dict
+from athena.utils.llm_response import extract_message_text
+from athena.utils.message_conversion import dict_to_message, message_to_dict
 from athena.runtime.stream_coalescer import StreamCoalescer
 from athena.runtime.orchestration import (
     DELEGATION_TOOL_NAMES,
@@ -542,7 +542,7 @@ class HarnessTurnExecutor(Harness):
                 phase="llm_call",
             )
             if failure_exception is not None
-            else ExecutionError.from_value(
+            else ExecutionError.from_legacy_value(
                 failure_detail or error,
                 code="llm_empty_response" if "空响应" in error else "llm_call_failed",
                 retryable=retryable,

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from athena.models import ApprovalLog
 from athena.utils.logging import get_logger
-from athena.container import runtime_from
+from athena.container import get_runtime_container
 from athena.contracts.errors import ErrorDetail
 from athena.infrastructure.sqlite.repositories import _json_loads
 
@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
 
-class ApprovalResponseRequest(BaseModel):
+class ApprovalDecisionRequest(BaseModel):
     """审批响应请求体。
 
     ``action`` 仅接受 ``allow`` 或 ``deny``，由路由转换为内部审批决定。
@@ -42,7 +42,7 @@ async def _get_approval_manager(request: Request) -> ApprovalManager:
     异常：
         RuntimeError: 应用运行时未初始化。
     """
-    return runtime_from(request).approval_manager
+    return get_runtime_container(request).approval_manager
 
 
 @router.get("")
@@ -50,7 +50,7 @@ async def list_pending_approvals(
     request: Request, session_id: str | None = None
 ) -> list[dict[str, Any]]:
     """列出待审批请求."""
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     rows = await runtime.agent_store.list_pending_approvals(session_id)
     return [
         {
@@ -72,17 +72,19 @@ async def list_pending_approvals(
 
 
 @router.post("/{approval_id}/respond")
-async def respond_approval(
-    approval_id: str, req: ApprovalResponseRequest, request: Request
+async def submit_approval_decision(
+    approval_id: str, req: ApprovalDecisionRequest, request: Request
 ) -> dict[str, Any]:
     """响应审批请求."""
     if req.action not in ("allow", "deny"):
         raise HTTPException(status_code=400, detail=ErrorDetail.INVALID_APPROVAL_ACTION)
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     approval = await runtime.agent_store.get_approval(approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail=ErrorDetail.APPROVAL_NOT_FOUND)
-    resolved = await runtime.approval_manager.respond_approval(approval_id, req.action)
+    resolved = await runtime.approval_manager.submit_approval_decision(
+        approval_id, req.action
+    )
     if not resolved:
         raise HTTPException(status_code=409, detail="approval_already_resolved")
     return {
@@ -94,7 +96,7 @@ async def respond_approval(
 @router.post("/{approval_id}/cancel")
 async def cancel_approval(approval_id: str, request: Request) -> dict[str, Any]:
     """提交审批取消命令，由 Runtime 条件更新持久化记录。"""
-    runtime = runtime_from(request)
+    runtime = get_runtime_container(request)
     approval = await runtime.agent_store.get_approval(approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail=ErrorDetail.APPROVAL_NOT_FOUND)
@@ -111,14 +113,16 @@ async def cancel_approval(approval_id: str, request: Request) -> dict[str, Any]:
 async def cancel_session_approvals(session_id: str, request: Request) -> dict[str, Any]:
     """取消指定会话的所有待审批请求."""
     manager = await _get_approval_manager(request)
-    await manager.cancel_all_pending(session_id)
+    await manager.cancel_pending_approvals(session_id)
     return {"status": "cancelled", "session_id": session_id}
 
 
 @router.get("/logs/{session_id}")
-async def get_approval_logs(session_id: str, request: Request) -> list[ApprovalLog]:
+async def list_session_approval_logs(
+    session_id: str, request: Request
+) -> list[ApprovalLog]:
     """获取会话审批日志."""
-    db = runtime_from(request).db
+    db = get_runtime_container(request).db
     return await db.approval_logs.get_by_session(session_id)
 
 
@@ -130,16 +134,16 @@ async def list_approval_logs(
     offset: int = 0,
 ) -> list[ApprovalLog]:
     """分页列出审批日志（新→旧），可选按会话过滤."""
-    db = runtime_from(request).db
+    db = get_runtime_container(request).db
     return await db.approval_logs.list_all(
         limit=limit, offset=offset, session_id=session_id
     )
 
 
 @router.get("/stats")
-async def approval_stats(request: Request) -> dict[str, Any]:
+async def get_approval_stats(request: Request) -> dict[str, Any]:
     """今日审批统计，含审批通过率."""
-    db = runtime_from(request).db
+    db = get_runtime_container(request).db
     stats = await db.approval_logs.stats()
     decided = stats["today_approved"] + stats["today_denied"]
     approval_rate = round(stats["today_approved"] / decided, 4) if decided else 0.0

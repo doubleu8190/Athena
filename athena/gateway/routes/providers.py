@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
-
 from fastapi import APIRouter
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel

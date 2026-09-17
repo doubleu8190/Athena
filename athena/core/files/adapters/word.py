@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 from docx import Document
 from athena.config.settings import Settings
-from athena.core.files.base import ExtractedUnit, ExtractionContext, ExtractionResult
+from athena.core.files.extraction import (
+    ExtractedUnit,
+    ExtractionContext,
+    ExtractionResult,
+)
 from athena.models.file import AdapterInfo
 
 from .common import _pil_image_png_bytes, _rapidocr_text, logger

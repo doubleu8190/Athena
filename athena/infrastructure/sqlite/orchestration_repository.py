@@ -78,7 +78,7 @@ class OrchestrationRepository:
 
         参数：
             plan_id: 要调度的计划标识。
-            lease_owner: 当前 Dispatcher 实例标识。
+            lease_owner: 当前 PlanDispatcher 实例标识。
 
         返回值：
             AgentTaskModel | None: 领取后的任务；没有可用任务时为空。

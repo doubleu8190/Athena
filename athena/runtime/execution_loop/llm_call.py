@@ -14,7 +14,7 @@ from ..state import AgentExecutionState
 from ._helpers import _stop_signal, _executor
 
 if TYPE_CHECKING:
-    from ..graph_runtime import LangGraphRuntime
+    from ..langgraph_runtime import LangGraphRuntime
 
 
 async def llm_call(

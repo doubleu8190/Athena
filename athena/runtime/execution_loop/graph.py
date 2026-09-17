@@ -17,7 +17,7 @@ from .execute_tools import execute_tool_batch
 from .finish import finish_execution
 
 if TYPE_CHECKING:
-    from ..graph_runtime import LangGraphRuntime
+    from ..langgraph_runtime import LangGraphRuntime
 
 AgentLoopRoute = Literal[
     "llm_call", "execute_tool_batch", "finish_execution", "plan_requested"

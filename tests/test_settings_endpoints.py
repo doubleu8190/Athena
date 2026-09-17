@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -79,11 +79,11 @@ def test_get_providers_masks_keys(client):
 
 
 def test_provider_test_ok(client):
-    fake_model = AsyncMock()
-    fake_model.ainvoke = AsyncMock(return_value="pong")
+    fake_provider = MagicMock()
+    fake_provider.ainvoke = AsyncMock(return_value="pong")
     with patch(
-        "athena.gateway.routes.providers._create_chat_model",
-        return_value=fake_model,
+        "athena.gateway.routes.providers.LLMProvider.from_config",
+        return_value=fake_provider,
     ):
         resp = client.post(
             "/providers/test",
@@ -106,7 +106,7 @@ def test_provider_test_error(client):
         raise ValueError("Unsupported LLM provider")
 
     with patch(
-        "athena.gateway.routes.providers._create_chat_model",
+        "athena.gateway.routes.providers.LLMProvider.from_config",
         side_effect=_boom,
     ):
         resp = client.post(

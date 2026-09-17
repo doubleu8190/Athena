@@ -20,7 +20,7 @@ from athena.models.json_models import CommandPayload
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.utils.logging import get_logger
 from .command_notifications import CommandNotifier
-from .langgraph_graph import invoke_graph
+from .agent_graph import invoke_graph
 from .cancellation import CancellationRegistry
 from langgraph.graph.state import CompiledStateGraph
 
@@ -37,8 +37,8 @@ class CommandConsumer:
         poll_interval: float = 0.25,
         graph: CompiledStateGraph,
         notifier: CommandNotifier | None = None,
-        cancellation: CancellationRegistry | None = None,
-        memory_manager: LongTermMemoryService,
+        cancellation_registry: CancellationRegistry | None = None,
+        memory_service: LongTermMemoryService,
     ) -> None:
         """创建命令消费者。
 
@@ -47,8 +47,8 @@ class CommandConsumer:
             poll_interval (float): 无命令时的轮询间隔，单位为秒，必须为非负数。
             graph (CompiledStateGraph): 已编译的 LangGraph 图；处理消息命令时必须可调用。
             notifier (CommandNotifier | None): Command 提交后的进程内唤醒通知器。
-            cancellation (CancellationRegistry | None): 可选取消注册表。
-            memory_manager (LongTermMemoryService): 处理主动保存记忆命令的服务。
+            cancellation_registry (CancellationRegistry | None): 可选取消注册表。
+            memory_service (LongTermMemoryService): 处理主动保存记忆命令的服务。
         返回值:
             None: 消费循环尚未启动。
         异常:
@@ -60,8 +60,8 @@ class CommandConsumer:
         self._task: asyncio.Task | None = None
         self.graph = graph
         self.notifier = notifier
-        self.cancellation = cancellation or CancellationRegistry()
-        self.memory_manager = memory_manager
+        self._cancellation_registry = cancellation_registry or CancellationRegistry()
+        self._memory_service = memory_service
 
     async def start(self) -> None:
         """启动后台命令消费任务。
@@ -221,7 +221,7 @@ class CommandConsumer:
         self, command: AgentCommandRecord, payload: CommandPayload
     ) -> None:
         if command.run_id:
-            await self.cancellation.request(command.run_id)
+            await self._cancellation_registry.request_cancellation(command.run_id)
             await self.store.update_run_control(
                 command.run_id,
                 cancel=True,
@@ -270,9 +270,7 @@ class CommandConsumer:
     async def _handle_memory_create(
         self, command: AgentCommandRecord, payload: CommandPayload
     ) -> None:
-        if self.memory_manager is None:
-            raise RuntimeError("memory service is not configured")
-        memory_id = await self.memory_manager.add_memory(
+        memory_id = await self._memory_service.add_memory(
             payload.content or "",
             payload.metadata,
             bool(payload.pinned),
@@ -290,10 +288,10 @@ class CommandConsumer:
         run_id = command.run_id
         if not run_id:
             raise RuntimeError("message.submit is missing run_id")
-        cancel_event = await self.cancellation.register(run_id)
+        cancel_event = await self._cancellation_registry.register(run_id)
         if cancel_event.is_set():
             await self._complete_cancelled_message(command, run_id)
-            await self.cancellation.release(run_id)
+            await self._cancellation_registry.unregister(run_id)
             return
 
         await self.store.update_run_status(run_id, AgentRunStatus.RUNNING)
@@ -309,10 +307,10 @@ class CommandConsumer:
         )
         if cancel_event.is_set():
             await self._complete_cancelled_message(command, run_id)
-            await self.cancellation.release(run_id)
+            await self._cancellation_registry.unregister(run_id)
             return
         await self._complete_message(command, run_id, result)
-        await self.cancellation.release(run_id)
+        await self._cancellation_registry.unregister(run_id)
 
     async def _complete_cancelled_message(
         self, command: AgentCommandRecord, run_id: str

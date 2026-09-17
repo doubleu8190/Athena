@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from athena.runtime.processors import (
+from athena.runtime.processor_lifecycle import (
     ProcessAction,
     ProcessDecision,
     ProcessOutcome,
     ProcessorBlocked,
-    StaticProcessorProxy,
+    ProcessorLifecycleRunner,
 )
 
 
 @pytest.mark.asyncio
-async def test_proxy_skips_without_running_lifecycle_hooks():
+async def test_runner_skips_without_running_lifecycle_hooks():
     calls: list[str] = []
 
     class Processor:
@@ -30,12 +30,12 @@ async def test_proxy_skips_without_running_lifecycle_hooks():
         async def post_process(self, _context, _outcome):
             calls.append("post")
 
-    assert await StaticProcessorProxy(Processor()).execute(None) == "restored"
+    assert await ProcessorLifecycleRunner(Processor()).execute(None) == "restored"
     assert calls == ["inspect"]
 
 
 @pytest.mark.asyncio
-async def test_proxy_calls_post_process_for_failures():
+async def test_runner_calls_post_process_for_failures():
     calls: list[str] = []
 
     class Processor:
@@ -53,12 +53,12 @@ async def test_proxy_calls_post_process_for_failures():
             calls.append(outcome.status)
 
     with pytest.raises(ValueError, match="boom"):
-        await StaticProcessorProxy(Processor()).execute(None)
+        await ProcessorLifecycleRunner(Processor()).execute(None)
     assert calls == ["pre", "process", "failed"]
 
 
 @pytest.mark.asyncio
-async def test_proxy_blocks_when_recovery_is_ambiguous():
+async def test_runner_blocks_when_recovery_is_ambiguous():
     class Processor:
         async def inspect(self, _context):
             return ProcessDecision(ProcessAction.BLOCK, reason="unknown side effect")
@@ -73,4 +73,4 @@ async def test_proxy_blocks_when_recovery_is_ambiguous():
             raise AssertionError("blocked processor has no lifecycle")
 
     with pytest.raises(ProcessorBlocked, match="unknown side effect"):
-        await StaticProcessorProxy(Processor()).execute(None)
+        await ProcessorLifecycleRunner(Processor()).execute(None)

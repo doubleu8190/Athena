@@ -202,7 +202,7 @@ async def lifespan(app: FastAPI):
         memory_retrieval=memory_retrieval,
         conversation_summarizer=conversation_summarizer,
         fact_extractor=fact_extractor,
-        memory_manager=memory_manager,
+        memory_service=memory_manager,
         settings=settings,
         file_runtime=file_runtime,
         memory_job_repository=memory_job_repository,
@@ -214,7 +214,7 @@ async def lifespan(app: FastAPI):
     memory_job_worker.configure_workflow(graph_runtime.memory_write_workflow)
     await memory_job_worker.start()
     # 注册子 Agent 派生工具到工具管理器
-    await tool_registry.install(graph_runtime.delegation_tool_specs())
+    await tool_registry.install(graph_runtime.build_delegation_tool_specs())
 
     # ── 6.1 RuntimeContainer（路由层依赖注入容器） ──
     realtime_transport = SessionEventBus()
@@ -251,8 +251,8 @@ async def lifespan(app: FastAPI):
         app.state.runtime.agent_store,
         notifier=command_notifier,
         graph=graph,
-        cancellation=CancellationRegistry(),
-        memory_manager=memory_manager,
+        cancellation_registry=CancellationRegistry(),
+        memory_service=memory_manager,
     )
     await command_consumer.start()
 

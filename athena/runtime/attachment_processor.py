@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.models.file import AttachmentStatus
 
-from .processors import (
+from .processor_lifecycle import (
     ProcessAction,
     ProcessDecision,
     ProcessOutcome,
@@ -17,7 +17,7 @@ from .processors import (
 from .state import FileProcessResult
 
 if TYPE_CHECKING:
-    from .graph_runtime import LangGraphRuntime
+    from .langgraph_runtime import LangGraphRuntime
 
 
 @dataclass(frozen=True, slots=True)

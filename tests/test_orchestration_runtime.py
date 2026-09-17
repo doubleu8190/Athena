@@ -1,4 +1,4 @@
-"""Planner、Dispatcher 与 Worker 的协调行为测试。"""
+"""计划物化、调度与 Worker 的协调行为测试。"""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import pytest
 
 from athena.infrastructure.sqlite.database import Database
 from athena.runtime.orchestration import ExecutionPlan, TaskSpec
-from athena.runtime.orchestration.dispatcher import Dispatcher
-from athena.runtime.orchestration.planner import Planner
+from athena.runtime.orchestration.plan_dispatcher import PlanDispatcher
+from athena.runtime.orchestration.plan_materializer import PlanMaterializer
 from athena.runtime.orchestration.structured_llm import StructuredLLMService
 from athena.runtime.orchestration.worker import WorkerExecutor
 from athena.runtime.orchestration.events import OrchestrationEventPublisher
@@ -40,15 +40,17 @@ class _FakeWorker:
 
 
 @pytest.mark.asyncio
-async def test_planner_persists_structured_plan(tmp_path) -> None:
+async def test_plan_materializer_persists_structured_plan(tmp_path) -> None:
     database = Database(str(tmp_path / "planner.db"))
     await database.connect()
     session = await database.sessions.create("session-1", "Plan")
 
     from athena.runtime.orchestration import OrchestrationEventPublisher
 
-    planner = Planner(database, OrchestrationEventPublisher(AsyncMock()))
-    plan = await planner.materialize_submission(
+    materializer = PlanMaterializer(
+        database, OrchestrationEventPublisher(AsyncMock())
+    )
+    plan = await materializer.materialize_submission(
         session.id,
         "root-1",
         "检查模块",
@@ -73,7 +75,7 @@ async def test_planner_persists_structured_plan(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_claims_and_runs_independent_task(tmp_path) -> None:
+async def test_plan_dispatcher_claims_and_runs_independent_task(tmp_path) -> None:
     database = Database(str(tmp_path / "dispatch.db"))
     await database.connect()
     session = await database.sessions.create("session-1", "Dispatch")
@@ -85,11 +87,11 @@ async def test_dispatcher_claims_and_runs_independent_task(tmp_path) -> None:
     )
     await database.orchestration.create_plan(session.id, plan)
 
-    dispatcher = Dispatcher(
+    dispatcher = PlanDispatcher(
         database, _FakeWorker(), OrchestrationEventPublisher(AsyncMock())
     )
-    dispatcher.register_session("plan-1", "session-1")
-    results = await dispatcher.run(plan, session.id)
+    dispatcher.register_plan_session("plan-1", "session-1")
+    results = await dispatcher.execute_plan(plan, session.id)
 
     assert set(results) == {"task-1"}
     assert results["task-1"].status == "completed"
@@ -104,7 +106,7 @@ async def test_recovery_requeues_stale_claimed_task(tmp_path) -> None:
 
     from sqlalchemy import text
 
-    from athena.runtime.recovery import RecoveryReconciler
+    from athena.runtime.recovery_reconciler import RecoveryReconciler
 
     database = Database(str(tmp_path / "recovery.db"))
     await database.connect()

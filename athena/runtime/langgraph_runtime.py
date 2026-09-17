@@ -37,19 +37,19 @@ from athena.utils.logging import get_logger
 from athena.utils.prompts import get_prompt
 
 from .attachment_processor import AttachmentProcessContext, AttachmentProcessor
-from .processors import StaticProcessorProxy
+from .processor_lifecycle import ProcessorLifecycleRunner
 from .state import AgentState, FileProcessResult
-from .sub_agent import SubAgentManager
+from .sub_agent_manager import SubAgentManager
 from .services.session_context_service import SessionContextService
-from .services.execution_service import ExecutionService
+from .services.agent_execution_service import AgentExecutionService
 from .orchestration.events import OrchestrationEventPublisher
 from .orchestration import (
-    Dispatcher,
+    PlanDispatcher,
     ExecutionPlan,
     PlanStatus,
-    Planner,
+    PlanMaterializer,
     StructuredLLMService,
-    Synthesizer,
+    PlanResultSynthesizer,
     WorkerExecutor,
 )
 from .task_understanding import TaskUnderstandingService
@@ -72,7 +72,7 @@ class LangGraphRuntime:
     - ``TaskUnderstandingService`` — 用户任务理解
     - ``ContextAcquisitionService`` — Memory / Knowledge / File 上下文获取
     - ``SessionContextService`` — 会话历史、消息持久化、附件绑定和 Harness 输入准备
-    - ``ExecutionService`` — Harness 执行编排与后处理
+    - ``AgentExecutionService`` — Harness 执行编排与后处理
 
     保留在运行时的职责：
     - 附件处理（依赖 ``FileIntelligenceRuntime`` 的信号量和生命周期）
@@ -90,7 +90,7 @@ class LangGraphRuntime:
         memory_retrieval: MemoryRetrievalService,
         conversation_summarizer: ConversationSummarizer,
         fact_extractor: FactExtractor,
-        memory_manager: LongTermMemoryService,
+        memory_service: LongTermMemoryService,
         settings: Settings,
         file_runtime: FileIntelligenceRuntime,
         memory_job_repository: MemoryJobRepository,
@@ -107,7 +107,7 @@ class LangGraphRuntime:
             memory_retrieval: 记忆检索服务。
             conversation_summarizer: 对话摘要生成器。
             fact_extractor: 事实提取器。
-            memory_manager: 长期记忆管理器。
+            memory_service: 长期记忆服务。
             settings: 全局配置。
             file_runtime: 文件智能运行时。
             memory_job_repository: 记忆任务持久化仓库。
@@ -141,12 +141,11 @@ class LangGraphRuntime:
         self._session_context_service = SessionContextService(
             db=db, event_publisher=event_publisher
         )
-        self._execution_service = ExecutionService(
+        self._agent_execution_service = AgentExecutionService(
             llm=llm,
             tool_manager=tool_manager,
             db=db,
             compressor=compressor,
-            memory_manager=memory_manager,
             conversation_summarizer=conversation_summarizer,
             memory_job_repository=memory_job_repository,
             settings=settings,
@@ -159,7 +158,7 @@ class LangGraphRuntime:
         self._db = db
         self._events = event_publisher
         self._compressor = compressor
-        self._memory_manager = memory_manager
+        self._memory_service = memory_service
         self._conversation_summarizer = conversation_summarizer
         self._fact_extractor = fact_extractor
         self._settings = settings
@@ -172,12 +171,12 @@ class LangGraphRuntime:
         self._file_parse_semaphore = asyncio.Semaphore(2)
         self._file_embedding_semaphore = asyncio.Semaphore(3)
         self._memory_trigger = MemoryWriteTrigger()
-        self._memory_resolver = MemoryCandidateResolver(self._memory_manager)
+        self._memory_resolver = MemoryCandidateResolver(self._memory_service)
         self._memory_write_workflow: MemoryWriteWorkflow | None = None
         structured_llm = StructuredLLMService(llm)
         orchestration_events = OrchestrationEventPublisher(event_publisher)
-        self._orchestration_planner = Planner(db, orchestration_events)
-        self._orchestration_worker = WorkerExecutor(
+        self._plan_materializer = PlanMaterializer(db, orchestration_events)
+        self._worker_executor = WorkerExecutor(
             llm=llm,
             structured_llm=structured_llm,
             tool_manager=tool_manager,
@@ -188,14 +187,14 @@ class LangGraphRuntime:
             settings=settings,
             root_run_id="",
         )
-        self._orchestration_dispatcher = Dispatcher(
-            db, self._orchestration_worker, orchestration_events
+        self._plan_dispatcher = PlanDispatcher(
+            db, self._worker_executor, orchestration_events
         )
-        self._orchestration_synthesizer = Synthesizer(llm)
+        self._plan_result_synthesizer = PlanResultSynthesizer(llm)
         self._orchestration_events = orchestration_events
 
     # ------------------------------------------------------------------
-    # 属性暴露（供 langgraph_graph.py 注入到节点）
+    # 属性暴露（供 agent_graph.py 注入到节点）
     # ------------------------------------------------------------------
 
     @property
@@ -215,20 +214,20 @@ class LangGraphRuntime:
         return self._session_context_service
 
     @property
-    def execution_service(self) -> ExecutionService:
-        return self._execution_service
+    def agent_execution_service(self) -> AgentExecutionService:
+        return self._agent_execution_service
 
     @property
-    def orchestration_planner(self) -> Planner:
-        return self._orchestration_planner
+    def plan_materializer(self) -> PlanMaterializer:
+        return self._plan_materializer
 
     @property
-    def orchestration_dispatcher(self) -> Dispatcher:
-        return self._orchestration_dispatcher
+    def plan_dispatcher(self) -> PlanDispatcher:
+        return self._plan_dispatcher
 
     @property
-    def orchestration_synthesizer(self) -> Synthesizer:
-        return self._orchestration_synthesizer
+    def plan_result_synthesizer(self) -> PlanResultSynthesizer:
+        return self._plan_result_synthesizer
 
     async def materialize_plan(
         self,
@@ -239,7 +238,7 @@ class LangGraphRuntime:
         submission: dict[str, Any],
     ) -> ExecutionPlan:
         """校验并持久化顶层 Agent LLM 提交的计划。"""
-        return await self._orchestration_planner.materialize_submission(
+        return await self._plan_materializer.materialize_submission(
             session_id=session_id,
             root_run_id=root_run_id,
             user_goal=user_goal,
@@ -258,17 +257,17 @@ class LangGraphRuntime:
         from .orchestration import ExecutionPlan
 
         plan = ExecutionPlan.model_validate(plan_payload)
-        self._orchestration_dispatcher.register_session(plan.plan_id, session_id)
+        self._plan_dispatcher.register_plan_session(plan.plan_id, session_id)
         try:
             await self._db.orchestration.set_plan_status(
                 plan.plan_id, PlanStatus.SYNTHESIZING.value
             )
-            results = await self._orchestration_dispatcher.run(
+            results = await self._plan_dispatcher.execute_plan(
                 plan=plan,
                 session_id=session_id,
                 stop_signal=stop_signal,
             )
-            content = await self._orchestration_synthesizer.synthesize(plan, results)
+            content = await self._plan_result_synthesizer.synthesize(plan, results)
             await self._db.orchestration.set_plan_status(
                 plan.plan_id,
                 PlanStatus.COMPLETED.value,
@@ -464,7 +463,7 @@ class LangGraphRuntime:
         )
 
     # ------------------------------------------------------------------
-    # ExecutionService 委托
+    # AgentExecutionService 委托
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -473,9 +472,9 @@ class LangGraphRuntime:
         context_bundle: dict[str, Any] | None = None,
     ) -> str:
         """使用内置系统提示词，并注入任务理解和上下文包。"""
-        return ExecutionService._build_system_prompt(task_spec, context_bundle)
+        return AgentExecutionService._build_system_prompt(task_spec, context_bundle)
 
-    async def run_harness(
+    async def execute_harness(
         self,
         messages: list[Message],
         session_id: str,
@@ -484,7 +483,7 @@ class LangGraphRuntime:
         run_id: str = "",
         stop_signal: Any = None,
     ) -> HarnessRunResult:
-        return await self._execution_service.run_harness(
+        return await self._agent_execution_service.execute_harness(
             messages=messages,
             session_id=session_id,
             task_spec=task_spec,
@@ -493,7 +492,7 @@ class LangGraphRuntime:
             stop_signal=stop_signal,
         )
 
-    async def post_process(
+    async def process_completed_run(
         self,
         session_id: str,
         user_message: str,
@@ -501,7 +500,7 @@ class LangGraphRuntime:
         *,
         turn_id: str,
     ) -> None:
-        return await self._execution_service.post_process(
+        return await self._agent_execution_service.process_completed_run(
             session_id=session_id,
             user_message=user_message,
             result=result,
@@ -509,20 +508,20 @@ class LangGraphRuntime:
         )
 
     @classmethod
-    def result_payload(
+    def build_result_payload(
         cls, result: HarnessRunResult, attachment_refs: list[AttachmentRef]
     ) -> dict[str, Any]:
-        return ExecutionService.result_payload(result, attachment_refs)
+        return AgentExecutionService.build_result_payload(result, attachment_refs)
 
     @staticmethod
     def deserialize_attachment_refs(
         payload: list[dict[str, Any]],
     ) -> list[AttachmentRef]:
-        return ExecutionService.deserialize_attachment_refs(payload)
+        return AgentExecutionService.deserialize_attachment_refs(payload)
 
     @staticmethod
     def deserialize_messages(payload: list[dict[str, Any]]) -> list[Message]:
-        return ExecutionService.deserialize_messages(payload)
+        return AgentExecutionService.deserialize_messages(payload)
 
     # ------------------------------------------------------------------
     # 附件处理（依赖 FileIntelligenceRuntime，保留在此）
@@ -538,7 +537,7 @@ class LangGraphRuntime:
             session_id=session_id,
             run_id=run_id,
         )
-        return await StaticProcessorProxy(AttachmentProcessor(self)).execute(context)
+        return await ProcessorLifecycleRunner(AttachmentProcessor(self)).execute(context)
 
     async def _process_attachment_once(
         self, attachment_id: str, message_id: str, session_id: str, run_id: str
@@ -572,7 +571,7 @@ class LangGraphRuntime:
     # 子 Agent 工具处理器
     # ------------------------------------------------------------------
 
-    def delegation_tool_specs(self) -> list:
+    def build_delegation_tool_specs(self) -> list:
         """构建供组合根注册的 Agent 委派工具声明。"""
         from athena.core.tools.providers.agents import build_agent_tool_specs
 
@@ -636,9 +635,9 @@ class LangGraphRuntime:
         )
 
         try:
-            manager = self.get_sub_agent_manager(main_run_id=parent_run_id)
+            manager = self.create_sub_agent_manager(main_run_id=parent_run_id)
             stop_signal = self._session_stop_signals.get(session_id)
-            results = await manager.parallel(
+            results = await manager.spawn_parallel(
                 tasks=tasks,
                 session_id=session_id,
                 max_turns=max_turns,
@@ -683,7 +682,7 @@ class LangGraphRuntime:
             task=task[:200],
         )
         try:
-            manager = self.get_sub_agent_manager(main_run_id=parent_run_id)
+            manager = self.create_sub_agent_manager(main_run_id=parent_run_id)
             stop_signal = self._session_stop_signals.get(session_id)
             result = await manager.spawn(
                 task=task, session_id=session_id, stop_signal=stop_signal
@@ -705,7 +704,7 @@ class LangGraphRuntime:
             logger.exception("sub_agent_tool_exception", session_id=session_id)
             return f"[SUB-AGENT ERROR] {e}"
 
-    def get_sub_agent_manager(self, main_run_id: str) -> SubAgentManager:
+    def create_sub_agent_manager(self, main_run_id: str) -> SubAgentManager:
         """创建子 Agent 管理器实例。"""
         return SubAgentManager(
             llm=self._llm,
@@ -713,7 +712,6 @@ class LangGraphRuntime:
             db=self._db,
             event_publisher=self._events,
             compressor=self._compressor,
-            memory_manager=self._memory_manager,
             settings=self._settings,
             main_run_id=main_run_id,
             agent_store=self._agent_store,
@@ -730,7 +728,7 @@ class LangGraphRuntime:
                 extractor=self._fact_extractor,
                 trigger=self._memory_trigger,
                 resolver=self._memory_resolver,
-                memory_service=self._memory_manager,
+                memory_service=self._memory_service,
             )
         return self._memory_write_workflow
 
@@ -742,12 +740,12 @@ class LangGraphRuntime:
         """Initialize runtime components."""
         logger.info("langgraph_runtime_initialized")
 
-    def set_stop_signal(
+    def set_session_stop_signal(
         self, session_id: str, stop_signal: asyncio.Event | None
     ) -> None:
         self._session_stop_signals[session_id] = stop_signal
 
-    def validate_state(self, state: AgentState) -> None:
+    def validate_session_state(self, state: AgentState) -> None:
         """Validate minimum required state fields exist."""
         if state.get("session_id") is None:
             raise ValueError("AgentState missing required field: session_id")

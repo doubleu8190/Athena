@@ -370,6 +370,7 @@ class LLMRetryManager:
         func: Callable[..., Awaitable[Any]],
         *args: Any,
         on_retry: Callable[[int, Exception, float], Awaitable[None]] | None = None,
+        fallback_invoke: Callable[[LLMProvider], Awaitable[Any]] | None = None,
         **kwargs: Any,
     ) -> RetryResult:
         """执行 LLM 调用，失败时按多级故障转移策略重试.
@@ -378,6 +379,8 @@ class LLMRetryManager:
             func: 待执行的 LLM 调用异步函数。
             *args: 传递给 func 的位置参数。
             on_retry: 每次重试前的回调，参见 ``retry_with_backoff``。
+            fallback_invoke: 可选的备用 Provider 调用方式。结构化输出等调用
+                需要保留原始调用形式时使用；未提供时调用 Provider.ainvoke。
             **kwargs: 传递给 func 的关键字参数。
 
         返回值：
@@ -405,7 +408,11 @@ class LLMRetryManager:
                     "trying_fallback_provider", provider=type(fallback).__name__
                 )
                 try:
-                    fallback_result = await fallback.ainvoke(*args, **kwargs)
+                    fallback_result = (
+                        await fallback_invoke(fallback)
+                        if fallback_invoke is not None
+                        else await fallback.ainvoke(*args, **kwargs)
+                    )
                     return RetryResult(
                         success=True,
                         result=fallback_result,

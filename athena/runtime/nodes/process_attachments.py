@@ -10,14 +10,14 @@ from langgraph.graph.state import StateNode
 from ..state import AgentState
 
 if TYPE_CHECKING:
-    from ..graph_runtime import LangGraphRuntime
+    from ..langgraph_runtime import LangGraphRuntime
 
 
 async def process_attachments(
     state: AgentState, *, runtime: LangGraphRuntime
 ) -> AgentState:
     """处理全部附件并将小型、可检查点化的结果写入 State。"""
-    runtime.validate_state(state)
+    runtime.validate_session_state(state)
     results = await asyncio.gather(
         *(
             runtime.process_attachment(

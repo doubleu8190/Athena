@@ -92,9 +92,9 @@ class WorkerExecutor:
         """执行任务并把最终文本转换为结构化结果。
 
         参数：
-            task: 已通过 Planner 校验的任务规格。
+            task: 已通过 PlanMaterializer 校验的任务规格。
             session_id: Worker 所属用户会话。
-            parent_run_id: 创建 Worker 的 Planner Run 标识。
+            parent_run_id: 创建 Worker 的顶层 Agent Run 标识。
             root_run_id: Worker 所属的 Root Run 标识。
             index: 同一计划内的稳定序号。
             attempt: 从 1 开始的执行尝试序号。

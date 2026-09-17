@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -81,7 +81,6 @@ class StructuredLLMService:
             ValueError: 模型返回空或无法解析为指定模型。
         """
 
-        runnable = self._primary.structured_runnable(schema)
         messages: list[BaseMessage] = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_message),
@@ -89,7 +88,7 @@ class StructuredLLMService:
         started = time.perf_counter()
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                result: Any = await runnable.ainvoke(messages)
+                result = await self._primary.ainvoke_structured(schema, messages)
         except TimeoutError:
             logger.warning(
                 "structured_output_request_timeout",
@@ -115,14 +114,4 @@ class StructuredLLMService:
             schema=schema.__name__,
             duration_ms=round((time.perf_counter() - started) * 1000),
         )
-        if result is None:
-            raise ValueError("structured LLM returned no result")
-        if isinstance(result, schema):
-            return result
-        if isinstance(result, BaseModel):
-            return schema.model_validate(result.model_dump(mode="json"))
-        if isinstance(result, dict):
-            return schema.model_validate(result)
-        raise ValueError(
-            f"structured LLM returned unsupported type: {type(result).__name__}"
-        )
+        return result

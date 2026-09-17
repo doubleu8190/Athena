@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from langchain_core.runnables import RunnableConfig
 
 if TYPE_CHECKING:
-    from ..graph_runtime import LangGraphRuntime
+    from ..langgraph_runtime import LangGraphRuntime
     from athena.core.harness.turn_executor import HarnessTurnExecutor
 
 

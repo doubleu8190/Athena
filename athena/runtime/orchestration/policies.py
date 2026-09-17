@@ -24,13 +24,13 @@ class ToolPolicy:
 
         参数：
             available_tools: Runtime 当前注册且启用的工具名称。
-            requested_tools: Planner 为任务申请的工具；为空时使用全部非委派工具。
+            requested_tools: 顶层 Agent 为任务申请的工具；为空时使用全部非委派工具。
 
         返回值：
             ToolPolicy: 已剔除委派能力的 Worker 策略。
 
         异常：
-            ValueError: Planner 申请了 Runtime 不存在的工具。
+            ValueError: 顶层 Agent 申请了 Runtime 不存在的工具。
         """
 
         available = set(available_tools) - DELEGATION_TOOL_NAMES

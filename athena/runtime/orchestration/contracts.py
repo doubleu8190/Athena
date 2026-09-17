@@ -1,4 +1,4 @@
-"""Planner、Worker 和 Coordinator 共享的编排契约。"""
+"""顶层 Agent、Worker 和 Coordinator 共享的编排契约。"""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ def ensure_task_transition(current: TaskStatus, target: TaskStatus) -> None:
 
 
 class TaskSpec(StrictContract):
-    """Planner 分配给单个 Worker 的完整任务。"""
+    """顶层 Agent 分配给单个 Worker 的完整任务。"""
 
     task_id: str = Field(min_length=1)
     plan_id: str = Field(min_length=1)
@@ -131,7 +131,7 @@ class TaskSpec(StrictContract):
 
 
 class ExecutionPlan(StrictContract):
-    """Planner 通过 Structured Output 生成的 V1 执行计划。"""
+    """顶层 Agent 提交并经校验的 V1 执行计划。"""
 
     schema_version: Literal[1] = 1
     plan_id: str = Field(min_length=1)
@@ -162,7 +162,7 @@ class ExecutionPlan(StrictContract):
 
 
 class TaskDraft(StrictContract):
-    """Planner 决策中的任务草稿，尚未绑定 Root Run。"""
+    """顶层 Agent 决策中的任务草稿，尚未绑定 Root Run。"""
 
     task_id: str = Field(min_length=1)
     title: str = Field(min_length=1, max_length=200)

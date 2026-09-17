@@ -149,3 +149,12 @@ def test_service_locator_compatibility_hooks_are_absent():
         "close_database",
     )
     assert not any(name in source for name in forbidden)
+
+
+def test_provider_test_endpoint_uses_llm_provider() -> None:
+    """提供商连通性测试不得绕过统一的 LLMProvider 调用边界。"""
+    source = (ROOT / "athena/gateway/routes/providers.py").read_text(encoding="utf-8")
+
+    assert "from athena.core.llm.provider import LLMProvider" in source
+    assert "LLMProvider.from_config" in source
+    assert "_create_chat_model" not in source

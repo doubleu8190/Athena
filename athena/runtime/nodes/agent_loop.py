@@ -15,8 +15,8 @@ from ..state import AgentState
 from ..execution_loop.graph import build_agent_loop
 
 if TYPE_CHECKING:
-    from ..graph_runtime import LangGraphRuntime
-    from ..services.execution_service import ExecutionService
+    from ..langgraph_runtime import LangGraphRuntime
+    from ..services.agent_execution_service import AgentExecutionService
 
 
 def create_agent_loop_node(runtime: LangGraphRuntime) -> CompiledStateGraph:
@@ -54,13 +54,13 @@ def route_after_agent_loop(
 async def post_process_and_build_result(
     state: AgentState,
     *,
-    execution_service: ExecutionService,
+    agent_execution_service: AgentExecutionService,
 ) -> AgentState:
     """执行完成后的记忆/摘要后处理。
 
     参数：
         state: 至少包含 ``harness_result`` 的图状态。
-        execution_service: 提供后处理和结果序列化能力的服务。
+        agent_execution_service: 提供后处理和结果序列化能力的服务。
 
     返回值：
         AgentState: 仅包含 ``result`` 字段。
@@ -71,33 +71,36 @@ async def post_process_and_build_result(
     if payload is None:
         return {}
     from athena.core.harness.harness import HarnessRunResult
-    from ..services.execution_service import ExecutionService
+    from ..services.agent_execution_service import AgentExecutionService
 
     result = HarnessRunResult(**payload)
-    attachment_refs = ExecutionService.deserialize_attachment_refs(
+    attachment_refs = AgentExecutionService.deserialize_attachment_refs(
         state.get("attachment_refs", [])
     )
     if result.error is None and not result.interrupted:
-        await execution_service.post_process(
+        await agent_execution_service.process_completed_run(
             state.get("session_id", ""),
             state.get("user_message", ""),
             result,
             turn_id=state.get("run_id", ""),
         )
-    return {"result": ExecutionService.result_payload(result, attachment_refs)}
+    return {
+        "result": AgentExecutionService.build_result_payload(result, attachment_refs)
+    }
 
 
 def create_post_process_and_build_result_node(
-    execution_service: ExecutionService,
+    agent_execution_service: AgentExecutionService,
 ) -> StateNode[AgentState, None]:
     """创建执行结果后处理节点。
 
     参数：
-        execution_service: 提供 post_process 和 result_payload 能力的服务。
+        agent_execution_service: 提供完成后处理和结果序列化能力的服务。
 
     返回值：
         StateNode: 可注册到 LangGraph 的异步节点。
     """
     return partial(
-        post_process_and_build_result, execution_service=execution_service
+        post_process_and_build_result,
+        agent_execution_service=agent_execution_service,
     )

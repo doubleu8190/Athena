@@ -9,7 +9,7 @@ from langgraph.graph.state import StateNode
 from ..state import AgentState
 
 if TYPE_CHECKING:
-    from ..graph_runtime import LangGraphRuntime
+    from ..langgraph_runtime import LangGraphRuntime
 
 
 async def understand_task(

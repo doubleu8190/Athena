@@ -14,10 +14,10 @@ from .contracts import (
 )
 from .policies import DELEGATION_TOOL_NAMES, ToolPolicy
 from .structured_llm import StructuredLLMService
-from .planner import Planner
+from .plan_materializer import PlanMaterializer
 from .worker import WorkerExecutor
-from .dispatcher import Dispatcher
-from .synthesizer import Synthesizer
+from .plan_dispatcher import PlanDispatcher
+from .plan_result_synthesizer import PlanResultSynthesizer
 from .events import OrchestrationEventPublisher
 
 __all__ = [
@@ -29,10 +29,10 @@ __all__ = [
     "TaskStatus",
     "ToolPolicy",
     "StructuredLLMService",
-    "Planner",
+    "PlanMaterializer",
     "WorkerExecutor",
-    "Dispatcher",
-    "Synthesizer",
+    "PlanDispatcher",
+    "PlanResultSynthesizer",
     "OrchestrationEventPublisher",
     "WorkerResult",
     "WorkerResultStatus",

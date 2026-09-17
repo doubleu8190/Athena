@@ -34,7 +34,7 @@ from .state import AgentState
 from .node_events import instrument_graph_node
 
 if TYPE_CHECKING:
-    from .graph_runtime import LangGraphRuntime
+    from .langgraph_runtime import LangGraphRuntime
 
 logger = get_logger(__name__)
 
@@ -109,10 +109,10 @@ def build_graph(
         "close_execution_stream", create_close_execution_stream_node(runtime)
     )
 
-    # 后处理并组装 Harness 结果 → 使用 ExecutionService
+    # 后处理并组装 Harness 结果 → 使用 AgentExecutionService
     add_instrumented_node(
         "post_process_and_build_result",
-        create_post_process_and_build_result_node(runtime.execution_service),
+        create_post_process_and_build_result_node(runtime.agent_execution_service),
     )
     # 组装最终响应 → 无依赖
     add_instrumented_node("assemble_final_response", create_assemble_final_response_node())

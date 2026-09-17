@@ -5,11 +5,11 @@ import asyncio
 
 import pytest
 
-from athena.runtime.graph_runtime import (
+from athena.runtime.langgraph_runtime import (
     DEFAULT_SYSTEM_PROMPT,
     LangGraphRuntime,
 )
-from athena.runtime.langgraph_graph import invoke_graph
+from athena.runtime.agent_graph import invoke_graph
 from athena.runtime.nodes.prepare_request import prepare_request_and_persist_message
 from athena.models import Message, MessageRole
 from athena.models.file import Attachment, AttachmentRef, AttachmentStatus
@@ -198,8 +198,8 @@ def test_build_harness_messages_does_not_change_non_user_messages():
 
 
 def test_deserialize_messages_restores_flat_checkpoint_field():
-    """deserialize_messages moved to ExecutionService."""
-    from athena.runtime.services.execution_service import ExecutionService
+    """deserialize_messages moved to AgentExecutionService."""
+    from athena.runtime.services.agent_execution_service import AgentExecutionService
 
     message = Message(
         id="message-1",
@@ -209,7 +209,7 @@ def test_deserialize_messages_restores_flat_checkpoint_field():
         timestamp=datetime.now(),
     )
 
-    restored = ExecutionService.deserialize_messages(
+    restored = AgentExecutionService.deserialize_messages(
         [message.model_dump(mode="json")]
     )
 

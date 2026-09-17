@@ -3,11 +3,11 @@
 import asyncio
 import pytest
 
-from athena.runtime.graph_runtime import DEFAULT_SYSTEM_PROMPT
-from athena.runtime.langgraph_graph import build_graph, invoke_graph
-from athena.runtime.sub_agent import SubAgentManager, SubAgentResult
+from athena.runtime.langgraph_runtime import DEFAULT_SYSTEM_PROMPT
+from athena.runtime.agent_graph import build_graph, invoke_graph
+from athena.runtime.sub_agent_manager import SubAgentManager, SubAgentResult
 from athena.runtime.services.session_context_service import SessionContextService
-from athena.runtime.services.execution_service import ExecutionService
+from athena.runtime.services.agent_execution_service import AgentExecutionService
 
 
 class _RecordingGraph:
@@ -34,9 +34,9 @@ class TestModuleStructure:
         assert SessionContextService is not None
         assert hasattr(SessionContextService, "_build_harness_messages")
 
-    def test_execution_service_exists(self):
-        assert ExecutionService is not None
-        assert callable(ExecutionService.result_payload)
+    def test_agent_execution_service_exists(self):
+        assert AgentExecutionService is not None
+        assert callable(AgentExecutionService.build_result_payload)
 
     def test_sub_agent_extracted(self):
         assert SubAgentManager is not None

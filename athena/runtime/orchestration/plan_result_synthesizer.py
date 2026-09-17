@@ -1,4 +1,4 @@
-"""Synthesizer：把 Worker 结果合并为用户可读的最终答案。"""
+"""PlanResultSynthesizer：把 Worker 结果合并为用户可读的最终答案。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from athena.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-class Synthesizer:
+class PlanResultSynthesizer:
     """基于计划目标与 Worker 结果生成最终文本。"""
 
     def __init__(self, llm: LLMProvider) -> None:

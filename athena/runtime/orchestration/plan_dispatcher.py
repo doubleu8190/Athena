@@ -1,4 +1,4 @@
-"""Dispatcher：并发领取并执行 V1 无依赖任务。"""
+"""PlanDispatcher：并发领取并执行 V1 无依赖任务。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 TaskRunner = Callable[[TaskSpec, int], Awaitable[WorkerResult]]
 
 
-class Dispatcher:
+class PlanDispatcher:
     """按并发上限调度同一计划内的无依赖任务。"""
 
     def __init__(
@@ -40,7 +40,7 @@ class Dispatcher:
             db: 数据库门面，通过 ``db.orchestration`` 领取任务。
             worker: 执行单个任务的 Worker。
             events: 编排生命周期事件发布器。
-            lease_owner: 当前 Dispatcher 实例标识。
+            lease_owner: 当前 PlanDispatcher 实例标识。
 
         返回值：
             None。
@@ -52,9 +52,9 @@ class Dispatcher:
         self._worker = worker
         self._events = events
         self._lease_owner = lease_owner
-        self._session_ids: dict[str, str] = {}
+        self._plan_id_to_session_id: dict[str, str] = {}
 
-    def register_session(self, plan_id: str, session_id: str) -> None:
+    def register_plan_session(self, plan_id: str, session_id: str) -> None:
         """登记计划所属会话，用于任务事件发布。
 
         参数：
@@ -67,9 +67,9 @@ class Dispatcher:
         异常：
             不主动抛出业务异常。
         """
-        self._session_ids[plan_id] = session_id
+        self._plan_id_to_session_id[plan_id] = session_id
 
-    async def run(
+    async def execute_plan(
         self,
         plan: ExecutionPlan,
         session_id: str,
@@ -92,7 +92,7 @@ class Dispatcher:
 
         async def _run_one(index: int, task: TaskSpec) -> WorkerResult:
             async with semaphore:
-                session_id = self._session_ids.get(plan.plan_id, "")
+                session_id = self._plan_id_to_session_id.get(plan.plan_id, "")
                 claimed = await self._db.orchestration.claim_next_task(
                     plan.plan_id, self._lease_owner
                 )

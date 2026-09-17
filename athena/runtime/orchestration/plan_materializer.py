@@ -17,7 +17,7 @@ from athena.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-class Planner:
+class PlanMaterializer:
     """只负责处理顶层 Agent LLM 已经决定提交的执行计划。"""
 
     def __init__(self, db: Database, events: OrchestrationEventPublisher) -> None:

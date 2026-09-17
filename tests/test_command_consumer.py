@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from athena.runtime.consumer import CommandConsumer
+from athena.runtime.command_consumer import CommandConsumer
 
 
 def test_error_message_uses_exception_type_when_message_is_empty() -> None:

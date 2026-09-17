@@ -15,7 +15,6 @@ from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.tools.manager import UnifiedToolManager
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import AgentStorePort, EventPublisherPort
@@ -66,7 +65,6 @@ class SubAgentManager:
         db: 数据库连接。
         event_publisher: 应用事件发布器，用于发布子 Agent 生命周期事件。
         compressor: 上下文压缩器（与父级共享摘要缓冲区）。
-        memory_manager: 长期记忆管理器。
         settings: 全局配置。
         main_run_id: 父级运行 ID，用于生成子 Agent 的 ``sub_run_id``。
     """
@@ -78,7 +76,6 @@ class SubAgentManager:
         db: Database,
         event_publisher: EventPublisherPort,
         compressor: ContextCompressor,
-        memory_manager: LongTermMemoryService,
         settings: Settings,
         main_run_id: str,
         agent_store: AgentStorePort,
@@ -91,7 +88,6 @@ class SubAgentManager:
             db (数据库): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             event_publisher: 应用事件发布器。
             compressor (ContextCompressor): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            memory_manager (LongTermMemoryService): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
             main_run_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
@@ -106,7 +102,6 @@ class SubAgentManager:
         self._db = db
         self._events = event_publisher
         self._compressor = compressor
-        self._memory_manager = memory_manager
         self._settings = settings
         self._main_run_id = main_run_id
         self._agent_store = agent_store
@@ -259,7 +254,7 @@ class SubAgentManager:
                 task=task, content="", error=str(e), run_id=sub_run_id
             )
 
-    async def parallel(
+    async def spawn_parallel(
         self,
         tasks: list[str],
         session_id: str,

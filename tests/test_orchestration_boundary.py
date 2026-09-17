@@ -16,7 +16,7 @@ class _UnsupportedLLM:
 
 @pytest.mark.asyncio
 async def test_runtime_orchestrate_runs_full_pipeline(tmp_path) -> None:
-    from athena.runtime.graph_runtime import LangGraphRuntime
+    from athena.runtime.langgraph_runtime import LangGraphRuntime
     from athena.runtime.orchestration import ExecutionPlan, TaskSpec
 
     database = Database(str(tmp_path / "runtime.db"))
@@ -63,23 +63,28 @@ async def test_runtime_orchestrate_runs_full_pipeline(tmp_path) -> None:
     runtime._settings = type("S", (), {"max_turns_per_run": 1, "retry_budget": 1})()
     runtime._session_stop_signals = {}
 
-    from athena.runtime.orchestration import Dispatcher, Planner, StructuredLLMService, Synthesizer
+    from athena.runtime.orchestration import (
+        PlanDispatcher,
+        PlanMaterializer,
+        PlanResultSynthesizer,
+        StructuredLLMService,
+    )
     from athena.runtime.orchestration.worker import WorkerExecutor
 
     structured = StructuredLLMService(fake_llm)
     from athena.runtime.orchestration.events import OrchestrationEventPublisher
 
-    runtime._orchestration_planner = Planner(
+    runtime._plan_materializer = PlanMaterializer(
         database, OrchestrationEventPublisher(runtime._events)
     )
-    runtime._orchestration_worker = _Worker()
-    runtime._orchestration_dispatcher = Dispatcher(
+    runtime._worker_executor = _Worker()
+    runtime._plan_dispatcher = PlanDispatcher(
         database,
-        runtime._orchestration_worker,
+        runtime._worker_executor,
         OrchestrationEventPublisher(runtime._events),
     )
     runtime._orchestration_events = OrchestrationEventPublisher(runtime._events)
-    runtime._orchestration_synthesizer = Synthesizer(fake_llm)
+    runtime._plan_result_synthesizer = PlanResultSynthesizer(fake_llm)
 
     materialized = await runtime.materialize_plan(
         session_id="session-1",
@@ -109,16 +114,16 @@ async def test_runtime_orchestrate_runs_full_pipeline(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_main_graph_has_orchestration_branch() -> None:
-    """主图必须包含 Planner 分支、计划执行和编排汇总节点。"""
+    """主图必须包含计划物化、计划执行和编排汇总节点。"""
 
     from unittest.mock import MagicMock
 
-    from athena.runtime.graph_runtime import LangGraphRuntime
-    from athena.runtime.langgraph_graph import build_graph
+    from athena.runtime.langgraph_runtime import LangGraphRuntime
+    from athena.runtime.agent_graph import build_graph
 
     runtime = LangGraphRuntime.__new__(LangGraphRuntime)
     runtime._session_context_service = MagicMock()
-    runtime._execution_service = MagicMock()
+    runtime._agent_execution_service = MagicMock()
     runtime._file_runtime = MagicMock()
     runtime._file_parse_semaphore = None
     runtime._file_embedding_semaphore = None

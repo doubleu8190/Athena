@@ -28,7 +28,7 @@ from athena.core.harness.harness import Harness
 from athena.models import Message, MessageRole
 from athena.utils.llm import extract_message_text
 from athena.utils.message import dict_to_message, message_to_dict
-from athena.runtime.streaming import StreamCoalescer
+from athena.runtime.stream_coalescer import StreamCoalescer
 from athena.runtime.orchestration import (
     DELEGATION_TOOL_NAMES,
     PLAN_SUBMISSION_TOOL_NAME,

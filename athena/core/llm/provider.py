@@ -9,12 +9,21 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from typing import Any, AsyncIterator, Protocol, cast, runtime_checkable
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Protocol,
+    TypeVar,
+    cast,
+    runtime_checkable,
+)
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk, BaseMessage
-from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, StructuredTool
+from pydantic import BaseModel
 
 from athena.config.settings import (
     LLMProviderConfig,
@@ -30,6 +39,8 @@ from athena.core.llm.tokens import ModelTokenCounter, TokenCounter
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 @runtime_checkable
@@ -55,8 +66,10 @@ class LLMProviderProtocol(Protocol):
         """返回绑定指定工具定义的模型提供商。"""
         ...
 
-    def with_structured_output(self, schema: type) -> Runnable:
-        """返回约束为指定结构化输出的模型提供商。"""
+    async def ainvoke_structured(
+        self, schema: type[ModelT], messages: list[BaseMessage], **kwargs: Any
+    ) -> ModelT:
+        """异步调用模型并返回通过 schema 校验的结构化结果。"""
         ...
 
 
@@ -107,12 +120,56 @@ class LLMProvider:
 
     async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> BaseMessage:
         """异步调用模型，失败时使用指数退避重试."""
+        result = await self._invoke_with_retry(self._model.ainvoke, messages, **kwargs)
+        return cast(BaseMessage, result)
+
+    async def ainvoke_structured(
+        self,
+        schema: type[ModelT],
+        messages: list[BaseMessage],
+        **kwargs: Any,
+    ) -> ModelT:
+        """调用模型并将结果校验为指定的 Pydantic 模型。
+
+        结构化调用与普通调用使用相同的重试和故障转移策略；故障转移时会在
+        备用 Provider 上重新绑定相同 schema，避免退化为未约束的文本调用。
+        """
+        runnable = self._model.with_structured_output(schema)
+
+        async def invoke_fallback(fallback: LLMProvider) -> ModelT:
+            return await fallback.ainvoke_structured(schema, messages, **kwargs)
+
+        result = await self._invoke_with_retry(
+            runnable.ainvoke,
+            messages,
+            fallback_invoke=invoke_fallback,
+            **kwargs,
+        )
+        if isinstance(result, schema):
+            return result
+        if isinstance(result, BaseModel):
+            return schema.model_validate(result.model_dump(mode="json"))
+        if isinstance(result, dict):
+            return schema.model_validate(result)
+        raise ValueError(
+            f"structured LLM returned unsupported type: {type(result).__name__}"
+        )
+
+    async def _invoke_with_retry(
+        self,
+        invoke: Callable[..., Awaitable[Any]],
+        *args: Any,
+        fallback_invoke: Callable[["LLMProvider"], Awaitable[Any]] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """通过当前 Provider 的重试与故障转移策略执行一次模型调用。"""
         if self._retry_manager is None:
-            return await self._model.ainvoke(messages, **kwargs)
+            return await invoke(*args, **kwargs)
 
         result = await self._retry_manager.execute_with_retry(
-            self._model.ainvoke,
-            messages,
+            invoke,
+            *args,
+            fallback_invoke=fallback_invoke,
             **kwargs,
         )
         if not result.success:
@@ -203,10 +260,6 @@ class LLMProvider:
         provider._token_counter = self._token_counter
         return provider
 
-    def with_structured_output(self, schema: type) -> Runnable:
-        """绑定结构化输出 schema，返回可调用的 runnable."""
-        return self._model.with_structured_output(schema)
-
     @property
     def fallback_providers(self) -> list["LLMProvider"]:
         """返回重试管理器注册的备用模型列表。"""
@@ -232,20 +285,24 @@ class LLMProvider:
             return False
         return True
 
-    def structured_runnable(self, schema: type) -> Runnable:
-        """创建原生结构化输出 Runnable。
+    @classmethod
+    def from_config(
+        cls,
+        config: LLMProviderConfig,
+        settings: Settings,
+        *,
+        retry_settings: LLMRetrySettings | None = None,
+    ) -> "LLMProvider":
+        """根据单个配置创建统一的 LLM Provider。
 
-        参数：
-            schema: Pydantic 模型或 JSON Schema。
-
-        返回值：
-            Runnable: 输出会解析为 ``schema`` 实例的调用链。
-
-        异常：
-            NotImplementedError: 底层模型不支持结构化输出。
-            ValueError: schema 或厂商参数不受支持。
+        用于一次性连通性测试等不应直接接触底层 ChatModel 的入口。未指定
+        ``retry_settings`` 时使用全局主 Provider 的重试配置。
         """
-        return self._model.with_structured_output(schema)
+        retry_config = _to_retry_config(retry_settings or settings.llm_retry)
+        return cls(
+            _create_chat_model(config, settings),
+            retry_manager=LLMRetryManager(retry_config=retry_config),
+        )
 
     @classmethod
     def from_primary_settings(cls, settings: Settings) -> "LLMProvider":
@@ -257,9 +314,14 @@ class LLMProvider:
         3. 将 fallback providers 注入 retry_manager 的故障转移链
         """
         primary_config = settings.primary_llm
-        model = _create_chat_model(primary_config, settings)
-        retry_config = _to_retry_config(settings.llm_retry)
-        retry_manager = LLMRetryManager(retry_config=retry_config)
+        provider = cls.from_config(
+            primary_config,
+            settings,
+            retry_settings=settings.llm_retry,
+        )
+        retry_manager = provider._retry_manager
+        if retry_manager is None:
+            raise RuntimeError("primary LLM provider must have a retry manager")
 
         # 注入 secondary / fallback providers 到故障转移链
         for fallback_config in settings.fallback_llm_list:
@@ -273,7 +335,7 @@ class LLMProvider:
                 model=fallback_config.model,
             )
 
-        return cls(model, retry_manager=retry_manager)
+        return provider
 
     @classmethod
     def from_secondary_settings(cls, settings: Settings) -> "LLMProvider | None":
@@ -289,16 +351,17 @@ class LLMProvider:
         if secondary_config is None:
             return None
 
-        model = _create_chat_model(secondary_config, settings)
-        retry_config = _to_retry_config(settings.llm_secondary_retry)
-        retry_manager = LLMRetryManager(retry_config=retry_config)
         logger.info(
             "llm_secondary_created",
             name=secondary_config.name,
             provider=secondary_config.provider,
             model=secondary_config.model,
         )
-        return cls(model, retry_manager=retry_manager)
+        return cls.from_config(
+            secondary_config,
+            settings,
+            retry_settings=settings.llm_secondary_retry,
+        )
 
 
 def _to_retry_config(settings: LLMRetrySettings) -> RetryConfig:

@@ -6,32 +6,32 @@
 
 # ── 轻量模块（直接导入，不触发循环） ──
 
-from .streaming import StreamCoalescer
+from .stream_coalescer import StreamCoalescer
 from .transport import SessionEventBus
 from .cancellation import CancellationRegistry
 from .command_notifications import CommandNotifier
-from .processors import (
+from .processor_lifecycle import (
     ProcessAction,
     ProcessDecision,
     ProcessOutcome,
     Processor,
     ProcessorBlocked,
-    StaticProcessorProxy,
+    ProcessorLifecycleRunner,
     run_with_lifecycle,
 )
 from .attachment_processor import AttachmentProcessContext, AttachmentProcessor
 
-# ── 懒加载：避免循环导入（consumer → langgraph_graph → ... → harness → tools.manager） ──
+# ── 懒加载：避免循环导入（command_consumer → agent_graph → ... → harness → tools.manager） ──
 
 _lazy = {
-    "CommandConsumer": ".consumer",
-    "RecoveryReconciler": ".recovery",
-    "AgentState": ".langgraph_graph",
-    "build_graph": ".langgraph_graph",
-    "invoke_graph": ".langgraph_graph",
-    "LangGraphRuntime": ".graph_runtime",
-    "SubAgentManager": ".sub_agent",
-    "SubAgentResult": ".sub_agent",
+    "CommandConsumer": ".command_consumer",
+    "RecoveryReconciler": ".recovery_reconciler",
+    "AgentState": ".agent_graph",
+    "build_graph": ".agent_graph",
+    "invoke_graph": ".agent_graph",
+    "LangGraphRuntime": ".langgraph_runtime",
+    "SubAgentManager": ".sub_agent_manager",
+    "SubAgentResult": ".sub_agent_manager",
 }
 
 
@@ -57,7 +57,7 @@ __all__ = [
     "ProcessOutcome",
     "Processor",
     "ProcessorBlocked",
-    "StaticProcessorProxy",
+    "ProcessorLifecycleRunner",
     "run_with_lifecycle",
     "AttachmentProcessContext",
     "AttachmentProcessor",

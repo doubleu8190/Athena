@@ -11,7 +11,6 @@ from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.distillation import ConversationSummarizer
 from athena.core.memory.contracts import CompletedTurn
 from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
@@ -26,7 +25,7 @@ from athena.utils.prompts import get_prompt
 logger = get_logger(__name__)
 
 
-class ExecutionService:
+class AgentExecutionService:
     """Harness 执行编排与后处理服务。
 
     负责创建 Harness 实例、执行 LLM/工具循环、序列化结果为 JSON 安全格式，
@@ -39,7 +38,6 @@ class ExecutionService:
         tool_manager: UnifiedToolManager,
         db: Database,
         compressor: ContextCompressor,
-        memory_manager: LongTermMemoryService,
         conversation_summarizer: ConversationSummarizer,
         memory_job_repository: MemoryJobRepository,
         settings: Settings,
@@ -49,13 +47,12 @@ class ExecutionService:
         self._tool_manager = tool_manager
         self._db = db
         self._compressor = compressor
-        self._memory_manager = memory_manager
         self._conversation_summarizer = conversation_summarizer
         self._memory_job_repository = memory_job_repository
         self._settings = settings
         self._events = event_publisher
 
-    async def run_harness(
+    async def execute_harness(
         self,
         messages: list[Message],
         session_id: str,
@@ -148,7 +145,7 @@ class ExecutionService:
                 system += "\n\n[Retrieved Context]\n" + "\n\n".join(blocks)
         return system
 
-    async def post_process(
+    async def process_completed_run(
         self,
         session_id: str,
         user_message: str,
@@ -183,7 +180,7 @@ class ExecutionService:
             logger.warning("summary_trigger_failed", error=str(e))
 
     @classmethod
-    def result_payload(
+    def build_result_payload(
         cls, result: HarnessRunResult, attachment_refs: list[AttachmentRef]
     ) -> dict[str, Any]:
         """将 Harness 运行结果序列化为 JSON 安全的字典负载。

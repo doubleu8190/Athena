@@ -73,7 +73,7 @@ class Processor(Protocol[ContextT, ResultT]):
         ...
 
 
-class StaticProcessorProxy(Generic[ContextT, ResultT]):
+class ProcessorLifecycleRunner(Generic[ContextT, ResultT]):
     """Run a processor with a fixed, exception-safe lifecycle."""
 
     def __init__(self, processor: Processor[ContextT, ResultT]) -> None:
@@ -147,7 +147,7 @@ async def run_with_lifecycle(
             if post_process is not None:
                 await post_process(outcome)
 
-    return await StaticProcessorProxy(_CallableProcessor()).execute(None)
+    return await ProcessorLifecycleRunner(_CallableProcessor()).execute(None)
 
 
 __all__ = [
@@ -156,6 +156,6 @@ __all__ = [
     "ProcessOutcome",
     "Processor",
     "ProcessorBlocked",
-    "StaticProcessorProxy",
+    "ProcessorLifecycleRunner",
     "run_with_lifecycle",
 ]

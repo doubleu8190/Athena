@@ -46,7 +46,7 @@ from athena.utils.ids import generate_time_id
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
 from athena.utils.message import dict_to_message, normalize_tool_calls
-from athena.runtime.streaming import StreamCoalescer
+from athena.runtime.stream_coalescer import StreamCoalescer
 
 logger = get_logger(__name__)
 

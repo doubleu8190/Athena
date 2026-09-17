@@ -12,7 +12,7 @@ from ..execution_loop.finish import finish_execution
 from ..execution_loop._helpers import _stop_signal
 
 if TYPE_CHECKING:
-    from ..graph_runtime import LangGraphRuntime
+    from ..langgraph_runtime import LangGraphRuntime
 
 async def materialize_execution_plan(
     state: AgentState, *, runtime: LangGraphRuntime
@@ -47,7 +47,7 @@ async def run_planned_orchestration(
         AgentState: 包含 ``orchestration_result`` 的 JSON 安全状态。
 
     异常：
-        ValueError: Planner 决策缺少计划。
+        ValueError: 顶层 Agent 的决策缺少计划。
     """
     plan_payload = state.get("execution_plan")
     if plan_payload is None:

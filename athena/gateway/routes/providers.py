@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from athena.config.settings import LLMProviderConfig
-from athena.core.llm.provider import _create_chat_model
+from athena.core.llm.provider import LLMProvider
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -86,9 +86,9 @@ async def test_provider(req: TestProviderRequest) -> TestProviderResult:
         base_url=req.base_url,
     )
     try:
-        model = _create_chat_model(config, settings)
+        provider = LLMProvider.from_config(config, settings)
         start = time.monotonic()
-        await asyncio.wait_for(model.ainvoke([HumanMessage("ping")]), timeout=10)
+        await asyncio.wait_for(provider.ainvoke([HumanMessage("ping")]), timeout=10)
         latency_ms = int((time.monotonic() - start) * 1000)
         return TestProviderResult(ok=True, latency_ms=latency_ms)
     except Exception as e:

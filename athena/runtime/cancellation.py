@@ -32,7 +32,7 @@ class CancellationRegistry:
         async with self._lock:
             return self._events.setdefault(run_id, asyncio.Event())
 
-    async def request(self, run_id: str) -> None:
+    async def request_cancellation(self, run_id: str) -> None:
         """请求取消指定运行任务。
 
         参数:
@@ -46,8 +46,8 @@ class CancellationRegistry:
             event = self._events.setdefault(run_id, asyncio.Event())
             event.set()
 
-    async def release(self, run_id: str) -> None:
-        """释放指定运行任务的取消状态。
+    async def unregister(self, run_id: str) -> None:
+        """移除指定运行任务的取消事件。
 
         参数:
             run_id (str): 要移除的运行 ID；不存在时视为幂等成功。

@@ -208,7 +208,10 @@ async def lifespan(app: FastAPI):
         memory_job_repository=memory_job_repository,
         agent_store=agent_store,
     )
-    memory_job_worker.configure_workflow(graph_runtime._memory_write_workflow)
+    # Access the runtime property so the workflow is constructed before the
+    # worker starts claiming queued turns.  The backing attribute is lazily
+    # initialized and is None during runtime construction.
+    memory_job_worker.configure_workflow(graph_runtime.memory_write_workflow)
     await memory_job_worker.start()
     # 注册子 Agent 派生工具到工具管理器
     await tool_registry.install(graph_runtime.delegation_tool_specs())

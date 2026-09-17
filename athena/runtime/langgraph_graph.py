@@ -12,7 +12,7 @@ from athena.utils.logging import get_logger
 
 from .nodes import (
     route_after_attachment_processing,
-    route_after_memory_request,
+    route_after_task_understanding,
     create_handle_attachment_failure_node,
     create_agent_loop_node,
     create_post_process_and_build_result_node,
@@ -21,8 +21,10 @@ from .nodes import (
     create_prepare_harness_input_node,
     create_prepare_request_and_persist_message_node,
     create_process_attachments_node,
-    create_retrieve_memory_node,
-    create_build_memory_request_node,
+    create_understand_task_node,
+    create_plan_context_node,
+    create_acquire_context_node,
+    create_clarification_response_node,
     create_run_planned_orchestration_node,
     create_materialize_execution_plan_node,
     create_build_orchestration_response_node,
@@ -76,13 +78,15 @@ def build_graph(
     add_instrumented_node("process_attachments", create_process_attachments_node(runtime))
     # 附件失败处理 → 无依赖
     add_instrumented_node("handle_attachment_failure", create_handle_attachment_failure_node())
-    # 构建记忆检索请求 → 使用 MemoryService
+    # 任务理解 → 生成 UserTaskSpec
+    add_instrumented_node("understand_task", create_understand_task_node(runtime))
+    # 上下文计划 → 推导 Provider
+    add_instrumented_node("plan_context", create_plan_context_node(runtime))
+    # 上下文获取 → 并发调用 Provider
+    add_instrumented_node("acquire_context", create_acquire_context_node(runtime))
+    # 澄清回答 → 持久化为普通 assistant 回答并结束 run
     add_instrumented_node(
-        "build_memory_request", create_build_memory_request_node(runtime.memory_service)
-    )
-    # 记忆检索 → 使用 MemoryService
-    add_instrumented_node(
-        "retrieve_memory", create_retrieve_memory_node(runtime.memory_service)
+        "clarification_response", create_clarification_response_node(runtime)
     )
     # 准备 Harness 输入 → 使用 SessionContextService
     add_instrumented_node(
@@ -120,20 +124,23 @@ def build_graph(
         "process_attachments",
         route_after_attachment_processing,
         {
-            "build_memory_request": "build_memory_request",
+            "understand_task": "understand_task",
             "handle_attachment_failure": "handle_attachment_failure",
         },
     )
     graph.add_edge("handle_attachment_failure", "assemble_final_response")
+    graph.add_edge("understand_task", "plan_context")
     graph.add_conditional_edges(
-        "build_memory_request",
-        route_after_memory_request,
+        "understand_task",
+        route_after_task_understanding,
         {
-            "retrieve_memory": "retrieve_memory",
-            "prepare_harness_input": "prepare_harness_input",
+            "clarification_response": "clarification_response",
+            "plan_context": "plan_context",
         },
     )
-    graph.add_edge("retrieve_memory", "prepare_harness_input")
+    graph.add_edge("clarification_response", "assemble_final_response")
+    graph.add_edge("plan_context", "acquire_context")
+    graph.add_edge("acquire_context", "prepare_harness_input")
     graph.add_edge("prepare_harness_input", "agent_loop")
     graph.add_conditional_edges(
         "agent_loop",

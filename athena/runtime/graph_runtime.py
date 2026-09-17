@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 from typing import Any
 
@@ -21,7 +22,6 @@ from athena.core.llm.provider import LLMProvider
 from athena.core.memory.memory import MemoryManager
 from athena.core.memory.retrieval import MemoryRetrievalService
 from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
-from athena.core.memory.contracts import MemoryRetrievalRequest
 from athena.core.memory.trigger import MemoryTrigger
 from athena.core.memory.workflow import MemoryWriteWorkflow
 from athena.core.memory.resolver import MemoryResolver
@@ -29,7 +29,7 @@ from athena.infrastructure.sqlite.memory_job_repository import MemoryJobReposito
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message
-from athena.models.file import Attachment, AttachmentRef
+from athena.models.file import Attachment, AttachmentRef, AttachmentStatus
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
 from athena.contracts.ports import AgentStorePort
@@ -40,7 +40,6 @@ from .attachment_processor import AttachmentProcessContext, AttachmentProcessor
 from .processors import StaticProcessorProxy
 from .state import AgentState, FileProcessResult
 from .sub_agent import SubAgentManager
-from .services.memory_service import MemoryService
 from .services.session_context_service import SessionContextService
 from .services.execution_service import ExecutionService
 from .orchestration.events import OrchestrationEventPublisher
@@ -53,6 +52,11 @@ from .orchestration import (
     Synthesizer,
     WorkerExecutor,
 )
+from .task_understanding import TaskUnderstandingService
+from .context import ContextAcquisitionService, ContextPlanner
+from .context.providers.file import FileContextProvider
+from .context.providers.knowledge import KnowledgeContextProvider
+from .context.providers.memory import MemoryContextProvider
 
 logger = get_logger(__name__)
 
@@ -65,7 +69,8 @@ class LangGraphRuntime:
 
     创建并持有所有聚焦服务，向 Graph Node 提供统一的委托入口。
     领域逻辑已拆分至：
-    - ``MemoryService`` — 记忆请求构建与检索
+    - ``TaskUnderstandingService`` — 用户任务理解
+    - ``ContextAcquisitionService`` — Memory / Knowledge / File 上下文获取
     - ``SessionContextService`` — 会话历史、消息持久化、附件绑定和 Harness 输入准备
     - ``ExecutionService`` — Harness 执行编排与后处理
 
@@ -108,11 +113,31 @@ class LangGraphRuntime:
             memory_job_repository: 记忆任务持久化仓库。
         """
         # ── 聚焦服务 ──
-        self._memory_service = MemoryService(
-            llm=llm,
-            memory_retrieval=memory_retrieval,
-            retrieval_timeout_seconds=settings.memory_retrieval_timeout_seconds,
+        structured_llm = StructuredLLMService(
+            llm,
+            timeout_seconds=settings.task_understanding_timeout_seconds,
         )
+        self._task_understanding_service = TaskUnderstandingService(structured_llm)
+        memory_provider = MemoryContextProvider(
+            memory_retrieval,
+            timeout_seconds=settings.memory_retrieval_timeout_seconds,
+        )
+        knowledge_provider = KnowledgeContextProvider(
+            db.files,
+            file_runtime,
+            timeout_seconds=settings.memory_retrieval_timeout_seconds,
+        )
+        file_provider = FileContextProvider(
+            file_runtime,
+            timeout_seconds=settings.memory_retrieval_timeout_seconds,
+        )
+        self._context_acquisition_service = ContextAcquisitionService(
+            memory_provider=memory_provider,
+            knowledge_provider=knowledge_provider,
+            file_provider=file_provider,
+            token_counter=llm,
+        )
+        self._context_planner = ContextPlanner()
         self._session_context_service = SessionContextService(
             db=db, event_publisher=event_publisher
         )
@@ -137,7 +162,6 @@ class LangGraphRuntime:
         self._memory_manager = memory_manager
         self._conversation_summarizer = conversation_summarizer
         self._fact_extractor = fact_extractor
-        self._memory_retrieval = memory_retrieval
         self._settings = settings
         self._file_runtime = file_runtime
         self._memory_job_repository = memory_job_repository
@@ -175,8 +199,16 @@ class LangGraphRuntime:
     # ------------------------------------------------------------------
 
     @property
-    def memory_service(self) -> MemoryService:
-        return self._memory_service
+    def task_understanding_service(self) -> TaskUnderstandingService:
+        return self._task_understanding_service
+
+    @property
+    def context_acquisition_service(self) -> ContextAcquisitionService:
+        return self._context_acquisition_service
+
+    @property
+    def context_planner(self) -> ContextPlanner:
+        return self._context_planner
 
     @property
     def session_context_service(self) -> SessionContextService:
@@ -274,29 +306,135 @@ class LangGraphRuntime:
             raise
 
     # ------------------------------------------------------------------
-    # MemoryService 委托
+    # Task Understanding / Context 委托
     # ------------------------------------------------------------------
 
-    async def build_memory_request(
-        self,
-        session_id: str,
-        user_message: str,
-        history: list[dict[str, Any]] | None = None,
-    ) -> MemoryRetrievalRequest | None:
-        return await self._memory_service.build_memory_request(
-            session_id, user_message, history
+    async def understand_task(self, state: AgentState) -> AgentState:
+        """生成当前请求的 UserTaskSpec。"""
+        history = state.get("history", [])
+        attachment_refs = state.get("requested_attachment_refs", [])
+        knowledge_documents = await self._db.files.list_global_knowledge_documents()
+        result = await self._task_understanding_service.understand(
+            session_id=state.get("session_id", ""),
+            user_message=state.get("user_message", ""),
+            history=history,
+            attachment_refs=attachment_refs,
+            knowledge_document_count=len(knowledge_documents),
+            tool_names=self._tool_manager.list_names(),
         )
+        update: AgentState = {
+            "task_spec": result.task.model_dump(mode="json"),
+            "task_understanding_source": result.source,
+        }
+        if result.task.requires_clarification:
+            update["clarification_question"] = result.task.clarification_question
+        return update
 
-    async def retrieve_memory_context(
-        self,
-        session_id: str,
-        memory_request: dict[str, Any] | None,
-        *,
-        run_id: str = "",
-    ) -> str:
-        return await self._memory_service.retrieve_memory_context(
-            session_id, memory_request, run_id=run_id
+    async def complete_clarification(self, state: AgentState) -> AgentState:
+        """把澄清问题持久化为一次普通 assistant 回答。"""
+        from athena.models import Message, MessageRole
+
+        session_id = state.get("session_id", "")
+        run_id = state.get("run_id", "")
+        message_id = state.get("message_id", "")
+        clarification = state.get("clarification_question") or "请补充说明你的目标。"
+        assistant_message_id = f"{run_id}:assistant:clarification"
+        message = Message(
+            id=assistant_message_id,
+            session_id=session_id,
+            role=MessageRole.ASSISTANT,
+            content=clarification,
+            run_id=run_id,
+            timestamp=datetime.now(),
         )
+        await self._db.messages.save(message)
+        await self._events.publish(
+            ApplicationEvent(
+                event_type=EventType.STREAM_END,
+                durability=EventDurability.DURABLE,
+                session_id=session_id,
+                run_id=run_id,
+                message_id=message_id or None,
+                stream_id=f"answer:{run_id}",
+                stream_type="answer",
+                is_complete=True,
+                payload={
+                    "content": clarification,
+                    "run_id": run_id,
+                    "turn_count": 0,
+                    "content_type": "clarification",
+                },
+            )
+        )
+        await self._db.sessions.update(session_id, status="idle")
+        return {
+            "result": {
+                "content": clarification,
+                "run_id": run_id,
+                "turn_count": 0,
+                "tool_results": [],
+                "error": None,
+                "error_detail": None,
+                "interrupted": False,
+                "attachments": state.get("requested_attachment_refs", []),
+            }
+        }
+
+    def plan_context(self, state: AgentState) -> AgentState:
+        """根据任务理解结果生成上下文获取计划。"""
+        from athena.runtime.task_understanding import UserTaskSpec
+
+        task_payload = state.get("task_spec")
+        if task_payload is None:
+            task = UserTaskSpec(
+                goal=state.get("user_message", "")[:1000] or "answer the user",
+                task_type="answer",
+                context_requirements=["conversation"],
+            )
+        else:
+            task = UserTaskSpec.model_validate(task_payload)
+        requested_file_ids = [
+            ref.get("id", "")
+            for ref in state.get("requested_attachment_refs", [])
+            if ref.get("id")
+        ]
+        plan = self._context_planner.plan(
+            task,
+            requested_file_ids=requested_file_ids,
+            max_files=self._settings.knowledge_context_max_files,
+            limit_per_file=self._settings.knowledge_context_limit_per_file,
+            max_items=self._settings.knowledge_context_max_items,
+            max_tokens=self._settings.knowledge_context_max_tokens,
+        )
+        return {"context_plan": plan.model_dump(mode="json")}
+
+    async def acquire_context(self, state: AgentState) -> AgentState:
+        """并发获取计划中的上下文。"""
+        from athena.runtime.context.contracts import ContextPlan
+        from athena.runtime.task_understanding import UserTaskSpec
+
+        task_payload = state.get("task_spec")
+        plan_payload = state.get("context_plan")
+        task = (
+            UserTaskSpec.model_validate(task_payload)
+            if task_payload is not None
+            else UserTaskSpec(
+                goal=state.get("user_message", "")[:1000] or "answer the user",
+                task_type="answer",
+                context_requirements=["conversation"],
+            )
+        )
+        plan = (
+            ContextPlan.model_validate(plan_payload)
+            if plan_payload is not None
+            else ContextPlan()
+        )
+        bundle = await self._context_acquisition_service.acquire(
+            session_id=state.get("session_id", ""),
+            task=task,
+            plan=plan,
+        )
+        return {"context_bundle": bundle.model_dump(mode="json")}
 
     # ------------------------------------------------------------------
     # SessionContextService 委托
@@ -330,22 +468,27 @@ class LangGraphRuntime:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def build_system_prompt(memory_context: str) -> str:
-        """使用内置系统提示词，并在存在记忆上下文时追加记忆注入块。"""
-        return ExecutionService._build_system_prompt(memory_context)
+    def build_system_prompt(
+        task_spec: dict[str, Any] | None = None,
+        context_bundle: dict[str, Any] | None = None,
+    ) -> str:
+        """使用内置系统提示词，并注入任务理解和上下文包。"""
+        return ExecutionService._build_system_prompt(task_spec, context_bundle)
 
     async def run_harness(
         self,
         messages: list[Message],
         session_id: str,
-        memory_context: str = "",
+        task_spec: dict[str, Any] | None = None,
+        context_bundle: dict[str, Any] | None = None,
         run_id: str = "",
         stop_signal: Any = None,
     ) -> HarnessRunResult:
         return await self._execution_service.run_harness(
             messages=messages,
             session_id=session_id,
-            memory_context=memory_context,
+            task_spec=task_spec,
+            context_bundle=context_bundle,
             run_id=run_id,
             stop_signal=stop_signal,
         )

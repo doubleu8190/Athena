@@ -608,17 +608,6 @@ class KnowledgeBaseModel(Base):
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True, comment="软删除时间（UTC）")
 
 
-class SessionKnowledgeBaseModel(Base):
-    """会话与可访问知识库的多对多绑定。"""
-
-    __tablename__ = "session_knowledge_bases"
-    __table_args__ = (Index("idx_session_knowledge_bases_kb", "knowledge_base_id"),)
-
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), primary_key=True)
-    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"), primary_key=True)
-    created_at: Mapped[str] = mapped_column(String, comment="绑定时间（UTC）")
-
-
 class AttachmentModel(Base):
     """会话附件或独立知识库文档的元数据。原始字节存储在存储层。"""
 

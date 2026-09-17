@@ -1,0 +1,145 @@
+"""并发执行 Context Plan 的服务。"""
+
+from __future__ import annotations
+
+import asyncio
+
+from typing import Protocol
+
+from athena.core.llm.tokens import TokenCounter
+from athena.runtime.context.contracts import (
+    ContextBundle,
+    ContextItem,
+    ContextPlan,
+    ProviderResult,
+)
+from athena.runtime.context.providers.file import FileContextProvider
+from athena.runtime.context.providers.knowledge import KnowledgeContextProvider
+from athena.runtime.context.providers.memory import MemoryContextProvider
+from athena.runtime.task_understanding.contracts import UserTaskSpec
+from athena.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class _ContextProvider(Protocol):
+    """Context Provider 的最小协议。"""
+
+    name: str
+
+    async def acquire(
+        self,
+        *,
+        session_id: str,
+        task: UserTaskSpec,
+        plan: ContextPlan,
+    ) -> ProviderResult:
+        """获取上下文。"""
+        ...
+
+
+class ContextAcquisitionService:
+    """按 ContextPlan 并发调用 Provider 并合并结果。"""
+
+    def __init__(
+        self,
+        *,
+        memory_provider: MemoryContextProvider | None = None,
+        knowledge_provider: KnowledgeContextProvider | None = None,
+        file_provider: FileContextProvider | None = None,
+        token_counter: TokenCounter | None = None,
+    ) -> None:
+        """绑定可用的 Provider。
+
+        参数：
+            memory_provider (MemoryContextProvider | None): Memory Provider。
+            knowledge_provider (KnowledgeContextProvider | None): Knowledge Provider。
+            file_provider (FileContextProvider | None): File Provider。
+            token_counter (TokenCounter | None): Token 计数器，用于按预算截断。
+
+        返回值：
+            None。
+
+        异常：
+            不主动抛出业务异常。
+        """
+        self._providers: dict[str, _ContextProvider] = {}
+        for provider in (memory_provider, knowledge_provider, file_provider):
+            if provider is not None:
+                self._providers[provider.name] = provider
+        self._token_counter = token_counter
+
+    async def acquire(
+        self,
+        *,
+        session_id: str,
+        task: UserTaskSpec,
+        plan: ContextPlan,
+    ) -> ContextBundle:
+        """并发执行计划中的 Provider。
+
+        参数：
+            session_id (str): 当前会话唯一标识。
+            task (UserTaskSpec): 当前任务理解结果。
+            plan (ContextPlan): 上下文获取计划。
+
+        返回值：
+            ContextBundle: 合并后的上下文包。
+
+        异常：
+            不主动抛出异常；Provider 失败记录到 ContextBundle。
+        """
+        selected = [
+            self._providers[provider]
+            for provider in plan.providers
+            if provider in self._providers
+        ]
+        results = await asyncio.gather(
+            *(
+                provider.acquire(session_id=session_id, task=task, plan=plan)
+                for provider in selected
+            ),
+            return_exceptions=True,
+        )
+        normalized_results: list[ProviderResult] = []
+        for provider, result in zip(selected, results):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "context_provider_unexpected_failure",
+                    provider=provider.name,
+                    error=str(result),
+                )
+                normalized_results.append(
+                    ProviderResult(provider=provider.name, status="failed")
+                )
+            else:
+                normalized_results.append(result)
+        items = [item for result in normalized_results for item in result.items]
+        truncated = len(items) > plan.max_items
+        items = items[: plan.max_items]
+        if self._token_counter is not None and plan.max_tokens:
+            total_tokens = 0
+            kept: list[ContextItem] = []
+            for item in items:
+                tokens = self._token_counter.count_text_tokens(item.content)
+                if total_tokens + tokens > plan.max_tokens:
+                    truncated = True
+                    break
+                kept.append(item)
+                total_tokens += tokens
+            items = kept
+        return ContextBundle(
+            items=items,
+            provider_results=normalized_results,
+            providers_succeeded=[
+                result.provider
+                for result in normalized_results
+                if result.status == "succeeded"
+            ],
+            providers_failed=[
+                result.provider
+                for result in normalized_results
+                if result.status in {"failed", "timeout"}
+            ],
+            truncated=truncated,
+        )

@@ -77,4 +77,4 @@ class MemoryRetrievalRequest(BaseModel):
     task: str = ""
     scope: str = "user"
     limit: int = Field(default=8, ge=1, le=100)
-    reason: str | None = None
+    expand_query: bool = False

@@ -518,3 +518,25 @@ class MemoryManager:
             logger.exception("memory_cleanup_vector_failed")
             raise
         return len(ids)
+
+    async def clear_all(self) -> dict[str, int]:
+        """清空 SQLite 和 Chroma 中的全部长期记忆数据。
+
+        参数：
+            无。
+
+        返回：
+            包含清理前 SQLite 记录数和 Chroma 向量数的字典。
+
+        异常：
+            任一存储后端无法清理时向上抛出异常，便于调用方发现残留数据。
+        """
+        await self.initialize()
+        vector_count = await self._vectors.clear()
+        try:
+            sqlite_count = await self._repository.clear_all()
+        except Exception:
+            logger.exception("memory_clear_sqlite_failed")
+            raise
+        self._access_stats.clear()
+        return {"sqlite": sqlite_count, "chroma": vector_count}

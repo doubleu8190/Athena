@@ -5,7 +5,9 @@ import asyncio
 import pytest
 from sqlalchemy import text
 
+from athena.config.settings import Settings
 from athena.core.memory.contracts import CompletedTurn
+from athena.core.memory.memory import MemoryManager
 from athena.infrastructure.sqlite.engine import (
     close_engine,
     get_memory_session,
@@ -13,6 +15,15 @@ from athena.infrastructure.sqlite.engine import (
     init_engine,
 )
 from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
+
+
+class _VectorStore:
+    async def initialize(self) -> None:
+        pass
+
+    async def add(self, memory_id: str, content: str, metadata: dict) -> None:
+        pass
 
 
 @pytest.fixture
@@ -85,18 +96,100 @@ async def test_jobs_use_separate_database_when_configured(tmp_path):
     try:
         assert await MemoryJobRepository().enqueue(payload("split-turn")) is True
         async with get_session() as session:
-            core_count = (
+            core_memory_tables = (
                 await session.execute(
-                    text("SELECT count(*) FROM memory_processing_jobs")
+                    text(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('memories', 'memory_relations', 'memory_processing_jobs')"
+                    )
                 )
-            ).scalar_one()
+            ).scalars().all()
         async with get_memory_session() as session:
             memory_count = (
                 await session.execute(
                     text("SELECT count(*) FROM memory_processing_jobs")
                 )
             ).scalar_one()
-        assert core_count == 0
+        assert core_memory_tables == []
         assert memory_count == 1
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_memory_manager_writes_to_configured_memory_database(tmp_path):
+    await init_engine(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
+    try:
+        manager = MemoryManager(
+            settings=Settings(),
+            repository=SqliteMemoryRepository(),
+            vector_store=_VectorStore(),
+        )
+        await manager.add_memory("remember this", metadata={"session_id": "s1"})
+
+        async with get_memory_session() as session:
+            assert (
+                await session.execute(text("SELECT count(*) FROM memories"))
+            ).scalar_one() == 1
+        async with get_session() as session:
+            assert (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM sqlite_master WHERE type='table' "
+                        "AND name='memories'"
+                    )
+                )
+            ).scalar_one() == 0
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_recover_retries_jobs_failed_by_unconfigured_worker(jobs):
+    await jobs.enqueue(payload())
+    await jobs.claim_next()
+    await jobs.mark_failed(
+        "turn-1", "memory job worker workflow is not configured", retry=False
+    )
+
+    assert await jobs.recover_interrupted() == 1
+    recovered = await jobs.claim_next()
+
+    assert recovered is not None
+    assert recovered["attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_split_database_creates_only_final_memory_schema(tmp_path):
+    core_path = str(tmp_path / "core.db")
+    memory_path = str(tmp_path / "memory.db")
+    await init_engine(core_path, memory_path)
+    try:
+        async with get_memory_session() as session:
+            memory_tables = (
+                await session.execute(
+                    text(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('memories', 'memory_relations', 'memory_processing_jobs', 'memory_fts') "
+                        "ORDER BY name"
+                    )
+                )
+            ).scalars().all()
+        assert memory_tables == [
+            "memories",
+            "memory_fts",
+            "memory_processing_jobs",
+            "memory_relations",
+        ]
+        async with get_session() as session:
+            core_memory_tables = (
+                await session.execute(
+                    text(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('memories', 'memory_relations', 'memory_processing_jobs', 'memory_fts')"
+                    )
+                )
+            ).scalars().all()
+        assert core_memory_tables == []
     finally:
         await close_engine()

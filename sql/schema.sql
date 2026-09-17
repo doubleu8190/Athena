@@ -8,29 +8,13 @@
 --     print(MEMORY_FTS_DDL.strip()); print('PRAGMA user_version = 1;')" > athena/db/schema.sql
 --
 -- 用法：
---   sqlite3 data/athena.db < athena/db/schema.sql
+--   sqlite3 data/athena.db < sql/schema.sql
+--
+-- 记忆表（memories/memory_relations/memory_processing_jobs/memory_fts）由
+-- 应用按 sqlite_memory_db_path 初始化到独立的 memory.db，不属于核心库。
 -- =============================================================
 
 PRAGMA foreign_keys = ON;
-
-CREATE TABLE memories (
-	id VARCHAR NOT NULL, 
-	session_id VARCHAR NOT NULL, 
-	content TEXT NOT NULL, 
-	metadata_json TEXT NOT NULL, 
-	pinned INTEGER NOT NULL, 
-	expires_at VARCHAR, 
-	created_at VARCHAR NOT NULL, 
-	last_accessed VARCHAR, 
-	access_count INTEGER NOT NULL, 
-	type VARCHAR, 
-	category VARCHAR, 
-	confidence FLOAT, 
-	source VARCHAR, 
-	deleted_time VARCHAR, 
-	PRIMARY KEY (id)
-);
-CREATE INDEX idx_memories_session ON memories (session_id);
 
 CREATE TABLE sessions (
 	id VARCHAR NOT NULL, 
@@ -126,12 +110,6 @@ CREATE TABLE tool_call (
 CREATE INDEX idx_tool_call_status ON tool_call (status);
 CREATE INDEX idx_tool_call_session ON tool_call (session_id);
 CREATE INDEX idx_tool_call_step ON tool_call (step_id);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    content,
-    memory_id UNINDEXED,
-    tokenize='unicode61'
-);
 
 PRAGMA user_version = 1;
 

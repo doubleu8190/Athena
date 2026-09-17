@@ -32,7 +32,8 @@ class AgentExecutionContext(TypedDict, total=False):
     message_id: str
     parent_run_id: str | None
     user_message: str
-    memory_context: str
+    task_spec: dict[str, Any] | None
+    context_bundle: dict[str, Any] | None
     system_prompt: str
     tool_names: list[str] | None
 
@@ -139,8 +140,11 @@ class AgentState(TypedDict, total=False):
     attachment_ids: list[str]
     requested_attachment_refs: list[dict[str, Any]]
     file_results: list[FileProcessResult]
-    memory_context: str
-    memory_request: dict[str, Any] | None
+    task_spec: dict[str, Any] | None
+    context_plan: dict[str, Any] | None
+    context_bundle: dict[str, Any] | None
+    task_understanding_source: Literal["fast_path", "llm", "fallback"] | None
+    clarification_question: str | None
     history: list[dict[str, Any]]
     attachment_refs: list[dict[str, Any]]
     harness_messages: list[dict[str, Any]]

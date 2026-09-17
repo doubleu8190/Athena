@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio
 from datetime import datetime
-import sqlite3
 import sys
 import types
 from unittest.mock import AsyncMock
@@ -104,8 +103,8 @@ async def test_parse_search_message_binding_and_session_isolation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_knowledge_base_documents_are_reusable_only_by_bound_sessions(tmp_path):
-    """独立知识库文档应能跨会话复用，同时保持显式授权边界。"""
+async def test_knowledge_base_documents_are_global_and_session_files_are_scoped(tmp_path):
+    """知识库文档默认全局可见，会话附件只属于当前会话。"""
     db = Database(str(tmp_path / "knowledge-base.db"))
     await db.connect()
     try:
@@ -121,72 +120,42 @@ async def test_knowledge_base_documents_are_reusable_only_by_bound_sessions(tmp_
             storage_key="blobs/aa/placeholder",
         )
 
-        assert await db.files.get_accessible_attachment("one", document.id) is None
-
-        await db.knowledge_bases.bind_session("one", knowledge_base.id)
-        await db.knowledge_bases.bind_session("two", knowledge_base.id)
+        attachment = await db.files.create_attachment(
+            session_id="one",
+            filename="upload.txt",
+            mime_type="text/plain",
+            size_bytes=3,
+            sha256="b" * 64,
+            storage_key="blobs/bb/placeholder",
+        )
 
         assert await db.files.get_accessible_attachment("one", document.id) is not None
         assert await db.files.get_accessible_attachment("two", document.id) is not None
-        assert [item.id for item in await db.files.list_accessible_attachments("one")] == [document.id]
+        assert await db.files.get_accessible_attachment("two", attachment.id) is None
+        assert [
+            item.id for item in await db.files.list_session_attachments("one")
+        ] == [attachment.id]
+        assert [
+            item.id for item in await db.files.list_global_knowledge_documents()
+        ] == [document.id]
 
-        await db.knowledge_bases.unbind_session("one", knowledge_base.id)
-        assert await db.files.get_accessible_attachment("one", document.id) is None
-        assert await db.files.get_accessible_attachment("two", document.id) is not None
+        await db.files.delete_session("one")
+        assert await db.files.get_attachment(
+            attachment.id, include_deleted=True
+        ) is not None
+        assert await db.files.get_attachment(document.id) is not None
     finally:
         await db.close()
 
 
 @pytest.mark.asyncio
-async def test_existing_attachment_table_migrates_to_independent_ownership(tmp_path):
-    """旧数据库启动时应解除 session_id 非空限制并保留原附件。"""
-    database_path = tmp_path / "legacy-attachments.db"
-    connection = sqlite3.connect(database_path)
-    connection.execute(
-        """
-        CREATE TABLE attachments (
-            id VARCHAR PRIMARY KEY,
-            session_id VARCHAR NOT NULL,
-            message_id VARCHAR,
-            filename VARCHAR NOT NULL,
-            mime_type VARCHAR NOT NULL,
-            size_bytes INTEGER NOT NULL,
-            sha256 VARCHAR NOT NULL,
-            storage_key VARCHAR NOT NULL,
-            adapter_name VARCHAR,
-            adapter_version VARCHAR,
-            status VARCHAR NOT NULL DEFAULT 'uploaded',
-            capabilities_json TEXT NOT NULL DEFAULT '[]',
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            error_message TEXT,
-            created_at VARCHAR NOT NULL,
-            updated_at VARCHAR NOT NULL,
-            deleted_time VARCHAR
-        )
-        """
-    )
-    now = datetime.now().isoformat()
-    connection.execute(
-        """
-        INSERT INTO attachments (
-            id, session_id, filename, mime_type, size_bytes, sha256,
-            storage_key, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        ("legacy", "session", "old.txt", "text/plain", 3, "b" * 64, "blob", now, now),
-    )
-    connection.commit()
-    connection.close()
-
+async def test_attachment_table_uses_final_independent_ownership_schema(tmp_path):
+    """新数据库直接支持会话附件和知识库附件二选一的所有权。"""
+    database_path = tmp_path / "attachments.db"
     db = Database(str(database_path))
     await db.connect()
     try:
-        legacy = await db.files.get_attachment("legacy")
-        assert legacy is not None
-        assert legacy.session_id == "session"
-        assert legacy.knowledge_base_id is None
-
-        knowledge_base = await db.knowledge_bases.create("迁移后知识库")
+        knowledge_base = await db.knowledge_bases.create("知识库")
         document = await db.files.create_attachment(
             knowledge_base_id=knowledge_base.id,
             filename="new.txt",

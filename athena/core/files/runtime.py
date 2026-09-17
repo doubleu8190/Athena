@@ -402,10 +402,11 @@ class FileIntelligenceRuntime:
         return best
 
     async def list_files(self, session_id: str) -> list[dict[str, Any]]:
-        """列出会话直接附件和已绑定知识库文档（公开字段）。"""
+        """列出会话附件和全局知识库文档（公开字段）。"""
+        session_files = await self.repository.list_session_attachments(session_id)
+        knowledge_documents = await self.repository.list_global_knowledge_documents()
         return [
-            _attachment_to_public(item)
-            for item in await self.repository.list_accessible_attachments(session_id)
+            _attachment_to_public(item) for item in [*session_files, *knowledge_documents]
         ]
 
     async def list_session_files(self, session_id: str) -> list[dict[str, Any]]:

@@ -106,6 +106,29 @@ class SqliteMemoryRepository:
                     {"content": record["content"], "id": record["id"]},
                 )
 
+    async def clear_all(self) -> int:
+        """清空记忆库中的记录、关系、全文索引和处理任务。
+
+        参数：
+            无。
+
+        返回：
+            删除前的记忆记录数量。
+
+        异常：
+            SQLite 删除操作失败时向上抛出异常，事务会自动回滚。
+        """
+        async with get_memory_session() as session:
+            async with session.begin():
+                memory_count = (
+                    await session.execute(select(func.count(MemoryModel.id)))
+                ).scalar_one()
+                await session.execute(text("DELETE FROM memory_relations"))
+                await session.execute(text("DELETE FROM memory_fts"))
+                await session.execute(text("DELETE FROM memories"))
+                await session.execute(text("DELETE FROM memory_processing_jobs"))
+        return int(memory_count)
+
     async def flush_access_stats(
         self, stats: dict[str, Any], expires_at: str
     ) -> list[dict[str, Any]]:

@@ -1,4 +1,4 @@
-"""独立知识库、文档导入以及会话授权 REST API。"""
+"""独立知识库与文档导入 REST API。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from athena.models.file import Attachment, AttachmentStatus, KnowledgeBase
 
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
-session_router = APIRouter(prefix="/sessions", tags=["knowledge-bases"])
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -180,7 +179,7 @@ async def update_knowledge_base(
 async def delete_knowledge_base(
     knowledge_base_id: str, request: Request
 ) -> dict[str, str]:
-    """删除知识库、全部文档和所有会话绑定。"""
+    """删除知识库及其全部文档。"""
     runtime = runtime_from(request)
     await _require_knowledge_base(runtime, knowledge_base_id)
     documents = await runtime.db.files.list_knowledge_base_attachments(
@@ -257,39 +256,3 @@ async def delete_document(
         raise HTTPException(status_code=404, detail="知识库文档不存在")
     await runtime.file_runtime.cleanup_unreferenced_blobs()
     return {"status": "deleted", "attachment_id": attachment_id}
-
-
-@session_router.get("/{session_id}/knowledge-bases")
-async def list_session_knowledge_bases(
-    session_id: str, request: Request
-) -> list[KnowledgeBase]:
-    """列出会话当前可以访问的知识库。"""
-    runtime = runtime_from(request)
-    if await runtime.db.sessions.get(session_id) is None:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    return await runtime.db.knowledge_bases.list_for_session(session_id)
-
-
-@session_router.put("/{session_id}/knowledge-bases/{knowledge_base_id}")
-async def bind_session_knowledge_base(
-    session_id: str, knowledge_base_id: str, request: Request
-) -> dict[str, str]:
-    """授予会话访问指定知识库的权限。"""
-    runtime = runtime_from(request)
-    if await runtime.db.sessions.get(session_id) is None:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    await _require_knowledge_base(runtime, knowledge_base_id)
-    await runtime.db.knowledge_bases.bind_session(session_id, knowledge_base_id)
-    return {"status": "bound", "knowledge_base_id": knowledge_base_id}
-
-
-@session_router.delete("/{session_id}/knowledge-bases/{knowledge_base_id}")
-async def unbind_session_knowledge_base(
-    session_id: str, knowledge_base_id: str, request: Request
-) -> dict[str, str]:
-    """移除会话对指定知识库的访问权限。"""
-    runtime = runtime_from(request)
-    if await runtime.db.sessions.get(session_id) is None:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    await runtime.db.knowledge_bases.unbind_session(session_id, knowledge_base_id)
-    return {"status": "unbound", "knowledge_base_id": knowledge_base_id}

@@ -9,9 +9,6 @@ from athena.runtime.graph_runtime import (
     DEFAULT_SYSTEM_PROMPT,
     LangGraphRuntime,
 )
-from athena.runtime.services.memory_service import (
-    _recent_history_by_turns,
-)
 from athena.runtime.langgraph_graph import invoke_graph
 from athena.runtime.nodes.prepare_request import prepare_request_and_persist_message
 from athena.models import Message, MessageRole
@@ -62,213 +59,28 @@ async def test_invoke_graph_requires_run_id_for_checkpointing():
 
 
 @pytest.mark.asyncio
-async def test_simple_memory_request_does_not_call_llm():
-    """Memory requests now go through MemoryService, not directly on LangGraphRuntime."""
-    from athena.runtime.services.memory_service import MemoryService
-
-    class LLM:
-        async def ainvoke(self, messages):
-            raise AssertionError("simple requests must stay deterministic")
-
-    class RetrievalStub:
-        async def get_context(self, request):
-            return ""
-
-    service = MemoryService(llm=LLM(), memory_retrieval=RetrievalStub())
-    request = await service.build_memory_request(
-        "session-1", "请检查 Athena Candidate Resolver 的关系决策是否完整"
-    )
-
-    assert request is not None
-    assert request.query == "请检查 Athena Candidate Resolver 的关系决策是否完整"
-    assert request.reason == "substantive_task"
-
-
-@pytest.mark.asyncio
-async def test_substantive_memory_request_is_retrieved() -> None:
-    from athena.runtime.nodes.conditions import route_after_memory_request
-
-    assert route_after_memory_request(
-        {"memory_request": {"reason": "substantive_task"}}
-    ) == "retrieve_memory"
-    assert route_after_memory_request(
-        {"memory_request": {"reason": "context_reference"}}
-    ) == "retrieve_memory"
-    assert route_after_memory_request(
-        {"memory_request": {"reason": "llm_complex_request"}}
-    ) == "retrieve_memory"
-
-    from athena.runtime.services.memory_service import MemoryService
-
-    service = MemoryService(llm=object(), memory_retrieval=object())
-    request = await service.build_memory_request(
-        "session-1", "请按照优先级修复问题"
-    )
-    assert request is None
-
-
-@pytest.mark.asyncio
-async def test_short_knowledge_query_is_retrieved() -> None:
-    """知识库短语不能被固定长度规则过滤。"""
-    from athena.runtime.services.memory_service import MemoryService
-
-    service = MemoryService(llm=object(), memory_retrieval=object())
-    request = await service.build_memory_request(
-        "session-1", "小学6年级的识字目标"
-    )
-
-    assert request is not None
-    assert request.query == "小学6年级的识字目标"
-    assert request.reason == "knowledge_query"
-
-
-def test_knowledge_query_routes_to_retrieval() -> None:
-    from athena.runtime.nodes.conditions import route_after_memory_request
-
-    assert route_after_memory_request(
-        {"memory_request": {"reason": "knowledge_query"}}
-    ) == "retrieve_memory"
-
-
-@pytest.mark.asyncio
 async def test_memory_retrieval_timeout_falls_back_without_context() -> None:
-    from athena.runtime.services.memory_service import MemoryService
+    from athena.runtime.context.providers.memory import MemoryContextProvider
+    from athena.runtime.context.contracts import ContextPlan
+    from athena.runtime.task_understanding import UserTaskSpec
 
     class RetrievalStub:
         async def get_context(self, request):
             await asyncio.sleep(0.05)
             return "should not be used"
 
-    service = MemoryService(
-        llm=object(), memory_retrieval=RetrievalStub(), retrieval_timeout_seconds=0.01
+    provider = MemoryContextProvider(
+        RetrievalStub(), timeout_seconds=0.01
     )
-    assert await service.retrieve_memory_context(
-        "session-1", {"session_id": "session-1", "query": "之前的设计"}
-    ) == ""
-
-
-@pytest.mark.asyncio
-async def test_complex_memory_request_timeout_falls_back_to_raw_query() -> None:
-    from athena.runtime.services.memory_service import MemoryService
-
-    class LLM:
-        async def ainvoke(self, messages):
-            await asyncio.sleep(0.05)
-
-    service = MemoryService(
-        llm=LLM(), memory_retrieval=object(), retrieval_timeout_seconds=0.01
+    task = UserTaskSpec(goal="之前的设计", task_type="retrieve", context_requirements=["memory"])
+    plan = ContextPlan(providers=["memory"], memory_query="之前的设计")
+    result = await provider.acquire(
+        session_id="session-1",
+        task=task,
+        plan=plan,
     )
-    request = await service.build_memory_request(
-        "session-1",
-        "继续分析之前的系统设计和实现细节，并逐项对照尚未完成的工作、风险、测试覆盖和兼容性问题。",
-    )
-    assert request is not None
-    assert request.query.startswith("继续分析之前")
-    assert request.reason == "context_reference"
-
-
-@pytest.mark.asyncio
-async def test_complex_memory_request_uses_validated_llm_plan():
-    """Memory requests now go through MemoryService."""
-    from athena.runtime.services.memory_service import MemoryService
-
-    class LLM:
-        async def ainvoke(self, messages):
-            return type(
-                "Response",
-                (),
-                {
-                    "content": (
-                        '{"query":"Athena 记忆系统候选解析和检索共享设计",'
-                        '"task":"继续实现记忆系统", "limit":12}'
-                    )
-                },
-            )()
-
-    class RetrievalStub:
-        async def get_context(self, request):
-            return ""
-
-    service = MemoryService(llm=LLM(), memory_retrieval=RetrievalStub())
-    message = "继续完善 Athena"
-    request = await service.build_memory_request(
-        "session-1",
-        message,
-        [{"role": "user", "content": "我们正在设计 Athena 的记忆系统"}],
-    )
-
-    assert request is not None
-    assert request.session_id == "session-1"
-    assert request.query == "Athena 记忆系统候选解析和检索共享设计"
-    assert request.limit == 12
-    assert request.reason == "llm_complex_request"
-
-
-def test_recent_history_keeps_six_complete_turns():
-    history = [{"role": "system", "content": "summary"}]
-    for index in range(1, 8):
-        history.extend(
-            [
-                {"role": "user", "content": f"user-{index}"},
-                {"role": "assistant", "content": f"assistant-{index}"},
-                {"role": "tool", "content": f"tool-{index}"},
-            ]
-        )
-
-    recent = _recent_history_by_turns(history)
-
-    assert recent[0] == {"role": "system", "content": "summary"}
-    assert [item["content"] for item in recent if item["role"] == "user"] == [
-        "user-2",
-        "user-3",
-        "user-4",
-        "user-5",
-        "user-6",
-        "user-7",
-    ]
-    assert [item["content"] for item in recent] == [
-        "summary",
-        "user-2",
-        "assistant-2",
-        "tool-2",
-        "user-3",
-        "assistant-3",
-        "tool-3",
-        "user-4",
-        "assistant-4",
-        "tool-4",
-        "user-5",
-        "assistant-5",
-        "tool-5",
-        "user-6",
-        "assistant-6",
-        "tool-6",
-        "user-7",
-        "assistant-7",
-        "tool-7",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_complex_memory_request_falls_back_on_invalid_llm_output():
-    """Memory requests now go through MemoryService."""
-    from athena.runtime.services.memory_service import MemoryService
-
-    class LLM:
-        async def ainvoke(self, messages):
-            return type("Response", (), {"content": '{"query":"ok","extra":true}'})()
-
-    class RetrievalStub:
-        async def get_context(self, request):
-            return ""
-
-    service = MemoryService(llm=LLM(), memory_retrieval=RetrievalStub())
-    message = "继续分析之前的系统设计和实现细节，并逐项对照尚未完成的工作、风险、测试覆盖和兼容性问题。" * 3
-    request = await service.build_memory_request("session-1", message)
-
-    assert request is not None
-    assert request.query == message
-    assert request.reason == "context_reference"
+    assert result.status == "timeout"
+    assert result.items == []
 
 
 @pytest.mark.asyncio

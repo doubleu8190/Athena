@@ -59,7 +59,8 @@ class ExecutionService:
         self,
         messages: list[Message],
         session_id: str,
-        memory_context: str = "",
+        task_spec: dict[str, Any] | None = None,
+        context_bundle: dict[str, Any] | None = None,
         run_id: str = "",
         stop_signal: Any = None,
     ) -> HarnessRunResult:
@@ -68,7 +69,8 @@ class ExecutionService:
         参数：
             messages: 已构建的会话消息列表（包含历史、当前用户消息和文件引用）。
             session_id: 会话唯一标识。
-            memory_context: 从长期记忆中检索到的上下文，注入系统提示。
+            task_spec: 当前任务理解结果，注入系统提示。
+            context_bundle: 检索到的上下文包，注入系统提示。
             run_id: 运行唯一标识。
             stop_signal: 停止事件，置位时终止执行。
 
@@ -82,7 +84,7 @@ class ExecutionService:
             approval_timeout=self._settings.approval_timeout,
         )
 
-        system_prompt = self._build_system_prompt(memory_context)
+        system_prompt = self._build_system_prompt(task_spec, context_bundle)
 
         harness = Harness(
             llm=self._llm,
@@ -103,11 +105,47 @@ class ExecutionService:
         )
 
     @staticmethod
-    def _build_system_prompt(memory_context: str) -> str:
-        """使用内置系统提示词，并在存在记忆上下文时追加记忆注入块。"""
+    def _build_system_prompt(
+        task_spec: dict[str, Any] | None = None,
+        context_bundle: dict[str, Any] | None = None,
+    ) -> str:
+        """使用内置系统提示词，并注入任务理解和检索上下文。"""
         system = get_prompt("system")
-        if memory_context:
-            system += f"\n\n[Memory Context]\n{memory_context}"
+        if task_spec:
+            goal = task_spec.get("goal", "")
+            task_type = task_spec.get("task_type", "")
+            requirements = ", ".join(task_spec.get("context_requirements", []))
+            system += (
+                "\n\n[Task Understanding]\n"
+                f"goal: {goal}\n"
+                f"task_type: {task_type}\n"
+                f"context_requirements: {requirements}"
+            )
+        if context_bundle:
+            sections = {
+                "memory": [],
+                "knowledge": [],
+                "file": [],
+                "conversation": [],
+                "external": [],
+            }
+            for item in context_bundle.get("items", []):
+                provider = item.get("provider", "")
+                content = item.get("content", "")
+                source = item.get("title") or item.get("source_id") or ""
+                locator = item.get("locator", {})
+                locator_text = (
+                    f" locator={locator}" if locator else ""
+                )
+                sections.setdefault(provider, []).append(
+                    f"- {f'source: {source}{locator_text}\\n  ' if source else ''}{content}"
+                )
+            blocks = []
+            for provider, lines in sections.items():
+                if lines:
+                    blocks.append(f"[{provider.capitalize()}]\n" + "\n".join(lines))
+            if blocks:
+                system += "\n\n[Retrieved Context]\n" + "\n\n".join(blocks)
         return system
 
     async def post_process(

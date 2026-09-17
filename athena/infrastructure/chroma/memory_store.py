@@ -178,3 +178,21 @@ class ChromaMemoryStore:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         await asyncio.to_thread(self.collection.delete, ids=memory_ids)
+
+    async def clear(self) -> int:
+        """删除 collection 中的全部向量记录。
+
+        参数：
+            无。
+
+        返回：
+            删除前的向量记录数量。
+
+        异常：
+            Chroma 查询或删除失败时向上抛出异常。
+        """
+        records = await asyncio.to_thread(self.collection.get)
+        memory_ids = [str(memory_id) for memory_id in records.get("ids", [])]
+        if memory_ids:
+            await asyncio.to_thread(self.collection.delete, ids=memory_ids)
+        return len(memory_ids)

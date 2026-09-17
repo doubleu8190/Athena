@@ -9,17 +9,18 @@ from ..state import AgentState
 
 def route_after_attachment_processing(
     state: AgentState,
-) -> Literal["build_memory_request", "handle_attachment_failure"]:
-    """只有所有附件 READY 时才允许进入记忆检索。"""
+) -> Literal["understand_task", "handle_attachment_failure"]:
+    """只有所有附件 READY 时才允许进入任务理解。"""
     results = state.get("file_results", [])
     if all(item.get("status") == "ready" for item in results):
-        return "build_memory_request"
+        return "understand_task"
     return "handle_attachment_failure"
 
-def route_after_memory_request(
+
+def route_after_task_understanding(
     state: AgentState,
-) -> Literal["retrieve_memory", "prepare_harness_input"]:
-    request = state.get("memory_request")
-    # 检索是低风险的只读步骤：所有已经通过低价值/执行指令过滤的请求
-    # 都允许进入检索，避免依赖固定 reason 白名单漏掉新类型的知识问题。
-    return "retrieve_memory" if request else "prepare_harness_input"
+) -> Literal["clarification_response", "plan_context"]:
+    """目标不明确时先向用户澄清，否则继续获取上下文。"""
+    if state.get("clarification_question"):
+        return "clarification_response"
+    return "plan_context"

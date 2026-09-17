@@ -75,7 +75,7 @@ class MemoryJobRepository:
                 return payload
 
     async def recover_interrupted(self) -> int:
-        """Return jobs left running by a previous process to the retry queue."""
+        """Return interrupted and previously misconfigured jobs to the retry queue."""
         now = datetime.now().isoformat()
         async with get_memory_session() as session:
             async with session.begin():
@@ -83,9 +83,19 @@ class MemoryJobRepository:
                     CursorResult[Any],
                     await session.execute(
                         text("""UPDATE memory_processing_jobs
-                            SET status = 'retry', available_at = :now,
-                                error_json = 'process_interrupted', updated_at = :now
-                            WHERE status = 'running'"""),
+                            SET status = 'retry',
+                                attempt = CASE WHEN status = 'failed' THEN 0 ELSE attempt END,
+                                available_at = :now,
+                                error_json = CASE
+                                    WHEN status = 'running' THEN 'process_interrupted'
+                                    ELSE error_json
+                                END,
+                                updated_at = :now
+                            WHERE status = 'running'
+                               OR (
+                                   status = 'failed'
+                                   AND error_json = 'memory job worker workflow is not configured'
+                               )"""),
                         {"now": now},
                     ),
                 )

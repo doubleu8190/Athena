@@ -542,8 +542,7 @@ class MemoryRetrievalService:
         try:
             results = await self._manager.retrieve(
                 query=request.query,
-                expand_query=request.reason
-                in {"knowledge_query", "llm_complex_request"},
+                expand_query=request.expand_query,
             )
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))

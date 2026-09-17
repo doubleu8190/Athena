@@ -24,7 +24,6 @@ from athena.infrastructure.sqlite.models import (
     CodeSymbolModel,
     FileArtifactModel,
     FileChunkModel,
-    SessionKnowledgeBaseModel,
 )
 from athena.infrastructure.sqlite.repositories import (
     _json_dumps,
@@ -94,11 +93,6 @@ class FileRepository:
                     .all()
                 )
                 if not attachment_ids:
-                    await session.execute(
-                        delete(SessionKnowledgeBaseModel).where(
-                            SessionKnowledgeBaseModel.session_id == session_id
-                        )
-                    )
                     return
                 chunk_ids = list(
                     (
@@ -148,12 +142,6 @@ class FileRepository:
                         CodeDependencyModel.attachment_id.in_(attachment_ids)
                     )
                 )
-                await session.execute(
-                    delete(SessionKnowledgeBaseModel).where(
-                        SessionKnowledgeBaseModel.session_id == session_id
-                    )
-                )
-
     async def live_storage_keys(self) -> set[str]:
         """
 
@@ -305,30 +293,46 @@ class FileRepository:
             )
             return [_row_to_attachment(row) for row in rows]
 
-    async def list_accessible_attachments(self, session_id: str) -> list[Attachment]:
-        """列出会话直接附件以及绑定知识库中的全部文档。
+    async def list_session_attachments(self, session_id: str) -> list[Attachment]:
+        """列出直接上传到当前会话的附件。
 
         参数：
             session_id (str): 当前会话唯一标识。
 
         返回值：
-            list[Attachment]: 当前会话有权访问的文件，按创建时间升序排列。
+        list[Attachment]: 当前会话附件，按创建时间升序排列。
 
         异常：
             数据库读取失败时传播底层异常。
         """
         async with get_session() as session:
-            knowledge_base_ids = select(
-                SessionKnowledgeBaseModel.knowledge_base_id
-            ).where(SessionKnowledgeBaseModel.session_id == session_id)
             rows = (
                 await session.execute(
                     select(AttachmentModel)
                     .where(
-                        or_(
-                            AttachmentModel.session_id == session_id,
-                            AttachmentModel.knowledge_base_id.in_(knowledge_base_ids),
-                        ),
+                        AttachmentModel.session_id == session_id,
+                        AttachmentModel.deleted_time.is_(None),
+                    )
+                    .order_by(AttachmentModel.created_at.asc())
+                )
+            ).scalars().all()
+        return [_row_to_attachment(row) for row in rows]
+
+    async def list_global_knowledge_documents(self) -> list[Attachment]:
+        """列出所有全局知识库文档。
+
+        返回值：
+            list[Attachment]: 所有未删除的知识库文档，按创建时间升序排列。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(AttachmentModel)
+                    .where(
+                        AttachmentModel.knowledge_base_id.is_not(None),
                         AttachmentModel.deleted_time.is_(None),
                     )
                     .order_by(AttachmentModel.created_at.asc())
@@ -339,7 +343,7 @@ class FileRepository:
     async def get_accessible_attachment(
         self, session_id: str, attachment_id: str
     ) -> Attachment | None:
-        """读取会话直接拥有或通过知识库绑定获得权限的附件。
+        """读取会话直接拥有或全局知识库中的文档。
 
         参数：
             session_id (str): 当前会话唯一标识。
@@ -352,16 +356,13 @@ class FileRepository:
             数据库读取失败时传播底层异常。
         """
         async with get_session() as session:
-            knowledge_base_ids = select(
-                SessionKnowledgeBaseModel.knowledge_base_id
-            ).where(SessionKnowledgeBaseModel.session_id == session_id)
             row = (
                 await session.execute(
                     select(AttachmentModel).where(
                         AttachmentModel.id == attachment_id,
                         or_(
                             AttachmentModel.session_id == session_id,
-                            AttachmentModel.knowledge_base_id.in_(knowledge_base_ids),
+                            AttachmentModel.knowledge_base_id.is_not(None),
                         ),
                         AttachmentModel.deleted_time.is_(None),
                     )

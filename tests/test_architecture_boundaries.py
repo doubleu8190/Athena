@@ -34,7 +34,7 @@ def _imports(path: Path) -> set[str]:
     return modules
 
 
-def test_memory_service_has_no_storage_sdk_dependencies():
+def test_memory_core_has_no_storage_sdk_dependencies():
     imports = _imports(ROOT / "athena/core/memory/memory.py")
     forbidden = ("sqlalchemy", "chromadb", "athena.db")
     assert not any(module.startswith(forbidden) for module in imports)

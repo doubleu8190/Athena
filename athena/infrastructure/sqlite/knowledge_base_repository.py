@@ -1,16 +1,15 @@
-"""独立知识库及会话绑定关系的 SQLite 持久化。"""
+"""独立知识库的 SQLite 持久化。"""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 
 from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import (
     AttachmentModel,
     KnowledgeBaseModel,
-    SessionKnowledgeBaseModel,
 )
 from athena.models.file import AttachmentStatus, KnowledgeBase
 from athena.utils.ids import generate_time_id
@@ -29,7 +28,7 @@ def _now_iso() -> str:
 
 
 class KnowledgeBaseRepository:
-    """管理知识库元数据以及知识库与会话的绑定关系。"""
+    """管理全局知识库元数据。"""
 
     async def create(self, name: str, description: str = "") -> KnowledgeBase:
         """创建一个空知识库。
@@ -181,100 +180,7 @@ class KnowledgeBaseRepository:
                     return False
                 row.deleted_time = now
                 row.updated_at = now
-                await session.execute(
-                    delete(SessionKnowledgeBaseModel).where(
-                        SessionKnowledgeBaseModel.knowledge_base_id
-                        == knowledge_base_id
-                    )
-                )
                 return True
-
-    async def bind_session(self, session_id: str, knowledge_base_id: str) -> None:
-        """授予会话访问指定知识库的权限。
-
-        参数：
-            session_id (str): 会话唯一标识。
-            knowledge_base_id (str): 知识库唯一标识。
-
-        返回值：
-            None: 绑定已存在时保持幂等。
-
-        异常：
-            数据库写入失败时传播底层异常。
-        """
-        async with get_session() as session:
-            async with session.begin():
-                existing = (
-                    await session.execute(
-                        select(SessionKnowledgeBaseModel).where(
-                            SessionKnowledgeBaseModel.session_id == session_id,
-                            SessionKnowledgeBaseModel.knowledge_base_id
-                            == knowledge_base_id,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if existing is None:
-                    session.add(
-                        SessionKnowledgeBaseModel(
-                            session_id=session_id,
-                            knowledge_base_id=knowledge_base_id,
-                            created_at=_now_iso(),
-                        )
-                    )
-
-    async def unbind_session(
-        self, session_id: str, knowledge_base_id: str
-    ) -> None:
-        """移除会话对知识库的访问权限。
-
-        参数：
-            session_id (str): 会话唯一标识。
-            knowledge_base_id (str): 知识库唯一标识。
-
-        返回值：
-            None: 绑定不存在时保持幂等。
-
-        异常：
-            数据库写入失败时传播底层异常。
-        """
-        async with get_session() as session:
-            async with session.begin():
-                await session.execute(
-                    delete(SessionKnowledgeBaseModel).where(
-                        SessionKnowledgeBaseModel.session_id == session_id,
-                        SessionKnowledgeBaseModel.knowledge_base_id
-                        == knowledge_base_id,
-                    )
-                )
-
-    async def list_for_session(self, session_id: str) -> list[KnowledgeBase]:
-        """列出当前会话已绑定的知识库。
-
-        参数：
-            session_id (str): 会话唯一标识。
-
-        返回值：
-            list[KnowledgeBase]: 当前会话可以访问的知识库。
-
-        异常：
-            数据库读取失败时传播底层异常。
-        """
-        async with get_session() as session:
-            knowledge_base_ids = list(
-                (
-                    await session.execute(
-                        select(SessionKnowledgeBaseModel.knowledge_base_id).where(
-                            SessionKnowledgeBaseModel.session_id == session_id
-                        )
-                    )
-                ).scalars().all()
-            )
-        knowledge_bases: list[KnowledgeBase] = []
-        for knowledge_base_id in knowledge_base_ids:
-            knowledge_base = await self.get(knowledge_base_id)
-            if knowledge_base is not None:
-                knowledge_bases.append(knowledge_base)
-        return knowledge_bases
 
     @staticmethod
     def _to_domain(

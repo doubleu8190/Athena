@@ -152,6 +152,13 @@ class Settings(BaseSettings):
     # indefinitely when the vector backend or embedding service is slow.
     memory_retrieval_timeout_seconds: float = Field(default=3.0, ge=0.1, le=60.0)
 
+    # --- Task Understanding / Context Providers ---
+    task_understanding_timeout_seconds: float = Field(default=3.0, ge=0.1, le=60.0)
+    knowledge_context_max_files: int = Field(default=5, ge=1, le=20)
+    knowledge_context_limit_per_file: int = Field(default=5, ge=1, le=20)
+    knowledge_context_max_items: int = Field(default=12, ge=1, le=50)
+    knowledge_context_max_tokens: int = Field(default=4000, ge=100, le=20000)
+
     # --- 上下文压缩 ---
     max_context_tokens: int = 128000
     compression_threshold: float = 0.8  # 上下文使用率阈值

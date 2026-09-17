@@ -119,7 +119,6 @@ async def test_main_graph_has_orchestration_branch() -> None:
     runtime = LangGraphRuntime.__new__(LangGraphRuntime)
     runtime._session_context_service = MagicMock()
     runtime._execution_service = MagicMock()
-    runtime._memory_service = MagicMock()
     runtime._file_runtime = MagicMock()
     runtime._file_parse_semaphore = None
     runtime._file_embedding_semaphore = None
@@ -127,12 +126,14 @@ async def test_main_graph_has_orchestration_branch() -> None:
     graph = build_graph(runtime)
     nodes = set(graph.get_graph().nodes)
     assert {
-        "prepare_request_and_persist_message",
-        "process_attachments",
-        "handle_attachment_failure",
-        "build_memory_request",
-        "retrieve_memory",
-        "prepare_harness_input",
+            "prepare_request_and_persist_message",
+            "process_attachments",
+            "handle_attachment_failure",
+            "understand_task",
+            "plan_context",
+            "acquire_context",
+            "clarification_response",
+            "prepare_harness_input",
         "agent_loop",
         "materialize_execution_plan",
         "run_planned_orchestration",

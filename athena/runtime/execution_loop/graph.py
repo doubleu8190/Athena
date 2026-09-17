@@ -42,11 +42,13 @@ async def _initialize_wrapper(
                 "user_message": state.get(
                     "user_message", exec_state.get("user_message", "")
                 ),
-                "memory_context": state.get(
-                    "memory_context", exec_state.get("memory_context", "")
+                "task_spec": state.get("task_spec", exec_state.get("task_spec")),
+                "context_bundle": state.get(
+                    "context_bundle", exec_state.get("context_bundle")
                 ),
                 "system_prompt": graph_runtime.build_system_prompt(
-                    state.get("memory_context", "")
+                    state.get("task_spec", exec_state.get("task_spec")),
+                    state.get("context_bundle", exec_state.get("context_bundle")),
                 ),
                 "messages": list(
                     state.get("harness_messages", exec_state.get("messages", []))

@@ -257,6 +257,20 @@ async def test_flush_empty_stats_noop(mm: MemoryManager):
     assert await mm.flush_access_stats() == 0
 
 
+@pytest.mark.asyncio
+async def test_clear_all_removes_sqlite_and_vector_records(
+    mm: MemoryManager, vector_store: ChromaMemoryStore
+):
+    await mm.add_memory(content="第一条记忆", metadata={"session_id": "s1"})
+    await mm.add_memory(content="第二条记忆", metadata={"session_id": "s1"})
+
+    result = await mm.clear_all()
+
+    assert result == {"sqlite": 2, "chroma": 2}
+    assert vector_store.collection._items == {}
+    assert await mm.list_memories() == []
+
+
 # ---------------------------------------------------------------------------
 # 滑动 TTL 与清理
 # ---------------------------------------------------------------------------

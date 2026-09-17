@@ -17,7 +17,7 @@ from athena.contracts.statuses import (
     AgentRunStatus,
 )
 from athena.models.json_models import CommandPayload
-from athena.core.memory.memory import MemoryManager
+from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.utils.logging import get_logger
 from .command_notifications import CommandNotifier
 from .langgraph_graph import invoke_graph
@@ -38,7 +38,7 @@ class CommandConsumer:
         graph: CompiledStateGraph,
         notifier: CommandNotifier | None = None,
         cancellation: CancellationRegistry | None = None,
-        memory_manager: MemoryManager,
+        memory_manager: LongTermMemoryService,
     ) -> None:
         """创建命令消费者。
 
@@ -48,7 +48,7 @@ class CommandConsumer:
             graph (CompiledStateGraph): 已编译的 LangGraph 图；处理消息命令时必须可调用。
             notifier (CommandNotifier | None): Command 提交后的进程内唤醒通知器。
             cancellation (CancellationRegistry | None): 可选取消注册表。
-            memory_manager (MemoryManager): 处理主动保存记忆命令的服务。
+            memory_manager (LongTermMemoryService): 处理主动保存记忆命令的服务。
         返回值:
             None: 消费循环尚未启动。
         异常:

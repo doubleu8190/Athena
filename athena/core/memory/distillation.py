@@ -7,7 +7,7 @@
 - ``ConversationSummarizer`` — 每 N 轮对话触发一次摘要生成，
   将讨论主线、决策过程和问题解决路径提炼为结构化摘要条目。
 
-两者均通过 ``MemoryManager.add_memory()`` 写入长期记忆，供下游的
+两者均通过 ``LongTermMemoryService.add_memory()`` 写入长期记忆，供下游的
 ``MemoryRetrievalService`` 在后续对话中召回注入系统提示。
 """
 
@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 
 from athena.config.settings import Settings
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.memory import MemoryManager
 from athena.core.memory.contracts import CompletedTurn, MemoryCandidate
+from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message, MessageRole
 from athena.utils.llm import extract_json_from_llm_response, extract_message_text
@@ -110,13 +110,11 @@ class FactExtractor:
         单独进行记忆检索的语义查询，确保召回与用户意图相关的已有记忆。
 
         参数：
-            user_message: 用户消息原始文本，用于记忆检索查询。
-            assistant_reply: 助手回复文本；为空时退化为仅提取用户消息。
-            session_id: 当前会话 ID。
-            memory_manager: 长期记忆管理器实例。
+            turn: 已完成的用户与助手对话轮次。
+            existing_memories: 已格式化的相关长期记忆，用于避免重复提取。
 
         返回值：
-            提取到的原子事实列表；提取失败或无有价值信息时为空列表。
+            提取到的候选记忆列表；提取失败或无有价值信息时为空列表。
         """
         conversation_text = self._format_conversation(turn.user_text, turn.assistant_text)
         facts = await self._extract_facts(conversation_text, existing_memories)
@@ -150,41 +148,6 @@ class FactExtractor:
         lines = [f"[用户] {user_message}"]
         if assistant_reply:
             lines.append(f"[助手] {assistant_reply}")
-        return "\n".join(lines)
-
-    async def _fetch_existing_memories(
-        self,
-        memory_manager: MemoryManager,
-        message: str,
-        limit: int = 8,
-    ) -> str:
-        """检索与当前消息语义相关的已有记忆，供提取提示词做去重。
-
-        跨会话召回：与所有会话已建立的记忆做语义比较，避免同一事实
-        被重复写入记忆库（历史上按当前会话过滤会导致跨会话重复）。
-
-        参数：
-            memory_manager: 长期记忆管理器实例。
-            message: 用于语义检索的查询文本（用户消息）。
-            limit: 最大召回条数，默认 8。
-
-        返回值：
-            格式化的已有记忆文本，每行一条（``"- content (category: xxx)"``）；
-            检索失败或无结果时返回 ``"(无已有记忆)"``。
-        """
-        try:
-            results = await memory_manager.search(query=message, n_results=limit)
-        except Exception as e:
-            logger.warning("existing_memory_fetch_failed", error=str(e))
-            return "(无已有记忆)"
-        if not results:
-            return "(无已有记忆)"
-        lines: list[str] = []
-        for r in results:
-            content = r.get("content", "")
-            meta = r.get("metadata") or {}
-            cat = meta.get("category") or meta.get("type") or ""
-            lines.append(f"- {content} (category: {cat})" if cat else f"- {content}")
         return "\n".join(lines)
 
     async def _extract_facts(
@@ -258,7 +221,7 @@ class ConversationSummarizer:
     """对话摘要生成器。
 
     每隔 ``summary_threshold`` 轮对话触发一次摘要生成，将最近的对话内容
-    提炼为结构化的 ``Summary`` 条目，通过 ``MemoryManager`` 写入长期记忆。
+    提炼为结构化的 ``Summary`` 条目，通过 ``LongTermMemoryService`` 写入长期记忆。
 
     与 ``FactExtractor`` 互补：``FactExtractor`` 提取离散的原子事实，
     ``ConversationSummarizer`` 提取连贯的叙事摘要，两者共同构成
@@ -270,18 +233,18 @@ class ConversationSummarizer:
     def __init__(
         self,
         llm_provider: LLMProvider,
-        memory_manager: MemoryManager,
+        memory_service: LongTermMemoryService,
         settings: Settings,
     ) -> None:
         """初始化对话摘要生成器。
 
         参数：
             llm_provider: LLM 提供者实例，用于调用摘要提示词。
-            memory_manager: 长期记忆管理器实例，用于写入生成的摘要。
+            memory_service: 长期记忆服务实例，用于写入生成的摘要。
             settings: 全局配置。
         """
         self._llm = llm_provider
-        self._memory = memory_manager
+        self._memory = memory_service
         self._settings = settings
         self._summary_threshold = self._settings.summary_threshold
 

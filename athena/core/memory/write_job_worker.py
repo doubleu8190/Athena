@@ -6,10 +6,10 @@ import asyncio
 
 from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
 from .contracts import CompletedTurn
-from .workflow import MemoryWriteWorkflow
+from .write_workflow import MemoryWriteWorkflow
 
 
-class MemoryJobWorker:
+class MemoryWriteJobWorker:
     def __init__(
         self,
         repository: MemoryJobRepository,

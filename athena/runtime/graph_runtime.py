@@ -19,12 +19,12 @@ from athena.core.compression.compressor import ContextCompressor
 from athena.core.files.runtime import FileIntelligenceRuntime
 from athena.core.harness.harness import HarnessRunResult
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.memory import MemoryManager
+from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import MemoryRetrievalService
-from athena.core.memory.summarizer import ConversationSummarizer, FactExtractor
-from athena.core.memory.trigger import MemoryTrigger
-from athena.core.memory.workflow import MemoryWriteWorkflow
-from athena.core.memory.resolver import MemoryResolver
+from athena.core.memory.distillation import ConversationSummarizer, FactExtractor
+from athena.core.memory.write_trigger import MemoryWriteTrigger
+from athena.core.memory.write_workflow import MemoryWriteWorkflow
+from athena.core.memory.candidate_resolver import MemoryCandidateResolver
 from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
@@ -90,7 +90,7 @@ class LangGraphRuntime:
         memory_retrieval: MemoryRetrievalService,
         conversation_summarizer: ConversationSummarizer,
         fact_extractor: FactExtractor,
-        memory_manager: MemoryManager,
+        memory_manager: LongTermMemoryService,
         settings: Settings,
         file_runtime: FileIntelligenceRuntime,
         memory_job_repository: MemoryJobRepository,
@@ -171,8 +171,8 @@ class LangGraphRuntime:
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
         self._file_parse_semaphore = asyncio.Semaphore(2)
         self._file_embedding_semaphore = asyncio.Semaphore(3)
-        self._memory_trigger = MemoryTrigger()
-        self._memory_resolver = MemoryResolver(self._memory_manager)
+        self._memory_trigger = MemoryWriteTrigger()
+        self._memory_resolver = MemoryCandidateResolver(self._memory_manager)
         self._memory_write_workflow: MemoryWriteWorkflow | None = None
         structured_llm = StructuredLLMService(llm)
         orchestration_events = OrchestrationEventPublisher(event_publisher)
@@ -730,7 +730,7 @@ class LangGraphRuntime:
                 extractor=self._fact_extractor,
                 trigger=self._memory_trigger,
                 resolver=self._memory_resolver,
-                memory_manager=self._memory_manager,
+                memory_service=self._memory_manager,
             )
         return self._memory_write_workflow
 

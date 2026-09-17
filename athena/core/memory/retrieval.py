@@ -9,7 +9,7 @@ import asyncio
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -18,7 +18,7 @@ from langchain_core.messages import HumanMessage
 from athena.config.settings import Settings
 from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import TokenCounter
-from athena.core.memory.memory import MemoryManager
+from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.contracts import MemoryRetrievalRequest
 from athena.utils.llm import extract_message_text
 from athena.utils.logging import get_logger
@@ -32,83 +32,22 @@ _MEM_FREQ_K = 0.15  # log1p 缩放系数
 _MEM_RECENCY_M = 0.4  # 新近度加成上限
 
 
-@dataclass(init=False)
-class SearchResult:
-    """检索结果，分别保存各阶段分数的语义。"""
+@dataclass
+class MemoryRetrievalResult:
+    """长期记忆检索结果，保存各检索阶段的分数。"""
 
     content: str
-    item_id: str
-    source: str
-    metadata: dict[str, Any]
-    native_score: float | None
-    fused_score: float | None
-    rerank_score: float | None
-    exact_match: bool
-    rank_sources: dict[str, int]
-
-    def __init__(
-        self,
-        content: str,
-        item_id: str | None = None,
-        source: str = "vector",
-        metadata: dict[str, Any] | None = None,
-        native_score: float | None = None,
-        fused_score: float | None = None,
-        rerank_score: float | None = None,
-        exact_match: bool = False,
-        rank_sources: dict[str, int] | None = None,
-        *,
-        score: float | None = None,
-        chunk_id: str | None = None,
-    ) -> None:
-        """构造检索结果并兼容旧版 ``score``、``chunk_id`` 字段。
-
-        参数:
-            content (str): 检索到的正文。
-            item_id (str | None): 结果唯一 ID；为空时回退到 ``chunk_id``。
-            source (str): 结果来源或融合来源标识。
-            metadata (dict[str, Any] | None): 结果元数据。
-            native_score (float | None): 向量或关键词通道原始分数。
-            fused_score (float | None): 融合阶段分数。
-            rerank_score (float | None): 重排阶段分数。
-            exact_match (bool): 是否命中完整查询词。
-            rank_sources (dict[str, int] | None): 各检索通道中的排名。
-            score (float | None): 旧字段兼容值，仅在 ``native_score`` 为空时使用。
-            chunk_id (str | None): 旧字段兼容别名，仅在 ``item_id`` 为空时使用。
-        返回值:
-            None: 字段已规范化并写入对象。
-        异常:
-            不抛出业务异常。
-        """
-        self.content = content
-        self.item_id = item_id or chunk_id or ""
-        self.source = source
-        self.metadata = metadata or {}
-        self.native_score = native_score if native_score is not None else score
-        self.fused_score = fused_score
-        self.rerank_score = rerank_score
-        self.exact_match = exact_match
-        self.rank_sources = dict(rank_sources or {})
-
-    @property
-    def score(self) -> float:
-        """迁移期兼容属性，按 rerank > fused > native 的顺序读取。"""
-        return next(
-            (
-                value
-                for value in (self.rerank_score, self.fused_score, self.native_score)
-                if value is not None
-            ),
-            0.0,
-        )
-
-    @property
-    def chunk_id(self) -> str:
-        """迁移期兼容别名。"""
-        return self.item_id
+    memory_id: str
+    source: str = "vector"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    native_score: float | None = None
+    fused_score: float | None = None
+    rerank_score: float | None = None
+    exact_match: bool = False
+    rank_sources: dict[str, int] = field(default_factory=dict)
 
 
-class HybridRetrievalManager:
+class HybridMemoryRetriever:
     """混合检索管理器.
 
     流程：LLM 查询扩展 → 向量检索 + 关键词检索 → RRF 融合 → 时间衰减 → 过滤排序.
@@ -117,14 +56,14 @@ class HybridRetrievalManager:
     def __init__(
         self,
         llm_provider: LLMProvider,
-        memory_manager: MemoryManager,
+        memory_service: LongTermMemoryService,
         settings: Settings,
     ) -> None:
         """
 
         参数：
             llm_provider (LLMProvider): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            memory_manager (MemoryManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            memory_service (LongTermMemoryService): 提供向量和关键词检索的长期记忆服务。
             settings (Settings): 全局配置对象。
         返回值：
             None: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -133,7 +72,7 @@ class HybridRetrievalManager:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         self._llm = llm_provider
-        self._memory = memory_manager
+        self._memory = memory_service
         self._settings = settings
         self._min_score = self._settings.memory_min_score
         self._top_k = self._settings.retrieval_top_k
@@ -161,7 +100,7 @@ class HybridRetrievalManager:
         *,
         record_access: bool = True,
         expand_query: bool = True,
-    ) -> list[SearchResult]:
+    ) -> list[MemoryRetrievalResult]:
         """执行混合检索（默认跨会话全库）.
 
         长期记忆定位为跨会话召回：不按 session_id 过滤，任何会话沉淀的
@@ -222,7 +161,7 @@ class HybridRetrievalManager:
                 0 if x.exact_match else 1,
                 -float(x.fused_score or 0.0),
                 -self._lifecycle_score(x.metadata),
-                x.item_id,
+                x.memory_id,
             )
         )
         selected = fused[: self._rerank_k][: self._context_k]
@@ -255,7 +194,7 @@ class HybridRetrievalManager:
         record_access: bool = False,
         *,
         route: str = "vector",
-    ) -> list[SearchResult]:
+    ) -> list[MemoryRetrievalResult]:
         """向量检索（跨会话全库；filter_params 为可选显式过滤）."""
         try:
             kwargs: dict[str, Any] = {
@@ -268,22 +207,22 @@ class HybridRetrievalManager:
             logger.warning("vector_search_failed", error=str(e))
             return []
 
-        out: list[SearchResult] = []
+        out: list[MemoryRetrievalResult] = []
         has_raw_native_scores = any(r.get("native_score") is not None for r in results)
         for i, r in enumerate(results, 1):
             out.append(
-                SearchResult(
+                MemoryRetrievalResult(
                     content=r["content"],
                     source=route,
                     metadata=r.get("metadata", {}),
                     native_score=r.get("native_score", r.get("score")),
                     rank_sources={route: i},
-                    chunk_id=r.get("id", str(i)),
+                    memory_id=r.get("id", str(i)),
                 )
             )
         # RRF 依赖列表位置作为 rank（位置越靠前贡献越大），必须"最相关在前"。
         # score 为原始相似度 1-dist/2（越大越相似），vector_weight 统一在 RRF
-        # 融合处生效，这里不乘权重，避免融合改读 r.score 时双倍加权。上游
+        # 融合处生效，这里不乘权重，避免融合改读 r.native_score 时双倍加权。上游
         # ChromaDB 已按距离升序返回，这里显式按 score 降序把不变量固化。
         out.sort(
             key=lambda x: x.native_score or 0.0,
@@ -303,10 +242,10 @@ class HybridRetrievalManager:
         record_access: bool = False,
         *,
         route: str = "keyword",
-    ) -> list[SearchResult]:
+    ) -> list[MemoryRetrievalResult]:
         """关键词检索（SQLite FTS5 MATCH 全文检索）.
 
-        通过 MemoryManager.keyword_search() 走 FTS5 虚拟表的 MATCH 操作符，
+        通过 LongTermMemoryService.keyword_search() 走 FTS5 虚拟表的 MATCH 操作符，
         tokenize='unicode61' 仅做精确词/整段/前缀召回，不做中文语义分词
         （分词语义由向量检索承担），bm25 算法排序。
 
@@ -324,10 +263,10 @@ class HybridRetrievalManager:
             logger.warning("keyword_search_failed", error=str(e))
             return []
 
-        out: list[SearchResult] = []
+        out: list[MemoryRetrievalResult] = []
         for i, r in enumerate(results, 1):
             out.append(
-                SearchResult(
+                MemoryRetrievalResult(
                     content=r["content"],
                     source=route,
                     metadata=r.get("metadata", {}),
@@ -335,7 +274,7 @@ class HybridRetrievalManager:
                     exact_match=bool(r.get("exact_match"))
                     or self._is_exact_match(query, r["content"]),
                     rank_sources={route: i},
-                    chunk_id=r.get("id", str(i)),
+                    memory_id=r.get("id", str(i)),
                 )
             )
         # 同上：RRF 需要"最相关在前"。score 为原始相似度 |bm25|/(1+|bm25|)
@@ -346,16 +285,16 @@ class HybridRetrievalManager:
 
     def _reciprocal_rank_fusion(
         self,
-        vector_results: list[SearchResult],
-        keyword_results: list[SearchResult],
-    ) -> list[SearchResult]:
+        vector_results: list[MemoryRetrievalResult],
+        keyword_results: list[MemoryRetrievalResult],
+    ) -> list[MemoryRetrievalResult]:
         """使用加权倒数排名融合向量和关键词候选集。
 
         每条检索路只贡献排名证据，不直接比较不同路由的原始分数，因而
         可以在向量距离和 BM25 分数尺度不同的情况下保持排序稳定。
         """
         scores: dict[str, float] = {}
-        content_map: dict[str, SearchResult] = {}
+        content_map: dict[str, MemoryRetrievalResult] = {}
 
         # 加权 RRF：按来源权重缩放贡献，使 vector_weight / keyword_weight 真正生效。
         # 首次出现时保留完整结果对象，后续只更新融合分数，避免重复候选携带不一致内容。
@@ -363,27 +302,27 @@ class HybridRetrievalManager:
         for rank, r in enumerate(vector_results, 1):
             route = r.source if r.source.startswith("vector") else "vector"
             route_rank = r.rank_sources.get(route, rank)
-            if r.chunk_id not in scores:
-                scores[r.chunk_id] = 0.0
-                content_map[r.chunk_id] = r
-            content_map[r.chunk_id].rank_sources.setdefault(route, route_rank)
-            scores[r.chunk_id] += self._vector_weight / (self._rrf_k + route_rank)
+            if r.memory_id not in scores:
+                scores[r.memory_id] = 0.0
+                content_map[r.memory_id] = r
+            content_map[r.memory_id].rank_sources.setdefault(route, route_rank)
+            scores[r.memory_id] += self._vector_weight / (self._rrf_k + route_rank)
 
         for rank, r in enumerate(keyword_results, 1):
             route = "keyword"
             route_rank = r.rank_sources.get(route, rank)
-            if r.chunk_id not in scores:
-                scores[r.chunk_id] = 0.0
-                content_map[r.chunk_id] = r
-            content_map[r.chunk_id].rank_sources.setdefault(route, route_rank)
-            content_map[r.chunk_id].exact_match = (
-                content_map[r.chunk_id].exact_match or r.exact_match
+            if r.memory_id not in scores:
+                scores[r.memory_id] = 0.0
+                content_map[r.memory_id] = r
+            content_map[r.memory_id].rank_sources.setdefault(route, route_rank)
+            content_map[r.memory_id].exact_match = (
+                content_map[r.memory_id].exact_match or r.exact_match
             )
-            scores[r.chunk_id] += self._keyword_weight / (self._rrf_k + route_rank)
+            scores[r.memory_id] += self._keyword_weight / (self._rrf_k + route_rank)
 
-        fused: list[SearchResult] = []
-        for chunk_id, rrf_score in scores.items():
-            result = content_map[chunk_id]
+        fused: list[MemoryRetrievalResult] = []
+        for memory_id, rrf_score in scores.items():
+            result = content_map[memory_id]
             result.fused_score = rrf_score
             result.source = "fused"
             fused.append(result)
@@ -483,14 +422,14 @@ class MemoryRetrievalService:
 
     def __init__(
         self,
-        retrieval_manager: HybridRetrievalManager,
+        retrieval_manager: HybridMemoryRetriever,
         token_counter: TokenCounter,
         settings: Settings,
     ) -> None:
         """
 
         参数：
-            retrieval_manager (HybridRetrievalManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            retrieval_manager (HybridMemoryRetriever): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             token_counter (TokenCounter): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
 
@@ -529,7 +468,7 @@ class MemoryRetrievalService:
                 break
             parts.append(f"- {r.content}")
             total_tokens += content_tokens
-            selected_ids.append(r.item_id)
+            selected_ids.append(r.memory_id)
 
         if len(parts) > 1:
             parts.append("[/相关记忆]")
@@ -549,7 +488,7 @@ class MemoryRetrievalService:
             return ""
         return self._format_results(results[: request.limit])
 
-    def _format_results(self, results: list[SearchResult]) -> str:
+    def _format_results(self, results: list[MemoryRetrievalResult]) -> str:
         if not results:
             return ""
         parts = ["[相关记忆]"]
@@ -561,7 +500,7 @@ class MemoryRetrievalService:
                 break
             parts.append(f"- {result.content}")
             total_tokens += content_tokens
-            selected_ids.append(result.item_id)
+            selected_ids.append(result.memory_id)
         if len(parts) == 1:
             return ""
         parts.append("[/相关记忆]")

@@ -133,14 +133,14 @@ async def lifespan(app: FastAPI):
     await tool_registry.install(toolSpecList)
 
     # ── 5.2 记忆系统 ──
-    from athena.core.memory.memory import MemoryManager
+    from athena.core.memory.long_term_memory import LongTermMemoryService
 
     from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
     from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
     from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
-    from athena.core.memory.job_worker import MemoryJobWorker
+    from athena.core.memory.write_job_worker import MemoryWriteJobWorker
 
-    memory_manager = MemoryManager(
+    memory_manager = LongTermMemoryService(
         settings=settings,
         repository=SqliteMemoryRepository(),
         vector_store=ChromaMemoryStore(path=str(settings.chroma_path)),
@@ -155,28 +155,28 @@ async def lifespan(app: FastAPI):
     memory_flush_task = asyncio.create_task(memory_manager.run_periodic_flush())
 
     from athena.core.memory.retrieval import (
-        HybridRetrievalManager,
+        HybridMemoryRetriever,
         MemoryRetrievalService,
     )
 
-    retrieval_manager = HybridRetrievalManager(
+    retrieval_manager = HybridMemoryRetriever(
         llm_secondary,
         memory_manager,
         settings=settings,
     )
     memory_retrieval = MemoryRetrievalService(retrieval_manager, llm_primary, settings)
 
-    from athena.core.memory.summarizer import ConversationSummarizer
+    from athena.core.memory.distillation import ConversationSummarizer
 
     conversation_summarizer = ConversationSummarizer(
         llm_secondary, memory_manager, settings=settings
     )
 
-    from athena.core.memory.summarizer import FactExtractor
+    from athena.core.memory.distillation import FactExtractor
 
     fact_extractor = FactExtractor(llm_secondary)
     memory_job_repository = MemoryJobRepository()
-    memory_job_worker = MemoryJobWorker(
+    memory_job_worker = MemoryWriteJobWorker(
         memory_job_repository,
         # Workflow is created by LangGraphRuntime; worker is attached below.
         None,

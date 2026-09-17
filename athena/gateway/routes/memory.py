@@ -12,7 +12,7 @@ from athena.container import runtime_from
 from athena.contracts.errors import ErrorDetail
 
 if TYPE_CHECKING:
-    from athena.core.memory.memory import MemoryManager
+    from athena.core.memory.long_term_memory import LongTermMemoryService
 
 logger = get_logger(__name__)
 
@@ -39,14 +39,14 @@ class UpdateMemoryRequest(BaseModel):
     content: str
 
 
-async def _get_memory_manager(request: Request) -> MemoryManager:
-    """从请求应用状态获取记忆管理器。
+async def _get_memory_service(request: Request) -> LongTermMemoryService:
+    """从请求应用状态获取长期记忆服务。
 
     参数：
         request (Request): 当前 HTTP 请求对象。
 
     返回值：
-        MemoryManager: 应用启动时注入的记忆管理器。
+        LongTermMemoryService: 应用启动时注入的长期记忆服务。
 
     异常：
         RuntimeError: 应用运行时未初始化。
@@ -57,10 +57,10 @@ async def _get_memory_manager(request: Request) -> MemoryManager:
 @router.post("/save")
 async def save_memory(req: SaveMemoryRequest, request: Request) -> dict[str, Any]:
     """主动保存记忆条目."""
-    manager = await _get_memory_manager(request)
+    service = await _get_memory_service(request)
     try:
         meta = {"session_id": req.session_id, **(req.metadata or {})}
-        memory_id = await manager.add_memory(
+        memory_id = await service.add_memory(
             content=req.content,
             metadata=meta,
             pinned=req.pinned,
@@ -74,9 +74,9 @@ async def save_memory(req: SaveMemoryRequest, request: Request) -> dict[str, Any
 @router.post("/search")
 async def search_memory(req: SearchMemoryRequest, request: Request) -> list[dict[str, Any]]:
     """检索记忆."""
-    manager = await _get_memory_manager(request)
+    service = await _get_memory_service(request)
     try:
-        return await manager.search(
+        return await service.search(
             query=req.query,
             n_results=req.n_results,
             where=req.where,
@@ -96,23 +96,23 @@ async def list_memories(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """分页列出记忆条目，附带统计（total/pinned/expired/recent_week）."""
-    manager = await _get_memory_manager(request)
-    items = await manager.list_memories(
+    service = await _get_memory_service(request)
+    items = await service.list_memories(
         limit=limit,
         offset=offset,
         pinned_only=pinned,
         expired_only=expired,
         session_id=session_id,
     )
-    stats = await manager.count_memories()
+    stats = await service.count_memories()
     return {"items": items, **stats}
 
 
 @router.get("/{memory_id}")
 async def get_memory(memory_id: str, request: Request) -> dict[str, Any]:
     """根据 ID 获取记忆."""
-    manager = await _get_memory_manager(request)
-    result = await manager.get(memory_id)
+    service = await _get_memory_service(request)
+    result = await service.get_memory(memory_id)
     if not result:
         raise HTTPException(status_code=404, detail=ErrorDetail.MEMORY_NOT_FOUND)
     return result
@@ -121,8 +121,8 @@ async def get_memory(memory_id: str, request: Request) -> dict[str, Any]:
 @router.delete("/{memory_id}")
 async def delete_memory(memory_id: str, request: Request) -> dict[str, str]:
     """删除记忆条目."""
-    manager = await _get_memory_manager(request)
-    await manager.delete(memory_id)
+    service = await _get_memory_service(request)
+    await service.delete_memory(memory_id)
     return {"status": "deleted", "memory_id": memory_id}
 
 
@@ -134,8 +134,8 @@ async def update_memory(
     content = req.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail=ErrorDetail.CONTENT_EMPTY)
-    manager = await _get_memory_manager(request)
-    updated = await manager.update_memory(memory_id, content)
+    service = await _get_memory_service(request)
+    updated = await service.update_memory(memory_id, content)
     if not updated:
         raise HTTPException(status_code=404, detail=ErrorDetail.MEMORY_NOT_FOUND)
     return {"status": "updated", "memory_id": memory_id}
@@ -144,14 +144,14 @@ async def update_memory(
 @router.post("/{memory_id}/pin")
 async def pin_memory(memory_id: str, request: Request, pinned: bool = True) -> dict[str, Any]:
     """固定/取消固定记忆."""
-    manager = await _get_memory_manager(request)
-    await manager.pin(memory_id, pinned=pinned)
+    service = await _get_memory_service(request)
+    await service.set_memory_pinned(memory_id, pinned=pinned)
     return {"status": "pinned" if pinned else "unpinned", "memory_id": memory_id}
 
 
 @router.post("/cleanup")
 async def cleanup_expired(request: Request) -> dict[str, Any]:
     """清理过期记忆（手动触发）."""
-    manager = await _get_memory_manager(request)
-    count = await manager.cleanup_expired()
+    service = await _get_memory_service(request)
+    count = await service.cleanup_expired()
     return {"status": "cleaned", "count": count}

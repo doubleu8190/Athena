@@ -6,7 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from athena.config.settings import Settings
-from athena.core.memory.retrieval import HybridRetrievalManager, MemoryRetrievalService
+from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalService
 
 
 class _LLM:
@@ -57,7 +57,7 @@ async def test_retrieval_keeps_original_vector_query_and_filters_low_native_scor
     memory = _Memory(
         {"original entity": [{"id": "weak", "content": "weak", "score": 0.69}]}
     )
-    manager = HybridRetrievalManager(_LLM("original entity"), memory, _settings())
+    manager = HybridMemoryRetriever(_LLM("original entity"), memory, _settings())
 
     assert await manager.retrieve("original entity") == []
     assert memory.vector_queries == ["original entity"]
@@ -71,7 +71,7 @@ async def test_retrieval_adds_different_rewrite_and_retains_route_ranks():
             "expanded": [{"id": "same", "content": "same", "score": 0.95}],
         }
     )
-    manager = HybridRetrievalManager(_LLM("expanded"), memory, _settings())
+    manager = HybridMemoryRetriever(_LLM("expanded"), memory, _settings())
 
     results = await manager.retrieve("raw")
 
@@ -93,11 +93,11 @@ async def test_retrieval_exact_keyword_hit_is_independent_of_vector_score():
             }
         ],
     )
-    manager = HybridRetrievalManager(_LLM("ERR_NOT_FOUND"), memory, _settings())
+    manager = HybridMemoryRetriever(_LLM("ERR_NOT_FOUND"), memory, _settings())
 
     results = await manager.retrieve("ERR_NOT_FOUND")
 
-    assert [result.item_id for result in results] == ["error"]
+    assert [result.memory_id for result in results] == ["error"]
     assert results[0].exact_match is True
     assert results[0].rank_sources == {"keyword": 1}
 
@@ -107,7 +107,7 @@ async def test_access_is_recorded_only_for_memory_written_to_context():
     memory = _Memory(
         {"query": [{"id": "candidate", "content": "selected", "score": 0.9}]}
     )
-    manager = HybridRetrievalManager(_LLM("query"), memory, _settings())
+    manager = HybridMemoryRetriever(_LLM("query"), memory, _settings())
     service = MemoryRetrievalService(manager, _Tokens(), _settings())
 
     await manager.retrieve("query")

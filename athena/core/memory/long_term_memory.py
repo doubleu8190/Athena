@@ -23,7 +23,7 @@ class _AccessStat:
     last_accessed: str = ""
 
 
-class MemoryManager:
+class LongTermMemoryService:
     """长期记忆双写应用服务。
 
     SQLite 是生命周期管理和关键词搜索的事实来源，Chroma 是可替换的向量索引。
@@ -68,7 +68,10 @@ class MemoryManager:
             return
         await self._vectors.initialize()
         self._initialized = True
-        logger.info("memory_manager_initialized", path=str(self._settings.chroma_path))
+        logger.info(
+            "long_term_memory_service_initialized",
+            path=str(self._settings.chroma_path),
+        )
 
     def _record_access(self, memory_id: str) -> None:
         """
@@ -327,17 +330,17 @@ class MemoryManager:
                 self._record_access(item["id"])
         return results
 
-    async def get(self, memory_id: str) -> dict[str, Any] | None:
-        """获取数据。
+    async def get_memory(self, memory_id: str) -> dict[str, Any] | None:
+        """按 ID 从向量索引读取一条长期记忆并记录访问。
 
         参数：
-            memory_id (str): 记忆记录唯一标识。
+            memory_id: 长期记忆唯一标识。
 
         返回值：
-            dict[str, Any] | None: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            找到时返回正文和元数据；记录不存在或向量索引读取失败时返回 ``None``。
 
         异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
+            不主动抛出业务异常。
         """
         await self.initialize()
         try:
@@ -421,8 +424,19 @@ class MemoryManager:
             raise
         return True
 
-    async def supersede(self, old_memory_id: str, new_memory_id: str) -> bool:
-        """Mark an active memory as superseded by a newly-created record."""
+    async def supersede_memory(self, old_memory_id: str, new_memory_id: str) -> bool:
+        """将旧记忆标记为被新记忆替代。
+
+        参数：
+            old_memory_id: 要归档的旧记忆 ID。
+            new_memory_id: 替代旧记忆的新记录 ID。
+
+        返回值：
+            成功更新旧记录时返回 ``True``，旧记录不存在时返回 ``False``。
+
+        异常：
+            SQLite 或向量索引更新失败时向上抛出异常。
+        """
         changed = await self._repository.mark_superseded(old_memory_id, new_memory_id)
         if changed:
             await self._vectors.update(
@@ -431,25 +445,37 @@ class MemoryManager:
             )
         return changed
 
-    async def relate(
+    async def add_memory_relation(
         self, source_memory_id: str, target_memory_id: str, relation_type: str
     ) -> None:
-        """Persist a semantic relation between two memories."""
+        """保存两条长期记忆之间的语义关系。
+
+        参数：
+            source_memory_id: 关系起点的记忆 ID。
+            target_memory_id: 关系终点的记忆 ID。
+            relation_type: 关系类型，例如 ``supports`` 或 ``contradicts``。
+
+        返回值：
+            无。
+
+        异常：
+            关系写入失败时向上抛出异常。
+        """
         await self._repository.add_relation(
             source_memory_id, target_memory_id, relation_type
         )
 
-    async def delete(self, memory_id: str) -> None:
-        """删除数据。
+    async def delete_memory(self, memory_id: str) -> None:
+        """软删除长期记忆，并同步移除其向量索引。
 
         参数：
-            memory_id (str): 记忆记录唯一标识。
+            memory_id: 要删除的长期记忆 ID。
 
         返回值：
-            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            无。
 
         异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
+            向量索引删除失败时恢复 SQLite 软删除并向上抛出异常。
         """
         await self.initialize()
         await self._repository.soft_delete([memory_id])
@@ -460,18 +486,18 @@ class MemoryManager:
             logger.exception("memory_delete_vector_failed", memory_id=memory_id)
             raise
 
-    async def pin(self, memory_id: str, pinned: bool = True) -> None:
-        """更新固定状态。
+    async def set_memory_pinned(self, memory_id: str, pinned: bool = True) -> None:
+        """设置长期记忆的固定状态和对应过期时间。
 
         参数：
-            memory_id (str): 记忆记录唯一标识。
-            pinned (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            memory_id: 要更新的长期记忆 ID。
+            pinned: ``True`` 时固定且不设过期时间，``False`` 时恢复 TTL。
 
         返回值：
-            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            无；记录不存在时不做修改。
 
         异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
+            向量索引更新失败时恢复 SQLite 中的固定状态并向上抛出异常。
         """
         await self.initialize()
         expires_at = (

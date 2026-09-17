@@ -6,28 +6,28 @@ from athena.core.memory.contracts import (
     MemoryRelationType,
     MemoryResolution,
 )
-from athena.core.memory.trigger import MemoryTrigger
-from athena.core.memory.workflow import MemoryWriteWorkflow
-from athena.core.memory.resolver import MemoryResolver
+from athena.core.memory.write_trigger import MemoryWriteTrigger
+from athena.core.memory.write_workflow import MemoryWriteWorkflow
+from athena.core.memory.candidate_resolver import MemoryCandidateResolver
 from athena.core.memory.contracts import ResolutionAction
 
 
 def test_trigger_skips_obvious_low_value_turns():
-    result = MemoryTrigger().evaluate(
+    result = MemoryWriteTrigger().evaluate(
         CompletedTurn(turn_id="t1", session_id="s1", user_text="你好")
     )
     assert result.should_extract is False
 
 
 def test_trigger_allows_weak_semantic_signal():
-    result = MemoryTrigger().evaluate(
+    result = MemoryWriteTrigger().evaluate(
         CompletedTurn(turn_id="t1", session_id="s1", user_text="我一直都是用 Python 写后端的")
     )
     assert result.should_extract is True
 
 
 def test_trigger_does_not_drop_long_turn_for_partial_negative_signal():
-    result = MemoryTrigger().evaluate(
+    result = MemoryWriteTrigger().evaluate(
         CompletedTurn(
             turn_id="t1",
             session_id="s1",
@@ -38,7 +38,7 @@ def test_trigger_does_not_drop_long_turn_for_partial_negative_signal():
 
 
 def test_trigger_skips_only_standalone_negative_turn():
-    result = MemoryTrigger().evaluate(
+    result = MemoryWriteTrigger().evaluate(
         CompletedTurn(turn_id="t1", session_id="s1", user_text="请帮我计算")
     )
     assert result.should_extract is False
@@ -53,7 +53,7 @@ async def test_resolver_creates_when_related_score_is_below_threshold():
     candidate = MemoryCandidate(
         content="新信息", source_turn_id="t1", confidence=0.9
     )
-    result = await MemoryResolver(Memory()).resolve([candidate])
+    result = await MemoryCandidateResolver(Memory()).resolve([candidate])
     assert result[0].action is ResolutionAction.CREATE
 
 
@@ -66,7 +66,7 @@ async def test_resolver_marks_explicit_change_as_supersede():
     candidate = MemoryCandidate(
         content="后端改为 Rust（was Python）", source_turn_id="t1", confidence=0.9
     )
-    result = await MemoryResolver(Memory()).resolve([candidate])
+    result = await MemoryCandidateResolver(Memory()).resolve([candidate])
     assert result[0].action is ResolutionAction.SUPERSEDE
 
 
@@ -83,7 +83,7 @@ async def test_resolver_uses_llm_only_for_ambiguous_related_memory():
     candidate = MemoryCandidate(
         content="数据库方案调整为 PostgreSQL", source_turn_id="t1", confidence=0.9
     )
-    result = await MemoryResolver(Memory(), llm_provider=LLM()).resolve([candidate])
+    result = await MemoryCandidateResolver(Memory(), llm_provider=LLM()).resolve([candidate])
     assert result[0].action is ResolutionAction.SUPERSEDE
     assert result[0].reason == "llm_resolution"
 
@@ -157,11 +157,11 @@ async def test_workflow_persists_create_relations(relation, llm_response):
         async def add_memory(self, **kwargs):
             return "new-1"
 
-        async def relate(self, source_id, target_id, relation_type):
+        async def add_memory_relation(self, source_id, target_id, relation_type):
             self.relations.append((source_id, target_id, relation_type))
 
     memory = Memory()
-    resolver = MemoryResolver(memory, llm_provider=LLM())
+    resolver = MemoryCandidateResolver(memory, llm_provider=LLM())
     outcome = await MemoryWriteWorkflow(
         Extractor(), memory, resolver=resolver
     ).process_turn(CompletedTurn(turn_id="t1", session_id="s1", user_text="新证据"))

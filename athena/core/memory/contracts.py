@@ -25,7 +25,7 @@ class CompletedTurn(BaseModel):
     completed_at: datetime = Field(default_factory=datetime.now)
 
 
-class MemoryTriggerResult(BaseModel):
+class MemoryWriteTriggerResult(BaseModel):
     """Result of the cheap, non-LLM write trigger."""
 
     should_extract: bool

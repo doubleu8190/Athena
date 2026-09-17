@@ -9,9 +9,9 @@ from pathlib import Path
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.files.runtime import FileIntelligenceRuntime
 from athena.core.harness.harness import Harness
-from athena.core.memory.memory import MemoryManager
-from athena.core.memory.retrieval import HybridRetrievalManager, MemoryRetrievalService
-from athena.core.memory.summarizer import ConversationSummarizer
+from athena.core.memory.long_term_memory import LongTermMemoryService
+from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalService
+from athena.core.memory.distillation import ConversationSummarizer
 from athena.core.tools.catalog import ToolRegistry
 from athena.core.tools.manager import UnifiedToolManager
 from athena.core.tools.mcp.adapter import MCPToolAdapter
@@ -35,7 +35,7 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_memory_core_has_no_storage_sdk_dependencies():
-    imports = _imports(ROOT / "athena/core/memory/memory.py")
+    imports = _imports(ROOT / "athena/core/memory/long_term_memory.py")
     forbidden = ("sqlalchemy", "chromadb", "athena.db")
     assert not any(module.startswith(forbidden) for module in imports)
 
@@ -101,11 +101,11 @@ def test_runtime_dependencies_are_required():
         RuntimeContainer: tuple(RuntimeContainer.__dataclass_fields__),
         UnifiedToolManager: ("approval_manager",),
         ApprovalManager: ("event_publisher", "db"),
-        MemoryManager: ("settings", "repository", "vector_store"),
+        LongTermMemoryService: ("settings", "repository", "vector_store"),
         FileIntelligenceRuntime: ("settings", "event_publisher"),
         Harness: ("settings", "db", "event_publisher", "compressor"),
         ContextCompressor: ("settings",),
-        HybridRetrievalManager: ("settings",),
+        HybridMemoryRetriever: ("settings",),
         MemoryRetrievalService: ("settings",),
         ConversationSummarizer: ("settings",),
         ToolRegistry: ("catalog",),
@@ -121,7 +121,7 @@ def test_runtime_dependencies_are_required():
 def test_service_locator_compatibility_hooks_are_absent():
     paths = (
         ROOT / "athena/core/llm/provider.py",
-        ROOT / "athena/core/memory/memory.py",
+        ROOT / "athena/core/memory/long_term_memory.py",
         ROOT / "athena/core/tools/manager.py",
         ROOT / "athena/core/tools/mcp/manager.py",
         ROOT / "athena/gateway/approval.py",

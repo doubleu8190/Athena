@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from athena.core.memory.memory import MemoryManager
-from athena.core.memory.summarizer import FactExtractor
+from athena.core.memory.distillation import FactExtractor
+from athena.core.memory.long_term_memory import LongTermMemoryService
 
 from .contracts import (
     CompletedTurn,
@@ -13,8 +13,8 @@ from .contracts import (
     MemoryResolution,
     ResolutionAction,
 )
-from .resolver import MemoryResolver
-from .trigger import MemoryTrigger
+from .candidate_resolver import MemoryCandidateResolver
+from .write_trigger import MemoryWriteTrigger
 
 
 @dataclass
@@ -30,15 +30,15 @@ class MemoryWriteWorkflow:
     def __init__(
         self,
         extractor: FactExtractor,
-        memory_manager: MemoryManager,
+        memory_service: LongTermMemoryService,
         *,
-        trigger: MemoryTrigger | None = None,
-        resolver: MemoryResolver | None = None,
+        trigger: MemoryWriteTrigger | None = None,
+        resolver: MemoryCandidateResolver | None = None,
     ) -> None:
         self._extractor = extractor
-        self._memory = memory_manager
-        self._trigger = trigger or MemoryTrigger()
-        self._resolver = resolver or MemoryResolver(memory_manager)
+        self._memory = memory_service
+        self._trigger = trigger or MemoryWriteTrigger()
+        self._resolver = resolver or MemoryCandidateResolver(memory_service)
 
     async def process_turn(self, turn: CompletedTurn) -> MemoryWriteOutcome:
         trigger = self._trigger.evaluate(turn)
@@ -66,7 +66,7 @@ class MemoryWriteWorkflow:
                     },
                 )
                 if resolution.relation_type and resolution.target_memory_id:
-                    await self._memory.relate(
+                    await self._memory.add_memory_relation(
                         new_id,
                         resolution.target_memory_id,
                         resolution.relation_type.value,
@@ -95,7 +95,9 @@ class MemoryWriteWorkflow:
                         "source": "extraction",
                     },
                 )
-                await self._memory.supersede(resolution.target_memory_id, new_id)
+                await self._memory.supersede_memory(
+                    resolution.target_memory_id, new_id
+                )
         return MemoryWriteOutcome(True, candidates, resolutions)
 
     async def _build_extraction_context(

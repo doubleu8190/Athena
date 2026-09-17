@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from athena.config.settings import Settings
-from athena.core.memory.memory import MemoryManager
+from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.sqlite.database import Database
 from athena.infrastructure.chroma.memory_store import ChromaMemoryStore
 from athena.infrastructure.sqlite.memory_repository import SqliteMemoryRepository
@@ -78,7 +78,7 @@ async def db(db_path):
 def manager(db):
     """为端点测试显式注入 SQLite 和 Chroma 存储端口."""
     settings = Settings(_env_file=None)
-    return MemoryManager(
+    return LongTermMemoryService(
         settings=settings,
         repository=SqliteMemoryRepository(),
         vector_store=ChromaMemoryStore.with_client(
@@ -157,7 +157,7 @@ async def test_patch_memory_updates_content(manager, client):
     assert resp.status_code == 200
     assert resp.json()["status"] == "updated"
 
-    fetched = await manager.get(memory_id)
+    fetched = await manager.get_memory(memory_id)
     assert fetched is not None
     assert fetched["content"] == "新内容"
 

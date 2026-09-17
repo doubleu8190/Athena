@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from athena.config.settings import Settings
 from athena.core.memory.contracts import CompletedTurn
-from athena.core.memory.memory import MemoryManager
+from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.sqlite.engine import (
     close_engine,
     get_memory_session,
@@ -120,7 +120,7 @@ async def test_jobs_use_separate_database_when_configured(tmp_path):
 async def test_memory_manager_writes_to_configured_memory_database(tmp_path):
     await init_engine(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
     try:
-        manager = MemoryManager(
+        manager = LongTermMemoryService(
             settings=Settings(),
             repository=SqliteMemoryRepository(),
             vector_store=_VectorStore(),

@@ -11,8 +11,8 @@ from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.memory import MemoryManager
-from athena.core.memory.summarizer import ConversationSummarizer
+from athena.core.memory.long_term_memory import LongTermMemoryService
+from athena.core.memory.distillation import ConversationSummarizer
 from athena.core.memory.contracts import CompletedTurn
 from athena.infrastructure.sqlite.memory_job_repository import MemoryJobRepository
 from athena.core.tools.manager import UnifiedToolManager
@@ -39,7 +39,7 @@ class ExecutionService:
         tool_manager: UnifiedToolManager,
         db: Database,
         compressor: ContextCompressor,
-        memory_manager: MemoryManager,
+        memory_manager: LongTermMemoryService,
         conversation_summarizer: ConversationSummarizer,
         memory_job_repository: MemoryJobRepository,
         settings: Settings,

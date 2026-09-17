@@ -15,7 +15,7 @@ from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.memory import MemoryManager
+from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.tools.manager import UnifiedToolManager
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import AgentStorePort, EventPublisherPort
@@ -78,7 +78,7 @@ class SubAgentManager:
         db: Database,
         event_publisher: EventPublisherPort,
         compressor: ContextCompressor,
-        memory_manager: MemoryManager,
+        memory_manager: LongTermMemoryService,
         settings: Settings,
         main_run_id: str,
         agent_store: AgentStorePort,
@@ -91,7 +91,7 @@ class SubAgentManager:
             db (数据库): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             event_publisher: 应用事件发布器。
             compressor (ContextCompressor): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            memory_manager (MemoryManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            memory_manager (LongTermMemoryService): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             settings (Settings): 全局配置对象。
             main_run_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 

@@ -7,7 +7,9 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from athena.core.llm.provider import LLMProvider
+from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.utils.llm import extract_json_from_llm_response, extract_message_text
+from athena.utils.prompts import get_prompt
 
 from .contracts import (
     MemoryCandidate,
@@ -17,18 +19,20 @@ from .contracts import (
 )
 
 
-class MemoryResolver:
+class MemoryCandidateResolver:
     """Resolve obvious duplicates locally; leave ambiguity to a later LLM step."""
+
+    RESOLUTION_PROMPT = get_prompt("memory_resolution")
 
     def __init__(
         self,
-        memory_manager: Any,
+        memory_service: LongTermMemoryService,
         *,
         similarity_threshold: float = 0.92,
         related_threshold: float = 0.65,
         llm_provider: LLMProvider | None = None,
     ) -> None:
-        self._memory = memory_manager
+        self._memory = memory_service
         self._threshold = similarity_threshold
         self._related_threshold = related_threshold
         self._llm = llm_provider
@@ -176,15 +180,9 @@ class MemoryResolver:
         self, candidate: MemoryCandidate, existing: dict[str, Any]
     ) -> tuple[ResolutionAction, MemoryRelationType | None]:
         """Resolve semantic ambiguity without allowing the model to write data."""
-        prompt = (
-            "判断新记忆候选与已有记忆的关系，只返回 JSON。\n"
-            "action 只能是 UPDATE、SUPERSEDE、IGNORE、CREATE；"
-            "relation 只能是 supersedes、contradicts、supports 或 null。"
-            "矛盾但无法确认新值替代旧值时用 CREATE+contradicts；"
-            "独立证据支持旧记忆时用 CREATE+supports；不确定时返回 UPDATE。\n"
-            f"已有记忆：{existing.get('content', '')}\n"
-            f"新候选：{candidate.content}\n"
-            '{"action":"UPDATE","relation":null}'
+        prompt = self.RESOLUTION_PROMPT.format(
+            existing_memory=existing.get("content", ""),
+            candidate=candidate.content,
         )
         try:
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])

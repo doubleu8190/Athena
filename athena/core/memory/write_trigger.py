@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from .contracts import CompletedTurn, MemoryTriggerResult
+from .contracts import CompletedTurn, MemoryWriteTriggerResult
 
 
-class MemoryTrigger:
+class MemoryWriteTrigger:
     """Conservative rule-based gate; it never calls an LLM."""
 
     _positive = (
@@ -31,10 +31,10 @@ class MemoryTrigger:
         "翻译", "请翻译", "天气",
     )
 
-    def evaluate(self, turn: CompletedTurn) -> MemoryTriggerResult:
+    def evaluate(self, turn: CompletedTurn) -> MemoryWriteTriggerResult:
         text = (turn.user_text or "").strip()
         if not text:
-            return MemoryTriggerResult(should_extract=False, reason="empty_turn")
+            return MemoryWriteTriggerResult(should_extract=False, reason="empty_turn")
         signals = [
             signal for signal in self._positive if signal.lower() in text.lower()
         ]
@@ -46,11 +46,11 @@ class MemoryTrigger:
         compact = "".join(text.split()).rstrip("。！？!?．.")
         negative = any(compact == signal for signal in self._negative)
         if negative and len(compact) <= 12 and not signals:
-            return MemoryTriggerResult(
+            return MemoryWriteTriggerResult(
                 should_extract=False, signals=["low_value"], reason="low_value_turn"
             )
         if signals:
-            return MemoryTriggerResult(
+            return MemoryWriteTriggerResult(
                 should_extract=True,
                 score=1.0,
                 signals=signals,
@@ -59,7 +59,7 @@ class MemoryTrigger:
         # Weak signals are allowed through: the extractor, not the trigger,
         # owns semantic judgement. This avoids missing statements such as
         # “我一直都是用 Python 写后端的”.
-        return MemoryTriggerResult(
+        return MemoryWriteTriggerResult(
             should_extract=True,
             score=0.25,
             signals=["weak_signal"],

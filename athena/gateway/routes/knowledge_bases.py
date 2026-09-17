@@ -12,7 +12,6 @@ from athena.core.files.attachment_serialization import attachment_to_payload
 from athena.models.file import Attachment, KnowledgeBase
 from athena.utils.logging import get_logger
 
-
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
 logger = get_logger(__name__)
 
@@ -204,7 +203,9 @@ async def upload_documents(
             await runtime.db.knowledge_document_jobs.enqueue_job(attachment.id)
     except Exception:
         for attachment in created:
-            await runtime.db.knowledge_document_jobs.cancel_attachment_job(attachment.id)
+            await runtime.db.knowledge_document_jobs.cancel_attachment_job(
+                attachment.id
+            )
             try:
                 await runtime.file_runtime.delete_knowledge_document(
                     attachment.id, knowledge_base_id

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 from athena.core.files.runtime import FileIntelligenceRuntime
 from athena.infrastructure.sqlite.repositories.knowledge_document_job_repository import (
@@ -120,9 +121,11 @@ class KnowledgeDocumentWorker:
         """
         job_id = str(job["job_id"])
         attachment_id = str(job["attachment_id"])
-        attempt = int(job["attempt"])
+        attempt = cast(int, job["attempt"])
         try:
-            attachment = await self._file_runtime.repository.get_attachment(attachment_id)
+            attachment = await self._file_runtime.repository.get_attachment(
+                attachment_id
+            )
             if attachment is None:
                 await self._repository.mark_cancelled(job_id, "attachment_deleted")
                 return

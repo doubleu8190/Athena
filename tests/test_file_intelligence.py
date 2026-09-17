@@ -6,6 +6,7 @@ import types
 from unittest.mock import AsyncMock
 
 import pytest
+from chromadb import QueryResult
 
 from athena.config.settings import Settings
 from athena.runtime.langgraph_runtime import LangGraphRuntime
@@ -76,6 +77,23 @@ async def test_content_addressed_storage_deduplicates_and_limits(tmp_path):
 
     with pytest.raises(FileTooLargeError):
         await storage.save_stream(_chunks(b"123456789"))
+
+
+def test_vector_items_falls_back_for_non_string_locator_metadata():
+    """向量元数据的定位器不是 JSON 字符串时使用空定位器。"""
+    runtime = _make_runtime(AsyncMock(), Settings(_env_file=None))
+
+    items = runtime._vector_items(
+        QueryResult(
+            ids=[["chunk-1"]],
+            documents=[["content"]],
+            metadatas=[[{"attachment_id": "file-1", "locator_json": 1}]],
+            distances=[[0.0]],
+            included=["documents", "metadatas", "distances"],
+        )
+    )
+
+    assert items[0]["locator"] == {}
 
 
 @pytest.mark.asyncio

@@ -67,15 +67,13 @@ class KnowledgeDocumentJobRepository:
             async with session.begin():
                 row = (
                     await session.execute(
-                        text(
-                            """SELECT job_id, attachment_id, attempt
+                        text("""SELECT job_id, attachment_id, attempt
                             FROM knowledge_document_jobs
                             WHERE status IN ('queued', 'retry')
                               AND available_at <= :now
                               AND attempt < :max_attempts
                             ORDER BY available_at, created_at
-                            LIMIT 1"""
-                        ),
+                            LIMIT 1"""),
                         {"now": now, "max_attempts": max_attempts},
                     )
                 ).first()
@@ -155,12 +153,10 @@ class KnowledgeDocumentJobRepository:
         async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
-                    text(
-                        """UPDATE knowledge_document_jobs
+                    text("""UPDATE knowledge_document_jobs
                         SET status = 'cancelled', updated_at = :now
                         WHERE attachment_id = :attachment_id
-                          AND status IN ('queued', 'retry', 'running')"""
-                    ),
+                          AND status IN ('queued', 'retry', 'running')"""),
                     {"attachment_id": attachment_id, "now": datetime.now().isoformat()},
                 )
 
@@ -195,12 +191,10 @@ class KnowledgeDocumentJobRepository:
         async with get_core_session() as session:
             async with session.begin():
                 result = await session.execute(
-                    text(
-                        """UPDATE knowledge_document_jobs
+                    text("""UPDATE knowledge_document_jobs
                         SET status = 'retry', available_at = :now,
                             error_json = 'process_interrupted', updated_at = :now
-                        WHERE status = 'running'"""
-                    ),
+                        WHERE status = 'running'"""),
                     {"now": now},
                 )
         return cast(CursorResult[Any], result).rowcount
@@ -233,15 +227,13 @@ class KnowledgeDocumentJobRepository:
         async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
-                    text(
-                        """UPDATE knowledge_document_jobs
+                    text("""UPDATE knowledge_document_jobs
                         SET status = :status, result_json = :result_json,
                             error_json = :error_json,
                             available_at = COALESCE(:available_at, available_at),
                             updated_at = :updated_at
                         WHERE job_id = :job_id
-                        AND (:only_running = 0 OR status = 'running')"""
-                    ),
+                        AND (:only_running = 0 OR status = 'running')"""),
                     {
                         "job_id": job_id,
                         "status": status,

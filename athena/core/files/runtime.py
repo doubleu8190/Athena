@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
-from chromadb import Collection
+from chromadb import Collection, QueryResult
 from langchain_core.messages import HumanMessage
 
 from athena.config.settings import Settings
@@ -778,7 +778,7 @@ class FileIntelligenceRuntime:
         return vector
 
     @staticmethod
-    def _vector_items(result: dict[str, Any]) -> list[dict[str, Any]]:
+    def _vector_items(result: QueryResult) -> list[dict[str, Any]]:
         """
 
         参数：
@@ -795,7 +795,11 @@ class FileIntelligenceRuntime:
                 "id": chunk_id,
                 "content": content,
                 "locator": FileLocator.model_validate_json(
-                    (metadata or {}).get("locator_json", "{}")
+                    locator_json
+                    if isinstance(
+                        locator_json := (metadata or {}).get("locator_json"), str
+                    )
+                    else "{}"
                 ).model_dump(mode="json", exclude_none=True),
                 "attachment_id": (metadata or {}).get("attachment_id", ""),
                 "score": max(0.0, 1 - float(distance) / 2),

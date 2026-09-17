@@ -142,6 +142,7 @@ class FileRepository:
                         CodeDependencyModel.attachment_id.in_(attachment_ids)
                     )
                 )
+
     async def list_live_storage_keys(self) -> set[str]:
         """
 
@@ -278,15 +279,19 @@ class FileRepository:
         """
         async with get_core_session() as session:
             rows = (
-                await session.execute(
-                    select(AttachmentModel)
-                    .where(
-                        AttachmentModel.session_id == session_id,
-                        AttachmentModel.deleted_time.is_(None),
+                (
+                    await session.execute(
+                        select(AttachmentModel)
+                        .where(
+                            AttachmentModel.session_id == session_id,
+                            AttachmentModel.deleted_time.is_(None),
+                        )
+                        .order_by(AttachmentModel.created_at.asc())
                     )
-                    .order_by(AttachmentModel.created_at.asc())
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return [_row_to_attachment(row) for row in rows]
 
     async def list_global_knowledge_documents(self) -> list[Attachment]:
@@ -300,15 +305,19 @@ class FileRepository:
         """
         async with get_core_session() as session:
             rows = (
-                await session.execute(
-                    select(AttachmentModel)
-                    .where(
-                        AttachmentModel.knowledge_base_id.is_not(None),
-                        AttachmentModel.deleted_time.is_(None),
+                (
+                    await session.execute(
+                        select(AttachmentModel)
+                        .where(
+                            AttachmentModel.knowledge_base_id.is_not(None),
+                            AttachmentModel.deleted_time.is_(None),
+                        )
+                        .order_by(AttachmentModel.created_at.asc())
                     )
-                    .order_by(AttachmentModel.created_at.asc())
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return [_row_to_attachment(row) for row in rows]
 
     async def get_accessible_attachment(
@@ -357,15 +366,19 @@ class FileRepository:
         """
         async with get_core_session() as session:
             rows = (
-                await session.execute(
-                    select(AttachmentModel)
-                    .where(
-                        AttachmentModel.knowledge_base_id == knowledge_base_id,
-                        AttachmentModel.deleted_time.is_(None),
+                (
+                    await session.execute(
+                        select(AttachmentModel)
+                        .where(
+                            AttachmentModel.knowledge_base_id == knowledge_base_id,
+                            AttachmentModel.deleted_time.is_(None),
+                        )
+                        .order_by(AttachmentModel.created_at.asc())
                     )
-                    .order_by(AttachmentModel.created_at.asc())
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return [_row_to_attachment(row) for row in rows]
 
     async def update_attachment(
@@ -510,7 +523,9 @@ class FileRepository:
         async with get_core_session() as session:
             async with session.begin():
                 await session.execute(
-                    text("DELETE FROM file_chunk_fts WHERE attachment_id = :attachment_id"),
+                    text(
+                        "DELETE FROM file_chunk_fts WHERE attachment_id = :attachment_id"
+                    ),
                     {"attachment_id": attachment_id},
                 )
                 for model in (
@@ -855,7 +870,9 @@ class FileRepository:
                 for r in rows
             ]
 
-    async def search_knowledge_chunks(self, query: str, limit: int = 10) -> list[FileChunk]:
+    async def search_knowledge_chunks(
+        self, query: str, limit: int = 10
+    ) -> list[FileChunk]:
         """跨全部未删除知识库文档执行 FTS5 分块检索。
 
         参数：
@@ -873,9 +890,9 @@ class FileRepository:
             return []
         async with get_core_session() as session:
             rows = (
-                await session.execute(
-                    text(
-                        """SELECT c.* FROM file_chunk_fts f
+                (
+                    await session.execute(
+                        text("""SELECT c.* FROM file_chunk_fts f
                         JOIN file_chunks c ON c.id = f.chunk_id
                         JOIN attachments a ON a.id = c.attachment_id
                         WHERE file_chunk_fts MATCH :match_expr
@@ -883,11 +900,13 @@ class FileRepository:
                           AND a.deleted_time IS NULL
                           AND a.status = 'ready'
                         ORDER BY bm25(f.file_chunk_fts)
-                        LIMIT :limit"""
-                    ),
-                    {"match_expr": match_expr, "limit": limit},
+                        LIMIT :limit"""),
+                        {"match_expr": match_expr, "limit": limit},
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         return [
             FileChunk(
                 id=row["id"],
@@ -895,8 +914,12 @@ class FileRepository:
                 ordinal=row["ordinal"],
                 content=row["content"],
                 token_count=row["token_count"],
-                locator=_json_loads_model(row["locator_json"], FileLocator, FileLocator()),
-                metadata=_json_loads_model(row["metadata_json"], FileMetadata, FileMetadata()),
+                locator=_json_loads_model(
+                    row["locator_json"], FileLocator, FileLocator()
+                ),
+                metadata=_json_loads_model(
+                    row["metadata_json"], FileMetadata, FileMetadata()
+                ),
                 native_score=1.0,
             )
             for row in rows

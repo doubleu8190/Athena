@@ -5,7 +5,12 @@ from typing import Any
 import pytest
 
 from athena.config.settings import Settings
-from athena.core.memory.retrieval import HybridMemoryRetriever
+from athena.core.memory.contracts import MemoryRetrievalRequest
+from athena.core.memory.retrieval import (
+    HybridMemoryRetriever,
+    MemoryRetrievalResult,
+    MemoryRetrievalService,
+)
 
 
 class _Memory:
@@ -72,3 +77,28 @@ async def test_retrieval_exact_keyword_hit_is_independent_of_vector_score():
 
     assert [result.memory_id for result in results] == ["error"]
     assert results[0].exact_match is True
+
+
+@pytest.mark.asyncio
+async def test_memory_context_skips_over_budget_result_and_keeps_later_short_result():
+    class _Manager:
+        def __init__(self) -> None:
+            self.selected: list[str] = []
+
+        async def retrieve(self, query: str):
+            return [
+                MemoryRetrievalResult(memory_id="long", content="123456"),
+                MemoryRetrievalResult(memory_id="short", content="ok"),
+            ]
+
+        def record_selected_access(self, memory_ids: list[str]) -> None:
+            self.selected.extend(memory_ids)
+
+    settings = Settings(_env_file=None, memory_max_tokens=2)
+    manager = _Manager()
+    service = MemoryRetrievalService(manager, _Tokens(), settings)
+
+    context = await service.get_context(MemoryRetrievalRequest(query="偏好"))
+
+    assert context == "[相关记忆]\n- ok\n[/相关记忆]"
+    assert manager.selected == ["short"]

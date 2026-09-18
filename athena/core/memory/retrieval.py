@@ -383,7 +383,8 @@ class MemoryRetrievalService:
         for result in results:
             content_tokens = self._token_counter.count_text_tokens(result.content)
             if total_tokens + content_tokens > self._max_tokens:
-                break
+                # 单条记忆过长时跳过它，继续尝试后续短记忆，避免浪费整个上下文预算。
+                continue
             parts.append(f"- {result.content}")
             total_tokens += content_tokens
             selected_ids.append(result.memory_id)

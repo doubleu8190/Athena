@@ -67,7 +67,7 @@ async def test_resolver_creates_when_related_score_is_below_threshold():
 
 
 @pytest.mark.asyncio
-async def test_resolver_marks_explicit_change_as_supersede():
+async def test_resolver_keeps_candidate_when_llm_resolution_fails():
     class Memory:
         async def search(self, *args, **kwargs):
             return [{"id": "m1", "content": "使用 Python", "score": 0.8}]
@@ -78,7 +78,8 @@ async def test_resolver_marks_explicit_change_as_supersede():
     result = await MemoryCandidateResolver(
         Memory(), llm_provider=_FailingLLM()
     ).resolve([candidate])
-    assert result[0].action is ResolutionAction.SUPERSEDE
+    assert result[0].action is ResolutionAction.CREATE
+    assert result[0].relation_type is None
 
 
 @pytest.mark.asyncio

@@ -191,4 +191,5 @@ class MemoryCandidateResolver:
                 )
             return action, relation
         except Exception:
-            return ResolutionAction.SUPERSEDE, MemoryRelationType.SUPERSEDES
+            # 无法判断语义时保留旧记忆，并将候选作为独立事实保存，避免误关闭旧版本。
+            return ResolutionAction.CREATE, None

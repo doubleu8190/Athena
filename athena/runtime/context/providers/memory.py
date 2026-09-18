@@ -70,9 +70,7 @@ class MemoryContextProvider:
         started = time.perf_counter()
         query = plan.memory_query or task.goal
         request = MemoryRetrievalRequest(
-            session_id=session_id,
             query=query,
-            task=task.goal,
             limit=self._limit,
         )
         try:

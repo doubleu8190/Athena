@@ -29,8 +29,6 @@ class MemoryWriteTriggerResult(BaseModel):
     """Result of the cheap, non-LLM write trigger."""
 
     should_extract: bool
-    score: float = 0.0
-    signals: list[str] = Field(default_factory=list)
     reason: str = ""
 
 
@@ -77,4 +75,3 @@ class MemoryRetrievalRequest(BaseModel):
     task: str = ""
     scope: str = "user"
     limit: int = Field(default=8, ge=1, le=100)
-    expand_query: bool = False

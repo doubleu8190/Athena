@@ -29,7 +29,9 @@ SUMMARY_PROMPT = get_prompt("compression_summary")
 class IncrementalSummarizer:
     """增量摘要生成器 — 按 session_id 隔离摘要缓冲区."""
 
-    def __init__(self, llm: LLMProvider, db: Database, max_summary_tokens: int = 2000) -> None:
+    def __init__(
+        self, llm: LLMProvider, db: Database, max_summary_tokens: int = 2000
+    ) -> None:
         """
 
         参数：
@@ -69,7 +71,9 @@ class IncrementalSummarizer:
                     buffer_tokens=self._llm.count_text_tokens(summary),
                 )
         except Exception as e:
-            logger.warning("summary_buffer_load_failed", error=str(e), session_id=session_id)
+            logger.warning(
+                "summary_buffer_load_failed", error=str(e), session_id=session_id
+            )
 
     async def get_summary(self, session_id: str) -> str:
         """获取指定会话的当前摘要（懒加载：内存无缓存时从 session 表恢复）."""
@@ -143,7 +147,9 @@ class IncrementalSummarizer:
                 compression_summary=self._get_buffer_local(session_id),
             )
         except Exception as e:
-            logger.warning("summary_buffer_persist_failed", error=str(e), session_id=session_id)
+            logger.warning(
+                "summary_buffer_persist_failed", error=str(e), session_id=session_id
+            )
 
     def _format_turns_for_summary(self, turns: list[list[Message]]) -> str:
         """将轮次格式化为摘要输入."""
@@ -161,7 +167,9 @@ class IncrementalSummarizer:
                             f"{tc.name}({json.dumps(tc.args, ensure_ascii=False)})"
                             for tc in tool_calls
                         )
-                        turn_content.append(f"助手: {content}\n  调用工具: {calls_desc}")
+                        turn_content.append(
+                            f"助手: {content}\n  调用工具: {calls_desc}"
+                        )
                     else:
                         turn_content.append(f"助手: {content}")
                 elif msg.role == MessageRole.TOOL:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from athena.core.memory.distillation import FactExtractor
 from athena.core.memory.long_term_memory import LongTermMemoryService
+from athena.utils.logging import get_logger
 
 from .contracts import (
     CompletedTurn,
@@ -15,6 +16,8 @@ from .contracts import (
 )
 from .candidate_resolver import MemoryCandidateResolver
 from .write_trigger import MemoryWriteTrigger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -33,16 +36,21 @@ class MemoryWriteWorkflow:
         memory_service: LongTermMemoryService,
         *,
         trigger: MemoryWriteTrigger | None = None,
-        resolver: MemoryCandidateResolver | None = None,
+        resolver: MemoryCandidateResolver,
     ) -> None:
         self._extractor = extractor
         self._memory = memory_service
         self._trigger = trigger or MemoryWriteTrigger()
-        self._resolver = resolver or MemoryCandidateResolver(memory_service)
+        self._resolver = resolver
 
     async def process_turn(self, turn: CompletedTurn) -> MemoryWriteOutcome:
         trigger = self._trigger.evaluate(turn)
         if not trigger.should_extract:
+            logger.debug(
+                "Memory write trigger did not fire for turn %s: %s",
+                turn.turn_id,
+                trigger.reason,
+            )
             return MemoryWriteOutcome(False, [], [])
         existing_memories, related_memories = await self._build_extraction_context(turn)
         candidates = await self._extractor.extract(
@@ -71,10 +79,14 @@ class MemoryWriteWorkflow:
                         resolution.target_memory_id,
                         resolution.relation_type.value,
                     )
-            elif resolution.action in {
-                ResolutionAction.UPDATE,
-                ResolutionAction.SUPERSEDE,
-            } and resolution.target_memory_id:
+            elif (
+                resolution.action
+                in {
+                    ResolutionAction.UPDATE,
+                    ResolutionAction.SUPERSEDE,
+                }
+                and resolution.target_memory_id
+            ):
                 candidate = resolution.candidate
                 # 自动更新从不覆写旧文本。即使解析器给出 UPDATE，也以新版本
                 # supersede 旧版本，保留冲突判断、回滚和审计所需的历史。

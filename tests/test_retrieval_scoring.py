@@ -3,18 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from athena.config.settings import Settings
-from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalService
-
-
-class _LLM:
-    def __init__(self, expanded: str) -> None:
-        self.expanded = expanded
-
-    async def ainvoke(self, _messages: list[Any]) -> AIMessage:
-        return AIMessage(content=self.expanded)
+from athena.core.memory.retrieval import HybridMemoryRetriever
 
 
 class _Memory:
@@ -57,28 +48,10 @@ async def test_retrieval_keeps_original_vector_query_and_filters_low_native_scor
     memory = _Memory(
         {"original entity": [{"id": "weak", "content": "weak", "score": 0.69}]}
     )
-    manager = HybridMemoryRetriever(_LLM("original entity"), memory, _settings())
+    manager = HybridMemoryRetriever(memory, _settings())
 
     assert await manager.retrieve("original entity") == []
     assert memory.vector_queries == ["original entity"]
-
-
-@pytest.mark.asyncio
-async def test_retrieval_adds_different_rewrite_and_retains_route_ranks():
-    memory = _Memory(
-        {
-            "raw": [{"id": "same", "content": "same", "score": 0.9}],
-            "expanded": [{"id": "same", "content": "same", "score": 0.95}],
-        }
-    )
-    manager = HybridMemoryRetriever(_LLM("expanded"), memory, _settings())
-
-    results = await manager.retrieve("raw")
-
-    assert memory.vector_queries == ["raw", "expanded"]
-    assert results[0].rank_sources == {"vector": 1, "vector_rewrite": 1}
-    assert results[0].native_score == 0.9
-    assert results[0].fused_score is not None
 
 
 @pytest.mark.asyncio
@@ -93,25 +66,9 @@ async def test_retrieval_exact_keyword_hit_is_independent_of_vector_score():
             }
         ],
     )
-    manager = HybridMemoryRetriever(_LLM("ERR_NOT_FOUND"), memory, _settings())
+    manager = HybridMemoryRetriever(memory, _settings())
 
     results = await manager.retrieve("ERR_NOT_FOUND")
 
     assert [result.memory_id for result in results] == ["error"]
     assert results[0].exact_match is True
-    assert results[0].rank_sources == {"keyword": 1}
-
-
-@pytest.mark.asyncio
-async def test_access_is_recorded_only_for_memory_written_to_context():
-    memory = _Memory(
-        {"query": [{"id": "candidate", "content": "selected", "score": 0.9}]}
-    )
-    manager = HybridMemoryRetriever(_LLM("query"), memory, _settings())
-    service = MemoryRetrievalService(manager, _Tokens(), _settings())
-
-    await manager.retrieve("query")
-    assert memory.selected == []
-
-    assert "selected" in await service.get_relevant_memories("query")
-    assert memory.selected == ["candidate"]

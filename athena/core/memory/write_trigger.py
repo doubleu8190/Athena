@@ -27,8 +27,16 @@ class MemoryWriteTrigger:
         "default",
     )
     _negative = (
-        "你好", "谢谢", "感谢", "帮我算", "请帮我算", "计算", "请帮我计算",
-        "翻译", "请翻译", "天气",
+        "你好",
+        "谢谢",
+        "感谢",
+        "帮我算",
+        "请帮我算",
+        "计算",
+        "请帮我计算",
+        "翻译",
+        "请翻译",
+        "天气",
     )
 
     def evaluate(self, turn: CompletedTurn) -> MemoryWriteTriggerResult:
@@ -47,13 +55,11 @@ class MemoryWriteTrigger:
         negative = any(compact == signal for signal in self._negative)
         if negative and len(compact) <= 12 and not signals:
             return MemoryWriteTriggerResult(
-                should_extract=False, signals=["low_value"], reason="low_value_turn"
+                should_extract=False, reason="low_value_turn"
             )
         if signals:
             return MemoryWriteTriggerResult(
                 should_extract=True,
-                score=1.0,
-                signals=signals,
                 reason="explicit_long_term_signal",
             )
         # Weak signals are allowed through: the extractor, not the trigger,
@@ -61,7 +67,5 @@ class MemoryWriteTrigger:
         # “我一直都是用 Python 写后端的”.
         return MemoryWriteTriggerResult(
             should_extract=True,
-            score=0.25,
-            signals=["weak_signal"],
             reason="semantic_review",
         )

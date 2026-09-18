@@ -79,6 +79,7 @@ def _metadata(row: Any) -> dict[str, Any]:
 
 class SQLiteMemoryRepository:
     """SQLite 长期记忆生命周期与 FTS5 关键词检索仓库。"""
+
     async def add(self, record: dict[str, Any]) -> None:
         """添加数据。
 
@@ -262,7 +263,6 @@ class SQLiteMemoryRepository:
                     "content": row.content,
                     "metadata": _metadata(row),
                     "score": abs(rank) / (1.0 + abs(rank)),
-                    "source": "keyword",
                 }
             )
         return results
@@ -427,19 +427,27 @@ class SQLiteMemoryRepository:
         async with get_memory_database_session() as session:
             async with session.begin():
                 result = await session.execute(
-                    update(MemoryModel).where(
+                    update(MemoryModel)
+                    .where(
                         MemoryModel.id == old_id,
                         MemoryModel.status == "active",
                         MemoryModel.deleted_time.is_(None),
-                    ).values(status="superseded", superseded_by=new_id, superseded_at=now)
+                    )
+                    .values(
+                        status="superseded", superseded_by=new_id, superseded_at=now
+                    )
                 )
                 if result.rowcount != 1:
                     return False
-                await session.execute(text("""INSERT OR IGNORE INTO memory_relations
+                await session.execute(
+                    text("""INSERT OR IGNORE INTO memory_relations
                     (source_memory_id, target_memory_id, relation_type, created_at)
                     VALUES (:source, :target, 'supersedes', :created)"""),
-                    {"source": new_id, "target": old_id, "created": now})
-                await session.execute(text("DELETE FROM memory_fts WHERE memory_id = :id"), {"id": old_id})
+                    {"source": new_id, "target": old_id, "created": now},
+                )
+                await session.execute(
+                    text("DELETE FROM memory_fts WHERE memory_id = :id"), {"id": old_id}
+                )
                 return True
 
     async def restore_active(self, memory_id: str) -> None:
@@ -542,8 +550,12 @@ class SQLiteMemoryRepository:
                     text("""INSERT OR IGNORE INTO memory_relations
                         (source_memory_id, target_memory_id, relation_type, created_at)
                         VALUES (:source, :target, :relation, :created)"""),
-                    {"source": source_id, "target": target_id,
-                     "relation": relation_type, "created": datetime.now().isoformat()},
+                    {
+                        "source": source_id,
+                        "target": target_id,
+                        "relation": relation_type,
+                        "created": datetime.now().isoformat(),
+                    },
                 )
 
     async def soft_delete(self, memory_ids: list[str]) -> None:

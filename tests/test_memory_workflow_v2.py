@@ -5,11 +5,18 @@ from athena.core.memory.contracts import (
     MemoryCandidate,
     MemoryRelationType,
     MemoryResolution,
+    ResolutionAction,
 )
 from athena.core.memory.write_trigger import MemoryWriteTrigger
 from athena.core.memory.write_workflow import MemoryWriteWorkflow
 from athena.core.memory.candidate_resolver import MemoryCandidateResolver
-from athena.core.memory.contracts import ResolutionAction
+
+
+class _FailingLLM:
+    """用于覆盖 Resolver 的 LLM 失败回退路径。"""
+
+    async def ainvoke(self, messages):
+        raise RuntimeError("resolver llm unavailable")
 
 
 def test_trigger_skips_obvious_low_value_turns():
@@ -53,7 +60,9 @@ async def test_resolver_creates_when_related_score_is_below_threshold():
     candidate = MemoryCandidate(
         content="新信息", source_turn_id="t1", confidence=0.9
     )
-    result = await MemoryCandidateResolver(Memory()).resolve([candidate])
+    result = await MemoryCandidateResolver(
+        Memory(), llm_provider=_FailingLLM()
+    ).resolve([candidate])
     assert result[0].action is ResolutionAction.CREATE
 
 
@@ -66,7 +75,9 @@ async def test_resolver_marks_explicit_change_as_supersede():
     candidate = MemoryCandidate(
         content="后端改为 Rust（was Python）", source_turn_id="t1", confidence=0.9
     )
-    result = await MemoryCandidateResolver(Memory()).resolve([candidate])
+    result = await MemoryCandidateResolver(
+        Memory(), llm_provider=_FailingLLM()
+    ).resolve([candidate])
     assert result[0].action is ResolutionAction.SUPERSEDE
 
 
@@ -120,7 +131,10 @@ async def test_write_workflow_persists_only_create_resolutions():
 
     memory = Memory()
     extractor = Extractor()
-    outcome = await MemoryWriteWorkflow(extractor, memory).process_turn(
+    resolver = MemoryCandidateResolver(memory, llm_provider=_FailingLLM())
+    outcome = await MemoryWriteWorkflow(
+        extractor, memory, resolver=resolver
+    ).process_turn(
         CompletedTurn(turn_id="t1", session_id="s1", user_text="以后用 Python")
     )
     assert outcome.triggered is True

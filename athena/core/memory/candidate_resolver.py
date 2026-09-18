@@ -8,7 +8,10 @@ from langchain_core.messages import HumanMessage
 
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.long_term_memory import LongTermMemoryService
-from athena.utils.llm_response import extract_json_from_llm_response, extract_message_text
+from athena.utils.llm_response import (
+    extract_json_from_llm_response,
+    extract_message_text,
+)
 from athena.utils.prompt_loader import get_prompt
 
 from .contracts import (
@@ -30,7 +33,7 @@ class MemoryCandidateResolver:
         *,
         similarity_threshold: float = 0.92,
         related_threshold: float = 0.65,
-        llm_provider: LLMProvider | None = None,
+        llm_provider: LLMProvider,
     ) -> None:
         self._memory = memory_service
         self._threshold = similarity_threshold

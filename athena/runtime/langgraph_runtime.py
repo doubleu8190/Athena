@@ -25,7 +25,9 @@ from athena.core.memory.distillation import ConversationSummarizer, FactExtracto
 from athena.core.memory.write_trigger import MemoryWriteTrigger
 from athena.core.memory.write_workflow import MemoryWriteWorkflow
 from athena.core.memory.candidate_resolver import MemoryCandidateResolver
-from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.sqlite.repositories.memory_job_repository import (
+    MemoryJobRepository,
+)
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.models import Message
@@ -171,7 +173,9 @@ class LangGraphRuntime:
         self._file_parse_semaphore = asyncio.Semaphore(2)
         self._file_embedding_semaphore = asyncio.Semaphore(3)
         self._memory_trigger = MemoryWriteTrigger()
-        self._memory_resolver = MemoryCandidateResolver(self._memory_service)
+        self._memory_resolver = MemoryCandidateResolver(
+            memory_service=self._memory_service, llm_provider=llm
+        )
         self._memory_write_workflow: MemoryWriteWorkflow | None = None
         structured_llm = StructuredLLMService(llm)
         orchestration_events = OrchestrationEventPublisher(event_publisher)
@@ -537,7 +541,9 @@ class LangGraphRuntime:
             session_id=session_id,
             run_id=run_id,
         )
-        return await ProcessorLifecycleRunner(AttachmentProcessor(self)).execute(context)
+        return await ProcessorLifecycleRunner(AttachmentProcessor(self)).execute(
+            context
+        )
 
     async def _process_attachment_once(
         self, attachment_id: str, message_id: str, session_id: str, run_id: str

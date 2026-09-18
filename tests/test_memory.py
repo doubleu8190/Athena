@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 import pytest
-from langchain_core.messages import AIMessage
 from sqlalchemy import select, update
 
 from athena.config.settings import Settings
@@ -99,11 +98,6 @@ class _FakeChromaClient:
 # ---------------------------------------------------------------------------
 # 检索测试用 stub
 # ---------------------------------------------------------------------------
-
-class _StubLLM:
-    async def ainvoke(self, messages: list[Any]) -> AIMessage:
-        return AIMessage(content="expanded query")
-
 
 class _StubMemory:
     def __init__(
@@ -449,7 +443,6 @@ async def test_keyword_search_orders_by_relevance_not_insertion(mm: LongTermMemo
 
 def _retrieval_manager() -> HybridMemoryRetriever:
     return HybridMemoryRetriever(
-        llm_provider=_StubLLM(),
         memory_service=_StubMemory(vector_results=[]),
         settings=_make_settings(),
     )
@@ -494,7 +487,6 @@ async def test_retrieve_ranks_hot_memory_higher():
         "score": 0.9,
     }
     mgr = HybridMemoryRetriever(
-        llm_provider=_StubLLM(),
         memory_service=_StubMemory(vector_results=[hot, cold], pending={}),
         settings=_make_settings(),
     )
@@ -547,7 +539,6 @@ async def test_retrieve_is_cross_session_without_session_filter():
     }
     mem = _WhereCapturingMemory(vector_results=[other])
     mgr = HybridMemoryRetriever(
-        llm_provider=_StubLLM(),
         memory_service=mem,
         settings=_make_settings(),
     )

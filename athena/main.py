@@ -170,7 +170,6 @@ async def lifespan(app: FastAPI):
     )
 
     retrieval_manager = HybridMemoryRetriever(
-        llm_secondary,
         memory_service,
         settings=settings,
     )

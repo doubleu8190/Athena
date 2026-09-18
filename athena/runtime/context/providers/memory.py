@@ -74,7 +74,6 @@ class MemoryContextProvider:
             query=query,
             task=task.goal,
             limit=self._limit,
-            expand_query=False,
         )
         try:
             async with asyncio.timeout(self._timeout_seconds):

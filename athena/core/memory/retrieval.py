@@ -1,4 +1,4 @@
-"""混合检索管理器 — LLM 查询扩展 + 向量检索 + 关键词检索 + RRF 融合 + 时间衰减.
+"""混合检索管理器 — 向量检索 + 关键词检索 + RRF 融合 + 时间衰减.
 
 技术方案：LLM 提取 + 向量数据库 + 混合检索。
 """
@@ -13,16 +13,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable
 
-from langchain_core.messages import HumanMessage
-
 from athena.config.settings import Settings
-from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import TokenCounter
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.contracts import MemoryRetrievalRequest
-from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
-from athena.utils.prompt_loader import get_prompt
 
 logger = get_logger(__name__)
 
@@ -44,25 +39,22 @@ class MemoryRetrievalResult:
     fused_score: float | None = None
     rerank_score: float | None = None
     exact_match: bool = False
-    rank_sources: dict[str, int] = field(default_factory=dict)
 
 
 class HybridMemoryRetriever:
     """混合检索管理器.
 
-    流程：LLM 查询扩展 → 向量检索 + 关键词检索 → RRF 融合 → 时间衰减 → 过滤排序.
+    流程：向量检索 + 关键词检索 → RRF 融合 → 时间衰减 → 过滤排序.
     """
 
     def __init__(
         self,
-        llm_provider: LLMProvider,
         memory_service: LongTermMemoryService,
         settings: Settings,
     ) -> None:
         """
 
         参数：
-            llm_provider (LLMProvider): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             memory_service (LongTermMemoryService): 提供向量和关键词检索的长期记忆服务。
             settings (Settings): 全局配置对象。
         返回值：
@@ -71,7 +63,6 @@ class HybridMemoryRetriever:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        self._llm = llm_provider
         self._memory = memory_service
         self._settings = settings
         self._min_score = self._settings.memory_min_score
@@ -97,9 +88,6 @@ class HybridMemoryRetriever:
         self,
         query: str,
         filter_params: dict[str, Any] | None = None,
-        *,
-        record_access: bool = False,
-        expand_query: bool = True,
     ) -> list[MemoryRetrievalResult]:
         """执行混合检索（默认跨会话全库）.
 
@@ -108,44 +96,18 @@ class HybridMemoryRetriever:
         type 等），产线不传即全库检索。
         """
         started = time.perf_counter()
-        # 并发启动原始向量和关键词路线；扩展 query 只作为完成原始路线后的
-        # 附加向量证据。
-        keyword_task = asyncio.create_task(
-            self._keyword_search(query, filter_params, route="keyword")
-        )
-        raw_vector_task = asyncio.create_task(
-            self._vector_search(query, filter_params, route="vector")
-        )
-        expansion_started = time.perf_counter()
-        expanded_query = await self._expand_query(query) if expand_query else None
-        logger.info(
-            "memory_retrieval_query_expansion_completed",
-            duration_ms=round((time.perf_counter() - expansion_started) * 1000),
-            enabled=expand_query,
-        )
+        # 并发执行向量和关键词路线，随后统一使用 RRF 合并两路排名证据。
+        keyword_task = asyncio.create_task(self._keyword_search(query, filter_params))
+        raw_vector_task = asyncio.create_task(self._vector_search(query, filter_params))
 
         keyword_results = await keyword_task
         vector_results = await raw_vector_task
-        if expanded_query and expanded_query.strip() != query.strip():
-            rewrite_started = time.perf_counter()
-            vector_results.extend(
-                await self._vector_search(
-                    expanded_query,
-                    filter_params,
-                    route="vector_rewrite",
-                )
-            )
-            logger.info(
-                "memory_retrieval_query_rewrite_completed",
-                duration_ms=round((time.perf_counter() - rewrite_started) * 1000),
-            )
 
         logger.info(
             "memory_retrieval_completed",
             duration_ms=round((time.perf_counter() - started) * 1000),
             keyword_count=len(keyword_results),
             vector_count=len(vector_results),
-            expanded=bool(expanded_query),
         )
 
         fused = self._reciprocal_rank_fusion(
@@ -167,33 +129,10 @@ class HybridMemoryRetriever:
         selected = fused[: self._rerank_k][: self._context_k]
         return selected
 
-    async def _expand_query(self, query: str) -> str | None:
-        """使用 LLM 扩展查询.
-
-        扩展结果仅用于向量语义检索（关键词检索使用原始查询走 FTS5），
-        因此提示词明确语义检索目标、约束输出为单行语句。
-        """
-        prompt = get_prompt("query_expansion").format(query=query)
-        try:
-            response = await self._llm.ainvoke([HumanMessage(content=prompt)])
-            expanded = extract_message_text(response).strip()
-            if not expanded:
-                # 空响应（模型返回工具调用/错误/无文本）静默回落为 "None" 曾导致
-                # 下游检索被垃圾查询污染且无日志，这里显式记录并回退原查询。
-                logger.warning("query_expand_empty", query_length=len(query))
-                return None
-            return expanded
-        except Exception as e:
-            logger.warning("query_expand_failed", error=str(e))
-            return None
-
     async def _vector_search(
         self,
         query: str,
         filter_params: dict[str, Any] | None,
-        record_access: bool = False,
-        *,
-        route: str = "vector",
     ) -> list[MemoryRetrievalResult]:
         """向量检索（跨会话全库；filter_params 为可选显式过滤）."""
         try:
@@ -208,26 +147,18 @@ class HybridMemoryRetriever:
             return []
 
         out: list[MemoryRetrievalResult] = []
-        has_raw_native_scores = any(r.get("native_score") is not None for r in results)
         for i, r in enumerate(results, 1):
             out.append(
                 MemoryRetrievalResult(
                     content=r["content"],
-                    source=route,
+                    source="vector",
                     metadata=r.get("metadata", {}),
-                    native_score=r.get("native_score", r.get("score")),
-                    rank_sources={route: i},
+                    native_score=r.get("score"),
                     memory_id=r.get("id", str(i)),
                 )
             )
-        # RRF 依赖列表位置作为 rank（位置越靠前贡献越大），必须"最相关在前"。
-        # score 为原始相似度 1-dist/2（越大越相似），vector_weight 统一在 RRF
-        # 融合处生效，这里不乘权重，避免融合改读 r.native_score 时双倍加权。上游
-        # ChromaDB 已按距离升序返回，这里显式按 score 降序把不变量固化。
-        out.sort(
-            key=lambda x: x.native_score or 0.0,
-            reverse=not has_raw_native_scores,
-        )
+        # score 为原始相似度 1-dist/2（越大越相似），这里显式按 score 降序。
+        out.sort(key=lambda x: x.native_score or 0.0, reverse=True)
         out = [
             result
             for result in out
@@ -239,9 +170,6 @@ class HybridMemoryRetriever:
         self,
         query: str,
         filter_params: dict[str, Any] | None,
-        record_access: bool = False,
-        *,
-        route: str = "keyword",
     ) -> list[MemoryRetrievalResult]:
         """关键词检索（SQLite FTS5 MATCH 全文检索）.
 
@@ -268,12 +196,10 @@ class HybridMemoryRetriever:
             out.append(
                 MemoryRetrievalResult(
                     content=r["content"],
-                    source=route,
+                    source="keyword",
                     metadata=r.get("metadata", {}),
                     native_score=r.get("score"),
-                    exact_match=bool(r.get("exact_match"))
-                    or self._is_exact_match(query, r["content"]),
-                    rank_sources={route: i},
+                    exact_match=self._is_exact_match(query, r["content"]),
                     memory_id=r.get("id", str(i)),
                 )
             )
@@ -300,25 +226,19 @@ class HybridMemoryRetriever:
         # 首次出现时保留完整结果对象，后续只更新融合分数，避免重复候选携带不一致内容。
         # （职责边界：向量路承担语义，关键词路仅作精确词/前缀助力的弱贡献）
         for rank, r in enumerate(vector_results, 1):
-            route = r.source if r.source.startswith("vector") else "vector"
-            route_rank = r.rank_sources.get(route, rank)
             if r.memory_id not in scores:
                 scores[r.memory_id] = 0.0
                 content_map[r.memory_id] = r
-            content_map[r.memory_id].rank_sources.setdefault(route, route_rank)
-            scores[r.memory_id] += self._vector_weight / (self._rrf_k + route_rank)
+            scores[r.memory_id] += self._vector_weight / (self._rrf_k + rank)
 
         for rank, r in enumerate(keyword_results, 1):
-            route = "keyword"
-            route_rank = r.rank_sources.get(route, rank)
             if r.memory_id not in scores:
                 scores[r.memory_id] = 0.0
                 content_map[r.memory_id] = r
-            content_map[r.memory_id].rank_sources.setdefault(route, route_rank)
             content_map[r.memory_id].exact_match = (
                 content_map[r.memory_id].exact_match or r.exact_match
             )
-            scores[r.memory_id] += self._keyword_weight / (self._rrf_k + route_rank)
+            scores[r.memory_id] += self._keyword_weight / (self._rrf_k + rank)
 
         fused: list[MemoryRetrievalResult] = []
         for memory_id, rrf_score in scores.items():
@@ -443,45 +363,11 @@ class MemoryRetrievalService:
         self._token_counter = token_counter
         self._max_tokens = settings.memory_max_tokens
 
-    async def get_relevant_memories(
-        self,
-        user_message: str,
-    ) -> str:
-        """获取相关记忆并格式化为系统提示（跨会话召回）."""
-        try:
-            results = await self._manager.retrieve(
-                query=user_message,
-            )
-        except Exception as e:
-            logger.warning("memory_retrieve_failed", error=str(e))
-            return ""
-
-        if not results:
-            return ""
-
-        parts = ["[相关记忆]"]
-        total_tokens = 0
-        selected_ids: list[str] = []
-        for r in results:
-            content_tokens = self._token_counter.count_text_tokens(r.content)
-            if total_tokens + content_tokens > self._max_tokens:
-                break
-            parts.append(f"- {r.content}")
-            total_tokens += content_tokens
-            selected_ids.append(r.memory_id)
-
-        if len(parts) > 1:
-            parts.append("[/相关记忆]")
-            self._manager.record_selected_access(selected_ids)
-            return "\n".join(parts)
-        return ""
-
     async def get_context(self, request: MemoryRetrievalRequest) -> str:
         """Retrieve and assemble context from an explicit runtime request."""
         try:
             results = await self._manager.retrieve(
                 query=request.query,
-                expand_query=request.expand_query,
             )
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))

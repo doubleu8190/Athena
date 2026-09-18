@@ -17,7 +17,6 @@ from typing import Any
 from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.files.runtime import FileIntelligenceRuntime
-from athena.core.harness.harness import HarnessRunResult
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import MemoryRetrievalService
@@ -30,8 +29,6 @@ from athena.infrastructure.sqlite.repositories.memory_job_repository import (
 )
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
-from athena.models import Message
-from athena.models.file import Attachment, AttachmentRef
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
 from athena.contracts.ports import AgentStorePort
@@ -202,36 +199,12 @@ class LangGraphRuntime:
     # ------------------------------------------------------------------
 
     @property
-    def task_understanding_service(self) -> TaskUnderstandingService:
-        return self._task_understanding_service
-
-    @property
-    def context_acquisition_service(self) -> ContextAcquisitionService:
-        return self._context_acquisition_service
-
-    @property
-    def context_planner(self) -> ContextPlanner:
-        return self._context_planner
-
-    @property
     def session_context_service(self) -> SessionContextService:
         return self._session_context_service
 
     @property
     def agent_execution_service(self) -> AgentExecutionService:
         return self._agent_execution_service
-
-    @property
-    def plan_materializer(self) -> PlanMaterializer:
-        return self._plan_materializer
-
-    @property
-    def plan_dispatcher(self) -> PlanDispatcher:
-        return self._plan_dispatcher
-
-    @property
-    def plan_result_synthesizer(self) -> PlanResultSynthesizer:
-        return self._plan_result_synthesizer
 
     async def materialize_plan(
         self,
@@ -439,37 +412,6 @@ class LangGraphRuntime:
         )
         return {"context_bundle": bundle.model_dump(mode="json")}
 
-    # ------------------------------------------------------------------
-    # SessionContextService 委托
-    # ------------------------------------------------------------------
-
-    async def load_history(self, session_id: str) -> list[Message]:
-        return await self._session_context_service.load_history(session_id)
-
-    async def load_and_validate_attachments(
-        self, session_id: str, attachment_ids: list[str]
-    ) -> list[Attachment]:
-        return await self._session_context_service.load_and_validate_attachments(
-            session_id, attachment_ids
-        )
-
-    async def prepare_harness_input(
-        self,
-        session_id: str,
-        user_message: str,
-        attachment_ids: list[str],
-        history: list[Message],
-        run_id: str = "",
-        message_id: str = "",
-    ) -> tuple[list[AttachmentRef], list[Message]]:
-        return await self._session_context_service.prepare_harness_input(
-            session_id, user_message, attachment_ids, history, run_id, message_id
-        )
-
-    # ------------------------------------------------------------------
-    # AgentExecutionService 委托
-    # ------------------------------------------------------------------
-
     @staticmethod
     def build_system_prompt(
         task_spec: dict[str, Any] | None = None,
@@ -477,55 +419,6 @@ class LangGraphRuntime:
     ) -> str:
         """使用内置系统提示词，并注入任务理解和上下文包。"""
         return AgentExecutionService._build_system_prompt(task_spec, context_bundle)
-
-    async def execute_harness(
-        self,
-        messages: list[Message],
-        session_id: str,
-        task_spec: dict[str, Any] | None = None,
-        context_bundle: dict[str, Any] | None = None,
-        run_id: str = "",
-        stop_signal: Any = None,
-    ) -> HarnessRunResult:
-        return await self._agent_execution_service.execute_harness(
-            messages=messages,
-            session_id=session_id,
-            task_spec=task_spec,
-            context_bundle=context_bundle,
-            run_id=run_id,
-            stop_signal=stop_signal,
-        )
-
-    async def process_completed_run(
-        self,
-        session_id: str,
-        user_message: str,
-        result: HarnessRunResult,
-        *,
-        turn_id: str,
-    ) -> None:
-        return await self._agent_execution_service.process_completed_run(
-            session_id=session_id,
-            user_message=user_message,
-            result=result,
-            turn_id=turn_id,
-        )
-
-    @classmethod
-    def build_result_payload(
-        cls, result: HarnessRunResult, attachment_refs: list[AttachmentRef]
-    ) -> dict[str, Any]:
-        return AgentExecutionService.build_result_payload(result, attachment_refs)
-
-    @staticmethod
-    def deserialize_attachment_refs(
-        payload: list[dict[str, Any]],
-    ) -> list[AttachmentRef]:
-        return AgentExecutionService.deserialize_attachment_refs(payload)
-
-    @staticmethod
-    def deserialize_messages(payload: list[dict[str, Any]]) -> list[Message]:
-        return AgentExecutionService.deserialize_messages(payload)
 
     # ------------------------------------------------------------------
     # 附件处理（依赖 FileIntelligenceRuntime，保留在此）
@@ -737,19 +630,6 @@ class LangGraphRuntime:
                 memory_service=self._memory_service,
             )
         return self._memory_write_workflow
-
-    # ------------------------------------------------------------------
-    # 运行时管理
-    # ------------------------------------------------------------------
-
-    async def initialize(self) -> None:
-        """Initialize runtime components."""
-        logger.info("langgraph_runtime_initialized")
-
-    def set_session_stop_signal(
-        self, session_id: str, stop_signal: asyncio.Event | None
-    ) -> None:
-        self._session_stop_signals[session_id] = stop_signal
 
     def validate_session_state(self, state: AgentState) -> None:
         """Validate minimum required state fields exist."""

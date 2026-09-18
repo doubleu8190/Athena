@@ -135,7 +135,6 @@ class WorkerExecutor:
             harness_settings=HarnessSettings(
                 max_turns_per_run=task.max_turns,
                 tool_timeout=self._settings.tool_timeout,
-                approval_timeout=self._settings.approval_timeout,
             ),
         )
         result = await harness.run(

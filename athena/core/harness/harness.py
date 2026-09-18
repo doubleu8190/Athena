@@ -66,7 +66,6 @@ class HarnessSettings:
     max_turns_per_run: int = 20
     retry_budget: int = 3
     tool_timeout: int = 60
-    approval_timeout: int = 120
     llm_stream_timeout: int = 120
 
 
@@ -134,17 +133,15 @@ class Harness:
         """
         self._llm = llm
         self._tool_manager = tool_manager
-        self._settings = settings
         self._db = db
         self._events = event_publisher
         self._compressor = compressor
         self._error_handler = error_handler or ToolErrorHandler()
         self._harness_settings = harness_settings or HarnessSettings(
-            max_turns_per_run=self._settings.max_turns_per_run,
-            retry_budget=self._settings.retry_budget,
-            tool_timeout=self._settings.tool_timeout,
-            approval_timeout=getattr(self._settings, "approval_timeout", 120),
-            llm_stream_timeout=self._settings.llm_stream_timeout,
+            max_turns_per_run=settings.max_turns_per_run,
+            retry_budget=settings.retry_budget,
+            tool_timeout=settings.tool_timeout,
+            llm_stream_timeout=settings.llm_stream_timeout,
         )
         self._stop_signal: asyncio.Event | None = None
         self._allowed_tool_names: set[str] | None = None

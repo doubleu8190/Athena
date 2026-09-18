@@ -81,19 +81,6 @@ class IncrementalSummarizer:
             await self._load_buffer(session_id)
         return self._buffers.get(session_id, "")
 
-    def set_buffer(self, session_id: str, buffer: str) -> None:
-        """直接设置摘要缓冲区（用于测试或外部恢复）."""
-        self._buffers[session_id] = buffer
-        logger.info(
-            "summary_buffer_set",
-            session_id=session_id,
-            buffer_tokens=self._llm.count_text_tokens(buffer),
-        )
-
-    def reset(self, session_id: str) -> None:
-        """重置指定会话的摘要（新会话或会话结束时调用）."""
-        self._buffers.pop(session_id, None)
-
     async def update_summary(
         self,
         old_turns: list[list[Message]],

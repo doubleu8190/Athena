@@ -116,7 +116,9 @@ class FactExtractor:
         返回值：
             提取到的候选记忆列表；提取失败或无有价值信息时为空列表。
         """
-        conversation_text = self._format_conversation(turn.user_text, turn.assistant_text)
+        conversation_text = self._format_conversation(
+            turn.user_text, turn.assistant_text
+        )
         facts = await self._extract_facts(conversation_text, existing_memories)
         return [
             MemoryCandidate(

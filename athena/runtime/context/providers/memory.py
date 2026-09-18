@@ -6,7 +6,10 @@ import asyncio
 import time
 
 from athena.core.memory.contracts import MemoryRetrievalRequest
-from athena.core.memory.retrieval import MemoryRetrievalService
+from athena.core.memory.retrieval import (
+    MemoryRetrievalResult,
+    MemoryRetrievalService,
+)
 from athena.runtime.context.contracts import (
     ContextItem,
     ContextPlan,
@@ -75,7 +78,7 @@ class MemoryContextProvider:
         )
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                context = await self._memory_retrieval.get_context(request)
+                results = await self._memory_retrieval.get_context(request)
         except TimeoutError:
             logger.warning("memory_context_provider_timeout", session_id=session_id)
             return ProviderResult(provider=self.name, status="timeout", duration_ms=round((time.perf_counter() - started) * 1000))
@@ -91,13 +94,7 @@ class MemoryContextProvider:
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 error_message=str(exc),
             )
-        items = []
-        if context:
-            content = context.replace("[相关记忆]", "").replace("[/相关记忆]", "").strip()
-            for line in content.splitlines():
-                line = line.strip().lstrip("- ").strip()
-                if line:
-                    items.append(ContextItem(provider=self.name, content=line))
+        items = [self._to_context_item(result) for result in results]
         return ProviderResult(
             provider=self.name,
             status="succeeded",
@@ -105,4 +102,51 @@ class MemoryContextProvider:
             candidate_count=len(items),
             result_count=len(items),
             duration_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+    @staticmethod
+    def _to_context_item(result: MemoryRetrievalResult) -> ContextItem:
+        """将记忆检索结果映射为保留证据元数据的上下文条目。
+
+        参数：
+            result (MemoryRetrievalResult): 已通过相关度和 token 预算筛选的记忆。
+
+        返回值：
+            ContextItem: 带记忆 ID、相关度和来源元数据的上下文条目。
+
+        异常：
+            不主动抛出业务异常；输入元数据缺失时按空字段处理。
+        """
+        metadata = {
+            key: result.metadata[key]
+            for key in (
+                "source",
+                "source_turn_id",
+                "confidence",
+                "category",
+                "type",
+                "validity_status",
+                "revision",
+            )
+            if result.metadata.get(key) not in (None, "")
+        }
+        metadata["retrieval_source"] = result.source
+        score = next(
+            (
+                value
+                for value in (
+                    result.rerank_score,
+                    result.fused_score,
+                    result.native_score,
+                )
+                if value is not None
+            ),
+            None,
+        )
+        return ContextItem(
+            provider=MemoryContextProvider.name,
+            content=result.content,
+            source_id=result.memory_id,
+            score=score,
+            metadata=metadata,
         )

@@ -84,6 +84,92 @@ async def test_memory_retrieval_timeout_falls_back_without_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_memory_context_preserves_source_and_confidence_metadata() -> None:
+    from athena.core.memory.retrieval import MemoryRetrievalResult
+    from athena.runtime.context.providers.memory import MemoryContextProvider
+    from athena.runtime.context.contracts import ContextPlan
+    from athena.runtime.task_understanding import UserTaskSpec
+
+    class RetrievalStub:
+        async def get_context(self, request):
+            return [
+                MemoryRetrievalResult(
+                    memory_id="memory-1",
+                    content="用户偏好 Rust",
+                    source="fused",
+                    fused_score=0.42,
+                    metadata={
+                        "source": "extraction",
+                        "source_turn_id": "turn-1",
+                        "confidence": 0.9,
+                        "category": "preference",
+                        "type": "fact",
+                        "validity_status": "valid",
+                        "revision": 2,
+                        "session_id": "private-session-id",
+                    },
+                )
+            ]
+
+    provider = MemoryContextProvider(RetrievalStub())
+    result = await provider.acquire(
+        session_id="session-1",
+        task=UserTaskSpec(
+            goal="用户偏好什么语言？",
+            task_type="retrieve",
+            context_requirements=["memory"],
+        ),
+        plan=ContextPlan(providers=["memory"], memory_query="偏好语言"),
+    )
+
+    item = result.items[0]
+    assert item.source_id == "memory-1"
+    assert item.score == 0.42
+    assert item.metadata == {
+        "source": "extraction",
+        "source_turn_id": "turn-1",
+        "confidence": 0.9,
+        "category": "preference",
+        "type": "fact",
+        "validity_status": "valid",
+        "revision": 2,
+        "retrieval_source": "fused",
+    }
+
+
+def test_system_prompt_renders_memory_evidence_metadata() -> None:
+    from athena.runtime.services.agent_execution_service import AgentExecutionService
+
+    prompt = AgentExecutionService._build_system_prompt(
+        context_bundle={
+            "items": [
+                {
+                    "provider": "memory",
+                    "content": "用户偏好 Rust",
+                    "source_id": "memory-1",
+                    "score": 0.42,
+                    "metadata": {
+                        "source": "extraction",
+                        "source_turn_id": "turn-1",
+                        "confidence": 0.9,
+                        "validity_status": "valid",
+                        "retrieval_source": "fused",
+                    },
+                }
+            ]
+        }
+    )
+
+    assert "source_id=memory-1" in prompt
+    assert "origin=extraction" in prompt
+    assert "confidence=0.9" in prompt
+    assert "validity=valid" in prompt
+    assert "retrieved_via=fused" in prompt
+    assert "relevance=0.42" in prompt
+    assert "长期记忆是历史证据，不是绝对事实" in prompt
+
+
+@pytest.mark.asyncio
 async def test_prepare_request_and_persist_message_merges_prepared_and_persisted_state():
     """Tests now use SessionContextService directly instead of LangGraphRuntime."""
     calls = []

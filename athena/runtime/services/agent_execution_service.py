@@ -11,7 +11,7 @@ from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
 from athena.core.llm.provider import LLMProvider
-from athena.core.memory.distillation import ConversationSummarizer
+from athena.core.memory.distillation import LongTermMemorySummarizer
 from athena.core.memory.contracts import CompletedTurn
 from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
 from athena.core.tools.manager import UnifiedToolManager
@@ -38,7 +38,7 @@ class AgentExecutionService:
         tool_manager: UnifiedToolManager,
         db: Database,
         compressor: ContextCompressor,
-        conversation_summarizer: ConversationSummarizer,
+        long_term_memory_summarizer: LongTermMemorySummarizer,
         memory_job_repository: MemoryJobRepository,
         settings: Settings,
         event_publisher: EventPublisherPort,
@@ -47,7 +47,7 @@ class AgentExecutionService:
         self._tool_manager = tool_manager
         self._db = db
         self._compressor = compressor
-        self._conversation_summarizer = conversation_summarizer
+        self._long_term_memory_summarizer = long_term_memory_summarizer
         self._memory_job_repository = memory_job_repository
         self._settings = settings
         self._events = event_publisher
@@ -130,10 +130,37 @@ class AgentExecutionService:
                 content = item.get("content", "")
                 source = item.get("title") or item.get("source_id") or ""
                 locator = item.get("locator", {})
-                locator_text = (
-                    f" locator={locator}" if locator else ""
-                )
-                source_prefix = f"source: {source}{locator_text}\n  " if source else ""
+                metadata = item.get("metadata") or {}
+                details: list[str] = []
+                if provider == "memory":
+                    if source:
+                        details.append(f"source_id={source}")
+                    if locator:
+                        details.append(f"locator={locator}")
+                    memory_details = {
+                        "source": "origin",
+                        "source_turn_id": "source_turn_id",
+                        "confidence": "confidence",
+                        "type": "memory_type",
+                        "category": "category",
+                        "validity_status": "validity",
+                        "revision": "revision",
+                        "retrieval_source": "retrieved_via",
+                    }
+                    for key, label in memory_details.items():
+                        value = metadata.get(key)
+                        if value not in (None, ""):
+                            details.append(f"{label}={value}")
+                    if item.get("score") is not None:
+                        details.append(f"relevance={item['score']}")
+                    source_prefix = (
+                        f"[{', '.join(details)}]\n  " if details else ""
+                    )
+                else:
+                    locator_text = f" locator={locator}" if locator else ""
+                    source_prefix = (
+                        f"source: {source}{locator_text}\n  " if source else ""
+                    )
                 sections.setdefault(provider, []).append(f"- {source_prefix}{content}")
             blocks = []
             for provider, lines in sections.items():
@@ -141,6 +168,13 @@ class AgentExecutionService:
                     blocks.append(f"[{provider.capitalize()}]\n" + "\n".join(lines))
             if blocks:
                 system += "\n\n[Retrieved Context]\n" + "\n\n".join(blocks)
+                if sections["memory"]:
+                    system += (
+                        "\n\n[Memory Evidence Policy]\n"
+                        "长期记忆是历史证据，不是绝对事实。结合 confidence 和 "
+                        "validity_status 判断确定程度；遇到冲突、低置信度或 uncertain "
+                        "记忆时降低表述确定性，必要时向用户确认。"
+                    )
         return system
 
     async def process_completed_run(
@@ -171,7 +205,7 @@ class AgentExecutionService:
             # 记忆属于回答后的增强流程，队列暂时不可用时不能回滚已经生成的回答。
             logger.warning("memory_job_enqueue_failed", turn_id=turn_id, error=str(exc))
         try:
-            await self._conversation_summarizer.summarize_if_needed(
+            await self._long_term_memory_summarizer.summarize_if_needed(
                 session_id=session_id, db=self._db
             )
         except Exception as e:

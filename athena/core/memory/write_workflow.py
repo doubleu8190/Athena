@@ -21,14 +21,14 @@ logger = get_logger(__name__)
 
 
 @dataclass
-class MemoryWriteOutcome:
+class FactMemoryWriteOutcome:
     triggered: bool
     candidates: list[MemoryCandidate]
     resolutions: list[MemoryResolution]
 
 
-class MemoryWriteWorkflow:
-    """Trigger, extract, resolve, and persist one completed turn."""
+class FactMemoryWriteWorkflow:
+    """触发、提取、解析并持久化一轮中的原子事实记忆。"""
 
     def __init__(
         self,
@@ -43,7 +43,7 @@ class MemoryWriteWorkflow:
         self._trigger = trigger or MemoryWriteTrigger()
         self._resolver = resolver
 
-    async def process_turn(self, turn: CompletedTurn) -> MemoryWriteOutcome:
+    async def process_turn(self, turn: CompletedTurn) -> FactMemoryWriteOutcome:
         trigger = self._trigger.evaluate(turn)
         if not trigger.should_extract:
             logger.debug(
@@ -51,7 +51,7 @@ class MemoryWriteWorkflow:
                 turn.turn_id,
                 trigger.reason,
             )
-            return MemoryWriteOutcome(False, [], [])
+            return FactMemoryWriteOutcome(False, [], [])
         existing_memories, related_memories = await self._build_extraction_context(turn)
         candidates = await self._extractor.extract(
             turn, existing_memories=existing_memories
@@ -102,7 +102,7 @@ class MemoryWriteWorkflow:
                         "source": "extraction",
                     },
                 )
-        return MemoryWriteOutcome(True, candidates, resolutions)
+        return FactMemoryWriteOutcome(True, candidates, resolutions)
 
     async def _build_extraction_context(
         self, turn: CompletedTurn

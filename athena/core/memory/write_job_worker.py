@@ -6,14 +6,14 @@ import asyncio
 
 from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
 from .contracts import CompletedTurn
-from .write_workflow import MemoryWriteWorkflow
+from .write_workflow import FactMemoryWriteWorkflow
 
 
 class MemoryWriteJobWorker:
     def __init__(
         self,
         repository: MemoryJobRepository,
-        workflow: MemoryWriteWorkflow | None,
+        workflow: FactMemoryWriteWorkflow | None,
         *,
         poll_interval: float = 1.0,
     ) -> None:
@@ -29,7 +29,7 @@ class MemoryWriteJobWorker:
             self._stop.clear()
             self._task = asyncio.create_task(self.run(), name="athena-memory-worker")
 
-    def configure_workflow(self, workflow: MemoryWriteWorkflow) -> None:
+    def configure_workflow(self, workflow: FactMemoryWriteWorkflow) -> None:
         """Attach the workflow before starting the worker."""
         self._workflow = workflow
 

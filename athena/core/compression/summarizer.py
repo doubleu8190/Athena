@@ -26,8 +26,8 @@ logger = get_logger(__name__)
 SUMMARY_PROMPT = get_prompt("compression_summary")
 
 
-class IncrementalSummarizer:
-    """增量摘要生成器 — 按 session_id 隔离摘要缓冲区."""
+class ContextSummaryBuffer:
+    """上下文摘要缓冲区 — 按 session_id 隔离运行时摘要."""
 
     def __init__(
         self, llm: LLMProvider, db: Database, max_summary_tokens: int = 2000

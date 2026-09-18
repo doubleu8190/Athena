@@ -80,6 +80,35 @@ async def test_retrieval_exact_keyword_hit_is_independent_of_vector_score():
 
 
 @pytest.mark.asyncio
+async def test_retrieval_merges_metadata_when_memory_hits_both_routes():
+    memory = _Memory(
+        {
+            "Rust": [
+                {
+                    "id": "memory-1",
+                    "content": "用户偏好 Rust",
+                    "score": 0.9,
+                    "metadata": {"source": "extraction"},
+                }
+            ]
+        },
+        keyword=[
+            {
+                "id": "memory-1",
+                "content": "用户偏好 Rust",
+                "score": 0.01,
+                "metadata": {"confidence": 0.9},
+            }
+        ],
+    )
+    manager = HybridMemoryRetriever(memory, _settings())
+
+    results = await manager.retrieve("Rust")
+
+    assert results[0].metadata == {"source": "extraction", "confidence": 0.9}
+
+
+@pytest.mark.asyncio
 async def test_memory_context_skips_over_budget_result_and_keeps_later_short_result():
     class _Manager:
         def __init__(self) -> None:
@@ -100,5 +129,6 @@ async def test_memory_context_skips_over_budget_result_and_keeps_later_short_res
 
     context = await service.get_context(MemoryRetrievalRequest(query="偏好"))
 
-    assert context == "[相关记忆]\n- ok\n[/相关记忆]"
+    assert [result.memory_id for result in context] == ["short"]
+    assert [result.content for result in context] == ["ok"]
     assert manager.selected == ["short"]

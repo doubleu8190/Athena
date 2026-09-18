@@ -8,7 +8,7 @@ from athena.core.memory.contracts import (
     ResolutionAction,
 )
 from athena.core.memory.write_trigger import MemoryWriteTrigger
-from athena.core.memory.write_workflow import MemoryWriteWorkflow
+from athena.core.memory.write_workflow import FactMemoryWriteWorkflow
 from athena.core.memory.candidate_resolver import MemoryCandidateResolver
 
 
@@ -133,7 +133,7 @@ async def test_write_workflow_persists_only_create_resolutions():
     memory = Memory()
     extractor = Extractor()
     resolver = MemoryCandidateResolver(memory, llm_provider=_FailingLLM())
-    outcome = await MemoryWriteWorkflow(
+    outcome = await FactMemoryWriteWorkflow(
         extractor, memory, resolver=resolver
     ).process_turn(
         CompletedTurn(turn_id="t1", session_id="s1", user_text="以后用 Python")
@@ -177,7 +177,7 @@ async def test_workflow_persists_create_relations(relation, llm_response):
 
     memory = Memory()
     resolver = MemoryCandidateResolver(memory, llm_provider=LLM())
-    outcome = await MemoryWriteWorkflow(
+    outcome = await FactMemoryWriteWorkflow(
         Extractor(), memory, resolver=resolver
     ).process_turn(CompletedTurn(turn_id="t1", session_id="s1", user_text="新证据"))
 
@@ -211,7 +211,7 @@ async def test_workflow_creates_revision_for_update_action():
             return "m-revision"
 
     memory = Memory()
-    await MemoryWriteWorkflow(Extractor(), memory, resolver=Resolver()).process_turn(
+    await FactMemoryWriteWorkflow(Extractor(), memory, resolver=Resolver()).process_turn(
         CompletedTurn(turn_id="t1", session_id="s1", user_text="更新")
     )
     assert memory.revision[0:2] == ("m-update", "更新后的事实")

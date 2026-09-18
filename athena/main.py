@@ -175,9 +175,9 @@ async def lifespan(app: FastAPI):
     )
     memory_retrieval = MemoryRetrievalService(retrieval_manager, llm_primary, settings)
 
-    from athena.core.memory.distillation import ConversationSummarizer
+    from athena.core.memory.distillation import LongTermMemorySummarizer
 
-    conversation_summarizer = ConversationSummarizer(
+    long_term_memory_summarizer = LongTermMemorySummarizer(
         llm_secondary, memory_service, settings=settings
     )
 
@@ -209,7 +209,7 @@ async def lifespan(app: FastAPI):
         event_publisher=event_publisher,
         compressor=compressor,
         memory_retrieval=memory_retrieval,
-        conversation_summarizer=conversation_summarizer,
+        long_term_memory_summarizer=long_term_memory_summarizer,
         fact_extractor=fact_extractor,
         memory_service=memory_service,
         settings=settings,
@@ -220,7 +220,7 @@ async def lifespan(app: FastAPI):
     # Access the runtime property so the workflow is constructed before the
     # worker starts claiming queued turns.  The backing attribute is lazily
     # initialized and is None during runtime construction.
-    memory_job_worker.configure_workflow(graph_runtime.memory_write_workflow)
+    memory_job_worker.configure_workflow(graph_runtime.fact_memory_write_workflow)
     await memory_job_worker.start()
     # 注册子 Agent 派生工具到工具管理器
     await tool_registry.install(graph_runtime.build_delegation_tool_specs())

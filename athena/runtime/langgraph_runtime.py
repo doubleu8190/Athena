@@ -20,9 +20,9 @@ from athena.core.files.runtime import FileIntelligenceRuntime
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import MemoryRetrievalService
-from athena.core.memory.distillation import ConversationSummarizer, FactExtractor
+from athena.core.memory.distillation import FactExtractor, LongTermMemorySummarizer
 from athena.core.memory.write_trigger import MemoryWriteTrigger
-from athena.core.memory.write_workflow import MemoryWriteWorkflow
+from athena.core.memory.write_workflow import FactMemoryWriteWorkflow
 from athena.core.memory.candidate_resolver import MemoryCandidateResolver
 from athena.infrastructure.sqlite.repositories.memory_job_repository import (
     MemoryJobRepository,
@@ -87,7 +87,7 @@ class LangGraphRuntime:
         event_publisher: EventPublisherPort,
         compressor: ContextCompressor,
         memory_retrieval: MemoryRetrievalService,
-        conversation_summarizer: ConversationSummarizer,
+        long_term_memory_summarizer: LongTermMemorySummarizer,
         fact_extractor: FactExtractor,
         memory_service: LongTermMemoryService,
         settings: Settings,
@@ -104,7 +104,7 @@ class LangGraphRuntime:
             event_publisher: 应用事件发布器。
             compressor: 上下文压缩器。
             memory_retrieval: 记忆检索服务。
-            conversation_summarizer: 对话摘要生成器。
+            long_term_memory_summarizer: 长期记忆叙事摘要生成器。
             fact_extractor: 事实提取器。
             memory_service: 长期记忆服务。
             settings: 全局配置。
@@ -145,7 +145,7 @@ class LangGraphRuntime:
             tool_manager=tool_manager,
             db=db,
             compressor=compressor,
-            conversation_summarizer=conversation_summarizer,
+            long_term_memory_summarizer=long_term_memory_summarizer,
             memory_job_repository=memory_job_repository,
             settings=settings,
             event_publisher=event_publisher,
@@ -158,7 +158,7 @@ class LangGraphRuntime:
         self._events = event_publisher
         self._compressor = compressor
         self._memory_service = memory_service
-        self._conversation_summarizer = conversation_summarizer
+        self._long_term_memory_summarizer = long_term_memory_summarizer
         self._fact_extractor = fact_extractor
         self._settings = settings
         self._file_runtime = file_runtime
@@ -173,7 +173,7 @@ class LangGraphRuntime:
         self._memory_resolver = MemoryCandidateResolver(
             memory_service=self._memory_service, llm_provider=llm
         )
-        self._memory_write_workflow: MemoryWriteWorkflow | None = None
+        self._fact_memory_write_workflow: FactMemoryWriteWorkflow | None = None
         structured_llm = StructuredLLMService(llm)
         orchestration_events = OrchestrationEventPublisher(event_publisher)
         self._plan_materializer = PlanMaterializer(db, orchestration_events)
@@ -621,15 +621,15 @@ class LangGraphRuntime:
     # ------------------------------------------------------------------
 
     @property
-    def memory_write_workflow(self) -> MemoryWriteWorkflow:
-        if self._memory_write_workflow is None:
-            self._memory_write_workflow = MemoryWriteWorkflow(
+    def fact_memory_write_workflow(self) -> FactMemoryWriteWorkflow:
+        if self._fact_memory_write_workflow is None:
+            self._fact_memory_write_workflow = FactMemoryWriteWorkflow(
                 extractor=self._fact_extractor,
                 trigger=self._memory_trigger,
                 resolver=self._memory_resolver,
                 memory_service=self._memory_service,
             )
-        return self._memory_write_workflow
+        return self._fact_memory_write_workflow
 
     def validate_session_state(self, state: AgentState) -> None:
         """Validate minimum required state fields exist."""

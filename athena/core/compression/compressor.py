@@ -14,7 +14,7 @@ from datetime import datetime
 
 from athena.config.settings import Settings
 from athena.core.compression.pairer import MessagePairer
-from athena.core.compression.summarizer import IncrementalSummarizer
+from athena.core.compression.summarizer import ContextSummaryBuffer
 from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import TokenCounter
 from athena.infrastructure.sqlite.database import Database
@@ -55,7 +55,7 @@ class ContextCompressor:
         self._max_tokens = self._settings.max_context_tokens
         self._threshold = self._settings.compression_threshold
         self._pairer = MessagePairer()
-        self._summarizer = IncrementalSummarizer(
+        self._summary_buffer = ContextSummaryBuffer(
             llm=llm,
             db=db,
             max_summary_tokens=self._settings.max_summary_tokens,
@@ -63,16 +63,16 @@ class ContextCompressor:
         self._keep_recent_turns = self._settings.keep_recent_turns
 
     @property
-    def summarizer(self) -> IncrementalSummarizer:
+    def summary_buffer(self) -> ContextSummaryBuffer:
         """
 
         返回值：
-            IncrementalSummarizer: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            ContextSummaryBuffer: 当前会话的运行时摘要缓冲区。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        return self._summarizer
+        return self._summary_buffer
 
     def _should_compress(self, messages: list[Message]) -> bool:
         """检查是否需要压缩（超过阈值时触发）."""
@@ -118,20 +118,30 @@ class ContextCompressor:
 
         # 3. 识别完整对话轮次
         turns = self._pairer.identify_turns(incremental_messages)
-
-        if len(turns) <= self._keep_recent_turns + 1:
+        dialogue_turn_count = sum(
+            1
+            for turn in turns
+            if turn and turn[0].role != MessageRole.SYSTEM
+        )
+        if dialogue_turn_count == 0:
             return messages
 
-        # 4. 分离旧轮次和最近轮次
+        # 阈值已经触发时，至少摘要一个对话轮次；否则单个超大轮次会
+        # 因“最近轮次保留数量”而绕过压缩，无法降低上下文占用。
+        keep_recent_turns = min(
+            max(self._keep_recent_turns, 0), dialogue_turn_count - 1
+        )
+
+        # 4. 分离待摘要轮次和最近轮次
         old_turns, recent_turns = self._pairer.split_recent_turns(
-            turns, self._keep_recent_turns
+            turns, keep_recent_turns
         )
         if not old_turns:
             return messages
 
         # 5. 增量更新摘要
-        original_buffer = await self._summarizer.get_summary(sid)
-        updated_summary = await self._summarizer.update_summary(
+        original_buffer = await self._summary_buffer.get_summary(sid)
+        updated_summary = await self._summary_buffer.update_summary(
             old_turns,
             session_id=session_id,
         )

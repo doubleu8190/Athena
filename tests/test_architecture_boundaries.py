@@ -11,7 +11,7 @@ from athena.core.files.runtime import FileIntelligenceRuntime
 from athena.core.harness.harness import Harness
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalService
-from athena.core.memory.distillation import ConversationSummarizer
+from athena.core.memory.distillation import LongTermMemorySummarizer
 from athena.core.tools.catalog import ToolRegistry
 from athena.core.tools.manager import UnifiedToolManager
 from athena.core.tools.mcp.adapter import MCPToolAdapter
@@ -107,7 +107,7 @@ def test_runtime_dependencies_are_required():
         ContextCompressor: ("settings",),
         HybridMemoryRetriever: ("settings",),
         MemoryRetrievalService: ("settings",),
-        ConversationSummarizer: ("settings",),
+        LongTermMemorySummarizer: ("settings",),
         ToolRegistry: ("catalog",),
         MCPToolAdapter: ("catalog",),
         MCPManager: ("adapter",),

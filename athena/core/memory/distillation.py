@@ -4,7 +4,7 @@
 
 - ``FactExtractor`` — 从对话中提取原子事实（key/value 结构）。
   支持用户消息 + 助手回复的多轮对话输入，具备跨会话语义去重能力。
-- ``ConversationSummarizer`` — 每 N 轮对话触发一次摘要生成，
+- ``LongTermMemorySummarizer`` — 每 N 轮对话触发一次摘要生成，
   将讨论主线、决策过程和问题解决路径提炼为结构化摘要条目。
 
 两者均通过 ``LongTermMemoryService.add_memory()`` 写入长期记忆，供下游的
@@ -103,7 +103,7 @@ class FactExtractor:
         *,
         existing_memories: str = "(无已有记忆)",
     ) -> list[MemoryCandidate]:
-        """从完成的对话轮次提取候选；持久化由 ``MemoryWriteWorkflow`` 负责。
+        """从完成的对话轮次提取候选；持久化由事实记忆写入工作流负责。
 
         将用户消息与助手回复格式化为多轮对话文本送入 LLM 提取，
         以捕获决策闭环（如用户采纳助手方案）。使用 ``user_message``
@@ -137,7 +137,7 @@ class FactExtractor:
     def _format_conversation(user_message: str, assistant_reply: str) -> str:
         """将用户消息与助手回复格式化为多轮对话文本。
 
-        格式与 ``ConversationSummarizer._format_messages`` 保持一致，
+        格式与 ``LongTermMemorySummarizer._format_messages`` 保持一致，
         便于 LLM 统一理解对话结构。
 
         参数：
@@ -213,20 +213,20 @@ class Summary(BaseModel):
 class SummaryList(BaseModel):
     """摘要列表的 LLM 结构化输出包装器。
 
-    用于 ``ConversationSummarizer._summarize()`` 的 JSON 解析目标结构。
+    用于 ``LongTermMemorySummarizer._summarize()`` 的 JSON 解析目标结构。
     """
 
     summaries: list[Summary] = Field(default_factory=list)
 
 
-class ConversationSummarizer:
-    """对话摘要生成器。
+class LongTermMemorySummarizer:
+    """长期记忆叙事摘要生成器。
 
     每隔 ``summary_threshold`` 轮对话触发一次摘要生成，将最近的对话内容
     提炼为结构化的 ``Summary`` 条目，通过 ``LongTermMemoryService`` 写入长期记忆。
 
     与 ``FactExtractor`` 互补：``FactExtractor`` 提取离散的原子事实，
-    ``ConversationSummarizer`` 提取连贯的叙事摘要，两者共同构成
+    ``LongTermMemorySummarizer`` 提取连贯的叙事摘要，两者共同构成
     对话记忆的"点 + 线"沉淀体系。
     """
 

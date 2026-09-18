@@ -75,9 +75,13 @@ def build_graph(
         ),
     )
     # 附件处理 → 使用完整 runtime（需要 FileIntelligenceRuntime 等）
-    add_instrumented_node("process_attachments", create_process_attachments_node(runtime))
+    add_instrumented_node(
+        "process_attachments", create_process_attachments_node(runtime)
+    )
     # 附件失败处理 → 无依赖
-    add_instrumented_node("handle_attachment_failure", create_handle_attachment_failure_node())
+    add_instrumented_node(
+        "handle_attachment_failure", create_handle_attachment_failure_node()
+    )
     # 任务理解 → 生成 UserTaskSpec
     add_instrumented_node("understand_task", create_understand_task_node(runtime))
     # 上下文计划 → 推导 Provider
@@ -115,7 +119,9 @@ def build_graph(
         create_post_process_and_build_result_node(runtime.agent_execution_service),
     )
     # 组装最终响应 → 无依赖
-    add_instrumented_node("assemble_final_response", create_assemble_final_response_node())
+    add_instrumented_node(
+        "assemble_final_response", create_assemble_final_response_node()
+    )
 
     # ── 边 ──
     graph.add_edge(START, "prepare_request_and_persist_message")

@@ -2,30 +2,44 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from datetime import datetime
 
 from athena.core.compression.pairer import MessagePairer
+from athena.models import Message, MessageRole
 
 
-def _human(content: str) -> HumanMessage:
-    return HumanMessage(content=content)
+def _message(
+    role: MessageRole,
+    content: str = "",
+    *,
+    tool_calls: list[dict] | None = None,
+    tool_call_id: str | None = None,
+) -> Message:
+    return Message(
+        id=f"{role.value}:{content}",
+        session_id="session-1",
+        role=role,
+        content=content,
+        tool_calls=tool_calls or [],
+        tool_call_id=tool_call_id,
+        timestamp=datetime.now(),
+    )
 
 
-def _assistant(content: str = "", tool_calls: list | None = None) -> AIMessage:
-    return AIMessage(content=content, tool_calls=tool_calls or [])
+def _human(content: str) -> Message:
+    return _message(MessageRole.USER, content)
 
 
-def _system(content: str) -> SystemMessage:
-    return SystemMessage(content=content)
+def _assistant(content: str = "", tool_calls: list[dict] | None = None) -> Message:
+    return _message(MessageRole.ASSISTANT, content, tool_calls=tool_calls)
 
 
-def _tool(content: str, tool_call_id: str) -> ToolMessage:
-    return ToolMessage(content=content, tool_call_id=tool_call_id)
+def _system(content: str) -> Message:
+    return _message(MessageRole.SYSTEM, content)
+
+
+def _tool(content: str, tool_call_id: str) -> Message:
+    return _message(MessageRole.TOOL, content, tool_call_id=tool_call_id)
 
 
 def test_identify_turns_single_user_assistant():
@@ -78,9 +92,9 @@ def test_identify_turns_multiple_rounds():
     turns = pairer.identify_turns(msgs)
     # system 单独成段 + 2 个完整轮次
     assert len(turns) == 3
-    assert isinstance(turns[0][0], SystemMessage)
-    assert isinstance(turns[1][0], HumanMessage)
-    assert isinstance(turns[2][0], HumanMessage)
+    assert turns[0][0].role == MessageRole.SYSTEM
+    assert turns[1][0].role == MessageRole.USER
+    assert turns[2][0].role == MessageRole.USER
 
 
 def test_split_recent_turns_separation():
@@ -91,7 +105,7 @@ def test_split_recent_turns_separation():
     assert len(old) == 3
     # recent 包含 system 段 + 2 个最近轮次
     assert len(recent) == 3
-    assert isinstance(recent[0][0], SystemMessage)
+    assert recent[0][0].role == MessageRole.SYSTEM
 
 
 def test_split_recent_turns_insufficient():

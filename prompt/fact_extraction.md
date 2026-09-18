@@ -1,4 +1,4 @@
-从对话中提取离散的原子事实候选，供 Memory Resolver 后续判断是否创建、更新或替代长期记忆。与对话摘要（ConversationSummarizer）互补：你提取独立的 key/value 信息点，它提取完整的问题解决过程和决策链。
+从对话中提取离散的原子事实候选，供 Memory Resolver 后续判断是否创建、更新或替代长期记忆。与长期记忆叙事摘要（LongTermMemorySummarizer）互补：你提取独立的 key/value 信息点，它提取完整的问题解决过程和决策链。
 
 ## 什么是原子事实
 

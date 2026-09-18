@@ -225,16 +225,27 @@ class HybridMemoryRetriever:
         # 加权 RRF：按来源权重缩放贡献，使 vector_weight / keyword_weight 真正生效。
         # 首次出现时保留完整结果对象，后续只更新融合分数，避免重复候选携带不一致内容。
         # （职责边界：向量路承担语义，关键词路仅作精确词/前缀助力的弱贡献）
+        # 同一记忆可能同时命中两条路线；合并元数据时补齐先出现结果缺失的字段。
         for rank, r in enumerate(vector_results, 1):
             if r.memory_id not in scores:
                 scores[r.memory_id] = 0.0
                 content_map[r.memory_id] = r
+            else:
+                content_map[r.memory_id].metadata = {
+                    **r.metadata,
+                    **content_map[r.memory_id].metadata,
+                }
             scores[r.memory_id] += self._vector_weight / (self._rrf_k + rank)
 
         for rank, r in enumerate(keyword_results, 1):
             if r.memory_id not in scores:
                 scores[r.memory_id] = 0.0
                 content_map[r.memory_id] = r
+            else:
+                content_map[r.memory_id].metadata = {
+                    **r.metadata,
+                    **content_map[r.memory_id].metadata,
+                }
             content_map[r.memory_id].exact_match = (
                 content_map[r.memory_id].exact_match or r.exact_match
             )
@@ -338,7 +349,7 @@ class HybridMemoryRetriever:
 
 
 class MemoryRetrievalService:
-    """记忆检索服务 - 对外接口，将检索结果格式化为系统提示."""
+    """记忆检索服务，将预算筛选后的结构化结果交给上下文 Provider。"""
 
     def __init__(
         self,
@@ -363,33 +374,57 @@ class MemoryRetrievalService:
         self._token_counter = token_counter
         self._max_tokens = settings.memory_max_tokens
 
-    async def get_context(self, request: MemoryRetrievalRequest) -> str:
-        """Retrieve and assemble context from an explicit runtime request."""
+    async def get_context(
+        self, request: MemoryRetrievalRequest
+    ) -> list[MemoryRetrievalResult]:
+        """获取经过上下文预算筛选的记忆检索结果。
+
+        参数：
+            request (MemoryRetrievalRequest): 包含查询文本和结果数量上限的请求。
+
+        返回值：
+            list[MemoryRetrievalResult]: 可注入运行时上下文的结构化记忆结果。
+
+        异常：
+            不向调用方传播检索异常；底层失败时返回空列表。
+        """
         try:
             results = await self._manager.retrieve(
                 query=request.query,
             )
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))
-            return ""
-        return self._format_results(results[: request.limit])
+            return []
+        return self._select_results(results[: request.limit])
 
-    def _format_results(self, results: list[MemoryRetrievalResult]) -> str:
+    def _select_results(
+        self, results: list[MemoryRetrievalResult]
+    ) -> list[MemoryRetrievalResult]:
+        """按 token 预算筛选结果，并记录实际注入上下文的记忆访问。
+
+        参数：
+            results (list[MemoryRetrievalResult]): 已按相关度排序的候选记忆。
+
+        返回值：
+            list[MemoryRetrievalResult]: 在预算内保留的结构化记忆结果。
+
+        异常：
+            不主动抛出业务异常；token 计数器异常由调用方边界处理。
+        """
         if not results:
-            return ""
-        parts = ["[相关记忆]"]
+            return []
         total_tokens = 0
         selected_ids: list[str] = []
+        selected: list[MemoryRetrievalResult] = []
         for result in results:
             content_tokens = self._token_counter.count_text_tokens(result.content)
             if total_tokens + content_tokens > self._max_tokens:
                 # 单条记忆过长时跳过它，继续尝试后续短记忆，避免浪费整个上下文预算。
                 continue
-            parts.append(f"- {result.content}")
             total_tokens += content_tokens
             selected_ids.append(result.memory_id)
-        if len(parts) == 1:
-            return ""
-        parts.append("[/相关记忆]")
+            selected.append(result)
+        if not selected:
+            return []
         self._manager.record_selected_access(selected_ids)
-        return "\n".join(parts)
+        return selected

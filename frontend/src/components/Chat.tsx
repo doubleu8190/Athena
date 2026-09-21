@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, Paperclip, Files, X, Trash2 } from "lucide-react"
+import { Send, Square, Pause, Play, Loader2, Sparkles, Clock, CheckCircle, PanelRight, Paperclip, Files, X, Trash2 } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ApprovalCard } from "./ApprovalDialog"
 import { ActivityPanel } from "./ActivityPanel"
@@ -314,6 +314,19 @@ function Chat({ sendEvent }: ChatProps) {
     sendEvent(ClientEventType.SESSION_STOP, { session_id: activeSessionId })
   }, [activeSessionId, sendEvent])
 
+  const handlePause = useCallback(() => {
+    if (!activeSessionId) return
+    sendEvent(ClientEventType.SESSION_PAUSE, { session_id: activeSessionId })
+    setAgentStatus("paused")
+    clearThinking()
+  }, [activeSessionId, sendEvent, setAgentStatus, clearThinking])
+
+  const handleResume = useCallback(() => {
+    if (!activeSessionId) return
+    sendEvent(ClientEventType.SESSION_RESUME, { session_id: activeSessionId })
+    setAgentStatus("running")
+  }, [activeSessionId, sendEvent, setAgentStatus])
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
@@ -338,6 +351,10 @@ function Chat({ sendEvent }: ChatProps) {
 
   // 只有存在助手答复且 Agent 已回到空闲状态时，才认为本次会话已完成。
   const isConversationCompleted =
+    agentStatus !== "paused" &&
+    !["run.paused", "run.cancelled", "run.failed", "run.budget_exceeded"].includes(
+      [...executionTimeline].reverse().find((entry) => entry.event_type.startsWith("run."))?.event_type || "",
+    ) &&
     !isAgentActive &&
     !thinking?.active &&
     messages.some((m) => m.role === "assistant")
@@ -411,16 +428,21 @@ function Chat({ sendEvent }: ChatProps) {
   // remains in the transcript. During this window there is no new assistant
   // message yet, so the timeline cannot be attached to a response group.
   const latestRequestGroup = [...phaseGroups].reverse().find((group) => group.phase === "request")
+  const latestRunLifecycleEntry = [...executionTimeline].reverse().find((entry) => entry.event_type.startsWith("run."))
   const activeRunId = [...executionTimeline]
     .reverse()
     .find((entry) => entry.event_type === "run.started" && entry.status === "running")
     ?.run_id
+  const currentRunId = activeRunId || latestRunLifecycleEntry?.run_id
   const activeRunHasResponse = activeRunId
     ? phaseGroups.some((group) => group.phase === "response" && group.messages.some((message) => message.run_id === activeRunId))
     : false
-  const activeTimelineEntries = latestRequestGroup && isAgentActive && !activeRunHasResponse
-    ? (activeRunId
-      ? executionTimeline.filter((entry) => entry.run_id === activeRunId)
+  const activeRunPaused = agentStatus === "paused"
+  const latestRunLifecycle = latestRunLifecycleEntry?.event_type
+  const showRunOutcome = latestRunLifecycle === "run.paused" || latestRunLifecycle === "run.cancelled" || latestRunLifecycle === "run.failed" || latestRunLifecycle === "run.budget_exceeded"
+  const activeTimelineEntries = latestRequestGroup && (isAgentActive || activeRunPaused || showRunOutcome) && !activeRunHasResponse
+    ? (currentRunId
+      ? executionTimeline.filter((entry) => entry.run_id === currentRunId)
       : executionTimeline)
     : []
 
@@ -561,14 +583,16 @@ function Chat({ sendEvent }: ChatProps) {
                         {group.messages.map((message) => (
                           <MessageBubble key={message.id} message={message} />
                         ))}
-                        {group === latestRequestGroup && isAgentActive && (
+                        {group === latestRequestGroup && (isAgentActive || activeRunPaused || showRunOutcome) && (
                           activeTimelineEntries.length > 0
                             ? <ExecutionTimeline entries={activeTimelineEntries} defaultExpanded />
                             : <div className="processing-group py-3">
                                 <div className="timeline-node thinking-node">
                                   <div className="flex items-center gap-3 text-sm text-athena-muted">
-                                    <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />
-                                    Processing request
+                                    {activeRunPaused
+                                      ? <Pause className="h-4 w-4 text-athena-muted" />
+                                      : <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />}
+                                    {activeRunPaused ? "Paused" : "Processing request"}
                                   </div>
                                 </div>
                               </div>
@@ -583,7 +607,7 @@ function Chat({ sendEvent }: ChatProps) {
                       <div className={isLastGroup && !isAgentActive ? "animate-fade-in" : ""}>
                         <ExecutionTimeline
                           entries={timelineEntriesForGroup(executionTimeline, group.messages)}
-                          defaultExpanded={timelineEntriesForGroup(executionTimeline, group.messages).some((entry) => entry.status === "running" || entry.status === "waiting")}
+                          defaultExpanded={timelineEntriesForGroup(executionTimeline, group.messages).some((entry) => entry.status === "running" || entry.status === "waiting" || entry.status === "paused")}
                         />
                         {group.messages.map((message) => (
                           <MessageBubble key={message.id} message={message} />
@@ -597,7 +621,7 @@ function Chat({ sendEvent }: ChatProps) {
               {phaseGroups.length === 0 && executionTimeline.length > 0 && (
                 <ExecutionTimeline
                   entries={executionTimeline}
-                  defaultExpanded={executionTimeline.some((entry) => entry.status === "running" || entry.status === "waiting")}
+                  defaultExpanded={executionTimeline.some((entry) => entry.status === "running" || entry.status === "waiting" || entry.status === "paused")}
                 />
               )}
 
@@ -698,14 +722,47 @@ function Chat({ sendEvent }: ChatProps) {
                 style={{ maxHeight: "200px", minHeight: "48px" }}
               />
             </div>
-            {isAgentActive ? (
-              <button
-                onClick={handleStop}
-                className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-danger text-white hover:opacity-90 flex-shrink-0 min-h-[48px] w-[48px]"
-                title="Stop"
-              >
-                <Square className="w-4 h-4" />
-              </button>
+            {agentStatus === "paused" ? (
+              <>
+                <button
+                  onClick={handleResume}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
+                  title="Resume"
+                  aria-label="Resume"
+                >
+                  <Play className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleSend}
+                  disabled={(!input.trim() && pendingFiles.length === 0) || !activeSessionId || isSending || isUploading}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
+                  title="Send"
+                  aria-label="Send"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </>
+            ) : isAgentActive ? (
+              <>
+                {agentStatus !== "waiting_approval" && (
+                  <button
+                    onClick={handlePause}
+                    className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 bg-athena-warning text-white hover:opacity-90 flex-shrink-0 min-h-[48px] w-[48px]"
+                    title="Pause"
+                    aria-label="Pause"
+                  >
+                    <Pause className="w-4 h-4" />
+                  </button>
+                )}
+                <button
+                  onClick={handleStop}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-danger text-white hover:opacity-90 flex-shrink-0 min-h-[48px] w-[48px]"
+                  title="Stop"
+                  aria-label="Stop"
+                >
+                  <Square className="w-4 h-4" />
+                </button>
+              </>
             ) : (
               <button
                 onClick={handleSend}

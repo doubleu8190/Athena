@@ -52,6 +52,8 @@ export function StepCard({
         return <XCircle className="w-4 h-4 flex-shrink-0 text-athena-danger" />
       case "running":
         return <Loader2 className="w-4 h-4 flex-shrink-0 text-athena-accent animate-spin" />
+      case "paused":
+        return <Clock className="w-4 h-4 flex-shrink-0 text-athena-muted" />
       default:
         return <Clock className="w-4 h-4 flex-shrink-0 text-athena-muted" />
     }
@@ -65,6 +67,8 @@ export function StepCard({
         return "Failed"
       case "running":
         return "Running"
+      case "paused":
+        return "Paused"
       default:
         return "Pending"
     }
@@ -87,6 +91,7 @@ export function StepCard({
     if (!isLlmCall) return toolCall?.tool_name ?? "Tool execution"
     if (debug) return "LLM Call"
     if (status === "running") return "Thinking"
+    if (status === "paused") return "Paused"
     return "Composing"
   }
 

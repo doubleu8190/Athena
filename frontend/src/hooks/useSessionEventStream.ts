@@ -32,6 +32,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
   const {
     setConnectionStatus, setAgentStatus, addMessage, updateMessage,
     addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval,
+    updateSession,
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
     upsertOrchestrationTask, clearOrchestrationTasks,
     upsertExecutionTimelineEntry, clearExecutionTimeline,
@@ -238,14 +239,57 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (toolId) updateToolCall(toolId, { status, completed_at: now, duration_ms: Number(data.duration_ms || 0), output: data.output ? String(data.output) : undefined, error: data.error ? String(data.error) : undefined, error_detail: errorDetail || null })
           if (stepId) updateStep(stepId, { status: status === "success" ? "completed" : "failed", completed_at: now, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
         }
-        if (type === "run.started" || type === "run.resumed") setAgentStatus("running")
-        else if (type === "run.paused" || type === "run.cancelled") { setAgentStatus("idle"); clearThinking() }
-        else if (type === "run.failed") {
+        if (type === "run.started" || type === "run.resumed") {
+          setAgentStatus("running")
+          updateSession(sessionId, { status: "running" })
+        } else if (type === "run.paused") {
+          // A run-level terminal/control event must also close any child
+          // activity that did not get its own completion event. Otherwise the
+          // progress panel keeps spinning after pause.
+          const terminalStatus = "paused"
+          const completedAt = now
+          for (const step of useChatStore.getState().steps) {
+            if (step.run_id === runId && step.status === "running") {
+              updateStep(step.id, { status: terminalStatus, completed_at: completedAt })
+            }
+          }
+          for (const toolCall of useChatStore.getState().toolCalls) {
+            if (toolCall.run_id === runId && toolCall.status === "running") {
+              updateToolCall(toolCall.id, { status: terminalStatus, completed_at: completedAt })
+            }
+          }
+          setAgentStatus("paused")
+          updateSession(sessionId, { status: "interrupted" })
+          clearThinking()
+        } else if (type === "run.cancelled") {
+          const completedAt = now
+          for (const step of useChatStore.getState().steps) {
+            if (step.run_id === runId && step.status === "running") {
+              updateStep(step.id, { status: "failed", completed_at: completedAt, error_message: "Stopped by user" })
+            }
+          }
+          for (const toolCall of useChatStore.getState().toolCalls) {
+            if (toolCall.run_id === runId && toolCall.status === "running") {
+              updateToolCall(toolCall.id, { status: "failed", completed_at: completedAt, error: "Stopped by user" })
+            }
+          }
+          setAgentStatus("idle")
+          updateSession(sessionId, { status: "interrupted" })
+          clearApprovals()
+          clearThinking()
+        }
+        else if (type === "run.failed" || type === "run.budget_exceeded") {
           setAgentStatus("error")
           setErrorDetail(errorDetail || null)
-          setError(String(errorDetail?.message || data.error || data.message || "Run failed"))
+          updateSession(sessionId, { status: "interrupted" })
+          clearThinking()
+          setError(String(errorDetail?.message || data.error || data.message || (type === "run.budget_exceeded" ? "Run budget exceeded" : "Run failed")))
         }
-        else if (type === "run.completed") { setAgentStatus("idle"); clearThinking() }
+        else if (type === "run.completed") {
+          setAgentStatus("idle")
+          updateSession(sessionId, { status: "completed" })
+          clearThinking()
+        }
       } catch { /* 单条事件格式错误不应中断 EventSource。 */ }
     }
 
@@ -264,7 +308,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "file_processing_started", "file_processing_completed", "file_processing_failed",
     ].forEach((name) => source.addEventListener(name, parse))
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, upsertOrchestrationTask, clearOrchestrationTasks, upsertExecutionTimelineEntry, clearExecutionTimeline])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, upsertOrchestrationTask, clearOrchestrationTasks, upsertExecutionTimelineEntry, clearExecutionTimeline])
 
   return sourceRef
 }
@@ -301,7 +345,7 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
 
   if (type === "run.started" || type === "run.resumed") return base({ id: `run:${runId}`, label: "Execution started", status: "running" })
   if (type === "run.completed") return base({ id: `run:${runId}`, label: "Execution completed", status: "completed" })
-  if (type === "run.paused") return base({ id: `run:${runId}`, label: "Execution paused", status: "waiting" })
+  if (type === "run.paused") return base({ id: `run:${runId}`, label: "Execution paused", status: "paused" })
   if (type === "run.cancelled") return base({ id: `run:${runId}`, label: "Execution stopped", status: "info" })
   if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "Execution budget reached" : "Execution failed", detail, status: "failed" })
 

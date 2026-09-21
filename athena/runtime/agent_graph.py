@@ -125,25 +125,25 @@ def build_graph(
 
     # ── 边 ──
     graph.add_edge(START, "prepare_request_and_persist_message")
-    graph.add_edge("prepare_request_and_persist_message", "process_attachments")
-    graph.add_conditional_edges(
-        "process_attachments",
-        route_after_attachment_processing,
-        {
-            "understand_task": "understand_task",
-            "handle_attachment_failure": "handle_attachment_failure",
-        },
-    )
-    graph.add_edge("handle_attachment_failure", "assemble_final_response")
-    graph.add_edge("understand_task", "plan_context")
+    graph.add_edge("prepare_request_and_persist_message", "understand_task")
     graph.add_conditional_edges(
         "understand_task",
         route_after_task_understanding,
         {
             "clarification_response": "clarification_response",
+            "process_attachments": "process_attachments",
             "plan_context": "plan_context",
         },
     )
+    graph.add_conditional_edges(
+        "process_attachments",
+        route_after_attachment_processing,
+        {
+            "plan_context": "plan_context",
+            "handle_attachment_failure": "handle_attachment_failure",
+        },
+    )
+    graph.add_edge("handle_attachment_failure", "assemble_final_response")
     graph.add_edge("clarification_response", "assemble_final_response")
     graph.add_edge("plan_context", "acquire_context")
     graph.add_edge("acquire_context", "prepare_harness_input")

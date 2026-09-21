@@ -34,7 +34,7 @@ class TaskUnderstandingService:
         self,
         structured_llm: StructuredLLMService,
         *,
-        timeout_seconds: float = 3.0,
+        timeout_seconds: float = 15.0,
     ) -> None:
         """绑定结构化 LLM 服务。
 
@@ -49,7 +49,6 @@ class TaskUnderstandingService:
             不主动抛出业务异常。
         """
         self._structured_llm = structured_llm
-        self._timeout_seconds = timeout_seconds
 
     async def understand(
         self,
@@ -94,12 +93,11 @@ class TaskUnderstandingService:
         )
         started = time.perf_counter()
         try:
-            async with asyncio.timeout(self._timeout_seconds):
-                task = await self._structured_llm.generate(
-                    UserTaskSpec,
-                    get_prompt("task_understanding"),
-                    prompt,
-                )
+            task = await self._structured_llm.generate(
+                UserTaskSpec,
+                get_prompt("task_understanding"),
+                prompt,
+            )
         except Exception as exc:
             logger.warning(
                 "task_understanding_failed",
@@ -109,7 +107,9 @@ class TaskUnderstandingService:
             )
             fallback = UserTaskSpec(
                 goal=user_message[:1000] or "answer the user",
-                task_type="answer",
+                domain="general",
+                mode="answer",
+                confidence=0.0,
                 context_requirements=["conversation"],
             )
             return TaskUnderstandingResult(task=fallback, source="fallback")
@@ -122,7 +122,9 @@ class TaskUnderstandingService:
             "task_understanding_completed",
             session_id=session_id,
             duration_ms=round((time.perf_counter() - started) * 1000),
-            task_type=normalized.task_type,
+            domain=normalized.domain,
+            mode=normalized.mode,
+            confidence=normalized.confidence,
             context_requirements=normalized.context_requirements,
         )
         return TaskUnderstandingResult(task=normalized, source="llm")
@@ -157,21 +159,27 @@ class TaskUnderstandingService:
             content = str(item.get("content", ""))
             history_lines.append(f"{role}: {content}")
         history_text = "\n".join(history_lines) or "无"
-        attachments = "\n".join(
-            f"- file_id={ref.get('id', '')}; name={ref.get('filename', '')}; "
-            f"status={ref.get('status', '')}"
-            for ref in attachment_refs
-        ) or "无"
+        attachments = (
+            "\n".join(
+                f"- file_id={ref.get('id', '')}; name={ref.get('filename', '')}; "
+                f"status={ref.get('status', '')}"
+                for ref in attachment_refs
+            )
+            or "无"
+        )
         available_tools = "\n".join(f"- {name}" for name in tool_names) or "无"
-        knowledge_lines = "\n".join(
-            "- "
-            f"id={item.get('id', '')}; "
-            f"name={item.get('name', '')}; "
-            f"description={item.get('description', '')}; "
-            f"documents={item.get('document_count', 0)}; "
-            f"ready_documents={item.get('ready_document_count', 0)}"
-            for item in knowledge_bases
-        ) or "无"
+        knowledge_lines = (
+            "\n".join(
+                "- "
+                f"id={item.get('id', '')}; "
+                f"name={item.get('name', '')}; "
+                f"description={item.get('description', '')}; "
+                f"documents={item.get('document_count', 0)}; "
+                f"ready_documents={item.get('ready_document_count', 0)}"
+                for item in knowledge_bases
+            )
+            or "无"
+        )
         return (
             f"[用户消息]\n{user_message}\n\n"
             f"[最近会话上下文]\n{history_text[-3000:]}\n\n"
@@ -211,13 +219,24 @@ class TaskUnderstandingService:
         if not requirements:
             requirements.append("conversation")
         hints = task.query_hints
+        requirements_set = set(requirements)
         return task.model_copy(
             update={
                 "context_requirements": requirements,
                 "query_hints": hints.model_copy(
                     update={
-                        "memory": hints.memory or user_message[:500],
-                        "knowledge": hints.knowledge or user_message[:500],
+                        "memory": hints.memory
+                        or (
+                            user_message[:500] if "memory" in requirements_set else None
+                        ),
+                        "knowledge": hints.knowledge
+                        or (
+                            user_message[:500]
+                            if "knowledge" in requirements_set
+                            else None
+                        ),
+                        "file": hints.file
+                        or (user_message[:500] if "file" in requirements_set else None),
                     }
                 ),
             }

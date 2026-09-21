@@ -105,6 +105,10 @@ class AgentStorePort(Protocol):
         """更新运行状态，并可选记录错误信息。"""
         ...
 
+    async def get_run(self, run_id: str) -> Any | None:
+        """读取单条运行记录，用于控制命令和执行任务的竞态判定。"""
+        ...
+
     async def update_run_control(
         self,
         run_id: str,

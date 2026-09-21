@@ -1,17 +1,10 @@
-"""确定性任务理解规则，仅覆盖高置信度的常见请求。"""
+"""仅处理高确定性的简单会话请求。"""
 
 from __future__ import annotations
 
-from athena.runtime.task_understanding.contracts import (
-    ContextRequirement,
-    TaskType,
-    UserTaskSpec,
-)
-
+from athena.runtime.task_understanding.contracts import UserTaskSpec
 
 _GREETING_MARKERS = ("你好", "您好", "谢谢", "感谢", "好的", "收到", "明白")
-_MEMORY_MARKERS = ("之前", "上次", "刚才", "我们讨论过", "我说过", "记忆", "历史偏好")
-_ACTION_MARKERS = ("运行", "执行", "修复", "修改", "删除", "打开", "创建")
 
 
 def _matches(text: str, markers: tuple[str, ...]) -> bool:
@@ -19,37 +12,22 @@ def _matches(text: str, markers: tuple[str, ...]) -> bool:
 
 
 def build_fast_path_task(user_message: str) -> UserTaskSpec | None:
-    """按确定性规则推断简单请求的任务理解。
-
-    参数：
-        user_message (str): 当前用户消息文本。
-
-    返回值：
-        UserTaskSpec | None: 高置信度请求返回任务描述；否则返回 ``None``。
-
-    异常：
-        不主动抛出异常。
-    """
+    """只识别空输入、问候和简短确认，复杂请求交给结构化 LLM。"""
     text = user_message.strip()
     if not text:
         return UserTaskSpec(
             goal="respond to the empty input",
-            task_type="answer",
+            domain="general",
+            mode="answer",
+            confidence=1.0,
             context_requirements=["conversation"],
         )
-    if _matches(text, _MEMORY_MARKERS):
-        requirements: list[ContextRequirement] = ["memory", "conversation"]
-        task_type: TaskType = "retrieve"
-    elif _matches(text, _GREETING_MARKERS) and len(text) <= 16:
-        requirements = ["conversation"]
-        task_type = "answer"
-    elif _matches(text, _ACTION_MARKERS):
-        requirements = ["conversation"]
-        task_type = "act"
-    else:
-        return None
-    return UserTaskSpec(
-        goal=text[:1000],
-        task_type=task_type,
-        context_requirements=requirements,
-    )
+    if _matches(text, _GREETING_MARKERS) and len(text) <= 16:
+        return UserTaskSpec(
+            goal=text[:1000],
+            domain="general",
+            mode="answer",
+            confidence=1.0,
+            context_requirements=["conversation"],
+        )
+    return None

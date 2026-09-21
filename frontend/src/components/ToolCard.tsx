@@ -52,6 +52,8 @@ export function ToolCard({ toolCall, compact = false }: ToolCardProps) {
       case "denied":
       case "timeout":
         return <AlertTriangle className="w-4 h-4 text-athena-warning" />
+      case "paused":
+        return <Clock className="w-4 h-4 text-athena-muted" />
       case "running":
       default:
         return <Loader2 className="w-4 h-4 text-athena-accent animate-spin" />
@@ -71,6 +73,8 @@ export function ToolCard({ toolCall, compact = false }: ToolCardProps) {
         return "Timeout"
       case "running":
         return "Running"
+      case "paused":
+        return "Paused"
       default:
         return "Pending"
     }

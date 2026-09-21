@@ -270,6 +270,7 @@ async def lifespan(app: FastAPI):
         graph=graph,
         cancellation_registry=CancellationRegistry(),
         memory_service=memory_service,
+        approval_manager=approval_manager,
     )
     await command_consumer.start()
     # 所有运行时依赖和路由容器均就绪后，再开始领取持久化知识库任务。

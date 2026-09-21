@@ -46,18 +46,22 @@ class CancellationRegistry:
             event = self._events.setdefault(run_id, asyncio.Event())
             event.set()
 
-    async def unregister(self, run_id: str) -> None:
+    async def unregister(self, run_id: str, event: asyncio.Event | None = None) -> None:
         """移除指定运行任务的取消事件。
 
         参数:
             run_id (str): 要移除的运行 ID；不存在时视为幂等成功。
+            event (asyncio.Event | None): 可选的注册实例；若运行已被
+                恢复并重新注册，则不会误删新一轮的取消事件。
         返回值:
             None: 注册表不再保留该运行的事件。
         异常:
             底层锁被取消时传播 ``asyncio.CancelledError``。
         """
         async with self._lock:
-            self._events.pop(run_id, None)
+            current = self._events.get(run_id)
+            if event is None or current is event:
+                self._events.pop(run_id, None)
 
     async def is_cancelled(self, run_id: str) -> bool:
         """读取运行任务是否已收到取消请求。

@@ -106,6 +106,7 @@ function EntryIcon({ entry }: { entry: ExecutionTimelineEntry }) {
   if (entry.status === "running") return <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />
   if (entry.status === "failed") return <XCircle className="h-4 w-4 text-athena-danger" />
   if (entry.status === "completed") return <CheckCircle className="h-4 w-4 text-athena-success" />
+  if (entry.status === "paused") return <Clock className="h-4 w-4 text-athena-muted" />
   if (entry.event_type.startsWith("tool.")) return <Wrench className="h-4 w-4 text-yellow-400" />
   if (entry.event_type.startsWith("approval.")) return <ShieldCheck className="h-4 w-4 text-athena-warning" />
   if (entry.event_type.includes("file") || entry.event_type.includes("attachment")) return <FileText className="h-4 w-4 text-athena-accent" />
@@ -114,7 +115,7 @@ function EntryIcon({ entry }: { entry: ExecutionTimelineEntry }) {
 }
 
 function StatusLabel({ status }: { status: ExecutionTimelineEntry["status"] }) {
-  const label = status === "running" ? "Running" : status === "completed" ? "Done" : status === "failed" ? "Failed" : status === "waiting" ? "Waiting" : "Info"
+  const label = status === "running" ? "Running" : status === "completed" ? "Done" : status === "failed" ? "Failed" : status === "waiting" ? "Waiting" : status === "paused" ? "Paused" : "Info"
   const color = status === "failed" ? "text-athena-danger" : status === "completed" ? "text-athena-success" : status === "running" ? "text-athena-accent" : "text-athena-muted"
   return <span className={`shrink-0 text-xs ${color}`}>{label}</span>
 }

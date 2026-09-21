@@ -67,6 +67,15 @@ export function summarizeToolCall(data: ToolDisplayData): ToolSummary {
     }
   }
 
+  if (data.status === "paused") {
+    return {
+      title: data.name,
+      summary: "Paused",
+      outputPreview: null,
+      parsedOutput,
+    }
+  }
+
   if (parsedOutput == null || parsedOutput === "") {
     return {
       title: data.name,

@@ -665,7 +665,10 @@ class FileIntelligenceRuntime:
         return response
 
     async def search_knowledge(
-        self, query: str, limit: int = 10
+        self,
+        query: str,
+        limit: int = 10,
+        knowledge_base_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """在全部未删除知识库文档的分块上执行一次全局混合检索。
 
@@ -680,6 +683,16 @@ class FileIntelligenceRuntime:
             SQLite 读取失败时向上抛出；向量检索失败时降级为关键词结果。
         """
         limit = min(max(limit, 1), 50)
+        documents = await self.repository.list_global_knowledge_documents()
+        allowed_documents = {
+            document.id
+            for document in documents
+            if document.status == AttachmentStatus.READY
+            and (
+                not knowledge_base_ids
+                or document.knowledge_base_id in knowledge_base_ids
+            )
+        }
         run_id: str | None = None
         try:
             run_id = await self._trace_writer.start_run(
@@ -692,7 +705,11 @@ class FileIntelligenceRuntime:
             )
         except Exception as exc:
             logger.warning("retrieval_trace_start_failed", error=str(exc))
-        keyword = await self.repository.search_knowledge_chunks(query, limit)
+        keyword = [
+            chunk
+            for chunk in await self.repository.search_knowledge_chunks(query, limit)
+            if chunk.attachment_id in allowed_documents
+        ]
         vector: list[dict[str, Any]] = []
         if self._collection is not None:
             try:
@@ -705,11 +722,7 @@ class FileIntelligenceRuntime:
                 vector = self._vector_items(result)
             except Exception as exc:
                 logger.warning("knowledge_vector_search_failed", error=str(exc))
-        live_ids = {
-            document.id
-            for document in await self.repository.list_global_knowledge_documents()
-            if document.status == AttachmentStatus.READY
-        }
+        live_ids = allowed_documents
         vector_before_filter = list(vector)
         vector = [
             item for item in vector if str(item.get("attachment_id", "")) in live_ids

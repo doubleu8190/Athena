@@ -13,7 +13,9 @@ from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettin
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.distillation import LongTermMemorySummarizer
 from athena.core.memory.contracts import CompletedTurn
-from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.sqlite.repositories.memory_job_repository import (
+    MemoryJobRepository,
+)
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.sqlite.database import Database
 from athena.contracts.ports import EventPublisherPort
@@ -52,54 +54,6 @@ class AgentExecutionService:
         self._settings = settings
         self._events = event_publisher
 
-    async def execute_harness(
-        self,
-        messages: list[Message],
-        session_id: str,
-        task_spec: dict[str, Any] | None = None,
-        context_bundle: dict[str, Any] | None = None,
-        run_id: str = "",
-        stop_signal: Any = None,
-    ) -> HarnessRunResult:
-        """创建 Harness 实例并执行完整的 LLM/工具循环。
-
-        参数：
-            messages: 已构建的会话消息列表（包含历史、当前用户消息和文件引用）。
-            session_id: 会话唯一标识。
-            task_spec: 当前任务理解结果，注入系统提示。
-            context_bundle: 检索到的上下文包，注入系统提示。
-            run_id: 运行唯一标识。
-            stop_signal: 停止事件，置位时终止执行。
-
-        返回值：
-            ``HarnessRunResult``：包含 LLM 输出内容、轮次数、工具调用结果等信息。
-        """
-        harness_settings = HarnessSettings(
-            max_turns_per_run=self._settings.max_turns_per_run,
-            retry_budget=self._settings.retry_budget,
-            tool_timeout=self._settings.tool_timeout,
-        )
-
-        system_prompt = self._build_system_prompt(task_spec, context_bundle)
-
-        harness = Harness(
-            llm=self._llm,
-            tool_manager=self._tool_manager,
-            settings=self._settings,
-            db=self._db,
-            event_publisher=self._events,
-            compressor=self._compressor,
-            harness_settings=harness_settings,
-        )
-
-        return await harness.run(
-            messages=[{"role": m.role.value, "content": m.content} for m in messages],
-            session_id=session_id,
-            system_prompt=system_prompt,
-            run_id=run_id,
-            stop_signal=stop_signal,
-        )
-
     @staticmethod
     def _build_system_prompt(
         task_spec: dict[str, Any] | None = None,
@@ -109,13 +63,21 @@ class AgentExecutionService:
         system = get_prompt("system")
         if task_spec:
             goal = task_spec.get("goal", "")
-            task_type = task_spec.get("task_type", "")
+            domain = task_spec.get("domain", "")
+            mode = task_spec.get("mode", "")
+            confidence = task_spec.get("confidence", "")
             requirements = ", ".join(task_spec.get("context_requirements", []))
+            slots = task_spec.get("slots", {})
+            output = task_spec.get("output", {})
             system += (
-                "\n\n[Task Understanding]\n"
+                "\n\n[Teaching Task]\n"
                 f"goal: {goal}\n"
-                f"task_type: {task_type}\n"
-                f"context_requirements: {requirements}"
+                f"domain: {domain}\n"
+                f"mode: {mode}\n"
+                f"confidence: {confidence}\n"
+                f"context_requirements: {requirements}\n"
+                f"slots: {slots}\n"
+                f"output: {output}"
             )
         if context_bundle:
             sections = {
@@ -123,7 +85,6 @@ class AgentExecutionService:
                 "knowledge": [],
                 "file": [],
                 "conversation": [],
-                "external": [],
             }
             for item in context_bundle.get("items", []):
                 provider = item.get("provider", "")
@@ -153,9 +114,7 @@ class AgentExecutionService:
                             details.append(f"{label}={value}")
                     if item.get("score") is not None:
                         details.append(f"relevance={item['score']}")
-                    source_prefix = (
-                        f"[{', '.join(details)}]\n  " if details else ""
-                    )
+                    source_prefix = f"[{', '.join(details)}]\n  " if details else ""
                 else:
                     locator_text = f" locator={locator}" if locator else ""
                     source_prefix = (

@@ -150,10 +150,10 @@ class Settings(BaseSettings):
     memory_max_tokens: int = 2000
     # Memory is an optional enhancement. It must not hold the first answer
     # indefinitely when the vector backend or embedding service is slow.
-    memory_retrieval_timeout_seconds: float = Field(default=3.0, ge=0.1, le=60.0)
+    memory_retrieval_timeout_seconds: float = Field(default=60.0, ge=0.1, le=60.0)
 
     # --- Task Understanding / Context Providers ---
-    task_understanding_timeout_seconds: float = Field(default=3.0, ge=0.1, le=60.0)
+    task_understanding_timeout_seconds: float = Field(default=120.0, ge=0.1, le=120.0)
     knowledge_context_max_files: int = Field(default=5, ge=1, le=20)
     knowledge_context_limit_per_file: int = Field(default=5, ge=1, le=20)
     knowledge_context_max_items: int = Field(default=12, ge=1, le=50)

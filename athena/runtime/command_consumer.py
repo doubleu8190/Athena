@@ -38,6 +38,7 @@ class CommandConsumer:
         notifier: CommandNotifier | None = None,
         cancellation_registry: CancellationRegistry | None = None,
         memory_service: LongTermMemoryService,
+        approval_manager: Any | None = None,
     ) -> None:
         """创建命令消费者。
 
@@ -48,6 +49,7 @@ class CommandConsumer:
             notifier (CommandNotifier | None): Command 提交后的进程内唤醒通知器。
             cancellation_registry (CancellationRegistry | None): 可选取消注册表。
             memory_service (LongTermMemoryService): 处理主动保存记忆命令的服务。
+            approval_manager (Any | None): 可选审批协调器，用于停止等待中的审批。
         返回值:
             None: 消费循环尚未启动。
         异常:
@@ -57,10 +59,14 @@ class CommandConsumer:
         self.poll_interval = poll_interval
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
+        # Message execution is long-lived (it owns the graph invocation), so
+        # it must not block the consumer from receiving pause/cancel controls.
+        self._message_tasks: set[asyncio.Task] = set()
         self.graph = graph
         self.notifier = notifier
         self._cancellation_registry = cancellation_registry or CancellationRegistry()
         self._memory_service = memory_service
+        self._approval_manager = approval_manager
 
     async def start(self) -> None:
         """启动后台命令消费任务。
@@ -102,17 +108,36 @@ class CommandConsumer:
         异常:
             ``asyncio.CancelledError`` 会继续向上传播；普通命令异常会记录为失败状态。
         """
-        while not self._stop.is_set():
-            command = await self.store.claim_next_command()
-            if command is None:
-                await self._wait_for_command()
-                continue
-            try:
-                await self._process_command(command)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                await self._handle_command_error(command, exc)
+        try:
+            while not self._stop.is_set():
+                command = await self.store.claim_next_command()
+                if command is None:
+                    await self._wait_for_command()
+                    continue
+                # Keep the command loop responsive while LangGraph is running;
+                # otherwise a queued pause/cancel command cannot be consumed
+                # until the graph has already finished.
+                if command.command_type == CommandType.MESSAGE_SUBMIT:
+                    task = asyncio.create_task(
+                        self._process_command_safely(command),
+                        name=f"athena-run-{command.run_id or command.command_id}",
+                    )
+                    self._message_tasks.add(task)
+                    task.add_done_callback(self._message_tasks.discard)
+                    continue
+                await self._process_command_safely(command)
+        finally:
+            if self._message_tasks:
+                await asyncio.gather(*self._message_tasks, return_exceptions=True)
+
+    async def _process_command_safely(self, command: AgentCommandRecord) -> None:
+        """Process one command and persist ordinary command failures."""
+        try:
+            await self._process_command(command)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._handle_command_error(command, exc)
 
     async def _wait_for_command(self) -> None:
         """等待新命令或停止信号。"""
@@ -163,6 +188,11 @@ class CommandConsumer:
     async def _handle_run_pause(
         self, command: AgentCommandRecord, payload: CommandPayload
     ) -> None:
+        if command.run_id:
+            # A live pause must interrupt the current graph invocation. The
+            # durable PAUSED state keeps the claimed message available for
+            # resume_run to put back on the queue.
+            await self._cancellation_registry.request_cancellation(command.run_id)
         await self._handle_run_state_change(
             command,
             status=AgentRunStatus.PAUSED,
@@ -221,6 +251,11 @@ class CommandConsumer:
     ) -> None:
         if command.run_id:
             await self._cancellation_registry.request_cancellation(command.run_id)
+        if self._approval_manager is not None:
+            cancel_pending = getattr(self._approval_manager, "cancel_pending_approvals", None)
+            if cancel_pending is not None:
+                await cancel_pending(command.session_id)
+        if command.run_id:
             await self.store.update_run_control(
                 command.run_id,
                 cancel=True,
@@ -288,28 +323,44 @@ class CommandConsumer:
         if not run_id:
             raise RuntimeError("message.submit is missing run_id")
         cancel_event = await self._cancellation_registry.register(run_id)
-        if cancel_event.is_set():
-            await self._complete_cancelled_message(command, run_id)
-            await self._cancellation_registry.unregister(run_id)
-            return
+        try:
+            if cancel_event.is_set():
+                run = await self.store.get_run(run_id)
+                if run is not None and run.status == AgentRunStatus.PAUSED:
+                    # Keep the original message command claimed. Explicit resume
+                    # transitions it back to pending and re-enters the checkpoint.
+                    return
+                await self._complete_cancelled_message(command, run_id)
+                return
 
-        await self.store.update_run_status(run_id, AgentRunStatus.RUNNING)
-        await self._publish_run_event(command, EventType.RUN_STARTED)
-        result = await invoke_graph(
-            self.graph,
-            session_id=command.session_id,
-            run_id=run_id,
-            user_message=payload.message or "",
-            message_id=payload.message_id or "",
-            attachment_ids=payload.attachment_ids,
-            stop_signal=cancel_event,
-        )
-        if cancel_event.is_set():
-            await self._complete_cancelled_message(command, run_id)
-            await self._cancellation_registry.unregister(run_id)
-            return
-        await self._complete_message(command, run_id, result)
-        await self._cancellation_registry.unregister(run_id)
+            await self.store.update_run_status(run_id, AgentRunStatus.RUNNING)
+            # A control command may have been consumed between registration
+            # and the status write. Do not start the graph after that request.
+            if cancel_event.is_set():
+                run = await self.store.get_run(run_id)
+                if run is not None and run.status == AgentRunStatus.PAUSED:
+                    return
+                await self._complete_cancelled_message(command, run_id)
+                return
+            await self._publish_run_event(command, EventType.RUN_STARTED)
+            result = await invoke_graph(
+                self.graph,
+                session_id=command.session_id,
+                run_id=run_id,
+                user_message=payload.message or "",
+                message_id=payload.message_id or "",
+                attachment_ids=payload.attachment_ids,
+                stop_signal=cancel_event,
+            )
+            if cancel_event.is_set():
+                run = await self.store.get_run(run_id)
+                if run is not None and run.status == AgentRunStatus.PAUSED:
+                    return
+                await self._complete_cancelled_message(command, run_id)
+                return
+            await self._complete_message(command, run_id, result)
+        finally:
+            await self._cancellation_registry.unregister(run_id, cancel_event)
 
     async def _complete_cancelled_message(
         self, command: AgentCommandRecord, run_id: str

@@ -65,7 +65,7 @@ class FileContextProvider:
             不向调用方传播异常；所有失败都降级为空结果。
         """
         started = time.perf_counter()
-        query = plan.knowledge_query or task.goal
+        query = plan.file_query or task.goal
 
         async def search_one(file_id: str) -> list[dict[str, Any]]:
             """检索单个附件并降级错误。"""

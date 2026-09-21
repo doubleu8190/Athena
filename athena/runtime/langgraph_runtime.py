@@ -368,7 +368,9 @@ class LangGraphRuntime:
         if task_payload is None:
             task = UserTaskSpec(
                 goal=state.get("user_message", "")[:1000] or "answer the user",
-                task_type="answer",
+                domain="general",
+                mode="answer",
+                confidence=0.0,
                 context_requirements=["conversation"],
             )
         else:
@@ -400,7 +402,9 @@ class LangGraphRuntime:
             if task_payload is not None
             else UserTaskSpec(
                 goal=state.get("user_message", "")[:1000] or "answer the user",
-                task_type="answer",
+                domain="general",
+                mode="answer",
+                confidence=0.0,
                 context_requirements=["conversation"],
             )
         )

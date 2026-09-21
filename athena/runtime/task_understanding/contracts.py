@@ -1,4 +1,4 @@
-"""Task Understanding 与 Context Provider 共享的运行时契约。"""
+"""教育场景任务理解与上下文获取契约。"""
 
 from __future__ import annotations
 
@@ -6,77 +6,94 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
-ContextRequirement = Literal[
-    "conversation",
-    "memory",
-    "knowledge",
-    "file",
-    "external",
+TeachingDomain = Literal[
+    "lesson_planning", "teaching_material", "assignment", "assessment",
+    "student_analysis", "resource_retrieval", "document_editing",
+    "classroom_activity", "general",
 ]
-
-TaskType = Literal[
-    "answer",
-    "retrieve",
-    "act",
-    "delegate",
+TaskMode = Literal["answer", "retrieve", "generate", "act", "plan", "clarify"]
+ContextRequirement = Literal["conversation", "memory", "knowledge", "file"]
+ContentType = Literal[
+    "lesson_plan", "slide_deck", "worksheet", "test_paper", "answer_key",
+    "assessment_report", "rubric", "teaching_script", "resource_summary",
+    "general_text",
 ]
+OutputFormat = Literal["chat", "markdown", "docx", "pptx", "xlsx", "pdf", "txt"]
+OutputTarget = Literal["inline", "file", "inline_and_file"]
+ProviderStatus = Literal["succeeded", "failed", "timeout", "skipped"]
 
-ProviderStatus = Literal[
-    "succeeded",
-    "failed",
-    "timeout",
-    "skipped",
-]
+
+class TeachingSlots(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    grade: str | None = None
+    subject: str | None = None
+    textbook_version: str | None = None
+    topic: str | None = None
+    lesson_period: str | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=480)
+    difficulty: str | None = None
+    question_count: int | None = Field(default=None, ge=1, le=200)
+    student_level: str | None = None
+    target_file_ids: list[str] = Field(default_factory=list)
+    knowledge_base_ids: list[str] = Field(default_factory=list)
+
+
+class OutputSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content_type: ContentType | None = None
+    format: OutputFormat = "chat"
+    target: OutputTarget = "inline"
 
 
 class TaskQueryHints(BaseModel):
-    """任务理解产出的检索查询建议。"""
-
     model_config = ConfigDict(extra="forbid")
 
     memory: str | None = Field(default=None, max_length=500)
     knowledge: str | None = Field(default=None, max_length=500)
+    file: str | None = Field(default=None, max_length=500)
 
 
 class UserTaskSpec(BaseModel):
-    """用户单次请求的任务理解结果。"""
-
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(min_length=1, max_length=1000)
-    task_type: TaskType
+    domain: TeachingDomain
+    mode: TaskMode
+    confidence: float = Field(ge=0, le=1)
     context_requirements: list[ContextRequirement] = Field(default_factory=list)
+    slots: TeachingSlots = Field(default_factory=TeachingSlots)
+    output: OutputSpec = Field(default_factory=OutputSpec)
+    constraints: list[str] = Field(default_factory=list, max_length=20)
     query_hints: TaskQueryHints = Field(default_factory=TaskQueryHints)
     requires_clarification: bool = False
     clarification_question: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def validate_spec(self) -> "UserTaskSpec":
-        """保证澄清标志与澄清问题成对出现。
-
-        返回值：
-            UserTaskSpec: 校验通过的当前对象。
-
-        异常：
-            ValueError: 澄清问题与澄清标志不一致。
-        """
+        if self.requires_clarification != (self.mode == "clarify"):
+            raise ValueError("clarify mode and requires_clarification must agree")
         if self.requires_clarification and not self.clarification_question:
             raise ValueError("clarification_question is required")
         if not self.requires_clarification and self.clarification_question:
             raise ValueError("clarification_question must be empty")
+        if self.mode == "retrieve" and not any(
+            item in self.context_requirements for item in ("memory", "knowledge", "file")
+        ):
+            raise ValueError("retrieve mode requires a retrieval context")
         return self
 
 
 class ContextPlan(BaseModel):
-    """由 Runtime 推导出的上下文获取计划。"""
-
     model_config = ConfigDict(extra="forbid")
 
     providers: list[ContextRequirement] = Field(default_factory=list)
     memory_query: str | None = None
     knowledge_query: str | None = None
+    file_query: str | None = None
     file_ids: list[str] = Field(default_factory=list)
+    knowledge_base_ids: list[str] = Field(default_factory=list)
     max_files: int = Field(default=5, ge=1, le=20)
     limit_per_file: int = Field(default=5, ge=1, le=20)
     max_items: int = Field(default=12, ge=1, le=50)
@@ -84,8 +101,6 @@ class ContextPlan(BaseModel):
 
 
 class ContextItem(BaseModel):
-    """注入 Agent 系统提示的一条检索上下文。"""
-
     model_config = ConfigDict(extra="forbid")
 
     provider: ContextRequirement
@@ -99,8 +114,6 @@ class ContextItem(BaseModel):
 
 
 class ProviderResult(BaseModel):
-    """单个 Provider 的执行结果和观测信息。"""
-
     model_config = ConfigDict(extra="forbid")
 
     provider: ContextRequirement
@@ -113,8 +126,6 @@ class ProviderResult(BaseModel):
 
 
 class ContextBundle(BaseModel):
-    """所有 Provider 结果合并后的上下文包。"""
-
     model_config = ConfigDict(extra="forbid")
 
     items: list[ContextItem] = Field(default_factory=list)

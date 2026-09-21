@@ -1,5 +1,5 @@
 import { useChatStore } from "../store/chatStore"
-import { Wifi, WifiOff, Loader2, AlertCircle, Cpu, CheckCircle } from "lucide-react"
+import { Wifi, WifiOff, Loader2, AlertCircle, Cpu, CheckCircle, Pause } from "lucide-react"
 
 export default function StatusIndicator() {
   const connectionStatus = useChatStore((s) => s.connectionStatus)
@@ -49,6 +49,13 @@ export default function StatusIndicator() {
           <span className="flex items-center gap-1.5 text-sm text-athena-accent">
             <Loader2 className="w-4 h-4 animate-spin" />
             Running
+          </span>
+        )
+      case "paused":
+        return (
+          <span className="flex items-center gap-1.5 text-sm text-athena-muted">
+            <Pause className="w-4 h-4" />
+            Paused
           </span>
         )
       case "waiting_approval":

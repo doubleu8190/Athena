@@ -75,7 +75,9 @@ class KnowledgeContextProvider:
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 results = await self._file_runtime.search_knowledge(
-                    query, plan.max_items
+                    query,
+                    plan.max_items,
+                    plan.knowledge_base_ids or None,
                 )
             documents = await self._repository.list_global_knowledge_documents()
         except Exception as exc:

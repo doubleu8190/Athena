@@ -98,6 +98,7 @@ class ContextAcquisitionService:
             for provider in plan.providers
             if provider in self._providers
         ]
+        unknown = [provider for provider in plan.providers if provider not in self._providers]
         results = await asyncio.gather(
             *(
                 provider.acquire(session_id=session_id, task=task, plan=plan)
@@ -106,6 +107,10 @@ class ContextAcquisitionService:
             return_exceptions=True,
         )
         normalized_results: list[ProviderResult] = []
+        normalized_results.extend(
+            ProviderResult(provider=provider, status="skipped", error_message="provider unavailable")
+            for provider in unknown
+        )
         for provider, result in zip(selected, results):
             if isinstance(result, BaseException):
                 logger.warning(

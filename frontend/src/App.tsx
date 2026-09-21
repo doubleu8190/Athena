@@ -59,6 +59,8 @@ function AppContent() {
           })
         } else if (type === ClientEventType.SESSION_STOP) {
           await apiClient.cancelSession(activeSessionId)
+        } else if (type === ClientEventType.SESSION_PAUSE) {
+          await apiClient.pauseSession(activeSessionId)
         } else if (type === ClientEventType.SESSION_RESUME) {
           await apiClient.resumeSession(activeSessionId)
         } else if (type === ClientEventType.APPROVAL_RESPONSE) {

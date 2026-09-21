@@ -6,7 +6,7 @@ export type { ExecutionError }
 
 export type StepType = "llm_call" | "tool_execution"
 
-export type StepStatus = "pending" | "running" | "completed" | "failed"
+export type StepStatus = "pending" | "running" | "paused" | "completed" | "failed"
 
 export interface Step {
   id: string
@@ -127,7 +127,7 @@ export interface ThinkingState {
   messageId: string | null
 }
 
-export type ExecutionTimelineStatus = "running" | "completed" | "failed" | "waiting" | "info"
+export type ExecutionTimelineStatus = "running" | "completed" | "failed" | "waiting" | "paused" | "info"
 
 export interface ExecutionTimelineEntry {
   id: string
@@ -167,7 +167,7 @@ export interface Session {
 
 // ─── 工具调用相关 ────────────────────────────────────────────────
 
-export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "denied" | "timeout"
+export type ToolCallStatus = "pending" | "running" | "paused" | "success" | "failed" | "denied" | "timeout"
 
 export interface ToolCall {
   id: string
@@ -226,7 +226,7 @@ export type { ApplicationEventType }
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error"
 
-export type AgentStatus = "idle" | "thinking" | "running" | "waiting_approval" | "completed" | "error"
+export type AgentStatus = "idle" | "thinking" | "running" | "paused" | "waiting_approval" | "completed" | "error"
 
 export interface AppState {
   connectionStatus: ConnectionStatus

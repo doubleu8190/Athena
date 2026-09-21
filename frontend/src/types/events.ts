@@ -4,6 +4,7 @@ export const ClientEventType = {
   APPROVAL_RESPONSE: "approval_response",
   SESSION_STOP: "session_stop",
   SESSION_RESUME: "session_resume",
+  SESSION_PAUSE: "session_pause",
 } as const
 
 export type ClientEventType = (typeof ClientEventType)[keyof typeof ClientEventType]

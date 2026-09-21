@@ -102,6 +102,7 @@ function StatusIcon({ status }: { status?: ToolCall["status"] }) {
   if (status === "success") return <CheckCircle className="h-4 w-4 flex-shrink-0 text-athena-success" />
   if (status === "failed") return <XCircle className="h-4 w-4 flex-shrink-0 text-athena-danger" />
   if (status === "denied" || status === "timeout") return <AlertTriangle className="h-4 w-4 flex-shrink-0 text-athena-warning" />
+  if (status === "paused") return <Clock className="h-4 w-4 flex-shrink-0 text-athena-muted" />
   if (status === "running" || status === "pending") return <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-athena-accent" />
   return <Wrench className="h-4 w-4 flex-shrink-0 text-athena-muted" />
 }
@@ -112,6 +113,7 @@ function statusLabel(status?: ToolCall["status"]): string {
   if (status === "denied") return "Denied"
   if (status === "timeout") return "Timeout"
   if (status === "running") return "Running"
+  if (status === "paused") return "Paused"
   if (status === "pending") return "Pending"
   return "Called"
 }

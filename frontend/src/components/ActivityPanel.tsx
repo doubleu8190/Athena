@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react"
-import { CheckCircle, Clock, Loader2, MessageSquare, X, XCircle } from "lucide-react"
+import { CheckCircle, Clock, Loader2, MessageSquare, Pause, X, XCircle } from "lucide-react"
 import type { AgentStatus, Message } from "../types"
 import { buildActivityGroups, type ActivityRequestGroup } from "../utils/activityModel"
 
@@ -15,6 +15,7 @@ export function ActivityPanel({ messages, agentStatus = "idle", onClose }: Activ
   const groups = useMemo(() => buildActivityGroups(messages, [], []), [messages])
   const latestGroupKey = groups[groups.length - 1]?.key
   const isAgentActive = agentStatus === "thinking" || agentStatus === "running" || agentStatus === "waiting_approval"
+  const isAgentPaused = agentStatus === "paused"
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -43,7 +44,8 @@ export function ActivityPanel({ messages, agentStatus = "idle", onClose }: Activ
         ) : (
           groups.map((group) => {
             const active = group.key === latestGroupKey && isAgentActive
-            return <RequestItem key={group.key} group={group} active={active} />
+            const paused = group.key === latestGroupKey && isAgentPaused
+            return <RequestItem key={group.key} group={group} active={active} paused={paused} />
           })
         )}
       </div>
@@ -51,14 +53,14 @@ export function ActivityPanel({ messages, agentStatus = "idle", onClose }: Activ
   )
 }
 
-function RequestItem({ group, active }: { group: ActivityRequestGroup; active: boolean }) {
+function RequestItem({ group, active, paused }: { group: ActivityRequestGroup; active: boolean; paused: boolean }) {
   const failed = group.status === "failed"
-  const completed = !active && group.status === "completed"
+  const completed = !active && !paused && group.status === "completed"
 
   return (
     <article className="rounded-lg border border-athena-border bg-athena-bg/40 px-3 py-3">
       <div className="flex items-start gap-2">
-        <RequestStatusIcon active={active} failed={failed} completed={completed} />
+        <RequestStatusIcon active={active} paused={paused} failed={failed} completed={completed} />
         <div className="min-w-0 flex-1">
           <div className="text-xs font-semibold uppercase tracking-wide text-athena-muted">User request</div>
           <div className="mt-1 break-words text-sm leading-5 text-athena-text">
@@ -68,8 +70,8 @@ function RequestItem({ group, active }: { group: ActivityRequestGroup; active: b
             <Clock className="h-3 w-3" />
             {formatTime(group.startedAt)}
             <span className="px-0.5">·</span>
-            <span className={failed ? "text-athena-danger" : active ? "text-athena-accent" : "text-athena-success"}>
-              {active ? "Running" : failed ? "Failed" : completed ? "Completed" : "Waiting"}
+            <span className={failed ? "text-athena-danger" : active ? "text-athena-accent" : paused ? "text-athena-muted" : "text-athena-success"}>
+              {active ? "Running" : paused ? "Paused" : failed ? "Failed" : completed ? "Completed" : "Waiting"}
             </span>
           </div>
         </div>
@@ -79,8 +81,9 @@ function RequestItem({ group, active }: { group: ActivityRequestGroup; active: b
   )
 }
 
-function RequestStatusIcon({ active, failed, completed }: { active: boolean; failed: boolean; completed: boolean }) {
+function RequestStatusIcon({ active, paused, failed, completed }: { active: boolean; paused: boolean; failed: boolean; completed: boolean }) {
   if (active) return <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-athena-accent" />
+  if (paused) return <Pause className="mt-0.5 h-4 w-4 shrink-0 text-athena-muted" />
   if (failed) return <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-athena-danger" />
   if (completed) return <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-athena-success" />
   return <Clock className="mt-0.5 h-4 w-4 shrink-0 text-athena-muted" />

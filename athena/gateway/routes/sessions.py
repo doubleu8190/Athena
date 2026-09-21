@@ -416,6 +416,11 @@ async def cancel_run(
     runtime = get_runtime_container(request)
     if not await runtime.db.sessions.get(session_id):
         raise HTTPException(status_code=404, detail=ErrorDetail.SESSION_NOT_FOUND)
+    # The UI normally does not know the durable run id. Resolve it while
+    # enqueueing so a stop request cannot become a no-op control command.
+    if run_id is None:
+        active = await runtime.agent_store.get_active_run(session_id)
+        run_id = active.run_id if active else None
     command = Command(
         command_id=f"cmd_{generate_time_id()}",
         command_type=CommandType.RUN_CANCEL,

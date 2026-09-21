@@ -72,7 +72,13 @@ async def test_memory_retrieval_timeout_falls_back_without_context() -> None:
     provider = MemoryContextProvider(
         RetrievalStub(), timeout_seconds=0.01
     )
-    task = UserTaskSpec(goal="之前的设计", task_type="retrieve", context_requirements=["memory"])
+    task = UserTaskSpec(
+        goal="之前的设计",
+        domain="resource_retrieval",
+        mode="retrieve",
+        confidence=0.9,
+        context_requirements=["memory"],
+    )
     plan = ContextPlan(providers=["memory"], memory_query="之前的设计")
     result = await provider.acquire(
         session_id="session-1",
@@ -116,7 +122,9 @@ async def test_memory_context_preserves_source_and_confidence_metadata() -> None
         session_id="session-1",
         task=UserTaskSpec(
             goal="用户偏好什么语言？",
-            task_type="retrieve",
+            domain="general",
+            mode="retrieve",
+            confidence=0.9,
             context_requirements=["memory"],
         ),
         plan=ContextPlan(providers=["memory"], memory_query="偏好语言"),
@@ -223,6 +231,40 @@ async def test_prepare_request_and_persist_message_merges_prepared_and_persisted
     assert result["requested_attachment_refs"][0]["id"] == "file-1"
 
 
+def test_task_route_processes_files_only_when_task_requires_file():
+    from athena.runtime.nodes.conditions import route_after_task_understanding
+
+    assert route_after_task_understanding({
+        "task_spec": {"mode": "retrieve", "context_requirements": ["file"]},
+        "requested_attachment_refs": [{"id": "file-1"}],
+    }) == "process_attachments"
+    assert route_after_task_understanding({
+        "task_spec": {"mode": "generate", "context_requirements": ["conversation"]},
+        "requested_attachment_refs": [{"id": "file-1"}],
+    }) == "plan_context"
+
+
+def test_task_route_clarifies_before_attachment_processing():
+    from athena.runtime.nodes.conditions import route_after_task_understanding
+
+    assert route_after_task_understanding({
+        "clarification_question": "请提供年级",
+        "task_spec": {"mode": "clarify", "context_requirements": ["file"]},
+        "requested_attachment_refs": [{"id": "file-1"}],
+    }) == "clarification_response"
+
+
+def test_graph_compiles_with_minimal_runtime():
+    from types import SimpleNamespace
+    from athena.runtime.agent_graph import build_graph
+
+    runtime = SimpleNamespace(
+        _events=None,
+        session_context_service=SimpleNamespace(),
+        agent_execution_service=SimpleNamespace(),
+    )
+    graph = build_graph(runtime)
+    assert graph is not None
 def test_build_harness_messages_adds_attachment_context_without_mutating_message():
     """_build_harness_messages moved to SessionContextService."""
     from athena.runtime.services.session_context_service import SessionContextService

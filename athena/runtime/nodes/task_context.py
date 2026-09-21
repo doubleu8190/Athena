@@ -21,9 +21,7 @@ async def understand_task(
     return await runtime.understand_task(state)
 
 
-async def plan_context(
-    state: AgentState, *, runtime: LangGraphRuntime
-) -> AgentState:
+async def plan_context(state: AgentState, *, runtime: LangGraphRuntime) -> AgentState:
     """根据任务理解结果生成上下文获取计划。"""
     if not state.get("session_id"):
         raise ValueError("AgentState missing required field: session_id")

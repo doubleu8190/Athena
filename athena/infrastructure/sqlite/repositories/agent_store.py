@@ -437,7 +437,30 @@ class AgentStore:
         async with get_core_session() as db:
             row = await db.get(AgentRunModel, run_id)
             if row:
-                row.status, row.error, row.updated_at = status.value, error, _now()
+                # A pause/cancel control can be consumed while the message
+                # task is transitioning QUEUED -> RUNNING. Never let that
+                # late transition erase the durable control state.
+                effective_status = status
+                if status == AgentRunStatus.RUNNING and row.status in {
+                    AgentRunStatus.PAUSED.value,
+                    AgentRunStatus.CANCEL_REQUESTED.value,
+                }:
+                    effective_status = AgentRunStatus(row.status)
+                row.status, row.error, row.updated_at = effective_status.value, error, _now()
+                session_status = {
+                    AgentRunStatus.RUNNING: "running",
+                    AgentRunStatus.PAUSED: "interrupted",
+                    AgentRunStatus.CANCEL_REQUESTED: "interrupted",
+                    AgentRunStatus.CANCELLED: "interrupted",
+                    AgentRunStatus.COMPLETED: "idle",
+                    AgentRunStatus.FAILED: "failed",
+                }.get(effective_status)
+                if session_status and row.parent_run_id is None:
+                    await db.execute(
+                        update(SessionModel)
+                        .where(SessionModel.id == row.session_id)
+                        .values(status=session_status, updated_at=_now())
+                    )
                 await db.commit()
 
     async def update_run_control(
@@ -475,6 +498,17 @@ class AgentStore:
             if status:
                 row.status = status.value
             row.updated_at = _now()
+            session_status = {
+                AgentRunStatus.RUNNING: "running",
+                AgentRunStatus.PAUSED: "interrupted",
+                AgentRunStatus.CANCEL_REQUESTED: "interrupted",
+            }.get(status) if status else None
+            if session_status and row.parent_run_id is None:
+                await db.execute(
+                    update(SessionModel)
+                    .where(SessionModel.id == row.session_id)
+                    .values(status=session_status, updated_at=row.updated_at)
+                )
             await db.commit()
             return True
 

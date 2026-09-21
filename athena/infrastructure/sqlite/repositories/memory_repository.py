@@ -17,8 +17,9 @@ from .repository_utils import _json_dumps, _json_loads
 _SEMANTIC_KEYS = frozenset({"session_id", "type", "category", "confidence", "source"})
 _SYSTEM_KEYS = frozenset(
     {
+        "logical_memory_id",
         "created_at",
-        "last_accessed",
+        "last_accessed_at",
         "access_count",
         "pinned",
         "status",
@@ -41,6 +42,10 @@ _FILTER_COLUMNS = frozenset(
         "validity_status",
     }
 )
+_FILTER_COLUMN_MAP = {
+    "type": "memory_type",
+    "source": "source_kind",
+}
 
 
 def _metadata(row: Any) -> dict[str, Any]:
@@ -56,8 +61,9 @@ def _metadata(row: Any) -> dict[str, Any]:
         异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
     """
     metadata: dict[str, Any] = {
+        "logical_memory_id": row.logical_memory_id,
         "created_at": row.created_at,
-        "last_accessed": row.last_accessed,
+        "last_accessed_at": row.last_accessed_at,
         "access_count": row.access_count,
         "pinned": bool(row.pinned),
         "expires_at": row.expires_at or "",
@@ -69,8 +75,13 @@ def _metadata(row: Any) -> dict[str, Any]:
         "session_id": row.session_id,
         "status": getattr(row, "status", "active") or "active",
     }
-    for key in ("type", "category", "confidence", "source"):
-        value = getattr(row, key)
+    for key, column in {
+        "type": "memory_type",
+        "category": "category",
+        "confidence": "confidence",
+        "source": "source_kind",
+    }.items():
+        value = getattr(row, column)
         if value is not None:
             metadata[key] = value
     metadata.update(_json_loads(row.metadata_json, {}))
@@ -103,18 +114,21 @@ class SQLiteMemoryRepository:
                 await session.execute(
                     insert(MemoryModel).values(
                         id=record["id"],
+                        logical_memory_id=record.get(
+                            "logical_memory_id", record["id"]
+                        ),
                         session_id=metadata.get("session_id", ""),
                         content=record["content"],
                         metadata_json=_json_dumps(extras),
                         pinned=1 if record["pinned"] else 0,
                         expires_at=record["expires_at"],
                         created_at=record["created_at"],
-                        last_accessed=record["created_at"],
+                        last_accessed_at=record["created_at"],
                         access_count=0,
-                        type=metadata.get("type"),
+                        memory_type=metadata.get("type"),
                         category=metadata.get("category"),
                         confidence=metadata.get("confidence"),
-                        source=metadata.get("source"),
+                        source_kind=metadata.get("source"),
                         source_turn_id=metadata.get("source_turn_id"),
                         last_observed_at=metadata.get(
                             "last_observed_at", record["created_at"]
@@ -176,9 +190,9 @@ class SQLiteMemoryRepository:
                     update(MemoryModel)
                     .where(MemoryModel.id.in_(ids), MemoryModel.deleted_time.is_(None))
                     .values(
-                        last_accessed=case(
+                        last_accessed_at=case(
                             *[
-                                (MemoryModel.id == mid, value.last_accessed)
+                                (MemoryModel.id == mid, value.last_accessed_at)
                                 for mid, value in stats.items()
                             ]
                         ),
@@ -194,11 +208,20 @@ class SQLiteMemoryRepository:
                         MemoryModel.id,
                         MemoryModel.pinned,
                         MemoryModel.expires_at,
-                        MemoryModel.last_accessed,
+                        MemoryModel.last_accessed_at,
                         MemoryModel.access_count,
                     )
                 )
-                return [dict(row._mapping) for row in result.fetchall()]
+                return [
+                    {
+                        "id": row.id,
+                        "pinned": row.pinned,
+                        "expires_at": row.expires_at,
+                        "last_accessed_at": row.last_accessed_at,
+                        "access_count": row.access_count,
+                    }
+                    for row in result.fetchall()
+                ]
 
     async def keyword_search(
         self, query: str, limit: int, where: dict[str, Any] | None
@@ -229,10 +252,11 @@ class SQLiteMemoryRepository:
 
         sql = """
             SELECT m.id, m.content, m.metadata_json, m.session_id,
-                   m.created_at, m.pinned, m.expires_at, m.last_accessed,
-                   m.access_count, m.type, m.category, m.confidence, m.source, m.status,
+                   m.created_at, m.pinned, m.expires_at, m.last_accessed_at,
+                   m.access_count, m.memory_type, m.category, m.confidence,
+                   m.source_kind, m.status,
                    m.last_observed_at, m.validity_status, m.valid_until,
-                   m.revision_of, m.revision,
+                   m.revision_of, m.revision, m.logical_memory_id,
                    bm25(memory_fts) AS rank
             FROM memory_fts
             JOIN memories m ON memory_fts.memory_id = m.id
@@ -249,7 +273,7 @@ class SQLiteMemoryRepository:
         for key, value in (where or {}).items():
             if key not in _FILTER_COLUMNS:
                 raise ValueError(f"Unsupported memory filter: {key}")
-            sql += f" AND m.{key} = :where_{key}"
+            sql += f" AND m.{_FILTER_COLUMN_MAP.get(key, key)} = :where_{key}"
             params[f"where_{key}"] = value
         sql += " ORDER BY rank LIMIT :limit"
         async with get_memory_database_session() as session:
@@ -307,7 +331,7 @@ class SQLiteMemoryRepository:
                 "pinned": bool(row.pinned),
                 "expires_at": row.expires_at,
                 "created_at": row.created_at,
-                "last_accessed": row.last_accessed,
+                "last_accessed_at": row.last_accessed_at,
                 "access_count": row.access_count,
                 "validity_status": row.validity_status,
                 "valid_until": row.valid_until,
@@ -417,10 +441,55 @@ class SQLiteMemoryRepository:
             return None
         return {
             "id": row.id,
+            "logical_memory_id": row.logical_memory_id,
             "content": row.content,
             "pinned": bool(row.pinned),
             "metadata": _metadata(row),
         }
+
+    async def list_revisions(self, memory_id: str) -> list[dict[str, Any]]:
+        """读取一条逻辑记忆的完整 revision 链。
+
+        参数：
+            memory_id: 任意 revision ID 或逻辑记忆 ID。
+
+        返回值：
+            按 revision 序号升序排列的不可变记忆版本。
+
+        异常：
+            SQLite 查询失败时向上抛出异常。
+        """
+        async with get_memory_database_session() as session:
+            target = await session.get(MemoryModel, memory_id)
+            logical_id = target.logical_memory_id if target is not None else memory_id
+            rows = (
+                (
+                    await session.execute(
+                        select(MemoryModel)
+                        .where(
+                            MemoryModel.logical_memory_id == logical_id,
+                            MemoryModel.deleted_time.is_(None),
+                        )
+                        .order_by(MemoryModel.revision.asc(), MemoryModel.created_at.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [
+            {
+                "id": row.id,
+                "logical_memory_id": row.logical_memory_id,
+                "content": row.content,
+                "metadata": _metadata(row),
+                "revision": row.revision,
+                "revision_of": row.revision_of,
+                "status": row.status,
+                "created_at": row.created_at,
+                "superseded_by": row.superseded_by,
+            }
+            for row in rows
+        ]
 
     async def mark_superseded(self, old_id: str, new_id: str) -> bool:
         now = datetime.now().isoformat()

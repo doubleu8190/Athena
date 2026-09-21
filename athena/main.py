@@ -125,6 +125,7 @@ async def lifespan(app: FastAPI):
         llm_secondary,
         settings=settings,
         event_publisher=event_publisher,
+        trace_writer=db.retrieval,
     )
     await file_runtime.initialize()
 
@@ -146,8 +147,12 @@ async def lifespan(app: FastAPI):
     from athena.core.memory.long_term_memory import LongTermMemoryService
 
     from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
-    from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
-    from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
+    from athena.infrastructure.sqlite.repositories.memory_repository import (
+        SQLiteMemoryRepository,
+    )
+    from athena.infrastructure.sqlite.repositories.memory_job_repository import (
+        MemoryJobRepository,
+    )
     from athena.core.memory.write_job_worker import MemoryWriteJobWorker
 
     memory_service = LongTermMemoryService(
@@ -172,6 +177,7 @@ async def lifespan(app: FastAPI):
     retrieval_manager = HybridMemoryRetriever(
         memory_service,
         settings=settings,
+        trace_writer=db.retrieval,
     )
     memory_retrieval = MemoryRetrievalService(retrieval_manager, llm_primary, settings)
 
@@ -249,7 +255,9 @@ async def lifespan(app: FastAPI):
     ).reconcile()
 
     # 初始化sqlite checkpointer，确保langgraph的状态可以在中断后恢复
-    checkpoint_conn = await aiosqlite.connect(str(settings.checkpoint_db_path), timeout=5)
+    checkpoint_conn = await aiosqlite.connect(
+        str(settings.checkpoint_db_path), timeout=5
+    )
     await checkpoint_conn.execute("PRAGMA journal_mode=WAL")
     await checkpoint_conn.execute("PRAGMA busy_timeout=5000")
     checkpointer = AsyncSqliteSaver(checkpoint_conn)
@@ -298,6 +306,7 @@ async def lifespan(app: FastAPI):
         logger.warning("mcp_shutdown_failed", error=str(e))
     await db.close()
     logger.info("athena_stopped")
+
 
 # ---------------------------------------------------------------------------
 # FastAPI 应用（仅创建、中间件、路由注册）
@@ -360,6 +369,7 @@ def run() -> None:
         reload_dirs=reload_dirs,
         log_level="debug" if settings.debug else "info",
     )
+
 
 if __name__ == "__main__":
     run()

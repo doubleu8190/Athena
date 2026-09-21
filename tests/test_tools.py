@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -133,6 +134,54 @@ async def test_tool_call_repository_persists_step_link(tmp_path):
     record = await database.tool_calls.get("tool-call-1")
     assert record is not None
     assert record.step_id == "step-1"
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_repository_concurrent_save_and_claim(tmp_path):
+    """并行工具调用写入和领取不应依赖 BEGIN IMMEDIATE。"""
+    from datetime import datetime
+
+    from athena.infrastructure.sqlite.database import Database
+    from athena.models.tool import ToolCallRecord, ToolCallStatus
+
+    database = Database(str(tmp_path / "tool-call-concurrent.db"))
+    await database.connect()
+    await database.sessions.create("session-1", "Tools")
+
+    records = [
+        ToolCallRecord(
+            id=f"tool-call-{index}",
+            session_id="session-1",
+            run_id="run-1",
+            step_id=f"step-{index}",
+            step_number=index,
+            tool_name="read_local_file",
+            status=ToolCallStatus.PENDING,
+            started_at=datetime.now(),
+        )
+        for index in range(20)
+    ]
+    await asyncio.gather(*(database.tool_calls.save(record) for record in records))
+
+    persisted = await database.tool_calls.query("session-1")
+    assert {record.id for record in persisted} == {record.id for record in records}
+
+    claimed = await asyncio.gather(
+        *(
+            database.tool_calls.claim_for_execution(record.id)
+            for record in records
+        )
+    )
+    assert sum(claimed) == len(records)
+
+    claimed_again = await asyncio.gather(
+        *(
+            database.tool_calls.claim_for_execution(record.id)
+            for record in records
+        )
+    )
+    assert not any(claimed_again)
     await database.close()
 
 

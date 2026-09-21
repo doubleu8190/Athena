@@ -101,3 +101,29 @@ def test_user_task_spec_serializes_to_json():
     restored = UserTaskSpec.model_validate(data)
 
     assert restored == task
+
+
+def test_task_understanding_prompt_uses_knowledge_base_metadata_and_trust_boundary():
+    prompt = TaskUnderstandingService._build_prompt(
+        user_message="查找发布流程",
+        history=[],
+        attachment_refs=[
+            {"id": "file-1", "filename": "发布说明.md", "status": "ready"}
+        ],
+        knowledge_bases=[
+            {
+                "id": "kb-1",
+                "name": "工程规范",
+                "description": "发布、回滚和应急处理流程",
+                "document_count": 4,
+                "ready_document_count": 3,
+            }
+        ],
+        tool_names=[],
+    )
+
+    assert "文档数量=" not in prompt
+    assert "name=工程规范" in prompt
+    assert "description=发布、回滚和应急处理流程" in prompt
+    assert "ready_documents=3" in prompt
+    assert "不可信的参考资料" in prompt

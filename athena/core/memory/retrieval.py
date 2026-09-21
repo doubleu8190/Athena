@@ -17,6 +17,8 @@ from athena.config.settings import Settings
 from athena.core.llm.tokens import TokenCounter
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.contracts import MemoryRetrievalRequest
+from athena.core.retrieval import RetrievalCandidate, RetrievalRunRequest
+from athena.core.retrieval.ports import RetrievalTraceWriter
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -38,6 +40,10 @@ class MemoryRetrievalResult:
     native_score: float | None = None
     fused_score: float | None = None
     rerank_score: float | None = None
+    native_rank: int | None = None
+    fused_rank: int | None = None
+    retrieval_run_id: str | None = None
+    filter_reason: str | None = None
     exact_match: bool = False
 
 
@@ -51,6 +57,7 @@ class HybridMemoryRetriever:
         self,
         memory_service: LongTermMemoryService,
         settings: Settings,
+        trace_writer: RetrievalTraceWriter,
     ) -> None:
         """
 
@@ -65,15 +72,15 @@ class HybridMemoryRetriever:
         """
         self._memory = memory_service
         self._settings = settings
+        self._trace_writer = trace_writer
         self._min_score = self._settings.memory_min_score
         self._top_k = self._settings.retrieval_top_k
-        self._candidate_k = getattr(
-            self._settings, "retrieval_candidate_k", self._top_k * 2
-        )
-        self._rerank_k = getattr(self._settings, "retrieval_rerank_k", self._top_k)
-        self._context_k = getattr(self._settings, "retrieval_context_k", self._top_k)
-        self._vector_min_score = getattr(
-            self._settings, "memory_vector_min_score", self._min_score
+        self._candidate_k = self._settings.retrieval_candidate_k or self._top_k * 2
+
+        self._rerank_k = self._settings.retrieval_rerank_k or self._top_k
+        self._context_k = self._settings.retrieval_context_k or self._top_k
+        self._vector_min_score = (
+            self._settings.memory_vector_min_score or self._min_score
         )
         self._vector_weight = self._settings.vector_weight
         self._keyword_weight = self._settings.keyword_weight
@@ -96,6 +103,28 @@ class HybridMemoryRetriever:
         type 等），产线不传即全库检索。
         """
         started = time.perf_counter()
+        run_id: str | None = None
+        if self._trace_writer is not None:
+            try:
+                run_id = await self._trace_writer.start_run(
+                    RetrievalRunRequest(
+                        query=query,
+                        scope="memory",
+                        config={
+                            "candidate_k": self._candidate_k,
+                            "rerank_k": self._rerank_k,
+                            "context_k": self._context_k,
+                            "vector_min_score": self._vector_min_score,
+                            "vector_weight": self._vector_weight,
+                            "keyword_weight": self._keyword_weight,
+                            "rrf_k": self._rrf_k,
+                        },
+                        index_generation="memory/current",
+                    )
+                )
+            except Exception as exc:
+                logger.warning("retrieval_trace_start_failed", error=str(exc))
+
         # 并发执行向量和关键词路线，随后统一使用 RRF 合并两路排名证据。
         keyword_task = asyncio.create_task(self._keyword_search(query, filter_params))
         raw_vector_task = asyncio.create_task(self._vector_search(query, filter_params))
@@ -111,7 +140,7 @@ class HybridMemoryRetriever:
         )
 
         fused = self._reciprocal_rank_fusion(
-            vector_results,
+            [result for result in vector_results if result.filter_reason is None],
             keyword_results,
         )
 
@@ -126,8 +155,68 @@ class HybridMemoryRetriever:
                 x.memory_id,
             )
         )
+        for rank, result in enumerate(fused, 1):
+            result.fused_rank = rank
         selected = fused[: self._rerank_k][: self._context_k]
+        if run_id is not None:
+            try:
+                raw_candidates = [
+                    self._trace_candidate(result, provider="vector", stage="native")
+                    for result in vector_results
+                ]
+                raw_candidates.extend(
+                    self._trace_candidate(result, provider="keyword", stage="native")
+                    for result in keyword_results
+                )
+                selected_ids = {result.memory_id for result in selected}
+                fused_candidates = [
+                    self._trace_candidate(
+                        result,
+                        provider="fusion",
+                        stage="fused",
+                        selected_for_result=result.memory_id in selected_ids,
+                    )
+                    for result in fused
+                ]
+                await self._trace_writer.record_candidates(
+                    run_id, [*raw_candidates, *fused_candidates]
+                )
+                await self._trace_writer.complete_run(
+                    run_id,
+                    candidate_count=len(fused),
+                    selected_count=len(selected),
+                )
+            except Exception as exc:
+                logger.warning("retrieval_trace_record_failed", error=str(exc))
+        for result in selected:
+            result.retrieval_run_id = run_id
         return selected
+
+    @staticmethod
+    def _trace_candidate(
+        result: MemoryRetrievalResult,
+        *,
+        provider: str,
+        stage: str,
+        selected_for_result: bool = False,
+    ) -> RetrievalCandidate:
+        """把记忆检索结果转换为可持久化的候选轨迹。"""
+        metadata = result.metadata
+        return RetrievalCandidate(
+            provider=provider,
+            stage=stage,
+            source_type="memory_revision",
+            source_id=result.memory_id,
+            native_rank=result.native_rank,
+            native_score=result.native_score,
+            fused_rank=result.fused_rank if stage == "fused" else None,
+            fused_score=result.fused_score if stage == "fused" else None,
+            logical_source_id=metadata.get("logical_memory_id"),
+            revision_id=result.memory_id,
+            filter_reason=result.filter_reason,
+            selected_for_result=selected_for_result,
+            metadata={"source": result.source, "exact_match": result.exact_match},
+        )
 
     async def _vector_search(
         self,
@@ -148,22 +237,26 @@ class HybridMemoryRetriever:
 
         out: list[MemoryRetrievalResult] = []
         for i, r in enumerate(results, 1):
+            score = r.get("score")
             out.append(
                 MemoryRetrievalResult(
                     content=r["content"],
                     source="vector",
                     metadata=r.get("metadata", {}),
-                    native_score=r.get("score"),
+                    native_score=score,
+                    native_rank=i,
                     memory_id=r.get("id", str(i)),
+                    filter_reason=(
+                        None
+                        if (score or 0.0) >= self._vector_min_score
+                        else "below_vector_min_score"
+                    ),
                 )
             )
         # score 为原始相似度 1-dist/2（越大越相似），这里显式按 score 降序。
         out.sort(key=lambda x: x.native_score or 0.0, reverse=True)
-        out = [
-            result
-            for result in out
-            if (result.native_score or 0.0) >= self._vector_min_score
-        ]
+        for rank, result in enumerate(out, 1):
+            result.native_rank = rank
         return out
 
     async def _keyword_search(
@@ -199,6 +292,7 @@ class HybridMemoryRetriever:
                     source="keyword",
                     metadata=r.get("metadata", {}),
                     native_score=r.get("score"),
+                    native_rank=i,
                     exact_match=self._is_exact_match(query, r["content"]),
                     memory_id=r.get("id", str(i)),
                 )
@@ -207,6 +301,8 @@ class HybridMemoryRetriever:
         # （越大越相关），keyword_weight 统一在 RRF 融合处生效。上游已
         # ORDER BY rank(=bm25 升序) 返回，这里显式按 score 降序固化不变量。
         out.sort(key=lambda x: x.native_score or 0.0, reverse=True)
+        for rank, result in enumerate(out, 1):
+            result.native_rank = rank
         return out
 
     def _reciprocal_rank_fusion(
@@ -333,7 +429,7 @@ class HybridMemoryRetriever:
             freq = 1.0 + min(_MEM_FREQ_CAP, math.log1p(count) * _MEM_FREQ_K)
 
         recency = 1.0
-        last = metadata.get("last_accessed")
+        last = metadata.get("last_accessed_at")
         if last:
             try:
                 # 当记忆刚刚被访问（days_since = 0）时，recency = 1.0 + _MEM_RECENCY_M，获得最大加成。
@@ -395,10 +491,15 @@ class MemoryRetrievalService:
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))
             return []
-        return self._select_results(results[: request.limit])
+        return self._select_results(
+            results[: request.limit], record_access=request.record_access
+        )
 
     def _select_results(
-        self, results: list[MemoryRetrievalResult]
+        self,
+        results: list[MemoryRetrievalResult],
+        *,
+        record_access: bool = True,
     ) -> list[MemoryRetrievalResult]:
         """按 token 预算筛选结果，并记录实际注入上下文的记忆访问。
 
@@ -426,5 +527,20 @@ class MemoryRetrievalService:
             selected.append(result)
         if not selected:
             return []
-        self._manager.record_selected_access(selected_ids)
+        if record_access:
+            self._manager.record_selected_access(selected_ids)
         return selected
+
+    def record_selected_access(self, memory_ids: Iterable[str]) -> None:
+        """记录最终进入上下文的记忆访问。
+
+        参数：
+            memory_ids: 已通过最终上下文预算的记忆 revision ID。
+
+        返回值：
+            None。
+
+        异常：
+            底层记忆服务不支持访问统计时传播属性错误。
+        """
+        self._manager.record_selected_access(memory_ids)

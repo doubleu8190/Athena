@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from athena.infrastructure.sqlite.engine import get_core_session
 from athena.infrastructure.sqlite.models import StepModel, ToolCallModel
@@ -21,29 +21,30 @@ class ToolCallRepository:
 
     async def save(self, tool_call: ToolCallRecord) -> None:
         """保存工具调用记录。"""
+        step_id = tool_call.step_id or f"{tool_call.id}:step"
         async with get_core_session() as session:
-            await session.execute(text("BEGIN IMMEDIATE"))
-            try:
-                if await session.get(ToolCallModel, tool_call.id) is not None:
-                    await session.commit()
-                    return
-                step_id = tool_call.step_id or f"{tool_call.id}:step"
-                existing_step = await session.get(StepModel, step_id)
-                if existing_step is None:
-                    session.add(
-                        StepModel(
-                            id=step_id,
-                            session_id=tool_call.session_id,
-                            run_id=tool_call.run_id or tool_call.session_id,
-                            step_number=tool_call.step_number,
-                            step_type="tool_call",
-                            status=tool_call.status.value,
-                            started_at=tool_call.started_at.isoformat(),
-                            duration_ms=tool_call.duration_ms,
-                        )
+            async with session.begin():
+                # 先写入步骤，再写入工具调用。两个 INSERT 都只忽略主键冲突，
+                # 避免“先 SELECT 再 INSERT”在 WAL 下把读事务升级为写事务。
+                # 多个并行工具调用因此可以让 SQLite 自己串行化短写事务，
+                # 不需要手动执行 BEGIN IMMEDIATE 抢占整个数据库。
+                await session.execute(
+                    sqlite_insert(StepModel)
+                    .values(
+                        id=step_id,
+                        session_id=tool_call.session_id,
+                        run_id=tool_call.run_id or tool_call.session_id,
+                        step_number=tool_call.step_number,
+                        step_type="tool_call",
+                        status=tool_call.status.value,
+                        started_at=tool_call.started_at.isoformat(),
+                        duration_ms=tool_call.duration_ms,
                     )
-                session.add(
-                    ToolCallModel(
+                    .on_conflict_do_nothing(index_elements=[StepModel.id])
+                )
+                await session.execute(
+                    sqlite_insert(ToolCallModel)
+                    .values(
                         id=tool_call.id,
                         session_id=tool_call.session_id,
                         step_id=step_id,
@@ -64,15 +65,8 @@ class ToolCallRepository:
                         error_message=tool_call.error_message,
                         error_stack=tool_call.error_stack,
                     )
+                    .on_conflict_do_nothing(index_elements=[ToolCallModel.id])
                 )
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                if await session.get(ToolCallModel, tool_call.id) is None:
-                    raise
-            except Exception:
-                await session.rollback()
-                raise
 
     async def get(self, tool_call_id: str) -> ToolCallRecord | None:
         """按稳定账本 ID 查询一次工具调用。"""
@@ -105,8 +99,7 @@ class ToolCallRepository:
             return
         async with get_core_session() as session:
             async with session.begin():
-                row = await session.get(ToolCallModel, tool_call_id)
-                await session.execute(
+                changed = await session.execute(
                     update(ToolCallModel)
                     .where(
                         ToolCallModel.id == tool_call_id,
@@ -114,7 +107,15 @@ class ToolCallRepository:
                     )
                     .values(**values)
                 )
-                if row is not None and row.step_id:
+                if changed.rowcount != 1:
+                    return
+                step_id = await session.scalar(
+                    select(ToolCallModel.step_id).where(
+                        ToolCallModel.id == tool_call_id,
+                        ToolCallModel.deleted_time.is_(None),
+                    )
+                )
+                if step_id:
                     step_values = {
                         "status": updates.get("status"),
                         "completed_at": updates.get("completed_at"),
@@ -129,7 +130,7 @@ class ToolCallRepository:
                     if step_values:
                         await session.execute(
                             update(StepModel)
-                            .where(StepModel.id == row.step_id)
+                            .where(StepModel.id == step_id)
                             .values(**step_values)
                         )
 
@@ -144,17 +145,7 @@ class ToolCallRepository:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
         async with get_core_session() as session:
-            await session.execute(text("BEGIN IMMEDIATE"))
-            try:
-                row = await session.scalar(
-                    select(ToolCallModel).where(
-                        ToolCallModel.id == tool_call_id,
-                        ToolCallModel.deleted_time.is_(None),
-                    )
-                )
-                if row is None or row.status != "pending":
-                    await session.commit()
-                    return False
+            async with session.begin():
                 started_at = datetime.now().isoformat()
                 changed = await session.execute(
                     update(ToolCallModel)
@@ -166,19 +157,20 @@ class ToolCallRepository:
                     .values(status="running", started_at=started_at)
                 )
                 if changed.rowcount != 1:
-                    await session.rollback()
                     return False
-                if row.step_id:
+                step_id = await session.scalar(
+                    select(ToolCallModel.step_id).where(
+                        ToolCallModel.id == tool_call_id,
+                        ToolCallModel.deleted_time.is_(None),
+                    )
+                )
+                if step_id:
                     await session.execute(
                         update(StepModel)
-                        .where(StepModel.id == row.step_id)
+                        .where(StepModel.id == step_id)
                         .values(status="running", started_at=started_at)
                     )
-                await session.commit()
                 return True
-            except Exception:
-                await session.rollback()
-                raise
 
     async def mark_running_unknown(self) -> int:
         """把进程重启前未完成的工具尝试标记为未知。
@@ -191,19 +183,7 @@ class ToolCallRepository:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
         async with get_core_session() as session:
-            await session.execute(text("BEGIN IMMEDIATE"))
-            try:
-                rows = (
-                    await session.execute(
-                        select(ToolCallModel.id, ToolCallModel.step_id).where(
-                            ToolCallModel.status == "running",
-                            ToolCallModel.deleted_time.is_(None),
-                        )
-                    )
-                ).all()
-                if not rows:
-                    await session.commit()
-                    return 0
+            async with session.begin():
                 changed = await session.execute(
                     update(ToolCallModel)
                     .where(
@@ -212,18 +192,21 @@ class ToolCallRepository:
                     )
                     .values(status="unknown")
                 )
-                for _, step_id in rows:
-                    if step_id:
-                        await session.execute(
-                            update(StepModel)
-                            .where(StepModel.id == step_id)
-                            .values(status="unknown")
-                        )
-                await session.commit()
-                return int(changed.rowcount or 0)
-            except Exception:
-                await session.rollback()
-                raise
+                count = int(changed.rowcount or 0)
+                if count:
+                    # UPDATE 先取得写锁，再在同一事务内同步步骤状态，
+                    # 避免“先 SELECT 再 UPDATE”产生读写升级冲突。
+                    step_ids = select(ToolCallModel.step_id).where(
+                        ToolCallModel.status == "unknown",
+                        ToolCallModel.deleted_time.is_(None),
+                        ToolCallModel.step_id.is_not(None),
+                    )
+                    await session.execute(
+                        update(StepModel)
+                        .where(StepModel.id.in_(step_ids))
+                        .values(status="unknown")
+                    )
+                return count
 
     async def query(
         self, session_id: str, status: str | None = None, include_deleted: bool = False

@@ -72,3 +72,4 @@ class MemoryRetrievalRequest(BaseModel):
 
     query: str
     limit: int = Field(default=8, ge=1, le=100)
+    record_access: bool = True

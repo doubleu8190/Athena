@@ -75,6 +75,7 @@ class MemoryContextProvider:
         request = MemoryRetrievalRequest(
             query=query,
             limit=self._limit,
+            record_access=False,
         )
         try:
             async with asyncio.timeout(self._timeout_seconds):
@@ -104,6 +105,20 @@ class MemoryContextProvider:
             duration_ms=round((time.perf_counter() - started) * 1000),
         )
 
+    def record_selected_access(self, memory_ids: list[str]) -> None:
+        """把最终上下文中的记忆 ID 转交给记忆检索服务。
+
+        参数：
+            memory_ids: 通过全局上下文预算的记忆 revision ID。
+
+        返回值：
+            None。
+
+        异常：
+            记忆检索服务写入访问统计失败时传播底层异常。
+        """
+        self._memory_retrieval.record_selected_access(memory_ids)
+
     @staticmethod
     def _to_context_item(result: MemoryRetrievalResult) -> ContextItem:
         """将记忆检索结果映射为保留证据元数据的上下文条目。
@@ -127,10 +142,17 @@ class MemoryContextProvider:
                 "type",
                 "validity_status",
                 "revision",
+                "logical_memory_id",
             )
             if result.metadata.get(key) not in (None, "")
         }
         metadata["retrieval_source"] = result.source
+        if result.retrieval_run_id:
+            metadata["retrieval_run_id"] = result.retrieval_run_id
+        if result.native_rank is not None:
+            metadata["native_rank"] = result.native_rank
+        if result.fused_rank is not None:
+            metadata["fused_rank"] = result.fused_rank
         score = next(
             (
                 value
@@ -148,5 +170,6 @@ class MemoryContextProvider:
             content=result.content,
             source_id=result.memory_id,
             score=score,
+            retrieval_run_id=result.retrieval_run_id,
             metadata=metadata,
         )

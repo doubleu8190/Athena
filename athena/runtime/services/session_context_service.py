@@ -95,7 +95,7 @@ class SessionContextService:
             role=MessageRole.SYSTEM,
             content=f"[对话历史摘要]\n{session.compression_summary}",
             run_id=f"summary:{session_id}",
-            type="conversation_summary",
+            message_type="conversation_summary",
             timestamp=datetime.now(),
         )
         logger.info(

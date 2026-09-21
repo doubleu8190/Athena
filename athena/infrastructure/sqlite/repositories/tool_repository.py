@@ -37,7 +37,7 @@ class ToolRepository:
                 existing = await session.get(ToolModel, tool_name)
                 if existing is not None:
                     existing.description = description
-                    existing.parameters_json = params_json
+                    existing.parameters_schema_json = params_json
                     existing.execution_mode = execution_mode
                     existing.server_name = server_name
                     existing.remote_name = remote_name
@@ -50,7 +50,7 @@ class ToolRepository:
                             server_name=server_name,
                             remote_name=remote_name,
                             description=description,
-                            parameters_json=params_json,
+                            parameters_schema_json=params_json,
                             risk_level=risk_level,
                             require_approval=int(require_approval),
                             enabled=int(enabled),

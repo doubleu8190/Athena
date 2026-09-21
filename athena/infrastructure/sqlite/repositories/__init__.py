@@ -26,6 +26,7 @@ from .repository_utils import (
     _json_loads_model,
     _now_iso,
 )
+from .retrieval_repository import RetrievalTraceRepository
 from .session_repository import SessionRepository
 from .tool_call_repository import ToolCallRepository
 from .tool_repository import ToolRepository
@@ -43,6 +44,7 @@ __all__ = [
     "SessionRepository",
     "ToolCallRepository",
     "ToolRepository",
+    "RetrievalTraceRepository",
     "_json_dumps",
     "_json_loads",
     "_json_loads_model",

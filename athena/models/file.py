@@ -55,6 +55,9 @@ class Attachment(BaseModel):
 
     属性：
         id: 附件唯一标识（时间戳 ID）。
+        logical_document_id: 同一逻辑文档跨上传版本保持不变的标识。
+        current_version_id: 当前解析和分块生成标识。
+        document_version: 当前逻辑文档版本序号。
         session_id: 所属会话 ID；知识库文档为空。
         knowledge_base_id: 所属知识库 ID；会话附件为空。
         message_id: 关联的消息 ID（可选）。
@@ -75,6 +78,9 @@ class Attachment(BaseModel):
     """
 
     id: str
+    logical_document_id: str | None = None
+    current_version_id: str | None = None
+    document_version: int = 1
     session_id: str | None = None
     knowledge_base_id: str | None = None
     message_id: str | None = None
@@ -137,6 +143,7 @@ class FileChunk(BaseModel):
     属性：
         id: 分块唯一标识。
         attachment_id: 所属附件 ID。
+        document_version_id: 所属解析版本 ID。
         ordinal: 分块序号（从 0 开始）。
         content: 分块文本内容。
         token_count: 估算的 token 数量。
@@ -148,6 +155,7 @@ class FileChunk(BaseModel):
     attachment_id: str
     ordinal: int
     content: str
+    document_version_id: str | None = None
     token_count: int = 0
     locator: FileLocator = Field(default_factory=FileLocator)
     metadata: FileMetadata = Field(default_factory=FileMetadata)

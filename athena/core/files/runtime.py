@@ -27,6 +27,8 @@ from chromadb import Collection, QueryResult
 from langchain_core.messages import HumanMessage
 
 from athena.config.settings import Settings
+from athena.core.retrieval import RetrievalCandidate, RetrievalRunRequest
+from athena.core.retrieval.ports import RetrievalTraceWriter
 from athena.core.files.extraction import ExtractedUnit, ExtractionContext
 from athena.core.files.attachment_serialization import attachment_to_payload
 from athena.core.files.registry import AdapterRegistry
@@ -90,6 +92,7 @@ class FileIntelligenceRuntime:
         *,
         settings: Settings,
         event_publisher: FileEventPublisher,
+        trace_writer: RetrievalTraceWriter,
     ) -> None:
         """
 
@@ -115,6 +118,7 @@ class FileIntelligenceRuntime:
         self.primary_llm = primary_llm
         self.secondary_llm = secondary_llm
         self._events = event_publisher
+        self._trace_writer = trace_writer
         self._chroma_client: ClientAPI | None = None
         self._collection: Collection | None = None
         self._knowledge_document_locks: dict[str, asyncio.Lock] = {}
@@ -218,7 +222,9 @@ class FileIntelligenceRuntime:
                 if dependency.get("source") == path.name:
                     dependency["source"] = attachment.filename
             chunks = self._chunk_units(attachment.id, result.units)
-            await self.repository.replace_chunks(attachment.id, chunks)
+            document_version_id = await self.repository.replace_chunks(
+                attachment.id, chunks
+            )
             await self.repository.replace_code_index(
                 attachment.id, result.symbols, result.dependencies
             )
@@ -242,6 +248,7 @@ class FileIntelligenceRuntime:
                 "chunk_count": len(chunks),
                 "symbol_count": len(result.symbols),
                 "dependency_count": len(result.dependencies),
+                "document_version_id": document_version_id,
             }
             await self.repository.update_attachment(attachment.id, metadata=metadata)
             return metadata
@@ -277,6 +284,8 @@ class FileIntelligenceRuntime:
                             metadatas=[
                                 {
                                     "attachment_id": attachment_id,
+                                    "document_version_id": chunk.document_version_id or "",
+                                    "logical_document_id": attachment.logical_document_id or attachment.id,
                                     "ordinal": chunk.ordinal,
                                     "locator_json": json.dumps(
                                         chunk.locator.model_dump(
@@ -671,6 +680,18 @@ class FileIntelligenceRuntime:
             SQLite 读取失败时向上抛出；向量检索失败时降级为关键词结果。
         """
         limit = min(max(limit, 1), 50)
+        run_id: str | None = None
+        try:
+            run_id = await self._trace_writer.start_run(
+                RetrievalRunRequest(
+                    query=query,
+                    scope="knowledge",
+                    config={"limit": limit, "fusion": "rrf", "rrf_k": 60},
+                    index_generation="file_chunks/current",
+                )
+            )
+        except Exception as exc:
+            logger.warning("retrieval_trace_start_failed", error=str(exc))
         keyword = await self.repository.search_knowledge_chunks(query, limit)
         vector: list[dict[str, Any]] = []
         if self._collection is not None:
@@ -689,10 +710,78 @@ class FileIntelligenceRuntime:
             for document in await self.repository.list_global_knowledge_documents()
             if document.status == AttachmentStatus.READY
         }
+        vector_before_filter = list(vector)
         vector = [
             item for item in vector if str(item.get("attachment_id", "")) in live_ids
         ]
-        return self._fuse_file_results(keyword, vector, limit)
+        fused = self._fuse_file_results(keyword, vector, limit)
+        if run_id is not None:
+            try:
+                raw_candidates = [
+                    RetrievalCandidate(
+                        provider="keyword",
+                        stage="native",
+                        source_type="chunk",
+                        source_id=chunk.id,
+                        native_rank=rank,
+                        native_score=chunk.native_score,
+                        document_version_id=chunk.document_version_id,
+                        metadata={"attachment_id": chunk.attachment_id},
+                    )
+                    for rank, chunk in enumerate(keyword, 1)
+                ]
+                raw_candidates.extend(
+                    RetrievalCandidate(
+                        provider="vector",
+                        stage="native",
+                        source_type="chunk",
+                        source_id=str(item.get("id", "")),
+                        native_rank=rank,
+                        native_score=item.get("native_score"),
+                        document_version_id=item.get("document_version_id"),
+                        filter_reason=(
+                            None
+                            if str(item.get("attachment_id", "")) in live_ids
+                            else "document_not_live"
+                        ),
+                        metadata={
+                            "attachment_id": item.get("attachment_id", ""),
+                        },
+                    )
+                    for rank, item in enumerate(vector_before_filter, 1)
+                )
+                fused_candidates = [
+                    RetrievalCandidate(
+                        provider="fusion",
+                        stage="fused",
+                        source_type="chunk",
+                        source_id=str(item.get("id", "")),
+                        fused_rank=rank,
+                        fused_score=item.get("score"),
+                        document_version_id=item.get("document_version_id"),
+                        selected_for_result=True,
+                        metadata={
+                            "attachment_id": item.get("attachment_id", ""),
+                            "keyword_rank": item.get("keyword_rank"),
+                            "vector_rank": item.get("vector_rank"),
+                        },
+                    )
+                    for rank, item in enumerate(fused, 1)
+                ]
+                await self._trace_writer.record_candidates(
+                    run_id, [*raw_candidates, *fused_candidates]
+                )
+                await self._trace_writer.complete_run(
+                    run_id,
+                    candidate_count=len(fused),
+                    selected_count=len(fused),
+                )
+            except Exception as exc:
+                logger.warning("retrieval_trace_record_failed", error=str(exc))
+        if run_id is not None:
+            for item in fused:
+                item["retrieval_run_id"] = run_id
+        return fused
 
     def _failed_file_search_response(
         self,
@@ -802,6 +891,8 @@ class FileIntelligenceRuntime:
                     else "{}"
                 ).model_dump(mode="json", exclude_none=True),
                 "attachment_id": (metadata or {}).get("attachment_id", ""),
+                "document_version_id": (metadata or {}).get("document_version_id", ""),
+                "logical_document_id": (metadata or {}).get("logical_document_id", ""),
                 "score": max(0.0, 1 - float(distance) / 2),
                 "native_score": max(0.0, 1 - float(distance) / 2),
             }
@@ -839,8 +930,10 @@ class FileIntelligenceRuntime:
                 "id": chunk.id,
                 "content": chunk.content,
                 "attachment_id": chunk.attachment_id,
+                "document_version_id": chunk.document_version_id,
                 "locator": chunk.locator.model_dump(mode="json", exclude_none=True),
                 "native_score": chunk.native_score,
+                "keyword_rank": rank,
             }
         for rank, item in enumerate(vector, 1):
             scores[item["id"]] = scores.get(item["id"], 0) + 1 / (60 + rank)
@@ -850,12 +943,14 @@ class FileIntelligenceRuntime:
                 **item,
                 "keyword_native_score": previous.get("native_score"),
                 "vector_native_score": item.get("native_score"),
+                "vector_rank": rank,
             }
         ordered = sorted(
             values.values(), key=lambda item: scores[item["id"]], reverse=True
         )[:limit]
-        for item in ordered:
+        for rank, item in enumerate(ordered, 1):
             item["score"] = scores[item["id"]]
+            item["fused_rank"] = rank
         return ordered
 
     async def extract_table(self, session_id: str, file_id: str) -> dict[str, Any]:

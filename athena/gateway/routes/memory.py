@@ -130,6 +130,18 @@ async def get_memory(memory_id: str, request: Request) -> dict[str, Any]:
     return result
 
 
+@router.get("/{memory_id}/revisions")
+async def list_memory_revisions(
+    memory_id: str, request: Request
+) -> list[dict[str, Any]]:
+    """读取记忆的完整不可变 revision 链。"""
+    service = await _get_memory_service(request)
+    revisions = await service.list_memory_revisions(memory_id)
+    if not revisions:
+        raise HTTPException(status_code=404, detail=ErrorDetail.MEMORY_NOT_FOUND)
+    return revisions
+
+
 @router.delete("/{memory_id}")
 async def delete_memory(memory_id: str, request: Request) -> dict[str, str]:
     """删除记忆条目."""

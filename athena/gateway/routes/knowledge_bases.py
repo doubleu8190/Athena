@@ -91,6 +91,9 @@ async def _store_document(
         stored = await runtime.file_runtime.storage.save_stream(chunks())
     except ValueError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
+    previous = await runtime.db.files.find_latest_knowledge_document(
+        knowledge_base_id, filename
+    )
     return await runtime.db.files.create_attachment(
         knowledge_base_id=knowledge_base_id,
         filename=filename,
@@ -98,6 +101,7 @@ async def _store_document(
         size_bytes=stored.size_bytes,
         sha256=stored.sha256,
         storage_key=stored.storage_key,
+        logical_document_id=(previous.logical_document_id if previous else None),
     )
 
 
@@ -242,3 +246,21 @@ async def delete_document(
         raise HTTPException(status_code=404, detail="知识库文档不存在")
     await runtime.file_runtime.cleanup_unreferenced_blobs()
     return {"status": "deleted", "attachment_id": attachment_id}
+
+
+@router.get("/{knowledge_base_id}/documents/{attachment_id}/versions")
+async def list_document_versions(
+    knowledge_base_id: str, attachment_id: str, request: Request
+) -> list[dict[str, object]]:
+    """列出指定逻辑文档的全部上传版本。"""
+    runtime = get_runtime_container(request)
+    await _require_knowledge_base(runtime, knowledge_base_id)
+    versions = await runtime.db.files.list_document_versions(
+        attachment_id, knowledge_base_id
+    )
+    if not versions:
+        raise HTTPException(status_code=404, detail="知识库文档不存在")
+    return [
+        attachment_to_payload(version, include_metadata=True)
+        for version in versions
+    ]

@@ -180,8 +180,8 @@ async def test_only_selected_context_records_access(mm: LongTermMemoryService):
     st = mm._access_stats.get(mid)
     assert st is not None
     assert st.count == 1
-    # last_accessed 必须可解析为 isoformat
-    datetime.fromisoformat(st.last_accessed)
+    # last_accessed_at 必须可解析为 isoformat
+    datetime.fromisoformat(st.last_accessed_at)
 
 
 @pytest.mark.asyncio
@@ -200,12 +200,12 @@ async def test_flush_updates_sqlite_and_chroma(
     row = await _get_row(mid)
     assert row is not None
     assert row.access_count == 2
-    assert row.last_accessed is not None
+    assert row.last_accessed_at is not None
 
     # Chroma 元数据同步
     meta = vector_store.collection._items[mid]["metadata"]
     assert meta["access_count"] == 2
-    assert meta["last_accessed"] is not None
+    assert meta["last_accessed_at"] is not None
     # 访问热度不会改变事实有效期。
     assert datetime.fromisoformat(meta["expires_at"]) > datetime.now() + timedelta(days=89)
 
@@ -389,7 +389,7 @@ async def test_keyword_search_returns_fresh_access_fields(mm: LongTermMemoryServ
     assert results
     assert results[0]["id"] == mid
     assert results[0]["metadata"]["access_count"] == 1
-    assert results[0]["metadata"]["last_accessed"] is not None
+    assert results[0]["metadata"]["last_accessed_at"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -456,13 +456,13 @@ async def test_memorability_scoring():
 
     now = datetime.now().isoformat()
     hot = mgr._calculate_memorability(
-        {"access_count": 50, "last_accessed": now}
+        {"access_count": 50, "last_accessed_at": now}
     )
     assert hot == pytest.approx(2.10, abs=0.01)
 
     old = (datetime.now() - timedelta(days=10)).isoformat()
     stale = mgr._calculate_memorability(
-        {"access_count": 5, "last_accessed": old}
+        {"access_count": 5, "last_accessed_at": old}
     )
     assert stale == pytest.approx(1.27, abs=0.01)
 
@@ -476,7 +476,7 @@ async def test_retrieve_ranks_hot_memory_higher():
         "metadata": {
             "created_at": now,
             "access_count": 50,
-            "last_accessed": now,
+            "last_accessed_at": now,
         },
         "score": 1.0,
     }

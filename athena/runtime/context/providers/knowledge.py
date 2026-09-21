@@ -97,11 +97,17 @@ class KnowledgeContextProvider:
                 ContextItem(
                     provider=self.name,
                     content=str(result.get("content", "")),
-                    source_id=document.id,
+                    source_id=str(result.get("id") or document.id),
                     title=document.filename,
                     locator=result.get("locator", {}),
                     score=result.get("score"),
-                    metadata={"knowledge_base_id": document.knowledge_base_id},
+                    retrieval_run_id=result.get("retrieval_run_id"),
+                    metadata={
+                        "knowledge_base_id": document.knowledge_base_id,
+                        "document_id": document.id,
+                        "chunk_id": result.get("id"),
+                        "document_version_id": result.get("document_version_id"),
+                    },
                 )
             )
         return ProviderResult(

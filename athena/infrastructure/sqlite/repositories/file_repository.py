@@ -11,7 +11,7 @@ from datetime import datetime
 import re
 from typing import Any, Iterable, cast
 
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import SQLAlchemyError
@@ -123,9 +123,9 @@ class FileRepository:
                     )
                 )
                 await session.execute(
-                    delete(FileChunkModel).where(
-                        FileChunkModel.attachment_id.in_(attachment_ids)
-                    )
+                    update(FileChunkModel)
+                    .where(FileChunkModel.attachment_id.in_(attachment_ids))
+                    .values(is_current=0)
                 )
                 await session.execute(
                     delete(FileArtifactModel).where(
@@ -176,6 +176,7 @@ class FileRepository:
         size_bytes: int,
         sha256: str,
         storage_key: str,
+        logical_document_id: str | None = None,
     ) -> Attachment:
         """创建会话附件或知识库文档记录（上传完成后调用）。
 
@@ -195,8 +196,24 @@ class FileRepository:
         if (session_id is None) == (knowledge_base_id is None):
             raise ValueError("附件必须且只能属于一个会话或知识库")
         now = _now().isoformat()
+        attachment_id = generate_time_id()
+        document_version = 1
+        if logical_document_id is not None and knowledge_base_id is not None:
+            async with get_core_session() as session:
+                latest_version = (
+                    await session.execute(
+                        select(func.max(AttachmentModel.document_version)).where(
+                            AttachmentModel.logical_document_id == logical_document_id,
+                            AttachmentModel.knowledge_base_id == knowledge_base_id,
+                        )
+                    )
+                ).scalar_one()
+            document_version = int(latest_version or 0) + 1
         row = AttachmentModel(
-            id=generate_time_id(),
+            id=attachment_id,
+            logical_document_id=logical_document_id or attachment_id,
+            current_version_id=None,
+            document_version=document_version,
             session_id=session_id,
             knowledge_base_id=knowledge_base_id,
             message_id=message_id,
@@ -312,7 +329,95 @@ class FileRepository:
                             AttachmentModel.knowledge_base_id.is_not(None),
                             AttachmentModel.deleted_time.is_(None),
                         )
-                        .order_by(AttachmentModel.created_at.asc())
+                        .order_by(
+                            AttachmentModel.document_version.desc(),
+                            AttachmentModel.created_at.desc(),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        # 同一 logical document 只暴露当前版本；历史版本仍保留在数据库中。
+        latest_by_logical_id: dict[str, AttachmentModel] = {}
+        for row in rows:
+            latest_by_logical_id.setdefault(row.logical_document_id, row)
+        return [
+            _row_to_attachment(row)
+            for row in sorted(
+                latest_by_logical_id.values(), key=lambda item: item.created_at
+            )
+        ]
+
+    async def find_latest_knowledge_document(
+        self, knowledge_base_id: str, filename: str
+    ) -> Attachment | None:
+        """按知识库和文件名找到当前逻辑文档版本。
+
+        参数：
+            knowledge_base_id: 知识库唯一标识。
+            filename: 规范化后的文件名。
+
+        返回值：
+            当前未删除文档；不存在时返回 ``None``。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_core_session() as session:
+            row = (
+                await session.execute(
+                    select(AttachmentModel)
+                    .where(
+                        AttachmentModel.knowledge_base_id == knowledge_base_id,
+                        AttachmentModel.filename == filename,
+                        AttachmentModel.deleted_time.is_(None),
+                    )
+                    .order_by(
+                        AttachmentModel.document_version.desc(),
+                        AttachmentModel.created_at.desc(),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        return _row_to_attachment(row) if row is not None else None
+
+    async def list_document_versions(
+        self, attachment_id: str, knowledge_base_id: str
+    ) -> list[Attachment]:
+        """读取同一逻辑文档的全部上传版本。
+
+        参数：
+            attachment_id: 任意一个文档版本的附件 ID。
+            knowledge_base_id: 文档所属知识库 ID。
+
+        返回值：
+            按文档版本序号升序排列的附件版本，包含历史和已删除版本。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_core_session() as session:
+            target = (
+                await session.execute(
+                    select(AttachmentModel).where(
+                        AttachmentModel.id == attachment_id,
+                        AttachmentModel.knowledge_base_id == knowledge_base_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if target is None:
+                return []
+            rows = (
+                (
+                    await session.execute(
+                        select(AttachmentModel)
+                        .where(
+                            AttachmentModel.logical_document_id
+                            == target.logical_document_id,
+                            AttachmentModel.knowledge_base_id == knowledge_base_id,
+                        )
+                        .order_by(AttachmentModel.document_version.asc())
                     )
                 )
                 .scalars()
@@ -353,7 +458,7 @@ class FileRepository:
     async def list_knowledge_base_attachments(
         self, knowledge_base_id: str
     ) -> list[Attachment]:
-        """列出知识库中的全部未删除文档。
+        """列出知识库中每个逻辑文档的当前版本。
 
         参数：
             knowledge_base_id (str): 知识库唯一标识。
@@ -364,22 +469,12 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(AttachmentModel)
-                        .where(
-                            AttachmentModel.knowledge_base_id == knowledge_base_id,
-                            AttachmentModel.deleted_time.is_(None),
-                        )
-                        .order_by(AttachmentModel.created_at.asc())
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        return [_row_to_attachment(row) for row in rows]
+        documents = await self.list_global_knowledge_documents()
+        return [
+            document
+            for document in documents
+            if document.knowledge_base_id == knowledge_base_id
+        ]
 
     async def update_attachment(
         self, attachment_id: str, **values: Any
@@ -402,13 +497,13 @@ class FileRepository:
             "status",
             "error_message",
             "capabilities_json",
-            "metadata_json",
+            "parsed_metadata_json",
         }
         payload = {k: v for k, v in values.items() if k in allowed}
         if "capabilities" in values:
             payload["capabilities_json"] = _json_dumps(values["capabilities"])
         if "metadata" in values:
-            payload["metadata_json"] = _json_dumps(values["metadata"])
+            payload["parsed_metadata_json"] = _json_dumps(values["metadata"])
         payload["updated_at"] = _now().isoformat()
         async with get_core_session() as session:
             async with session.begin():
@@ -467,9 +562,9 @@ class FileRepository:
                     {"attachment_id": attachment_id},
                 )
                 await session.execute(
-                    delete(FileChunkModel).where(
-                        FileChunkModel.attachment_id == attachment_id
-                    )
+                    update(FileChunkModel)
+                    .where(FileChunkModel.attachment_id == attachment_id)
+                    .values(is_current=0)
                 )
                 await session.execute(
                     delete(FileArtifactModel).where(
@@ -509,7 +604,7 @@ class FileRepository:
         )
 
     async def delete_knowledge_base_derived_data(self, attachment_id: str) -> None:
-        """删除知识库文档的 SQLite 分块、FTS、产物和代码索引。
+        """撤下当前知识库分块并清理可重建的派生产物。
 
         参数：
             attachment_id：目标附件 ID。
@@ -528,12 +623,12 @@ class FileRepository:
                     ),
                     {"attachment_id": attachment_id},
                 )
-                for model in (
-                    FileChunkModel,
-                    FileArtifactModel,
-                    CodeSymbolModel,
-                    CodeDependencyModel,
-                ):
+                await session.execute(
+                    update(FileChunkModel)
+                    .where(FileChunkModel.attachment_id == attachment_id)
+                    .values(is_current=0)
+                )
+                for model in (FileArtifactModel, CodeSymbolModel, CodeDependencyModel):
                     await session.execute(
                         delete(model).where(model.attachment_id == attachment_id)
                     )
@@ -580,12 +675,12 @@ class FileRepository:
                     ),
                     {"attachment_id": attachment_id},
                 )
-                for model in (
-                    FileChunkModel,
-                    FileArtifactModel,
-                    CodeSymbolModel,
-                    CodeDependencyModel,
-                ):
+                await session.execute(
+                    update(FileChunkModel)
+                    .where(FileChunkModel.attachment_id == attachment_id)
+                    .values(is_current=0)
+                )
+                for model in (FileArtifactModel, CodeSymbolModel, CodeDependencyModel):
                     await session.execute(
                         delete(model).where(model.attachment_id == attachment_id)
                     )
@@ -663,7 +758,7 @@ class FileRepository:
                     out.setdefault(row.message_id, []).append(_row_to_attachment(row))
             return out
 
-    async def replace_chunks(self, attachment_id: str, chunks: list[FileChunk]) -> None:
+    async def replace_chunks(self, attachment_id: str, chunks: list[FileChunk]) -> str:
         """
 
         参数：
@@ -671,7 +766,7 @@ class FileRepository:
             chunks (list[FileChunk]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            None: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            str: 新建的不可变文档解析版本 ID。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
@@ -700,16 +795,25 @@ class FileRepository:
                         ),
                         {f"id{i}": value for i, value in enumerate(existing_ids)},
                     )
-                await session.execute(
-                    delete(FileChunkModel).where(
-                        FileChunkModel.attachment_id == attachment_id
+                version_id = generate_time_id()
+                attachment = await session.get(AttachmentModel, attachment_id)
+                if attachment is None:
+                    raise FileNotFoundError("附件不存在")
+                if existing_ids:
+                    await session.execute(
+                        update(FileChunkModel)
+                        .where(FileChunkModel.id.in_(existing_ids))
+                        .values(is_current=0)
                     )
-                )
+                attachment.current_version_id = version_id
+                attachment.updated_at = _now().isoformat()
                 for chunk in chunks:
                     session.add(
                         FileChunkModel(
                             id=chunk.id,
                             attachment_id=attachment_id,
+                            document_version_id=version_id,
+                            is_current=1,
                             ordinal=chunk.ordinal,
                             content=chunk.content,
                             token_count=chunk.token_count,
@@ -727,6 +831,7 @@ class FileRepository:
                             "attachment_id": attachment_id,
                         },
                     )
+        return version_id
 
     async def get_chunks(
         self, attachment_id: str, *, offset: int = 0, limit: int = 50
@@ -749,7 +854,15 @@ class FileRepository:
                 (
                     await session.execute(
                         select(FileChunkModel)
-                        .where(FileChunkModel.attachment_id == attachment_id)
+                        .join(
+                            AttachmentModel,
+                            AttachmentModel.id == FileChunkModel.attachment_id,
+                        )
+                        .where(
+                            FileChunkModel.attachment_id == attachment_id,
+                            FileChunkModel.is_current == 1,
+                            AttachmentModel.deleted_time.is_(None),
+                        )
                         .order_by(FileChunkModel.ordinal)
                         .offset(offset)
                         .limit(limit)
@@ -764,6 +877,7 @@ class FileRepository:
                     attachment_id=r.attachment_id,
                     ordinal=r.ordinal,
                     content=r.content,
+                    document_version_id=r.document_version_id,
                     token_count=r.token_count,
                     locator=_json_loads_model(
                         r.locator_json, FileLocator, FileLocator()
@@ -774,6 +888,49 @@ class FileRepository:
                 )
                 for r in rows
             ]
+
+    async def get_chunk_history(self, attachment_id: str) -> list[FileChunk]:
+        """读取附件的全部解析版本分块，包含当前版本和历史版本。
+
+        参数：
+            attachment_id: 附件唯一标识。
+
+        返回值：
+            按文档版本和分块序号排列的历史分块；当前调用方需要自行决定展示哪个版本。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_core_session() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(FileChunkModel)
+                        .where(FileChunkModel.attachment_id == attachment_id)
+                        .order_by(
+                            FileChunkModel.document_version_id,
+                            FileChunkModel.ordinal,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [
+            FileChunk(
+                id=row.id,
+                attachment_id=row.attachment_id,
+                ordinal=row.ordinal,
+                content=row.content,
+                document_version_id=row.document_version_id,
+                token_count=row.token_count,
+                locator=_json_loads_model(row.locator_json, FileLocator, FileLocator()),
+                metadata=_json_loads_model(
+                    row.metadata_json, FileMetadata, FileMetadata()
+                ),
+            )
+            for row in rows
+        ]
 
     async def search_chunks(
         self, attachment_id: str, query: str, limit: int = 10
@@ -825,7 +982,8 @@ class FileRepository:
                         (
                             await session.execute(
                                 select(FileChunkModel).where(
-                                    FileChunkModel.id.in_(chunk_ids)
+                                    FileChunkModel.id.in_(chunk_ids),
+                                    FileChunkModel.is_current == 1,
                                 )
                             )
                         )
@@ -843,6 +1001,7 @@ class FileRepository:
                             select(FileChunkModel)
                             .where(
                                 FileChunkModel.attachment_id == attachment_id,
+                                FileChunkModel.is_current == 1,
                                 FileChunkModel.content.contains(query),
                             )
                             .order_by(FileChunkModel.ordinal)
@@ -858,6 +1017,7 @@ class FileRepository:
                     attachment_id=r.attachment_id,
                     ordinal=r.ordinal,
                     content=r.content,
+                    document_version_id=r.document_version_id,
                     token_count=r.token_count,
                     locator=_json_loads_model(
                         r.locator_json, FileLocator, FileLocator()
@@ -892,13 +1052,22 @@ class FileRepository:
             rows = (
                 (
                     await session.execute(
-                        text("""SELECT c.* FROM file_chunk_fts f
+                        text("""SELECT c.*, bm25(f.file_chunk_fts) AS bm25_rank
+                        FROM file_chunk_fts f
                         JOIN file_chunks c ON c.id = f.chunk_id
                         JOIN attachments a ON a.id = c.attachment_id
                         WHERE file_chunk_fts MATCH :match_expr
                           AND a.knowledge_base_id IS NOT NULL
                           AND a.deleted_time IS NULL
                           AND a.status = 'ready'
+                          AND c.is_current = 1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM attachments newer
+                              WHERE newer.knowledge_base_id = a.knowledge_base_id
+                                AND newer.logical_document_id = a.logical_document_id
+                                AND newer.deleted_time IS NULL
+                                AND newer.document_version > a.document_version
+                          )
                         ORDER BY bm25(f.file_chunk_fts)
                         LIMIT :limit"""),
                         {"match_expr": match_expr, "limit": limit},
@@ -913,6 +1082,7 @@ class FileRepository:
                 attachment_id=row["attachment_id"],
                 ordinal=row["ordinal"],
                 content=row["content"],
+                document_version_id=row["document_version_id"],
                 token_count=row["token_count"],
                 locator=_json_loads_model(
                     row["locator_json"], FileLocator, FileLocator()
@@ -920,7 +1090,8 @@ class FileRepository:
                 metadata=_json_loads_model(
                     row["metadata_json"], FileMetadata, FileMetadata()
                 ),
-                native_score=1.0,
+                # 保留 SQLite FTS5 的原始 BM25 值；融合阶段使用 rank，不在这里伪造统一分数。
+                native_score=float(row["bm25_rank"]),
             )
             for row in rows
         ]

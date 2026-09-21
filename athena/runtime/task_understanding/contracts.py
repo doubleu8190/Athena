@@ -91,6 +91,7 @@ class ContextItem(BaseModel):
     provider: ContextRequirement
     content: str
     source_id: str | None = None
+    retrieval_run_id: str | None = None
     title: str | None = None
     locator: dict[str, Any] = Field(default_factory=dict)
     score: float | None = None

@@ -251,7 +251,7 @@ class StreamSnapshotModel(Base):
         Integer, default=0, comment="快照覆盖到的最后一个 Chunk 序号"
     )
     content: Mapped[str] = mapped_column(Text, default="", comment="当前完整内容")
-    content_length: Mapped[int] = mapped_column(
+    content_byte_length: Mapped[int] = mapped_column(
         Integer, default=0, comment="内容 UTF-8 字节长度"
     )
     status: Mapped[str] = mapped_column(
@@ -360,7 +360,9 @@ class MessageModel(Base):
     tool_name: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="工具名称"
     )
-    type: Mapped[str | None] = mapped_column(String, nullable=True, comment="消息类型")
+    message_type: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="消息类型"
+    )
     timestamp: Mapped[str] = mapped_column(String, comment="消息时间（UTC）")
     deleted_time: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="软删除时间（UTC）"
@@ -398,11 +400,11 @@ class StepModel(Base):
 class ToolCallModel(Base):
     """工具调用记录表模型."""
 
-    __tablename__ = "tool_call"
+    __tablename__ = "tool_calls"
     __table_args__ = (
-        Index("idx_tool_call_session", "session_id"),
-        Index("idx_tool_call_step", "step_id"),
-        Index("idx_tool_call_status", "status"),
+        Index("idx_tool_calls_session", "session_id"),
+        Index("idx_tool_calls_step", "step_id"),
+        Index("idx_tool_calls_status", "status"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -411,9 +413,8 @@ class ToolCallModel(Base):
     session_id: Mapped[str] = mapped_column(
         ForeignKey("sessions.id"), comment="所属会话标识"
     )
-    # Nullable keeps databases created before step observability readable;
-    # new writes always provide a step_id and the startup migration adds this
-    # column to legacy tool_call tables when it is missing.
+    # Nullable keeps imported or manually created records readable;
+    # new writes always provide a step_id.
     step_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("steps.id"), nullable=True, comment="所属执行步骤"
     )
@@ -491,6 +492,9 @@ class MemoryModel(Base):
     __table_args__ = (Index("idx_memories_session", "session_id"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, comment="记忆唯一标识")
+    logical_memory_id: Mapped[str] = mapped_column(
+        String, index=True, comment="跨 revision 保持不变的逻辑记忆标识"
+    )
     session_id: Mapped[str] = mapped_column(String, comment="所属会话标识")
     content: Mapped[str] = mapped_column(Text, comment="记忆内容")
     # 仅存任意用户扩展字段（系统/语义字段一律拆为独立列，避免双源真相）
@@ -504,12 +508,12 @@ class MemoryModel(Base):
         String, nullable=True, comment="过期时间（UTC）"
     )
     created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
-    last_accessed: Mapped[str | None] = mapped_column(
+    last_accessed_at: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="最后访问时间（UTC）"
     )
     access_count: Mapped[int] = mapped_column(Integer, default=0, comment="被访问次数")
     # 语义字段（平铺自 metadata_json，支持 SQL 过滤）
-    type: Mapped[str | None] = mapped_column(
+    memory_type: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="记忆类型，例如 fact 或 summary"
     )
     category: Mapped[str | None] = mapped_column(
@@ -518,7 +522,7 @@ class MemoryModel(Base):
     confidence: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="记忆置信度"
     )
-    source: Mapped[str | None] = mapped_column(
+    source_kind: Mapped[str | None] = mapped_column(
         String,
         nullable=True,
         comment="记忆来源，例如 extraction、threshold 或 api",
@@ -574,7 +578,7 @@ class ToolModel(Base):
     """工具治理配置表 — 持久化用户对工具的治理参数调优.
 
     MCP 工具和 Native 工具统一存储，通过 execution_mode 区分。
-    description / parameters_json 以注册时的最新值为准（MCP 工具可能随 服务端 升级而变化），
+    description / parameters_schema_json 以注册时的最新值为准（MCP 工具可能随服务端升级而变化），
     risk_level / require_approval / enabled 以用户修改为准。
     """
 
@@ -593,7 +597,7 @@ class ToolModel(Base):
         String, nullable=True, comment="MCP 服务器中的远程工具名称"
     )
     description: Mapped[str] = mapped_column(Text, default="", comment="工具描述")
-    parameters_json: Mapped[str] = mapped_column(
+    parameters_schema_json: Mapped[str] = mapped_column(
         Text, default="{}", comment="工具参数 Schema（JSON 格式）"
     )
     risk_level: Mapped[str] = mapped_column(
@@ -619,7 +623,9 @@ class KnowledgeBaseModel(Base):
     description: Mapped[str] = mapped_column(Text, default="", comment="知识库说明")
     created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
     updated_at: Mapped[str] = mapped_column(String, comment="最后更新时间（UTC）")
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True, comment="软删除时间（UTC）")
+    deleted_time: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="软删除时间（UTC）"
+    )
 
 
 class AttachmentModel(Base):
@@ -639,6 +645,15 @@ class AttachmentModel(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, comment="附件唯一标识")
+    logical_document_id: Mapped[str] = mapped_column(
+        String, index=True, comment="跨文档版本保持不变的逻辑文档标识"
+    )
+    current_version_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="当前解析版本标识"
+    )
+    document_version: Mapped[int] = mapped_column(
+        Integer, default=1, comment="逻辑文档版本序号"
+    )
     session_id: Mapped[str | None] = mapped_column(
         ForeignKey("sessions.id"), nullable=True, comment="所属会话标识"
     )
@@ -665,8 +680,8 @@ class AttachmentModel(Base):
     capabilities_json: Mapped[str] = mapped_column(
         Text, default="[]", comment="附件支持的能力列表（JSON 格式）"
     )
-    metadata_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="附件信息（JSON 格式）"
+    parsed_metadata_json: Mapped[str] = mapped_column(
+        Text, default="{}", comment="文件解析元数据（JSON 格式）"
     )
     error_message: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="附件处理错误信息"
@@ -704,8 +719,14 @@ class FileChunkModel(Base):
 
     __tablename__ = "file_chunks"
     __table_args__ = (
-        UniqueConstraint("attachment_id", "ordinal", name="uq_file_chunk_ordinal"),
+        UniqueConstraint(
+            "attachment_id",
+            "document_version_id",
+            "ordinal",
+            name="uq_file_chunk_version_ordinal",
+        ),
         Index("idx_file_chunks_attachment", "attachment_id"),
+        Index("idx_file_chunks_version", "document_version_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -713,6 +734,12 @@ class FileChunkModel(Base):
     )
     attachment_id: Mapped[str] = mapped_column(
         ForeignKey("attachments.id"), comment="所属附件标识"
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String, index=True, comment="所属文档解析版本标识"
+    )
+    is_current: Mapped[int] = mapped_column(
+        Integer, default=1, comment="是否属于当前文档版本，0 表示历史版本"
     )
     ordinal: Mapped[int] = mapped_column(Integer, comment="分块在附件中的顺序号")
     content: Mapped[str] = mapped_column(Text, comment="分块文本内容")
@@ -825,6 +852,69 @@ class CodeDependencyModel(Base):
     metadata_json: Mapped[str] = mapped_column(
         Text, default="{}", comment="依赖关系的额外信息（JSON 格式）"
     )
+
+
+class RetrievalRunModel(Base):
+    """一次记忆或知识库检索运行的可复现元数据。"""
+
+    __tablename__ = "retrieval_runs"
+    __table_args__ = (
+        Index("idx_retrieval_runs_created_at", "created_at"),
+        Index("idx_retrieval_runs_scope", "scope"),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        String, primary_key=True, comment="检索运行标识"
+    )
+    query: Mapped[str] = mapped_column(Text, comment="原始检索查询")
+    scope: Mapped[str] = mapped_column(
+        String, comment="检索范围，例如 memory 或 knowledge"
+    )
+    status: Mapped[str] = mapped_column(String, default="running", comment="运行状态")
+    config_json: Mapped[str] = mapped_column(
+        Text, default="{}", comment="检索配置（JSON 格式）"
+    )
+    index_generation: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="参与检索的索引生成标识"
+    )
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    selected_count: Mapped[int] = mapped_column(Integer, default=0)
+    injected_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class RetrievalCandidateModel(Base):
+    """检索流水线中单个候选的阶段性轨迹。"""
+
+    __tablename__ = "retrieval_candidates"
+    __table_args__ = (
+        Index("idx_retrieval_candidates_run_stage", "run_id", "stage"),
+        Index("idx_retrieval_candidates_source", "source_type", "source_id"),
+    )
+
+    candidate_id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("retrieval_runs.run_id"), index=True, comment="所属检索运行"
+    )
+    provider: Mapped[str] = mapped_column(String, comment="候选来源 provider")
+    stage: Mapped[str] = mapped_column(String, comment="候选所在阶段")
+    source_type: Mapped[str] = mapped_column(
+        String, comment="来源类型，例如 memory 或 chunk"
+    )
+    source_id: Mapped[str] = mapped_column(String, comment="不可变来源 ID")
+    logical_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    revision_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    document_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    native_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    native_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fused_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fused_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filter_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    selected_for_result: Mapped[int] = mapped_column(Integer, default=0)
+    injected_into_context: Mapped[int] = mapped_column(Integer, default=0)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[str] = mapped_column(String, comment="记录时间（UTC）")
 
 
 # FTS5 虚拟表 DDL（SQLAlchemy ORM 不支持 FTS5，需通过原生 SQL 创建）

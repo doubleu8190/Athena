@@ -135,6 +135,7 @@ class LangGraphRuntime:
             knowledge_provider=knowledge_provider,
             file_provider=file_provider,
             token_counter=llm,
+            trace_writer=db.retrieval,
         )
         self._context_planner = ContextPlanner()
         self._session_context_service = SessionContextService(
@@ -289,13 +290,16 @@ class LangGraphRuntime:
         """生成当前请求的 UserTaskSpec。"""
         history = state.get("history", [])
         attachment_refs = state.get("requested_attachment_refs", [])
-        knowledge_documents = await self._db.files.list_global_knowledge_documents()
+        knowledge_bases = await self._db.knowledge_bases.list_all()
         result = await self._task_understanding_service.understand(
             session_id=state.get("session_id", ""),
             user_message=state.get("user_message", ""),
             history=history,
             attachment_refs=attachment_refs,
-            knowledge_document_count=len(knowledge_documents),
+            knowledge_bases=[
+                knowledge_base.model_dump(mode="json")
+                for knowledge_base in knowledge_bases
+            ],
             tool_names=self._tool_manager.list_names(),
         )
         update: AgentState = {

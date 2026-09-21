@@ -20,7 +20,7 @@ class _AccessStat:
     """表示 AccessStat 组件，封装相关状态和行为。
     """
     count: int = 1
-    last_accessed: str = ""
+    last_accessed_at: str = ""
 
 
 class LongTermMemoryService:
@@ -88,10 +88,10 @@ class LongTermMemoryService:
         now = datetime.now().isoformat()
         stat = self._access_stats.get(memory_id)
         if stat is None:
-            self._access_stats[memory_id] = _AccessStat(last_accessed=now)
+            self._access_stats[memory_id] = _AccessStat(last_accessed_at=now)
         else:
             stat.count += 1
-            stat.last_accessed = now
+            stat.last_accessed_at = now
 
     def record_selected_access(self, memory_ids: Iterable[str]) -> None:
         """记录最终写入上下文的记忆访问，单个请求内按 ID 去重。"""
@@ -114,7 +114,7 @@ class LongTermMemoryService:
         return {
             memory_id: (
                 self._access_stats[memory_id].count,
-                self._access_stats[memory_id].last_accessed,
+                self._access_stats[memory_id].last_accessed_at,
             )
             for memory_id in ids
             if memory_id in self._access_stats
@@ -144,7 +144,7 @@ class LongTermMemoryService:
                 await self._vectors.update(
                     row["id"],
                     metadata={
-                        "last_accessed": row["last_accessed"],
+                        "last_accessed_at": row["last_accessed_at"],
                         "access_count": row["access_count"],
                     },
                 )
@@ -206,13 +206,16 @@ class LongTermMemoryService:
             except ValueError as exc:
                 raise ValueError("valid_until must be an ISO-8601 datetime") from exc
         revision_of = input_metadata.get("revision_of")
+        logical_memory_id = str(
+            input_metadata.get("logical_memory_id") or generate_time_id()
+        )
         revision = int(input_metadata.get("revision", 1))
         last_observed_at = (
             input_metadata.get("last_observed_at") or datetime.now().isoformat()
         )
         reserved = {
             "created_at",
-            "last_accessed",
+            "last_accessed_at",
             "access_count",
             "pinned",
             "expires_at",
@@ -222,6 +225,7 @@ class LongTermMemoryService:
             "valid_until",
             "revision_of",
             "revision",
+            "logical_memory_id",
         }
         metadata = {
             key: value for key, value in input_metadata.items() if key not in reserved
@@ -234,6 +238,7 @@ class LongTermMemoryService:
                 "valid_until": valid_until,
                 "revision_of": revision_of,
                 "revision": revision,
+                "logical_memory_id": logical_memory_id,
                 "last_observed_at": last_observed_at,
             }
         )
@@ -246,6 +251,7 @@ class LongTermMemoryService:
         )
         record = {
             "id": memory_id,
+            "logical_memory_id": logical_memory_id,
             "content": content,
             "metadata": metadata,
             "pinned": pinned,
@@ -255,7 +261,7 @@ class LongTermMemoryService:
         await self._repository.add(record)
         vector_metadata = {
             "created_at": now,
-            "last_accessed": now,
+            "last_accessed_at": now,
             "access_count": 0,
             "pinned": pinned,
             "expires_at": expires_at or "",
@@ -264,6 +270,7 @@ class LongTermMemoryService:
             "valid_until": valid_until or "",
             "revision_of": revision_of or "",
             "revision": revision,
+            "logical_memory_id": logical_memory_id,
             "status": "active",
             **{key: value for key, value in metadata.items() if value is not None},
         }
@@ -433,6 +440,20 @@ class LongTermMemoryService:
         """
         return await self._repository.counts()
 
+    async def list_memory_revisions(self, memory_id: str) -> list[dict[str, Any]]:
+        """读取一条逻辑记忆的不可变 revision 历史。
+
+        参数：
+            memory_id: 任意 revision ID 或逻辑记忆 ID。
+
+        返回值：
+            按 revision 序号升序排列的历史记录。
+
+        异常：
+            SQLite 读取失败时向上抛出异常。
+        """
+        return await self._repository.list_revisions(memory_id)
+
     async def update_memory(self, memory_id: str, content: str) -> str | None:
         """
 
@@ -494,6 +515,9 @@ class LongTermMemoryService:
                     "valid_until", old_metadata.get("valid_until") or None
                 ),
             }
+        )
+        revision_metadata["logical_memory_id"] = str(
+            old_metadata.get("logical_memory_id") or memory_id
         )
         valid_until = revision_metadata.get("valid_until")
         if valid_until:

@@ -29,7 +29,7 @@ class ToolInfoView(BaseModel):
     require_approval: bool
     enabled: bool
     parameters: dict[str, Any] = {}
-    last_called_at: str | None = None  # 最近调用时间(ISO)，来自 tool_call 表
+    last_called_at: str | None = None  # 最近调用时间(ISO)，来自 tool_calls 表
 
 
 class UpdateToolRequest(BaseModel):

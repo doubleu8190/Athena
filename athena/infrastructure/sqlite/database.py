@@ -18,6 +18,7 @@ from athena.infrastructure.sqlite.repositories import (
     KnowledgeDocumentJobRepository,
     MCPServerRepository,
     MessageRepository,
+    RetrievalTraceRepository,
     SessionRepository,
     ToolCallRepository,
     ToolRepository,
@@ -63,6 +64,7 @@ class Database:
         self.files = FileRepository()
         self.knowledge_bases = KnowledgeBaseRepository()
         self.knowledge_document_jobs = KnowledgeDocumentJobRepository()
+        self.retrieval = RetrievalTraceRepository()
 
     async def connect(self, memory_db_path: str | None = None) -> None:
         """建立核心数据库连接，并按需初始化独立的记忆数据库。

@@ -56,7 +56,7 @@ CREATE TABLE messages (
 	run_id VARCHAR, 
 	tool_call_record_id VARCHAR, 
 	tool_name VARCHAR, 
-	type VARCHAR, 
+	message_type VARCHAR,
 	timestamp VARCHAR NOT NULL, 
 	deleted_time VARCHAR, 
 	PRIMARY KEY (id), 
@@ -89,7 +89,7 @@ CREATE INDEX idx_steps_run ON steps (run_id);
 CREATE INDEX idx_steps_session ON steps (session_id);
 CREATE INDEX idx_steps_number ON steps (step_number);
 
-CREATE TABLE tool_call (
+CREATE TABLE tool_calls (
 	id VARCHAR NOT NULL,
 	session_id VARCHAR NOT NULL,
 	step_id VARCHAR,
@@ -107,9 +107,9 @@ CREATE TABLE tool_call (
 	FOREIGN KEY(session_id) REFERENCES sessions (id),
 	FOREIGN KEY(step_id) REFERENCES steps (id)
 );
-CREATE INDEX idx_tool_call_status ON tool_call (status);
-CREATE INDEX idx_tool_call_session ON tool_call (session_id);
-CREATE INDEX idx_tool_call_step ON tool_call (step_id);
+CREATE INDEX idx_tool_calls_status ON tool_calls (status);
+CREATE INDEX idx_tool_calls_session ON tool_calls (session_id);
+CREATE INDEX idx_tool_calls_step ON tool_calls (step_id);
 
 PRAGMA user_version = 1;
 
@@ -224,7 +224,7 @@ CREATE TABLE IF NOT EXISTS stream_snapshots (
     version INTEGER NOT NULL DEFAULT 0,
     last_chunk_id INTEGER NOT NULL DEFAULT 0,
     content TEXT NOT NULL DEFAULT '',
-    content_length INTEGER NOT NULL DEFAULT 0,
+    content_byte_length INTEGER NOT NULL DEFAULT 0,
     status VARCHAR NOT NULL DEFAULT 'streaming',
     updated_at VARCHAR NOT NULL
 );

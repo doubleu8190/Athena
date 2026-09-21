@@ -47,7 +47,7 @@ def _message_to_model(message: Message) -> MessageModel:
         run_id=message.run_id,
         tool_call_record_id=message.tool_call_record_id,
         tool_name=message.tool_name,
-        type=message.type,
+        message_type=message.message_type,
         timestamp=message.timestamp.isoformat(),
     )
 
@@ -83,7 +83,7 @@ def _row_to_message(row: MessageModel) -> Message:
         run_id=row.run_id,
         tool_call_record_id=row.tool_call_record_id,
         tool_name=row.tool_name,
-        type=row.type,
+        message_type=row.message_type,
         timestamp=datetime.fromisoformat(row.timestamp),
     )
 
@@ -148,7 +148,9 @@ def _row_to_tool_config(row: ToolModel) -> ToolConfig:
         server_name=row.server_name,
         remote_name=row.remote_name,
         description=row.description,
-        parameters=_json_loads_model(row.parameters_json, JsonSchema, JsonSchema()),
+        parameters=_json_loads_model(
+            row.parameters_schema_json, JsonSchema, JsonSchema()
+        ),
         risk_level=RiskLevel(row.risk_level),
         require_approval=bool(row.require_approval),
         enabled=bool(row.enabled),
@@ -161,6 +163,9 @@ def _row_to_attachment(row: AttachmentModel) -> Attachment:
     """将附件 ORM 行转换为领域模型。"""
     return Attachment(
         id=row.id,
+        logical_document_id=row.logical_document_id,
+        current_version_id=row.current_version_id,
+        document_version=row.document_version,
         session_id=row.session_id,
         knowledge_base_id=row.knowledge_base_id,
         message_id=row.message_id,
@@ -173,7 +178,9 @@ def _row_to_attachment(row: AttachmentModel) -> Attachment:
         adapter_version=row.adapter_version,
         status=AttachmentStatus(row.status),
         capabilities=_json_loads(row.capabilities_json, []),
-        metadata=_json_loads_model(row.metadata_json, FileMetadata, FileMetadata()),
+        metadata=_json_loads_model(
+            row.parsed_metadata_json, FileMetadata, FileMetadata()
+        ),
         error_message=row.error_message,
         created_at=datetime.fromisoformat(row.created_at),
         updated_at=datetime.fromisoformat(row.updated_at),

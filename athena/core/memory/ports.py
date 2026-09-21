@@ -36,6 +36,10 @@ class MemoryRepository(Protocol):
         """读取一条可以建立新修订版本的活跃记忆。"""
         ...
 
+    async def list_revisions(self, memory_id: str) -> list[dict[str, Any]]:
+        """读取一条逻辑记忆的完整 revision 链。"""
+        ...
+
     async def mark_superseded(self, old_id: str, new_id: str) -> bool: ...
 
     async def restore_active(self, memory_id: str) -> None:

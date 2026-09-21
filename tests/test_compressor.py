@@ -66,7 +66,7 @@ async def test_compresses_single_oversized_turn() -> None:
 
     assert len(compressed) == 1
     assert compressed[0].role == MessageRole.SYSTEM
-    assert compressed[0].type == "conversation_summary"
+    assert compressed[0].message_type == "conversation_summary"
     assert "压缩后的摘要" in compressed[0].content
 
 
@@ -82,5 +82,5 @@ async def test_compression_keeps_configured_recent_turns_when_available() -> Non
 
     compressed = await compressor.compress(messages)
 
-    assert compressed[0].type == "conversation_summary"
+    assert compressed[0].message_type == "conversation_summary"
     assert [message.run_id for message in compressed[1:]] == ["run-2", "run-2"]

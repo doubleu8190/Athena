@@ -1057,7 +1057,7 @@ class AgentStore:
                     version=version,
                     last_chunk_id=last_chunk_id,
                     content=content,
-                    content_length=len(content.encode("utf-8")),
+                    content_byte_length=len(content.encode("utf-8")),
                     status=status.value,
                     updated_at=_now(),
                 )
@@ -1072,7 +1072,7 @@ class AgentStore:
                 row.version,
                 row.last_chunk_id,
                 row.content,
-                row.content_length,
+                row.content_byte_length,
                 row.status,
                 row.updated_at,
             ) = (

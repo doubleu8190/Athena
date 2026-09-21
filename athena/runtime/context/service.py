@@ -7,6 +7,7 @@ import asyncio
 from typing import Protocol
 
 from athena.core.llm.tokens import TokenCounter
+from athena.core.retrieval.ports import RetrievalTraceWriter
 from athena.runtime.context.contracts import (
     ContextBundle,
     ContextItem,
@@ -48,6 +49,7 @@ class ContextAcquisitionService:
         knowledge_provider: KnowledgeContextProvider | None = None,
         file_provider: FileContextProvider | None = None,
         token_counter: TokenCounter | None = None,
+        trace_writer: RetrievalTraceWriter | None = None,
     ) -> None:
         """绑定可用的 Provider。
 
@@ -68,6 +70,8 @@ class ContextAcquisitionService:
             if provider is not None:
                 self._providers[provider.name] = provider
         self._token_counter = token_counter
+        self._trace_writer = trace_writer
+        self._memory_provider = memory_provider
 
     async def acquire(
         self,
@@ -128,6 +132,29 @@ class ContextAcquisitionService:
                 kept.append(item)
                 total_tokens += tokens
             items = kept
+        # 只有最终通过全局条数和 token 预算的条目才算真正注入上下文，
+        # 访问热度和检索轨迹都在这里落账，避免 provider 内部候选被误计入。
+        memory_ids = [
+            item.source_id
+            for item in items
+            if item.provider == "memory" and item.source_id
+        ]
+        if memory_ids and self._memory_provider is not None:
+            self._memory_provider.record_selected_access(memory_ids)
+        if self._trace_writer is not None:
+            by_run: dict[str, list[str]] = {}
+            for item in items:
+                if item.retrieval_run_id and item.source_id:
+                    by_run.setdefault(item.retrieval_run_id, []).append(item.source_id)
+            for run_id, source_ids in by_run.items():
+                try:
+                    await self._trace_writer.mark_injected(run_id, source_ids)
+                except Exception as exc:
+                    logger.warning(
+                        "retrieval_trace_injection_mark_failed",
+                        run_id=run_id,
+                        error=str(exc),
+                    )
         return ContextBundle(
             items=items,
             provider_results=normalized_results,

@@ -52,7 +52,10 @@ function Chat({ sendEvent }: ChatProps) {
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [supportedAttachmentTypes, setSupportedAttachmentTypes] = useState<SupportedAttachmentTypes | null>(null)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
+  // Only follow new content while the user is already reading the tail. Once
+  // they scroll up, streaming events must not steal the viewport back.
+  const shouldFollowLatestRef = useRef(true)
   const rootRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const loadingSessionIdRef = useRef<string | null>(null)
@@ -63,6 +66,7 @@ function Chat({ sendEvent }: ChatProps) {
     let cancelled = false
 
     if (activeSessionId) {
+      shouldFollowLatestRef.current = true
       // 先完全清除上一个 session 的所有残留状态
       clearMessages()
       clearSteps()
@@ -84,6 +88,7 @@ function Chat({ sendEvent }: ChatProps) {
         .then((types) => { if (!cancelled) setSupportedAttachmentTypes(types) })
         .catch(() => { if (!cancelled) setSupportedAttachmentTypes(null) })
     } else {
+      shouldFollowLatestRef.current = true
       clearMessages()
       clearSteps()
       clearToolCalls()
@@ -139,10 +144,25 @@ function Chat({ sendEvent }: ChatProps) {
     }
   }
 
-  // 自动滚动到底部
+  const handleMessagesScroll = useCallback(() => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    // A small threshold prevents sub-pixel/layout changes from disabling
+    // follow mode when the user is effectively at the bottom.
+    shouldFollowLatestRef.current = distanceFromBottom <= 64
+  }, [])
+
+  // 自动滚动到底部，但仅在用户没有主动查看历史消息时跟随。
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages, thinking])
+    if (!shouldFollowLatestRef.current) return
+    const container = messagesContainerRef.current
+    if (!container) return
+    // Use an immediate scroll here. Smooth scrolling emits intermediate
+    // scroll events while content is streaming and can incorrectly look like
+    // a user scroll-away.
+    container.scrollTo({ top: container.scrollHeight, behavior: "auto" })
+  }, [messages, thinking, pendingApprovals, executionTimeline])
 
   // 自动调整 textarea 高度
   useEffect(() => {
@@ -387,11 +407,32 @@ function Chat({ sendEvent }: ChatProps) {
     }
   }
 
+  // Keep the current request's progress visible while the previous response
+  // remains in the transcript. During this window there is no new assistant
+  // message yet, so the timeline cannot be attached to a response group.
+  const latestRequestGroup = [...phaseGroups].reverse().find((group) => group.phase === "request")
+  const activeRunId = [...executionTimeline]
+    .reverse()
+    .find((entry) => entry.event_type === "run.started" && entry.status === "running")
+    ?.run_id
+  const activeRunHasResponse = activeRunId
+    ? phaseGroups.some((group) => group.phase === "response" && group.messages.some((message) => message.run_id === activeRunId))
+    : false
+  const activeTimelineEntries = latestRequestGroup && isAgentActive && !activeRunHasResponse
+    ? (activeRunId
+      ? executionTimeline.filter((entry) => entry.run_id === activeRunId)
+      : executionTimeline)
+    : []
+
   return (
     <div ref={rootRef} className="flex-1 flex flex-row min-w-0 min-h-0">
       <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
       {/* 消息区域 */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div
+        ref={messagesContainerRef}
+        onScroll={handleMessagesScroll}
+        className="flex-1 overflow-y-auto min-h-0"
+      >
         {/* Activity 面板开关，固定在消息区右上角 */}
         {(messages.length > 0 || isAgentActive) && (
           <div className="absolute top-3 right-4 z-10">
@@ -520,6 +561,18 @@ function Chat({ sendEvent }: ChatProps) {
                         {group.messages.map((message) => (
                           <MessageBubble key={message.id} message={message} />
                         ))}
+                        {group === latestRequestGroup && isAgentActive && (
+                          activeTimelineEntries.length > 0
+                            ? <ExecutionTimeline entries={activeTimelineEntries} defaultExpanded />
+                            : <div className="processing-group py-3">
+                                <div className="timeline-node thinking-node">
+                                  <div className="flex items-center gap-3 text-sm text-athena-muted">
+                                    <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />
+                                    Processing request
+                                  </div>
+                                </div>
+                              </div>
+                        )}
                       </div>
                     )}
 
@@ -541,7 +594,7 @@ function Chat({ sendEvent }: ChatProps) {
                 )
               })}
 
-              {!phaseGroups.some((group) => group.phase === "response") && (
+              {phaseGroups.length === 0 && executionTimeline.length > 0 && (
                 <ExecutionTimeline
                   entries={executionTimeline}
                   defaultExpanded={executionTimeline.some((entry) => entry.status === "running" || entry.status === "waiting")}
@@ -573,7 +626,6 @@ function Chat({ sendEvent }: ChatProps) {
             </div>
           )}
 
-          <div ref={messagesEndRef} />
         </div>
       </div>
 

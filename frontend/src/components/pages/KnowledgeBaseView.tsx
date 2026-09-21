@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, CheckCircle2, Database, FileCode2, FileSpreadsheet, FileText, FolderOpen, Loader2, Plus, RefreshCw, Trash2, UploadCloud, X } from "lucide-react"
+import { AlertCircle, CheckCircle2, Database, Edit3, FileCode2, FileSpreadsheet, FileText, FolderOpen, Loader2, Plus, RefreshCw, Save, Trash2, UploadCloud, X } from "lucide-react"
 import { apiClient } from "../../api/client"
 import type { Attachment, KnowledgeBase, SupportedAttachmentTypes } from "../../types"
 import Badge from "../ui/Badge"
@@ -37,6 +37,11 @@ function KnowledgeBaseView() {
   const [supportedTypes, setSupportedTypes] = useState<SupportedAttachmentTypes | null>(null)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState("")
+  const [newDescription, setNewDescription] = useState("")
+  const [editing, setEditing] = useState(false)
+  const [editName, setEditName] = useState("")
+  const [editDescription, setEditDescription] = useState("")
+  const [isSaving, setIsSaving] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -85,7 +90,33 @@ function KnowledgeBaseView() {
   const createKnowledgeBase = async () => {
     const name = newName.trim()
     if (!name) return
-    try { const created = await apiClient.createKnowledgeBase(name); setKnowledgeBases((items) => [created, ...items]); setSelectedId(created.id); setNewName(""); setCreating(false); setError(null) } catch (err) { setError(err instanceof Error ? err.message : "知识库创建失败") }
+    try {
+      const created = await apiClient.createKnowledgeBase(name, newDescription.trim())
+      setKnowledgeBases((items) => [created, ...items])
+      setSelectedId(created.id)
+      setNewName("")
+      setNewDescription("")
+      setCreating(false)
+      setError(null)
+    } catch (err) { setError(err instanceof Error ? err.message : "知识库创建失败") }
+  }
+
+  const startEditing = () => {
+    if (!selected) return
+    setEditName(selected.name)
+    setEditDescription(selected.description)
+    setEditing(true)
+  }
+
+  const updateKnowledgeBase = async () => {
+    if (!selected || !editName.trim() || isSaving) return
+    setIsSaving(true)
+    try {
+      const updated = await apiClient.updateKnowledgeBase(selected.id, editName.trim(), editDescription.trim())
+      setKnowledgeBases((items) => items.map((item) => item.id === updated.id ? updated : item))
+      setEditing(false)
+      setError(null)
+    } catch (err) { setError(err instanceof Error ? err.message : "知识库更新失败") } finally { setIsSaving(false) }
   }
 
   const upload = async () => {
@@ -109,12 +140,13 @@ function KnowledgeBaseView() {
 
   return <ViewShell side={<div className="p-3 h-full flex flex-col">
     <div className="flex items-center justify-between px-1 mb-3"><div className="flex items-center gap-2"><Database className="w-4 h-4 text-athena-accent" /><h2 className="text-sm font-semibold">知识库</h2></div><button type="button" onClick={() => setCreating(true)} className="p-1.5 rounded-md text-athena-muted hover:text-athena-text hover:bg-athena-border/40" title="新建知识库"><Plus className="w-4 h-4" /></button></div>
-    {creating ? <div className="mb-3 rounded-lg border border-athena-accent/40 bg-athena-bg p-2"><input autoFocus value={newName} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void createKnowledgeBase(); if (event.key === "Escape") setCreating(false) }} className="input px-2 py-1.5 text-xs" placeholder="知识库名称" /><div className="flex justify-end gap-1 mt-2"><button type="button" onClick={() => setCreating(false)} className="btn-ghost px-2 py-1 text-xs">取消</button><button type="button" onClick={() => void createKnowledgeBase()} className="btn-primary px-2 py-1 text-xs">创建</button></div></div> : null}
+    {creating ? <div className="mb-3 rounded-lg border border-athena-accent/40 bg-athena-bg p-2"><input autoFocus value={newName} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void createKnowledgeBase(); if (event.key === "Escape") setCreating(false) }} className="input px-2 py-1.5 text-xs" placeholder="知识库名称" /><textarea value={newDescription} onChange={(event) => setNewDescription(event.target.value)} className="input mt-2 min-h-16 resize-y px-2 py-1.5 text-xs" placeholder="描述知识库的主题和用途（可选）" maxLength={1000} /><div className="flex justify-end gap-1 mt-2"><button type="button" onClick={() => { setCreating(false); setNewName(""); setNewDescription("") }} className="btn-ghost px-2 py-1 text-xs">取消</button><button type="button" onClick={() => void createKnowledgeBase()} disabled={!newName.trim()} className="btn-primary px-2 py-1 text-xs">创建</button></div></div> : null}
     <div className="space-y-1 overflow-y-auto">{knowledgeBases.map((item) => <button type="button" key={item.id} onClick={() => setSelectedId(item.id)} className={`w-full text-left rounded-lg px-3 py-2.5 transition-colors ${selectedId === item.id ? "bg-athena-accent/15 text-athena-text" : "text-athena-muted hover:bg-athena-border/30 hover:text-athena-text"}`}><div className="flex items-center gap-2"><FolderOpen className={`w-4 h-4 ${selectedId === item.id ? "text-athena-accent" : ""}`} /><span className="text-sm truncate flex-1">{item.name}</span><span className="text-[11px]">{item.document_count}</span></div>{item.description ? <p className="text-[11px] truncate mt-1 ml-6">{item.description}</p> : null}</button>)}{!loading && !knowledgeBases.length ? <p className="text-xs text-athena-muted text-center py-8">还没有知识库</p> : null}</div>
   </div>}>
-    <Toolbar title={selected?.name ?? "知识库"} subtitle={selected ? `${documents.length} 个文档 · ${readyCount} 个可检索 · ${formatBytes(totalSize)}` : "创建独立知识库后开始导入"} actions={<div className="flex items-center gap-1"><button type="button" onClick={() => { void loadDocuments(); void loadKnowledgeBases() }} className="btn-ghost px-2 py-1.5" title="刷新"><RefreshCw className="w-4 h-4" /></button>{selected ? <button type="button" onClick={() => void deleteKnowledgeBase()} className="btn-ghost px-2 py-1.5 text-athena-danger" title="删除知识库"><Trash2 className="w-4 h-4" /></button> : null}</div>} />
+    <Toolbar title={selected?.name ?? "知识库"} subtitle={selected ? `${documents.length} 个文档 · ${readyCount} 个可检索 · ${formatBytes(totalSize)}` : "创建独立知识库后开始导入"} actions={<div className="flex items-center gap-1"><button type="button" onClick={() => { void loadDocuments(); void loadKnowledgeBases() }} className="btn-ghost px-2 py-1.5" title="刷新"><RefreshCw className="w-4 h-4" /></button>{selected ? <><button type="button" onClick={startEditing} className="btn-ghost px-2 py-1.5" title="编辑知识库信息"><Edit3 className="w-4 h-4" /></button><button type="button" onClick={() => void deleteKnowledgeBase()} className="btn-ghost px-2 py-1.5 text-athena-danger" title="删除知识库"><Trash2 className="w-4 h-4" /></button></> : null}</div>} />
     <div className="p-6 max-w-5xl mx-auto w-full space-y-5">{error ? <div className="flex items-center gap-2 rounded-lg border border-athena-danger/30 bg-athena-danger/10 px-3 py-2 text-sm text-red-300"><AlertCircle className="w-4 h-4" /><span className="flex-1">{error}</span><button type="button" onClick={() => setError(null)}><X className="w-4 h-4" /></button></div> : null}
       {!selected ? <div className="card py-20 text-center"><Database className="w-10 h-10 mx-auto mb-3 text-athena-accent opacity-70" /><h2 className="font-medium mb-1">创建第一个知识库</h2><p className="text-sm text-athena-muted mb-4">导入后的文档可供所有对话检索。</p><button type="button" onClick={() => setCreating(true)} className="btn-primary"><Plus className="w-4 h-4" />新建知识库</button></div> : <>
+        <SectionCard title="知识库信息" description="描述知识库的主题和用途，帮助系统在意图识别时选择相关资料。">{editing ? <div className="space-y-3"><input value={editName} onChange={(event) => setEditName(event.target.value)} className="input" placeholder="知识库名称" maxLength={120} /><textarea value={editDescription} onChange={(event) => setEditDescription(event.target.value)} className="input min-h-20 resize-y" placeholder="描述知识库的主题和用途（可选）" maxLength={1000} /><div className="flex justify-end gap-2"><button type="button" onClick={() => setEditing(false)} className="btn-ghost">取消</button><button type="button" onClick={() => void updateKnowledgeBase()} disabled={!editName.trim() || isSaving} className="btn-primary">{isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}{isSaving ? "保存中" : "保存"}</button></div></div> : <div className="flex items-start justify-between gap-4"><p className="text-sm text-athena-muted whitespace-pre-wrap">{selected.description || "尚未填写描述"}</p><button type="button" onClick={startEditing} className="btn-ghost shrink-0 px-2 py-1.5" title="编辑知识库信息"><Edit3 className="w-4 h-4" /></button></div>}</SectionCard>
         <SectionCard title="导入文档" description="文档独立保存，处理完成后可供所有对话检索。"><div className={`border border-dashed rounded-xl p-7 text-center transition-colors ${isDragging ? "border-athena-accent bg-athena-accent/10" : "border-athena-border hover:border-athena-accent/60"}`} onDragOver={(event) => { event.preventDefault(); setIsDragging(true) }} onDragLeave={() => setIsDragging(false)} onDrop={(event) => { event.preventDefault(); setIsDragging(false); addFiles(Array.from(event.dataTransfer.files)) }}><UploadCloud className="w-9 h-9 mx-auto mb-3 text-athena-accent" /><p className="text-sm font-medium mb-1">拖拽文档到这里</p><p className="text-xs text-athena-muted mb-4">单文件最大 512 MB · {extensions.slice(0, 6).join("、")} 等</p><input ref={fileInputRef} type="file" multiple accept={extensions.join(",")} className="hidden" onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = "" }} /><button type="button" onClick={() => fileInputRef.current?.click()} className="btn-secondary"><FolderOpen className="w-4 h-4" />选择文件</button></div>{pendingFiles.length ? <div className="mt-4 space-y-2"><div className="flex justify-between text-xs text-athena-muted"><span>待导入 {pendingFiles.length} 个文件</span><button type="button" onClick={() => setPendingFiles([])}>清空</button></div>{pendingFiles.map((file, index) => { const Icon = fileIcon(file.name); return <div key={`${file.name}-${file.lastModified}`} className="flex items-center gap-3 rounded-lg bg-athena-bg px-3 py-2"><Icon className="w-4 h-4 text-athena-accent" /><span className="flex-1 truncate text-sm">{file.name}</span><span className="text-xs text-athena-muted">{formatBytes(file.size)}</span><button type="button" onClick={() => setPendingFiles((items) => items.filter((_, itemIndex) => itemIndex !== index))}><X className="w-4 h-4 text-athena-muted" /></button></div> })}<div className="flex justify-end pt-2"><button type="button" onClick={() => void upload()} disabled={isUploading} className="btn-primary">{isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}{isUploading ? "正在导入" : "开始导入"}</button></div></div> : null}</SectionCard>
         <SectionCard title="知识库文档" description="处理完成后，所有对话都能通过文件工具检索这些内容。">{!documents.length ? <div className="py-10 text-center text-sm text-athena-muted"><FileText className="w-8 h-8 mx-auto mb-2 opacity-50" />还没有导入文档</div> : <div className="divide-y divide-athena-border">{documents.map((document) => { const Icon = fileIcon(document.filename); const status = statusLabel(document.status); return <div key={document.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0"><div className="w-9 h-9 rounded-lg bg-athena-bg flex items-center justify-center"><Icon className="w-4 h-4 text-athena-accent" /></div><div className="flex-1 min-w-0"><p className="text-sm truncate">{document.filename}</p><p className="text-xs text-athena-muted mt-0.5">{formatBytes(document.size_bytes)} · {document.adapter_name ?? "等待解析"}</p></div><Badge tone={status.tone}>{status.text}</Badge>{document.status === "ready" ? <CheckCircle2 className="w-4 h-4 text-athena-success" /> : null}<button type="button" onClick={() => void deleteDocument(document)} className="p-1.5 text-athena-muted hover:text-athena-danger" title="删除文档"><Trash2 className="w-4 h-4" /></button></div> })}</div>}</SectionCard>
       </>}

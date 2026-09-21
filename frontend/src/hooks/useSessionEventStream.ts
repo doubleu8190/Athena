@@ -62,11 +62,13 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       void apiClient.listPendingApprovals(sessionId)
         .then((approvals) => {
           if (useChatStore.getState().activeSessionId !== sessionId) return
-          mergeApprovals(approvals.map((approval) => ({
+          const pending = approvals.map((approval) => ({
             ...approval,
             timeout: approval.timeout || 120,
             session_id: approval.session_id || sessionId,
-          })))
+          }))
+          mergeApprovals(pending)
+          if (pending.length > 0) setAgentStatus("waiting_approval")
         })
         .catch(() => {
           // API 暂时不可用时保留已有事件状态，等待下一次重连同步。
@@ -76,10 +78,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       setConnectionStatus("connected")
       syncPendingApprovals()
     }
-    source.onerror = () => {
-      setConnectionStatus("error")
-      syncPendingApprovals()
-    }
+    source.onerror = () => setConnectionStatus("error")
     syncPendingApprovals()
 
     const upsertAssistant = (runId: string, content: string, streamId?: string) => {
@@ -190,11 +189,12 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
 
         if (type === "approval.required") {
-          addApproval({ approval_id: String(data.approval_id || ""), tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, risk_level: (String(data.risk_level || "low") as "low" | "medium" | "high"), timeout: Number(data.timeout || 120), session_id: sessionId })
+          addApproval({ approval_id: String(data.approval_id || ""), tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, risk_level: (String(data.risk_level || "low") as "low" | "medium" | "high"), timeout: Number(data.timeout || 120), expires_at: data.expires_at ? String(data.expires_at) : null, session_id: sessionId })
           setAgentStatus("waiting_approval")
         } else if (type === "approval.resolved" || type === "approval.expired") {
           const approvalId = String(data.approval_id || "")
           if (approvalId) resolveApproval(approvalId, String(data.decision || "denied"))
+          if (useChatStore.getState().pendingApprovals.length <= 1) setAgentStatus("running")
         }
         if (
           type === "task.queued" ||

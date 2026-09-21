@@ -16,18 +16,24 @@ function riskClass(risk: ApprovalRequest["risk_level"]): string {
 
 export function ApprovalCard({ requests, onApprove, onDeny }: ApprovalCardProps) {
   const [resolving, setResolving] = useState<Set<string>>(new Set())
-  const [elapsed, setElapsed] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
-    setElapsed(0)
     setResolving(new Set())
-    const interval = window.setInterval(() => setElapsed((value) => value + 1), 1000)
+    setNow(Date.now())
+    const interval = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(interval)
   }, [requests.length])
 
   const remaining = useMemo(
-    () => Math.max(0, Math.min(...requests.map((request) => request.timeout || 120)) - elapsed),
-    [elapsed, requests],
+    () => Math.max(0, Math.min(...requests.map((request) => {
+      if (request.expires_at) {
+        const expiresAt = new Date(request.expires_at).getTime()
+        if (Number.isFinite(expiresAt)) return Math.ceil((expiresAt - now) / 1000)
+      }
+      return request.timeout || 120
+    }))),
+    [now, requests],
   )
 
   const resolve = (request: ApprovalRequest, action: "allow" | "deny") => {

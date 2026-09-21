@@ -208,6 +208,7 @@ export interface ApprovalRequest {
   arguments: Record<string, unknown>
   risk_level: "low" | "medium" | "high"
   timeout: number
+  expires_at?: string | null
   description?: string
   session_id?: string
 }

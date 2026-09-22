@@ -8,8 +8,8 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 
-from athena.infrastructure.sqlite.engine import get_session
-from athena.infrastructure.sqlite.models import StepModel, ToolCallModel
+from athena.infrastructure.postgre.engine import get_session
+from athena.infrastructure.postgre.models import StepModel, ToolCallModel
 from athena.models import ToolCallRecord
 
 from .model_converters import _row_to_tool_call

@@ -112,7 +112,7 @@ async def test_tool_call_repository_persists_step_link(tmp_path):
     """工具账本应在步骤表存在时成功写入并保留归属。"""
     from datetime import datetime
 
-    from athena.infrastructure.sqlite.database import Database
+    from athena.infrastructure.postgre.database import Database
     from athena.models.tool import ToolCallRecord, ToolCallStatus
 
     database = Database(str(tmp_path / "tool-call.db"))
@@ -142,7 +142,7 @@ async def test_tool_call_repository_concurrent_save_and_claim(tmp_path):
     """并行工具调用写入和领取不应依赖 BEGIN IMMEDIATE。"""
     from datetime import datetime
 
-    from athena.infrastructure.sqlite.database import Database
+    from athena.infrastructure.postgre.database import Database
     from athena.models.tool import ToolCallRecord, ToolCallStatus
 
     database = Database(str(tmp_path / "tool-call-concurrent.db"))

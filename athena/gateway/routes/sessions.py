@@ -13,7 +13,7 @@ from typing import TypeGuard
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.models import CommandPayload, Message, Session
 from athena.utils.id_generation import generate_session_id
 from athena.utils.logging import get_logger

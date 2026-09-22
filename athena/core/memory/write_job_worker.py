@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.postgre.repositories.memory_job_repository import MemoryJobRepository
 from .contracts import CompletedTurn
 from .write_workflow import FactMemoryWriteWorkflow
 

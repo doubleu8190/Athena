@@ -344,11 +344,10 @@ class HybridMemoryRetriever:
         query: str,
         filter_params: dict[str, Any] | None,
     ) -> list[MemoryRetrievalResult]:
-        """关键词检索（SQLite FTS5 MATCH 全文检索）.
+        """关键词检索（PostgreSQL 上兼容 SQLite FTS5 的全文检索）。
 
-        通过 LongTermMemoryService.keyword_search() 走 FTS5 虚拟表的 MATCH 操作符，
-        tokenize='unicode61' 仅做精确词/整段/前缀召回，不做中文语义分词
-        （分词语义由向量检索承担），bm25 算法排序。
+        通过 LongTermMemoryService.keyword_search() 使用 unicode61 兼容分词、
+        精确词/整段/前缀召回和 bm25 排序；中文语义分词仍由向量检索承担。
 
         跨会话全库检索：不再按 session_id 过滤，跨会话的关键词命中也参与
         RRF 融合；filter_params 为可选显式过滤（仅支持 memories 表顶层列）。
@@ -379,7 +378,7 @@ class HybridMemoryRetriever:
             )
         # 同上：RRF 需要"最相关在前"。score 为原始相似度 |bm25|/(1+|bm25|)
         # （越大越相关），keyword_weight 统一在 RRF 融合处生效。上游已
-        # ORDER BY rank(=bm25 升序) 返回，这里显式按 score 降序固化不变量。
+        # 仓库按 bm25 升序返回，这里显式按 score 降序固化不变量。
         out.sort(key=lambda x: x.native_score or 0.0, reverse=True)
         for rank, result in enumerate(out, 1):
             result.native_rank = rank

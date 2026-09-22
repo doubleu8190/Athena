@@ -9,7 +9,7 @@ from typing import Any, cast
 from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 
-from athena.infrastructure.sqlite.engine import get_session
+from athena.infrastructure.postgre.engine import get_session
 from athena.utils.id_generation import generate_time_id
 
 

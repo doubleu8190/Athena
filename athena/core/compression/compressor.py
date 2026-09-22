@@ -17,7 +17,7 @@ from athena.core.compression.pairer import MessagePairer
 from athena.core.compression.summarizer import ContextSummaryBuffer
 from athena.core.llm.provider import LLMProvider
 from athena.core.llm.tokens import TokenCounter
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.models import Message, MessageRole
 from athena.utils.logging import get_logger
 

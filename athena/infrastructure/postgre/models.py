@@ -10,17 +10,20 @@ Repository 读取后，会把文本转换成 ``athena.models.json_models`` 中�
 from __future__ import annotations
 
 from sqlalchemy import (
+    Column,
     CheckConstraint,
     Float,
     ForeignKey,
     Index,
     Integer,
     String,
+    Table,
     Text,
     UniqueConstraint,
+    select,
     text,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, column_property, mapped_column
 
 
 class Base(DeclarativeBase):
@@ -29,34 +32,34 @@ class Base(DeclarativeBase):
     pass
 
 
+memory_relations_table = Table(
+    "memory_relations",
+    Base.metadata,
+    Column("source_memory_id", String, primary_key=True),
+    Column("target_memory_id", String, primary_key=True),
+    Column("relation_type", String, primary_key=True),
+    Column("created_at", String, nullable=False),
+    Column("metadata_json", Text, nullable=False, server_default=text("'{}'")),
+)
+
+
 class AgentRunModel(Base):
     __tablename__ = "agent_runs"
     __table_args__ = (Index("idx_agent_runs_session_status", "session_id", "status"),)
     run_id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="运行唯一标识"
     )
-    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
+    session_id: Mapped[str] = mapped_column(
+        String, comment="所属会话标识；由核心库维护"
+    )
     created_by_command_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="创建该运行的命令标识"
     )
     parent_run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="父运行标识；Root Run 为空"
     )
-    root_run_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="所属 Root Run；Root Run 等于自身标识"
-    )
-    role: Mapped[str] = mapped_column(String, default="root", comment="运行角色")
-    plan_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="所属执行计划"
-    )
-    task_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="Worker 执行的稳定任务标识"
-    )
     attempt: Mapped[int] = mapped_column(
         Integer, default=1, comment="同一任务的执行尝试序号"
-    )
-    depth: Mapped[int] = mapped_column(
-        Integer, default=0, comment="编排深度；Root 为 0，Worker 为 1"
     )
     status: Mapped[str] = mapped_column(String, default="queued", comment="运行状态")
     pause_requested: Mapped[int] = mapped_column(
@@ -80,7 +83,9 @@ class AgentCommandModel(Base):
     command_id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="命令唯一标识和幂等键"
     )
-    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
+    session_id: Mapped[str] = mapped_column(
+        String, comment="所属会话标识；由核心库维护"
+    )
     run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="关联运行标识"
     )
@@ -121,7 +126,9 @@ class AgentPlanModel(Base):
     __tablename__ = "agent_plans"
     __table_args__ = (Index("idx_agent_plans_root_run", "root_run_id"),)
     plan_id: Mapped[str] = mapped_column(String, primary_key=True)
-    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
+    session_id: Mapped[str] = mapped_column(
+        String, comment="所属会话标识；由核心库维护"
+    )
     root_run_id: Mapped[str] = mapped_column(String)
     goal: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String, default="planning")
@@ -161,11 +168,9 @@ class AgentTaskResultModel(Base):
     """一次任务最终结果的幂等持久化记录。"""
 
     __tablename__ = "agent_task_results"
-    __table_args__ = (Index("idx_agent_task_results_plan", "plan_id"),)
     task_id: Mapped[str] = mapped_column(
         ForeignKey("agent_tasks.task_id"), primary_key=True
     )
-    plan_id: Mapped[str] = mapped_column(String)
     worker_run_id: Mapped[str] = mapped_column(String, unique=True)
     status: Mapped[str] = mapped_column(String)
     result_json: Mapped[str] = mapped_column(Text)
@@ -228,39 +233,15 @@ class AgentEventModel(Base):
     occurred_at: Mapped[str] = mapped_column(String, comment="事件发生时间（UTC）")
 
 
-class StreamSnapshotModel(Base):
-    __tablename__ = "stream_snapshots"
-    stream_id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="流快照唯一标识"
-    )
-    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
-    run_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="关联运行标识"
-    )
-    stream_type: Mapped[str] = mapped_column(
-        String, default="answer", comment="流类型，例如 answer 或 thinking"
-    )
-    version: Mapped[int] = mapped_column(Integer, default=0, comment="快照版本号")
-    last_chunk_id: Mapped[int] = mapped_column(
-        Integer, default=0, comment="快照覆盖到的最后一个 Chunk 序号"
-    )
-    content: Mapped[str] = mapped_column(Text, default="", comment="当前完整内容")
-    content_byte_length: Mapped[int] = mapped_column(
-        Integer, default=0, comment="内容 UTF-8 字节长度"
-    )
-    status: Mapped[str] = mapped_column(
-        String, default="streaming", comment="流快照状态"
-    )
-    updated_at: Mapped[str] = mapped_column(String, comment="最后更新时间（UTC）")
-
-
 class ApprovalRecordModel(Base):
     __tablename__ = "approvals"
     __table_args__ = (Index("idx_approvals_session_status", "session_id", "status"),)
     approval_id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="审批记录唯一标识"
     )
-    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
+    session_id: Mapped[str] = mapped_column(
+        String, comment="所属会话标识；由核心库维护"
+    )
     run_id: Mapped[str] = mapped_column(String, comment="所属运行标识")
     plan_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="审批所属执行计划"
@@ -373,7 +354,9 @@ class StepModel(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
+    session_id: Mapped[str] = mapped_column(
+        String, comment="所属会话标识；由核心库维护"
+    )
     run_id: Mapped[str] = mapped_column(String)
     step_number: Mapped[int] = mapped_column(Integer)
     step_type: Mapped[str] = mapped_column(String)
@@ -402,7 +385,9 @@ class ToolCallModel(Base):
     id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="工具调用记录唯一标识"
     )
-    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
+    session_id: Mapped[str] = mapped_column(
+        String, comment="所属会话标识；由核心库维护"
+    )
     # Nullable keeps imported or manually created records readable;
     # new writes always provide a step_id.
     step_id: Mapped[str | None] = mapped_column(
@@ -443,38 +428,8 @@ class ToolCallModel(Base):
     )
 
 
-class ApprovalLogModel(Base):
-    """审批日志表模型."""
-
-    __tablename__ = "approval_logs"
-    __table_args__ = (Index("idx_approval_logs_session", "session_id"),)
-
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="审批日志唯一标识"
-    )
-    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
-    tool_call_id: Mapped[str] = mapped_column(String, comment="工具调用标识")
-    tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
-    arguments_json: Mapped[str] = mapped_column(
-        Text, default="{}", comment="工具调用参数（JSON 格式）"
-    )
-    risk_level: Mapped[str] = mapped_column(String, comment="工具风险等级")
-    decision: Mapped[str] = mapped_column(String, comment="审批决定")
-    decision_time_ms: Mapped[float] = mapped_column(
-        Float, default=0, comment="审批处理耗时（毫秒）"
-    )
-    timestamp: Mapped[str] = mapped_column(String, comment="日志时间（UTC）")
-    deleted_time: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="软删除时间（UTC）"
-    )
-
-
 class MemoryModel(Base):
-    """记忆表模型 — 与 ChromaDB 双写的 SQLite 侧.
-
-    用于 FTS5 全文检索（关键词检索），ChromaDB 负责向量检索。
-    content 字段通过 FTS5 虚拟表 memory_fts 建立全文索引。
-    """
+    """记忆表模型，与 ChromaDB 双写并由 memory_fts 提供关键词索引。"""
 
     __tablename__ = "memories"
     __table_args__ = (Index("idx_memories_session", "session_id"),)
@@ -518,8 +473,17 @@ class MemoryModel(Base):
     status: Mapped[str] = mapped_column(
         String, default="active", comment="生命周期状态"
     )
-    superseded_by: Mapped[str | None] = mapped_column(String, nullable=True)
     superseded_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 兼容旧 ORM 调用方；替代关系实际唯一存储在 memory_relations。
+    superseded_by: Mapped[str | None] = column_property(
+        select(memory_relations_table.c.source_memory_id)
+        .where(
+            memory_relations_table.c.target_memory_id == id,
+            memory_relations_table.c.relation_type == "supersedes",
+        )
+        .correlate_except(memory_relations_table)
+        .scalar_subquery()
+    )
     source_turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
     last_observed_at: Mapped[str | None] = mapped_column(String, nullable=True)
     # 事实有效性不等同于保留期限或访问热度。invalid 记录保留用于历史追溯，

@@ -5,8 +5,8 @@ from __future__ import annotations
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 
-from athena.infrastructure.sqlite.engine import get_session
-from athena.infrastructure.sqlite.models import MCPServerModel
+from athena.infrastructure.postgre.engine import get_session
+from athena.infrastructure.postgre.models import MCPServerModel
 from athena.models import MCPServer, MCPServerConfig
 
 from .model_converters import _row_to_mcp_server

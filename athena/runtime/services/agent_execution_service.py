@@ -13,11 +13,11 @@ from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettin
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.distillation import LongTermMemorySummarizer
 from athena.core.memory.contracts import CompletedTurn
-from athena.infrastructure.sqlite.repositories.memory_job_repository import (
+from athena.infrastructure.postgre.repositories.memory_job_repository import (
     MemoryJobRepository,
 )
 from athena.core.tools.manager import UnifiedToolManager
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.contracts.ports import EventPublisherPort
 from athena.models import Message
 from athena.models.file import AttachmentRef

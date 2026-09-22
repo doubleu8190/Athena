@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from starlette.requests import HTTPConnection
 
 from athena.runtime.transport import SessionEventBus, RuntimeEventPublisher
-from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
+from athena.infrastructure.postgre.repositories.agent_store import AgentStore
 
 if TYPE_CHECKING:
     from athena.core.files.runtime import FileIntelligenceRuntime
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from athena.core.tools.manager import UnifiedToolManager
     from athena.core.tools.mcp.manager import MCPManager
     from athena.gateway.approval import ApprovalManager
-    from athena.infrastructure.sqlite.database import Database
+    from athena.infrastructure.postgre.database import Database
 
 
 @dataclass

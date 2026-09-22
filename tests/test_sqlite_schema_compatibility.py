@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from athena.infrastructure.sqlite.database import Database
-from athena.infrastructure.sqlite.models import Base
+from athena.infrastructure.postgre.database import Database
+from athena.infrastructure.postgre.models import Base
 
 
 @pytest.mark.asyncio

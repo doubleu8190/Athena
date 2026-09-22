@@ -8,7 +8,7 @@ from athena.core.retrieval import (
     RetrievalRunRequest,
     evaluate_rankings,
 )
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.models.file import FileChunk
 
 

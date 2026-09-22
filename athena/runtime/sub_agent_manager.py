@@ -19,7 +19,7 @@ from athena.core.tools.manager import UnifiedToolManager
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import AgentStorePort, EventPublisherPort
 from athena.contracts.statuses import AgentRunStatus
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.utils.id_generation import generate_sub_run_id
 from athena.utils.logging import get_logger
 from athena.utils.prompt_loader import get_prompt
@@ -151,9 +151,6 @@ class SubAgentManager:
             run_id=sub_run_id,
             session_id=session_id,
             parent_run_id=self._main_run_id,
-            root_run_id=self._main_run_id,
-            plan_id=None,
-            task_id=None,
             attempt=attempt,
         )
         await self._agent_store.update_run_status(

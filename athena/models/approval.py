@@ -6,7 +6,6 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
 
 class ApprovalDecision(StrEnum):
     """审批结果枚举。"""
@@ -84,17 +83,3 @@ class ApprovalRequest:
         self.resolved: bool = False
         self.resolution: str = "pending"  # approved/denied/timeout（已批准 / 已拒绝 / 超时）
         self.decided_at: datetime | None = None
-
-
-class ApprovalLog(BaseModel):
-    """审批决策记录（持久化）."""
-
-    id: str
-    session_id: str
-    tool_call_id: str
-    tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    risk_level: str
-    decision: ApprovalDecision
-    decision_time_ms: float = 0  # 用户响应耗时
-    timestamp: datetime

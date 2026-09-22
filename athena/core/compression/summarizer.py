@@ -19,7 +19,7 @@ from athena.utils.logging import get_logger
 from athena.utils.prompt_loader import get_prompt
 
 if TYPE_CHECKING:
-    from athena.infrastructure.sqlite.database import Database
+    from athena.infrastructure.postgre.database import Database
 
 logger = get_logger(__name__)
 

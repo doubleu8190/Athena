@@ -27,8 +27,8 @@ from athena.core.llm.provider import LLMProvider
 from athena.gateway.auth.middleware import AuthenticationMiddleware
 from athena.gateway.approval import ApprovalManager
 from athena.gateway.routes import api_router
-from athena.infrastructure.sqlite.database import Database
-from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
+from athena.infrastructure.postgre.database import Database
+from athena.infrastructure.postgre.repositories.agent_store import AgentStore
 from athena.runtime import (
     CancellationRegistry,
     CommandConsumer,
@@ -132,7 +132,7 @@ async def lifespan(app: FastAPI):
     await file_runtime.initialize()
 
     from athena.core.files.knowledge_document_worker import KnowledgeDocumentWorker
-    from athena.infrastructure.sqlite.repositories.knowledge_document_job_repository import (
+    from athena.infrastructure.postgre.repositories.knowledge_document_job_repository import (
         KnowledgeDocumentJobRepository,
     )
 
@@ -149,10 +149,10 @@ async def lifespan(app: FastAPI):
     from athena.core.memory.long_term_memory import LongTermMemoryService
 
     from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
-    from athena.infrastructure.sqlite.repositories.memory_repository import (
+    from athena.infrastructure.postgre.repositories.memory_repository import (
         SQLiteMemoryRepository,
     )
-    from athena.infrastructure.sqlite.repositories.memory_job_repository import (
+    from athena.infrastructure.postgre.repositories.memory_job_repository import (
         MemoryJobRepository,
     )
     from athena.core.memory.write_job_worker import MemoryWriteJobWorker

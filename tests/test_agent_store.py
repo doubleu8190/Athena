@@ -14,12 +14,12 @@ from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentRunStatus, StreamSnapshotStatus
 from athena.runtime.stream_coalescer import StreamCoalescer
 from athena.runtime.transport import SessionEventBus
-from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
+from athena.infrastructure.postgre.repositories.agent_store import AgentStore
 from athena.models.tool import RiskLevel
 from athena.contracts.statuses import AgentApprovalDecision
-from athena.infrastructure.sqlite.database import Database
-from athena.infrastructure.sqlite.engine import get_core_session
-from athena.infrastructure.sqlite.models import StreamSnapshotModel
+from athena.infrastructure.postgre.database import Database
+from athena.infrastructure.postgre.engine import get_core_session
+from athena.infrastructure.postgre.models import StreamSnapshotModel
 from athena.utils.id_generation import generate_session_id
 
 
@@ -170,9 +170,6 @@ async def test_approval_cannot_be_resolved_for_stale_worker_attempt(agent_store)
         run_id="worker-1",
         session_id=session.id,
         parent_run_id="root-1",
-        root_run_id="root-1",
-        plan_id="plan-1",
-        task_id="task-1",
         attempt=1,
     )
     await store.create_approval(
@@ -241,9 +238,6 @@ async def test_worker_run_is_independent_from_root_session(agent_store):
         run_id="worker-1",
         session_id=session.id,
         parent_run_id="root-1",
-        root_run_id="root-1",
-        plan_id="plan-1",
-        task_id="task-1",
         attempt=1,
     )
 
@@ -252,7 +246,6 @@ async def test_worker_run_is_independent_from_root_session(agent_store):
     assert active is not None and active.run_id == "root-1"
     assert worker is not None
     assert worker.parent_run_id == "root-1"
-    assert worker.role == "worker"
 
 
 @pytest.mark.asyncio

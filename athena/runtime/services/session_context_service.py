@@ -7,7 +7,7 @@ and Harness input preparation — the session-context operations of the agent ru
 from __future__ import annotations
 
 from datetime import datetime
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.models import Message, MessageRole
 from athena.models.file import (
     Attachment,

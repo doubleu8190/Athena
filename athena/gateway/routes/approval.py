@@ -7,11 +7,10 @@ from typing import Any, TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from athena.models import ApprovalLog
 from athena.utils.logging import get_logger
 from athena.container import get_runtime_container
 from athena.contracts.errors import ErrorDetail
-from athena.infrastructure.sqlite.repositories import _json_loads
+from athena.infrastructure.postgre.repositories import _json_loads
 
 if TYPE_CHECKING:
     from athena.gateway.approval import ApprovalManager
@@ -115,36 +114,3 @@ async def cancel_session_approvals(session_id: str, request: Request) -> dict[st
     manager = await _get_approval_manager(request)
     await manager.cancel_pending_approvals(session_id)
     return {"status": "cancelled", "session_id": session_id}
-
-
-@router.get("/logs/{session_id}")
-async def list_session_approval_logs(
-    session_id: str, request: Request
-) -> list[ApprovalLog]:
-    """获取会话审批日志."""
-    db = get_runtime_container(request).db
-    return await db.approval_logs.get_by_session(session_id)
-
-
-@router.get("/logs")
-async def list_approval_logs(
-    request: Request,
-    session_id: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
-) -> list[ApprovalLog]:
-    """分页列出审批日志（新→旧），可选按会话过滤."""
-    db = get_runtime_container(request).db
-    return await db.approval_logs.list_all(
-        limit=limit, offset=offset, session_id=session_id
-    )
-
-
-@router.get("/stats")
-async def get_approval_stats(request: Request) -> dict[str, Any]:
-    """今日审批统计，含审批通过率."""
-    db = get_runtime_container(request).db
-    stats = await db.approval_logs.stats()
-    decided = stats["today_approved"] + stats["today_denied"]
-    approval_rate = round(stats["today_approved"] / decided, 4) if decided else 0.0
-    return {**stats, "approval_rate": approval_rate}

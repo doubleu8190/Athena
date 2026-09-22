@@ -23,11 +23,10 @@ from athena.contracts.statuses import (
     AgentRunStatus,
     StreamSnapshotStatus,
 )
-from athena.infrastructure.sqlite.engine import get_session
-from athena.infrastructure.sqlite.models import (
+from athena.infrastructure.postgre.engine import get_session
+from athena.infrastructure.postgre.models import (
     AgentCommandModel,
     AgentEventModel,
-    StreamSnapshotModel,
     AgentRunModel,
     ApprovalRecordModel,
     SessionModel,
@@ -89,6 +88,7 @@ class AgentStore:
                     .where(SessionModel.id.in_(session_ids))
                     .values(status=status, updated_at=now)
                 )
+
     command_notifier: CommandNotifier | None
     _event_locks: dict[str, asyncio.Lock]
     _session_seq_cache: dict[str, int]
@@ -192,187 +192,12 @@ class AgentStore:
                 .limit(1)
             )
 
-    async def prepare_runs_for_manual_recovery(self) -> dict[str, int]:
-        """暂停异常退出留下的运行，并把消息命令保持在队列外。
-
-        参数:
-            无。
-        返回值:
-            dict[str, int]: 被暂停的运行数和被挂起的消息命令数。
-        异常:
-            数据库写入失败时传播 SQLAlchemy 异常。
-
-        这里只做状态收敛，不执行 Graph，也不把消息命令重新放回消费队列。
-        用户显式调用恢复接口后，``resume_run`` 才会释放原消息命令。
-        """
-        recoverable_statuses = tuple(
-            status.value
-            for status in (
-                AgentRunStatus.QUEUED,
-                AgentRunStatus.RUNNING,
-                AgentRunStatus.PAUSED,
-                AgentRunStatus.WAITING_APPROVAL,
-                AgentRunStatus.CANCEL_REQUESTED,
-            )
-        )
-        now = _now()
-        async with get_session() as db:
-            try:
-                run_rows = (
-                    await db.execute(
-                        select(AgentRunModel).where(
-                            AgentRunModel.status.in_(recoverable_statuses)
-                        )
-                    )
-                ).scalars().all()
-                active_runs = [
-                    row
-                    for row in run_rows
-                    if row.status != AgentRunStatus.CANCEL_REQUESTED.value
-                    and not row.cancel_requested
-                ]
-                run_ids = [row.run_id for row in active_runs]
-                session_ids = {row.session_id for row in active_runs}
-                paused = 0
-                if run_ids:
-                    changed = await db.execute(
-                        update(AgentRunModel)
-                        .where(AgentRunModel.run_id.in_(run_ids))
-                        .values(
-                            status=AgentRunStatus.PAUSED.value,
-                            pause_requested=1,
-                            updated_at=now,
-                        )
-                    )
-                    paused = int(changed.rowcount or 0)
-                held = 0
-                if run_ids:
-                    changed = await db.execute(
-                        update(AgentCommandModel)
-                        .where(
-                            AgentCommandModel.run_id.in_(run_ids),
-                            AgentCommandModel.command_type
-                            == CommandType.MESSAGE_SUBMIT.value,
-                            AgentCommandModel.status.in_(
-                                (
-                                    AgentCommandStatus.PENDING.value,
-                                    AgentCommandStatus.CLAIMED.value,
-                                )
-                            ),
-                        )
-                        .values(
-                            status=AgentCommandStatus.CLAIMED.value,
-                            claimed_at=now,
-                        )
-                    )
-                    held = int(changed.rowcount or 0)
-                await db.commit()
-                await self._update_session_status(session_ids, "interrupted", now)
-                return {"paused_runs": paused, "held_commands": held}
-            except Exception:
-                await db.rollback()
-                raise
-
-    async def resume_run(self, run_id: str) -> bool:
-        """在用户明确恢复后释放原消息命令。
-
-        参数:
-            run_id (str): 待恢复的 Root Run 标识。
-        返回值:
-            bool: 运行存在且完成恢复状态转换时返回 ``True``。
-        异常:
-            数据库写入失败时传播 SQLAlchemy 异常。
-        """
-        now = _now()
-        should_notify = False
-        async with get_session() as db:
-            try:
-                run = await db.get(AgentRunModel, run_id)
-                if run is None:
-                    await db.commit()
-                    return False
-                run.status = AgentRunStatus.RUNNING.value
-                run.pause_requested = 0
-                run.updated_at = now
-                command = await db.scalar(
-                    select(AgentCommandModel).where(
-                        AgentCommandModel.run_id == run_id,
-                        AgentCommandModel.command_type
-                        == CommandType.MESSAGE_SUBMIT.value,
-                        AgentCommandModel.status.in_(
-                            (
-                                AgentCommandStatus.PENDING.value,
-                                AgentCommandStatus.CLAIMED.value,
-                            )
-                        ),
-                    )
-                )
-                if command is not None:
-                    command.status = AgentCommandStatus.PENDING.value
-                    command.available_at = now
-                    command.claimed_at = None
-                    should_notify = True
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-        await self._update_session_status({run.session_id}, "running", now)
-        if should_notify and self.command_notifier is not None:
-            await self.command_notifier.notify()
-        return True
-
-    async def mark_running_tool_calls_unknown(self) -> int:
-        """在启动阶段把上一个进程遗留的工具执行标记为未知。
-
-        参数:
-            无。
-        返回值:
-            int: 被标记的工具尝试数量。
-        异常:
-            数据库写入失败时传播 SQLAlchemy 异常。
-        """
-        rows = (
-            await self._tool_call_rows_with_status("running")
-        )
-        if not rows:
-            return 0
-        async with get_session() as db:
-            try:
-                changed = await db.execute(
-                    update(ToolCallModel)
-                    .where(ToolCallModel.status == "running")
-                    .values(status="unknown")
-                )
-                for row in rows:
-                    if row.step_id:
-                        await db.execute(
-                            update(StepModel)
-                            .where(StepModel.id == row.step_id)
-                            .values(status="unknown")
-                        )
-                await db.commit()
-                return int(changed.rowcount or 0)
-            except Exception:
-                await db.rollback()
-                raise
-
-    async def _tool_call_rows_with_status(self, status: str) -> list[ToolCallModel]:
-        """读取指定状态的工具账本行，供启动状态收敛使用。"""
-        async with get_session() as db:
-            result = await db.execute(
-                select(ToolCallModel).where(ToolCallModel.status == status)
-            )
-            return list(result.scalars())
-
     async def create_worker_run(
         self,
         *,
         run_id: str,
         session_id: str,
         parent_run_id: str,
-        root_run_id: str,
-        plan_id: str | None,
-        task_id: str | None,
         attempt: int,
     ) -> None:
         """创建独立 Worker Run，不改变会话当前 Root Run。
@@ -381,9 +206,6 @@ class AgentStore:
             run_id: 本次 Worker 尝试的唯一标识。
             session_id: Worker 所属用户会话。
             parent_run_id: 创建该 Worker 的直接父运行。
-            root_run_id: 整个编排请求的 Root Run。
-            plan_id: 所属计划；旧委派路径可以为空。
-            task_id: 稳定任务标识；旧委派路径可以为空。
             attempt: 同一任务从 1 开始的尝试序号。
 
         返回值:
@@ -393,7 +215,7 @@ class AgentStore:
             ValueError: 标识为空、尝试序号非法或 run_id 已存在。
         """
 
-        if not all((run_id, session_id, parent_run_id, root_run_id)):
+        if not all((run_id, session_id, parent_run_id)):
             raise ValueError("worker run identity fields must not be empty")
         if attempt < 1:
             raise ValueError("worker run attempt must be at least 1")
@@ -405,12 +227,7 @@ class AgentStore:
                     run_id=run_id,
                     session_id=session_id,
                     parent_run_id=parent_run_id,
-                    root_run_id=root_run_id,
-                    role="worker",
-                    plan_id=plan_id,
-                    task_id=task_id,
                     attempt=attempt,
-                    depth=1,
                     status=AgentRunStatus.QUEUED.value,
                     created_at=_now(),
                     updated_at=_now(),
@@ -444,7 +261,11 @@ class AgentStore:
                     AgentRunStatus.CANCEL_REQUESTED.value,
                 }:
                     effective_status = AgentRunStatus(row.status)
-                row.status, row.error, row.updated_at = effective_status.value, error, _now()
+                row.status, row.error, row.updated_at = (
+                    effective_status.value,
+                    error,
+                    _now(),
+                )
                 session_status = {
                     AgentRunStatus.RUNNING: "running",
                     AgentRunStatus.PAUSED: "interrupted",
@@ -455,7 +276,9 @@ class AgentStore:
                 }.get(effective_status)
                 await db.commit()
                 if session_status and row.parent_run_id is None:
-                    await self._update_session_status({row.session_id}, session_status, row.updated_at)
+                    await self._update_session_status(
+                        {row.session_id}, session_status, row.updated_at
+                    )
 
     async def update_run_control(
         self,
@@ -492,14 +315,20 @@ class AgentStore:
             if status:
                 row.status = status.value
             row.updated_at = _now()
-            session_status = {
-                AgentRunStatus.RUNNING: "running",
-                AgentRunStatus.PAUSED: "interrupted",
-                AgentRunStatus.CANCEL_REQUESTED: "interrupted",
-            }.get(status) if status else None
+            session_status = (
+                {
+                    AgentRunStatus.RUNNING: "running",
+                    AgentRunStatus.PAUSED: "interrupted",
+                    AgentRunStatus.CANCEL_REQUESTED: "interrupted",
+                }.get(status)
+                if status
+                else None
+            )
             await db.commit()
             if session_status and row.parent_run_id is None:
-                await self._update_session_status({row.session_id}, session_status, row.updated_at)
+                await self._update_session_status(
+                    {row.session_id}, session_status, row.updated_at
+                )
             return True
 
     async def list_runs_for_session(self, session_id: str) -> list[AgentRunModel]:
@@ -636,27 +465,6 @@ class AgentStore:
             row.claimed_at = None
             await db.commit()
 
-    async def reclaim_stale_commands(self, lease_seconds: int = 300) -> int:
-        """Return commands left claimed by a crashed worker to the queue."""
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)
-        ).isoformat()
-        async with get_session() as db:
-            result = await db.execute(
-                text("""UPDATE agent_commands
-                    SET status = :pending, available_at = :now, claimed_at = NULL
-                    WHERE status = :claimed
-                      AND (claimed_at IS NULL OR claimed_at < :cutoff)"""),
-                {
-                    "pending": AgentCommandStatus.PENDING.value,
-                    "claimed": AgentCommandStatus.CLAIMED.value,
-                    "now": _now(),
-                    "cutoff": cutoff,
-                },
-            )
-            await db.commit()
-            return int(result.rowcount or 0)
-
     async def get_command(self, command_id: str) -> AgentCommandModel | None:
         """按 ID 查询命令记录。
 
@@ -669,30 +477,6 @@ class AgentStore:
         """
         async with get_session() as db:
             return await db.get(AgentCommandModel, command_id)
-
-    async def list_events_after(
-        self, session_id: str, after: int = 0
-    ) -> list[AgentEventModel]:
-        """查询会话中游标之后的持久化事件。
-
-        参数:
-            session_id (str): 会话 ID。
-            after (int): 排除该 session_seq 及之前事件，必须为非负整数。
-        返回值:
-            list[AgentEventModel]: 按 session_seq 升序排列的事件。
-        异常:
-            数据库查询失败时传播 SQLAlchemy 异常。
-        """
-        async with get_session() as db:
-            result = await db.execute(
-                select(AgentEventModel)
-                .where(
-                    AgentEventModel.session_id == session_id,
-                    AgentEventModel.session_seq > after,
-                )
-                .order_by(AgentEventModel.session_seq)
-            )
-            return list(result.scalars())
 
     async def list_events_between(
         self, session_id: str, after: int = 0, upto: int | None = None
@@ -719,26 +503,6 @@ class AgentStore:
             async with get_session() as db:
                 watermark = await self._cached_session_seq(db, session_id)
             return queue, watermark
-
-    async def list_snapshots_for_session(
-        self, session_id: str
-    ) -> list[StreamSnapshotModel]:
-        """查询会话的流快照，并按更新时间升序返回。
-
-        参数:
-            session_id (str): 会话 ID。
-        返回值:
-            list[StreamSnapshotModel]: 会话快照列表。
-        异常:
-            数据库查询失败时传播 SQLAlchemy 异常。
-        """
-        async with get_session() as db:
-            result = await db.execute(
-                select(StreamSnapshotModel)
-                .where(StreamSnapshotModel.session_id == session_id)
-                .order_by(StreamSnapshotModel.updated_at)
-            )
-            return list(result.scalars())
 
     @staticmethod
     def _same_command(
@@ -850,9 +614,6 @@ class AgentStore:
                             run_id=run_id,
                             session_id=command.session_id,
                             created_by_command_id=command.command_id,
-                            root_run_id=run_id,
-                            role="root",
-                            depth=0,
                             status=AgentRunStatus.QUEUED.value,
                             created_at=_now(),
                             updated_at=_now(),
@@ -1041,75 +802,6 @@ class AgentStore:
             await self.transport.publish(event)
         return event
 
-    async def upsert_snapshot(
-        self,
-        session_id: str,
-        stream_id: str,
-        version: int,
-        content: str,
-        *,
-        run_id: str | None = None,
-        stream_type: str = "answer",
-        last_chunk_id: int = 0,
-        status: StreamSnapshotStatus = StreamSnapshotStatus.STREAMING,
-    ) -> bool:
-        """按版本递增条件写入流快照。
-
-        参数:
-            session_id (str): 快照所属会话 ID。
-            stream_id (str): 流快照主键。
-            version (int): 新快照版本，必须高于已保存版本。
-            content (str): 当前完整文本内容。
-            run_id (str | None): 可选关联运行 ID。
-            status (StreamSnapshotStatus): 快照状态。
-        返回值:
-            bool: 实际写入新版本时返回 ``True``，版本未增长时返回 ``False``。
-        异常:
-            数据库写入失败时传播 SQLAlchemy 异常。
-        """
-        async with get_session() as db:
-            row = await db.get(StreamSnapshotModel, stream_id)
-            if row and row.version >= version:
-                return False
-            if row is None:
-                row = StreamSnapshotModel(
-                    stream_id=stream_id,
-                    session_id=session_id,
-                    stream_type=stream_type,
-                    version=version,
-                    last_chunk_id=last_chunk_id,
-                    content=content,
-                    content_byte_length=len(content.encode("utf-8")),
-                    status=status.value,
-                    updated_at=_now(),
-                )
-                db.add(row)
-            if last_chunk_id == 0:
-                last_chunk_id = await self._cached_stream_chunk_id(
-                    db, session_id, stream_id
-                )
-            (
-                row.run_id,
-                row.stream_type,
-                row.version,
-                row.last_chunk_id,
-                row.content,
-                row.content_byte_length,
-                row.status,
-                row.updated_at,
-            ) = (
-                run_id,
-                stream_type,
-                version,
-                last_chunk_id,
-                content,
-                len(content.encode("utf-8")),
-                status.value,
-                _now(),
-            )
-            await db.commit()
-            return True
-
     async def create_approval(
         self,
         *,
@@ -1195,26 +887,6 @@ class AgentStore:
         """
         async with get_session() as db:
             return await db.get(ApprovalRecordModel, approval_id)
-
-    async def get_approval_for_tool_call(
-        self, tool_call_id: str
-    ) -> ApprovalRecordModel | None:
-        """按工具尝试 ID 查询其审批记录。
-
-        参数:
-            tool_call_id (str): 工具尝试账本 ID。
-        返回值:
-            ApprovalRecordModel | None: 已有关联审批时返回记录，否则返回 ``None``。
-        异常:
-            数据库查询失败时传播 SQLAlchemy 异常。
-        """
-        async with get_session() as db:
-            return await db.scalar(
-                select(ApprovalRecordModel)
-                .where(ApprovalRecordModel.tool_call_id == tool_call_id)
-                .order_by(ApprovalRecordModel.created_at.desc())
-                .limit(1)
-            )
 
     async def resolve_approval_for_attempt(
         self,

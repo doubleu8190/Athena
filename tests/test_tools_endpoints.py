@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from athena.core.tools.builtin.registry import register_builtin_tools
 from athena.core.tools.manager import UnifiedToolManager
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from tests.fakes import install_runtime, make_tool_manager
 
 

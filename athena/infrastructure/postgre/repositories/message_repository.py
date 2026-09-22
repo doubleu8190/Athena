@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from sqlalchemy import select, update
 
-from athena.infrastructure.sqlite.engine import get_session
-from athena.infrastructure.sqlite.models import (
+from athena.infrastructure.postgre.engine import get_session
+from athena.infrastructure.postgre.models import (
     MessageModel,
     SessionModel,
 )
@@ -68,7 +68,7 @@ class MessageRepository:
                     .values(updated_at=_now_iso())
                 )
 
-        from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
+        from athena.infrastructure.postgre.repositories.file_repository import FileRepository
 
         refs = await FileRepository().bind_message(
             message.session_id, message.id, ids
@@ -83,7 +83,7 @@ class MessageRepository:
         """填充轻量级附件引用，不暴露存储键。"""
         if not messages:
             return messages
-        from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
+        from athena.infrastructure.postgre.repositories.file_repository import FileRepository
 
         refs = await FileRepository().attachments_for_messages(
             [item.id for item in messages]

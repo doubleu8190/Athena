@@ -28,10 +28,6 @@ class MemoryRepository(Protocol):
         """返回记忆统计计数。"""
         ...
 
-    async def update_content(self, memory_id: str, content: str) -> str | None:
-        """更新记忆内容并返回旧内容；记录不存在时返回 ``None``。"""
-        ...
-
     async def get_active_memory(self, memory_id: str) -> dict[str, Any] | None:
         """读取一条可以建立新修订版本的活跃记忆。"""
         ...
@@ -80,10 +76,6 @@ class MemoryRepository(Protocol):
         """恢复指定的软删除记忆。"""
         ...
 
-    async def clear_all(self) -> int:
-        """永久删除全部记忆记录、关系、全文索引和待处理任务。"""
-        ...
-
 
 class MemoryVectorStore(Protocol):
     """可替换的向量索引端口。"""
@@ -110,8 +102,4 @@ class MemoryVectorStore(Protocol):
 
     async def delete(self, memory_ids: list[str]) -> None:
         """删除指定向量记录。"""
-        ...
-
-    async def clear(self) -> int:
-        """删除全部向量记录并返回删除数量。"""
         ...

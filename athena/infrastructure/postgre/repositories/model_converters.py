@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from athena.infrastructure.sqlite.models import (
-    ApprovalLogModel,
+from athena.infrastructure.postgre.models import (
     AttachmentModel,
     MCPServerModel,
     MessageModel,
@@ -14,8 +13,6 @@ from athena.infrastructure.sqlite.models import (
     ToolModel,
 )
 from athena.models import (
-    ApprovalDecision,
-    ApprovalLog,
     Attachment,
     AttachmentStatus,
     MCPServer,
@@ -108,21 +105,6 @@ def _row_to_tool_call(row: ToolCallModel) -> ToolCallRecord:
         duration_ms=row.duration_ms,
         error_message=row.error_message,
         error_stack=row.error_stack,
-    )
-
-
-def _row_to_approval_log(row: ApprovalLogModel) -> ApprovalLog:
-    """将审批日志 ORM 行转换为领域模型。"""
-    return ApprovalLog(
-        id=row.id,
-        session_id=row.session_id,
-        tool_call_id=row.tool_call_id,
-        tool_name=row.tool_name,
-        arguments=_json_loads(row.arguments_json, {}),
-        risk_level=row.risk_level,
-        decision=ApprovalDecision(row.decision),
-        decision_time_ms=row.decision_time_ms,
-        timestamp=datetime.fromisoformat(row.timestamp),
     )
 
 

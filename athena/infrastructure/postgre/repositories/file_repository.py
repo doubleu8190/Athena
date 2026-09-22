@@ -15,8 +15,8 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.engine import CursorResult
 
-from athena.infrastructure.sqlite.engine import get_session
-from athena.infrastructure.sqlite.models import (
+from athena.infrastructure.postgre.engine import get_session
+from athena.infrastructure.postgre.models import (
     AdapterRegistryModel,
     AttachmentModel,
     CodeDependencyModel,
@@ -24,6 +24,7 @@ from athena.infrastructure.sqlite.models import (
     FileArtifactModel,
     FileChunkModel,
 )
+from athena.infrastructure.postgre.fts5_compat import FTS5Document, rank_bm25
 from .repository_utils import (
     _json_dumps,
     _json_loads,
@@ -583,36 +584,6 @@ class FileRepository:
             knowledge_base_id=knowledge_base_id,
         )
 
-    async def delete_knowledge_base_derived_data(self, attachment_id: str) -> None:
-        """撤下当前知识库分块并清理可重建的派生产物。
-
-        参数：
-            attachment_id：目标附件 ID。
-
-        返回：
-            None。
-
-        异常：
-            SQLite 删除失败时事务回滚并向上抛出异常。
-        """
-        async with get_session() as session:
-            async with session.begin():
-                await session.execute(
-                    text(
-                        "DELETE FROM file_chunk_fts WHERE attachment_id = :attachment_id"
-                    ),
-                    {"attachment_id": attachment_id},
-                )
-                await session.execute(
-                    update(FileChunkModel)
-                    .where(FileChunkModel.attachment_id == attachment_id)
-                    .values(is_current=0)
-                )
-                for model in (FileArtifactModel, CodeSymbolModel, CodeDependencyModel):
-                    await session.execute(
-                        delete(model).where(model.attachment_id == attachment_id)
-                    )
-
     async def _soft_delete_owned_attachment(
         self,
         attachment_id: str,
@@ -869,49 +840,6 @@ class FileRepository:
                 for r in rows
             ]
 
-    async def get_chunk_history(self, attachment_id: str) -> list[FileChunk]:
-        """读取附件的全部解析版本分块，包含当前版本和历史版本。
-
-        参数：
-            attachment_id: 附件唯一标识。
-
-        返回值：
-            按文档版本和分块序号排列的历史分块；当前调用方需要自行决定展示哪个版本。
-
-        异常：
-            数据库读取失败时传播底层异常。
-        """
-        async with get_session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(FileChunkModel)
-                        .where(FileChunkModel.attachment_id == attachment_id)
-                        .order_by(
-                            FileChunkModel.document_version_id,
-                            FileChunkModel.ordinal,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        return [
-            FileChunk(
-                id=row.id,
-                attachment_id=row.attachment_id,
-                ordinal=row.ordinal,
-                content=row.content,
-                document_version_id=row.document_version_id,
-                token_count=row.token_count,
-                locator=_json_loads_model(row.locator_json, FileLocator, FileLocator()),
-                metadata=_json_loads_model(
-                    row.metadata_json, FileMetadata, FileMetadata()
-                ),
-            )
-            for row in rows
-        ]
-
     async def search_chunks(
         self, attachment_id: str, query: str, limit: int = 10
     ) -> list[FileChunk]:
@@ -928,23 +856,50 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
+        if not query.strip():
+            return []
         async with get_session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(FileChunkModel)
-                        .where(
-                            FileChunkModel.attachment_id == attachment_id,
-                            FileChunkModel.is_current == 1,
-                            FileChunkModel.content.ilike(f"%{query}%"),
-                        )
-                        .order_by(FileChunkModel.ordinal)
-                        .limit(limit)
-                    )
+            fts_rows = (
+                await session.execute(
+                    text(
+                        "SELECT chunk_id, content FROM file_chunk_fts "
+                        "WHERE attachment_id = :attachment_id"
+                    ),
+                    {"attachment_id": attachment_id},
                 )
-                .scalars()
-                .all()
+            ).fetchall()
+            corpus_rows = (
+                await session.execute(
+                    text("SELECT chunk_id, content FROM file_chunk_fts")
+                )
+            ).fetchall()
+            scores = rank_bm25(
+                [FTS5Document(str(row.chunk_id), row.content) for row in corpus_rows],
+                query,
+                include_prefix=False,
             )
+            ranked_ids = [
+                row.chunk_id
+                for row in sorted(
+                    fts_rows,
+                    key=lambda row: scores.get(str(row.chunk_id), float("inf")),
+                )
+                if str(row.chunk_id) in scores
+            ][:limit]
+            if not ranked_ids:
+                return []
+            rows_by_id = {
+                row.id: row
+                for row in (
+                    await session.execute(
+                        select(FileChunkModel).where(
+                            FileChunkModel.id.in_(ranked_ids),
+                            FileChunkModel.is_current == 1,
+                        )
+                    )
+                ).scalars().all()
+            }
+            rows = [rows_by_id[item] for item in ranked_ids if item in rows_by_id]
             return [
                 FileChunk(
                     id=r.id,
@@ -959,7 +914,7 @@ class FileRepository:
                     metadata=_json_loads_model(
                         r.metadata_json, FileMetadata, FileMetadata()
                     ),
-                    native_score=None,
+                    native_score=scores.get(r.id),
                 )
                 for r in rows
             ]
@@ -967,7 +922,7 @@ class FileRepository:
     async def search_knowledge_chunks(
         self, query: str, limit: int = 10
     ) -> list[FileChunk]:
-        """跨全部未删除知识库文档执行 FTS5 分块检索。
+        """跨全部未删除知识库文档执行 FTS5 兼容分块检索。
 
         参数：
             query：FTS5 查询文本。
@@ -977,7 +932,7 @@ class FileRepository:
             按 BM25 相关度排序的文件分块。
 
         异常：
-            SQLite 读取失败时向上抛出异常；无有效 FTS token 时返回空列表。
+            数据库读取失败时向上抛出异常；无有效 FTS token 时返回空列表。
         """
         if not query.strip():
             return []
@@ -992,7 +947,6 @@ class FileRepository:
                         AttachmentModel.deleted_time.is_(None),
                         AttachmentModel.status == "ready",
                         FileChunkModel.is_current == 1,
-                        FileChunkModel.content.ilike(f"%{query}%"),
                         ~exists(
                             select(1).where(
                                 newer.knowledge_base_id == AttachmentModel.knowledge_base_id,
@@ -1002,10 +956,23 @@ class FileRepository:
                             )
                         ),
                     )
-                    .order_by(FileChunkModel.ordinal)
-                    .limit(limit)
                 )
             ).all()
+            corpus_rows = (
+                await session.execute(
+                    text("SELECT chunk_id, content FROM file_chunk_fts")
+                )
+            ).fetchall()
+        scores = rank_bm25(
+            [FTS5Document(str(row.chunk_id), row.content) for row in corpus_rows],
+            query,
+            include_prefix=False,
+        )
+        rows = [
+            row for row in rows if row[0].id in scores
+        ]
+        rows.sort(key=lambda row: scores[row[0].id])
+        rows = rows[:limit]
         return [
             FileChunk(
                 id=chunk.id,
@@ -1020,7 +987,7 @@ class FileRepository:
                 metadata=_json_loads_model(
                     chunk.metadata_json, FileMetadata, FileMetadata()
                 ),
-                native_score=1.0,
+                native_score=scores[chunk.id],
             )
             for chunk, _attachment in rows
         ]

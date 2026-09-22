@@ -1,6 +1,6 @@
 """Regression tests for typed JSON persistence boundaries."""
 
-from athena.infrastructure.sqlite.repositories import _json_dumps, _json_loads_model
+from athena.infrastructure.postgre.repositories import _json_dumps, _json_loads_model
 from athena.models import (
     FileLocator,
     CommandPayload,

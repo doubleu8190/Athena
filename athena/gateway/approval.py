@@ -8,8 +8,8 @@ from typing import Any
 
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.statuses import AgentApprovalDecision, AgentApprovalStatus
-from athena.infrastructure.sqlite.repositories.agent_store import AgentStore
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.repositories.agent_store import AgentStore
+from athena.infrastructure.postgre.database import Database
 from athena.models.approval import ApprovalDecision, ApprovalRequest
 from athena.models.tool import RiskLevel
 from athena.runtime.transport import RuntimeEventPublisher

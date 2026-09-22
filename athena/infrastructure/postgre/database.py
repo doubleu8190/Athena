@@ -7,9 +7,8 @@
 
 from __future__ import annotations
 
-from athena.infrastructure.sqlite.engine import close_postgres_engine, initialize_postgres_engine
-from athena.infrastructure.sqlite.repositories import (
-    ApprovalLogRepository,
+from athena.infrastructure.postgre.engine import close_postgres_engine, initialize_postgres_engine
+from athena.infrastructure.postgre.repositories import (
     FileRepository,
     KnowledgeBaseRepository,
     KnowledgeDocumentJobRepository,
@@ -48,12 +47,11 @@ class Database:
         self.sessions = SessionRepository()
         self.messages = MessageRepository()
         self.tool_calls = ToolCallRepository()
-        self.approval_logs = ApprovalLogRepository()
         self.mcp_servers = MCPServerRepository()
         self.tools = ToolRepository()
         # 编排仓库依赖 runtime.orchestration；延迟导入可避免 SQLite 门面和
         # 编排包在模块加载阶段形成循环依赖。
-        from athena.infrastructure.sqlite.repositories.orchestration_repository import (
+        from athena.infrastructure.postgre.repositories.orchestration_repository import (
             OrchestrationRepository,
         )
 

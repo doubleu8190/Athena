@@ -17,8 +17,8 @@ logger = get_logger(__name__)
 
 @dataclass
 class _AccessStat:
-    """表示 AccessStat 组件，封装相关状态和行为。
-    """
+    """表示 AccessStat 组件，封装相关状态和行为。"""
+
     count: int = 1
     last_accessed_at: str = ""
 
@@ -226,6 +226,9 @@ class LongTermMemoryService:
             "revision_of",
             "revision",
             "logical_memory_id",
+            "source_turn_id",
+            "superseded_by",
+            "superseded_at",
         }
         metadata = {
             key: value for key, value in input_metadata.items() if key not in reserved
@@ -234,6 +237,7 @@ class LongTermMemoryService:
         now = datetime.now().isoformat()
         metadata.update(
             {
+                "source_turn_id": input_metadata.get("source_turn_id"),
                 "validity_status": validity_status,
                 "valid_until": valid_until,
                 "revision_of": revision_of,
@@ -254,6 +258,7 @@ class LongTermMemoryService:
             "logical_memory_id": logical_memory_id,
             "content": content,
             "metadata": metadata,
+            "source_turn_id": input_metadata.get("source_turn_id"),
             "pinned": pinned,
             "expires_at": expires_at,
             "created_at": now,
@@ -613,7 +618,7 @@ class LongTermMemoryService:
             try:
                 await self._vectors.update(
                     old_memory_id,
-                    metadata={"status": "superseded", "superseded_by": new_memory_id},
+                    metadata={"status": "superseded"},
                 )
             except Exception:
                 await self._repository.restore_active(old_memory_id)
@@ -719,25 +724,3 @@ class LongTermMemoryService:
             logger.exception("memory_cleanup_vector_failed")
             raise
         return len(ids)
-
-    async def clear_all(self) -> dict[str, int]:
-        """清空 SQLite 和 Chroma 中的全部长期记忆数据。
-
-        参数：
-            无。
-
-        返回：
-            包含清理前 SQLite 记录数和 Chroma 向量数的字典。
-
-        异常：
-            任一存储后端无法清理时向上抛出异常，便于调用方发现残留数据。
-        """
-        await self.initialize()
-        vector_count = await self._vectors.clear()
-        try:
-            sqlite_count = await self._repository.clear_all()
-        except Exception:
-            logger.exception("memory_clear_sqlite_failed")
-            raise
-        self._access_stats.clear()
-        return {"sqlite": sqlite_count, "chroma": vector_count}

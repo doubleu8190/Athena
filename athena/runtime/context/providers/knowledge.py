@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from athena.core.files.runtime import FileIntelligenceRuntime
-from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
+from athena.infrastructure.postgre.repositories.file_repository import FileRepository
 from athena.models.file import AttachmentStatus
 from athena.runtime.context.contracts import (
     ContextItem,

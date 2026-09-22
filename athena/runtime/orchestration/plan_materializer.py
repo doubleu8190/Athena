@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from athena.contracts.events import EventType
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.runtime.orchestration.contracts import (
     ExecutionPlan,
     PLAN_SUBMISSION_TOOL_NAME,

@@ -6,7 +6,7 @@ import asyncio
 from typing import cast
 
 from athena.core.files.runtime import FileIntelligenceRuntime
-from athena.infrastructure.sqlite.repositories.knowledge_document_job_repository import (
+from athena.infrastructure.postgre.repositories.knowledge_document_job_repository import (
     KnowledgeDocumentJobRepository,
 )
 from athena.models.file import AttachmentStatus

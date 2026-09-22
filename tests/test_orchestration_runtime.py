@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.runtime.orchestration import ExecutionPlan, TaskSpec
 from athena.runtime.orchestration.plan_dispatcher import PlanDispatcher
 from athena.runtime.orchestration.plan_materializer import PlanMaterializer
@@ -121,7 +121,7 @@ async def test_recovery_requeues_stale_claimed_task(tmp_path) -> None:
     await database.orchestration.claim_next_task("plan-1", "old-owner")
 
     # 直接把 claimed_at 改为过期时间，模拟进程崩溃后遗留的租约。
-    from athena.infrastructure.sqlite.engine import get_core_session
+    from athena.infrastructure.postgre.engine import get_core_session
 
     expired_at = (datetime.now() - timedelta(seconds=3600)).isoformat()
     async with get_core_session() as db:

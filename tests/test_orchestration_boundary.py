@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 
 
 class _UnsupportedLLM:

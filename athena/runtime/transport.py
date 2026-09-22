@@ -42,33 +42,6 @@ class RuntimeEventPublisher:
         await self.store.publish_realtime(event)
         return event
 
-    async def upsert_snapshot(
-        self,
-        session_id: str,
-        stream_id: str,
-        version: int,
-        content: str,
-        *,
-        run_id: str | None = None,
-        stream_type: str = "answer",
-        last_chunk_id: int = 0,
-        status: StreamSnapshotStatus = StreamSnapshotStatus.STREAMING,
-    ) -> bool:
-        """将可恢复的回答流快照委托给事件存储。
-
-        当前回答流不再使用快照恢复；该接口保留用于兼容已有调用方。
-        """
-        return await self.store.upsert_snapshot(
-            session_id,
-            stream_id,
-            version,
-            content,
-            run_id=run_id,
-            stream_type=stream_type,
-            last_chunk_id=last_chunk_id,
-            status=status,
-        )
-
 
 class SessionEventBus:
     """会话级事件总线的广播端。

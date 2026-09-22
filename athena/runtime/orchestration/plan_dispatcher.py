@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Callable, Awaitable
 
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.runtime.orchestration.contracts import (
     ExecutionPlan,
     TaskSpec,

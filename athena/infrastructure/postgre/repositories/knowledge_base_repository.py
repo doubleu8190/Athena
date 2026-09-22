@@ -6,8 +6,8 @@ from datetime import datetime
 
 from sqlalchemy import select, update
 
-from athena.infrastructure.sqlite.engine import get_session
-from athena.infrastructure.sqlite.models import (
+from athena.infrastructure.postgre.engine import get_session
+from athena.infrastructure.postgre.models import (
     AttachmentModel,
     KnowledgeBaseModel,
 )

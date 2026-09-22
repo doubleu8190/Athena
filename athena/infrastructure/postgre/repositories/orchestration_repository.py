@@ -8,8 +8,8 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from athena.infrastructure.sqlite.engine import get_session
-from athena.infrastructure.sqlite.models import (
+from athena.infrastructure.postgre.engine import get_session
+from athena.infrastructure.postgre.models import (
     AgentPlanModel,
     AgentTaskModel,
     AgentTaskResultModel,
@@ -197,7 +197,6 @@ class OrchestrationRepository:
             db.add(
                 AgentTaskResultModel(
                     task_id=result.task_id,
-                    plan_id=result.plan_id,
                     worker_run_id=result.run_id,
                     status=result.status.value,
                     result_json=result_json,

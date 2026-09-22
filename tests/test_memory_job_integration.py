@@ -8,14 +8,14 @@ from sqlalchemy import text
 from athena.config.settings import Settings
 from athena.core.memory.contracts import CompletedTurn
 from athena.core.memory.long_term_memory import LongTermMemoryService
-from athena.infrastructure.sqlite.engine import (
+from athena.infrastructure.postgre.engine import (
     close_sqlite_engines,
     get_memory_database_session,
     get_core_session,
     initialize_sqlite_engines,
 )
-from athena.infrastructure.sqlite.repositories.memory_job_repository import MemoryJobRepository
-from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
+from athena.infrastructure.postgre.repositories.memory_job_repository import MemoryJobRepository
+from athena.infrastructure.postgre.repositories.memory_repository import SQLiteMemoryRepository
 
 
 class _VectorStore:

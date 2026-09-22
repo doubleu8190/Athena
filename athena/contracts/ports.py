@@ -52,9 +52,6 @@ class AgentStorePort(Protocol):
         run_id: str,
         session_id: str,
         parent_run_id: str,
-        root_run_id: str,
-        plan_id: str | None,
-        task_id: str | None,
         attempt: int,
     ) -> None:
         """创建一条独立 Worker Run 记录。"""
@@ -64,21 +61,6 @@ class AgentStorePort(Protocol):
         """按最早发布时间领取一条可执行命令；无命令时返回 ``None``。"""
         ...
 
-    async def reclaim_stale_commands(self, lease_seconds: int = 300) -> int:
-        """Requeue commands whose worker lease expired."""
-        ...
-
-    async def prepare_runs_for_manual_recovery(self) -> dict[str, int]:
-        """启动时暂停运行并阻止消息命令自动领取。"""
-        ...
-
-    async def resume_run(self, run_id: str) -> bool:
-        """用户明确恢复后释放对应的消息命令。"""
-        ...
-
-    async def mark_running_tool_calls_unknown(self) -> int:
-        """把重启前遗留的工具执行标记为未知。"""
-        ...
 
     async def complete_command(
         self,
@@ -121,30 +103,6 @@ class AgentStorePort(Protocol):
         """更新运行控制标志及状态；运行不存在时返回 ``False``。"""
         ...
 
-    async def upsert_snapshot(
-        self,
-        session_id: str,
-        stream_id: str,
-        version: int,
-        content: str,
-        *,
-        run_id: str | None = None,
-        stream_type: str = "answer",
-        last_chunk_id: int = 0,
-        status: StreamSnapshotStatus = StreamSnapshotStatus.STREAMING,
-    ) -> bool:
-        """按版本条件写入流快照；版本未增长时返回 ``False``。"""
-        ...
-
-    async def resolve_approval(
-        self, approval_id: str, decision: AgentApprovalDecision
-    ) -> bool:
-        """原子解析审批记录；记录不存在或已处理时返回 ``False``。"""
-        ...
-
-    async def get_approval_for_tool_call(self, tool_call_id: str) -> Any | None:
-        """读取一次工具尝试关联的审批记录。"""
-        ...
 
     async def resolve_approval_for_attempt(
         self,
@@ -169,19 +127,4 @@ class EventPublisherPort(Protocol):
 
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
         """只向在线订阅者广播实时事件，不写入事件数据库。"""
-        ...
-
-    async def upsert_snapshot(
-        self,
-        session_id: str,
-        stream_id: str,
-        version: int,
-        content: str,
-        *,
-        run_id: str | None = None,
-        stream_type: str = "answer",
-        last_chunk_id: int = 0,
-        status: StreamSnapshotStatus = StreamSnapshotStatus.STREAMING,
-    ) -> bool:
-        """按版本写入可恢复的流快照。"""
         ...

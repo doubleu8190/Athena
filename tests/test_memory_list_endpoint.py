@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 
 from athena.config.settings import Settings
 from athena.core.memory.long_term_memory import LongTermMemoryService
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
-from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
+from athena.infrastructure.postgre.repositories.memory_repository import SQLiteMemoryRepository
 from tests.fakes import install_runtime
 
 

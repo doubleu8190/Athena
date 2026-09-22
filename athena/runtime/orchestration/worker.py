@@ -10,7 +10,7 @@ from athena.contracts.statuses import AgentRunStatus
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessSettings
 from athena.core.tools.manager import UnifiedToolManager
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.runtime.orchestration.contracts import (
     AgentRole,
     TaskSpec,
@@ -118,9 +118,6 @@ class WorkerExecutor:
             run_id=run_id,
             session_id=session_id,
             parent_run_id=parent_run_id,
-            root_run_id=root_run_id,
-            plan_id=task.plan_id,
-            task_id=task.task_id,
             attempt=attempt,
         )
         await self._agent_store.update_run_status(run_id, AgentRunStatus.RUNNING)

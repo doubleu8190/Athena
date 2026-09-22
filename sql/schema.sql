@@ -35,22 +35,6 @@ CREATE TABLE sessions (
 	PRIMARY KEY (id)
 );
 
-CREATE TABLE approval_logs (
-	id VARCHAR NOT NULL, 
-	session_id VARCHAR NOT NULL, 
-	tool_call_id VARCHAR NOT NULL, 
-	tool_name VARCHAR NOT NULL, 
-	arguments_json TEXT NOT NULL, 
-	risk_level VARCHAR NOT NULL, 
-	decision VARCHAR NOT NULL, 
-	decision_time_ms FLOAT NOT NULL, 
-	timestamp VARCHAR NOT NULL, 
-	deleted_time VARCHAR, 
-	PRIMARY KEY (id), 
-	FOREIGN KEY(session_id) REFERENCES sessions (id)
-);
-CREATE INDEX idx_approval_logs_session ON approval_logs (session_id);
-
 CREATE TABLE messages (
 	id VARCHAR NOT NULL, 
 	session_id VARCHAR NOT NULL, 
@@ -125,12 +109,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     session_id VARCHAR NOT NULL REFERENCES sessions(id),
     created_by_command_id VARCHAR,
     parent_run_id VARCHAR,
-    root_run_id VARCHAR,
-    role VARCHAR NOT NULL DEFAULT 'root',
-    plan_id VARCHAR,
-    task_id VARCHAR,
     attempt INTEGER NOT NULL DEFAULT 1,
-    depth INTEGER NOT NULL DEFAULT 0,
     status VARCHAR NOT NULL DEFAULT 'queued',
     pause_requested INTEGER NOT NULL DEFAULT 0,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
@@ -176,7 +155,6 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_queue ON agent_tasks(status, availabl
 
 CREATE TABLE IF NOT EXISTS agent_task_results (
     task_id VARCHAR PRIMARY KEY REFERENCES agent_tasks(task_id),
-    plan_id VARCHAR NOT NULL,
     worker_run_id VARCHAR NOT NULL UNIQUE,
     status VARCHAR NOT NULL,
     result_json TEXT NOT NULL,
@@ -184,8 +162,6 @@ CREATE TABLE IF NOT EXISTS agent_task_results (
     created_at VARCHAR NOT NULL,
     completed_at VARCHAR NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_agent_task_results_plan ON agent_task_results(plan_id);
-
 CREATE TABLE IF NOT EXISTS agent_commands (
     command_id VARCHAR PRIMARY KEY,
     session_id VARCHAR NOT NULL REFERENCES sessions(id),

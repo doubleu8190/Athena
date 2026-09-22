@@ -24,7 +24,7 @@ from athena.core.files.storage import FileTooLargeError, StorageLayer
 from athena.core.tools.catalog import ToolCatalogService, ToolRegistry
 from athena.core.tools.providers.files import build_file_tool_specs
 from athena.core.llm.tokens import conservative_text_token_count
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.models import Message, MessageRole
 from athena.models.file import FileChunk
 from tests.fakes import make_tool_manager

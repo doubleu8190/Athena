@@ -16,7 +16,7 @@ from athena.models.mcp import MCPServerConfig
 from athena.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from athena.infrastructure.sqlite.database import Database
+    from athena.infrastructure.postgre.database import Database
     from athena.core.tools.manager import UnifiedToolManager
 
 logger = get_logger(__name__)

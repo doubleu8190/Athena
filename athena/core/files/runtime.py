@@ -32,7 +32,7 @@ from athena.core.retrieval.ports import RetrievalTraceWriter
 from athena.core.files.extraction import ExtractedUnit, ExtractionContext
 from athena.core.files.attachment_serialization import attachment_to_payload
 from athena.core.files.registry import AdapterRegistry
-from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
+from athena.infrastructure.postgre.repositories.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
 from athena.core.llm.provider import LLMProvider
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType

@@ -20,7 +20,7 @@ from athena.core.tools.catalog import ToolCatalogService
 from athena.core.tools.manager import UnifiedToolManager
 from athena.core.tools.mcp.adapter import MCPToolAdapter
 from athena.core.tools.mcp.manager import MCPManager
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.models.mcp import MCPServerConfig
 from tests.fakes import install_runtime, make_tool_manager
 

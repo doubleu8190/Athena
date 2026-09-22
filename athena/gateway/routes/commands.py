@@ -6,7 +6,7 @@ from athena.contracts.errors import ErrorDetail
 from athena.contracts.statuses import AgentCommandStatus
 from athena.utils.id_generation import generate_time_id
 from athena.gateway.routes.schemas import CancelCommandResponse, CommandStatusResponse
-from athena.infrastructure.sqlite.repositories import _json_loads
+from athena.infrastructure.postgre.repositories import _json_loads
 
 router = APIRouter(prefix="/commands", tags=["commands"])
 run_router = APIRouter(prefix="/runs", tags=["runs"])

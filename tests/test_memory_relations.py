@@ -3,12 +3,12 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
-from athena.infrastructure.sqlite.engine import (
+from athena.infrastructure.postgre.engine import (
     close_sqlite_engines,
     get_core_session,
     initialize_sqlite_engines,
 )
-from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
+from athena.infrastructure.postgre.repositories.memory_repository import SQLiteMemoryRepository
 
 
 @pytest.fixture

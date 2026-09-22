@@ -24,11 +24,11 @@ from athena.core.memory.distillation import FactExtractor, LongTermMemorySummari
 from athena.core.memory.write_trigger import MemoryWriteTrigger
 from athena.core.memory.write_workflow import FactMemoryWriteWorkflow
 from athena.core.memory.candidate_resolver import MemoryCandidateResolver
-from athena.infrastructure.sqlite.repositories.memory_job_repository import (
+from athena.infrastructure.postgre.repositories.memory_job_repository import (
     MemoryJobRepository,
 )
 from athena.core.tools.manager import UnifiedToolManager
-from athena.infrastructure.sqlite.database import Database
+from athena.infrastructure.postgre.database import Database
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
 from athena.contracts.ports import AgentStorePort

@@ -15,10 +15,10 @@ from sqlalchemy import select, update
 from athena.config.settings import Settings
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalResult
-from athena.infrastructure.sqlite.engine import close_sqlite_engines, get_core_session, initialize_sqlite_engines
-from athena.infrastructure.sqlite.models import MemoryModel
+from athena.infrastructure.postgre.engine import close_sqlite_engines, get_core_session, initialize_sqlite_engines
+from athena.infrastructure.postgre.models import MemoryModel
 from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
-from athena.infrastructure.sqlite.repositories.memory_repository import SQLiteMemoryRepository
+from athena.infrastructure.postgre.repositories.memory_repository import SQLiteMemoryRepository
 
 
 # ---------------------------------------------------------------------------

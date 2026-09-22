@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from athena.infrastructure.sqlite.engine import (
+from athena.infrastructure.postgre.engine import (
     close_sqlite_engines,
     initialize_sqlite_engines,
 )

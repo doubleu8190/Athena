@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from athena.contracts.errors import ErrorDetail
 from athena.container import get_runtime_container
-from athena.infrastructure.sqlite.repositories import _json_loads
+from athena.infrastructure.postgre.repositories import _json_loads
 
 router = APIRouter(prefix="/sessions", tags=["events"])
 

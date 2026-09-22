@@ -48,6 +48,8 @@ class FileContextProvider:
         self,
         *,
         session_id: str,
+        agent_run_id: str | None = None,
+        message_id: str | None = None,
         task: UserTaskSpec,
         plan: ContextPlan,
     ) -> ProviderResult:
@@ -72,7 +74,12 @@ class FileContextProvider:
             try:
                 async with asyncio.timeout(self._timeout_seconds):
                     response = await self._file_runtime.search_file(
-                        session_id, file_id, query, plan.limit_per_file
+                        session_id,
+                        file_id,
+                        query,
+                        plan.limit_per_file,
+                        agent_run_id=agent_run_id,
+                        message_id=message_id,
                     )
                 return list(response.get("results", []))
             except Exception as exc:
@@ -91,9 +98,11 @@ class FileContextProvider:
             ContextItem(
                 provider=self.name,
                 content=result.get("content", ""),
-                source_id=file_id,
+                source_id=str(result.get("id") or file_id),
                 locator=result.get("locator", {}),
                 score=result.get("score"),
+                retrieval_run_id=result.get("retrieval_run_id"),
+                metadata={"attachment_id": file_id},
             )
             for file_id, results in zip(plan.file_ids, result_groups)
             for result in results[: plan.limit_per_file]

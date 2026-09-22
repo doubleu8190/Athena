@@ -6,9 +6,9 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import StepModel, ToolCallModel
 from athena.models import ToolCallRecord
 
@@ -22,14 +22,14 @@ class ToolCallRepository:
     async def save(self, tool_call: ToolCallRecord) -> None:
         """保存工具调用记录。"""
         step_id = tool_call.step_id or f"{tool_call.id}:step"
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 # 先写入步骤，再写入工具调用。两个 INSERT 都只忽略主键冲突，
                 # 避免“先 SELECT 再 INSERT”在 WAL 下把读事务升级为写事务。
                 # 多个并行工具调用因此可以让 SQLite 自己串行化短写事务，
                 # 不需要手动执行 BEGIN IMMEDIATE 抢占整个数据库。
                 await session.execute(
-                    sqlite_insert(StepModel)
+                    postgres_insert(StepModel)
                     .values(
                         id=step_id,
                         session_id=tool_call.session_id,
@@ -43,7 +43,7 @@ class ToolCallRepository:
                     .on_conflict_do_nothing(index_elements=[StepModel.id])
                 )
                 await session.execute(
-                    sqlite_insert(ToolCallModel)
+                    postgres_insert(ToolCallModel)
                     .values(
                         id=tool_call.id,
                         session_id=tool_call.session_id,
@@ -71,7 +71,7 @@ class ToolCallRepository:
     async def get(self, tool_call_id: str) -> ToolCallRecord | None:
         """按稳定账本 ID 查询一次工具调用。"""
 
-        async with get_core_session() as session:
+        async with get_session() as session:
             row = await session.get(ToolCallModel, tool_call_id)
             if row is None or row.deleted_time is not None:
                 return None
@@ -97,7 +97,7 @@ class ToolCallRepository:
         values = self._allowed_values(updates)
         if not values:
             return
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 changed = await session.execute(
                     update(ToolCallModel)
@@ -144,7 +144,7 @@ class ToolCallRepository:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 started_at = datetime.now().isoformat()
                 changed = await session.execute(
@@ -182,7 +182,7 @@ class ToolCallRepository:
         异常:
             数据库写入失败时传播 SQLAlchemy 异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 changed = await session.execute(
                     update(ToolCallModel)
@@ -212,7 +212,7 @@ class ToolCallRepository:
         self, session_id: str, status: str | None = None, include_deleted: bool = False
     ) -> list[ToolCallRecord]:
         """查询工具调用记录。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = (
                 select(ToolCallModel)
                 .where(ToolCallModel.session_id == session_id)
@@ -227,7 +227,7 @@ class ToolCallRepository:
 
     async def last_called_by_tool(self) -> dict[str, str]:
         """返回工具名到最近调用时间的映射。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = (
                 select(ToolCallModel.tool_name, func.max(ToolCallModel.started_at))
                 .where(ToolCallModel.deleted_time.is_(None))
@@ -238,7 +238,7 @@ class ToolCallRepository:
 
     async def count_calls_since(self, since: datetime) -> int:
         """统计指定时间点之后的工具调用次数。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = select(func.count(ToolCallModel.id)).where(
                 ToolCallModel.started_at >= since.isoformat(),
                 ToolCallModel.deleted_time.is_(None),

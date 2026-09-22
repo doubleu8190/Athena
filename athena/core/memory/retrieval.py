@@ -57,7 +57,7 @@ class HybridMemoryRetriever:
         self,
         memory_service: LongTermMemoryService,
         settings: Settings,
-        trace_writer: RetrievalTraceWriter,
+        trace_writer: RetrievalTraceWriter | None = None,
     ) -> None:
         """
 
@@ -91,10 +91,54 @@ class HybridMemoryRetriever:
         """记录已写入上下文的记忆访问。"""
         self._memory.record_selected_access(memory_ids)
 
+    async def _complete_trace(
+        self,
+        run_id: str | None,
+        started: float,
+        *,
+        candidate_count: int,
+        selected_count: int = 0,
+        status: str,
+        error_message: str | None = None,
+    ) -> None:
+        """写入召回终态，避免检索异常留下未完成运行。
+
+        参数：
+            run_id: 召回运行标识；为空时不执行写入。
+            started: ``perf_counter`` 记录的起始时间。
+            candidate_count: 融合阶段候选数量。
+            selected_count: 通过 provider 预算的候选数量。
+            status: 终态，例如 succeeded、partial、failed 或 cancelled。
+            error_message: 可选的错误信息。
+
+        返回值：
+            None。
+
+        异常：
+            轨迹写入失败只记录日志，不影响原始召回结果。
+        """
+        if run_id is None or self._trace_writer is None:
+            return
+        try:
+            await self._trace_writer.complete_run(
+                run_id,
+                candidate_count=candidate_count,
+                selected_count=selected_count,
+                status=status,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                error_message=error_message,
+            )
+        except Exception as exc:
+            logger.warning("retrieval_trace_complete_failed", error=str(exc))
+
     async def retrieve(
         self,
         query: str,
         filter_params: dict[str, Any] | None = None,
+        *,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        message_id: str | None = None,
     ) -> list[MemoryRetrievalResult]:
         """执行混合检索（默认跨会话全库）.
 
@@ -120,77 +164,109 @@ class HybridMemoryRetriever:
                             "rrf_k": self._rrf_k,
                         },
                         index_generation="memory/current",
+                        session_id=session_id,
+                        agent_run_id=agent_run_id,
+                        message_id=message_id,
                     )
                 )
             except Exception as exc:
                 logger.warning("retrieval_trace_start_failed", error=str(exc))
 
-        # 并发执行向量和关键词路线，随后统一使用 RRF 合并两路排名证据。
-        keyword_task = asyncio.create_task(self._keyword_search(query, filter_params))
-        raw_vector_task = asyncio.create_task(self._vector_search(query, filter_params))
+        try:
+            # 并发执行向量和关键词路线，随后统一使用 RRF 合并两路排名证据。
+            keyword_task = asyncio.create_task(self._keyword_search(query, filter_params))
+            raw_vector_task = asyncio.create_task(self._vector_search(query, filter_params))
 
-        keyword_results = await keyword_task
-        vector_results = await raw_vector_task
+            keyword_results = await keyword_task
+            vector_results = await raw_vector_task
 
-        logger.info(
-            "memory_retrieval_completed",
-            duration_ms=round((time.perf_counter() - started) * 1000),
-            keyword_count=len(keyword_results),
-            vector_count=len(vector_results),
-        )
-
-        fused = self._reciprocal_rank_fusion(
-            [result for result in vector_results if result.filter_reason is None],
-            keyword_results,
-        )
-
-        # 生命周期信号只作为同一相关度层内的 tie-break。
-        for r in fused:
-            r.rerank_score = r.fused_score
-        fused.sort(
-            key=lambda x: (
-                0 if x.exact_match else 1,
-                -float(x.fused_score or 0.0),
-                -self._lifecycle_score(x.metadata),
-                x.memory_id,
+            logger.info(
+                "memory_retrieval_completed",
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                keyword_count=len(keyword_results),
+                vector_count=len(vector_results),
             )
-        )
-        for rank, result in enumerate(fused, 1):
-            result.fused_rank = rank
-        selected = fused[: self._rerank_k][: self._context_k]
-        if run_id is not None:
-            try:
-                raw_candidates = [
-                    self._trace_candidate(result, provider="vector", stage="native")
-                    for result in vector_results
-                ]
-                raw_candidates.extend(
-                    self._trace_candidate(result, provider="keyword", stage="native")
-                    for result in keyword_results
+
+            fused = self._reciprocal_rank_fusion(
+                [result for result in vector_results if result.filter_reason is None],
+                keyword_results,
+            )
+
+            # 生命周期信号只作为同一相关度层内的 tie-break。
+            for r in fused:
+                r.rerank_score = r.fused_score
+            fused.sort(
+                key=lambda x: (
+                    0 if x.exact_match else 1,
+                    -float(x.fused_score or 0.0),
+                    -self._lifecycle_score(x.metadata),
+                    x.memory_id,
                 )
-                selected_ids = {result.memory_id for result in selected}
-                fused_candidates = [
-                    self._trace_candidate(
-                        result,
-                        provider="fusion",
-                        stage="fused",
-                        selected_for_result=result.memory_id in selected_ids,
+            )
+            for rank, result in enumerate(fused, 1):
+                result.fused_rank = rank
+            selected = fused[: self._rerank_k][: self._context_k]
+            if run_id is not None and self._trace_writer is not None:
+                try:
+                    raw_candidates = [
+                        self._trace_candidate(result, provider="vector", stage="native")
+                        for result in vector_results
+                    ]
+                    raw_candidates.extend(
+                        self._trace_candidate(result, provider="keyword", stage="native")
+                        for result in keyword_results
                     )
-                    for result in fused
-                ]
-                await self._trace_writer.record_candidates(
-                    run_id, [*raw_candidates, *fused_candidates]
-                )
-                await self._trace_writer.complete_run(
-                    run_id,
-                    candidate_count=len(fused),
-                    selected_count=len(selected),
-                )
-            except Exception as exc:
-                logger.warning("retrieval_trace_record_failed", error=str(exc))
-        for result in selected:
-            result.retrieval_run_id = run_id
-        return selected
+                    selected_ids = {result.memory_id for result in selected}
+                    fused_candidates = [
+                        self._trace_candidate(
+                            result,
+                            provider="fusion",
+                            stage="fused",
+                            selected_for_result=result.memory_id in selected_ids,
+                        )
+                        for result in fused
+                    ]
+                    await self._trace_writer.record_candidates(
+                        run_id, [*raw_candidates, *fused_candidates]
+                    )
+                    await self._complete_trace(
+                        run_id,
+                        started,
+                        candidate_count=len(fused),
+                        selected_count=len(selected),
+                        status="succeeded",
+                    )
+                except Exception as exc:
+                    logger.warning("retrieval_trace_record_failed", error=str(exc))
+                    await self._complete_trace(
+                        run_id,
+                        started,
+                        candidate_count=len(fused),
+                        selected_count=len(selected),
+                        status="partial",
+                        error_message=str(exc),
+                    )
+            for result in selected:
+                result.retrieval_run_id = run_id
+            return selected
+        except asyncio.CancelledError:
+            await self._complete_trace(
+                run_id,
+                started,
+                candidate_count=0,
+                status="cancelled",
+                error_message="检索任务被取消",
+            )
+            raise
+        except Exception as exc:
+            await self._complete_trace(
+                run_id,
+                started,
+                candidate_count=0,
+                status="failed",
+                error_message=str(exc),
+            )
+            raise
 
     @staticmethod
     def _trace_candidate(
@@ -202,6 +278,9 @@ class HybridMemoryRetriever:
     ) -> RetrievalCandidate:
         """把记忆检索结果转换为可持久化的候选轨迹。"""
         metadata = result.metadata
+        filter_reason = result.filter_reason
+        if stage == "fused" and not selected_for_result and filter_reason is None:
+            filter_reason = "outside_context_k"
         return RetrievalCandidate(
             provider=provider,
             stage=stage,
@@ -213,8 +292,9 @@ class HybridMemoryRetriever:
             fused_score=result.fused_score if stage == "fused" else None,
             logical_source_id=metadata.get("logical_memory_id"),
             revision_id=result.memory_id,
-            filter_reason=result.filter_reason,
+            filter_reason=filter_reason,
             selected_for_result=selected_for_result,
+            content_preview=result.content[:500],
             metadata={"source": result.source, "exact_match": result.exact_match},
         )
 
@@ -485,9 +565,16 @@ class MemoryRetrievalService:
             不向调用方传播检索异常；底层失败时返回空列表。
         """
         try:
-            results = await self._manager.retrieve(
-                query=request.query,
-            )
+            trace_kwargs = {
+                key: value
+                for key, value in {
+                    "session_id": request.session_id,
+                    "agent_run_id": request.agent_run_id,
+                    "message_id": request.message_id,
+                }.items()
+                if value is not None
+            }
+            results = await self._manager.retrieve(query=request.query, **trace_kwargs)
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))
             return []

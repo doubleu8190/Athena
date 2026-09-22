@@ -54,6 +54,8 @@ class KnowledgeContextProvider:
         self,
         *,
         session_id: str,
+        agent_run_id: str | None = None,
+        message_id: str | None = None,
         task: UserTaskSpec,
         plan: ContextPlan,
     ) -> ProviderResult:
@@ -78,6 +80,9 @@ class KnowledgeContextProvider:
                     query,
                     plan.max_items,
                     plan.knowledge_base_ids or None,
+                    session_id=session_id,
+                    agent_run_id=agent_run_id,
+                    message_id=message_id,
                 )
             documents = await self._repository.list_global_knowledge_documents()
         except Exception as exc:

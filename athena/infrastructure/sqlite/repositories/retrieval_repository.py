@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from athena.core.retrieval.contracts import RetrievalCandidate, RetrievalRunRequest
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import (
     RetrievalCandidateModel,
     RetrievalRunModel,
@@ -42,9 +42,12 @@ class RetrievalTraceRepository:
             status="running",
             config_json=_json_dumps(request.config),
             index_generation=request.index_generation,
+            session_id=request.session_id,
+            agent_run_id=request.agent_run_id,
+            message_id=request.message_id,
             created_at=now,
         )
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 session.add(row)
         return run_id
@@ -85,12 +88,15 @@ class RetrievalTraceRepository:
                 filter_reason=candidate.filter_reason,
                 selected_for_result=1 if candidate.selected_for_result else 0,
                 injected_into_context=1 if candidate.injected_into_context else 0,
+                content_preview=candidate.content_preview,
+                source_title=candidate.source_title,
+                locator_json=_json_dumps(candidate.locator),
                 metadata_json=_json_dumps(candidate.metadata),
                 created_at=now,
             )
             for candidate in candidates
         ]
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 session.add_all(rows)
 
@@ -102,6 +108,8 @@ class RetrievalTraceRepository:
         selected_count: int = 0,
         injected_count: int = 0,
         status: str = "succeeded",
+        duration_ms: float | None = None,
+        error_message: str | None = None,
     ) -> None:
         """写入检索运行的完成状态和统计。
 
@@ -111,6 +119,8 @@ class RetrievalTraceRepository:
             selected_count: 进入 provider 结果的候选数量。
             injected_count: 最终注入上下文的候选数量。
             status: ``succeeded``、``failed`` 或其他运行状态。
+            duration_ms: 从启动到结束的耗时；不可用时为空。
+            error_message: 失败、超时或部分成功时的错误说明。
 
         返回值：
             None。
@@ -118,7 +128,7 @@ class RetrievalTraceRepository:
         异常：
             数据库更新失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     update(RetrievalRunModel)
@@ -128,6 +138,8 @@ class RetrievalTraceRepository:
                         candidate_count=candidate_count,
                         selected_count=selected_count,
                         injected_count=injected_count,
+                        duration_ms=duration_ms,
+                        error_message=error_message,
                         completed_at=_now_iso(),
                     )
                 )
@@ -148,7 +160,7 @@ class RetrievalTraceRepository:
         ids = list(dict.fromkeys(source_ids))
         if not ids:
             return
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     update(RetrievalCandidateModel)
@@ -177,23 +189,11 @@ class RetrievalTraceRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             row = await session.get(RetrievalRunModel, run_id)
         if row is None:
             return None
-        return {
-            "run_id": row.run_id,
-            "query": row.query,
-            "scope": row.scope,
-            "status": row.status,
-            "config": _json_loads(row.config_json, {}),
-            "index_generation": row.index_generation,
-            "candidate_count": row.candidate_count,
-            "selected_count": row.selected_count,
-            "injected_count": row.injected_count,
-            "created_at": row.created_at,
-            "completed_at": row.completed_at,
-        }
+        return self._run_payload(row)
 
     async def list_candidates(self, run_id: str) -> list[dict[str, Any]]:
         """按阶段和 rank 读取一次检索的全部候选轨迹。
@@ -207,7 +207,7 @@ class RetrievalTraceRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             rows = (
                 (
                     await session.execute(
@@ -237,6 +237,9 @@ class RetrievalTraceRepository:
                 "filter_reason": row.filter_reason,
                 "selected_for_result": bool(row.selected_for_result),
                 "injected_into_context": bool(row.injected_into_context),
+                "content_preview": row.content_preview,
+                "source_title": row.source_title,
+                "locator": _json_loads(row.locator_json, {}),
                 "metadata": _json_loads(row.metadata_json, {}),
                 "created_at": row.created_at,
             }
@@ -249,6 +252,85 @@ class RetrievalTraceRepository:
                 ),
             )
         ]
+
+    async def list_runs(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        scope: str | None = None,
+        status: str | None = None,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        query: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """按筛选条件分页读取召回运行摘要。
+
+        参数：
+            limit: 返回数量，范围会被限制在 1 到 100。
+            offset: 从第几条记录开始读取。
+            scope: 可选的召回范围。
+            status: 可选的运行状态。
+            session_id: 可选的会话标识。
+            agent_run_id: 可选的 Agent 运行标识。
+            query: 可选的查询文本模糊匹配。
+
+        返回值：
+            ``(items, total)``，其中 items 按创建时间倒序排列。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        limit = min(max(int(limit), 1), 100)
+        offset = max(int(offset), 0)
+        conditions = []
+        if scope:
+            conditions.append(RetrievalRunModel.scope == scope)
+        if status:
+            conditions.append(RetrievalRunModel.status == status)
+        if session_id:
+            conditions.append(RetrievalRunModel.session_id == session_id)
+        if agent_run_id:
+            conditions.append(RetrievalRunModel.agent_run_id == agent_run_id)
+        if query:
+            conditions.append(RetrievalRunModel.query.contains(query))
+
+        async with get_session() as session:
+            count_stmt = select(func.count()).select_from(RetrievalRunModel)
+            if conditions:
+                count_stmt = count_stmt.where(*conditions)
+            total = int((await session.execute(count_stmt)).scalar_one())
+
+            stmt = select(RetrievalRunModel).order_by(
+                RetrievalRunModel.created_at.desc(), RetrievalRunModel.run_id.desc()
+            )
+            if conditions:
+                stmt = stmt.where(*conditions)
+            rows = (await session.execute(stmt.offset(offset).limit(limit))).scalars().all()
+
+        return [self._run_payload(row) for row in rows], total
+
+    @staticmethod
+    def _run_payload(row: RetrievalRunModel) -> dict[str, Any]:
+        """把 ORM 运行行转换成 API 使用的字典。"""
+        return {
+            "run_id": row.run_id,
+            "query": row.query,
+            "scope": row.scope,
+            "status": row.status,
+            "config": _json_loads(row.config_json, {}),
+            "index_generation": row.index_generation,
+            "session_id": row.session_id,
+            "agent_run_id": row.agent_run_id,
+            "message_id": row.message_id,
+            "candidate_count": row.candidate_count,
+            "selected_count": row.selected_count,
+            "injected_count": row.injected_count,
+            "duration_ms": row.duration_ms,
+            "error_message": row.error_message,
+            "created_at": row.created_at,
+            "completed_at": row.completed_at,
+        }
 
     async def ranked_source_ids(self, run_id: str, limit: int | None = None) -> list[str]:
         """读取融合阶段的候选 ID，供离线评估或回放使用。

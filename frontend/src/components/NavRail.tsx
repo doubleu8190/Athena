@@ -9,6 +9,7 @@ import {
   Settings,
   Sparkles,
   Network,
+  GitBranch,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import type { AppView } from "../types"
@@ -27,6 +28,7 @@ const NAV_ITEMS: NavItem[] = [
   { view: "approvals", label: "审批日志", icon: ClipboardCheck },
   { view: "providers", label: "LLM 提供商", icon: Server },
   { view: "mcp", label: "MCP 服务器", icon: Network },
+  { view: "retrieval", label: "召回分析", icon: GitBranch },
   { view: "session-detail", label: "会话详情", icon: History },
   { view: "settings", label: "系统设置", icon: Settings },
 ]

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from sqlalchemy import select, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import MCPServerModel
 from athena.models import MCPServer, MCPServerConfig
 
@@ -20,9 +20,9 @@ class MCPServerRepository:
         """插入或覆盖 MCP 服务器配置，并复活软删除记录。"""
         now = _now_iso()
         config_json = _json_dumps(config.model_dump())
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
-                stmt = sqlite_insert(MCPServerModel).values(
+                stmt = postgres_insert(MCPServerModel).values(
                     name=name,
                     config_json=config_json,
                     created_at=now,
@@ -39,7 +39,7 @@ class MCPServerRepository:
 
     async def get(self, name: str, include_deleted: bool = False) -> MCPServer | None:
         """获取单个 MCP 服务器配置。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = select(MCPServerModel).where(MCPServerModel.name == name)
             if not include_deleted:
                 stmt = stmt.where(MCPServerModel.deleted_time.is_(None))
@@ -49,7 +49,7 @@ class MCPServerRepository:
 
     async def list_all(self, include_deleted: bool = False) -> list[MCPServer]:
         """列出所有 MCP 服务器配置。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = select(MCPServerModel).order_by(MCPServerModel.created_at.asc())
             if not include_deleted:
                 stmt = stmt.where(MCPServerModel.deleted_time.is_(None))
@@ -58,7 +58,7 @@ class MCPServerRepository:
 
     async def soft_delete(self, name: str) -> None:
         """软删除 MCP 服务器配置。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     update(MCPServerModel)

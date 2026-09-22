@@ -54,6 +54,8 @@ class MemoryContextProvider:
         self,
         *,
         session_id: str,
+        agent_run_id: str | None = None,
+        message_id: str | None = None,
         task: UserTaskSpec,
         plan: ContextPlan,
     ) -> ProviderResult:
@@ -76,6 +78,9 @@ class MemoryContextProvider:
             query=query,
             limit=self._limit,
             record_access=False,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            message_id=message_id,
         )
         try:
             async with asyncio.timeout(self._timeout_seconds):

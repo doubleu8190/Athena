@@ -415,6 +415,8 @@ class LangGraphRuntime:
         )
         bundle = await self._context_acquisition_service.acquire(
             session_id=state.get("session_id", ""),
+            agent_run_id=state.get("run_id"),
+            message_id=state.get("message_id"),
             task=task,
             plan=plan,
         )

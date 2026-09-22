@@ -23,6 +23,9 @@ async def test_retrieval_trace_persists_candidates_and_injection(tmp_path):
                 scope="memory",
                 config={"candidate_k": 10},
                 index_generation="memory/current",
+                session_id="session-1",
+                agent_run_id="agent-run-1",
+                message_id="message-1",
             )
         )
         await db.retrieval.record_candidates(
@@ -38,6 +41,8 @@ async def test_retrieval_trace_persists_candidates_and_injection(tmp_path):
                     fused_rank=1,
                     fused_score=0.42,
                     selected_for_result=True,
+                    content_preview="用户偏好 Python",
+                    locator={"turn": 3},
                 )
             ],
         )
@@ -46,13 +51,42 @@ async def test_retrieval_trace_persists_candidates_and_injection(tmp_path):
         )
         await db.retrieval.mark_injected(run_id, ["memory-r2"])
 
+        # The retrieval trace has its own ID.  A single Agent run can produce
+        # multiple traces when it queries more than one provider.
+        second_run_id = await db.retrieval.start_run(
+            RetrievalRunRequest(
+                query="知识库中的相关内容",
+                scope="knowledge",
+                session_id="session-1",
+                agent_run_id="agent-run-1",
+                message_id="message-1",
+            )
+        )
+        assert second_run_id != run_id
+        agent_runs, agent_total = await db.retrieval.list_runs(
+            agent_run_id="agent-run-1"
+        )
+        assert agent_total == 2
+        assert {item["run_id"] for item in agent_runs} == {run_id, second_run_id}
+
         run = await db.retrieval.get_run(run_id)
         candidates = await db.retrieval.list_candidates(run_id)
         assert run is not None
         assert run["status"] == "succeeded"
         assert run["injected_count"] == 1
+        assert run["session_id"] == "session-1"
+        assert run["agent_run_id"] == "agent-run-1"
+        assert run["message_id"] == "message-1"
         assert candidates[0]["revision_id"] == "memory-r2"
+        assert candidates[0]["content_preview"] == "用户偏好 Python"
+        assert candidates[0]["locator"] == {"turn": 3}
         assert candidates[0]["injected_into_context"] is True
+
+        runs, total = await db.retrieval.list_runs(
+            session_id="session-1", scope="memory", query="偏好"
+        )
+        assert total == 1
+        assert runs[0]["run_id"] == run_id
     finally:
         await db.close()
 

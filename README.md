@@ -7,7 +7,7 @@ Athena 是一个面向本地运行的自主 AI Agent 桌面应用。项目将 LL
 - Agent 工作流：支持工具调用、重试、预算控制、错误处理和子 Agent 并行执行。
 - 工具系统：统一管理内置工具与 MCP 工具，支持启用/禁用、风险等级和人工审批。
 - 会话与恢复：持久化消息、步骤和工具调用，支持中断会话恢复或放弃。
-- 记忆与检索：SQLite 保存记忆元数据，ChromaDB 保存向量；支持向量检索、关键词检索、融合排序、摘要和事实提取。
+- 记忆与检索：PostgreSQL 保存统一持久化数据，ChromaDB 保存向量；支持向量检索、关键词检索、融合排序、摘要和事实提取。
 - 文件智能：支持文本、PDF、Word、Excel、图片和代码文件的上传、解析、检索与分析。
 - 浏览器体验：React Web 前端通过 HTTP Command 和 SSE 接收 LLM 流式输出、工具执行、审批和文件处理事件。
 - 可选安全能力：路径安全过滤和 Docker 沙箱执行。沙箱默认关闭。
@@ -20,7 +20,7 @@ flowchart TB
     API[FastAPI 网关]
     Agent[AgentWorkflow + Harness]
     Tools[工具管理器]
-    Storage[SQLite + ChromaDB]
+    Storage[PostgreSQL + ChromaDB]
     Files[文件智能运行时]
     Runtime[LangGraph Runtime]
 
@@ -39,7 +39,7 @@ flowchart TB
 | 后端 | Python 3.11+、FastAPI、Uvicorn、Pydantic Settings |
 | Agent 与 LLM | LangChain、OpenAI、Anthropic、Ollama 适配器 |
 | 工具 | 内置异步工具、MCP SDK、可选 Docker 沙箱 |
-| 持久化 | SQLite、SQLAlchemy、ChromaDB |
+| 持久化 | PostgreSQL、SQLAlchemy、ChromaDB |
 | 文件处理 | pypdf、pdfplumber、python-docx、openpyxl、Pillow、RapidOCR、Tree-sitter |
 | 前端 | React 18、TypeScript、Vite、Zustand、Tailwind CSS |
 
@@ -52,7 +52,7 @@ Athena/
 │   ├── core/                 # Agent、Harness、LLM、记忆、检索、工具、文件和安全能力
 │   ├── contracts/            # Command/Event 协议与端口
 │   ├── gateway/              # REST API、SSE 和认证
-│   ├── infrastructure/       # SQLite、ChromaDB 等基础设施
+│   ├── infrastructure/       # PostgreSQL、ChromaDB 等基础设施
 │   ├── models/               # 领域模型
 │   └── main.py               # FastAPI 应用入口
 ├── agent_runtime/            # LangGraph、命令消费和恢复
@@ -165,7 +165,13 @@ LLM_PROVIDERS='[{"name":"primary","provider":"openai","model":"gpt-4o","api_key"
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=4096
 
-SQLITE_DB_PATH=./data/athena.db
+POSTGRES_USER=doubleu
+POSTGRES_PASSWORD=your-password
+POSTGRES_DB=athena
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_POOL_SIZE=10
+POSTGRES_MAX_OVERFLOW=10
 CHROMADB_PATH=./data/chromadb
 FILE_STORAGE_PATH=./data/files
 
@@ -177,6 +183,10 @@ APPROVAL_TIMEOUT=120
 
 SANDBOX_ENABLED=false
 ```
+
+所有业务表和 LangGraph checkpoint 现在统一创建在一个 PostgreSQL 数据库中。
+首次切换时无需迁移旧 SQLite 文件；确保 PostgreSQL 服务已启动并重新启动应用，
+应用会自动创建完整 schema。
 
 `LLM_PROVIDERS` 是 JSON 数组，列表顺序决定 Provider 优先级。当前代码支持 `openai`、`anthropic`、`deepseek` 和 `ollama`；`ollama` 可以不填写 API Key，并可通过 `base_url` 指定地址。
 

@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import bindparam, case, func, insert, select, text, update
 
 from athena.infrastructure.sqlite.engine import (
-    get_memory_database_session,
+    get_session,
 )
 from athena.infrastructure.sqlite.models import MemoryModel
 from .repository_utils import _json_dumps, _json_loads
@@ -109,7 +109,7 @@ class SQLiteMemoryRepository:
             for key, value in metadata.items()
             if key not in _SEMANTIC_KEYS and key not in _SYSTEM_KEYS
         }
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     insert(MemoryModel).values(
@@ -158,7 +158,7 @@ class SQLiteMemoryRepository:
         异常：
             SQLite 删除操作失败时向上抛出异常，事务会自动回滚。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 memory_count = (
                     await session.execute(select(func.count(MemoryModel.id)))
@@ -184,7 +184,7 @@ class SQLiteMemoryRepository:
         if not stats:
             return []
         ids = list(stats)
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 result = await session.execute(
                     update(MemoryModel)
@@ -254,29 +254,27 @@ class SQLiteMemoryRepository:
             SELECT m.id, m.content, m.metadata_json, m.session_id,
                    m.created_at, m.pinned, m.expires_at, m.last_accessed_at,
                    m.access_count, m.memory_type, m.category, m.confidence,
-                   m.source_kind, m.status,
-                   m.last_observed_at, m.validity_status, m.valid_until,
-                   m.revision_of, m.revision, m.logical_memory_id,
-                   bm25(memory_fts) AS rank
-            FROM memory_fts
-            JOIN memories m ON memory_fts.memory_id = m.id
-            WHERE memory_fts MATCH :match_expr AND m.deleted_time IS NULL
-              AND m.status = 'active'
+                   m.source_kind, m.status, m.last_observed_at,
+                   m.validity_status, m.valid_until, m.revision_of,
+                   m.revision, m.logical_memory_id, 1.0 AS rank
+            FROM memories m
+            WHERE m.deleted_time IS NULL AND m.status = 'active'
               AND m.validity_status != 'invalid'
               AND (m.valid_until IS NULL OR m.valid_until >= :now)
         """
-        params: dict[str, Any] = {
-            "match_expr": " OR ".join(terms),
-            "limit": limit,
-            "now": datetime.now().isoformat(),
-        }
+        params: dict[str, Any] = {"limit": limit, "now": datetime.now().isoformat()}
+        sql += " AND (" + " OR ".join(
+            f"m.content ILIKE :term_{i}" for i, _ in enumerate(terms)
+        ) + ")"
+        for i, token in enumerate(tokens):
+            params[f"term_{i}"] = f"%{token}%"
         for key, value in (where or {}).items():
             if key not in _FILTER_COLUMNS:
                 raise ValueError(f"Unsupported memory filter: {key}")
             sql += f" AND m.{_FILTER_COLUMN_MAP.get(key, key)} = :where_{key}"
             params[f"where_{key}"] = value
-        sql += " ORDER BY rank LIMIT :limit"
-        async with get_memory_database_session() as session:
+        sql += " ORDER BY m.created_at DESC LIMIT :limit"
+        async with get_session() as session:
             rows = (await session.execute(text(sql), params)).fetchall()
         results: list[dict[str, Any]] = []
         for row in rows:
@@ -321,7 +319,7 @@ class SQLiteMemoryRepository:
             .offset(filters.get("offset", 0))
             .limit(filters.get("limit", 50))
         )
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             rows = (await session.execute(stmt)).scalars().all()
         return [
             {
@@ -365,7 +363,7 @@ class SQLiteMemoryRepository:
                 MemoryModel.created_at >= (now - timedelta(days=7)).isoformat(),
             ],
         }
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             result: dict[str, int] = {}
             for name, clauses in conditions.items():
                 value = (
@@ -389,7 +387,7 @@ class SQLiteMemoryRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 row = (
                     await session.execute(
@@ -427,7 +425,7 @@ class SQLiteMemoryRepository:
         异常：
             SQLite 查询失败时向上抛出异常。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             row = (
                 await session.execute(
                     select(MemoryModel).where(
@@ -459,7 +457,7 @@ class SQLiteMemoryRepository:
         异常：
             SQLite 查询失败时向上抛出异常。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             target = await session.get(MemoryModel, memory_id)
             logical_id = target.logical_memory_id if target is not None else memory_id
             rows = (
@@ -493,7 +491,7 @@ class SQLiteMemoryRepository:
 
     async def mark_superseded(self, old_id: str, new_id: str) -> bool:
         now = datetime.now().isoformat()
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 result = await session.execute(
                     update(MemoryModel)
@@ -509,9 +507,10 @@ class SQLiteMemoryRepository:
                 if result.rowcount != 1:
                     return False
                 await session.execute(
-                    text("""INSERT OR IGNORE INTO memory_relations
+                    text("""INSERT INTO memory_relations
                     (source_memory_id, target_memory_id, relation_type, created_at)
-                    VALUES (:source, :target, 'supersedes', :created)"""),
+                    VALUES (:source, :target, 'supersedes', :created)
+                    ON CONFLICT (source_memory_id, target_memory_id, relation_type) DO NOTHING"""),
                     {"source": new_id, "target": old_id, "created": now},
                 )
                 await session.execute(
@@ -531,7 +530,7 @@ class SQLiteMemoryRepository:
         异常：
             SQLite 更新失败时向上抛出异常。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 row = await session.get(MemoryModel, memory_id)
                 if row is None:
@@ -571,7 +570,7 @@ class SQLiteMemoryRepository:
         异常：
             SQLite 事务失败时向上抛出异常。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 row = (
                     await session.execute(
@@ -613,12 +612,13 @@ class SQLiteMemoryRepository:
     async def add_relation(
         self, source_id: str, target_id: str, relation_type: str
     ) -> None:
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
-                    text("""INSERT OR IGNORE INTO memory_relations
+                    text("""INSERT INTO memory_relations
                         (source_memory_id, target_memory_id, relation_type, created_at)
-                        VALUES (:source, :target, :relation, :created)"""),
+                        VALUES (:source, :target, :relation, :created)
+                        ON CONFLICT (source_memory_id, target_memory_id, relation_type) DO NOTHING"""),
                     {
                         "source": source_id,
                         "target": target_id,
@@ -641,7 +641,7 @@ class SQLiteMemoryRepository:
         """
         if not memory_ids:
             return
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     update(MemoryModel)
@@ -669,7 +669,7 @@ class SQLiteMemoryRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 row = await session.get(MemoryModel, memory_id)
                 if row is None:
@@ -691,7 +691,7 @@ class SQLiteMemoryRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             rows = (
                 await session.execute(
                     select(MemoryModel.id).where(
@@ -716,7 +716,7 @@ class SQLiteMemoryRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     text("DELETE FROM memories WHERE id = :id"), {"id": memory_id}
@@ -738,7 +738,7 @@ class SQLiteMemoryRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 for memory_id in memory_ids:
                     row = await session.get(MemoryModel, memory_id)

@@ -19,7 +19,10 @@ class SettingsView(BaseModel):
     debug: bool
 
     # 数据库
-    sqlite_db_path: str
+    postgres_user: str
+    postgres_db: str
+    postgres_host: str
+    postgres_port: int
     chromadb_path: str
 
     # Harness 执行引擎
@@ -61,7 +64,10 @@ async def get_settings_view() -> SettingsView:
         host=s.host,
         port=s.port,
         debug=s.debug,
-        sqlite_db_path=s.sqlite_db_path,
+        postgres_user=s.postgres_user,
+        postgres_db=s.postgres_db,
+        postgres_host=s.postgres_host,
+        postgres_port=s.postgres_port,
         chromadb_path=s.chromadb_path,
         max_turns_per_run=s.max_turns_per_run,
         retry_budget=s.retry_budget,

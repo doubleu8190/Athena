@@ -20,6 +20,8 @@ import type {
   Attachment,
   SupportedAttachmentTypes,
   KnowledgeBase,
+  RetrievalRunDetail,
+  RetrievalRunListResponse,
 } from "../types"
 
 class ApiClient {
@@ -103,6 +105,37 @@ class ApiClient {
   async getMessages(sessionId: string, limit?: number): Promise<Message[]> {
     const params = limit ? `?limit=${limit}` : ""
     return this.request<Message[]>(`/api/sessions/${sessionId}/messages${params}`)
+  }
+
+  /** 分页读取召回运行摘要，可按范围、状态、会话或查询文本过滤。 */
+  async listRetrievalRuns(opts?: {
+    limit?: number
+    offset?: number
+    scope?: string
+    status?: string
+    session_id?: string
+    agent_run_id?: string
+    q?: string
+  }): Promise<RetrievalRunListResponse> {
+    const params = new URLSearchParams()
+    if (opts?.limit != null) params.set("limit", String(opts.limit))
+    if (opts?.offset != null) params.set("offset", String(opts.offset))
+    if (opts?.scope) params.set("scope", opts.scope)
+    if (opts?.status) params.set("status", opts.status)
+    if (opts?.session_id) params.set("session_id", opts.session_id)
+    if (opts?.agent_run_id) params.set("agent_run_id", opts.agent_run_id)
+    if (opts?.q) params.set("q", opts.q)
+    const query = params.toString()
+    return this.request<RetrievalRunListResponse>(
+      `/api/retrieval/runs${query ? `?${query}` : ""}`,
+    )
+  }
+
+  /** 读取一次召回运行的配置、阶段候选和上下文注入状态。 */
+  async getRetrievalRun(runId: string): Promise<RetrievalRunDetail> {
+    return this.request<RetrievalRunDetail>(
+      `/api/retrieval/runs/${encodeURIComponent(runId)}`,
+    )
   }
 
   /** 提交异步 Agent 运行命令。

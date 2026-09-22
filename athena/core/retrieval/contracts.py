@@ -14,6 +14,9 @@ class RetrievalRunRequest:
     scope: str
     config: dict[str, Any] = field(default_factory=dict)
     index_generation: str | None = None
+    session_id: str | None = None
+    agent_run_id: str | None = None
+    message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -34,4 +37,7 @@ class RetrievalCandidate:
     filter_reason: str | None = None
     selected_for_result: bool = False
     injected_into_context: bool = False
+    content_preview: str | None = None
+    source_title: str | None = None
+    locator: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)

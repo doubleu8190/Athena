@@ -17,14 +17,14 @@ dependencies = [
     "langchain-anthropic==1.7.1",
     "langchain-community==0.4.2",
     "langchain-ollama==1.1.0",
-    # LangGraph runtime and SQLite checkpointer used by the SSE migration.
+    # LangGraph runtime and PostgreSQL checkpointer.
     "langgraph==1.2.11",
-    "langgraph-checkpoint-sqlite==3.1.1",
+    "langgraph-checkpoint-postgres>=3.1.2",
+    "psycopg[binary]>=3.2",
     "chromadb>=0.5.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "sqlalchemy[asyncio]>=2.0.0",
-    "aiosqlite>=0.20.0",
     "structlog>=24.0.0",
     # MCP 客户端基于官方 SDK（client.py 直接导入 mcp）。
     # 此前仅作为 langchain-mcp-adapters 的传递依赖存在，需显式声明以防移除。

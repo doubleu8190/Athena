@@ -27,7 +27,10 @@ const SECTIONS: { id: string; title: string; fields: Field[] }[] = [
     id: "database",
     title: "存储",
     fields: [
-      { key: "sqlite_db_path", label: "SQLite 数据库" },
+      { key: "postgres_user", label: "PostgreSQL 用户" },
+      { key: "postgres_db", label: "PostgreSQL 数据库" },
+      { key: "postgres_host", label: "PostgreSQL 主机" },
+      { key: "postgres_port", label: "PostgreSQL 端口" },
       { key: "chromadb_path", label: "ChromaDB 路径" },
     ],
   },

@@ -428,15 +428,25 @@ function Chat({ sendEvent }: ChatProps) {
   // remains in the transcript. During this window there is no new assistant
   // message yet, so the timeline cannot be attached to a response group.
   const latestRequestGroup = [...phaseGroups].reverse().find((group) => group.phase === "request")
+  const latestRequestGroupIndex = latestRequestGroup ? phaseGroups.lastIndexOf(latestRequestGroup) : -1
+  const latestResponseGroupIndex = phaseGroups.reduce(
+    (lastIndex, group, index) => (group.phase === "response" ? index : lastIndex),
+    -1,
+  )
   const latestRunLifecycleEntry = [...executionTimeline].reverse().find((entry) => entry.event_type.startsWith("run."))
   const activeRunId = [...executionTimeline]
     .reverse()
     .find((entry) => entry.event_type === "run.started" && entry.status === "running")
     ?.run_id
   const currentRunId = activeRunId || latestRunLifecycleEntry?.run_id
-  const activeRunHasResponse = activeRunId
+  // A response group after the latest request is authoritative even when a
+  // replayed/legacy message has no run_id (or a mismatched one). Without this
+  // fallback the same timeline is rendered once below the request and again
+  // above the response while the run is still marked active.
+  const latestRequestHasResponse = latestRequestGroupIndex >= 0 && latestResponseGroupIndex > latestRequestGroupIndex
+  const activeRunHasResponse = latestRequestHasResponse || (activeRunId
     ? phaseGroups.some((group) => group.phase === "response" && group.messages.some((message) => message.run_id === activeRunId))
-    : false
+    : false)
   const activeRunPaused = agentStatus === "paused"
   const latestRunLifecycle = latestRunLifecycleEntry?.event_type
   const showRunOutcome = latestRunLifecycle === "run.paused" || latestRunLifecycle === "run.cancelled" || latestRunLifecycle === "run.failed" || latestRunLifecycle === "run.budget_exceeded"
@@ -583,7 +593,7 @@ function Chat({ sendEvent }: ChatProps) {
                         {group.messages.map((message) => (
                           <MessageBubble key={message.id} message={message} />
                         ))}
-                        {group === latestRequestGroup && (isAgentActive || activeRunPaused || showRunOutcome) && (
+                        {group === latestRequestGroup && (isAgentActive || activeRunPaused || showRunOutcome) && !activeRunHasResponse && (
                           activeTimelineEntries.length > 0
                             ? <ExecutionTimeline entries={activeTimelineEntries} defaultExpanded />
                             : <div className="processing-group py-3">

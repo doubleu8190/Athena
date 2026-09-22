@@ -32,6 +32,8 @@ class _ContextProvider(Protocol):
         self,
         *,
         session_id: str,
+        agent_run_id: str | None = None,
+        message_id: str | None = None,
         task: UserTaskSpec,
         plan: ContextPlan,
     ) -> ProviderResult:
@@ -77,6 +79,8 @@ class ContextAcquisitionService:
         self,
         *,
         session_id: str,
+        agent_run_id: str | None = None,
+        message_id: str | None = None,
         task: UserTaskSpec,
         plan: ContextPlan,
     ) -> ContextBundle:
@@ -101,7 +105,13 @@ class ContextAcquisitionService:
         unknown = [provider for provider in plan.providers if provider not in self._providers]
         results = await asyncio.gather(
             *(
-                provider.acquire(session_id=session_id, task=task, plan=plan)
+                provider.acquire(
+                    session_id=session_id,
+                    agent_run_id=agent_run_id,
+                    message_id=message_id,
+                    task=task,
+                    plan=plan,
+                )
                 for provider in selected
             ),
             return_exceptions=True,

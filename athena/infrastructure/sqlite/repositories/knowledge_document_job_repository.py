@@ -9,7 +9,7 @@ from typing import Any, cast
 from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.utils.id_generation import generate_time_id
 
 
@@ -29,7 +29,7 @@ class KnowledgeDocumentJobRepository:
             SQLite 写入失败时向上抛出异常。
         """
         now = datetime.now().isoformat()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 result = await session.execute(
                     text(
@@ -63,7 +63,7 @@ class KnowledgeDocumentJobRepository:
             SQLite 读取或更新失败时向上抛出异常。
         """
         now = datetime.now().isoformat()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 row = (
                     await session.execute(
@@ -150,7 +150,7 @@ class KnowledgeDocumentJobRepository:
         异常：
             SQLite 更新失败时向上抛出异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     text("""UPDATE knowledge_document_jobs
@@ -188,7 +188,7 @@ class KnowledgeDocumentJobRepository:
             SQLite 更新失败时向上抛出异常。
         """
         now = datetime.now().isoformat()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 result = await session.execute(
                     text("""UPDATE knowledge_document_jobs
@@ -224,7 +224,7 @@ class KnowledgeDocumentJobRepository:
         异常：
             SQLite 更新失败时向上抛出异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     text("""UPDATE knowledge_document_jobs

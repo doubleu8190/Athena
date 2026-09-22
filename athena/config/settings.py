@@ -6,7 +6,7 @@
 配置分组：
 - 服务端: 服务端口、调试模式
 - LLM 提供者: 主/副/兜底 LLM 配置
-- 数据库: SQLite 和 ChromaDB 路径
+- 数据库: PostgreSQL 和 ChromaDB 配置
 - File Intelligence: 文件处理参数
 - Harness: Agent 执行参数
 - Memory: 记忆系统参数
@@ -111,10 +111,14 @@ class Settings(BaseSettings):
         )
     )
 
-    # --- 数据库 ---
-    sqlite_db_path: str = "./data/athena.db"
-    sqlite_memory_db_path: str = "./data/memory.db"
-    sqlite_checkpoint_db_path: str = "./data/checkpoint.db"
+    # --- PostgreSQL ---
+    postgres_user: str = "doubleu"
+    postgres_password: str = ""
+    postgres_db: str = "athena"
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_pool_size: int = Field(default=10, ge=1)
+    postgres_max_overflow: int = Field(default=10, ge=0)
     chromadb_path: str = "./data/chromadb"
 
     # --- 文件智能 ---
@@ -205,19 +209,23 @@ class Settings(BaseSettings):
         return self.llm_providers[2:] if len(self.llm_providers) > 2 else []
 
     @property
-    def db_path(self) -> Path:
-        """SQLite 数据库文件路径。"""
-        return Path(self.sqlite_db_path)
+    def postgres_url(self) -> str:
+        """Return the SQLAlchemy async PostgreSQL URL with safely escaped credentials."""
+        from sqlalchemy.engine import URL
+
+        return URL.create(
+            "postgresql+psycopg",
+            username=self.postgres_user,
+            password=self.postgres_password,
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        ).render_as_string(hide_password=False)
 
     @property
-    def memory_db_path(self) -> Path:
-        """记忆任务数据库文件路径，未配置时由核心数据库路径派生。"""
-        return Path(self.sqlite_memory_db_path or self.db_path.with_name(f"{self.db_path.stem}-memory.db"))
-
-    @property
-    def checkpoint_db_path(self) -> Path:
-        """LangGraph 检查点数据库文件路径，未配置时由核心数据库路径派生。"""
-        return Path(self.sqlite_checkpoint_db_path or self.db_path.with_name(f"{self.db_path.stem}-checkpoints.db"))
+    def postgres_conn_string(self) -> str:
+        """Return the native psycopg connection string used by LangGraph."""
+        return self.postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
 
     @property
     def chroma_path(self) -> Path:

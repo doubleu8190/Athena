@@ -7,10 +7,7 @@
 
 from __future__ import annotations
 
-from athena.infrastructure.sqlite.engine import (
-    close_sqlite_engines,
-    initialize_sqlite_engines,
-)
+from athena.infrastructure.sqlite.engine import close_postgres_engine, initialize_postgres_engine
 from athena.infrastructure.sqlite.repositories import (
     ApprovalLogRepository,
     FileRepository,
@@ -35,7 +32,7 @@ class Database:
     connect/close 管理 SQLAlchemy 引擎生命周期。
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, database_url: str) -> None:
         """
 
         参数：
@@ -47,7 +44,7 @@ class Database:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        self._db_path = db_path
+        self._database_url = database_url
         self.sessions = SessionRepository()
         self.messages = MessageRepository()
         self.tool_calls = ToolCallRepository()
@@ -66,20 +63,30 @@ class Database:
         self.knowledge_document_jobs = KnowledgeDocumentJobRepository()
         self.retrieval = RetrievalTraceRepository()
 
-    async def connect(self, memory_db_path: str | None = None) -> None:
+    async def connect(
+        self,
+        *,
+        pool_size: int = 10,
+        max_overflow: int = 10,
+    ) -> None:
         """建立核心数据库连接，并按需初始化独立的记忆数据库。
 
         参数:
             memory_db_path: 记忆任务数据库路径；为空时与核心数据库共用连接。
+            runtime_db_path: Agent 运行态数据库路径；为空时使用核心库。
+            knowledge_db_path: 文件和知识库数据库路径；为空时使用核心库。
+            telemetry_db_path: 检索轨迹数据库路径；为空时使用核心库。
         返回:
             None。
         异常:
             数据库初始化失败时传播底层异常。
         """
-        await initialize_sqlite_engines(self._db_path, memory_db_path=memory_db_path)
-        logger.info("database_connected", db_path=self._db_path)
+        await initialize_postgres_engine(
+            self._database_url, pool_size=pool_size, max_overflow=max_overflow
+        )
+        logger.info("database_connected", database="postgresql")
 
     async def close(self) -> None:
         """关闭数据库连接."""
-        await close_sqlite_engines()
+        await close_postgres_engine()
         logger.info("database_closed")

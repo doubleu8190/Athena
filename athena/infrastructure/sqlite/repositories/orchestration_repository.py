@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import (
     AgentPlanModel,
     AgentTaskModel,
@@ -38,7 +38,7 @@ class OrchestrationRepository:
         """
 
         now = _now_iso()
-        async with get_core_session() as db:
+        async with get_session() as db:
             db.add(
                 AgentPlanModel(
                     plan_id=plan.plan_id,
@@ -88,7 +88,7 @@ class OrchestrationRepository:
         """
 
         now = _now_iso()
-        async with get_core_session() as db:
+        async with get_session() as db:
             candidate = await db.scalar(
                 select(AgentTaskModel)
                 .where(
@@ -160,7 +160,7 @@ class OrchestrationRepository:
             TaskStatus.CANCELLED,
         }:
             values["finished_at"] = now
-        async with get_core_session() as db:
+        async with get_session() as db:
             changed = await db.execute(
                 update(AgentTaskModel)
                 .where(
@@ -188,7 +188,7 @@ class OrchestrationRepository:
         result_json = _json_dumps(result)
         output_hash = hashlib.sha256(result_json.encode("utf-8")).hexdigest()
         now = _now_iso()
-        async with get_core_session() as db:
+        async with get_session() as db:
             existing = await db.get(AgentTaskResultModel, result.task_id)
             if existing is not None:
                 if existing.output_hash != output_hash:
@@ -233,7 +233,7 @@ class OrchestrationRepository:
         values: dict[str, Any] = {"status": status, "updated_at": _now_iso()}
         if error is not None:
             values["error_json"] = _json_dumps(error)
-        async with get_core_session() as db:
+        async with get_session() as db:
             changed = await db.execute(
                 update(AgentPlanModel)
                 .where(AgentPlanModel.plan_id == plan_id)
@@ -254,7 +254,7 @@ class OrchestrationRepository:
         异常：
             数据库查询失败时传播 SQLAlchemy 异常。
         """
-        async with get_core_session() as db:
+        async with get_session() as db:
             return await db.get(AgentTaskModel, task_id)
 
     async def requeue_stale_claimed_tasks(
@@ -280,7 +280,7 @@ class OrchestrationRepository:
             datetime.now() - timedelta(seconds=lease_seconds)
         ).isoformat()
         now = _now_iso()
-        async with get_core_session() as db:
+        async with get_session() as db:
             rows = (
                 await db.execute(
                     select(AgentTaskModel).where(

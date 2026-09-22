@@ -6,7 +6,7 @@ from datetime import datetime
 
 from sqlalchemy import select, update
 
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import (
     AttachmentModel,
     KnowledgeBaseModel,
@@ -51,7 +51,7 @@ class KnowledgeBaseRepository:
             created_at=now,
             updated_at=now,
         )
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 session.add(row)
         return self._to_domain(row, [])
@@ -68,7 +68,7 @@ class KnowledgeBaseRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             row = (
                 await session.execute(
                     select(KnowledgeBaseModel).where(
@@ -98,7 +98,7 @@ class KnowledgeBaseRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             rows = (
                 await session.execute(
                     select(KnowledgeBaseModel)
@@ -141,7 +141,7 @@ class KnowledgeBaseRepository:
         异常：
             数据库写入失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     update(KnowledgeBaseModel)
@@ -166,7 +166,7 @@ class KnowledgeBaseRepository:
             数据库写入失败时传播底层异常。
         """
         now = _now_iso()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 row = (
                     await session.execute(

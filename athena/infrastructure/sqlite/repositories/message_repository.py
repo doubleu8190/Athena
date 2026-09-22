@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from sqlalchemy import select, update
 
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import (
-    AttachmentModel,
     MessageModel,
     SessionModel,
 )
@@ -21,7 +20,7 @@ class MessageRepository:
 
     async def save(self, message: Message) -> str:
         """保存消息并同步刷新会话的 updated_at。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 session.add(_message_to_model(message))
                 await session.execute(
@@ -36,7 +35,7 @@ class MessageRepository:
 
     async def get(self, message_id: str) -> Message | None:
         """按 ID 获取一条未删除消息。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             row = await session.get(MessageModel, message_id)
             if row is None or row.deleted_time is not None:
                 return None
@@ -48,7 +47,7 @@ class MessageRepository:
     ) -> Message:
         """幂等创建用户消息并在同一事务内绑定附件。"""
         ids = list(dict.fromkeys(attachment_ids))
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 existing = await session.get(MessageModel, message.id)
                 if existing is None:
@@ -60,28 +59,6 @@ class MessageRepository:
                 ):
                     raise ValueError("message_id 已关联其他消息")
                 
-                # 将附件绑定到消息，确保它们属于同一会话且未被其他消息占用
-                if ids:
-                    attachments = (
-                        (
-                            await session.execute(
-                                select(AttachmentModel).where(
-                                    AttachmentModel.id.in_(ids),
-                                    AttachmentModel.session_id == message.session_id,
-                                    AttachmentModel.deleted_time.is_(None),
-                                )
-                            )
-                        )
-                        .scalars()
-                        .all()
-                    )
-                    if len(attachments) != len(ids):
-                        raise ValueError("附件不存在或不属于当前会话")
-                    for attachment in attachments:
-                        if attachment.message_id not in (None, message.id):
-                            raise ValueError("附件已关联其他消息")
-                        attachment.message_id = message.id
-                        
                 await session.execute(
                     update(SessionModel)
                     .where(
@@ -93,13 +70,12 @@ class MessageRepository:
 
         from athena.infrastructure.sqlite.repositories.file_repository import FileRepository
 
-        refs_by_message = await FileRepository().attachments_for_messages([message.id])
+        refs = await FileRepository().bind_message(
+            message.session_id, message.id, ids
+        )
         return message.model_copy(
             update={
-                "attachments": [
-                    attachment.to_reference()
-                    for attachment in refs_by_message.get(message.id, [])
-                ]
+                "attachments": [attachment.to_reference() for attachment in refs]
             }
         )
 
@@ -122,7 +98,7 @@ class MessageRepository:
         self, session_id: str, limit: int | None = None, include_deleted: bool = False
     ) -> list[Message]:
         """获取会话的消息列表。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = (
                 select(MessageModel)
                 .where(MessageModel.session_id == session_id)
@@ -141,7 +117,7 @@ class MessageRepository:
         self, session_id: str, after_id: str, include_deleted: bool = False
     ) -> list[Message]:
         """获取指定消息之后的消息列表。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = (
                 select(MessageModel)
                 .where(

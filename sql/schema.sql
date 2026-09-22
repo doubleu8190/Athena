@@ -1,5 +1,8 @@
 -- =============================================================
--- Athena 数据库重建脚本（由 athena/db/models.py 生成，勿手改）
+-- 注意：应用启动时会通过 SQLAlchemy 自动在 PostgreSQL 中创建完整 schema。
+-- 本文件仅保留为历史参考，不应直接执行。
+-- =============================================================
+-- Athena 数据库重建脚本（历史 SQLite 布局）
 -- 重新生成方法：
 --   python3 -c "from sqlalchemy.schema import CreateTable,CreateIndex; \
 --     from sqlalchemy.dialects import sqlite; from athena.db.models import Base,MEMORY_FTS_DDL; \
@@ -11,7 +14,9 @@
 --   sqlite3 data/athena.db < sql/schema.sql
 --
 -- 记忆表（memories/memory_relations/memory_processing_jobs/memory_fts）由
--- 应用按 sqlite_memory_db_path 初始化到独立的 memory.db，不属于核心库。
+-- 应用按 sqlite_runtime_db_path、sqlite_knowledge_db_path、
+-- sqlite_telemetry_db_path 和 sqlite_memory_db_path 分别初始化独立数据库；
+-- 本文件仅描述 ORM 统一模型，实际建表时会按数据库职责筛选表。
 -- =============================================================
 
 PRAGMA foreign_keys = ON;

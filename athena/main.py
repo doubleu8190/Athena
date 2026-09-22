@@ -2,7 +2,7 @@
 
 启动流程：
 1. 配置 structlog 日志
-2. 初始化 SQLite 数据库（建表）
+2. 初始化 PostgreSQL 数据库（建表）
 3. 初始化 LLM Provider / 工具管理器 / 审批管理器 / 记忆系统 / 上下文压缩
 4. 构建 LangGraph 运行时并编译唯一 Agent 入口
 5. 注册 REST API 与 SSE 路由
@@ -17,10 +17,9 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import aiosqlite
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from athena.config.settings import get_settings
 from athena.container import RuntimeContainer
@@ -73,8 +72,11 @@ async def lifespan(app: FastAPI):
     logger.info("athena_starting", host=settings.host, port=settings.port)
 
     # ── 1. 数据库 ──
-    db = Database(settings.sqlite_db_path)
-    await db.connect(memory_db_path=str(settings.memory_db_path))
+    db = Database(settings.postgres_url)
+    await db.connect(
+        pool_size=settings.postgres_pool_size,
+        max_overflow=settings.postgres_max_overflow,
+    )
     command_notifier = CommandNotifier()
     agent_store = AgentStore(command_notifier=command_notifier)
 
@@ -254,13 +256,9 @@ async def lifespan(app: FastAPI):
         orchestration=db.orchestration,
     ).reconcile()
 
-    # 初始化sqlite checkpointer，确保langgraph的状态可以在中断后恢复
-    checkpoint_conn = await aiosqlite.connect(
-        str(settings.checkpoint_db_path), timeout=5
-    )
-    await checkpoint_conn.execute("PRAGMA journal_mode=WAL")
-    await checkpoint_conn.execute("PRAGMA busy_timeout=5000")
-    checkpointer = AsyncSqliteSaver(checkpoint_conn)
+    # 初始化 PostgreSQL checkpointer，确保 LangGraph 的状态可以在中断后恢复。
+    checkpointer_context = AsyncPostgresSaver.from_conn_string(settings.postgres_conn_string)
+    checkpointer = await checkpointer_context.__aenter__()
     await checkpointer.setup()
 
     graph = build_graph(graph_runtime, checkpointer)
@@ -287,7 +285,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("command_consumer_shutdown_failed", error=str(e))
     await memory_job_worker.stop()
-    await checkpoint_conn.close()
+    await checkpointer_context.__aexit__(None, None, None)
     # 关闭不会取消持久化审批。审批记录和未完成工具尝试需要跨进程保留，
     # 下次启动后由用户手动恢复任务，再按 DB 状态决定等待或执行。
     # 停掉后台看门狗，并落盘内存中未同步的访问统计

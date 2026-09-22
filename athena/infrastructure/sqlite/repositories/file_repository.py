@@ -8,15 +8,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-import re
 from typing import Any, Iterable, cast
 
-from sqlalchemy import delete, func, or_, select, text, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import delete, exists, func, or_, select, text, update
+from sqlalchemy.orm import aliased
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.exc import SQLAlchemyError
 
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import (
     AdapterRegistryModel,
     AttachmentModel,
@@ -44,25 +43,6 @@ from athena.models.json_models import (
 )
 from athena.utils.id_generation import generate_time_id
 
-_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*|[\u4e00-\u9fff]+")
-
-
-def _fts_match_expression(query: str) -> str | None:
-    """构造带引号的 FTS5 表达式，阻止查询运算符直接进入全文检索语法。
-
-    参数:
-        query (str): 用户输入的检索词。
-    返回值:
-        str | None: 由安全词元组成的 OR 表达式；没有有效词元时返回 ``None``。
-    异常:
-        不抛出业务异常。
-    """
-    tokens = _FTS_TOKEN_RE.findall(query)
-    if not tokens:
-        return None
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
-
-
 def _now() -> datetime:
     """返回当前时间。"""
     return datetime.now()
@@ -78,7 +58,7 @@ class FileRepository:
     async def soft_delete_session_attachments(self, session_id: str) -> None:
         """软删除会话的全部附件，并清理其派生索引和产物。"""
         now = _now().isoformat()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 attachment_ids = list(
                     (
@@ -152,7 +132,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             return set(
                 (
                     await session.execute(
@@ -199,7 +179,7 @@ class FileRepository:
         attachment_id = generate_time_id()
         document_version = 1
         if logical_document_id is not None and knowledge_base_id is not None:
-            async with get_core_session() as session:
+            async with get_session() as session:
                 latest_version = (
                     await session.execute(
                         select(func.max(AttachmentModel.document_version)).where(
@@ -226,7 +206,7 @@ class FileRepository:
             created_at=now,
             updated_at=now,
         )
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 session.add(row)
         return _row_to_attachment(row)
@@ -251,7 +231,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = select(AttachmentModel).where(AttachmentModel.id == attachment_id)
             if session_id is not None:
                 stmt = stmt.where(AttachmentModel.session_id == session_id)
@@ -271,7 +251,7 @@ class FileRepository:
         ids = list(dict.fromkeys(attachment_ids))
         if not ids:
             return []
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = select(AttachmentModel).where(
                 AttachmentModel.session_id == session_id,
                 AttachmentModel.id.in_(ids),
@@ -294,7 +274,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             rows = (
                 (
                     await session.execute(
@@ -320,7 +300,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             rows = (
                 (
                     await session.execute(
@@ -364,7 +344,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             row = (
                 await session.execute(
                     select(AttachmentModel)
@@ -397,7 +377,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             target = (
                 await session.execute(
                     select(AttachmentModel).where(
@@ -440,7 +420,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             row = (
                 await session.execute(
                     select(AttachmentModel).where(
@@ -505,7 +485,7 @@ class FileRepository:
         if "metadata" in values:
             payload["parsed_metadata_json"] = _json_dumps(values["metadata"])
         payload["updated_at"] = _now().isoformat()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     update(AttachmentModel)
@@ -538,7 +518,7 @@ class FileRepository:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         now = _now().isoformat()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 result = await session.execute(
                     update(AttachmentModel)
@@ -615,7 +595,7 @@ class FileRepository:
         异常：
             SQLite 删除失败时事务回滚并向上抛出异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     text(
@@ -652,7 +632,7 @@ class FileRepository:
             数据库写入失败时传播底层异常。
         """
         now = _now().isoformat()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 result = await session.execute(
                     update(AttachmentModel)
@@ -705,7 +685,7 @@ class FileRepository:
         ids = list(dict.fromkeys(attachment_ids))
         if not ids:
             return []
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 rows = (
                     (
@@ -745,7 +725,7 @@ class FileRepository:
         ids = list(message_ids)
         if not ids:
             return {}
-        async with get_core_session() as session:
+        async with get_session() as session:
             result = await session.execute(
                 select(AttachmentModel).where(
                     AttachmentModel.message_id.in_(ids),
@@ -771,7 +751,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 existing_ids = (
                     (
@@ -849,7 +829,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             rows = (
                 (
                     await session.execute(
@@ -901,7 +881,7 @@ class FileRepository:
         异常：
             数据库读取失败时传播底层异常。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             rows = (
                 (
                     await session.execute(
@@ -948,69 +928,23 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_core_session() as session:
-            rows = []
-            ranks: dict[str, float] = {}
-            fts_succeeded = False
-            match_expr = _fts_match_expression(query)
-            try:
-                if match_expr is None:
-                    raise ValueError("query has no FTS tokens")
-                fts_rows = list(
-                    (
-                        await session.execute(
-                            text(
-                                "SELECT chunk_id, bm25(file_chunk_fts) AS rank "
-                                "FROM file_chunk_fts "
-                                "WHERE attachment_id = :attachment_id "
-                                "AND file_chunk_fts MATCH :match_expr "
-                                "ORDER BY rank LIMIT :limit"
-                            ),
-                            {
-                                "attachment_id": attachment_id,
-                                "match_expr": match_expr,
-                                "limit": limit,
-                            },
+        async with get_session() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(FileChunkModel)
+                        .where(
+                            FileChunkModel.attachment_id == attachment_id,
+                            FileChunkModel.is_current == 1,
+                            FileChunkModel.content.ilike(f"%{query}%"),
                         )
-                    ).all()
-                )
-                fts_succeeded = True
-                chunk_ids = [row.chunk_id for row in fts_rows]
-                ranks = {row.chunk_id: float(row.rank) for row in fts_rows}
-                if chunk_ids:
-                    fetched = (
-                        (
-                            await session.execute(
-                                select(FileChunkModel).where(
-                                    FileChunkModel.id.in_(chunk_ids),
-                                    FileChunkModel.is_current == 1,
-                                )
-                            )
-                        )
-                        .scalars()
-                        .all()
+                        .order_by(FileChunkModel.ordinal)
+                        .limit(limit)
                     )
-                    by_id = {row.id: row for row in fetched}
-                    rows = [by_id[item] for item in chunk_ids if item in by_id]
-            except (SQLAlchemyError, ValueError):
-                rows = []
-            if not fts_succeeded:
-                rows = (
-                    (
-                        await session.execute(
-                            select(FileChunkModel)
-                            .where(
-                                FileChunkModel.attachment_id == attachment_id,
-                                FileChunkModel.is_current == 1,
-                                FileChunkModel.content.contains(query),
-                            )
-                            .order_by(FileChunkModel.ordinal)
-                            .limit(limit)
-                        )
-                    )
-                    .scalars()
-                    .all()
                 )
+                .scalars()
+                .all()
+            )
             return [
                 FileChunk(
                     id=r.id,
@@ -1025,7 +959,7 @@ class FileRepository:
                     metadata=_json_loads_model(
                         r.metadata_json, FileMetadata, FileMetadata()
                     ),
-                    native_score=ranks.get(r.id) if fts_succeeded else None,
+                    native_score=None,
                 )
                 for r in rows
             ]
@@ -1045,55 +979,50 @@ class FileRepository:
         异常：
             SQLite 读取失败时向上抛出异常；无有效 FTS token 时返回空列表。
         """
-        match_expr = _fts_match_expression(query)
-        if match_expr is None:
+        if not query.strip():
             return []
-        async with get_core_session() as session:
+        async with get_session() as session:
+            newer = aliased(AttachmentModel)
             rows = (
-                (
-                    await session.execute(
-                        text("""SELECT c.*, bm25(f.file_chunk_fts) AS bm25_rank
-                        FROM file_chunk_fts f
-                        JOIN file_chunks c ON c.id = f.chunk_id
-                        JOIN attachments a ON a.id = c.attachment_id
-                        WHERE file_chunk_fts MATCH :match_expr
-                          AND a.knowledge_base_id IS NOT NULL
-                          AND a.deleted_time IS NULL
-                          AND a.status = 'ready'
-                          AND c.is_current = 1
-                          AND NOT EXISTS (
-                              SELECT 1 FROM attachments newer
-                              WHERE newer.knowledge_base_id = a.knowledge_base_id
-                                AND newer.logical_document_id = a.logical_document_id
-                                AND newer.deleted_time IS NULL
-                                AND newer.document_version > a.document_version
-                          )
-                        ORDER BY bm25(f.file_chunk_fts)
-                        LIMIT :limit"""),
-                        {"match_expr": match_expr, "limit": limit},
+                await session.execute(
+                    select(FileChunkModel, AttachmentModel)
+                    .join(AttachmentModel, AttachmentModel.id == FileChunkModel.attachment_id)
+                    .where(
+                        AttachmentModel.knowledge_base_id.is_not(None),
+                        AttachmentModel.deleted_time.is_(None),
+                        AttachmentModel.status == "ready",
+                        FileChunkModel.is_current == 1,
+                        FileChunkModel.content.ilike(f"%{query}%"),
+                        ~exists(
+                            select(1).where(
+                                newer.knowledge_base_id == AttachmentModel.knowledge_base_id,
+                                newer.logical_document_id == AttachmentModel.logical_document_id,
+                                newer.deleted_time.is_(None),
+                                newer.document_version > AttachmentModel.document_version,
+                            )
+                        ),
                     )
+                    .order_by(FileChunkModel.ordinal)
+                    .limit(limit)
                 )
-                .mappings()
-                .all()
-            )
+            ).all()
         return [
             FileChunk(
-                id=row["id"],
-                attachment_id=row["attachment_id"],
-                ordinal=row["ordinal"],
-                content=row["content"],
-                document_version_id=row["document_version_id"],
-                token_count=row["token_count"],
+                id=chunk.id,
+                attachment_id=chunk.attachment_id,
+                ordinal=chunk.ordinal,
+                content=chunk.content,
+                document_version_id=chunk.document_version_id,
+                token_count=chunk.token_count,
                 locator=_json_loads_model(
-                    row["locator_json"], FileLocator, FileLocator()
+                    chunk.locator_json, FileLocator, FileLocator()
                 ),
                 metadata=_json_loads_model(
-                    row["metadata_json"], FileMetadata, FileMetadata()
+                    chunk.metadata_json, FileMetadata, FileMetadata()
                 ),
-                # 保留 SQLite FTS5 的原始 BM25 值；融合阶段使用 rank，不在这里伪造统一分数。
-                native_score=float(row["bm25_rank"]),
+                native_score=1.0,
             )
-            for row in rows
+            for chunk, _attachment in rows
         ]
 
     async def get_artifact(self, cache_key: str) -> FileArtifact | None:
@@ -1108,7 +1037,7 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             row = (
                 await session.execute(
                     select(FileArtifactModel).where(
@@ -1151,10 +1080,10 @@ class FileRepository:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
-                    sqlite_insert(FileArtifactModel)
+                    postgres_insert(FileArtifactModel)
                     .values(
                         id=generate_time_id(),
                         attachment_id=attachment_id,
@@ -1189,7 +1118,7 @@ class FileRepository:
         items = list(adapters)
         names = [item.name for item in items]
         now = _now().isoformat()
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 if names:
                     await session.execute(
@@ -1201,7 +1130,7 @@ class FileRepository:
                     await session.execute(delete(AdapterRegistryModel))
                 for item in items:
                     await session.execute(
-                        sqlite_insert(AdapterRegistryModel)
+                        postgres_insert(AdapterRegistryModel)
                         .values(
                             name=item.name,
                             version=item.version,
@@ -1231,7 +1160,7 @@ class FileRepository:
         dependencies: list[dict[str, Any]],
     ) -> None:
         """替换附件的代码索引（先删后增，同一事务内完成）。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     delete(CodeSymbolModel).where(
@@ -1274,7 +1203,7 @@ class FileRepository:
         返回值：
             符号信息列表（含 name/qualified_name/kind/path/language 等字段）。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             rows = (
                 (
                     await session.execute(
@@ -1317,7 +1246,7 @@ class FileRepository:
         返回值：
             依赖关系列表（含 source/target/kind/metadata 字段）。
         """
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = select(CodeDependencyModel).where(
                 CodeDependencyModel.attachment_id == attachment_id
             )

@@ -29,6 +29,8 @@ class RetrievalTraceWriter(Protocol):
         selected_count: int = 0,
         injected_count: int = 0,
         status: str = "succeeded",
+        duration_ms: float | None = None,
+        error_message: str | None = None,
     ) -> None:
         """写入检索运行的最终统计和状态。"""
         ...

@@ -92,7 +92,7 @@ class FileIntelligenceRuntime:
         *,
         settings: Settings,
         event_publisher: FileEventPublisher,
-        trace_writer: RetrievalTraceWriter,
+        trace_writer: RetrievalTraceWriter | None = None,
     ) -> None:
         """
 
@@ -127,6 +127,46 @@ class FileIntelligenceRuntime:
     def vector_index_ready(self) -> bool:
         """向量索引是否已初始化，可供评估 readiness 检查。"""
         return self._collection is not None
+
+    async def _complete_retrieval_trace(
+        self,
+        run_id: str | None,
+        started: float,
+        *,
+        candidate_count: int,
+        selected_count: int = 0,
+        status: str,
+        error_message: str | None = None,
+    ) -> None:
+        """安全写入文件检索终态，避免轨迹故障影响搜索结果。
+
+        参数：
+            run_id: 召回运行标识；为空时跳过写入。
+            started: 运行计时起点。
+            candidate_count: 融合候选数量。
+            selected_count: 通过 provider 筛选的候选数量。
+            status: 运行终态。
+            error_message: 可选的错误说明。
+
+        返回值：
+            None。
+
+        异常：
+            轨迹写入异常只记录日志，不覆盖搜索本身的结果或错误。
+        """
+        if run_id is None or self._trace_writer is None:
+            return
+        try:
+            await self._trace_writer.complete_run(
+                run_id,
+                candidate_count=candidate_count,
+                selected_count=selected_count,
+                status=status,
+                duration_ms=round((asyncio.get_running_loop().time() - started) * 1000, 2),
+                error_message=error_message,
+            )
+        except Exception as exc:
+            logger.warning("retrieval_trace_complete_failed", error=str(exc))
 
     async def initialize(self) -> None:
         """初始化运行时：同步适配器注册表到 DB，创建 ChromaDB 向量集合。"""
@@ -634,6 +674,9 @@ class FileIntelligenceRuntime:
         file_id: str,
         query: str,
         limit: int = 10,
+        *,
+        agent_run_id: str | None = None,
+        message_id: str | None = None,
     ) -> dict[str, Any]:
         """混合搜索文件内容（FTS5 关键词 + ChromaDB 向量语义）。
 
@@ -650,13 +693,131 @@ class FileIntelligenceRuntime:
             包含 query/results/score 的搜索结果字典。
         """
         attachment = await self.require_attachment(session_id, file_id)
+        started = asyncio.get_running_loop().time()
+        run_id: str | None = None
+        if self._trace_writer is not None:
+            try:
+                run_id = await self._trace_writer.start_run(
+                    RetrievalRunRequest(
+                        query=query,
+                        scope="file",
+                        config={"file_id": file_id, "limit": limit, "fusion": "rrf", "rrf_k": 60},
+                        index_generation="file_chunks/current",
+                        session_id=session_id,
+                        agent_run_id=agent_run_id,
+                        message_id=message_id,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("retrieval_trace_start_failed", error=str(exc))
         if attachment.status == AttachmentStatus.FAILED:
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=0,
+                status="failed",
+                error_message=attachment.error_message or "文件处理失败",
+            )
             return self._failed_file_search_response(attachment, query)
 
         limit = min(max(limit, 1), 50)
-        keyword = await self._search_file_keywords(file_id, query, limit)
-        vector = await self._search_file_vectors(file_id, query, limit)
-        ordered = self._fuse_file_results(keyword, vector, limit)
+        try:
+            keyword = await self._search_file_keywords(file_id, query, limit)
+            vector = await self._search_file_vectors(file_id, query, limit)
+            ordered = self._fuse_file_results(keyword, vector, limit)
+        except asyncio.CancelledError:
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=0,
+                status="cancelled",
+                error_message="检索任务被取消",
+            )
+            raise
+        except Exception as exc:
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=0,
+                status="failed",
+                error_message=str(exc),
+            )
+            raise
+        if run_id is not None and self._trace_writer is not None:
+            try:
+                raw_candidates = [
+                    RetrievalCandidate(
+                        provider="keyword",
+                        stage="native",
+                        source_type="chunk",
+                        source_id=chunk.id,
+                        native_rank=rank,
+                        native_score=chunk.native_score,
+                        document_version_id=chunk.document_version_id,
+                        content_preview=chunk.content[:500],
+                        source_title=attachment.filename,
+                        locator=chunk.locator.model_dump(mode="json", exclude_none=True),
+                    )
+                    for rank, chunk in enumerate(keyword, 1)
+                ]
+                raw_candidates.extend(
+                    RetrievalCandidate(
+                        provider="vector",
+                        stage="native",
+                        source_type="chunk",
+                        source_id=str(item.get("id", "")),
+                        native_rank=rank,
+                        native_score=item.get("native_score"),
+                        document_version_id=item.get("document_version_id"),
+                        content_preview=str(item.get("content", ""))[:500],
+                        source_title=attachment.filename,
+                        locator=item.get("locator", {}),
+                    )
+                    for rank, item in enumerate(vector, 1)
+                )
+                fused_candidates = [
+                    RetrievalCandidate(
+                        provider="fusion",
+                        stage="fused",
+                        source_type="chunk",
+                        source_id=str(item.get("id", "")),
+                        fused_rank=rank,
+                        fused_score=item.get("score"),
+                        document_version_id=item.get("document_version_id"),
+                        selected_for_result=True,
+                        content_preview=str(item.get("content", ""))[:500],
+                        source_title=attachment.filename,
+                        locator=item.get("locator", {}),
+                        metadata={
+                            "keyword_rank": item.get("keyword_rank"),
+                            "vector_rank": item.get("vector_rank"),
+                        },
+                    )
+                    for rank, item in enumerate(ordered, 1)
+                ]
+                await self._trace_writer.record_candidates(
+                    run_id, [*raw_candidates, *fused_candidates]
+                )
+                await self._complete_retrieval_trace(
+                    run_id,
+                    started,
+                    candidate_count=len(ordered),
+                    selected_count=len(ordered),
+                    status="succeeded",
+                )
+            except Exception as exc:
+                logger.warning("retrieval_trace_record_failed", error=str(exc))
+                await self._complete_retrieval_trace(
+                    run_id,
+                    started,
+                    candidate_count=len(ordered),
+                    selected_count=len(ordered),
+                    status="partial",
+                    error_message=str(exc),
+                )
+        if run_id is not None:
+            for item in ordered:
+                item["retrieval_run_id"] = run_id
         response: dict[str, Any] = {"query": query, "results": ordered}
         if not ordered and attachment.adapter_name == "image":
             response["message"] = (
@@ -669,6 +830,10 @@ class FileIntelligenceRuntime:
         query: str,
         limit: int = 10,
         knowledge_base_ids: list[str] | None = None,
+        *,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        message_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """在全部未删除知识库文档的分块上执行一次全局混合检索。
 
@@ -693,42 +858,68 @@ class FileIntelligenceRuntime:
                 or document.knowledge_base_id in knowledge_base_ids
             )
         }
+        started = asyncio.get_running_loop().time()
         run_id: str | None = None
-        try:
-            run_id = await self._trace_writer.start_run(
-                RetrievalRunRequest(
-                    query=query,
-                    scope="knowledge",
-                    config={"limit": limit, "fusion": "rrf", "rrf_k": 60},
-                    index_generation="file_chunks/current",
-                )
-            )
-        except Exception as exc:
-            logger.warning("retrieval_trace_start_failed", error=str(exc))
-        keyword = [
-            chunk
-            for chunk in await self.repository.search_knowledge_chunks(query, limit)
-            if chunk.attachment_id in allowed_documents
-        ]
-        vector: list[dict[str, Any]] = []
-        if self._collection is not None:
+        if self._trace_writer is not None:
             try:
-                result = await asyncio.to_thread(
-                    self._collection.query,
-                    query_texts=[query],
-                    n_results=max(limit * 3, limit),
-                    include=["documents", "metadatas", "distances"],
+                run_id = await self._trace_writer.start_run(
+                    RetrievalRunRequest(
+                        query=query,
+                        scope="knowledge",
+                        config={"limit": limit, "fusion": "rrf", "rrf_k": 60},
+                        index_generation="file_chunks/current",
+                        session_id=session_id,
+                        agent_run_id=agent_run_id,
+                        message_id=message_id,
+                    )
                 )
-                vector = self._vector_items(result)
             except Exception as exc:
-                logger.warning("knowledge_vector_search_failed", error=str(exc))
-        live_ids = allowed_documents
-        vector_before_filter = list(vector)
-        vector = [
-            item for item in vector if str(item.get("attachment_id", "")) in live_ids
-        ]
-        fused = self._fuse_file_results(keyword, vector, limit)
-        if run_id is not None:
+                logger.warning("retrieval_trace_start_failed", error=str(exc))
+        vector_error: str | None = None
+        try:
+            keyword = [
+                chunk
+                for chunk in await self.repository.search_knowledge_chunks(query, limit)
+                if chunk.attachment_id in allowed_documents
+            ]
+            vector: list[dict[str, Any]] = []
+            if self._collection is not None:
+                try:
+                    result = await asyncio.to_thread(
+                        self._collection.query,
+                        query_texts=[query],
+                        n_results=max(limit * 3, limit),
+                        include=["documents", "metadatas", "distances"],
+                    )
+                    vector = self._vector_items(result)
+                except Exception as exc:
+                    vector_error = str(exc)
+                    logger.warning("knowledge_vector_search_failed", error=vector_error)
+            live_ids = allowed_documents
+            vector_before_filter = list(vector)
+            vector = [
+                item for item in vector if str(item.get("attachment_id", "")) in live_ids
+            ]
+            fused = self._fuse_file_results(keyword, vector, limit)
+        except asyncio.CancelledError:
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=0,
+                status="cancelled",
+                error_message="检索任务被取消",
+            )
+            raise
+        except Exception as exc:
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=0,
+                status="failed",
+                error_message=str(exc),
+            )
+            raise
+        if run_id is not None and self._trace_writer is not None:
             try:
                 raw_candidates = [
                     RetrievalCandidate(
@@ -739,6 +930,12 @@ class FileIntelligenceRuntime:
                         native_rank=rank,
                         native_score=chunk.native_score,
                         document_version_id=chunk.document_version_id,
+                        content_preview=chunk.content[:500],
+                        locator=chunk.locator.model_dump(mode="json", exclude_none=True),
+                        source_title=next(
+                            (document.filename for document in documents if document.id == chunk.attachment_id),
+                            None,
+                        ),
                         metadata={"attachment_id": chunk.attachment_id},
                     )
                     for rank, chunk in enumerate(keyword, 1)
@@ -757,6 +954,12 @@ class FileIntelligenceRuntime:
                             if str(item.get("attachment_id", "")) in live_ids
                             else "document_not_live"
                         ),
+                        content_preview=str(item.get("content", ""))[:500],
+                        locator=item.get("locator", {}),
+                        source_title=next(
+                            (document.filename for document in documents if document.id == item.get("attachment_id")),
+                            None,
+                        ),
                         metadata={
                             "attachment_id": item.get("attachment_id", ""),
                         },
@@ -773,6 +976,12 @@ class FileIntelligenceRuntime:
                         fused_score=item.get("score"),
                         document_version_id=item.get("document_version_id"),
                         selected_for_result=True,
+                        content_preview=str(item.get("content", ""))[:500],
+                        locator=item.get("locator", {}),
+                        source_title=next(
+                            (document.filename for document in documents if document.id == item.get("attachment_id")),
+                            None,
+                        ),
                         metadata={
                             "attachment_id": item.get("attachment_id", ""),
                             "keyword_rank": item.get("keyword_rank"),
@@ -784,13 +993,24 @@ class FileIntelligenceRuntime:
                 await self._trace_writer.record_candidates(
                     run_id, [*raw_candidates, *fused_candidates]
                 )
-                await self._trace_writer.complete_run(
+                await self._complete_retrieval_trace(
                     run_id,
+                    started,
                     candidate_count=len(fused),
                     selected_count=len(fused),
+                    status="partial" if vector_error else "succeeded",
+                    error_message=vector_error,
                 )
             except Exception as exc:
                 logger.warning("retrieval_trace_record_failed", error=str(exc))
+                await self._complete_retrieval_trace(
+                    run_id,
+                    started,
+                    candidate_count=len(fused),
+                    selected_count=len(fused),
+                    status="partial",
+                    error_message=str(exc),
+                )
         if run_id is not None:
             for item in fused:
                 item["retrieval_run_id"] = run_id

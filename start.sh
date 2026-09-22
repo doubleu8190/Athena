@@ -116,10 +116,12 @@ export LLM_PROVIDER="${LLM_PROVIDER:-openai}"
 export LLM_MODEL="${LLM_MODEL:-gpt-4o}"
 export LLM_API_KEY="${LLM_API_KEY:-}"
 export LLM_BASE_URL="${LLM_BASE_URL:-}"
-# 数据库默认路径（必须相对于 Athena 根，因此用绝对路径规范化）
-export SQLITE_DB_PATH="${SQLITE_DB_PATH:-./data/athena.db}"
 export CHROMADB_PATH="${CHROMADB_PATH:-./data/chromadb}"
-# 确保 data 目录存在（SQLite 目录不存在会导致首次启动失败）
+# PostgreSQL connection defaults
+export POSTGRES_USER="${POSTGRES_USER:-doubleu}"
+export POSTGRES_DB="${POSTGRES_DB:-athena}"
+export POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
+export POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 mkdir -p "${PROJECT_ROOT}/data"
 
 # ---------------------------------------------------------------------------
@@ -415,7 +417,9 @@ start_backend() {
       HOST="${HOST}" PORT="${PORT}" DEBUG="${DEBUG}" \
       LLM_PROVIDER="${LLM_PROVIDER}" LLM_MODEL="${LLM_MODEL}" \
       LLM_API_KEY="${LLM_API_KEY}" LLM_BASE_URL="${LLM_BASE_URL}" \
-      SQLITE_DB_PATH="${SQLITE_DB_PATH}" CHROMADB_PATH="${CHROMADB_PATH}" \
+      POSTGRES_USER="${POSTGRES_USER}" POSTGRES_DB="${POSTGRES_DB}" \
+      POSTGRES_HOST="${POSTGRES_HOST}" POSTGRES_PORT="${POSTGRES_PORT}" \
+      CHROMADB_PATH="${CHROMADB_PATH}" \
       "${PYTHON_BIN}" -u athena/main.py \
       >> "${LOG_BACKEND}" 2>&1 &
     echo $! > "${PID_BACKEND}"
@@ -574,7 +578,10 @@ ENVIRONMENT (可在 .env 中配置，或执行时临时覆盖):
   LLM_MODEL            LLM 模型                 默认 gpt-4o
   LLM_API_KEY          LLM API Key             默认 "" (强烈建议填写)
   LLM_BASE_URL         自定义 API 基址 (可选)
-  SQLITE_DB_PATH       SQLite 文件路径         默认 ./data/athena.db
+  POSTGRES_USER        PostgreSQL 用户          默认 doubleu
+  POSTGRES_DB          PostgreSQL 数据库        默认 athena
+  POSTGRES_HOST        PostgreSQL 主机          默认 localhost
+  POSTGRES_PORT        PostgreSQL 端口          默认 5432
   CHROMADB_PATH        ChromaDB 存储路径       默认 ./data/chromadb
 
 EXAMPLES:

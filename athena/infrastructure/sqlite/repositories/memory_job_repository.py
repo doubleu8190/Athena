@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 
 from athena.infrastructure.sqlite.engine import (
-    get_memory_database_session,
+    get_session,
 )
 
 
@@ -19,15 +19,16 @@ class MemoryJobRepository:
 
     async def enqueue_job(self, payload: dict[str, Any]) -> bool:
         now = datetime.now().isoformat()
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 result = await session.execute(
                     text(
-                        """INSERT OR IGNORE INTO memory_processing_jobs
+                        """INSERT INTO memory_processing_jobs
                         (job_id, turn_id, session_id, status, attempt,
                          available_at, payload_json, created_at, updated_at)
                         VALUES (:job_id, :turn_id, :session_id, 'queued', 0,
-                                :available_at, :payload_json, :created_at, :updated_at)"""
+                                :available_at, :payload_json, :created_at, :updated_at)
+                        ON CONFLICT (turn_id) DO NOTHING"""
                     ),
                     {
                         "job_id": payload["turn_id"],
@@ -43,7 +44,7 @@ class MemoryJobRepository:
 
     async def claim_next_job(self, *, max_attempts: int = 5) -> dict[str, Any] | None:
         now = datetime.now().isoformat()
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 row = (
                     await session.execute(
@@ -79,7 +80,7 @@ class MemoryJobRepository:
     async def recover_interrupted_jobs(self) -> int:
         """Return interrupted and previously misconfigured jobs to the retry queue."""
         now = datetime.now().isoformat()
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 result = cast(
                     CursorResult[Any],
@@ -115,7 +116,7 @@ class MemoryJobRepository:
     async def _mark(
         self, job_id: str, status: str, error: str | None, available: str | None
     ) -> None:
-        async with get_memory_database_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 await session.execute(
                     text("""UPDATE memory_processing_jobs

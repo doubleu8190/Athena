@@ -35,9 +35,7 @@ class AgentRunModel(Base):
     run_id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="运行唯一标识"
     )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
+    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
     created_by_command_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="创建该运行的命令标识"
     )
@@ -82,9 +80,7 @@ class AgentCommandModel(Base):
     command_id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="命令唯一标识和幂等键"
     )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
+    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
     run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="关联运行标识"
     )
@@ -125,7 +121,7 @@ class AgentPlanModel(Base):
     __tablename__ = "agent_plans"
     __table_args__ = (Index("idx_agent_plans_root_run", "root_run_id"),)
     plan_id: Mapped[str] = mapped_column(String, primary_key=True)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
+    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
     root_run_id: Mapped[str] = mapped_column(String)
     goal: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String, default="planning")
@@ -187,12 +183,12 @@ class AgentEventModel(Base):
             "stream_id",
             "chunk_id",
             unique=True,
-            sqlite_where=text("stream_id IS NOT NULL AND chunk_id IS NOT NULL"),
+            postgresql_where=text("stream_id IS NOT NULL AND chunk_id IS NOT NULL"),
         ),
         Index("idx_agent_events_run", "run_id"),
     )
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), primary_key=True, comment="所属会话标识"
+        String, primary_key=True, comment="所属会话标识；由核心库维护"
     )
     session_seq: Mapped[int] = mapped_column(
         Integer, primary_key=True, comment="会话内递增的事件游标"
@@ -237,9 +233,7 @@ class StreamSnapshotModel(Base):
     stream_id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="流快照唯一标识"
     )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
+    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
     run_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="关联运行标识"
     )
@@ -266,9 +260,7 @@ class ApprovalRecordModel(Base):
     approval_id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="审批记录唯一标识"
     )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
+    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
     run_id: Mapped[str] = mapped_column(String, comment="所属运行标识")
     plan_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="审批所属执行计划"
@@ -381,7 +373,7 @@ class StepModel(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
+    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
     run_id: Mapped[str] = mapped_column(String)
     step_number: Mapped[int] = mapped_column(Integer)
     step_type: Mapped[str] = mapped_column(String)
@@ -410,9 +402,7 @@ class ToolCallModel(Base):
     id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="工具调用记录唯一标识"
     )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
+    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
     # Nullable keeps imported or manually created records readable;
     # new writes always provide a step_id.
     step_id: Mapped[str | None] = mapped_column(
@@ -462,9 +452,7 @@ class ApprovalLogModel(Base):
     id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="审批日志唯一标识"
     )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id"), comment="所属会话标识"
-    )
+    session_id: Mapped[str] = mapped_column(String, comment="所属会话标识；由核心库维护")
     tool_call_id: Mapped[str] = mapped_column(String, comment="工具调用标识")
     tool_name: Mapped[str] = mapped_column(String, comment="工具名称")
     arguments_json: Mapped[str] = mapped_column(
@@ -655,13 +643,13 @@ class AttachmentModel(Base):
         Integer, default=1, comment="逻辑文档版本序号"
     )
     session_id: Mapped[str | None] = mapped_column(
-        ForeignKey("sessions.id"), nullable=True, comment="所属会话标识"
+        String, nullable=True, comment="所属会话标识；由核心库维护"
     )
     knowledge_base_id: Mapped[str | None] = mapped_column(
         ForeignKey("knowledge_bases.id"), nullable=True, comment="所属知识库标识"
     )
     message_id: Mapped[str | None] = mapped_column(
-        ForeignKey("messages.id"), nullable=True, comment="关联消息标识"
+        String, nullable=True, comment="关联消息标识；由核心库维护"
     )
     filename: Mapped[str] = mapped_column(String, comment="原始文件名")
     mime_type: Mapped[str] = mapped_column(String, comment="文件 MIME 类型")
@@ -855,16 +843,24 @@ class CodeDependencyModel(Base):
 
 
 class RetrievalRunModel(Base):
-    """一次记忆或知识库检索运行的可复现元数据。"""
+    """一次召回轨迹的可复现元数据。
+
+    ``run_id`` 标识本表中的单次召回轨迹；``agent_run_id`` 标识发起召回的
+    上游 Agent 执行。一个 Agent 执行可以并行触发 memory、knowledge 和 file
+    等多次召回，因此两者必须保持为不同的标识。
+    """
 
     __tablename__ = "retrieval_runs"
     __table_args__ = (
         Index("idx_retrieval_runs_created_at", "created_at"),
         Index("idx_retrieval_runs_scope", "scope"),
+        Index("idx_retrieval_runs_session", "session_id"),
+        Index("idx_retrieval_runs_agent_run", "agent_run_id"),
+        Index("idx_retrieval_runs_message", "message_id"),
     )
 
     run_id: Mapped[str] = mapped_column(
-        String, primary_key=True, comment="检索运行标识"
+        String, primary_key=True, comment="本次召回轨迹的唯一标识"
     )
     query: Mapped[str] = mapped_column(Text, comment="原始检索查询")
     scope: Mapped[str] = mapped_column(
@@ -877,9 +873,22 @@ class RetrievalRunModel(Base):
     index_generation: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="参与检索的索引生成标识"
     )
+    session_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="发起检索的会话标识"
+    )
+    agent_run_id: Mapped[str | None] = mapped_column(
+        String,
+        nullable=True,
+        comment="发起召回的上游 Agent 运行标识；一个 Agent run 可对应多条召回轨迹",
+    )
+    message_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="触发检索的消息标识"
+    )
     candidate_count: Mapped[int] = mapped_column(Integer, default=0)
     selected_count: Mapped[int] = mapped_column(Integer, default=0)
     injected_count: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
     completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -913,24 +922,8 @@ class RetrievalCandidateModel(Base):
     filter_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     selected_for_result: Mapped[int] = mapped_column(Integer, default=0)
     injected_into_context: Mapped[int] = mapped_column(Integer, default=0)
+    content_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    locator_json: Mapped[str] = mapped_column(Text, default="{}")
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[str] = mapped_column(String, comment="记录时间（UTC）")
-
-
-# FTS5 虚拟表 DDL（SQLAlchemy ORM 不支持 FTS5，需通过原生 SQL 创建）
-MEMORY_FTS_DDL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    content,
-    memory_id UNINDEXED,
-    tokenize='unicode61'
-)
-"""
-
-FILE_CHUNK_FTS_DDL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS file_chunk_fts USING fts5(
-    content,
-    chunk_id UNINDEXED,
-    attachment_id UNINDEXED,
-    tokenize='unicode61'
-)
-"""

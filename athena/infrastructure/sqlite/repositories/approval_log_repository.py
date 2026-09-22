@@ -6,7 +6,7 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
-from athena.infrastructure.sqlite.engine import get_core_session
+from athena.infrastructure.sqlite.engine import get_session
 from athena.infrastructure.sqlite.models import ApprovalLogModel
 from athena.models import ApprovalLog
 
@@ -19,7 +19,7 @@ class ApprovalLogRepository:
 
     async def save(self, log: ApprovalLog) -> None:
         """保存审批日志。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             async with session.begin():
                 session.add(
                     ApprovalLogModel(
@@ -39,7 +39,7 @@ class ApprovalLogRepository:
         self, session_id: str, include_deleted: bool = False
     ) -> list[ApprovalLog]:
         """获取会话的审批日志。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = (
                 select(ApprovalLogModel)
                 .where(ApprovalLogModel.session_id == session_id)
@@ -54,7 +54,7 @@ class ApprovalLogRepository:
         self, limit: int = 50, offset: int = 0, session_id: str | None = None
     ) -> list[ApprovalLog]:
         """分页列出审批日志，按时间倒序，可选按会话过滤。"""
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = select(ApprovalLogModel).where(
                 ApprovalLogModel.deleted_time.is_(None)
             )
@@ -71,7 +71,7 @@ class ApprovalLogRepository:
     async def stats(self) -> dict[str, int]:
         """统计今日审批决策数。"""
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        async with get_core_session() as session:
+        async with get_session() as session:
             stmt = (
                 select(ApprovalLogModel.decision, func.count(ApprovalLogModel.id))
                 .where(

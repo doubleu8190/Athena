@@ -255,6 +255,69 @@ export interface GetMessagesResponse {
   messages: Message[]
 }
 
+export type RetrievalScope = "memory" | "knowledge" | "file"
+export type RetrievalRunStatus =
+  | "running"
+  | "succeeded"
+  | "partial"
+  | "failed"
+  | "timeout"
+  | "cancelled"
+
+export interface RetrievalCandidate {
+  candidate_id: string
+  run_id: string
+  provider: string
+  stage: string
+  source_type: string
+  source_id: string
+  logical_source_id?: string | null
+  revision_id?: string | null
+  document_version_id?: string | null
+  native_rank?: number | null
+  native_score?: number | null
+  fused_rank?: number | null
+  fused_score?: number | null
+  filter_reason?: string | null
+  selected_for_result: boolean
+  injected_into_context: boolean
+  content_preview?: string | null
+  source_title?: string | null
+  locator?: Record<string, unknown>
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface RetrievalRunSummary {
+  run_id: string
+  session_id?: string | null
+  agent_run_id?: string | null
+  message_id?: string | null
+  query: string
+  scope: RetrievalScope | string
+  status: RetrievalRunStatus | string
+  candidate_count: number
+  selected_count: number
+  injected_count: number
+  duration_ms?: number | null
+  created_at: string
+  completed_at?: string | null
+}
+
+export interface RetrievalRunDetail extends RetrievalRunSummary {
+  config: Record<string, unknown>
+  index_generation?: string | null
+  error_message?: string | null
+  candidates: RetrievalCandidate[]
+}
+
+export interface RetrievalRunListResponse {
+  items: RetrievalRunSummary[]
+  total: number
+  limit: number
+  offset: number
+}
+
 // ─── 应用视图（导航栏）──────────────────────────────────────────
 
 export type AppView =
@@ -267,6 +330,7 @@ export type AppView =
   | "session-detail"
   | "settings"
   | "mcp"
+  | "retrieval"
 
 // ─── 工具管理 ────────────────────────────────────────────────────
 
@@ -403,7 +467,10 @@ export interface SettingsView {
   host: string
   port: number
   debug: boolean
-  sqlite_db_path: string
+  postgres_user: string
+  postgres_db: string
+  postgres_host: string
+  postgres_port: number
   chromadb_path: string
   max_turns_per_run: number
   retry_budget: number

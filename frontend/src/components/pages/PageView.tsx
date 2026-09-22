@@ -7,6 +7,7 @@ import SessionDetailView from "./SessionDetailView"
 import SettingsView from "./SettingsView"
 import McpView from "./McpView"
 import KnowledgeBaseView from "./KnowledgeBaseView"
+import RetrievalView from "./RetrievalView"
 
 interface PageViewProps {
   view: AppView
@@ -34,6 +35,8 @@ function PageView({ view }: PageViewProps) {
       return <SessionDetailView />
     case "settings":
       return <SettingsView />
+    case "retrieval":
+      return <RetrievalView />
     default:
       return null
   }

@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 class UnifiedToolManager:
     """统一工具管理器."""
 
-    def __init__(self, approval_manager: ApprovalManager) -> None:
+    def __init__(self, approval_manager: ApprovalManager, tool_runtime: Any = None) -> None:
         """
 
         参数：
@@ -48,6 +48,11 @@ class UnifiedToolManager:
         self._tools: dict[str, ToolProtocol] = {}
         self._disabled: set[str] = set()
         self._approval_manager = approval_manager
+        self._tool_runtime = tool_runtime
+
+    def set_tool_runtime(self, runtime: Any) -> None:
+        """Attach trusted infrastructure used by native sandboxed tools."""
+        self._tool_runtime = runtime
 
     # ------------------------------------------------------------------
     # 注册接口
@@ -309,8 +314,9 @@ class UnifiedToolManager:
         # 所有本地能力都从协程本地上下文读取可信的调用元数据，
         # 该元数据不会暴露为模型参数。
         token = None
+        runtime_token = None
         if isinstance(tool, NativeTool):
-            from athena.core.tools.spec import ToolContext, set_tool_context
+            from athena.core.tools.spec import ToolContext, set_tool_context, set_tool_runtime
 
             context = ToolContext(
                 session_id=session_id,
@@ -323,6 +329,11 @@ class UnifiedToolManager:
                 depth=depth,
             )
             token = set_tool_context(context)
+            runtime_token = (
+                set_tool_runtime(self._tool_runtime)
+                if self._tool_runtime is not None
+                else None
+            )
         try:
             execution = tool.execute(**params)
             if execution_timeout is not None:
@@ -333,6 +344,10 @@ class UnifiedToolManager:
                 from athena.core.tools.spec import reset_tool_context
 
                 reset_tool_context(token)
+            if runtime_token is not None:
+                from athena.core.tools.spec import reset_tool_runtime
+
+                reset_tool_runtime(runtime_token)
 
     # ------------------------------------------------------------------
     # LangChain 集成

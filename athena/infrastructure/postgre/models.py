@@ -600,9 +600,6 @@ class AttachmentModel(Base):
     logical_document_id: Mapped[str] = mapped_column(
         String, index=True, comment="跨文档版本保持不变的逻辑文档标识"
     )
-    current_version_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="当前解析版本标识"
-    )
     document_version: Mapped[int] = mapped_column(
         Integer, default=1, comment="逻辑文档版本序号"
     )

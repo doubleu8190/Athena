@@ -16,6 +16,8 @@ from athena.core.tools.mcp.client import MCPClient
 from athena.core.tools.catalog import ToolCatalogService
 from athena.models.tool import RiskLevel
 from athena.utils.logging import get_logger
+from athena.core.sandbox.ports import SandboxRunner
+from pathlib import Path
 
 if TYPE_CHECKING:
     from athena.core.tools.manager import UnifiedToolManager
@@ -47,6 +49,9 @@ class MCPToolAdapter:
         self,
         tool_manager: UnifiedToolManager,
         catalog: ToolCatalogService,
+        sandbox_runner: SandboxRunner | None = None,
+        sandbox_workspace_root: str | Path | None = None,
+        sandbox_image: str | None = None,
     ) -> None:
         """
 
@@ -63,6 +68,9 @@ class MCPToolAdapter:
         self._tool_manager = tool_manager
         self._catalog = catalog
         self._clients: dict[str, MCPClient] = {}
+        self._sandbox_runner = sandbox_runner
+        self._sandbox_workspace_root = Path(sandbox_workspace_root or "./data/sandboxes")
+        self._sandbox_image = sandbox_image
 
     async def register_server(
         self,
@@ -72,6 +80,8 @@ class MCPToolAdapter:
         env: dict[str, str] | None = None,
         timeout: float = 30.0,
         connect_timeout: float = 60.0,
+        sandbox_image: str | None = None,
+        sandbox_network_policy: str = "none",
     ) -> list[str]:
         """注册 MCP 服务端 的所有工具.
 
@@ -89,6 +99,11 @@ class MCPToolAdapter:
         返回值：
             注册的工具名称列表
         """
+        resolved_image = sandbox_image or self._sandbox_image
+        if self._sandbox_runner is not None:
+            if not resolved_image:
+                raise RuntimeError("sandbox MCP image is required")
+            resolved_image = self._sandbox_runner.resolve_mcp_image(resolved_image)
         client = MCPClient(
             server_name=server_name,
             server_command=server_command,
@@ -96,7 +111,15 @@ class MCPToolAdapter:
             env=env,
             timeout=timeout,
             connect_timeout=connect_timeout,
+            sandbox_runner=self._sandbox_runner,
+            sandbox_image=resolved_image,
+            sandbox_workspace=self._sandbox_workspace_root / "mcp" / _sanitize(server_name),
+            sandbox_network_policy=sandbox_network_policy,
         )
+        if self._sandbox_runner is not None:
+            (self._sandbox_workspace_root / "mcp" / _sanitize(server_name)).mkdir(
+                parents=True, exist_ok=True
+            )
 
         try:
             await client.connect()

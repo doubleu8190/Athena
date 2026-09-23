@@ -92,7 +92,7 @@ class FileIntelligenceRuntime:
         *,
         settings: Settings,
         event_publisher: FileEventPublisher,
-        trace_writer: RetrievalTraceWriter | None = None,
+        trace_writer: RetrievalTraceWriter,
     ) -> None:
         """
 
@@ -162,7 +162,9 @@ class FileIntelligenceRuntime:
                 candidate_count=candidate_count,
                 selected_count=selected_count,
                 status=status,
-                duration_ms=round((asyncio.get_running_loop().time() - started) * 1000, 2),
+                duration_ms=round(
+                    (asyncio.get_running_loop().time() - started) * 1000, 2
+                ),
                 error_message=error_message,
             )
         except Exception as exc:
@@ -324,8 +326,10 @@ class FileIntelligenceRuntime:
                             metadatas=[
                                 {
                                     "attachment_id": attachment_id,
-                                    "document_version_id": chunk.document_version_id or "",
-                                    "logical_document_id": attachment.logical_document_id or attachment.id,
+                                    "document_version_id": chunk.document_version_id
+                                    or "",
+                                    "logical_document_id": attachment.logical_document_id
+                                    or attachment.id,
                                     "ordinal": chunk.ordinal,
                                     "locator_json": json.dumps(
                                         chunk.locator.model_dump(
@@ -480,7 +484,9 @@ class FileIntelligenceRuntime:
         chunks: list[FileChunk] = []
         ordinal = 0
         for unit in units:
-            content = unit.content.strip()
+            # 二进制文档中的 NUL 不是可见文本，且 PostgreSQL TEXT 不允许保存；
+            # 在分块前清理可使 token 计数和字符定位都对应最终落库内容。
+            content = unit.content.replace("\x00", "").strip()
             if not content:
                 continue
             start = 0
@@ -564,7 +570,9 @@ class FileIntelligenceRuntime:
     async def list_files(self, session_id: str) -> list[dict[str, Any]]:
         """列出会话附件和全局知识库文档（公开字段）。"""
         session_files = await self.repository.list_session_attachments(session_id)
-        knowledge_documents = await self.repository.list_global_knowledge_documents()
+        knowledge_documents = (
+            await self.repository.list_global_knowledge_ready_documents()
+        )
         return [
             attachment_to_payload(item)
             for item in [*session_files, *knowledge_documents]
@@ -701,7 +709,12 @@ class FileIntelligenceRuntime:
                     RetrievalRunRequest(
                         query=query,
                         scope="file",
-                        config={"file_id": file_id, "limit": limit, "fusion": "rrf", "rrf_k": 60},
+                        config={
+                            "file_id": file_id,
+                            "limit": limit,
+                            "fusion": "rrf",
+                            "rrf_k": 60,
+                        },
                         index_generation="file_chunks/current",
                         session_id=session_id,
                         agent_run_id=agent_run_id,
@@ -756,7 +769,9 @@ class FileIntelligenceRuntime:
                         document_version_id=chunk.document_version_id,
                         content_preview=chunk.content[:500],
                         source_title=attachment.filename,
-                        locator=chunk.locator.model_dump(mode="json", exclude_none=True),
+                        locator=chunk.locator.model_dump(
+                            mode="json", exclude_none=True
+                        ),
                     )
                     for rank, chunk in enumerate(keyword, 1)
                 ]
@@ -848,38 +863,35 @@ class FileIntelligenceRuntime:
             SQLite 读取失败时向上抛出；向量检索失败时降级为关键词结果。
         """
         limit = min(max(limit, 1), 50)
-        documents = await self.repository.list_global_knowledge_documents()
-        allowed_documents = {
-            document.id
-            for document in documents
-            if document.status == AttachmentStatus.READY
-            and (
-                not knowledge_base_ids
-                or document.knowledge_base_id in knowledge_base_ids
+        if knowledge_base_ids is not None:
+            documents = await self.repository.list_knowledge_ready_documents(
+                knowledge_base_ids
             )
-        }
+        else:
+            documents = await self.repository.list_global_knowledge_ready_documents()
+            
+        allowed_documents = {doc.id for doc in documents}
         started = asyncio.get_running_loop().time()
         run_id: str | None = None
-        if self._trace_writer is not None:
-            try:
-                run_id = await self._trace_writer.start_run(
-                    RetrievalRunRequest(
-                        query=query,
-                        scope="knowledge",
-                        config={"limit": limit, "fusion": "rrf", "rrf_k": 60},
-                        index_generation="file_chunks/current",
-                        session_id=session_id,
-                        agent_run_id=agent_run_id,
-                        message_id=message_id,
-                    )
+        try:
+            run_id = await self._trace_writer.start_run(
+                RetrievalRunRequest(
+                    query=query,
+                    scope="knowledge",
+                    config={"limit": limit, "fusion": "rrf", "rrf_k": 60},
+                    index_generation="file_chunks/current",
+                    session_id=session_id,
+                    agent_run_id=agent_run_id,
+                    message_id=message_id,
                 )
-            except Exception as exc:
-                logger.warning("retrieval_trace_start_failed", error=str(exc))
+            )
+        except Exception as exc:
+            logger.warning("retrieval_trace_start_failed", error=str(exc))
         vector_error: str | None = None
         try:
             keyword = [
                 chunk
-                for chunk in await self.repository.search_knowledge_chunks(query, limit)
+                for chunk in await self.repository.search_knowledge_chunks(query, limit, allowed_documents)
                 if chunk.attachment_id in allowed_documents
             ]
             vector: list[dict[str, Any]] = []
@@ -898,7 +910,9 @@ class FileIntelligenceRuntime:
             live_ids = allowed_documents
             vector_before_filter = list(vector)
             vector = [
-                item for item in vector if str(item.get("attachment_id", "")) in live_ids
+                item
+                for item in vector
+                if str(item.get("attachment_id", "")) in live_ids
             ]
             fused = self._fuse_file_results(keyword, vector, limit)
         except asyncio.CancelledError:
@@ -931,9 +945,15 @@ class FileIntelligenceRuntime:
                         native_score=chunk.native_score,
                         document_version_id=chunk.document_version_id,
                         content_preview=chunk.content[:500],
-                        locator=chunk.locator.model_dump(mode="json", exclude_none=True),
+                        locator=chunk.locator.model_dump(
+                            mode="json", exclude_none=True
+                        ),
                         source_title=next(
-                            (document.filename for document in documents if document.id == chunk.attachment_id),
+                            (
+                                document.filename
+                                for document in documents
+                                if document.id == chunk.attachment_id
+                            ),
                             None,
                         ),
                         metadata={"attachment_id": chunk.attachment_id},
@@ -957,7 +977,11 @@ class FileIntelligenceRuntime:
                         content_preview=str(item.get("content", ""))[:500],
                         locator=item.get("locator", {}),
                         source_title=next(
-                            (document.filename for document in documents if document.id == item.get("attachment_id")),
+                            (
+                                document.filename
+                                for document in documents
+                                if document.id == item.get("attachment_id")
+                            ),
                             None,
                         ),
                         metadata={
@@ -979,7 +1003,11 @@ class FileIntelligenceRuntime:
                         content_preview=str(item.get("content", ""))[:500],
                         locator=item.get("locator", {}),
                         source_title=next(
-                            (document.filename for document in documents if document.id == item.get("attachment_id")),
+                            (
+                                document.filename
+                                for document in documents
+                                if document.id == item.get("attachment_id")
+                            ),
                             None,
                         ),
                         metadata={

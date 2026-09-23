@@ -176,6 +176,24 @@ class Settings(BaseSettings):
     approval_keyboard_shortcuts: bool = True
     approval_sound_alert: bool = False
 
+    # --- Docker sandbox ---
+    sandbox_enabled: bool = True
+    sandbox_required: bool = False
+    sandbox_docker_binary: str = "docker"
+    sandbox_workspace_root: str = "./data/sandboxes"
+    sandbox_shell_image: str = "python:3.12-slim"
+    sandbox_image_allowlist: list[str] = Field(default_factory=list)
+    sandbox_mcp_images: dict[str, str] = Field(default_factory=dict)
+    sandbox_default_network: str = "none"
+    sandbox_max_timeout: int = Field(default=60, ge=1, le=3600)
+    sandbox_max_output_bytes: int = Field(default=1_000_000, ge=1024)
+    sandbox_memory_mb: int = Field(default=512, ge=64)
+    sandbox_cpu_limit: float = Field(default=1.0, gt=0, le=8)
+    sandbox_pids_limit: int = Field(default=128, ge=16, le=4096)
+    sandbox_require_digest: bool = False
+    sandbox_mcp_auto_restore: bool = False
+    exec_shell_enabled: bool = True
+
     @property
     def primary_llm(self) -> LLMProviderConfig:
         """获取主 provider 配置（列表第一个）。

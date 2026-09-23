@@ -72,7 +72,7 @@ _BUILTIN_TOOLS: list[BuiltinToolDefinition] = [
     },
     {
         "name": "exec_shell",
-        "description": "在宿主机执行 Shell 命令（高风险，需用户审批）",
+        "description": "在隔离执行环境中运行 Shell 命令（高风险，需用户审批）",
         "handler": exec_shell,
         "risk_level": RiskLevel.HIGH,
         "require_approval": True,

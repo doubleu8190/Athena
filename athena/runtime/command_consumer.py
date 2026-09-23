@@ -6,6 +6,8 @@ import asyncio
 import traceback
 from typing import Any
 
+from athena.core.sandbox.ports import SandboxRunner
+
 from athena.contracts.commands import CommandType
 from athena.contracts.errors import ExecutionError
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
@@ -39,6 +41,7 @@ class CommandConsumer:
         cancellation_registry: CancellationRegistry | None = None,
         memory_service: LongTermMemoryService,
         approval_manager: Any | None = None,
+        sandbox_runner: SandboxRunner | None = None,
     ) -> None:
         """创建命令消费者。
 
@@ -67,6 +70,7 @@ class CommandConsumer:
         self._cancellation_registry = cancellation_registry or CancellationRegistry()
         self._memory_service = memory_service
         self._approval_manager = approval_manager
+        self._sandbox_runner = sandbox_runner
 
     async def start(self) -> None:
         """启动后台命令消费任务。
@@ -361,6 +365,12 @@ class CommandConsumer:
             await self._complete_message(command, run_id, result)
         finally:
             await self._cancellation_registry.unregister(run_id, cancel_event)
+            if self._sandbox_runner is not None:
+                run = await self.store.get_run(run_id)
+                # A paused run may be resumed and must retain its workspace
+                # and container. Terminal runs release both resources.
+                if run is None or run.status != AgentRunStatus.PAUSED:
+                    await self._sandbox_runner.close_run(run_id)
 
     async def _complete_cancelled_message(
         self, command: AgentCommandRecord, run_id: str

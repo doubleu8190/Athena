@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 from starlette.requests import HTTPConnection
 
+from athena.core.sandbox.ports import SandboxRunner
+from athena.core.sandbox.workspace import WorkspaceManager
 from athena.runtime.transport import SessionEventBus, RuntimeEventPublisher
 from athena.infrastructure.postgre.repositories.agent_store import AgentStore
 
@@ -40,6 +42,8 @@ class RuntimeContainer:
     memory_service: LongTermMemoryService
     agent_store: AgentStore
     realtime_transport: SessionEventBus
+    sandbox_runner: SandboxRunner
+    workspace_manager: WorkspaceManager
 
 
 def get_runtime_container(connection: HTTPConnection) -> RuntimeContainer:

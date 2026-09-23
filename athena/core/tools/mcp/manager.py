@@ -87,13 +87,32 @@ class MCPManager:
         # 先持久化：即使连接失败也保留配置，重启后仍会重试
         await self._db.mcp_servers.upsert(name, config)
 
-        server_command = [config.command, *config.args]
+        if (
+            self._adapter._sandbox_runner is not None
+            and not config.image_id
+        ):
+            error = "sandbox_mcp_image_required"
+            self._servers[name] = {"config": config, "tool_names": [], "error": error}
+            return {
+                "name": name,
+                "status": "failed",
+                "tool_count": 0,
+                "error": error,
+            }
+
+        server_command = (
+            [*config.command, *config.args]
+            if isinstance(config.command, list)
+            else [config.command, *config.args]
+        )
         try:
             tool_names = await self._adapter.register_server(
                 server_name=name,
                 server_command=server_command,
                 env=config.env,
                 connect_timeout=REGISTER_CONNECT_TIMEOUT,
+                sandbox_image=config.image_id,
+                sandbox_network_policy=config.network_policy,
             )
         except Exception as e:
             logger.error("mcp_register_failed", server=name, error=str(e))

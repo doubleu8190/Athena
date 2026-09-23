@@ -23,14 +23,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import timedelta
-from typing import Any, AsyncContextManager
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, AsyncContextManager
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
+from athena.core.sandbox.workspace import WorkspaceManager
 from athena.utils.logging import get_logger
+
+from athena.core.sandbox.ports import SandboxRunner
 
 logger = get_logger(__name__)
 
@@ -59,6 +63,10 @@ class MCPClient:
         env: dict[str, str] | None = None,
         timeout: float = 30.0,
         connect_timeout: float = 60.0,
+        sandbox_runner: SandboxRunner | None = None,
+        sandbox_image: str | None = None,
+        sandbox_workspace: Path | None = None,
+        sandbox_network_policy: str = "none",
     ) -> None:
         """
 
@@ -85,6 +93,10 @@ class MCPClient:
         # 握手阶段（initialize + tools/list）超时，独立于后续 tools/call 的 _timeout：
         # npx -y 冷启动（下载包 + 启动进程）可能远超单请求 30s
         self._connect_timeout = connect_timeout
+        self._sandbox_runner = sandbox_runner
+        self._sandbox_image = sandbox_image
+        self._sandbox_workspace = sandbox_workspace
+        self._sandbox_network_policy = sandbox_network_policy
         # 会话生命周期由后台任务独占持有（见模块 docstring 的说明）
         self._session_task: asyncio.Task[None] | None = None
         self._session: ClientSession | None = None
@@ -131,12 +143,26 @@ class MCPClient:
     async def _spawn_session(self) -> None:
         """构建传输并启动后台会话任务，等待握手完成（成功或失败）."""
         if self._server_command:
-            # env 由 SDK 增量合并：{**get_default_environment(), **server.env}，
-            # 默认环境含 PATH，保证 npx 等依赖 PATH 的命令可正常启动。
+            command = self._server_command
+            env = self._env
+            if self._sandbox_runner is not None:
+                if not self._sandbox_image or self._sandbox_workspace is None:
+                    raise RuntimeError("sandbox MCP requires image and workspace")
+                spec = self._sandbox_runner.build_mcp_process(
+                    server_name=self._server_name,
+                    image=self._sandbox_image,
+                    command=[command[0]],
+                    args=command[1:],
+                    workspace=self._sandbox_workspace,
+                    env=self._env,
+                    network_policy=self._sandbox_network_policy,
+                )
+                command = [spec.command, *spec.args]
+                env = spec.env
             params = StdioServerParameters(
-                command=self._server_command[0],
-                args=self._server_command[1:],
-                env=self._env,
+                command=command[0],
+                args=command[1:],
+                env=env,
             )
             transport: AsyncContextManager[Any] = stdio_client(params)
         elif self._server_url:

@@ -25,10 +25,12 @@ from athena.infrastructure.postgre.models import (
     FileChunkModel,
 )
 from athena.infrastructure.postgre.fts5_compat import FTS5Document, rank_bm25
+from athena.utils import logging
 from .repository_utils import (
     _json_dumps,
     _json_loads,
     _json_loads_model,
+    _strip_nul,
 )
 from .model_converters import _row_to_attachment
 from athena.models.file import (
@@ -43,6 +45,9 @@ from athena.models.json_models import (
     FileMetadata,
 )
 from athena.utils.id_generation import generate_time_id
+
+logger = logging.get_logger(__name__)
+
 
 def _now() -> datetime:
     """返回当前时间。"""
@@ -183,13 +188,17 @@ class FileRepository:
             async with get_session() as session:
                 latest_version = (
                     await session.execute(
-                        select(func.max(AttachmentModel.document_version)).where(
+                        select(AttachmentModel.document_version).where(
                             AttachmentModel.logical_document_id == logical_document_id,
                             AttachmentModel.knowledge_base_id == knowledge_base_id,
+                            AttachmentModel.status == AttachmentStatus.READY.value,
+                            AttachmentModel.deleted_time.is_(None),
                         )
                     )
                 ).scalar_one()
+                logger.info("知识库中 %s 当前版本为: %s", filename, document_version)
             document_version = int(latest_version or 0) + 1
+
         row = AttachmentModel(
             id=attachment_id,
             logical_document_id=logical_document_id or attachment_id,
@@ -209,7 +218,30 @@ class FileRepository:
         )
         async with get_session() as session:
             async with session.begin():
+                if document_version > 1:
+                    await session.execute(
+                        update(AttachmentModel)
+                        .where(
+                            AttachmentModel.logical_document_id == logical_document_id,
+                            AttachmentModel.knowledge_base_id == knowledge_base_id,
+                            AttachmentModel.status == AttachmentStatus.READY.value,
+                            AttachmentModel.deleted_time.is_(None),
+                        )
+                        .values(deleted_time=now)
+                    )
+                    logger.info(
+                        "%s 旧版本已删除",
+                        filename,
+                    )
+
                 session.add(row)
+                logger.info(
+                    "%s 创建新附件 %s，逻辑文档 %s，版本 %s",
+                    filename,
+                    attachment_id,
+                    logical_document_id,
+                    document_version,
+                )
         return _row_to_attachment(row)
 
     async def get_attachment(
@@ -311,7 +343,6 @@ class FileRepository:
                             AttachmentModel.deleted_time.is_(None),
                         )
                         .order_by(
-                            AttachmentModel.document_version.desc(),
                             AttachmentModel.created_at.desc(),
                         )
                     )
@@ -319,16 +350,63 @@ class FileRepository:
                 .scalars()
                 .all()
             )
-        # 同一 logical document 只暴露当前版本；历史版本仍保留在数据库中。
-        latest_by_logical_id: dict[str, AttachmentModel] = {}
-        for row in rows:
-            latest_by_logical_id.setdefault(row.logical_document_id, row)
-        return [
-            _row_to_attachment(row)
-            for row in sorted(
-                latest_by_logical_id.values(), key=lambda item: item.created_at
+        return [_row_to_attachment(row) for row in rows]
+
+    async def list_global_knowledge_ready_documents(self) -> list[Attachment]:
+        """列出所有全局知识库文档。
+
+        返回值：
+            list[Attachment]: 所有未删除的知识库文档，按创建时间升序排列。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_session() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AttachmentModel)
+                        .where(
+                            AttachmentModel.knowledge_base_id.is_not(None),
+                            AttachmentModel.status == AttachmentStatus.READY.value,
+                            AttachmentModel.deleted_time.is_(None),
+                        )
+                        .order_by(
+                            AttachmentModel.created_at.desc(),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
             )
-        ]
+        return [_row_to_attachment(row) for row in rows]
+
+    async def list_knowledge_ready_documents(
+        self, knowledge_base_ids: list[str]
+    ) -> list[Attachment]:
+        """列出所有全局知识库文档。
+
+        返回值：
+            list[Attachment]: 所有未删除的知识库文档，按创建时间升序排列。
+
+        异常：
+            数据库读取失败时传播底层异常。
+        """
+        async with get_session() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AttachmentModel).where(
+                            AttachmentModel.knowledge_base_id.in_(knowledge_base_ids),
+                            AttachmentModel.status == AttachmentStatus.READY.value,
+                            AttachmentModel.deleted_time.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [_row_to_attachment(row) for row in rows]
 
     async def find_latest_knowledge_document(
         self, knowledge_base_id: str, filename: str
@@ -348,17 +426,11 @@ class FileRepository:
         async with get_session() as session:
             row = (
                 await session.execute(
-                    select(AttachmentModel)
-                    .where(
+                    select(AttachmentModel).where(
                         AttachmentModel.knowledge_base_id == knowledge_base_id,
                         AttachmentModel.filename == filename,
                         AttachmentModel.deleted_time.is_(None),
                     )
-                    .order_by(
-                        AttachmentModel.document_version.desc(),
-                        AttachmentModel.created_at.desc(),
-                    )
-                    .limit(1)
                 )
             ).scalar_one_or_none()
         return _row_to_attachment(row) if row is not None else None
@@ -756,9 +828,12 @@ class FileRepository:
                         .where(FileChunkModel.id.in_(existing_ids))
                         .values(is_current=0)
                     )
-                attachment.current_version_id = version_id
                 attachment.updated_at = _now().isoformat()
                 for chunk in chunks:
+                    # PDF/Office 解析器可能把源文件中的 NUL 控制字节带入文本。
+                    # PostgreSQL TEXT 和 psycopg 都拒绝该字符，因此主表与 FTS
+                    # 索引必须使用同一份清理后的内容，避免两边出现分歧。
+                    content = _strip_nul(chunk.content)
                     session.add(
                         FileChunkModel(
                             id=chunk.id,
@@ -766,7 +841,7 @@ class FileRepository:
                             document_version_id=version_id,
                             is_current=1,
                             ordinal=chunk.ordinal,
-                            content=chunk.content,
+                            content=content,
                             token_count=chunk.token_count,
                             locator_json=_json_dumps(chunk.locator),
                             metadata_json=_json_dumps(chunk.metadata),
@@ -777,7 +852,7 @@ class FileRepository:
                             "INSERT INTO file_chunk_fts(content, chunk_id, attachment_id) VALUES (:content, :chunk_id, :attachment_id)"
                         ),
                         {
-                            "content": chunk.content,
+                            "content": content,
                             "chunk_id": chunk.id,
                             "attachment_id": attachment_id,
                         },
@@ -897,7 +972,9 @@ class FileRepository:
                             FileChunkModel.is_current == 1,
                         )
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             }
             rows = [rows_by_id[item] for item in ranked_ids if item in rows_by_id]
             return [
@@ -920,7 +997,10 @@ class FileRepository:
             ]
 
     async def search_knowledge_chunks(
-        self, query: str, limit: int = 10
+        self,
+        query: str,
+        document_ids: set[str],
+        limit: int = 10,
     ) -> list[FileChunk]:
         """跨全部未删除知识库文档执行 FTS5 兼容分块检索。
 
@@ -941,26 +1021,20 @@ class FileRepository:
             rows = (
                 await session.execute(
                     select(FileChunkModel, AttachmentModel)
-                    .join(AttachmentModel, AttachmentModel.id == FileChunkModel.attachment_id)
+                    .join(
+                        AttachmentModel,
+                        AttachmentModel.id == FileChunkModel.attachment_id,
+                    )
                     .where(
-                        AttachmentModel.knowledge_base_id.is_not(None),
-                        AttachmentModel.deleted_time.is_(None),
-                        AttachmentModel.status == "ready",
-                        FileChunkModel.is_current == 1,
-                        ~exists(
-                            select(1).where(
-                                newer.knowledge_base_id == AttachmentModel.knowledge_base_id,
-                                newer.logical_document_id == AttachmentModel.logical_document_id,
-                                newer.deleted_time.is_(None),
-                                newer.document_version > AttachmentModel.document_version,
-                            )
-                        ),
+                        AttachmentModel.id.in_(document_ids),
                     )
                 )
             ).all()
             corpus_rows = (
                 await session.execute(
-                    text("SELECT chunk_id, content FROM file_chunk_fts")
+                    text(
+                        "SELECT chunk_id, content FROM file_chunk_fts where attachment_id in :attachment_ids"
+                    ).bindparams(attachment_ids=tuple(document_ids))
                 )
             ).fetchall()
         scores = rank_bm25(
@@ -968,9 +1042,7 @@ class FileRepository:
             query,
             include_prefix=False,
         )
-        rows = [
-            row for row in rows if row[0].id in scores
-        ]
+        rows = [row for row in rows if row[0].id in scores]
         rows.sort(key=lambda row: scores[row[0].id])
         rows = rows[:limit]
         return [

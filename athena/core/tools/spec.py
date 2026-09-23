@@ -11,10 +11,15 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from athena.config.settings import Settings
 from athena.core.tools.tool_definitions import NativeHandler
 from athena.models.tool import RiskLevel
+
+if TYPE_CHECKING:
+    from athena.core.sandbox.ports import SandboxRunner
+    from athena.core.sandbox.workspace import WorkspaceManager
 
 
 @dataclass(frozen=True)
@@ -39,8 +44,20 @@ class ToolContext:
     depth: int = 0
 
 
+@dataclass(frozen=True)
+class ToolRuntime:
+    """Trusted runtime services available to a native tool handler."""
+
+    sandbox_runner: SandboxRunner
+    workspace_manager: WorkspaceManager
+    settings: Settings
+
+
 _current_context: ContextVar[ToolContext | None] = ContextVar(
     "athena_tool_context", default=None
+)
+_current_runtime: ContextVar[ToolRuntime | None] = ContextVar(
+    "athena_tool_runtime", default=None
 )
 
 
@@ -78,6 +95,21 @@ def get_tool_context() -> ToolContext:
     if context is None:
         raise RuntimeError("Tool context is only available during a tool invocation")
     return context
+
+
+def set_tool_runtime(runtime: ToolRuntime) -> Token[ToolRuntime | None]:
+    return _current_runtime.set(runtime)
+
+
+def reset_tool_runtime(token: Token[ToolRuntime | None]) -> None:
+    _current_runtime.reset(token)
+
+
+def get_tool_runtime() -> ToolRuntime:
+    runtime = _current_runtime.get()
+    if runtime is None:
+        raise RuntimeError("Tool runtime is only available during a tool invocation")
+    return runtime
 
 
 @dataclass(frozen=True)

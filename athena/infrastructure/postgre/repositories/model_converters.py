@@ -146,7 +146,6 @@ def _row_to_attachment(row: AttachmentModel) -> Attachment:
     return Attachment(
         id=row.id,
         logical_document_id=row.logical_document_id,
-        current_version_id=row.current_version_id,
         document_version=row.document_version,
         session_id=row.session_id,
         knowledge_base_id=row.knowledge_base_id,

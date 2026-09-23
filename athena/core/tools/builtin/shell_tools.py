@@ -1,11 +1,12 @@
 """内置 Shell 工具 — exec_shell.
 
-通过 subprocess 执行 Shell 命令，高风险工具，需审批。
+通过 Docker sandbox 执行 Shell 命令，高风险工具，需审批。
 """
 
 from __future__ import annotations
 
-import asyncio
+from athena.core.sandbox.models import ExecutionRequest, ExecutionStatus, SandboxRunRequest
+from athena.core.tools.spec import get_tool_context, get_tool_runtime
 
 
 class ShellCommandError(RuntimeError):
@@ -54,27 +55,44 @@ async def exec_shell(
         TimeoutError: 命令超时
         ShellCommandError: 退出码非零且 check=True
     """
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
+    context = get_tool_context()
+    runtime = get_tool_runtime()
+    if not runtime.settings.sandbox_enabled:
+        raise RuntimeError("sandbox_unavailable")
+    if not runtime.settings.exec_shell_enabled:
+        raise PermissionError("exec_shell is disabled")
+    workspace = runtime.workspace_manager.create(context.session_id, context.run_id)
+    safe_cwd = runtime.workspace_manager.resolve_cwd(workspace, cwd)
+    timeout = min(timeout, runtime.settings.sandbox_max_timeout)
+    handle = await runtime.sandbox_runner.ensure_run(
+        SandboxRunRequest(
+            run_id=context.run_id,
+            session_id=context.session_id,
+            workspace=workspace,
+            image=runtime.settings.sandbox_shell_image,
+            network_policy=runtime.settings.sandbox_default_network,
+        )
     )
-    try:
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise TimeoutError(f"命令执行超时（{timeout}s）: {command}")
-    finally:
-        # 任务被取消（停止/关停）时 communicate 会被取消但子进程仍在跑，必须清理
-        if proc.returncode is None:
-            proc.kill()
-
-    out = stdout.decode("utf-8", errors="replace") if stdout else ""
-    err = stderr.decode("utf-8", errors="replace") if stderr else ""
-    exit_code = proc.returncode
+    result = await runtime.sandbox_runner.execute(
+        ExecutionRequest(
+            execution_id=context.tool_call_id,
+            run_id=handle.run_id,
+            image=runtime.settings.sandbox_shell_image,
+            argv=["/bin/sh", "-lc", command],
+            workspace=workspace,
+            cwd=safe_cwd,
+            timeout_seconds=timeout,
+            max_output_bytes=runtime.settings.sandbox_max_output_bytes,
+            network_policy=runtime.settings.sandbox_default_network,
+        )
+    )
+    out = result.stdout
+    err = result.stderr
+    exit_code = result.exit_code
+    if result.status == ExecutionStatus.TIMEOUT:
+        raise TimeoutError(f"命令执行超时（{timeout}s）: {command}")
+    if result.status == ExecutionStatus.RUNNER_UNAVAILABLE:
+        raise RuntimeError("sandbox_unavailable")
 
     parts: list[str] = []
     parts.append(f"[exit_code={exit_code}]")
@@ -84,6 +102,6 @@ async def exec_shell(
         parts.append(f"[stderr]\n{err}")
     output = "\n".join(parts)
 
-    if check and exit_code != 0:
+    if check and (result.status != ExecutionStatus.SUCCESS or exit_code != 0):
         raise ShellCommandError(exit_code=exit_code, command=command, output=output)
     return output

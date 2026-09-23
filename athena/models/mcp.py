@@ -16,9 +16,12 @@ class MCPServerConfig(BaseModel):
         env: 环境变量（含密钥，仅用于启动子进程，列表接口返回掩码）
     """
 
-    command: str
+    command: str | list[str]
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    image_id: str | None = None
+    network_policy: str = "none"
+    enabled: bool = True
 
 
 class MCPServer(BaseModel):

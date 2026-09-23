@@ -29,6 +29,9 @@ from athena.gateway.approval import ApprovalManager
 from athena.gateway.routes import api_router
 from athena.infrastructure.postgre.database import Database
 from athena.infrastructure.postgre.repositories.agent_store import AgentStore
+from athena.infrastructure.sandbox.docker_runner import DockerRunner
+from athena.core.sandbox.workspace import WorkspaceManager
+from athena.core.tools.spec import ToolRuntime
 from athena.runtime import (
     CancellationRegistry,
     CommandConsumer,
@@ -96,7 +99,20 @@ async def lifespan(app: FastAPI):
     from athena.core.tools.manager import UnifiedToolManager
     from athena.core.tools.builtin.registry import register_builtin_tools
 
-    tool_manager = UnifiedToolManager(approval_manager=approval_manager)
+    sandbox_runner = DockerRunner(settings)
+    workspace_manager = WorkspaceManager(settings.sandbox_workspace_root)
+    if settings.sandbox_required and not await sandbox_runner.health():
+        raise RuntimeError("Docker sandbox is required but unavailable")
+
+    tool_runtime = ToolRuntime(
+        workspace_manager=workspace_manager,
+        sandbox_runner=sandbox_runner,
+        settings=settings,
+    )
+    tool_manager = UnifiedToolManager(
+        approval_manager=approval_manager,
+        tool_runtime=tool_runtime,
+    )
     tool_catalog = ToolCatalogService(db.tools)
     builtin_tool_names = register_builtin_tools(tool_manager)
     await tool_catalog.reconcile(tool_manager, names=builtin_tool_names)
@@ -105,7 +121,13 @@ async def lifespan(app: FastAPI):
     from athena.core.tools.mcp.adapter import MCPToolAdapter
     from athena.core.tools.mcp.manager import MCPManager
 
-    mcp_adapter = MCPToolAdapter(tool_manager, tool_catalog)
+    mcp_adapter = MCPToolAdapter(
+        tool_manager,
+        tool_catalog,
+        sandbox_runner=sandbox_runner,
+        sandbox_workspace_root=settings.sandbox_workspace_root,
+        sandbox_image=settings.sandbox_shell_image,
+    )
     mcp_manager = MCPManager(tool_manager=tool_manager, db=db, adapter=mcp_adapter)
     await mcp_manager.load_persisted()
 
@@ -248,6 +270,8 @@ async def lifespan(app: FastAPI):
         memory_service=memory_service,
         agent_store=agent_store,
         realtime_transport=realtime_transport,
+        sandbox_runner=sandbox_runner,
+        workspace_manager=workspace_manager,
     )
 
     # 目的是将没来得及取消的run，在重启的时候取消掉
@@ -269,6 +293,7 @@ async def lifespan(app: FastAPI):
         cancellation_registry=CancellationRegistry(),
         memory_service=memory_service,
         approval_manager=approval_manager,
+        sandbox_runner=sandbox_runner,
     )
     await command_consumer.start()
     # 所有运行时依赖和路由容器均就绪后，再开始领取持久化知识库任务。
@@ -303,6 +328,7 @@ async def lifespan(app: FastAPI):
         await mcp_manager.shutdown()
     except Exception as e:
         logger.warning("mcp_shutdown_failed", error=str(e))
+    await sandbox_runner.close_all()
     await db.close()
     logger.info("athena_stopped")
 

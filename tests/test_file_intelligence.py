@@ -6,7 +6,6 @@ import types
 from unittest.mock import AsyncMock
 
 import pytest
-from chromadb import QueryResult
 
 from athena.config.settings import Settings
 from athena.runtime.langgraph_runtime import LangGraphRuntime
@@ -41,6 +40,22 @@ class _FakeLLM:
         return conservative_text_token_count(text)
 
 
+class _FakeFileVectorStore:
+    ready = True
+
+    async def initialize(self):
+        self.ready = True
+
+    async def replace_attachment(self, _attachment_id, _chunks):
+        return None
+
+    async def delete_attachment(self, _attachment_id):
+        return None
+
+    async def query(self, _query, _limit, where=None):
+        return []
+
+
 def _make_runtime(repository, settings: Settings) -> FileIntelligenceRuntime:
     return FileIntelligenceRuntime(
         repository,
@@ -48,6 +63,8 @@ def _make_runtime(repository, settings: Settings) -> FileIntelligenceRuntime:
         _FakeLLM(),
         settings=settings,
         event_publisher=AsyncMock(),
+        trace_writer=AsyncMock(),
+        vector_store=_FakeFileVectorStore(),
     )
 
 
@@ -77,23 +94,6 @@ async def test_content_addressed_storage_deduplicates_and_limits(tmp_path):
 
     with pytest.raises(FileTooLargeError):
         await storage.save_stream(_chunks(b"123456789"))
-
-
-def test_vector_items_falls_back_for_non_string_locator_metadata():
-    """向量元数据的定位器不是 JSON 字符串时使用空定位器。"""
-    runtime = _make_runtime(AsyncMock(), Settings(_env_file=None))
-
-    items = runtime._vector_items(
-        QueryResult(
-            ids=[["chunk-1"]],
-            documents=[["content"]],
-            metadatas=[[{"attachment_id": "file-1", "locator_json": 1}]],
-            distances=[[0.0]],
-            included=["documents", "metadatas", "distances"],
-        )
-    )
-
-    assert items[0]["locator"] == {}
 
 
 @pytest.mark.asyncio
@@ -232,11 +232,11 @@ async def test_process_attachment_index_failure_marks_attachment_failed(tmp_path
             ],
         )
 
-        class BrokenCollection:
-            def delete(self, **_kwargs):
+        class BrokenVectorStore(_FakeFileVectorStore):
+            async def replace_attachment(self, _attachment_id, _chunks):
                 raise RuntimeError("vector index unavailable")
 
-        runtime._collection = BrokenCollection()
+        runtime._vector_store = BrokenVectorStore()
 
         runtime.parse_attachment = AsyncMock(return_value={"chunk_count": 1})
         graph_runtime = LangGraphRuntime.__new__(LangGraphRuntime)

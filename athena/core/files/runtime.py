@@ -23,13 +23,13 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
-from chromadb import Collection, QueryResult
 from langchain_core.messages import HumanMessage
 
 from athena.config.settings import Settings
 from athena.core.retrieval import RetrievalCandidate, RetrievalRunRequest
 from athena.core.retrieval.ports import RetrievalTraceWriter
 from athena.core.files.extraction import ExtractedUnit, ExtractionContext
+from athena.core.files.ports import FileVectorStore
 from athena.core.files.attachment_serialization import attachment_to_payload
 from athena.core.files.adapter_registry import AdapterRegistry
 from athena.infrastructure.postgre.repositories.file_repository import FileRepository
@@ -45,7 +45,6 @@ from athena.models.json_models import FileLocator, FileMetadata
 from athena.utils.id_generation import generate_time_id
 from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
-from chromadb.api import ClientAPI
 
 logger = get_logger(__name__)
 
@@ -93,6 +92,7 @@ class FileIntelligenceRuntime:
         settings: Settings,
         event_publisher: FileEventPublisher,
         trace_writer: RetrievalTraceWriter,
+        vector_store: FileVectorStore,
     ) -> None:
         """
 
@@ -119,14 +119,13 @@ class FileIntelligenceRuntime:
         self.secondary_llm = secondary_llm
         self._event_publisher = event_publisher
         self._trace_writer = trace_writer
-        self._chroma_client: ClientAPI | None = None
-        self._collection: Collection | None = None
+        self._vector_store = vector_store
         self._knowledge_document_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def vector_index_ready(self) -> bool:
         """向量索引是否已初始化，可供评估 readiness 检查。"""
-        return self._collection is not None
+        return self._vector_store.ready
 
     async def _complete_retrieval_trace(
         self,
@@ -171,19 +170,12 @@ class FileIntelligenceRuntime:
             logger.warning("retrieval_trace_complete_failed", error=str(exc))
 
     async def initialize(self) -> None:
-        """初始化运行时：同步适配器注册表到 DB，创建 ChromaDB 向量集合。"""
+        """初始化运行时：同步适配器注册表和文件向量索引。"""
         await self.repository.sync_adapters(
             adapter.info for adapter in self.adapter_registry.list()
         )
         try:
-            import chromadb
-
-            self._chroma_client = chromadb.PersistentClient(
-                path=str(self.settings.chroma_path)
-            )
-            self._collection = self._chroma_client.get_or_create_collection(
-                "athena_file_chunks", metadata={"hnsw:space": "cosine"}
-            )
+            await self._vector_store.initialize()
         except Exception as exc:
             logger.warning("file_vector_index_unavailable", error=str(exc))
 
@@ -311,36 +303,28 @@ class FileIntelligenceRuntime:
         if attachment is None:
             raise FileNotFoundError("附件不存在")
         chunks = await self.repository.get_chunks(attachment_id, limit=100_000)
-        if self._collection is not None:
+        if self._vector_store.ready:
             try:
-                await asyncio.to_thread(
-                    self._collection.delete, where={"attachment_id": attachment_id}
+                await self._vector_store.replace_attachment(
+                    attachment_id,
+                    [
+                        {
+                            "id": chunk.id,
+                            "content": chunk.content,
+                            "metadata": {
+                                "attachment_id": attachment_id,
+                                "document_version_id": chunk.document_version_id or "",
+                                "logical_document_id": attachment.logical_document_id or attachment.id,
+                                "ordinal": chunk.ordinal,
+                                "locator_json": json.dumps(
+                                    chunk.locator.model_dump(mode="json", exclude_none=True),
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                        for chunk in chunks
+                    ],
                 )
-                for start in range(0, len(chunks), 100):
-                    batch = chunks[start : start + 100]
-                    if batch:
-                        await asyncio.to_thread(
-                            self._collection.add,
-                            ids=[chunk.id for chunk in batch],
-                            documents=[chunk.content for chunk in batch],
-                            metadatas=[
-                                {
-                                    "attachment_id": attachment_id,
-                                    "document_version_id": chunk.document_version_id
-                                    or "",
-                                    "logical_document_id": attachment.logical_document_id
-                                    or attachment.id,
-                                    "ordinal": chunk.ordinal,
-                                    "locator_json": json.dumps(
-                                        chunk.locator.model_dump(
-                                            mode="json", exclude_none=True
-                                        ),
-                                        ensure_ascii=False,
-                                    ),
-                                }
-                                for chunk in batch
-                            ],
-                        )
             except Exception as exc:
                 logger.warning(
                     "file_embedding_index_failed",
@@ -348,7 +332,7 @@ class FileIntelligenceRuntime:
                     error=str(exc),
                 )
                 raise
-        return {"chunks": len(chunks), "vector_indexed": self._collection is not None}
+        return {"chunks": len(chunks), "vector_indexed": self._vector_store.ready}
 
     async def process_knowledge_document(self, attachment_id: str) -> dict[str, Any]:
         """幂等完成知识库文档解析和向量索引。
@@ -443,10 +427,8 @@ class FileIntelligenceRuntime:
         异常：
             Chroma 删除失败时向上抛出异常。
         """
-        if self._collection is not None:
-            await asyncio.to_thread(
-                self._collection.delete, where={"attachment_id": attachment_id}
-            )
+        if self._vector_store.ready:
+            await self._vector_store.delete_attachment(attachment_id)
 
     def _knowledge_lock(self, attachment_id: str) -> asyncio.Lock:
         """返回同一知识库文档共享的异步互斥锁。
@@ -895,15 +877,11 @@ class FileIntelligenceRuntime:
                 if chunk.attachment_id in allowed_documents
             ]
             vector: list[dict[str, Any]] = []
-            if self._collection is not None:
+            if self._vector_store.ready:
                 try:
-                    result = await asyncio.to_thread(
-                        self._collection.query,
-                        query_texts=[query],
-                        n_results=max(limit * 3, limit),
-                        include=["documents", "metadatas", "distances"],
+                    vector = await self._vector_store.query(
+                        query, max(limit * 3, limit)
                     )
-                    vector = self._vector_items(result)
                 except Exception as exc:
                     vector_error = str(exc)
                     logger.warning("knowledge_vector_search_failed", error=vector_error)
@@ -1110,60 +1088,17 @@ class FileIntelligenceRuntime:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         vector: list[dict[str, Any]] = []
-        if self._collection is not None:
+        if self._vector_store.ready:
             try:
-                result = await asyncio.to_thread(
-                    self._collection.query,
-                    query_texts=[query],
-                    n_results=limit,
-                    where={"attachment_id": file_id},
-                    include=["documents", "metadatas", "distances"],
+                vector = await self._vector_store.query(
+                    query, limit, where={"attachment_id": file_id}
                 )
-                vector = self._vector_items(result)
             except Exception as exc:
                 logger.warning(
                     "file_vector_search_failed", file_id=file_id, error=str(exc)
                 )
                 return vector
         return vector
-
-    @staticmethod
-    def _vector_items(result: QueryResult) -> list[dict[str, Any]]:
-        """
-
-        参数：
-            result (dict[str, Any]): 方法返回的领域结果。
-
-        返回值：
-            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        return [
-            {
-                "id": chunk_id,
-                "content": content,
-                "locator": FileLocator.model_validate_json(
-                    locator_json
-                    if isinstance(
-                        locator_json := (metadata or {}).get("locator_json"), str
-                    )
-                    else "{}"
-                ).model_dump(mode="json", exclude_none=True),
-                "attachment_id": (metadata or {}).get("attachment_id", ""),
-                "document_version_id": (metadata or {}).get("document_version_id", ""),
-                "logical_document_id": (metadata or {}).get("logical_document_id", ""),
-                "score": max(0.0, 1 - float(distance) / 2),
-                "native_score": max(0.0, 1 - float(distance) / 2),
-            }
-            for chunk_id, content, metadata, distance in zip(
-                (result.get("ids") or [[]])[0],
-                (result.get("documents") or [[]])[0],
-                (result.get("metadatas") or [[]])[0],
-                (result.get("distances") or [[]])[0],
-            )
-        ]
 
     def _fuse_file_results(
         self,

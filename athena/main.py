@@ -140,6 +140,7 @@ async def lifespan(app: FastAPI):
 
     # ── 5.1 文件智能 ──
     from athena.core.files.runtime import FileIntelligenceRuntime
+    from athena.infrastructure.chroma.file_vector_store import ChromaFileVectorStore
     from athena.core.tools.catalog import ToolRegistry
     from athena.core.tools.providers.files import build_file_tool_specs
 
@@ -150,6 +151,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
         event_publisher=event_publisher,
         trace_writer=db.retrieval,
+        vector_store=ChromaFileVectorStore(path=str(settings.chroma_path)),
     )
     await file_runtime.initialize()
 

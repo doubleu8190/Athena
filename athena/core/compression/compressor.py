@@ -89,7 +89,7 @@ class ContextCompressor:
     async def compress(
         self,
         messages: list[Message],
-        session_id: str | None = None,
+        session_id: str,
     ) -> list[Message]:
         """压缩消息列表.
 
@@ -103,11 +103,15 @@ class ContextCompressor:
         返回值：
             压缩后的消息列表（若未触发压缩，则原样返回）
         """
+        if not session_id:
+            logger.warning(
+                "compress_without_session_id",
+                message_count=len(messages),
+            )
+            raise ValueError("压缩消息时 session_id 不能为空")
         # 1. 检查是否需要压缩
         if not self._should_compress(messages):
             return messages
-
-        sid = session_id or "_default"
 
         # 2. 增量模式：获取上次压缩后的增量消息
         incremental_messages = await self._get_incremental_messages(
@@ -134,22 +138,18 @@ class ContextCompressor:
             return messages
 
         # 5. 增量更新摘要
-        original_buffer = await self._summary_buffer.get_summary(sid)
         updated_summary = await self._summary_buffer.update_summary(
             old_turns,
             session_id=session_id,
         )
-
-        # 摘要更新失败时降级为简单截断（保留更多消息）
-        if not updated_summary and not original_buffer:
-            logger.warning("compression_summary_empty_fallback_to_truncation")
-            return messages
+        if not updated_summary:
+            raise RuntimeError("增量摘要失败，无法压缩上下文。请检查 LLM 服务或配置。")
 
         # 6. 重建压缩后的消息列表
         compressed = self._rebuild_messages(
             updated_summary,
             recent_turns,
-            session_id=session_id or messages[0].session_id,
+            session_id=session_id,
         )
 
         # 7. 记录本次压缩的最后一条消息 ID（用于下次增量查询）

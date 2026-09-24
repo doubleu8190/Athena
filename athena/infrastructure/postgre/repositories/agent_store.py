@@ -21,7 +21,6 @@ from athena.contracts.statuses import (
     AgentApprovalStatus,
     AgentCommandStatus,
     AgentRunStatus,
-    StreamSnapshotStatus,
 )
 from athena.infrastructure.postgre.engine import get_session
 from athena.infrastructure.postgre.models import (

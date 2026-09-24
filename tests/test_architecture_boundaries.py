@@ -40,6 +40,12 @@ def test_memory_core_has_no_storage_sdk_dependencies():
     assert not any(module.startswith(forbidden) for module in imports)
 
 
+def test_file_runtime_has_no_vector_store_sdk_dependencies():
+    imports = _imports(ROOT / "athena/core/files/runtime.py")
+    forbidden = ("chromadb", "sqlalchemy", "athena.infrastructure.chroma")
+    assert not any(module.startswith(forbidden) for module in imports)
+
+
 def test_postgres_implementation_does_not_import_file_core_repository():
     postgres_dir = ROOT / "athena/infrastructure/postgre"
     imports = set().union(*(_imports(path) for path in postgres_dir.rglob("*.py")))

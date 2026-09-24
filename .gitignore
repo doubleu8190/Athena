@@ -22,6 +22,9 @@ data/
 .env
 .env.local
 
+# Local Docker Compose secrets
+deploy/postgres-fts/secrets/
+
 # IDE
 .idea/
 .vscode/

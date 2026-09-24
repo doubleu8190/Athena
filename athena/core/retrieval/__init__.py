@@ -2,13 +2,14 @@
 
 from .contracts import RetrievalCandidate, RetrievalRunRequest
 from .evaluation import RetrievalEvaluationCase, RetrievalMetrics, evaluate_rankings
-from .ports import RetrievalTraceWriter
+from .ports import RetrievalTraceReader, RetrievalTraceWriter
 
 __all__ = [
     "RetrievalCandidate",
     "RetrievalEvaluationCase",
     "RetrievalMetrics",
     "RetrievalRunRequest",
+    "RetrievalTraceReader",
     "RetrievalTraceWriter",
     "evaluate_rankings",
 ]

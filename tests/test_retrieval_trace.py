@@ -40,6 +40,8 @@ async def test_retrieval_trace_persists_candidates_and_injection(tmp_path):
                     revision_id="memory-r2",
                     fused_rank=1,
                     fused_score=0.42,
+                    rerank_rank=1,
+                    rerank_score=0.91,
                     selected_for_result=True,
                     content_preview="用户偏好 Python",
                     locator={"turn": 3},
@@ -78,6 +80,8 @@ async def test_retrieval_trace_persists_candidates_and_injection(tmp_path):
         assert run["agent_run_id"] == "agent-run-1"
         assert run["message_id"] == "message-1"
         assert candidates[0]["revision_id"] == "memory-r2"
+        assert candidates[0]["rerank_rank"] == 1
+        assert candidates[0]["rerank_score"] == pytest.approx(0.91)
         assert candidates[0]["content_preview"] == "用户偏好 Python"
         assert candidates[0]["locator"] == {"turn": 3}
         assert candidates[0]["injected_into_context"] is True

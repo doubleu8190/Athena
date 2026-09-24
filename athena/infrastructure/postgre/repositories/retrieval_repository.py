@@ -1,4 +1,4 @@
-"""检索运行和候选轨迹的 SQLite 仓库。"""
+"""检索运行和候选轨迹的 PostgreSQL 仓库。"""
 
 from __future__ import annotations
 
@@ -85,6 +85,8 @@ class RetrievalTraceRepository:
                 native_score=candidate.native_score,
                 fused_rank=candidate.fused_rank,
                 fused_score=candidate.fused_score,
+                rerank_rank=candidate.rerank_rank,
+                rerank_score=candidate.rerank_score,
                 filter_reason=candidate.filter_reason,
                 selected_for_result=1 if candidate.selected_for_result else 0,
                 injected_into_context=1 if candidate.injected_into_context else 0,
@@ -234,6 +236,8 @@ class RetrievalTraceRepository:
                 "native_score": row.native_score,
                 "fused_rank": row.fused_rank,
                 "fused_score": row.fused_score,
+                "rerank_rank": row.rerank_rank,
+                "rerank_score": row.rerank_score,
                 "filter_reason": row.filter_reason,
                 "selected_for_result": bool(row.selected_for_result),
                 "injected_into_context": bool(row.injected_into_context),
@@ -247,6 +251,7 @@ class RetrievalTraceRepository:
                 rows,
                 key=lambda item: (
                     item.stage,
+                    item.rerank_rank if item.rerank_rank is not None else 10**9,
                     item.fused_rank if item.fused_rank is not None else 10**9,
                     item.native_rank if item.native_rank is not None else 10**9,
                 ),
@@ -309,6 +314,12 @@ class RetrievalTraceRepository:
             rows = (await session.execute(stmt.offset(offset).limit(limit))).scalars().all()
 
         return [self._run_payload(row) for row in rows], total
+
+    async def get_run_with_candidates(self, run_id: str) -> dict[str, Any] | None:
+        run = await self.get_run(run_id)
+        if run is None:
+            return None
+        return {**run, "candidates": await self.list_candidates(run_id)}
 
     @staticmethod
     def _run_payload(row: RetrievalRunModel) -> dict[str, Any]:

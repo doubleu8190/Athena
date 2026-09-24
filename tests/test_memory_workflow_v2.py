@@ -90,7 +90,7 @@ async def test_resolver_uses_llm_only_for_ambiguous_related_memory():
 
     class Memory:
         async def search(self, *args, **kwargs):
-            return [{"id": "m1", "content": "使用 SQLite", "score": 0.8}]
+            return [{"id": "m1", "content": "使用 PostgreSQL", "score": 0.8}]
 
     candidate = MemoryCandidate(
         content="数据库方案调整为 PostgreSQL", source_turn_id="t1", confidence=0.9

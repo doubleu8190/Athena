@@ -9,13 +9,12 @@ from athena.config.settings import Settings
 from athena.core.memory.contracts import CompletedTurn
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.postgre.engine import (
-    close_sqlite_engines,
-    get_memory_database_session,
-    get_core_session,
-    initialize_sqlite_engines,
+    close_postgres_engine,
+    get_session,
+    initialize_postgres_engine,
 )
 from athena.infrastructure.postgre.repositories.memory_job_repository import MemoryJobRepository
-from athena.infrastructure.postgre.repositories.memory_repository import SQLiteMemoryRepository
+from athena.infrastructure.postgre.repositories.memory_repository import PostgresMemoryRepository
 
 
 class _VectorStore:
@@ -28,20 +27,20 @@ class _VectorStore:
 
 @pytest.fixture
 async def jobs(tmp_path):
-    await initialize_sqlite_engines(str(tmp_path / "jobs.db"))
+    await initialize_postgres_engine(str(tmp_path / "jobs.db"))
     repository = MemoryJobRepository()
     yield repository
-    await close_sqlite_engines()
+    await close_postgres_engine()
 
 
 def payload(turn_id: str = "turn-1") -> dict:
     return CompletedTurn(
-        turn_id=turn_id, session_id="session-1", user_text="记住使用 SQLite"
+        turn_id=turn_id, session_id="session-1", user_text="记住使用 PostgreSQL"
     ).model_dump(mode="json")
 
 
 async def status(turn_id: str) -> tuple[str, int]:
-    async with get_core_session() as session:
+    async with get_session() as session:
         row = (
             await session.execute(
                 text("SELECT status, attempt FROM memory_processing_jobs WHERE turn_id=:id"),
@@ -64,7 +63,7 @@ async def test_failed_job_can_be_retried(jobs):
     claimed = await jobs.claim_next_job()
     assert claimed and claimed["attempt"] == 1
     await jobs.mark_job_failed("turn-1", "temporary", retry=True)
-    async with get_core_session() as session:
+    async with get_session() as session:
         await session.execute(
             text("UPDATE memory_processing_jobs SET available_at='0001-01-01' WHERE turn_id='turn-1'")
         )
@@ -93,60 +92,6 @@ async def test_job_cannot_be_claimed_twice(jobs):
 
 
 @pytest.mark.asyncio
-async def test_jobs_use_separate_database_when_configured(tmp_path):
-    await initialize_sqlite_engines(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
-    try:
-        assert await MemoryJobRepository().enqueue_job(payload("split-turn")) is True
-        async with get_core_session() as session:
-            core_memory_tables = (
-                await session.execute(
-                    text(
-                        "SELECT name FROM sqlite_master WHERE type='table' "
-                        "AND name IN ('memories', 'memory_relations', 'memory_processing_jobs')"
-                    )
-                )
-            ).scalars().all()
-        async with get_memory_database_session() as session:
-            memory_count = (
-                await session.execute(
-                    text("SELECT count(*) FROM memory_processing_jobs")
-                )
-            ).scalar_one()
-        assert core_memory_tables == []
-        assert memory_count == 1
-    finally:
-        await close_sqlite_engines()
-
-
-@pytest.mark.asyncio
-async def test_memory_manager_writes_to_configured_memory_database(tmp_path):
-    await initialize_sqlite_engines(str(tmp_path / "core.db"), str(tmp_path / "memory.db"))
-    try:
-        manager = LongTermMemoryService(
-            settings=Settings(),
-            repository=SQLiteMemoryRepository(),
-            vector_store=_VectorStore(),
-        )
-        await manager.add_memory("remember this", metadata={"session_id": "s1"})
-
-        async with get_memory_database_session() as session:
-            assert (
-                await session.execute(text("SELECT count(*) FROM memories"))
-            ).scalar_one() == 1
-        async with get_core_session() as session:
-            assert (
-                await session.execute(
-                    text(
-                        "SELECT count(*) FROM sqlite_master WHERE type='table' "
-                        "AND name='memories'"
-                    )
-                )
-            ).scalar_one() == 0
-    finally:
-        await close_sqlite_engines()
-
-
-@pytest.mark.asyncio
 async def test_recover_retries_jobs_failed_by_unconfigured_worker(jobs):
     await jobs.enqueue_job(payload())
     await jobs.claim_next_job()
@@ -159,39 +104,3 @@ async def test_recover_retries_jobs_failed_by_unconfigured_worker(jobs):
 
     assert recovered is not None
     assert recovered["attempt"] == 1
-
-
-@pytest.mark.asyncio
-async def test_split_database_creates_only_final_memory_schema(tmp_path):
-    core_path = str(tmp_path / "core.db")
-    memory_path = str(tmp_path / "memory.db")
-    await initialize_sqlite_engines(core_path, memory_path)
-    try:
-        async with get_memory_database_session() as session:
-            memory_tables = (
-                await session.execute(
-                    text(
-                        "SELECT name FROM sqlite_master WHERE type='table' "
-                        "AND name IN ('memories', 'memory_relations', 'memory_processing_jobs', 'memory_fts') "
-                        "ORDER BY name"
-                    )
-                )
-            ).scalars().all()
-        assert memory_tables == [
-            "memories",
-            "memory_fts",
-            "memory_processing_jobs",
-            "memory_relations",
-        ]
-        async with get_core_session() as session:
-            core_memory_tables = (
-                await session.execute(
-                    text(
-                        "SELECT name FROM sqlite_master WHERE type='table' "
-                        "AND name IN ('memories', 'memory_relations', 'memory_processing_jobs', 'memory_fts')"
-                    )
-                )
-            ).scalars().all()
-        assert core_memory_tables == []
-    finally:
-        await close_sqlite_engines()

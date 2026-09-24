@@ -159,7 +159,7 @@ class FileChunk(BaseModel):
     token_count: int = 0
     locator: FileLocator = Field(default_factory=FileLocator)
     metadata: FileMetadata = Field(default_factory=FileMetadata)
-    # SQLite FTS5 的 BM25 是底层原生排序值，与文件检索对外暴露的融合分数保持分离。
+    # PostgreSQL PostgreSQL FTS 的 ts_rank_cd 是底层原生排序值，与文件检索对外暴露的融合分数保持分离。
     native_score: float | None = None
 
 

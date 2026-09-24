@@ -1,4 +1,4 @@
-"""工具调用记录 SQLite 仓库。"""
+"""工具调用记录 PostgreSQL 仓库。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class ToolCallRepository:
             async with session.begin():
                 # 先写入步骤，再写入工具调用。两个 INSERT 都只忽略主键冲突，
                 # 避免“先 SELECT 再 INSERT”在 WAL 下把读事务升级为写事务。
-                # 多个并行工具调用因此可以让 SQLite 自己串行化短写事务，
+                # 多个并行工具调用因此可以让 PostgreSQL 自己串行化短写事务，
                 # 不需要手动执行 BEGIN IMMEDIATE 抢占整个数据库。
                 await session.execute(
                     postgres_insert(StepModel)

@@ -41,7 +41,7 @@ async def list_retrieval_runs(
         数据库读取失败时传播底层异常。
     """
     runtime = get_runtime_container(request)
-    items, total = await runtime.db.retrieval.list_runs(
+    items, total = await runtime.retrieval_trace_reader.list_runs(
         limit=limit,
         offset=offset,
         scope=scope,
@@ -68,7 +68,7 @@ async def get_retrieval_run(run_id: str, request: Request) -> dict[str, Any]:
         HTTPException: 检索运行不存在时返回 404。
     """
     runtime = get_runtime_container(request)
-    run = await runtime.db.retrieval.get_run(run_id)
+    run = await runtime.retrieval_trace_reader.get_run_with_candidates(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="检索运行不存在")
-    return {**run, "candidates": await runtime.db.retrieval.list_candidates(run_id)}
+    return run

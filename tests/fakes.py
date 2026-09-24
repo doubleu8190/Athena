@@ -49,6 +49,7 @@ def install_runtime(app: Any, **overrides: Any) -> RuntimeContainer:
     """Attach a complete runtime container to a focused FastAPI test app."""
     dependencies = {
         "db": MagicMock(),
+        "retrieval_trace_reader": MagicMock(),
         "event_publisher": MagicMock(),
         "approval_manager": MagicMock(),
         "tool_manager": MagicMock(),

@@ -26,7 +26,7 @@ class _AccessStat:
 class LongTermMemoryService:
     """长期记忆双写应用服务。
 
-    SQLite 是生命周期管理和关键词搜索的事实来源，Chroma 是可替换的向量索引。
+    PostgreSQL 是生命周期管理和关键词搜索的事实来源，Chroma 是可替换的向量索引。
     跨存储操作使用显式的补偿机制，因为两种技术之间不存在原子事务。
     """
 
@@ -137,7 +137,7 @@ class LongTermMemoryService:
             rows = await self._repository.flush_access_stats(stats)
         except Exception:
             self._access_stats.update(stats)
-            logger.exception("memory_flush_sqlite_failed")
+            logger.exception("memory_flush_postgresql_failed")
             raise
         try:
             for row in rows:
@@ -455,7 +455,7 @@ class LongTermMemoryService:
             按 revision 序号升序排列的历史记录。
 
         异常：
-            SQLite 读取失败时向上抛出异常。
+            PostgreSQL 读取失败时向上抛出异常。
         """
         return await self._repository.list_revisions(memory_id)
 
@@ -562,7 +562,7 @@ class LongTermMemoryService:
             记录成功更新时返回 True；目标不存在或不是当前版本时返回 False。
 
         异常：
-            SQLite 或向量同步失败时向上抛出异常，并尽力恢复旧状态。
+            PostgreSQL 或向量同步失败时向上抛出异常，并尽力恢复旧状态。
         """
         if validity_status not in {"valid", "uncertain", "invalid"}:
             raise ValueError("validity_status must be valid, uncertain, or invalid")
@@ -611,7 +611,7 @@ class LongTermMemoryService:
             成功更新旧记录时返回 ``True``，旧记录不存在时返回 ``False``。
 
         异常：
-            SQLite 或向量索引更新失败时向上抛出异常。
+            PostgreSQL 或向量索引更新失败时向上抛出异常。
         """
         changed = await self._repository.mark_superseded(old_memory_id, new_memory_id)
         if changed:
@@ -655,7 +655,7 @@ class LongTermMemoryService:
             无。
 
         异常：
-            向量索引删除失败时恢复 SQLite 软删除并向上抛出异常。
+            向量索引删除失败时恢复 PostgreSQL 软删除并向上抛出异常。
         """
         await self.initialize()
         await self._repository.soft_delete([memory_id])
@@ -677,7 +677,7 @@ class LongTermMemoryService:
             无；记录不存在时不做修改。
 
         异常：
-            向量索引更新失败时恢复 SQLite 中的固定状态并向上抛出异常。
+            向量索引更新失败时恢复 PostgreSQL 中的固定状态并向上抛出异常。
         """
         await self.initialize()
         expires_at = (

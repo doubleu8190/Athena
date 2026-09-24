@@ -1,4 +1,4 @@
-"""知识库文档解析任务的 SQLite 队列。"""
+"""知识库文档解析任务的 PostgreSQL 队列。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class KnowledgeDocumentJobRepository:
             新建或重新排队时返回 ``True``；已在排队或运行时返回 ``False``。
 
         异常：
-            SQLite 写入失败时向上抛出异常。
+            PostgreSQL 写入失败时向上抛出异常。
         """
         now = datetime.now().isoformat()
         async with get_session() as session:
@@ -60,7 +60,7 @@ class KnowledgeDocumentJobRepository:
             领取成功时返回含 ``attachment_id`` 和本次 ``attempt`` 的任务；无任务时返回 ``None``。
 
         异常：
-            SQLite 读取或更新失败时向上抛出异常。
+            PostgreSQL 读取或更新失败时向上抛出异常。
         """
         now = datetime.now().isoformat()
         async with get_session() as session:
@@ -109,7 +109,7 @@ class KnowledgeDocumentJobRepository:
             None。
 
         异常：
-            SQLite 更新失败时向上抛出异常。
+            PostgreSQL 更新失败时向上抛出异常。
         """
         await self._mark(job_id, "succeeded", result=result, only_running=True)
 
@@ -125,7 +125,7 @@ class KnowledgeDocumentJobRepository:
             None。
 
         异常：
-            SQLite 更新失败时向上抛出异常。
+            PostgreSQL 更新失败时向上抛出异常。
         """
         available_at = (
             (datetime.now() + timedelta(seconds=30)).isoformat() if retry else None
@@ -148,7 +148,7 @@ class KnowledgeDocumentJobRepository:
             None。
 
         异常：
-            SQLite 更新失败时向上抛出异常。
+            PostgreSQL 更新失败时向上抛出异常。
         """
         async with get_session() as session:
             async with session.begin():
@@ -171,7 +171,7 @@ class KnowledgeDocumentJobRepository:
             None。
 
         异常：
-            SQLite 更新失败时向上抛出异常。
+            PostgreSQL 更新失败时向上抛出异常。
         """
         await self._mark(job_id, "cancelled", error=reason)
 
@@ -185,7 +185,7 @@ class KnowledgeDocumentJobRepository:
             恢复的任务数量。
 
         异常：
-            SQLite 更新失败时向上抛出异常。
+            PostgreSQL 更新失败时向上抛出异常。
         """
         now = datetime.now().isoformat()
         async with get_session() as session:
@@ -222,7 +222,7 @@ class KnowledgeDocumentJobRepository:
             None。
 
         异常：
-            SQLite 更新失败时向上抛出异常。
+            PostgreSQL 更新失败时向上抛出异常。
         """
         async with get_session() as session:
             async with session.begin():

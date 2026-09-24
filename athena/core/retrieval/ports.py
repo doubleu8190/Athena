@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol
 
 from .contracts import RetrievalCandidate, RetrievalRunRequest
 
@@ -37,4 +37,28 @@ class RetrievalTraceWriter(Protocol):
 
     async def mark_injected(self, run_id: str, source_ids: Sequence[str]) -> None:
         """标记最终进入上下文的候选。"""
+        ...
+
+
+class RetrievalTraceReader(Protocol):
+    """检索轨迹查询端口，供 API 用例依赖而不暴露数据库实现。"""
+
+    async def list_runs(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        scope: str | None = None,
+        status: str | None = None,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        query: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """分页读取检索运行摘要。"""
+        ...
+
+    async def get_run_with_candidates(
+        self, run_id: str
+    ) -> dict[str, Any] | None:
+        """读取运行摘要及其候选；运行不存在时返回 None。"""
         ...

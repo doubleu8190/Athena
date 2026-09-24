@@ -1,4 +1,4 @@
-"""混合检索管理器 — 向量检索 + 关键词检索 + RRF 融合 + 时间衰减.
+"""记忆检索编排 — 独立 Keyword/Semantic 通道、Fusion 与 Rerank 阶段.
 
 技术方案：LLM 提取 + 向量数据库 + 混合检索。
 """
@@ -16,7 +16,8 @@ from typing import Any, Iterable
 from athena.config.settings import Settings
 from athena.core.llm.tokens import TokenCounter
 from athena.core.memory.long_term_memory import LongTermMemoryService
-from athena.core.memory.contracts import MemoryRetrievalRequest
+from athena.core.memory.contracts import MemoryRetrievalMode, MemoryRetrievalRequest
+from athena.core.memory.ports import MemoryReranker
 from athena.core.retrieval import RetrievalCandidate, RetrievalRunRequest
 from athena.core.retrieval.ports import RetrievalTraceWriter
 from athena.utils.logging import get_logger
@@ -48,16 +49,14 @@ class MemoryRetrievalResult:
 
 
 class HybridMemoryRetriever:
-    """混合检索管理器.
-
-    流程：向量检索 + 关键词检索 → RRF 融合 → 时间衰减 → 过滤排序.
-    """
+    """选择检索通道并编排候选融合、重排和轨迹记录。"""
 
     def __init__(
         self,
         memory_service: LongTermMemoryService,
         settings: Settings,
         trace_writer: RetrievalTraceWriter | None = None,
+        reranker: MemoryReranker | None = None,
     ) -> None:
         """
 
@@ -73,6 +72,7 @@ class HybridMemoryRetriever:
         self._memory = memory_service
         self._settings = settings
         self._trace_writer = trace_writer
+        self._reranker = reranker
         self._min_score = self._settings.memory_min_score
         self._top_k = self._settings.retrieval_top_k
         self._candidate_k = self._settings.retrieval_candidate_k or self._top_k * 2
@@ -139,8 +139,9 @@ class HybridMemoryRetriever:
         session_id: str | None = None,
         agent_run_id: str | None = None,
         message_id: str | None = None,
+        mode: MemoryRetrievalMode = MemoryRetrievalMode.HYBRID,
     ) -> list[MemoryRetrievalResult]:
-        """执行混合检索（默认跨会话全库）.
+        """执行指定检索模式（默认跨会话全库的 hybrid）.
 
         长期记忆定位为跨会话召回：不按 session_id 过滤，任何会话沉淀的
         记忆都可被召回；filter_params 为可选显式过滤（按需传入 category/
@@ -156,6 +157,7 @@ class HybridMemoryRetriever:
                         scope="memory",
                         config={
                             "candidate_k": self._candidate_k,
+                            "mode": mode.value,
                             "rerank_k": self._rerank_k,
                             "context_k": self._context_k,
                             "vector_min_score": self._vector_min_score,
@@ -173,12 +175,25 @@ class HybridMemoryRetriever:
                 logger.warning("retrieval_trace_start_failed", error=str(exc))
 
         try:
-            # 并发执行向量和关键词路线，随后统一使用 RRF 合并两路排名证据。
-            keyword_task = asyncio.create_task(self._keyword_search(query, filter_params))
-            raw_vector_task = asyncio.create_task(self._vector_search(query, filter_params))
-
-            keyword_results = await keyword_task
-            vector_results = await raw_vector_task
+            keyword_results: list[MemoryRetrievalResult] = []
+            vector_results: list[MemoryRetrievalResult] = []
+            if mode == MemoryRetrievalMode.KEYWORD_ONLY:
+                keyword_results = await self._keyword_search(query, filter_params)
+                candidates = keyword_results
+            elif mode == MemoryRetrievalMode.SEMANTIC_ONLY:
+                vector_results = await self._vector_search(query, filter_params)
+                candidates = [
+                    result for result in vector_results if result.filter_reason is None
+                ]
+            else:
+                keyword_results, vector_results = await asyncio.gather(
+                    self._keyword_search(query, filter_params),
+                    self._vector_search(query, filter_params),
+                )
+                candidates = self._reciprocal_rank_fusion(
+                    [result for result in vector_results if result.filter_reason is None],
+                    keyword_results,
+                )
 
             logger.info(
                 "memory_retrieval_completed",
@@ -187,25 +202,12 @@ class HybridMemoryRetriever:
                 vector_count=len(vector_results),
             )
 
-            fused = self._reciprocal_rank_fusion(
-                [result for result in vector_results if result.filter_reason is None],
-                keyword_results,
-            )
-
-            # 生命周期信号只作为同一相关度层内的 tie-break。
-            for r in fused:
-                r.rerank_score = r.fused_score
-            fused.sort(
-                key=lambda x: (
-                    0 if x.exact_match else 1,
-                    -float(x.fused_score or 0.0),
-                    -self._lifecycle_score(x.metadata),
-                    x.memory_id,
-                )
-            )
-            for rank, result in enumerate(fused, 1):
-                result.fused_rank = rank
-            selected = fused[: self._rerank_k][: self._context_k]
+            if mode == MemoryRetrievalMode.HYBRID:
+                for rank, result in enumerate(candidates, 1):
+                    result.fused_rank = rank
+            rerank_input = candidates[: self._rerank_k]
+            reranked = await self._rerank(query, rerank_input)
+            selected = reranked[: self._context_k]
             if run_id is not None and self._trace_writer is not None:
                 try:
                     raw_candidates = [
@@ -217,22 +219,36 @@ class HybridMemoryRetriever:
                         for result in keyword_results
                     )
                     selected_ids = {result.memory_id for result in selected}
-                    fused_candidates = [
+                    fused_candidates = (
+                        [
+                            self._trace_candidate(
+                                result,
+                                provider="fusion",
+                                stage="fused",
+                                selected_for_result=result.memory_id in selected_ids,
+                            )
+                            for result in candidates
+                        ]
+                        if mode == MemoryRetrievalMode.HYBRID
+                        else []
+                    )
+                    reranked_candidates = [
                         self._trace_candidate(
                             result,
-                            provider="fusion",
-                            stage="fused",
+                            provider="reranker",
+                            stage="reranked",
                             selected_for_result=result.memory_id in selected_ids,
                         )
-                        for result in fused
+                        for result in reranked
                     ]
                     await self._trace_writer.record_candidates(
-                        run_id, [*raw_candidates, *fused_candidates]
+                        run_id,
+                        [*raw_candidates, *fused_candidates, *reranked_candidates],
                     )
                     await self._complete_trace(
                         run_id,
                         started,
-                        candidate_count=len(fused),
+                        candidate_count=len(candidates),
                         selected_count=len(selected),
                         status="succeeded",
                     )
@@ -241,7 +257,7 @@ class HybridMemoryRetriever:
                     await self._complete_trace(
                         run_id,
                         started,
-                        candidate_count=len(fused),
+                        candidate_count=len(candidates),
                         selected_count=len(selected),
                         status="partial",
                         error_message=str(exc),
@@ -290,6 +306,8 @@ class HybridMemoryRetriever:
             native_score=result.native_score,
             fused_rank=result.fused_rank if stage == "fused" else None,
             fused_score=result.fused_score if stage == "fused" else None,
+            rerank_rank=result.rerank_rank if stage == "reranked" else None,
+            rerank_score=result.rerank_score if stage == "reranked" else None,
             logical_source_id=metadata.get("logical_memory_id"),
             revision_id=result.memory_id,
             filter_reason=filter_reason,
@@ -304,16 +322,12 @@ class HybridMemoryRetriever:
         filter_params: dict[str, Any] | None,
     ) -> list[MemoryRetrievalResult]:
         """向量检索（跨会话全库；filter_params 为可选显式过滤）."""
-        try:
-            kwargs: dict[str, Any] = {
-                "query": query,
-                "n_results": self._candidate_k,
-                "where": filter_params,
-            }
-            results = await self._memory.search(**kwargs)
-        except Exception as e:
-            logger.warning("vector_search_failed", error=str(e))
-            return []
+        kwargs: dict[str, Any] = {
+            "query": query,
+            "n_results": self._candidate_k,
+            "where": filter_params,
+        }
+        results = await self._memory.search(**kwargs)
 
         out: list[MemoryRetrievalResult] = []
         for i, r in enumerate(results, 1):
@@ -344,24 +358,17 @@ class HybridMemoryRetriever:
         query: str,
         filter_params: dict[str, Any] | None,
     ) -> list[MemoryRetrievalResult]:
-        """关键词检索（PostgreSQL 上兼容 SQLite FTS5 的全文检索）。
-
-        通过 LongTermMemoryService.keyword_search() 使用 unicode61 兼容分词、
-        精确词/整段/前缀召回和 bm25 排序；中文语义分词仍由向量检索承担。
+        """执行独立关键词通道。
 
         跨会话全库检索：不再按 session_id 过滤，跨会话的关键词命中也参与
-        RRF 融合；filter_params 为可选显式过滤（仅支持 memories 表顶层列）。
+        Hybrid 下跨会话全库结果参与 Fusion；filter_params 为可选显式过滤。
         """
-        try:
-            kwargs = {
-                "query": query,
-                "n_results": self._candidate_k,
-                "where": filter_params,
-            }
-            results = await self._memory.keyword_search(**kwargs)
-        except Exception as e:
-            logger.warning("keyword_search_failed", error=str(e))
-            return []
+        kwargs = {
+            "query": query,
+            "n_results": self._candidate_k,
+            "where": filter_params,
+        }
+        results = await self._memory.keyword_search(**kwargs)
 
         out: list[MemoryRetrievalResult] = []
         for i, r in enumerate(results, 1):
@@ -376,13 +383,39 @@ class HybridMemoryRetriever:
                     memory_id=r.get("id", str(i)),
                 )
             )
-        # 同上：RRF 需要"最相关在前"。score 为原始相似度 |bm25|/(1+|bm25|)
+        # 同上：RRF 需要"最相关在前"。score 为原始相似度 |ts_rank_cd|/(1+|ts_rank_cd|)
         # （越大越相关），keyword_weight 统一在 RRF 融合处生效。上游已
-        # 仓库按 bm25 升序返回，这里显式按 score 降序固化不变量。
+        # 仓库按 ts_rank_cd 升序返回，这里显式按 score 降序固化不变量。
         out.sort(key=lambda x: x.native_score or 0.0, reverse=True)
         for rank, result in enumerate(out, 1):
             result.native_rank = rank
         return out
+
+    async def _rerank(
+        self, query: str, candidates: list[MemoryRetrievalResult]
+    ) -> list[MemoryRetrievalResult]:
+        """执行独立重排阶段并记录其分数与排名。"""
+        if self._reranker is not None:
+            results = await self._reranker.rerank(query, candidates, self._rerank_k)
+        else:
+            # 默认保留当前精确命中与生命周期信号排序，分数语义独立于融合分数。
+            for result in candidates:
+                result.rerank_score = (
+                    (10.0 if result.exact_match else 0.0)
+                    + self._lifecycle_score(result.metadata)
+                )
+            results = sorted(
+                candidates,
+                key=lambda result: (
+                    -float(result.rerank_score or 0.0),
+                    -float(result.fused_score or result.native_score or 0.0),
+                    result.memory_id,
+                ),
+            )
+        results = results[: self._rerank_k]
+        for rank, result in enumerate(results, 1):
+            result.rerank_rank = rank
+        return results
 
     def _reciprocal_rank_fusion(
         self,
@@ -392,7 +425,7 @@ class HybridMemoryRetriever:
         """使用加权倒数排名融合向量和关键词候选集。
 
         每条检索路只贡献排名证据，不直接比较不同路由的原始分数，因而
-        可以在向量距离和 BM25 分数尺度不同的情况下保持排序稳定。
+        可以在向量距离和 ts_rank_cd 分数尺度不同的情况下保持排序稳定。
         """
         scores: dict[str, float] = {}
         content_map: dict[str, MemoryRetrievalResult] = {}
@@ -573,7 +606,9 @@ class MemoryRetrievalService:
                 }.items()
                 if value is not None
             }
-            results = await self._manager.retrieve(query=request.query, **trace_kwargs)
+            results = await self._manager.retrieve(
+                query=request.query, mode=request.mode, **trace_kwargs
+            )
         except Exception as e:
             logger.warning("memory_retrieve_failed", error=str(e))
             return []

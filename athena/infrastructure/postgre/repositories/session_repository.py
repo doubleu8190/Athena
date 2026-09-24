@@ -1,4 +1,4 @@
-"""会话 SQLite 仓库。"""
+"""会话 PostgreSQL 仓库。"""
 
 from __future__ import annotations
 

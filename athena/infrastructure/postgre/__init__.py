@@ -1,4 +1,4 @@
-"""SQLite 持久化适配器。"""
+"""PostgreSQL 持久化适配器。"""
 
 from athena.infrastructure.postgre.database import Database
 

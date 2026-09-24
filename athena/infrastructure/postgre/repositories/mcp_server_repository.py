@@ -1,4 +1,4 @@
-"""MCP 服务端配置 SQLite 仓库。"""
+"""MCP 服务端配置 PostgreSQL 仓库。"""
 
 from __future__ import annotations
 

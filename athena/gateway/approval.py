@@ -1,4 +1,4 @@
-"""持久化审批服务。SQLite 记录是审批状态的唯一事实来源。"""
+"""持久化审批服务。PostgreSQL 记录是审批状态的唯一事实来源。"""
 
 from __future__ import annotations
 
@@ -466,7 +466,7 @@ class ApprovalManager:
 
 
 def _parse_datetime(value: Any) -> datetime:
-    """解析 SQLite 中的 ISO 时间，缺失时使用当前 UTC 时间。"""
+    """解析 PostgreSQL 中的 ISO 时间，缺失时使用当前 UTC 时间。"""
     parsed = _parse_optional_datetime(value)
     return parsed or datetime.now(timezone.utc)
 

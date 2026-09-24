@@ -18,7 +18,7 @@ class ApprovalDecision(StrEnum):
 class ApprovalRequest:
     """审批请求的完整数据结构.
 
-    运行时请求对象仅保存展示信息；审批决定以 SQLite Approval Record 为准。
+    运行时请求对象仅保存展示信息；审批决定以 PostgreSQL Approval Record 为准。
     """
 
     __slots__ = (

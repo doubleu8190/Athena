@@ -1,4 +1,4 @@
-"""中心编排计划、任务和结果的 SQLite 仓库。"""
+"""中心编排计划、任务和结果的 PostgreSQL 仓库。"""
 
 from __future__ import annotations
 

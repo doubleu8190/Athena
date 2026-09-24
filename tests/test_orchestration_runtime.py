@@ -121,10 +121,10 @@ async def test_recovery_requeues_stale_claimed_task(tmp_path) -> None:
     await database.orchestration.claim_next_task("plan-1", "old-owner")
 
     # 直接把 claimed_at 改为过期时间，模拟进程崩溃后遗留的租约。
-    from athena.infrastructure.postgre.engine import get_core_session
+    from athena.infrastructure.postgre.engine import get_session
 
     expired_at = (datetime.now() - timedelta(seconds=3600)).isoformat()
-    async with get_core_session() as db:
+    async with get_session() as db:
         await db.execute(
             text("UPDATE agent_tasks SET claimed_at=:claimed_at WHERE task_id='task-1'"),
             {"claimed_at": expired_at},

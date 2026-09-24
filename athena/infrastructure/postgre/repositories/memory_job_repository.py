@@ -15,7 +15,7 @@ from athena.infrastructure.postgre.engine import (
 
 
 class MemoryJobRepository:
-    """SQLite-backed, at-least-once queue keyed by ``turn_id``."""
+    """PostgreSQL-backed, at-least-once queue keyed by ``turn_id``."""
 
     async def enqueue_job(self, payload: dict[str, Any]) -> bool:
         now = datetime.now().isoformat()

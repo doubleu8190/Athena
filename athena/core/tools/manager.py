@@ -237,7 +237,7 @@ class UnifiedToolManager:
     ) -> ToolResult:
         """统一工具调用入口，含审批检查.
 
-        审批请求立即持久化，调用方等待 SQLite Approval Record 的决定。
+        审批请求立即持久化，调用方等待 PostgreSQL Approval Record 的决定。
 
         session_id / run_id / tool_call_id 为必填：标识本次工具调用归属的会话、运行与
         具体工具调用，用于审批留痕与子代理父链上下文。

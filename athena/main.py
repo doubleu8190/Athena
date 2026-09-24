@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI):
 
     from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
     from athena.infrastructure.postgre.repositories.memory_repository import (
-        SQLiteMemoryRepository,
+        PostgresMemoryRepository,
     )
     from athena.infrastructure.postgre.repositories.memory_job_repository import (
         MemoryJobRepository,
@@ -181,7 +181,7 @@ async def lifespan(app: FastAPI):
 
     memory_service = LongTermMemoryService(
         settings=settings,
-        repository=SQLiteMemoryRepository(),
+        repository=PostgresMemoryRepository(),
         vector_store=ChromaMemoryVectorStore(path=str(settings.chroma_path)),
     )
     try:
@@ -260,6 +260,7 @@ async def lifespan(app: FastAPI):
     agent_store.transport = realtime_transport
     app.state.runtime = RuntimeContainer(
         db=db,
+        retrieval_trace_reader=db.retrieval,
         event_publisher=event_publisher,
         approval_manager=approval_manager,
         tool_manager=tool_manager,

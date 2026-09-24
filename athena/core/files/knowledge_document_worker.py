@@ -132,7 +132,7 @@ class KnowledgeDocumentWorker:
             result = await self._file_runtime.process_knowledge_document(attachment_id)
             await self._repository.mark_succeeded(job_id, result)
         except Exception as exc:
-            # 每次失败均清掉本轮可能已经写入的向量。SQLite 分块会被下一次解析
+            # 每次失败均清掉本轮可能已经写入的向量。PostgreSQL 分块会被下一次解析
             # 原子替换，向量则必须显式删除，避免半索引被误召回。
             try:
                 await self._file_runtime.delete_attachment_vectors(attachment_id)

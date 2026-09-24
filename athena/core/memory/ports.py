@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, Sequence
+
+if TYPE_CHECKING:
+    from athena.core.memory.retrieval import MemoryRetrievalResult
 
 
 class MemoryRepository(Protocol):
-    """基于 SQLite 的记忆生命周期和关键词搜索操作。"""
+    """基于 数据库 的记忆生命周期和关键词搜索操作。"""
 
     async def add(self, record: dict[str, Any]) -> None:
         """写入一条记忆记录。"""
@@ -16,7 +19,9 @@ class MemoryRepository(Protocol):
         """批量持久化最终注入上下文的访问统计并返回更新后的记录。"""
         ...
 
-    async def keyword_search(self, query: str, limit: int, where: dict[str, Any] | None) -> list[dict[str, Any]]:
+    async def keyword_search(
+        self, query: str, limit: int, where: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
         """按关键词检索记忆记录。"""
         ...
 
@@ -60,7 +65,9 @@ class MemoryRepository(Protocol):
         """软删除指定记忆。"""
         ...
 
-    async def set_pin(self, memory_id: str, pinned: bool, expires_at: str | None) -> tuple[bool, str | None] | None:
+    async def set_pin(
+        self, memory_id: str, pinned: bool, expires_at: str | None
+    ) -> tuple[bool, str | None] | None:
         """更新固定状态并返回旧状态；记录不存在时返回 ``None``。"""
         ...
 
@@ -88,7 +95,9 @@ class MemoryVectorStore(Protocol):
         """添加带元数据的向量记录。"""
         ...
 
-    async def query(self, query: str, limit: int, where: dict[str, Any] | None) -> dict[str, Any]:
+    async def query(
+        self, query: str, limit: int, where: dict[str, Any] | None
+    ) -> dict[str, Any]:
         """执行向量相似度检索。"""
         ...
 
@@ -96,10 +105,28 @@ class MemoryVectorStore(Protocol):
         """按 ID 获取向量记录。"""
         ...
 
-    async def update(self, memory_id: str, content: str | None = None, metadata: dict[str, Any] | None = None) -> None:
+    async def update(
+        self,
+        memory_id: str,
+        content: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """更新向量记录的内容或元数据。"""
         ...
 
     async def delete(self, memory_ids: list[str]) -> None:
         """删除指定向量记录。"""
+        ...
+
+
+class MemoryReranker(Protocol):
+    """独立记忆候选重排阶段。"""
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: Sequence[MemoryRetrievalResult],
+        limit: int,
+    ) -> list["MemoryRetrievalResult"]:
+        """按查询相关性重排候选，并返回至多 limit 条结果。"""
         ...

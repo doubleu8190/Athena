@@ -2,10 +2,10 @@
 
 ``FileIntelligenceRuntime`` 是文件智能系统的中枢，协调以下能力：
 
-- **解析**：通过适配器提取文件内容、符号和表格，分块存储到 SQLite。
+- **解析**：通过适配器提取文件内容、符号和表格，分块存储到 PostgreSQL。
 - **索引**：将分块写入 ChromaDB 向量索引，支持语义搜索。
 - **读取**：按定位器（页码、工作表、路径）精准读取文件分块。
-- **搜索**：融合 FTS5 关键词搜索和向量语义搜索的混合检索。
+- **搜索**：融合 PostgreSQL FTS 关键词搜索和向量语义搜索的混合检索。
 - **摘要**：多级 LLM 摘要（分块 → 章节 → 文档），支持缓存。
 - **分析**：适配器级分析 + 视觉模型图片描述。
 
@@ -360,7 +360,7 @@ class FileIntelligenceRuntime:
             解析和索引阶段的统计信息。
 
         异常：
-            解析、SQLite 写入或向量索引失败时向上抛出，由任务 worker 负责重试。
+            解析、PostgreSQL 写入或向量索引失败时向上抛出，由任务 worker 负责重试。
         """
         async with self._knowledge_lock(attachment_id):
             await self.initialize()
@@ -369,7 +369,7 @@ class FileIntelligenceRuntime:
                 raise FileNotFoundError("知识库文档不存在")
             metadata = await self.parse_attachment(attachment_id)
             # 删除请求可能在解析耗时阶段完成。再次读取附件能阻止后续向量
-            # 写入，并由删除路径清理本轮已经生成的 SQLite 派生数据。
+            # 写入，并由删除路径清理本轮已经生成的 PostgreSQL 派生数据。
             attachment = await self.repository.get_attachment(attachment_id)
             if attachment is None or attachment.knowledge_base_id is None:
                 raise FileNotFoundError("知识库文档已删除")
@@ -387,7 +387,7 @@ class FileIntelligenceRuntime:
     async def delete_knowledge_document(
         self, attachment_id: str, knowledge_base_id: str
     ) -> bool:
-        """删除知识库文档的向量索引和 SQLite 派生数据。
+        """删除知识库文档的向量索引和 PostgreSQL 派生数据。
 
         参数：
             attachment_id：要删除的知识库文档附件 ID。
@@ -397,7 +397,7 @@ class FileIntelligenceRuntime:
             成功删除时返回 ``True``；文档不存在或不属于该知识库时返回 ``False``。
 
         异常：
-            Chroma 删除失败时不会继续删除 SQLite 数据，避免留下无法重建的状态。
+            Chroma 删除失败时不会继续删除 PostgreSQL 数据，避免留下无法重建的状态。
         """
         async with self._knowledge_lock(attachment_id):
             attachment = await self.repository.get_attachment(attachment_id)
@@ -410,7 +410,7 @@ class FileIntelligenceRuntime:
                     attachment_id, knowledge_base_id
                 )
             except Exception:
-                # Chroma 先于 SQLite 清理；SQLite 失败时以仍在库中的分块重建向量。
+                # Chroma 先于 PostgreSQL 清理；PostgreSQL 失败时以仍在库中的分块重建向量。
                 try:
                     current = await self.repository.get_attachment(
                         attachment_id, include_deleted=True
@@ -686,7 +686,7 @@ class FileIntelligenceRuntime:
         agent_run_id: str | None = None,
         message_id: str | None = None,
     ) -> dict[str, Any]:
-        """混合搜索文件内容（FTS5 关键词 + ChromaDB 向量语义）。
+        """混合搜索文件内容（PostgreSQL FTS 关键词 + ChromaDB 向量语义）。
 
         使用 RRF (Reciprocal Rank Fusion) 融合两种搜索结果，
         公式：score = Σ 1/(60 + rank)。
@@ -860,7 +860,7 @@ class FileIntelligenceRuntime:
             带文档 ID、定位器和融合分数的分块结果。
 
         异常：
-            SQLite 读取失败时向上抛出；向量检索失败时降级为关键词结果。
+            PostgreSQL 读取失败时向上抛出；向量检索失败时降级为关键词结果。
         """
         limit = min(max(limit, 1), 50)
         if knowledge_base_ids is not None:

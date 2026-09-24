@@ -19,7 +19,7 @@ from athena.core.tools.spec import ToolSpec
 class ToolConfigRepository(Protocol):
     """工具配置持久化仓库协议。
 
-    定义工具治理参数的 CRUD 接口，由 SQLite Repository 实现。
+    定义工具治理参数的 CRUD 接口，由 PostgreSQL Repository 实现。
     """
 
     async def get(self, tool_name: str) -> Any:

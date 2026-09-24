@@ -40,9 +40,9 @@ def test_memory_core_has_no_storage_sdk_dependencies():
     assert not any(module.startswith(forbidden) for module in imports)
 
 
-def test_sqlite_implementation_does_not_import_file_core_repository():
-    sqlite_dir = ROOT / "athena/infrastructure/sqlite"
-    imports = set().union(*(_imports(path) for path in sqlite_dir.glob("*.py")))
+def test_postgres_implementation_does_not_import_file_core_repository():
+    postgres_dir = ROOT / "athena/infrastructure/postgre"
+    imports = set().union(*(_imports(path) for path in postgres_dir.rglob("*.py")))
     assert "athena.core.files.repository" not in imports
 
 
@@ -125,7 +125,7 @@ def test_service_locator_compatibility_hooks_are_absent():
         ROOT / "athena/core/tools/manager.py",
         ROOT / "athena/core/tools/mcp/manager.py",
         ROOT / "athena/gateway/approval.py",
-        ROOT / "athena/infrastructure/sqlite/database.py",
+        ROOT / "athena/infrastructure/postgre/database.py",
     )
     source = "\n".join(path.read_text(encoding="utf-8") for path in paths)
     forbidden = (

@@ -1,4 +1,4 @@
-"""独立知识库的 SQLite 持久化。"""
+"""独立知识库的 PostgreSQL 持久化。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _now_iso() -> str:
     """返回本地当前时间的 ISO 字符串。
 
     返回值：
-        str: 可直接写入现有 SQLite 时间字段的字符串。
+        str: 可直接写入现有 PostgreSQL 时间字段的字符串。
 
     异常：
         不主动抛出业务异常。

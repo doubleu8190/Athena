@@ -1,4 +1,4 @@
-"""SQLite 数据库门面。
+"""PostgreSQL 数据库门面。
 
 数据库 持有各 Repository 实例并提供 connect/close 生命周期管理。
 调用者通过公开属性直接访问 Repository（如 db.messages.save(msg)）。
@@ -49,7 +49,7 @@ class Database:
         self.tool_calls = ToolCallRepository()
         self.mcp_servers = MCPServerRepository()
         self.tools = ToolRepository()
-        # 编排仓库依赖 runtime.orchestration；延迟导入可避免 SQLite 门面和
+        # 编排仓库依赖 runtime.orchestration；延迟导入可避免数据库门面和
         # 编排包在模块加载阶段形成循环依赖。
         from athena.infrastructure.postgre.repositories.orchestration_repository import (
             OrchestrationRepository,

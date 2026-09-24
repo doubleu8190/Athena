@@ -1,4 +1,4 @@
-"""版本化命令、事件和流快照的 SQLite 持久化实现。"""
+"""版本化命令、事件和流快照的 PostgreSQL 持久化实现。"""
 
 from __future__ import annotations
 
@@ -663,7 +663,7 @@ class AgentStore:
         """
         async with self._event_locks[event.session_id]:
             async with get_session() as db:
-                # 进程内按会话串行，事务锁覆盖多进程/多实例下的 SQLite 竞争。
+                # 进程内按会话串行，事务锁覆盖多进程/多实例下的 PostgreSQL 竞争。
                 payload = {
                     key: value
                     for key, value in event.payload.items()

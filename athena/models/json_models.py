@@ -1,6 +1,6 @@
 """存放数据库 JSON 字段对应的业务模型。
 
-SQLite 中的 JSON 仍以文本保存；读取后统一转换为这里定义的模型。
+PostgreSQL 中的 JSON 仍以文本保存；读取后统一转换为这里定义的模型。
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""SQLite 仓库共享的时间和 JSON 工具。"""
+"""PostgreSQL 仓库共享的时间和 JSON 工具。"""
 
 from __future__ import annotations
 

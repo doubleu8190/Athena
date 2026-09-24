@@ -31,6 +31,8 @@ class RetrievalCandidate:
     native_score: float | None = None
     fused_rank: int | None = None
     fused_score: float | None = None
+    rerank_rank: int | None = None
+    rerank_score: float | None = None
     logical_source_id: str | None = None
     revision_id: str | None = None
     document_version_id: str | None = None

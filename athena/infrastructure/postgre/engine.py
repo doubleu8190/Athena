@@ -92,19 +92,6 @@ async def initialize_postgres_engine(
             CREATE INDEX IF NOT EXISTS idx_memory_jobs_queue
             ON memory_processing_jobs(status, available_at)
         """))
-        # 这些是由 Repository 维护的 FTS5 兼容索引表。tokenization 和 BM25
-        # 在应用层实现，以便 PostgreSQL 不受默认全文检索配置影响。
-        await conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS memory_fts (
-                memory_id VARCHAR PRIMARY KEY, content TEXT NOT NULL
-            )
-        """))
-        await conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS file_chunk_fts (
-                chunk_id VARCHAR PRIMARY KEY, attachment_id VARCHAR NOT NULL,
-                content TEXT NOT NULL
-            )
-        """))
     logger.info(
         "postgres_database_initialized", database_url=database_url.split("@")[-1]
     )

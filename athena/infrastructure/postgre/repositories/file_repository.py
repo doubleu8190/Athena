@@ -1,4 +1,4 @@
-"""文件智能的 SQLite 持久化。
+"""文件智能的 PostgreSQL 持久化。
 
 ``FileRepository`` 封装所有 File Intelligence 相关的数据库操作，
 遵循 Repository 模式：查询方法返回类型化领域模型，写入方法接受类型化模型。
@@ -24,7 +24,6 @@ from athena.infrastructure.postgre.models import (
     FileArtifactModel,
     FileChunkModel,
 )
-from athena.infrastructure.postgre.fts5_compat import FTS5Document, rank_bm25
 from athena.utils import logging
 from .repository_utils import (
     _json_dumps,
@@ -91,14 +90,6 @@ class FileRepository:
                     .scalars()
                     .all()
                 )
-                if chunk_ids:
-                    placeholders = ", ".join(f":id{i}" for i in range(len(chunk_ids)))
-                    await session.execute(
-                        text(
-                            f"DELETE FROM file_chunk_fts WHERE chunk_id IN ({placeholders})"
-                        ),
-                        {f"id{i}": value for i, value in enumerate(chunk_ids)},
-                    )
                 await session.execute(
                     update(AttachmentModel)
                     .where(AttachmentModel.id.in_(attachment_ids))
@@ -609,12 +600,6 @@ class FileRepository:
                 if not cast(CursorResult[Any], result).rowcount:
                     return False
                 await session.execute(
-                    text(
-                        "DELETE FROM file_chunk_fts WHERE attachment_id = :attachment_id"
-                    ),
-                    {"attachment_id": attachment_id},
-                )
-                await session.execute(
                     update(FileChunkModel)
                     .where(FileChunkModel.attachment_id == attachment_id)
                     .values(is_current=0)
@@ -662,7 +647,7 @@ class FileRepository:
         *,
         knowledge_base_id: str,
     ) -> bool:
-        """按知识库所有权软删除附件并清理 SQLite 派生数据。
+        """按知识库所有权软删除附件并清理 PostgreSQL 派生数据。
 
         参数：
             attachment_id (str): 文档附件唯一标识。
@@ -692,12 +677,6 @@ class FileRepository:
                 )
                 if not cast(CursorResult[Any], result).rowcount:
                     return False
-                await session.execute(
-                    text(
-                        "DELETE FROM file_chunk_fts WHERE attachment_id = :attachment_id"
-                    ),
-                    {"attachment_id": attachment_id},
-                )
                 await session.execute(
                     update(FileChunkModel)
                     .where(FileChunkModel.attachment_id == attachment_id)
@@ -807,17 +786,6 @@ class FileRepository:
                     .scalars()
                     .all()
                 )
-                if existing_ids:
-                    # FTS5 没有 SQLAlchemy 表模型；为每个 ID 安全绑定参数。
-                    placeholders = ", ".join(
-                        f":id{i}" for i in range(len(existing_ids))
-                    )
-                    await session.execute(
-                        text(
-                            f"DELETE FROM file_chunk_fts WHERE chunk_id IN ({placeholders})"
-                        ),
-                        {f"id{i}": value for i, value in enumerate(existing_ids)},
-                    )
                 version_id = generate_time_id()
                 attachment = await session.get(AttachmentModel, attachment_id)
                 if attachment is None:
@@ -846,16 +814,6 @@ class FileRepository:
                             locator_json=_json_dumps(chunk.locator),
                             metadata_json=_json_dumps(chunk.metadata),
                         )
-                    )
-                    await session.execute(
-                        text(
-                            "INSERT INTO file_chunk_fts(content, chunk_id, attachment_id) VALUES (:content, :chunk_id, :attachment_id)"
-                        ),
-                        {
-                            "content": content,
-                            "chunk_id": chunk.id,
-                            "attachment_id": attachment_id,
-                        },
                     )
         return version_id
 
@@ -934,49 +892,24 @@ class FileRepository:
         if not query.strip():
             return []
         async with get_session() as session:
-            fts_rows = (
-                await session.execute(
-                    text(
-                        "SELECT chunk_id, content FROM file_chunk_fts "
-                        "WHERE attachment_id = :attachment_id"
+            rows = (await session.execute(
+                select(
+                    FileChunkModel,
+                    func.ts_rank_cd(
+                        FileChunkModel.content_fts,
+                        func.websearch_to_tsquery("chinese", query),
+                    ).label("fts_score"),
+                )
+                .where(
+                    FileChunkModel.attachment_id == attachment_id,
+                    FileChunkModel.is_current == 1,
+                    FileChunkModel.content_fts.op("@@")(
+                        func.websearch_to_tsquery("chinese", query)
                     ),
-                    {"attachment_id": attachment_id},
                 )
-            ).fetchall()
-            corpus_rows = (
-                await session.execute(
-                    text("SELECT chunk_id, content FROM file_chunk_fts")
-                )
-            ).fetchall()
-            scores = rank_bm25(
-                [FTS5Document(str(row.chunk_id), row.content) for row in corpus_rows],
-                query,
-                include_prefix=False,
-            )
-            ranked_ids = [
-                row.chunk_id
-                for row in sorted(
-                    fts_rows,
-                    key=lambda row: scores.get(str(row.chunk_id), float("inf")),
-                )
-                if str(row.chunk_id) in scores
-            ][:limit]
-            if not ranked_ids:
-                return []
-            rows_by_id = {
-                row.id: row
-                for row in (
-                    await session.execute(
-                        select(FileChunkModel).where(
-                            FileChunkModel.id.in_(ranked_ids),
-                            FileChunkModel.is_current == 1,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            }
-            rows = [rows_by_id[item] for item in ranked_ids if item in rows_by_id]
+                .order_by(text("fts_score DESC"))
+                .limit(limit)
+            )).all()
             return [
                 FileChunk(
                     id=r.id,
@@ -991,9 +924,9 @@ class FileRepository:
                     metadata=_json_loads_model(
                         r.metadata_json, FileMetadata, FileMetadata()
                     ),
-                    native_score=scores.get(r.id),
+                    native_score=float(fts_score),
                 )
-                for r in rows
+                for r, fts_score in rows
             ]
 
     async def search_knowledge_chunks(
@@ -1002,14 +935,14 @@ class FileRepository:
         document_ids: set[str],
         limit: int = 10,
     ) -> list[FileChunk]:
-        """跨全部未删除知识库文档执行 FTS5 兼容分块检索。
+        """跨全部未删除知识库文档执行 PostgreSQL 原生 FTS 检索。
 
         参数：
-            query：FTS5 查询文本。
+            query：全文检索查询文本。
             limit：最大结果数。
 
         返回：
-            按 BM25 相关度排序的文件分块。
+            按 PostgreSQL FTS 相关度排序的文件分块。
 
         异常：
             数据库读取失败时向上抛出异常；无有效 FTS token 时返回空列表。
@@ -1017,34 +950,28 @@ class FileRepository:
         if not query.strip():
             return []
         async with get_session() as session:
-            newer = aliased(AttachmentModel)
-            rows = (
-                await session.execute(
-                    select(FileChunkModel, AttachmentModel)
-                    .join(
-                        AttachmentModel,
-                        AttachmentModel.id == FileChunkModel.attachment_id,
-                    )
-                    .where(
-                        AttachmentModel.id.in_(document_ids),
-                    )
+            rows = (await session.execute(
+                select(
+                    FileChunkModel,
+                    func.ts_rank_cd(
+                        FileChunkModel.content_fts,
+                        func.websearch_to_tsquery("chinese", query),
+                    ).label("fts_score"),
                 )
-            ).all()
-            corpus_rows = (
-                await session.execute(
-                    text(
-                        "SELECT chunk_id, content FROM file_chunk_fts where attachment_id in :attachment_ids"
-                    ).bindparams(attachment_ids=tuple(document_ids))
+                .join(
+                    AttachmentModel,
+                    AttachmentModel.id == FileChunkModel.attachment_id,
                 )
-            ).fetchall()
-        scores = rank_bm25(
-            [FTS5Document(str(row.chunk_id), row.content) for row in corpus_rows],
-            query,
-            include_prefix=False,
-        )
-        rows = [row for row in rows if row[0].id in scores]
-        rows.sort(key=lambda row: scores[row[0].id])
-        rows = rows[:limit]
+                .where(
+                    AttachmentModel.id.in_(document_ids),
+                    FileChunkModel.is_current == 1,
+                    FileChunkModel.content_fts.op("@@")(
+                        func.websearch_to_tsquery("chinese", query)
+                    ),
+                )
+                .order_by(text("fts_score DESC"))
+                .limit(limit)
+            )).all()
         return [
             FileChunk(
                 id=chunk.id,
@@ -1059,9 +986,9 @@ class FileRepository:
                 metadata=_json_loads_model(
                     chunk.metadata_json, FileMetadata, FileMetadata()
                 ),
-                native_score=scores[chunk.id],
+                native_score=float(fts_score),
             )
-            for chunk, _attachment in rows
+            for chunk, fts_score in rows
         ]
 
     async def get_artifact(self, cache_key: str) -> FileArtifact | None:

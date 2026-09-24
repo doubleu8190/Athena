@@ -1,4 +1,4 @@
-"""SQLite ORM 行到领域模型的转换。"""
+"""PostgreSQL ORM 行到领域模型的转换。"""
 
 from __future__ import annotations
 

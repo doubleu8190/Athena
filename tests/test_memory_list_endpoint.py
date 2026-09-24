@@ -12,7 +12,7 @@ from athena.config.settings import Settings
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.postgre.database import Database
 from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
-from athena.infrastructure.postgre.repositories.memory_repository import SQLiteMemoryRepository
+from athena.infrastructure.postgre.repositories.memory_repository import PostgresMemoryRepository
 from tests.fakes import install_runtime
 
 
@@ -76,11 +76,11 @@ async def db(db_path):
 
 @pytest.fixture
 def manager(db):
-    """为端点测试显式注入 SQLite 和 Chroma 存储端口."""
+    """为端点测试显式注入 PostgreSQL 和 Chroma 存储端口."""
     settings = Settings(_env_file=None)
     return LongTermMemoryService(
         settings=settings,
-        repository=SQLiteMemoryRepository(),
+        repository=PostgresMemoryRepository(),
         vector_store=ChromaMemoryVectorStore.with_client(
             path=str(settings.chroma_path),
             client=_FakeClient(),

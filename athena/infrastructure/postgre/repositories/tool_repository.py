@@ -1,4 +1,4 @@
-"""工具治理配置 SQLite 仓库。"""
+"""工具治理配置 PostgreSQL 仓库。"""
 
 from __future__ import annotations
 

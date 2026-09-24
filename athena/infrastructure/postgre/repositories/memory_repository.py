@@ -1,4 +1,4 @@
-"""长期记忆记录的 SQLite/FTS5 仓库。"""
+"""长期记忆记录的 PostgreSQL 仓库。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from athena.infrastructure.postgre.engine import (
     get_session,
 )
 from athena.infrastructure.postgre.models import MemoryModel
-from athena.infrastructure.postgre.fts5_compat import FTS5Document, rank_bm25
 from .repository_utils import _json_dumps, _json_loads
 
 _SEMANTIC_KEYS = frozenset({"session_id", "type", "category", "confidence", "source"})
@@ -105,8 +104,8 @@ def _metadata(row: Any) -> dict[str, Any]:
     return metadata
 
 
-class SQLiteMemoryRepository:
-    """SQLite 长期记忆生命周期与 FTS5 关键词检索仓库。"""
+class PostgresMemoryRepository:
+    """PostgreSQL 长期记忆生命周期与原生 FTS 关键词检索仓库。"""
 
     async def add(self, record: dict[str, Any]) -> None:
         """添加数据。
@@ -155,12 +154,6 @@ class SQLiteMemoryRepository:
                         revision_of=metadata.get("revision_of"),
                         revision=int(metadata.get("revision", 1)),
                     )
-                )
-                await session.execute(
-                    text(
-                        "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :id)"
-                    ),
-                    {"content": record["content"], "id": record["id"]},
                 )
 
     async def flush_access_stats(self, stats: dict[str, Any]) -> list[dict[str, Any]]:
@@ -243,41 +236,32 @@ class SQLiteMemoryRepository:
                    m.source_kind, m.status, m.superseded_at, m.last_observed_at,
                    m.source_turn_id,
                    m.validity_status, m.valid_until, m.revision_of,
-                   m.revision, m.logical_memory_id
-            FROM memories m JOIN memory_fts f ON f.memory_id = m.id
+                   m.revision, m.logical_memory_id,
+                   ts_rank_cd(m.content_fts, websearch_to_tsquery('chinese', :query)) AS fts_score
+            FROM memories m
             WHERE m.deleted_time IS NULL AND m.status = 'active'
               AND m.validity_status != 'invalid'
               AND (m.valid_until IS NULL OR m.valid_until >= :now)
+              AND m.content_fts @@ websearch_to_tsquery('chinese', :query)
         """
-        params: dict[str, Any] = {"now": datetime.now().isoformat()}
+        params: dict[str, Any] = {"now": datetime.now().isoformat(), "query": query}
         for key, value in (where or {}).items():
             if key not in _FILTER_COLUMNS:
                 raise ValueError(f"Unsupported memory filter: {key}")
             sql += f" AND m.{_FILTER_COLUMN_MAP.get(key, key)} = :where_{key}"
             params[f"where_{key}"] = value
-        sql += " ORDER BY m.created_at DESC"
+        sql += " ORDER BY fts_score DESC, m.created_at DESC LIMIT :limit"
+        params["limit"] = limit
         async with get_session() as session:
             rows = (await session.execute(text(sql), params)).fetchall()
-            corpus_rows = (
-                await session.execute(text("SELECT memory_id, content FROM memory_fts"))
-            ).fetchall()
-        scores = rank_bm25(
-            [FTS5Document(str(row.memory_id), row.content) for row in corpus_rows],
-            query,
-        )
-        ranked_rows = sorted(
-            (row for row in rows if row.id in scores),
-            key=lambda row: scores[row.id],
-        )[:limit]
         results: list[dict[str, Any]] = []
-        for row in ranked_rows:
-            rank = scores[row.id]
+        for row in rows:
             results.append(
                 {
                     "id": row.id,
                     "content": row.content,
                     "metadata": _metadata(row),
-                    "score": abs(rank) / (1.0 + abs(rank)),
+                    "score": float(row.fts_score),
                 }
             )
         return results
@@ -377,7 +361,7 @@ class SQLiteMemoryRepository:
             活跃记录存在时返回内容、固定状态和元数据；否则返回 None。
 
         异常：
-            SQLite 查询失败时向上抛出异常。
+            PostgreSQL 查询失败时向上抛出异常。
         """
         async with get_session() as session:
             row = (
@@ -409,7 +393,7 @@ class SQLiteMemoryRepository:
             按 revision 序号升序排列的不可变记忆版本。
 
         异常：
-            SQLite 查询失败时向上抛出异常。
+            PostgreSQL 查询失败时向上抛出异常。
         """
         async with get_session() as session:
             target = await session.get(MemoryModel, memory_id)
@@ -484,9 +468,6 @@ class SQLiteMemoryRepository:
                     ),
                     {"source": new_id, "target": old_id, "created": now},
                 )
-                await session.execute(
-                    text("DELETE FROM memory_fts WHERE memory_id = :id"), {"id": old_id}
-                )
                 return True
 
     async def restore_active(self, memory_id: str) -> None:
@@ -499,7 +480,7 @@ class SQLiteMemoryRepository:
             None。
 
         异常：
-            SQLite 更新失败时向上抛出异常。
+            PostgreSQL 更新失败时向上抛出异常。
         """
         async with get_session() as session:
             async with session.begin():
@@ -515,16 +496,6 @@ class SQLiteMemoryRepository:
                              AND relation_type = 'supersedes'"""
                     ),
                     {"id": memory_id},
-                )
-                await session.execute(
-                    text("DELETE FROM memory_fts WHERE memory_id = :id"),
-                    {"id": memory_id},
-                )
-                await session.execute(
-                    text(
-                        "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :id)"
-                    ),
-                    {"content": row.content, "id": memory_id},
                 )
 
     async def set_validity(
@@ -546,7 +517,7 @@ class SQLiteMemoryRepository:
             更新前的有效性字段；记录不存在时返回 None。
 
         异常：
-            SQLite 事务失败时向上抛出异常。
+            PostgreSQL 事务失败时向上抛出异常。
         """
         async with get_session() as session:
             async with session.begin():
@@ -569,22 +540,6 @@ class SQLiteMemoryRepository:
                 row.validity_status = validity_status
                 row.valid_until = valid_until
                 row.last_observed_at = last_observed_at
-                if validity_status == "invalid":
-                    await session.execute(
-                        text("DELETE FROM memory_fts WHERE memory_id = :id"),
-                        {"id": memory_id},
-                    )
-                else:
-                    await session.execute(
-                        text("DELETE FROM memory_fts WHERE memory_id = :id"),
-                        {"id": memory_id},
-                    )
-                    await session.execute(
-                        text(
-                            "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :id)"
-                        ),
-                        {"content": row.content, "id": memory_id},
-                    )
                 return previous
 
     async def add_relation(
@@ -628,10 +583,6 @@ class SQLiteMemoryRepository:
                     .where(MemoryModel.id.in_(memory_ids))
                     .values(deleted_time=datetime.now().isoformat())
                 )
-                statement = text(
-                    "DELETE FROM memory_fts WHERE memory_id IN :ids"
-                ).bindparams(bindparam("ids", expanding=True))
-                await session.execute(statement, {"ids": memory_ids})
 
     async def set_pin(
         self, memory_id: str, pinned: bool, expires_at: str | None
@@ -708,10 +659,6 @@ class SQLiteMemoryRepository:
                     ),
                     {"id": memory_id},
                 )
-                await session.execute(
-                    text("DELETE FROM memory_fts WHERE memory_id = :id"),
-                    {"id": memory_id},
-                )
 
     async def restore_deleted(self, memory_ids: list[str]) -> None:
         """
@@ -732,13 +679,3 @@ class SQLiteMemoryRepository:
                     if row is None:
                         continue
                     row.deleted_time = None
-                    await session.execute(
-                        text("DELETE FROM memory_fts WHERE memory_id = :id"),
-                        {"id": memory_id},
-                    )
-                    await session.execute(
-                        text(
-                            "INSERT INTO memory_fts (content, memory_id) VALUES (:content, :id)"
-                        ),
-                        {"content": row.content, "id": memory_id},
-                    )

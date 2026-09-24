@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from athena.core.tools.mcp.manager import MCPManager
     from athena.gateway.approval import ApprovalManager
     from athena.infrastructure.postgre.database import Database
+    from athena.core.retrieval.ports import RetrievalTraceReader
 
 
 @dataclass
@@ -32,6 +33,7 @@ class RuntimeContainer:
     """应用运行期间共享的显式依赖集合。"""
 
     db: Database
+    retrieval_trace_reader: RetrievalTraceReader
     event_publisher: RuntimeEventPublisher
     approval_manager: ApprovalManager
     tool_manager: UnifiedToolManager

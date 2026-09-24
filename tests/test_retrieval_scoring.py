@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from athena.config.settings import Settings
-from athena.core.memory.contracts import MemoryRetrievalRequest
+from athena.core.memory.contracts import MemoryRetrievalMode, MemoryRetrievalRequest
 from athena.core.memory.retrieval import (
     HybridMemoryRetriever,
     MemoryRetrievalResult,
@@ -18,6 +18,7 @@ class _Memory:
         self.vector_by_query = vector_by_query
         self.keyword = keyword or []
         self.vector_queries: list[str] = []
+        self.keyword_queries: list[str] = []
         self.selected: list[str] = []
 
     async def search(self, query: str, n_results: int = 5, where: dict[str, Any] | None = None, record_access: bool = False) -> list[dict[str, Any]]:
@@ -26,6 +27,7 @@ class _Memory:
         return self.vector_by_query.get(query, [])[:n_results]
 
     async def keyword_search(self, query: str, n_results: int = 10, where: dict[str, Any] | None = None, record_access: bool = False) -> list[dict[str, Any]]:
+        self.keyword_queries.append(query)
         assert record_access is False
         return self.keyword[:n_results]
 
@@ -114,7 +116,7 @@ async def test_memory_context_skips_over_budget_result_and_keeps_later_short_res
         def __init__(self) -> None:
             self.selected: list[str] = []
 
-        async def retrieve(self, query: str):
+        async def retrieve(self, query: str, **kwargs):
             return [
                 MemoryRetrievalResult(memory_id="long", content="123456"),
                 MemoryRetrievalResult(memory_id="short", content="ok"),
@@ -132,3 +134,78 @@ async def test_memory_context_skips_over_budget_result_and_keeps_later_short_res
     assert [result.memory_id for result in context] == ["short"]
     assert [result.content for result in context] == ["ok"]
     assert manager.selected == ["short"]
+
+
+@pytest.mark.asyncio
+async def test_keyword_only_does_not_call_semantic_provider():
+    memory = _Memory(
+        {"Rust": [{"id": "semantic", "content": "vector hit", "score": 0.9}]},
+        keyword=[{"id": "keyword", "content": "Rust", "score": 0.8}],
+    )
+    manager = HybridMemoryRetriever(memory, _settings())
+
+    results = await manager.retrieve("Rust", mode=MemoryRetrievalMode.KEYWORD_ONLY)
+
+    assert [item.memory_id for item in results] == ["keyword"]
+    assert memory.keyword_queries == ["Rust"]
+    assert memory.vector_queries == []
+    assert results[0].fused_score is None
+    assert results[0].rerank_rank == 1
+
+
+@pytest.mark.asyncio
+async def test_semantic_only_does_not_call_keyword_provider():
+    memory = _Memory(
+        {"Rust": [{"id": "semantic", "content": "vector hit", "score": 0.9}]},
+        keyword=[{"id": "keyword", "content": "Rust", "score": 0.8}],
+    )
+    manager = HybridMemoryRetriever(memory, _settings())
+
+    results = await manager.retrieve("Rust", mode=MemoryRetrievalMode.SEMANTIC_ONLY)
+
+    assert [item.memory_id for item in results] == ["semantic"]
+    assert memory.vector_queries == ["Rust"]
+    assert memory.keyword_queries == []
+    assert results[0].fused_score is None
+
+
+@pytest.mark.asyncio
+async def test_reranker_order_and_score_are_independent_from_fusion():
+    class ReverseReranker:
+        async def rerank(self, query, candidates, limit):
+            for item in candidates:
+                item.rerank_score = 1.0 if item.memory_id == "second" else 0.1
+            return sorted(
+                candidates, key=lambda item: item.rerank_score, reverse=True
+            )[:limit]
+
+    memory = _Memory(
+        {
+            "q": [
+                {"id": "first", "content": "first", "score": 0.95},
+                {"id": "second", "content": "second", "score": 0.9},
+            ]
+        }
+    )
+    manager = HybridMemoryRetriever(memory, _settings(), reranker=ReverseReranker())
+
+    results = await manager.retrieve("q", mode=MemoryRetrievalMode.SEMANTIC_ONLY)
+
+    assert [item.memory_id for item in results] == ["second", "first"]
+    assert [item.rerank_rank for item in results] == [1, 2]
+    assert results[0].rerank_score == 1.0
+
+
+@pytest.mark.asyncio
+async def test_hybrid_provider_failure_is_not_reported_as_empty_success():
+    class FailingKeywordMemory(_Memory):
+        async def keyword_search(self, **kwargs):
+            raise RuntimeError("keyword provider unavailable")
+
+    memory = FailingKeywordMemory(
+        {"q": [{"id": "semantic", "content": "vector hit", "score": 0.9}]}
+    )
+    manager = HybridMemoryRetriever(memory, _settings())
+
+    with pytest.raises(RuntimeError, match="keyword provider unavailable"):
+        await manager.retrieve("q", mode=MemoryRetrievalMode.HYBRID)

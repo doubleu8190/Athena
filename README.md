@@ -185,7 +185,7 @@ SANDBOX_ENABLED=false
 ```
 
 所有业务表和 LangGraph checkpoint 现在统一创建在一个 PostgreSQL 数据库中。
-首次切换时无需迁移旧 SQLite 文件；确保 PostgreSQL 服务已启动并重新启动应用，
+首次切换时无需迁移旧数据库文件；确保 PostgreSQL 服务已启动并重新启动应用，
 应用会自动创建完整 schema。
 
 `LLM_PROVIDERS` 是 JSON 数组，列表顺序决定 Provider 优先级。当前代码支持 `openai`、`anthropic`、`deepseek` 和 `ollama`；`ollama` 可以不填写 API Key，并可通过 `base_url` 指定地址。

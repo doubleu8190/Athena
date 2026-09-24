@@ -1,7 +1,7 @@
 """记忆管理测试 — 访问追踪、滑动 TTL、记忆度加权.
 
 用 FakeChromaClient 替代真实 ChromaDB（真实默认 embedding 需下载 ONNX 模型，
-网络不稳定且现有测试从不触碰 Chroma）；SQLite 走真实 initialize_sqlite_engines + FTS5。
+网络不稳定且现有测试从不触碰 Chroma）；PostgreSQL 走真实 initialize_postgres_engine + PostgreSQL FTS。
 """
 
 from __future__ import annotations
@@ -15,10 +15,10 @@ from sqlalchemy import select, update
 from athena.config.settings import Settings
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalResult
-from athena.infrastructure.postgre.engine import close_sqlite_engines, get_core_session, initialize_sqlite_engines
+from athena.infrastructure.postgre.engine import close_postgres_engine, get_session, initialize_postgres_engine
 from athena.infrastructure.postgre.models import MemoryModel
 from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
-from athena.infrastructure.postgre.repositories.memory_repository import SQLiteMemoryRepository
+from athena.infrastructure.postgre.repositories.memory_repository import PostgresMemoryRepository
 
 
 # ---------------------------------------------------------------------------
@@ -149,19 +149,19 @@ def vector_store(tmp_path):
 
 @pytest.fixture
 async def mm(tmp_path, vector_store):
-    await initialize_sqlite_engines(str(tmp_path / "test.db"))
+    await initialize_postgres_engine(str(tmp_path / "test.db"))
     manager = LongTermMemoryService(
         settings=_make_settings(),
-        repository=SQLiteMemoryRepository(),
+        repository=PostgresMemoryRepository(),
         vector_store=vector_store,
     )
     await manager.initialize()
     yield manager
-    await close_sqlite_engines()
+    await close_postgres_engine()
 
 
 async def _get_row(memory_id: str) -> MemoryModel | None:
-    async with get_core_session() as session:
+    async with get_session() as session:
         result = await session.execute(
             select(MemoryModel).where(MemoryModel.id == memory_id)
         )
@@ -185,7 +185,7 @@ async def test_only_selected_context_records_access(mm: LongTermMemoryService):
 
 
 @pytest.mark.asyncio
-async def test_flush_updates_sqlite_and_chroma(
+async def test_flush_updates_postgresql_and_chroma(
     mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
 ):
     mid = await mm.add_memory(
@@ -223,7 +223,7 @@ async def test_flush_pinned_keeps_expires_at(
     row = await _get_row(mid)
     assert row is not None
     assert row.pinned == 1
-    assert row.expires_at is None  # SQLite 保持 NULL
+    assert row.expires_at is None  # PostgreSQL 保持 NULL
     assert row.access_count == 1
 
     meta = vector_store.collection._items[mid]["metadata"]
@@ -252,7 +252,7 @@ async def test_flush_empty_stats_noop(mm: LongTermMemoryService):
 
 
 @pytest.mark.asyncio
-async def test_clear_all_removes_sqlite_and_vector_records(
+async def test_clear_all_removes_postgresql_and_vector_records(
     mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
 ):
     await mm.add_memory(content="第一条记忆", metadata={"session_id": "s1"})
@@ -260,7 +260,7 @@ async def test_clear_all_removes_sqlite_and_vector_records(
 
     result = await mm.clear_all()
 
-    assert result == {"sqlite": 2, "chroma": 2}
+    assert result == {"postgresql": 2, "chroma": 2}
     assert vector_store.collection._items == {}
     assert await mm.list_memories() == []
 
@@ -274,7 +274,7 @@ async def test_access_does_not_refresh_fact_validity(mm: LongTermMemoryService):
     mid = await mm.add_memory(content="过期测试记忆", metadata={"session_id": "s1"})
     # 强制到期（模拟创建久远、TTL 已过）
     past = (datetime.now() - timedelta(days=1)).isoformat()
-    async with get_core_session() as session:
+    async with get_session() as session:
         async with session.begin():
             await session.execute(
                 update(MemoryModel)
@@ -361,7 +361,7 @@ async def test_cleanup_expired_respects_expires_at(
     expired_mid = await mm.add_memory(content="过期记忆", metadata={"session_id": "s1"})
     keep_mid = await mm.add_memory(content="保留记忆", metadata={"session_id": "s1"})
     past = (datetime.now() - timedelta(days=1)).isoformat()
-    async with get_core_session() as session:
+    async with get_session() as session:
         async with session.begin():
             await session.execute(
                 update(MemoryModel)
@@ -422,8 +422,8 @@ async def test_keyword_mixed_run_prefix_recall(mm: LongTermMemoryService):
 
 @pytest.mark.asyncio
 async def test_keyword_search_orders_by_relevance_not_insertion(mm: LongTermMemoryService):
-    # 回归：FTS5 无 ORDER BY 时按 rowid/插入序返回（弱命中可能排强命中前），
-    # keyword_search 必须显式 ORDER BY rank(bm25)。先插入"仅前缀命中"（弱）、
+    # 回归：PostgreSQL FTS 无 ORDER BY 时按 rowid/插入序返回（弱命中可能排强命中前），
+    # keyword_search 必须显式 ORDER BY rank(ts_rank_cd)。先插入"仅前缀命中"（弱）、
     # 后插入"精确命中"（强），断言强命中排前且 score 更高（与向量路径语义一致）。
     await mm.add_memory(content="北京烤鸭好吃", metadata={"session_id": "s1"})
     await mm.add_memory(content="北京 天气", metadata={"session_id": "s1"})

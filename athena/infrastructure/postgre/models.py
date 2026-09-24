@@ -1,9 +1,9 @@
-"""SQLite SQLAlchemy ORM 模型。
+"""PostgreSQL SQLAlchemy ORM 模型。
 
 所有模型采用软删除策略，包含 deleted_time 字段。
 不使用 relationship()，级联操作在 Repository 层手动处理。
 
-名称以 ``_json`` 结尾的字段在数据库中仍保存为文本，这样可以兼容已有的 SQLite 数据库。
+名称以 ``_json`` 结尾的字段在数据库中保存为文本，读取后转换为领域模型。
 Repository 读取后，会把文本转换成 ``athena.models.json_models`` 中对应的业务模型。
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 from sqlalchemy import (
     Column,
     CheckConstraint,
+    Computed,
     Float,
     ForeignKey,
     Index,
@@ -24,6 +25,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, column_property, mapped_column
+from sqlalchemy.dialects.postgresql import TSVECTOR
 
 
 class Base(DeclarativeBase):
@@ -429,10 +431,13 @@ class ToolCallModel(Base):
 
 
 class MemoryModel(Base):
-    """记忆表模型，与 ChromaDB 双写并由 memory_fts 提供关键词索引。"""
+    """记忆表模型，与 ChromaDB 双写并由 PostgreSQL 原生 FTS 索引。"""
 
     __tablename__ = "memories"
-    __table_args__ = (Index("idx_memories_session", "session_id"),)
+    __table_args__ = (
+        Index("idx_memories_session", "session_id"),
+        Index("idx_memories_content_fts", "content_fts", postgresql_using="gin"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, comment="记忆唯一标识")
     logical_memory_id: Mapped[str] = mapped_column(
@@ -440,6 +445,10 @@ class MemoryModel(Base):
     )
     session_id: Mapped[str] = mapped_column(String, comment="所属会话标识")
     content: Mapped[str] = mapped_column(Text, comment="记忆内容")
+    content_fts: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('chinese'::regconfig, content)", persisted=True),
+    )
     # 仅存任意用户扩展字段（系统/语义字段一律拆为独立列，避免双源真相）
     metadata_json: Mapped[str] = mapped_column(
         Text, default="{}", comment="用户自定义的额外信息（JSON 格式）"
@@ -676,6 +685,7 @@ class FileChunkModel(Base):
         ),
         Index("idx_file_chunks_attachment", "attachment_id"),
         Index("idx_file_chunks_version", "document_version_id"),
+        Index("idx_file_chunks_content_fts", "content_fts", postgresql_using="gin"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -692,6 +702,10 @@ class FileChunkModel(Base):
     )
     ordinal: Mapped[int] = mapped_column(Integer, comment="分块在附件中的顺序号")
     content: Mapped[str] = mapped_column(Text, comment="分块文本内容")
+    content_fts: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('chinese'::regconfig, content)", persisted=True),
+    )
     token_count: Mapped[int] = mapped_column(
         Integer, default=0, comment="分块估算 Token 数"
     )
@@ -880,6 +894,8 @@ class RetrievalCandidateModel(Base):
     native_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     fused_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fused_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rerank_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rerank_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     filter_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     selected_for_result: Mapped[int] = mapped_column(Integer, default=0)
     injected_into_context: Mapped[int] = mapped_column(Integer, default=0)

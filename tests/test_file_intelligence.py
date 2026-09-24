@@ -105,7 +105,7 @@ async def test_parse_search_message_binding_and_session_isolation(tmp_path):
         await db.sessions.create("two")
         settings = Settings(
             _env_file=None,
-            sqlite_db_path=str(tmp_path / "files.db"),
+            database_url=str(tmp_path / "files.db"),
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
@@ -210,7 +210,7 @@ async def test_process_attachment_index_failure_marks_attachment_failed(tmp_path
         await db.sessions.create("session")
         settings = Settings(
             _env_file=None,
-            sqlite_db_path=str(tmp_path / "index-failure.db"),
+            database_url=str(tmp_path / "index-failure.db"),
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
@@ -300,7 +300,7 @@ async def test_parse_csv_preserves_suffix_for_table_artifact(tmp_path):
         await db.sessions.create("session")
         settings = Settings(
             _env_file=None,
-            sqlite_db_path=str(tmp_path / "csv-artifacts.db"),
+            database_url=str(tmp_path / "csv-artifacts.db"),
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
@@ -406,7 +406,7 @@ async def test_read_failed_attachment_is_not_reported_as_waiting(tmp_path):
         await db.sessions.create("session")
         settings = Settings(
             _env_file=None,
-            sqlite_db_path=str(tmp_path / "failed.db"),
+            database_url=str(tmp_path / "failed.db"),
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
@@ -439,7 +439,7 @@ async def test_empty_ocr_image_summary_does_not_fail_attachment(tmp_path):
         await db.sessions.create("session")
         settings = Settings(
             _env_file=None,
-            sqlite_db_path=str(tmp_path / "image-summary.db"),
+            database_url=str(tmp_path / "image-summary.db"),
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
@@ -510,7 +510,7 @@ async def test_image_analysis_uses_ocr_fallback_without_vision(tmp_path, monkeyp
         await db.sessions.create("session")
         settings = Settings(
             _env_file=None,
-            sqlite_db_path=str(tmp_path / "image-analysis.db"),
+            database_url=str(tmp_path / "image-analysis.db"),
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )
@@ -591,7 +591,7 @@ async def test_file_capability_governance_is_applied_to_runtime_manager(tmp_path
     try:
         settings = Settings(
             _env_file=None,
-            sqlite_db_path=str(tmp_path / "tools.db"),
+            database_url=str(tmp_path / "tools.db"),
             chromadb_path=str(tmp_path / "chroma"),
             file_storage_path=str(tmp_path / "storage"),
         )

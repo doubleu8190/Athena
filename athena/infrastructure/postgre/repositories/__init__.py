@@ -1,4 +1,4 @@
-"""SQLite 仓库公共导出。"""
+"""PostgreSQL 仓库公共导出。"""
 
 from .agent_store import AgentStore
 from .model_converters import (
@@ -16,7 +16,7 @@ from .file_repository import FileRepository
 from .knowledge_base_repository import KnowledgeBaseRepository
 from .knowledge_document_job_repository import KnowledgeDocumentJobRepository
 from .memory_job_repository import MemoryJobRepository
-from .memory_repository import SQLiteMemoryRepository
+from .memory_repository import PostgresMemoryRepository
 from .repository_utils import (
     _SENTINEL,
     _json_dumps,
@@ -35,7 +35,7 @@ __all__ = [
     "KnowledgeBaseRepository",
     "KnowledgeDocumentJobRepository",
     "MemoryJobRepository",
-    "SQLiteMemoryRepository",
+    "PostgresMemoryRepository",
     "MCPServerRepository",
     "MessageRepository",
     "SessionRepository",

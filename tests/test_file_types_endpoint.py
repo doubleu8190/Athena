@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, MagicMock
 
-from athena.core.files.registry import AdapterRegistry
+from athena.core.files.adapter_registry import AdapterRegistry
 from tests.fakes import install_runtime
 
 

@@ -11,7 +11,7 @@ from athena.runtime.command_notifications import CommandNotifier
 from athena.contracts.commands import Command, CommandType
 from athena.contracts.errors import ErrorDetail
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
-from athena.contracts.statuses import AgentRunStatus, StreamSnapshotStatus
+from athena.contracts.statuses import AgentRunStatus
 from athena.runtime.stream_coalescer import StreamCoalescer
 from athena.runtime.transport import SessionEventBus
 from athena.infrastructure.postgre.repositories.agent_store import AgentStore

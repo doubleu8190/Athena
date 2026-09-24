@@ -18,7 +18,7 @@ from athena.core.files.adapters import (
     WordAdapter,
 )
 from athena.core.files.extraction import ExtractedUnit, ExtractionContext
-from athena.core.files.registry import AdapterRegistry
+from athena.core.files.adapter_registry import AdapterRegistry
 from athena.core.files.runtime import FileAccessError, FileIntelligenceRuntime
 from athena.core.files.storage import FileTooLargeError, StorageLayer
 from athena.core.tools.catalog import ToolCatalogService, ToolRegistry

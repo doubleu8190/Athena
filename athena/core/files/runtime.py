@@ -31,7 +31,7 @@ from athena.core.retrieval import RetrievalCandidate, RetrievalRunRequest
 from athena.core.retrieval.ports import RetrievalTraceWriter
 from athena.core.files.extraction import ExtractedUnit, ExtractionContext
 from athena.core.files.attachment_serialization import attachment_to_payload
-from athena.core.files.registry import AdapterRegistry
+from athena.core.files.adapter_registry import AdapterRegistry
 from athena.infrastructure.postgre.repositories.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
 from athena.core.llm.provider import LLMProvider
@@ -117,7 +117,7 @@ class FileIntelligenceRuntime:
         self.adapter_registry = AdapterRegistry()
         self.primary_llm = primary_llm
         self.secondary_llm = secondary_llm
-        self._events = event_publisher
+        self._event_publisher = event_publisher
         self._trace_writer = trace_writer
         self._chroma_client: ClientAPI | None = None
         self._collection: Collection | None = None
@@ -1463,7 +1463,7 @@ class FileIntelligenceRuntime:
         异常:
             payload 无法序列化或事件发布失败时传播相应异常。
         """
-        await self._events.publish(
+        await self._event_publisher.publish(
             ApplicationEvent(
                 event_type=event_type,
                 durability=EventDurability.DURABLE,

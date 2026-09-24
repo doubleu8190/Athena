@@ -7,7 +7,6 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 
 from athena.contracts.events import ApplicationEvent
-from athena.contracts.statuses import StreamSnapshotStatus
 
 
 class RuntimeEventPublisher:

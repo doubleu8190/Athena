@@ -8,7 +8,6 @@ from .statuses import (
     AgentApprovalStatus,
     AgentCommandStatus,
     AgentRunStatus,
-    StreamSnapshotStatus,
 )
 
 __all__ = [
@@ -21,5 +20,4 @@ __all__ = [
     "CommandType",
     "ErrorDetail",
     "EventDurability",
-    "StreamSnapshotStatus",
 ]

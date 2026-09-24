@@ -24,12 +24,6 @@ class AgentCommandStatus(StrEnum):
     REJECTED = "rejected"
 
 
-class StreamSnapshotStatus(StrEnum):
-    STREAMING = "streaming"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
 class AgentApprovalStatus(StrEnum):
     PENDING = "pending"
     RESOLVED = "resolved"

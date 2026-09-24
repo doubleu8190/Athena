@@ -51,10 +51,6 @@ class ContextSummaryBuffer:
         # 按 session_id 隔离，避免跨会话数据污染
         self._buffers: dict[str, str] = {}
 
-    def _get_buffer_local(self, session_id: str) -> str:
-        """获取内存中的摘要缓冲区（不触发懒加载）."""
-        return self._buffers.get(session_id, "")
-
     async def _load_buffer(self, session_id: str) -> None:
         """从 session 表懒加载摘要缓冲区."""
         try:
@@ -84,7 +80,7 @@ class ContextSummaryBuffer:
     async def update_summary(
         self,
         old_turns: list[list[Message]],
-        session_id: str | None = None,
+        session_id: str,
     ) -> str:
         """增量更新摘要.
 
@@ -95,48 +91,43 @@ class ContextSummaryBuffer:
         返回值：
             更新后的完整摘要文本
         """
+        if not session_id:
+            logger.warning(
+                "update_summary_called_without_session_id",
+                old_turns_count=len(old_turns),
+            )
+            return ""
+
         if not old_turns:
-            return "" if session_id is None else await self.get_summary(session_id)
-
-        sid = session_id or "_default"
-        current_buffer = await self.get_summary(sid)
-
-        new_content = self._format_turns_for_summary(old_turns)
+            return await self.get_summary(session_id)
+        # 1. 获取当前历史摘要
+        current_buffer = await self.get_summary(session_id)
         existing_section = ""
         if current_buffer:
             existing_section = f"历史摘要：\n{current_buffer}\n\n"
-
+        # 2. 将旧轮次格式化为摘要输入
+        new_content = self._format_turns_for_summary(old_turns)
+        # 3. 调用 LLM 生成增量摘要
         prompt = SUMMARY_PROMPT.format(
             existing_summary_section=existing_section,
             new_messages=new_content,
         )
-
         try:
             response = await self._llm.ainvoke([HumanMessage(content=prompt)])
             content = extract_message_text(response).strip()
-            self._buffers[sid] = content
-        except Exception as e:
-            logger.error("incremental_summary_failed", error=str(e), session_id=sid)
-            # 失败时保留旧摘要，不更新
-            return current_buffer
-
-        # 持久化到 session metadata
-        if session_id:
-            await self._persist_buffer(session_id)
-
-        return self._buffers[sid]
-
-    async def _persist_buffer(self, session_id: str) -> None:
-        """持久化摘要缓冲区到 session 表 compression_summary 字段."""
-        try:
+            # 持久化到 session 表
             await self._db.sessions.update(
                 session_id,
-                compression_summary=self._get_buffer_local(session_id),
+                compression_summary=content,
             )
+            self._buffers[session_id] = content
+            return content
         except Exception as e:
-            logger.warning(
-                "summary_buffer_persist_failed", error=str(e), session_id=session_id
+            logger.error(
+                "incremental_summary_failed", error=str(e), session_id=session_id
             )
+            # 失败时保留旧摘要，不更新
+            return current_buffer
 
     def _format_turns_for_summary(self, turns: list[list[Message]]) -> str:
         """将轮次格式化为摘要输入."""

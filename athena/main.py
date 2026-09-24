@@ -282,7 +282,9 @@ async def lifespan(app: FastAPI):
     ).reconcile()
 
     # 初始化 PostgreSQL checkpointer，确保 LangGraph 的状态可以在中断后恢复。
-    checkpointer_context = AsyncPostgresSaver.from_conn_string(settings.postgres_conn_string)
+    checkpointer_context = AsyncPostgresSaver.from_conn_string(
+        settings.postgres_conn_string
+    )
     checkpointer = await checkpointer_context.__aenter__()
     await checkpointer.setup()
 

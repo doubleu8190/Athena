@@ -10,7 +10,6 @@ from athena.contracts.statuses import (
     AgentApprovalDecision,
     AgentCommandStatus,
     AgentRunStatus,
-    StreamSnapshotStatus,
 )
 
 

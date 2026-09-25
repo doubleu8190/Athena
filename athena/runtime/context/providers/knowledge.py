@@ -113,7 +113,7 @@ class KnowledgeContextProvider:
                         "knowledge_base_id": document.knowledge_base_id,
                         "document_id": document.id,
                         "chunk_id": result.get("id"),
-                        "document_version_id": result.get("document_version_id"),
+                        "document_version": result.get("document_version"),
                     },
                 )
             )

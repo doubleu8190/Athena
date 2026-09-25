@@ -35,21 +35,21 @@ class RetrievalTraceRepository:
         """
         run_id = generate_time_id()
         now = _now_iso()
-        row = RetrievalRunModel(
-            run_id=run_id,
-            query=request.query,
-            scope=request.scope,
-            status="running",
-            config_json=_json_dumps(request.config),
-            index_generation=request.index_generation,
-            session_id=request.session_id,
-            agent_run_id=request.agent_run_id,
-            message_id=request.message_id,
-            created_at=now,
-        )
+
         async with get_session() as session:
-            async with session.begin():
-                session.add(row)
+            row = RetrievalRunModel(
+                run_id=run_id,
+                query=request.query,
+                scope=request.scope,
+                status="running",
+                config_json=_json_dumps(request.config),
+                index_generation=request.index_generation,
+                session_id=request.session_id,
+                agent_run_id=request.agent_run_id,
+                message_id=request.message_id,
+                created_at=now,
+            )
+            session.add(row)
         return run_id
 
     async def record_candidates(
@@ -80,7 +80,6 @@ class RetrievalTraceRepository:
                 source_id=candidate.source_id,
                 logical_source_id=candidate.logical_source_id,
                 revision_id=candidate.revision_id,
-                document_version_id=candidate.document_version_id,
                 native_rank=candidate.native_rank,
                 native_score=candidate.native_score,
                 fused_rank=candidate.fused_rank,
@@ -231,7 +230,6 @@ class RetrievalTraceRepository:
                 "source_id": row.source_id,
                 "logical_source_id": row.logical_source_id,
                 "revision_id": row.revision_id,
-                "document_version_id": row.document_version_id,
                 "native_rank": row.native_rank,
                 "native_score": row.native_score,
                 "fused_rank": row.fused_rank,
@@ -311,7 +309,11 @@ class RetrievalTraceRepository:
             )
             if conditions:
                 stmt = stmt.where(*conditions)
-            rows = (await session.execute(stmt.offset(offset).limit(limit))).scalars().all()
+            rows = (
+                (await session.execute(stmt.offset(offset).limit(limit)))
+                .scalars()
+                .all()
+            )
 
         return [self._run_payload(row) for row in rows], total
 
@@ -343,7 +345,9 @@ class RetrievalTraceRepository:
             "completed_at": row.completed_at,
         }
 
-    async def ranked_source_ids(self, run_id: str, limit: int | None = None) -> list[str]:
+    async def ranked_source_ids(
+        self, run_id: str, limit: int | None = None
+    ) -> list[str]:
         """读取融合阶段的候选 ID，供离线评估或回放使用。
 
         参数：
@@ -362,9 +366,9 @@ class RetrievalTraceRepository:
             if item["stage"] == "fused" and not item["filter_reason"]
         ]
         candidates.sort(
-            key=lambda item: item["fused_rank"]
-            if item["fused_rank"] is not None
-            else 10**9
+            key=lambda item: (
+                item["fused_rank"] if item["fused_rank"] is not None else 10**9
+            )
         )
         source_ids = [item["source_id"] for item in candidates]
         return source_ids if limit is None else source_ids[:limit]

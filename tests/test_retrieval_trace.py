@@ -114,7 +114,7 @@ def test_retrieval_metrics_use_immutable_evidence_ids():
 
 
 @pytest.mark.asyncio
-async def test_file_chunk_replacement_keeps_document_version_history(tmp_path):
+async def test_file_chunk_replacement_soft_deletes_previous_chunks(tmp_path):
     db = Database(str(tmp_path / "versions.db"))
     await db.connect()
     try:
@@ -126,7 +126,7 @@ async def test_file_chunk_replacement_keeps_document_version_history(tmp_path):
             sha256="a" * 64,
             storage_key="blobs/a",
         )
-        first_version = await db.files.replace_chunks(
+        await db.files.replace_chunks(
             attachment.id,
             [
                 FileChunk(
@@ -137,7 +137,7 @@ async def test_file_chunk_replacement_keeps_document_version_history(tmp_path):
                 )
             ],
         )
-        second_version = await db.files.replace_chunks(
+        await db.files.replace_chunks(
             attachment.id,
             [
                 FileChunk(
@@ -150,13 +150,7 @@ async def test_file_chunk_replacement_keeps_document_version_history(tmp_path):
         )
 
         current = await db.files.get_chunks(attachment.id)
-        history = await db.files.get_chunk_history(attachment.id)
-        assert first_version != second_version
         assert [chunk.id for chunk in current] == ["chunk-v2"]
-        assert {chunk.document_version_id for chunk in history} == {
-            first_version,
-            second_version,
-        }
     finally:
         await db.close()
 
@@ -212,7 +206,9 @@ async def test_same_knowledge_filename_creates_a_new_logical_document_version(tm
         assert [item.id for item in current] == [second.id]
         assert second.document_version == first.document_version + 1
         assert second.logical_document_id == first.logical_document_id
-        search = await db.files.search_knowledge_chunks("guide", limit=10)
+        search = await db.files.search_knowledge_chunks(
+            "guide", {second.id}, limit=10
+        )
         assert [chunk.id for chunk in search] == ["new-guide-chunk"]
         assert search[0].native_score is not None
         assert search[0].native_score < 0

@@ -35,7 +35,6 @@ class RetrievalCandidate:
     rerank_score: float | None = None
     logical_source_id: str | None = None
     revision_id: str | None = None
-    document_version_id: str | None = None
     filter_reason: str | None = None
     selected_for_result: bool = False
     injected_into_context: bool = False

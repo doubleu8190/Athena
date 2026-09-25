@@ -9,15 +9,6 @@ from typing import Any, Protocol
 class FileVectorStore(Protocol):
     """文件分块向量索引的存储无关端口。"""
 
-    @property
-    def ready(self) -> bool:
-        """向量索引是否已初始化。"""
-        ...
-
-    async def initialize(self) -> None:
-        """初始化向量索引资源。"""
-        ...
-
     async def replace_attachment(
         self,
         attachment_id: str,

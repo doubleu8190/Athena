@@ -677,14 +677,14 @@ class FileChunkModel(Base):
 
     __tablename__ = "file_chunks"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_file_chunk_attachment_ordinal_active",
             "attachment_id",
-            "document_version_id",
             "ordinal",
-            name="uq_file_chunk_version_ordinal",
+            unique=True,
+            postgresql_where=text("deleted_time IS NULL"),
         ),
         Index("idx_file_chunks_attachment", "attachment_id"),
-        Index("idx_file_chunks_version", "document_version_id"),
         Index("idx_file_chunks_content_fts", "content_fts", postgresql_using="gin"),
     )
 
@@ -693,12 +693,6 @@ class FileChunkModel(Base):
     )
     attachment_id: Mapped[str] = mapped_column(
         ForeignKey("attachments.id"), comment="所属附件标识"
-    )
-    document_version_id: Mapped[str] = mapped_column(
-        String, index=True, comment="所属文档解析版本标识"
-    )
-    is_current: Mapped[int] = mapped_column(
-        Integer, default=1, comment="是否属于当前文档版本，0 表示历史版本"
     )
     ordinal: Mapped[int] = mapped_column(Integer, comment="分块在附件中的顺序号")
     content: Mapped[str] = mapped_column(Text, comment="分块文本内容")
@@ -714,6 +708,9 @@ class FileChunkModel(Base):
     )
     metadata_json: Mapped[str] = mapped_column(
         Text, default="{}", comment="分块信息（JSON 格式）"
+    )
+    deleted_time: Mapped[str | None] = mapped_column(
+        String, nullable=True, comment="软删除时间（UTC）"
     )
 
 
@@ -889,7 +886,6 @@ class RetrievalCandidateModel(Base):
     source_id: Mapped[str] = mapped_column(String, comment="不可变来源 ID")
     logical_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
     revision_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    document_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
     native_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     native_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     fused_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)

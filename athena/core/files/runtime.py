@@ -122,11 +122,6 @@ class FileIntelligenceRuntime:
         self._vector_store = vector_store
         self._knowledge_document_locks: dict[str, asyncio.Lock] = {}
 
-    @property
-    def vector_index_ready(self) -> bool:
-        """向量索引是否已初始化，可供评估 readiness 检查。"""
-        return self._vector_store.ready
-
     async def _complete_retrieval_trace(
         self,
         run_id: str | None,
@@ -174,10 +169,6 @@ class FileIntelligenceRuntime:
         await self.repository.sync_adapters(
             adapter.info for adapter in self.adapter_registry.list()
         )
-        try:
-            await self._vector_store.initialize()
-        except Exception as exc:
-            logger.warning("file_vector_index_unavailable", error=str(exc))
 
     async def cleanup_unreferenced_blobs(self) -> int:
         """回收无引用的内容寻址 blob（附件软删除后调用）。
@@ -232,8 +223,12 @@ class FileIntelligenceRuntime:
             capabilities=adapter.info.capabilities,
             error_message=None,
         )
-        if processing is not None:
-            await self.emit_attachment(processing, run_id=run_id)
+        if processing is None:
+            raise RuntimeError("无法更新附件状态")
+        logger.info(
+            "file_processing_started", attachment_id=attachment.id, run_id=run_id
+        )
+        await self.emit_attachment(processing, run_id=run_id)
         path = self.storage.resolve(attachment.storage_key)
         workspace = self.storage.create_workspace(attachment.id)
         try:
@@ -256,9 +251,7 @@ class FileIntelligenceRuntime:
                 if dependency.get("source") == path.name:
                     dependency["source"] = attachment.filename
             chunks = self._chunk_units(attachment.id, result.units)
-            document_version_id = await self.repository.replace_chunks(
-                attachment.id, chunks
-            )
+            await self.repository.replace_chunks(attachment.id, chunks)
             await self.repository.replace_code_index(
                 attachment.id, result.symbols, result.dependencies
             )
@@ -282,7 +275,7 @@ class FileIntelligenceRuntime:
                 "chunk_count": len(chunks),
                 "symbol_count": len(result.symbols),
                 "dependency_count": len(result.dependencies),
-                "document_version_id": document_version_id,
+                "document_version": attachment.document_version,
             }
             await self.repository.update_attachment(attachment.id, metadata=metadata)
             return metadata
@@ -303,36 +296,36 @@ class FileIntelligenceRuntime:
         if attachment is None:
             raise FileNotFoundError("附件不存在")
         chunks = await self.repository.get_chunks(attachment_id, limit=100_000)
-        if self._vector_store.ready:
-            try:
-                await self._vector_store.replace_attachment(
-                    attachment_id,
-                    [
-                        {
-                            "id": chunk.id,
-                            "content": chunk.content,
-                            "metadata": {
-                                "attachment_id": attachment_id,
-                                "document_version_id": chunk.document_version_id or "",
-                                "logical_document_id": attachment.logical_document_id or attachment.id,
-                                "ordinal": chunk.ordinal,
-                                "locator_json": json.dumps(
-                                    chunk.locator.model_dump(mode="json", exclude_none=True),
-                                    ensure_ascii=False,
+        try:
+            await self._vector_store.replace_attachment(
+                attachment_id,
+                [
+                    {
+                        "id": chunk.id,
+                        "content": chunk.content,
+                        "metadata": {
+                            "attachment_id": attachment_id,
+                            "document_version": attachment.document_version,
+                            "ordinal": chunk.ordinal,
+                            "locator_json": json.dumps(
+                                chunk.locator.model_dump(
+                                    mode="json", exclude_none=True
                                 ),
-                            },
-                        }
-                        for chunk in chunks
-                    ],
-                )
-            except Exception as exc:
-                logger.warning(
-                    "file_embedding_index_failed",
-                    attachment_id=attachment_id,
-                    error=str(exc),
-                )
-                raise
-        return {"chunks": len(chunks), "vector_indexed": self._vector_store.ready}
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                    for chunk in chunks
+                ],
+            )
+        except Exception as exc:
+            logger.warning(
+                "file_embedding_index_failed",
+                attachment_id=attachment_id,
+                error=str(exc),
+            )
+            raise
+        return {"chunks": len(chunks)}
 
     async def process_knowledge_document(self, attachment_id: str) -> dict[str, Any]:
         """幂等完成知识库文档解析和向量索引。
@@ -427,8 +420,7 @@ class FileIntelligenceRuntime:
         异常：
             Chroma 删除失败时向上抛出异常。
         """
-        if self._vector_store.ready:
-            await self._vector_store.delete_attachment(attachment_id)
+        await self._vector_store.delete_attachment(attachment_id)
 
     def _knowledge_lock(self, attachment_id: str) -> asyncio.Lock:
         """返回同一知识库文档共享的异步互斥锁。
@@ -684,27 +676,27 @@ class FileIntelligenceRuntime:
         """
         attachment = await self.require_attachment(session_id, file_id)
         started = asyncio.get_running_loop().time()
-        run_id: str | None = None
-        if self._trace_writer is not None:
-            try:
-                run_id = await self._trace_writer.start_run(
-                    RetrievalRunRequest(
-                        query=query,
-                        scope="file",
-                        config={
-                            "file_id": file_id,
-                            "limit": limit,
-                            "fusion": "rrf",
-                            "rrf_k": 60,
-                        },
-                        index_generation="file_chunks/current",
-                        session_id=session_id,
-                        agent_run_id=agent_run_id,
-                        message_id=message_id,
-                    )
+        run_id: str
+        try:
+            run_id = await self._trace_writer.start_run(
+                RetrievalRunRequest(
+                    query=query,
+                    scope="file",
+                    config={
+                        "file_id": file_id,
+                        "limit": limit,
+                        "fusion": "rrf",
+                        "rrf_k": 60,
+                    },
+                    index_generation="file_chunks/current",
+                    session_id=session_id,
+                    agent_run_id=agent_run_id,
+                    message_id=message_id,
                 )
-            except Exception as exc:
-                logger.warning("retrieval_trace_start_failed", error=str(exc))
+            )
+        except Exception as exc:
+            logger.warning("retrieval_trace_start_failed", error=str(exc))
+            raise
         if attachment.status == AttachmentStatus.FAILED:
             await self._complete_retrieval_trace(
                 run_id,
@@ -720,6 +712,8 @@ class FileIntelligenceRuntime:
             keyword = await self._search_file_keywords(file_id, query, limit)
             vector = await self._search_file_vectors(file_id, query, limit)
             ordered = self._fuse_file_results(keyword, vector, limit)
+            for item in ordered:
+                item["document_version"] = attachment.document_version
         except asyncio.CancelledError:
             await self._complete_retrieval_trace(
                 run_id,
@@ -738,83 +732,81 @@ class FileIntelligenceRuntime:
                 error_message=str(exc),
             )
             raise
-        if run_id is not None and self._trace_writer is not None:
-            try:
-                raw_candidates = [
-                    RetrievalCandidate(
-                        provider="keyword",
-                        stage="native",
-                        source_type="chunk",
-                        source_id=chunk.id,
-                        native_rank=rank,
-                        native_score=chunk.native_score,
-                        document_version_id=chunk.document_version_id,
-                        content_preview=chunk.content[:500],
-                        source_title=attachment.filename,
-                        locator=chunk.locator.model_dump(
-                            mode="json", exclude_none=True
-                        ),
-                    )
-                    for rank, chunk in enumerate(keyword, 1)
-                ]
-                raw_candidates.extend(
-                    RetrievalCandidate(
-                        provider="vector",
-                        stage="native",
-                        source_type="chunk",
-                        source_id=str(item.get("id", "")),
-                        native_rank=rank,
-                        native_score=item.get("native_score"),
-                        document_version_id=item.get("document_version_id"),
-                        content_preview=str(item.get("content", ""))[:500],
-                        source_title=attachment.filename,
-                        locator=item.get("locator", {}),
-                    )
-                    for rank, item in enumerate(vector, 1)
+        try:
+            raw_candidates = [
+                RetrievalCandidate(
+                    provider="keyword",
+                    stage="native",
+                    source_type="chunk",
+                    source_id=chunk.id,
+                    native_rank=rank,
+                    native_score=chunk.native_score,
+                    content_preview=chunk.content,
+                    source_title=attachment.filename,
+                    metadata={"document_version": attachment.document_version},
+                    locator=chunk.locator.model_dump(
+                        mode="json", exclude_none=True
+                    ),
                 )
-                fused_candidates = [
-                    RetrievalCandidate(
-                        provider="fusion",
-                        stage="fused",
-                        source_type="chunk",
-                        source_id=str(item.get("id", "")),
-                        fused_rank=rank,
-                        fused_score=item.get("score"),
-                        document_version_id=item.get("document_version_id"),
-                        selected_for_result=True,
-                        content_preview=str(item.get("content", ""))[:500],
-                        source_title=attachment.filename,
-                        locator=item.get("locator", {}),
-                        metadata={
-                            "keyword_rank": item.get("keyword_rank"),
-                            "vector_rank": item.get("vector_rank"),
-                        },
-                    )
-                    for rank, item in enumerate(ordered, 1)
-                ]
-                await self._trace_writer.record_candidates(
-                    run_id, [*raw_candidates, *fused_candidates]
+                for rank, chunk in enumerate(keyword, 1)
+            ]
+            raw_candidates.extend(
+                RetrievalCandidate(
+                    provider="vector",
+                    stage="native",
+                    source_type="chunk",
+                    source_id=str(item.get("id", "")),
+                    native_rank=rank,
+                    native_score=item.get("native_score"),
+                    content_preview=str(item.get("content", "")),
+                    source_title=attachment.filename,
+                    metadata={"document_version": attachment.document_version},
+                    locator=item.get("locator", {}),
                 )
-                await self._complete_retrieval_trace(
-                    run_id,
-                    started,
-                    candidate_count=len(ordered),
-                    selected_count=len(ordered),
-                    status="succeeded",
+                for rank, item in enumerate(vector, 1)
+            )
+            fused_candidates = [
+                RetrievalCandidate(
+                    provider="fusion",
+                    stage="fused",
+                    source_type="chunk",
+                    source_id=str(item.get("id", "")),
+                    fused_rank=rank,
+                    fused_score=item.get("fused_score"),
+                    selected_for_result=True,
+                    content_preview=str(item.get("content", "")),
+                    source_title=attachment.filename,
+                    locator=item.get("locator", {}),
+                    metadata={
+                        "document_version": attachment.document_version,
+                        "keyword_rank": item.get("keyword_rank"),
+                        "vector_rank": item.get("vector_rank"),
+                    },
                 )
-            except Exception as exc:
-                logger.warning("retrieval_trace_record_failed", error=str(exc))
-                await self._complete_retrieval_trace(
-                    run_id,
-                    started,
-                    candidate_count=len(ordered),
-                    selected_count=len(ordered),
-                    status="partial",
-                    error_message=str(exc),
-                )
-        if run_id is not None:
-            for item in ordered:
-                item["retrieval_run_id"] = run_id
+                for rank, item in enumerate(ordered, 1)
+            ]
+            await self._trace_writer.record_candidates(
+                run_id, [*raw_candidates, *fused_candidates]
+            )
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=len(ordered),
+                selected_count=len(ordered),
+                status="succeeded",
+            )
+        except Exception as exc:
+            logger.warning("retrieval_trace_record_failed", error=str(exc))
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=len(ordered),
+                selected_count=len(ordered),
+                status="partial",
+                error_message=str(exc),
+            )
+        for item in ordered:
+            item["retrieval_run_id"] = run_id
         response: dict[str, Any] = {"query": query, "results": ordered}
         if not ordered and attachment.adapter_name == "image":
             response["message"] = (
@@ -851,10 +843,10 @@ class FileIntelligenceRuntime:
             )
         else:
             documents = await self.repository.list_global_knowledge_ready_documents()
-            
+
         allowed_documents = {doc.id for doc in documents}
         started = asyncio.get_running_loop().time()
-        run_id: str | None = None
+        run_id: str
         try:
             run_id = await self._trace_writer.start_run(
                 RetrievalRunRequest(
@@ -869,22 +861,22 @@ class FileIntelligenceRuntime:
             )
         except Exception as exc:
             logger.warning("retrieval_trace_start_failed", error=str(exc))
+            raise
         vector_error: str | None = None
         try:
             keyword = [
                 chunk
-                for chunk in await self.repository.search_knowledge_chunks(query, limit, allowed_documents)
+                for chunk in await self.repository.search_knowledge_chunks(
+                    query, allowed_documents, limit
+                )
                 if chunk.attachment_id in allowed_documents
             ]
             vector: list[dict[str, Any]] = []
-            if self._vector_store.ready:
-                try:
-                    vector = await self._vector_store.query(
-                        query, max(limit * 3, limit)
-                    )
-                except Exception as exc:
-                    vector_error = str(exc)
-                    logger.warning("knowledge_vector_search_failed", error=vector_error)
+            try:
+                vector = await self._vector_store.query(query, max(limit * 3, limit))
+            except Exception as exc:
+                vector_error = str(exc)
+                logger.warning("knowledge_vector_search_failed", error=vector_error)
             live_ids = allowed_documents
             vector_before_filter = list(vector)
             vector = [
@@ -893,6 +885,13 @@ class FileIntelligenceRuntime:
                 if str(item.get("attachment_id", "")) in live_ids
             ]
             fused = self._fuse_file_results(keyword, vector, limit)
+            document_versions = {
+                document.id: document.document_version for document in documents
+            }
+            for item in fused:
+                item["document_version"] = document_versions.get(
+                    str(item.get("attachment_id", ""))
+                )
         except asyncio.CancelledError:
             await self._complete_retrieval_trace(
                 run_id,
@@ -911,115 +910,126 @@ class FileIntelligenceRuntime:
                 error_message=str(exc),
             )
             raise
-        if run_id is not None and self._trace_writer is not None:
-            try:
-                raw_candidates = [
-                    RetrievalCandidate(
-                        provider="keyword",
-                        stage="native",
-                        source_type="chunk",
-                        source_id=chunk.id,
-                        native_rank=rank,
-                        native_score=chunk.native_score,
-                        document_version_id=chunk.document_version_id,
-                        content_preview=chunk.content[:500],
-                        locator=chunk.locator.model_dump(
-                            mode="json", exclude_none=True
+        try:
+            raw_candidates = [
+                RetrievalCandidate(
+                    provider="keyword",
+                    stage="native",
+                    source_type="chunk",
+                    source_id=chunk.id,
+                    native_rank=rank,
+                    native_score=chunk.native_score,
+                    content_preview=chunk.content,
+                    locator=chunk.locator.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    source_title=next(
+                        (
+                            document.filename
+                            for document in documents
+                            if document.id == chunk.attachment_id
                         ),
-                        source_title=next(
-                            (
-                                document.filename
-                                for document in documents
-                                if document.id == chunk.attachment_id
-                            ),
-                            None,
-                        ),
-                        metadata={"attachment_id": chunk.attachment_id},
-                    )
-                    for rank, chunk in enumerate(keyword, 1)
-                ]
-                raw_candidates.extend(
-                    RetrievalCandidate(
-                        provider="vector",
-                        stage="native",
-                        source_type="chunk",
-                        source_id=str(item.get("id", "")),
-                        native_rank=rank,
-                        native_score=item.get("native_score"),
-                        document_version_id=item.get("document_version_id"),
-                        filter_reason=(
-                            None
-                            if str(item.get("attachment_id", "")) in live_ids
-                            else "document_not_live"
-                        ),
-                        content_preview=str(item.get("content", ""))[:500],
-                        locator=item.get("locator", {}),
-                        source_title=next(
-                            (
-                                document.filename
-                                for document in documents
-                                if document.id == item.get("attachment_id")
-                            ),
-                            None,
-                        ),
-                        metadata={
-                            "attachment_id": item.get("attachment_id", ""),
-                        },
-                    )
-                    for rank, item in enumerate(vector_before_filter, 1)
+                        None,
+                    ),
+                    metadata={"attachment_id": chunk.attachment_id},
                 )
-                fused_candidates = [
-                    RetrievalCandidate(
-                        provider="fusion",
-                        stage="fused",
-                        source_type="chunk",
-                        source_id=str(item.get("id", "")),
-                        fused_rank=rank,
-                        fused_score=item.get("score"),
-                        document_version_id=item.get("document_version_id"),
-                        selected_for_result=True,
-                        content_preview=str(item.get("content", ""))[:500],
-                        locator=item.get("locator", {}),
-                        source_title=next(
+                for rank, chunk in enumerate(keyword, 1)
+            ]
+            raw_candidates.extend(
+                RetrievalCandidate(
+                    provider="vector",
+                    stage="native",
+                    source_type="chunk",
+                    source_id=str(item.get("id", "")),
+                    native_rank=rank,
+                    native_score=item.get("native_score"),
+                    filter_reason=(
+                        None
+                        if str(item.get("attachment_id", "")) in live_ids
+                        else "document_not_live"
+                    ),
+                    content_preview=str(item.get("content", "")),
+                    locator=item.get("locator", {}),
+                    source_title=next(
+                        (
+                            document.filename
+                            for document in documents
+                            if document.id == item.get("attachment_id")
+                        ),
+                        None,
+                    ),
+                    metadata={
+                        "attachment_id": item.get("attachment_id", ""),
+                        "document_version": next(
                             (
-                                document.filename
+                                document.document_version
                                 for document in documents
                                 if document.id == item.get("attachment_id")
                             ),
                             None,
                         ),
-                        metadata={
-                            "attachment_id": item.get("attachment_id", ""),
-                            "keyword_rank": item.get("keyword_rank"),
-                            "vector_rank": item.get("vector_rank"),
-                        },
-                    )
-                    for rank, item in enumerate(fused, 1)
-                ]
-                await self._trace_writer.record_candidates(
-                    run_id, [*raw_candidates, *fused_candidates]
+                    },
                 )
-                await self._complete_retrieval_trace(
-                    run_id,
-                    started,
-                    candidate_count=len(fused),
-                    selected_count=len(fused),
-                    status="partial" if vector_error else "succeeded",
-                    error_message=vector_error,
+                for rank, item in enumerate(vector_before_filter, 1)
+            )
+            fused_candidates = [
+                RetrievalCandidate(
+                    provider="fusion",
+                    stage="fused",
+                    source_type="chunk",
+                    source_id=str(item.get("id", "")),
+                    fused_rank=rank,
+                    fused_score=item.get("fused_score"),
+                    selected_for_result=True,
+                    content_preview=str(item.get("content", "")),
+                    locator=item.get("locator", {}),
+                    source_title=next(
+                        (
+                            document.filename
+                            for document in documents
+                            if document.id == item.get("attachment_id")
+                        ),
+                        None,
+                    ),
+                    metadata={
+                        "attachment_id": item.get("attachment_id", ""),
+                        "document_version": next(
+                            (
+                                document.document_version
+                                for document in documents
+                                if document.id == item.get("attachment_id")
+                            ),
+                            None,
+                        ),
+                        "keyword_rank": item.get("keyword_rank"),
+                        "vector_rank": item.get("vector_rank"),
+                    },
                 )
-            except Exception as exc:
-                logger.warning("retrieval_trace_record_failed", error=str(exc))
-                await self._complete_retrieval_trace(
-                    run_id,
-                    started,
-                    candidate_count=len(fused),
-                    selected_count=len(fused),
-                    status="partial",
-                    error_message=str(exc),
-                )
-        if run_id is not None:
-            for item in fused:
-                item["retrieval_run_id"] = run_id
+                for rank, item in enumerate(fused, 1)
+            ]
+            await self._trace_writer.record_candidates(
+                run_id, [*raw_candidates, *fused_candidates]
+            )
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=len(fused),
+                selected_count=len(fused),
+                status="partial" if vector_error else "succeeded",
+                error_message=vector_error,
+            )
+        except Exception as exc:
+            logger.warning("retrieval_trace_record_failed", error=str(exc))
+            await self._complete_retrieval_trace(
+                run_id,
+                started,
+                candidate_count=len(fused),
+                selected_count=len(fused),
+                status="partial",
+                error_message=str(exc),
+            )
+        for item in fused:
+            item["retrieval_run_id"] = run_id
         return fused
 
     def _failed_file_search_response(
@@ -1088,16 +1098,13 @@ class FileIntelligenceRuntime:
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         vector: list[dict[str, Any]] = []
-        if self._vector_store.ready:
-            try:
-                vector = await self._vector_store.query(
-                    query, limit, where={"attachment_id": file_id}
-                )
-            except Exception as exc:
-                logger.warning(
-                    "file_vector_search_failed", file_id=file_id, error=str(exc)
-                )
-                return vector
+        try:
+            vector = await self._vector_store.query(
+                query, limit, where={"attachment_id": file_id}
+            )
+        except Exception as exc:
+            logger.warning("file_vector_search_failed", file_id=file_id, error=str(exc))
+            return vector
         return vector
 
     def _fuse_file_results(
@@ -1126,7 +1133,6 @@ class FileIntelligenceRuntime:
                 "id": chunk.id,
                 "content": chunk.content,
                 "attachment_id": chunk.attachment_id,
-                "document_version_id": chunk.document_version_id,
                 "locator": chunk.locator.model_dump(mode="json", exclude_none=True),
                 "native_score": chunk.native_score,
                 "keyword_rank": rank,
@@ -1145,7 +1151,7 @@ class FileIntelligenceRuntime:
             values.values(), key=lambda item: scores[item["id"]], reverse=True
         )[:limit]
         for rank, item in enumerate(ordered, 1):
-            item["score"] = scores[item["id"]]
+            item["fused_score"] = scores[item["id"]]
             item["fused_rank"] = rank
         return ordered
 

@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import chromadb
 from chromadb.api import ClientAPI
 
 from athena.core.files.ports import FileVectorStore
@@ -23,61 +24,35 @@ class ChromaFileVectorStore(FileVectorStore):
     ) -> None:
         self._path = path
         self._collection_name = collection_name
-        self._client: ClientAPI | None = None
-        self._collection: Any | None = None
-
-    @classmethod
-    def with_client(
-        cls,
-        path: str,
-        client: ClientAPI,
-        collection_name: str = "athena_file_chunks",
-    ) -> "ChromaFileVectorStore":
-        store = cls(path, collection_name)
-        store._client = client
-        return store
-
-    @property
-    def ready(self) -> bool:
-        return self._collection is not None
-
-    async def initialize(self) -> None:
-        if self._collection is not None:
-            return
-        if self._client is None:
-            import chromadb
-
-            self._client = chromadb.PersistentClient(path=self._path)
-        self._collection = self._client.get_or_create_collection(
+        self._client: ClientAPI = chromadb.PersistentClient(path=self._path)
+        self._collection: chromadb.Collection = self._client.get_or_create_collection(
             name=self._collection_name,
             metadata={"hnsw:space": "cosine"},
         )
-
-    @property
-    def _index(self) -> Any:
-        if self._collection is None:
-            raise RuntimeError("ChromaFileVectorStore is not initialized")
-        return self._collection
 
     async def replace_attachment(
         self,
         attachment_id: str,
         chunks: Sequence[Mapping[str, Any]],
     ) -> None:
-        await asyncio.to_thread(self._index.delete, where={"attachment_id": attachment_id})
+        await asyncio.to_thread(
+            self._collection.delete, where={"attachment_id": attachment_id}
+        )
         for start in range(0, len(chunks), 100):
             batch = chunks[start : start + 100]
             if not batch:
                 continue
             await asyncio.to_thread(
-                self._index.add,
+                self._collection.add,
                 ids=[str(item["id"]) for item in batch],
                 documents=[str(item["content"]) for item in batch],
                 metadatas=[dict(item["metadata"]) for item in batch],
             )
 
     async def delete_attachment(self, attachment_id: str) -> None:
-        await asyncio.to_thread(self._index.delete, where={"attachment_id": attachment_id})
+        await asyncio.to_thread(
+            self._collection.delete, where={"attachment_id": attachment_id}
+        )
 
     async def query(
         self,
@@ -92,32 +67,38 @@ class ChromaFileVectorStore(FileVectorStore):
         }
         if where:
             kwargs["where"] = dict(where)
-        result = await asyncio.to_thread(self._index.query, **kwargs)
+        result = await asyncio.to_thread(self._collection.query, **kwargs)
         ids = (result.get("ids") or [[]])[0]
         documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
         items: list[dict[str, Any]] = []
-        for index, item_id in enumerate(ids):
-            metadata = metadatas[index] or {} if index < len(metadatas) else {}
+        for item_id, document, raw_metadata, distance in zip(
+            ids, documents, metadatas, distances
+        ):
+            metadata = raw_metadata or {}
             locator_raw = metadata.get("locator_json")
             try:
-                locator = FileLocator.model_validate_json(locator_raw).model_dump(
-                    mode="json", exclude_none=True
-                ) if isinstance(locator_raw, str) else {}
+                locator = (
+                    FileLocator.model_validate_json(locator_raw).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                    if isinstance(locator_raw, str)
+                    else {}
+                )
             except Exception:
                 locator = {}
             items.append(
                 {
                     "id": str(item_id),
-                    "content": documents[index] if index < len(documents) else "",
+                    "content": document,
                     "locator": locator,
                     "metadata": metadata,
                     "attachment_id": metadata.get("attachment_id", ""),
-                    "document_version_id": metadata.get("document_version_id", ""),
+                    "document_version": metadata.get("document_version"),
                     "native_score": (
-                        1.0 - float(distances[index])
-                        if index < len(distances) and distances[index] is not None
+                        1.0 - float(distance)
+                        if distance is not None
                         else None
                     ),
                 }

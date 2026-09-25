@@ -102,7 +102,7 @@ class FileRepository:
                 await session.execute(
                     update(FileChunkModel)
                     .where(FileChunkModel.attachment_id.in_(attachment_ids))
-                    .values(is_current=0)
+                    .values(deleted_time=now)
                 )
                 await session.execute(
                     delete(FileArtifactModel).where(
@@ -179,21 +179,18 @@ class FileRepository:
             async with get_session() as session:
                 latest_version = (
                     await session.execute(
-                        select(AttachmentModel.document_version).where(
+                        select(func.max(AttachmentModel.document_version)).where(
                             AttachmentModel.logical_document_id == logical_document_id,
                             AttachmentModel.knowledge_base_id == knowledge_base_id,
-                            AttachmentModel.status == AttachmentStatus.READY.value,
-                            AttachmentModel.deleted_time.is_(None),
                         )
                     )
                 ).scalar_one()
-                logger.info("知识库中 %s 当前版本为: %s", filename, document_version)
             document_version = int(latest_version or 0) + 1
+            logger.info("知识库中 %s 新版本为: %s", filename, document_version)
 
         row = AttachmentModel(
             id=attachment_id,
             logical_document_id=logical_document_id or attachment_id,
-            current_version_id=None,
             document_version=document_version,
             session_id=session_id,
             knowledge_base_id=knowledge_base_id,
@@ -215,8 +212,22 @@ class FileRepository:
                         .where(
                             AttachmentModel.logical_document_id == logical_document_id,
                             AttachmentModel.knowledge_base_id == knowledge_base_id,
-                            AttachmentModel.status == AttachmentStatus.READY.value,
                             AttachmentModel.deleted_time.is_(None),
+                        )
+                        .values(deleted_time=now)
+                    )
+                    await session.execute(
+                        update(FileChunkModel)
+                        .where(
+                            FileChunkModel.attachment_id.in_(
+                                select(AttachmentModel.id).where(
+                                    AttachmentModel.logical_document_id
+                                    == logical_document_id,
+                                    AttachmentModel.knowledge_base_id
+                                    == knowledge_base_id,
+                                    AttachmentModel.deleted_time.is_not(None),
+                                )
+                            )
                         )
                         .values(deleted_time=now)
                     )
@@ -602,7 +613,7 @@ class FileRepository:
                 await session.execute(
                     update(FileChunkModel)
                     .where(FileChunkModel.attachment_id == attachment_id)
-                    .values(is_current=0)
+                    .values(deleted_time=now)
                 )
                 await session.execute(
                     delete(FileArtifactModel).where(
@@ -680,7 +691,7 @@ class FileRepository:
                 await session.execute(
                     update(FileChunkModel)
                     .where(FileChunkModel.attachment_id == attachment_id)
-                    .values(is_current=0)
+                    .values(deleted_time=now)
                 )
                 for model in (FileArtifactModel, CodeSymbolModel, CodeDependencyModel):
                     await session.execute(
@@ -760,7 +771,7 @@ class FileRepository:
                     out.setdefault(row.message_id, []).append(_row_to_attachment(row))
             return out
 
-    async def replace_chunks(self, attachment_id: str, chunks: list[FileChunk]) -> str:
+    async def replace_chunks(self, attachment_id: str, chunks: list[FileChunk]) -> None:
         """
 
         参数：
@@ -768,7 +779,7 @@ class FileRepository:
             chunks (list[FileChunk]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
 
         返回值：
-            str: 新建的不可变文档解析版本 ID。
+            None: 分块版本由所属附件的 ``document_version`` 表示。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
@@ -786,7 +797,6 @@ class FileRepository:
                     .scalars()
                     .all()
                 )
-                version_id = generate_time_id()
                 attachment = await session.get(AttachmentModel, attachment_id)
                 if attachment is None:
                     raise FileNotFoundError("附件不存在")
@@ -794,7 +804,7 @@ class FileRepository:
                     await session.execute(
                         update(FileChunkModel)
                         .where(FileChunkModel.id.in_(existing_ids))
-                        .values(is_current=0)
+                        .values(deleted_time=_now().isoformat())
                     )
                 attachment.updated_at = _now().isoformat()
                 for chunk in chunks:
@@ -806,16 +816,15 @@ class FileRepository:
                         FileChunkModel(
                             id=chunk.id,
                             attachment_id=attachment_id,
-                            document_version_id=version_id,
-                            is_current=1,
                             ordinal=chunk.ordinal,
                             content=content,
                             token_count=chunk.token_count,
                             locator_json=_json_dumps(chunk.locator),
                             metadata_json=_json_dumps(chunk.metadata),
+                            deleted_time=None,
                         )
                     )
-        return version_id
+        return None
 
     async def get_chunks(
         self, attachment_id: str, *, offset: int = 0, limit: int = 50
@@ -844,7 +853,7 @@ class FileRepository:
                         )
                         .where(
                             FileChunkModel.attachment_id == attachment_id,
-                            FileChunkModel.is_current == 1,
+                            FileChunkModel.deleted_time.is_(None),
                             AttachmentModel.deleted_time.is_(None),
                         )
                         .order_by(FileChunkModel.ordinal)
@@ -861,7 +870,6 @@ class FileRepository:
                     attachment_id=r.attachment_id,
                     ordinal=r.ordinal,
                     content=r.content,
-                    document_version_id=r.document_version_id,
                     token_count=r.token_count,
                     locator=_json_loads_model(
                         r.locator_json, FileLocator, FileLocator()
@@ -902,7 +910,7 @@ class FileRepository:
                 )
                 .where(
                     FileChunkModel.attachment_id == attachment_id,
-                    FileChunkModel.is_current == 1,
+                    FileChunkModel.deleted_time.is_(None),
                     FileChunkModel.content_fts.op("@@")(
                         func.websearch_to_tsquery("chinese", query)
                     ),
@@ -916,7 +924,6 @@ class FileRepository:
                     attachment_id=r.attachment_id,
                     ordinal=r.ordinal,
                     content=r.content,
-                    document_version_id=r.document_version_id,
                     token_count=r.token_count,
                     locator=_json_loads_model(
                         r.locator_json, FileLocator, FileLocator()
@@ -964,7 +971,7 @@ class FileRepository:
                 )
                 .where(
                     AttachmentModel.id.in_(document_ids),
-                    FileChunkModel.is_current == 1,
+                    FileChunkModel.deleted_time.is_(None),
                     FileChunkModel.content_fts.op("@@")(
                         func.websearch_to_tsquery("chinese", query)
                     ),
@@ -978,7 +985,6 @@ class FileRepository:
                 attachment_id=chunk.attachment_id,
                 ordinal=chunk.ordinal,
                 content=chunk.content,
-                document_version_id=chunk.document_version_id,
                 token_count=chunk.token_count,
                 locator=_json_loads_model(
                     chunk.locator_json, FileLocator, FileLocator()

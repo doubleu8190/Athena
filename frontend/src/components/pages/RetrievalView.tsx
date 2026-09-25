@@ -169,7 +169,6 @@ function CandidateTable({ candidates }: { candidates: RetrievalCandidate[] }) {
                         <div className="flex flex-wrap gap-x-4 gap-y-1 text-athena-muted">
                           <span>source_id: {candidate.source_id}</span>
                           {candidate.revision_id ? <span>revision: {candidate.revision_id}</span> : null}
-                          {candidate.document_version_id ? <span>version: {candidate.document_version_id}</span> : null}
                           {candidate.filter_reason ? <span className="text-athena-warning">原因: {candidate.filter_reason}</span> : null}
                           {candidate.locator && Object.keys(candidate.locator).length > 0 ? (
                             <span>定位: {JSON.stringify(candidate.locator)}</span>

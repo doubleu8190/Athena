@@ -273,7 +273,6 @@ export interface RetrievalCandidate {
   source_id: string
   logical_source_id?: string | null
   revision_id?: string | null
-  document_version_id?: string | null
   native_rank?: number | null
   native_score?: number | null
   fused_rank?: number | null

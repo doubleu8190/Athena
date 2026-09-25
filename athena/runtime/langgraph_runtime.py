@@ -156,7 +156,7 @@ class LangGraphRuntime:
         self._llm = llm
         self._tool_manager = tool_manager
         self._db = db
-        self._events = event_publisher
+        self._event_publisher = event_publisher
         self._compressor = compressor
         self._memory_service = memory_service
         self._long_term_memory_summarizer = long_term_memory_summarizer

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Sequence
 
 from sqlalchemy import select, update
 
@@ -44,16 +45,16 @@ class KnowledgeBaseRepository:
             数据库写入失败时传播底层异常。
         """
         now = _now_iso()
-        row = KnowledgeBaseModel(
-            id=generate_time_id(),
-            name=name,
-            description=description,
-            created_at=now,
-            updated_at=now,
-        )
+
         async with get_session() as session:
-            async with session.begin():
-                session.add(row)
+            row = KnowledgeBaseModel(
+                id=generate_time_id(),
+                name=name,
+                description=description,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
         return self._to_domain(row, [])
 
     async def get(self, knowledge_base_id: str) -> KnowledgeBase | None:
@@ -80,13 +81,18 @@ class KnowledgeBaseRepository:
             if row is None:
                 return None
             documents = (
-                await session.execute(
-                    select(AttachmentModel).where(
-                        AttachmentModel.knowledge_base_id == knowledge_base_id,
-                        AttachmentModel.deleted_time.is_(None),
+                (
+                    await session.execute(
+                        select(AttachmentModel).where(
+                            AttachmentModel.knowledge_base_id == knowledge_base_id,
+                            AttachmentModel.status == AttachmentStatus.READY.value,
+                            AttachmentModel.deleted_time.is_(None),
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             return self._to_domain(row, documents)
 
     async def list_all(self) -> list[KnowledgeBase]:
@@ -100,20 +106,29 @@ class KnowledgeBaseRepository:
         """
         async with get_session() as session:
             rows = (
-                await session.execute(
-                    select(KnowledgeBaseModel)
-                    .where(KnowledgeBaseModel.deleted_time.is_(None))
-                    .order_by(KnowledgeBaseModel.updated_at.desc())
-                )
-            ).scalars().all()
-            documents = (
-                await session.execute(
-                    select(AttachmentModel).where(
-                        AttachmentModel.knowledge_base_id.is_not(None),
-                        AttachmentModel.deleted_time.is_(None),
+                (
+                    await session.execute(
+                        select(KnowledgeBaseModel)
+                        .where(KnowledgeBaseModel.deleted_time.is_(None))
+                        .order_by(KnowledgeBaseModel.updated_at.desc())
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
+            documents = (
+                (
+                    await session.execute(
+                        select(AttachmentModel).where(
+                            AttachmentModel.knowledge_base_id.is_not(None),
+                            AttachmentModel.status == AttachmentStatus.READY.value,
+                            AttachmentModel.deleted_time.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
         documents_by_knowledge_base: dict[str, list[AttachmentModel]] = {}
         for document in documents:
             if document.knowledge_base_id is not None:
@@ -184,7 +199,7 @@ class KnowledgeBaseRepository:
 
     @staticmethod
     def _to_domain(
-        row: KnowledgeBaseModel, documents: list[AttachmentModel]
+        row: KnowledgeBaseModel, documents: Sequence[AttachmentModel]
     ) -> KnowledgeBase:
         """把 ORM 行和文档集合转换为带统计信息的领域模型。
 
@@ -203,10 +218,7 @@ class KnowledgeBaseRepository:
             name=row.name,
             description=row.description,
             document_count=len(documents),
-            ready_document_count=sum(
-                document.status == AttachmentStatus.READY.value
-                for document in documents
-            ),
+            ready_document_count=len(documents),
             total_size_bytes=sum(document.size_bytes for document in documents),
             created_at=datetime.fromisoformat(row.created_at),
             updated_at=datetime.fromisoformat(row.updated_at),

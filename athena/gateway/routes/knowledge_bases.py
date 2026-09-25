@@ -261,6 +261,5 @@ async def list_document_versions(
     if not versions:
         raise HTTPException(status_code=404, detail="知识库文档不存在")
     return [
-        attachment_to_payload(version, include_metadata=True)
-        for version in versions
+        attachment_to_payload(version, include_metadata=True) for version in versions
     ]

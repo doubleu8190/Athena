@@ -53,7 +53,6 @@ def build_graph(
     graph = StateGraph(AgentState)
     # 所有主图节点都在注册边界统一包装，保证普通节点和嵌套 Agent loop
     # 具有一致的 started/completed/failed 事件生命周期。
-    event_publisher = getattr(runtime, "_events", None)
 
     def add_instrumented_node(node_name: str, node: Any) -> None:
         """注册一个带节点生命周期事件的主图节点。"""
@@ -62,7 +61,7 @@ def build_graph(
             instrument_graph_node(
                 node_name,
                 node,
-                event_publisher=event_publisher,
+                event_publisher=runtime._event_publisher,
             ),
         )
 

@@ -28,6 +28,38 @@ async def initialize_postgres_engine(
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # File chunks inherit their version from AttachmentModel. Migrate the
+        # old per-chunk version/current markers to soft deletion before dropping
+        # them; historical rows remain available for audit, while only rows
+        # with deleted_time IS NULL participate in current searches.
+        file_chunk_columns = await conn.run_sync(
+            lambda sync_conn: {
+                column["name"]
+                for column in inspect(sync_conn).get_columns("file_chunks")
+            }
+        )
+        if "deleted_time" not in file_chunk_columns:
+            await conn.execute(
+                text("ALTER TABLE file_chunks ADD COLUMN deleted_time VARCHAR")
+            )
+        if "is_current" in file_chunk_columns:
+            await conn.execute(
+                text("UPDATE file_chunks SET deleted_time = COALESCE(deleted_time, CURRENT_TIMESTAMP::text) WHERE is_current = 0")
+            )
+            await conn.execute(text("ALTER TABLE file_chunks DROP COLUMN is_current"))
+        # 旧约束依赖 document_version_id，必须先删除约束和索引，再删除字段。
+        await conn.execute(
+            text("ALTER TABLE file_chunks DROP CONSTRAINT IF EXISTS uq_file_chunk_version_ordinal")
+        )
+        await conn.execute(text("DROP INDEX IF EXISTS uq_file_chunk_version_ordinal"))
+        await conn.execute(text("DROP INDEX IF EXISTS idx_file_chunks_version"))
+        await conn.execute(text("DROP INDEX IF EXISTS ix_file_chunks_document_version_id"))
+        if "document_version_id" in file_chunk_columns:
+            await conn.execute(
+                text("ALTER TABLE file_chunks DROP COLUMN document_version_id")
+            )
+        await conn.execute(text("DROP INDEX IF EXISTS uq_file_chunk_attachment_ordinal_active"))
+        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_file_chunk_attachment_ordinal_active ON file_chunks (attachment_id, ordinal) WHERE deleted_time IS NULL"))
         # 运行账本中的计划/任务归属可由 agent_tasks -> agent_plans 推导；
         # root_run_id 也可沿 parent_run_id 关系推导。删除旧列，避免历史库继续
         # 暴露两套可能不一致的执行上下文。

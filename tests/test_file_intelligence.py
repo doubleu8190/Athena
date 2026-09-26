@@ -652,6 +652,68 @@ def test_file_chunks_respect_token_limit(tmp_path):
     assert all(0 < chunk.token_count <= settings.file_chunk_tokens for chunk in chunks)
 
 
+def test_pdf_units_can_cross_page_boundaries(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        file_storage_path=str(tmp_path / "storage"),
+        file_chunk_tokens=100,
+        file_chunk_overlap_tokens=2,
+    )
+    runtime = _make_runtime(AsyncMock(), settings)
+    units = [
+        ExtractedUnit(
+            "这是上一页尚未结束的段落，",
+            {"page": 1},
+            {"kind": "page"},
+            kind="page",
+        ),
+        ExtractedUnit(
+            "下一页继续完成这个语义单元。",
+            {"page": 2},
+            {"kind": "page"},
+            kind="page",
+        ),
+    ]
+    chunks = runtime._chunk_units("file-1", units)
+    assert len(chunks) == 1
+    assert chunks[0].locator.page_start == 1
+    assert chunks[0].locator.page_end == 2
+
+
+def test_pdf_chunk_locator_tracks_only_pages_touched_by_chunk():
+    units = [
+        ExtractedUnit("第一页内容", {"page": 1}, {"kind": "page"}, kind="page"),
+        ExtractedUnit("第二页内容", {"page": 2}, {"kind": "page"}, kind="page"),
+        ExtractedUnit("第三页内容", {"page": 3}, {"kind": "page"}, kind="page"),
+    ]
+
+    locator = FileIntelligenceRuntime._chunk_locator(units, 7, 15)
+
+    assert locator["page_start"] == 2
+    assert locator["page_end"] == 3
+
+
+def test_pdf_page_merge_flags_stop_at_headings_and_closed_sentences(tmp_path):
+    from athena.core.files.adapters.pdf import _page_can_merge_after, _page_can_merge_before
+
+    assert not _page_can_merge_after("上一页已经结束了。\n\n6")
+    assert _page_can_merge_after("上一页还没有结束\n内容还没有结束\n\n6")
+    assert not _page_can_merge_before("第一单元·阅读\n小蝌蚪找妈妈")
+    assert _page_can_merge_before("小蝌蚪游哇游，过了几天")
+
+
+def test_pdf_page_merge_flags_are_content_based_not_position_based():
+    from athena.core.files.adapters.pdf import _page_can_merge_after, _page_can_merge_before
+
+    structural = "Title\nPublisher\nEdition\nPrice 7.45"
+    prose = "这是一个跨页段落，\n它还没有结束"
+
+    assert not _page_can_merge_before(structural)
+    assert not _page_can_merge_after(structural)
+    assert _page_can_merge_before(prose)
+    assert _page_can_merge_after(prose)
+
+
 def test_cache_key_changes_with_every_version_dimension(tmp_path):
     from datetime import datetime
     from athena.models.file import Attachment

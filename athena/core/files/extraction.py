@@ -58,6 +58,10 @@ class ExtractedUnit:
     content: str
     locator: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    kind: str = "paragraph"
+    block_id: str | None = None
+    can_merge_before: bool = True
+    can_merge_after: bool = True
 
 
 @dataclass

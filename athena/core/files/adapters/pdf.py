@@ -49,6 +49,14 @@ _HANYUXI_PINYIN = {
     "Y": "ó",
 }
 _PINYIN_TOKEN = re.compile(r"(?<![A-Za-z])[A-Za-z]*[A-Z][A-Za-z]*(?![A-Za-z])")
+_PAGE_NUMBER = re.compile(r"^\s*\d+\s*$")
+_SECTION_START = re.compile(
+    r"^(?:第[一二三四五六七八九十百]+单元|语文园地|目录|识字表|写字表|词语表|分角色朗读|朗读课文|读一读)"
+)
+_NON_PROSE_PAGE = re.compile(
+    r"^(?:contents?|table of contents|copyright|isbn|目录|版权|定价|出版)\b",
+    re.IGNORECASE,
+)
 
 
 def _clean_pdf_text(text: str) -> str:
@@ -80,12 +88,67 @@ def _clean_pdf_text(text: str) -> str:
     ).strip()
 
 
+def _page_body_lines(content: str) -> list[str]:
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    while lines and _PAGE_NUMBER.fullmatch(lines[-1]):
+        lines.pop()
+    # Running headers and section/page labels are outside the body.
+    while lines and _SECTION_START.match(lines[-1]):
+        lines.pop()
+    return lines
+
+
+def _is_structural_page(lines: list[str]) -> bool:
+    """Detect front matter and navigation pages from their text shape.
+
+    This deliberately uses page content rather than page numbers or a known
+    document layout.  It is only a conservative merge barrier; normal prose
+    is still allowed to continue across a page boundary.
+    """
+    if not lines:
+        return True
+    first = lines[0]
+    if _NON_PROSE_PAGE.match(first):
+        return True
+    if len(lines) >= 3 and sum(len(line) <= 12 for line in lines) >= len(lines) - 1:
+        return True
+    visible = "".join(lines)
+    sentence_marks = len(re.findall(r"[。！？.!?]", visible))
+    long_lines = sum(len(line) >= 24 for line in lines)
+    digit_lines = sum(bool(re.search(r"\d", line)) for line in lines)
+    cjk_chars = len(re.findall(r"[\u3400-\u9fff]", visible))
+    return (
+        2 <= len(lines) <= 8
+        and long_lines == 0
+        and sentence_marks == 0
+        and cjk_chars == 0
+    ) or (
+        digit_lines >= max(3, len(lines) // 3)
+        and sentence_marks == 0
+    )
+
+
+def _page_can_merge_before(content: str) -> bool:
+    lines = _page_body_lines(content)
+    if not lines or _is_structural_page(lines) or _SECTION_START.match(lines[0]):
+        return False
+    return True
+
+
+def _page_can_merge_after(content: str) -> bool:
+    lines = _page_body_lines(content)
+    if not lines or _is_structural_page(lines):
+        return False
+    last = lines[-1]
+    return not bool(re.search(r"[。！？；!?;：:](?:[”’'）)]*)$", last))
+
+
 class PdfAdapter:
     """PDF 文档适配器，支持文本、OCR 和表格提取。"""
 
     info = AdapterInfo(
         name="pdf",
-        version="2.1",
+        version="3.0",
         mime_types=["application/pdf"],
         extensions=[".pdf"],
         capabilities=["read", "search", "summarize", "analyze", "extract_table"],
@@ -115,6 +178,10 @@ class PdfAdapter:
                         content,
                         {"page": index},
                         {"kind": "page", "ocr": index in empty_pages},
+                        kind="page",
+                        block_id=f"page-{index:04d}",
+                        can_merge_before=_page_can_merge_before(content),
+                        can_merge_after=_page_can_merge_after(content),
                     )
                 )
         tables: list[dict[str, Any]] = []

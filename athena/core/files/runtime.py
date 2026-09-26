@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -457,21 +458,16 @@ class FileIntelligenceRuntime:
         overlap_tokens = min(max_tokens // 3, self.settings.file_chunk_overlap_tokens)
         chunks: list[FileChunk] = []
         ordinal = 0
-        for unit in units:
+        for group in self._group_units_for_chunking(units):
             # 二进制文档中的 NUL 不是可见文本，且 PostgreSQL TEXT 不允许保存；
             # 在分块前清理可使 token 计数和字符定位都对应最终落库内容。
-            content = unit.content.replace("\x00", "").strip()
+            content = "\n\n".join(unit.content for unit in group).replace("\x00", "").strip()
             if not content:
                 continue
             start = 0
             while start < len(content):
                 end = self._find_chunk_end(content, start, max_tokens)
-                # 优先在换行符处断开
-                if end < len(content):
-                    midpoint = start + (end - start) // 2
-                    boundary = content.rfind("\n", midpoint, end)
-                    if boundary > start:
-                        end = boundary
+                end = self._prefer_semantic_boundary(content, start, end)
                 piece = content[start:end].strip()
                 if piece:
                     token_count = self.secondary_llm.count_text_tokens(piece)
@@ -483,13 +479,11 @@ class FileIntelligenceRuntime:
                             content=piece,
                             token_count=token_count,
                             locator=FileLocator.model_validate(
-                                {
-                                    **unit.locator,
-                                    "char_start": start,
-                                    "char_end": end,
-                                }
+                                self._chunk_locator(group, start, end)
                             ),
-                            metadata=FileMetadata.model_validate(unit.metadata),
+                            metadata=FileMetadata.model_validate(
+                                self._group_metadata(group)
+                            ),
                         )
                     )
                     ordinal += 1
@@ -500,6 +494,80 @@ class FileIntelligenceRuntime:
                 )
                 start = max(start + 1, overlap_start)
         return chunks
+
+    @staticmethod
+    def _group_units_for_chunking(
+        units: list[ExtractedUnit],
+    ) -> list[list[ExtractedUnit]]:
+        groups: list[list[ExtractedUnit]] = []
+        current: list[ExtractedUnit] = []
+        for unit in units:
+            is_pdf_page = unit.kind == "page" or unit.metadata.get("kind") == "page"
+            if current and (
+                not is_pdf_page
+                or not current[-1].can_merge_after
+                or not unit.can_merge_before
+            ):
+                groups.append(current)
+                current = []
+            if not is_pdf_page:
+                groups.append([unit])
+            else:
+                current.append(unit)
+        if current:
+            groups.append(current)
+        return groups
+
+    @staticmethod
+    def _group_metadata(group: list[ExtractedUnit]) -> dict[str, Any]:
+        if len(group) == 1:
+            return dict(group[0].metadata)
+        return {
+            "kind": "pdf_document",
+            "ocr": any(bool(unit.metadata.get("ocr")) for unit in group),
+            "chunk_strategy": "pdf-semantic-v1",
+        }
+
+    @staticmethod
+    def _chunk_locator(
+        group: list[ExtractedUnit], start: int, end: int
+    ) -> dict[str, Any]:
+        if len(group) == 1:
+            locator = dict(group[0].locator)
+            page = locator.get("page")
+            if page is not None:
+                locator.setdefault("page_start", page)
+                locator.setdefault("page_end", page)
+            locator.update(char_start=start, char_end=end)
+            return locator
+        cursor = 0
+        pages: list[int] = []
+        for unit in group:
+            unit_start = cursor
+            cursor += len(unit.content) + 2
+            unit_end = cursor
+            if end > unit_start and start < unit_end:
+                page = unit.locator.get("page")
+                if isinstance(page, int):
+                    pages.append(page)
+        locator = {
+            "page_start": min(pages) if pages else None,
+            "page_end": max(pages) if pages else None,
+            "char_start": start,
+            "char_end": end,
+        }
+        return {key: value for key, value in locator.items() if value is not None}
+
+    @staticmethod
+    def _prefer_semantic_boundary(content: str, start: int, end: int) -> int:
+        if end >= len(content):
+            return end
+        midpoint = start + max(1, (end - start) // 2)
+        newline = content.rfind("\n", midpoint, end)
+        if newline > start:
+            return newline
+        matches = list(re.finditer(r"[。！？；!?;]\s*", content[midpoint:end]))
+        return midpoint + matches[-1].end() if matches else end
 
     def _find_chunk_end(self, content: str, start: int, max_tokens: int) -> int:
         """查找适合 token 预算的最长字符切片。"""
@@ -630,7 +698,20 @@ class FileIntelligenceRuntime:
                 "message": "图片未识别出可读取的 OCR 文本；如需描述图片画面，请使用 analyze_file，并确保视觉模型能力已启用。",
             }
         locator = locator or {}
-        for key in ("page", "sheet", "path"):
+        if "page" in locator:
+            requested_page = int(locator["page"])
+            page_chunks: list[FileChunk] = []
+            for chunk in chunks:
+                start_page = chunk.locator.page_start or chunk.locator.page
+                end_page = chunk.locator.page_end or chunk.locator.page
+                if (
+                    start_page is not None
+                    and end_page is not None
+                    and start_page <= requested_page <= end_page
+                ):
+                    page_chunks.append(chunk)
+            chunks = page_chunks
+        for key in ("sheet", "path"):
             if key in locator:
                 chunks = [
                     chunk

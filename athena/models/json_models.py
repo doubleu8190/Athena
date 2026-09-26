@@ -76,6 +76,10 @@ class FileLocator(ExtensibleJsonModel):
 
     path: str | None = None
     page: int | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    block_start: int | None = None
+    block_end: int | None = None
     paragraph: int | None = None
     sheet: str | None = None
     row: int | str | None = None

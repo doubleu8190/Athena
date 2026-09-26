@@ -47,14 +47,15 @@ class KnowledgeBaseRepository:
         now = _now_iso()
 
         async with get_session() as session:
-            row = KnowledgeBaseModel(
-                id=generate_time_id(),
-                name=name,
-                description=description,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(row)
+            async with session.begin():
+                row = KnowledgeBaseModel(
+                    id=generate_time_id(),
+                    name=name,
+                    description=description,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
         return self._to_domain(row, [])
 
     async def get(self, knowledge_base_id: str) -> KnowledgeBase | None:

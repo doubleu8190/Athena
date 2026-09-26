@@ -24,6 +24,9 @@ class SettingsView(BaseModel):
     postgres_host: str
     postgres_port: int
     chromadb_path: str
+    chroma_embedding_provider: str
+    chroma_embedding_model: str
+    chroma_embedding_version: str
 
     # Harness 执行引擎
     max_turns_per_run: int
@@ -69,6 +72,9 @@ async def get_settings_view() -> SettingsView:
         postgres_host=s.postgres_host,
         postgres_port=s.postgres_port,
         chromadb_path=s.chromadb_path,
+        chroma_embedding_provider=s.chroma_embedding_provider,
+        chroma_embedding_model=s.chroma_embedding_model,
+        chroma_embedding_version=s.chroma_embedding_version,
         max_turns_per_run=s.max_turns_per_run,
         retry_budget=s.retry_budget,
         tool_timeout=s.tool_timeout,

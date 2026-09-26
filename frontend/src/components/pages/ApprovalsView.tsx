@@ -25,6 +25,7 @@ const DECISION_META = {
   approved: { tone: "success", label: "通过" },
   denied: { tone: "danger", label: "拒绝" },
   timeout: { tone: "warning", label: "超时" },
+  cancelled: { tone: "default", label: "取消" },
 } as const
 
 const RISK_TONE = {

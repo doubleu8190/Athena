@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import json
-from typing import Any
+from typing import Any, Literal, cast
 
 from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
@@ -145,11 +145,8 @@ class LangGraphRuntime:
             llm=llm,
             tool_manager=tool_manager,
             db=db,
-            compressor=compressor,
             long_term_memory_summarizer=long_term_memory_summarizer,
             memory_job_repository=memory_job_repository,
-            settings=settings,
-            event_publisher=event_publisher,
         )
 
         # ── 直接依赖（用于附件处理、子 Agent、图组装） ──
@@ -184,7 +181,7 @@ class LangGraphRuntime:
             tool_manager=tool_manager,
             db=db,
             compressor=compressor,
-            events=event_publisher,
+            event_publisher=event_publisher,
             agent_store=agent_store,
             settings=settings,
             root_run_id="",
@@ -300,11 +297,18 @@ class LangGraphRuntime:
                 knowledge_base.model_dump(mode="json")
                 for knowledge_base in knowledge_bases
             ],
-            tool_names=self._tool_manager.list_names(),
+        )
+        logger.info(
+            "task_understanding_completed",
+            session_id=state.get("session_id", ""),
+            run_id=state.get("run_id", ""),
+            result=result,
         )
         update: AgentState = {
             "task_spec": result.task.model_dump(mode="json"),
-            "task_understanding_source": result.source,
+            "task_understanding_source": cast(
+                Literal["fast_path", "llm", "fallback"], result.source
+            ),
         }
         if result.task.requires_clarification:
             update["clarification_question"] = result.task.clarification_question
@@ -328,7 +332,7 @@ class LangGraphRuntime:
             timestamp=datetime.now(),
         )
         await self._db.messages.save(message)
-        await self._events.publish(
+        await self._event_publisher.publish(
             ApplicationEvent(
                 event_type=EventType.STREAM_END,
                 durability=EventDurability.DURABLE,
@@ -533,7 +537,7 @@ class LangGraphRuntime:
             task_count=len(tasks),
         )
 
-        await self._events.publish(
+        await self._event_publisher.publish(
             ApplicationEvent(
                 event_type=EventType.SUB_AGENT_SPAWNED,
                 durability=EventDurability.DURABLE,
@@ -619,7 +623,7 @@ class LangGraphRuntime:
             llm=self._llm,
             tool_manager=self._tool_manager,
             db=self._db,
-            event_publisher=self._events,
+            event_publisher=self._event_publisher,
             compressor=self._compressor,
             settings=self._settings,
             main_run_id=main_run_id,

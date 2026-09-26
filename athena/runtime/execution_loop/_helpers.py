@@ -33,5 +33,5 @@ def _executor(runtime: LangGraphRuntime) -> HarnessTurnExecutor:
         settings=runtime._settings,
         db=runtime._db,
         compressor=runtime._compressor,
-        event_publisher=runtime._events,
+        event_publisher=runtime._event_publisher,
     )

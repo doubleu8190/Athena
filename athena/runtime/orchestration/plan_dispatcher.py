@@ -31,7 +31,7 @@ class PlanDispatcher:
         self,
         db: Database,
         worker: WorkerExecutor,
-        events: OrchestrationEventPublisher,
+        event_publisher: OrchestrationEventPublisher,
         lease_owner: str = "dispatcher",
     ) -> None:
         """绑定任务账本和 Worker 执行器。
@@ -39,7 +39,7 @@ class PlanDispatcher:
         参数：
             db: 数据库门面，通过 ``db.orchestration`` 领取任务。
             worker: 执行单个任务的 Worker。
-            events: 编排生命周期事件发布器。
+            event_publisher: 编排生命周期事件发布器。
             lease_owner: 当前 PlanDispatcher 实例标识。
 
         返回值：
@@ -50,7 +50,7 @@ class PlanDispatcher:
         """
         self._db = db
         self._worker = worker
-        self._events = events
+        self._event_publisher = event_publisher
         self._lease_owner = lease_owner
         self._plan_id_to_session_id: dict[str, str] = {}
 
@@ -108,7 +108,7 @@ class PlanDispatcher:
                     TaskStatus.RUNNING,
                     worker_run_id=worker_run_id,
                 )
-                await self._events.publish_task(
+                await self._event_publisher.publish_task(
                     EventType.TASK_STARTED,
                     session_id=session_id,
                     plan_id=plan.plan_id,
@@ -134,7 +134,7 @@ class PlanDispatcher:
                     TaskStatus.RUNNING,
                     self._to_task_status(result.status),
                 )
-                await self._events.publish_task(
+                await self._event_publisher.publish_task(
                     EventType.TASK_COMPLETED
                     if result.status == "completed"
                     else EventType.TASK_FAILED,

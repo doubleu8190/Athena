@@ -34,7 +34,7 @@ class SessionContextService:
 
     def __init__(self, db: Database, event_publisher: EventPublisherPort):
         self._db = db
-        self._events = event_publisher
+        self._event_publisher = event_publisher
 
     async def load_and_validate_attachments(
         self,
@@ -119,7 +119,7 @@ class SessionContextService:
         persisted = await self._db.messages.create_message_with_attachments(
             message, state.get("attachment_ids", [])
         )
-        await self._events.publish(
+        await self._event_publisher.publish(
             ApplicationEvent(
                 event_type=EventType.MESSAGE_PERSISTED,
                 durability=EventDurability.DURABLE,

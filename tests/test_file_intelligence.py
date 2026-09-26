@@ -16,6 +16,7 @@ from athena.core.files.adapters import (
     TextAdapter,
     WordAdapter,
 )
+from athena.core.files.adapters.pdf import _clean_pdf_text
 from athena.core.files.extraction import ExtractedUnit, ExtractionContext
 from athena.core.files.adapter_registry import AdapterRegistry
 from athena.core.files.runtime import FileAccessError, FileIntelligenceRuntime
@@ -82,6 +83,12 @@ def _context(
         filename=filename or path.name,
         mime_type=mime_type,
     )
+
+
+def test_pdf_text_cleaner_decodes_textbook_pinyin_and_drops_hidden_trailer():
+    source = "小\nxiAo\n找\nzhAo\n阿\nQ\n\nNÅO\x9bN*Nº"
+
+    assert _clean_pdf_text(source) == "小\nxiǎo\n找\nzhǎo\n阿\nā"
 
 
 @pytest.mark.asyncio

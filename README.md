@@ -173,6 +173,10 @@ POSTGRES_PORT=5432
 POSTGRES_POOL_SIZE=10
 POSTGRES_MAX_OVERFLOW=10
 CHROMADB_PATH=./data/chromadb
+CHROMA_EMBEDDING_PROVIDER=sentence_transformers
+CHROMA_EMBEDDING_MODEL=paraphrase-multilingual-MiniLM-L12-v2
+CHROMA_EMBEDDING_DEVICE=cpu
+CHROMA_EMBEDDING_VERSION=v1
 FILE_STORAGE_PATH=./data/files
 
 MAX_TURNS_PER_RUN=20
@@ -191,6 +195,23 @@ SANDBOX_ENABLED=false
 `LLM_PROVIDERS` 是 JSON 数组，列表顺序决定 Provider 优先级。当前代码支持 `openai`、`anthropic`、`deepseek` 和 `ollama`；`ollama` 可以不填写 API Key，并可通过 `base_url` 指定地址。
 
 完整配置项和默认值请参见 [.env.example](.env.example) 与 [athena/config/settings.py](athena/config/settings.py)。文件上传大小、分块、并发、检索、上下文压缩、影子评估和审批等参数也都可以通过环境变量调整。
+
+Chroma 默认使用覆盖中文和英文的多语言 embedding 模型。切换 `CHROMA_EMBEDDING_MODEL`、`CHROMA_EMBEDDING_PROVIDER` 或版本后，先删除旧向量 collection，再重启应用让文件和记忆重新建立索引：
+
+```bash
+python scripts/reset_chroma_vectors.py --yes
+python scripts/rebuild_chroma_vectors.py
+```
+
+第一个命令只删除 `athena_file_chunks` 和 `athena_memory` 两个 Chroma collection，不删除 PostgreSQL 中的原始文件分块或记忆记录。第二个命令从 PostgreSQL 重新写入文件分块和长期记忆；完成后再启动或重启 Athena。
+
+可以用固定中文/中英混合评测集检查模型质量：
+
+```bash
+python scripts/evaluate_chinese_embedding.py
+```
+
+评测集位于 `tests/retrieval_eval/chinese_cases.json`，输出 Recall@K、HitRate@K、MRR 和 nDCG。更换模型后应保留旧结果并比较这些指标。
 
 ## API 与事件协议
 

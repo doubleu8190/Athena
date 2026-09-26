@@ -10,6 +10,7 @@ from athena.runtime.task_understanding import (
     UserTaskSpec,
     build_fast_path_task,
 )
+from athena.utils.prompt_loader import get_prompt
 
 
 class _FakeStructuredLLM:
@@ -60,6 +61,66 @@ async def test_task_understanding_uses_structured_llm_and_normalizes_requirement
     assert result.task.context_requirements == ["knowledge", "conversation", "file"]
     assert result.task.query_hints.memory is None
     assert result.task.query_hints.knowledge == "Athena 的设计文档怎么说？"
+
+
+@pytest.mark.asyncio
+async def test_task_understanding_preserves_llm_query_hints_per_provider():
+    llm = _FakeStructuredLLM(
+        result=UserTaskSpec(
+            goal="继续设计分数乘法练习课",
+            domain="lesson_planning",
+            mode="retrieve",
+            confidence=0.9,
+            context_requirements=["memory", "knowledge", "file"],
+            query_hints={
+                "memory": "五年级 分数乘法 教案风格 练习课",
+                "knowledge": "五年级数学 分数乘法 练习课 教学目标",
+                "file": "分数乘法 练习题 第三单元",
+            },
+        )
+    )
+    service = TaskUnderstandingService(llm)
+
+    result = await service.understand(
+        session_id="s1",
+        user_message=(
+            "请根据之前关于五年级数学分数乘法的教案，继续设计一节练习课，"
+            "并参考附件中的第三单元练习题。"
+        ),
+        attachment_refs=[{"id": "file-1", "filename": "练习题.docx", "status": "ready"}],
+    )
+
+    assert result.task.query_hints.memory == "五年级 分数乘法 教案风格 练习课"
+    assert result.task.query_hints.knowledge == "五年级数学 分数乘法 练习课 教学目标"
+    assert result.task.query_hints.file == "分数乘法 练习题 第三单元"
+
+
+@pytest.mark.asyncio
+async def test_task_understanding_falls_back_to_truncated_message_per_required_provider():
+    user_message = "查询关键术语 " + ("中文检索内容 " * 100)
+    llm = _FakeStructuredLLM(
+        result=UserTaskSpec(
+            goal="检索资料",
+            domain="resource_retrieval",
+            mode="retrieve",
+            confidence=0.7,
+            context_requirements=["memory", "knowledge", "file"],
+            query_hints={"memory": "", "knowledge": None, "file": ""},
+        )
+    )
+    service = TaskUnderstandingService(llm)
+
+    result = await service.understand(
+        session_id="s1",
+        user_message=user_message,
+        attachment_refs=[{"id": "file-1", "filename": "资料.pdf", "status": "ready"}],
+    )
+
+    expected = user_message[:500]
+    assert result.task.query_hints.memory == expected
+    assert result.task.query_hints.knowledge == expected
+    assert result.task.query_hints.file == expected
+    assert len(result.task.query_hints.memory) == 500
 
 
 @pytest.mark.asyncio
@@ -161,7 +222,6 @@ def test_task_understanding_prompt_uses_knowledge_base_metadata_and_trust_bounda
                 "ready_document_count": 3,
             }
         ],
-        tool_names=[],
     )
 
     assert "文档数量=" not in prompt
@@ -169,3 +229,13 @@ def test_task_understanding_prompt_uses_knowledge_base_metadata_and_trust_bounda
     assert "description=发布、回滚和应急处理流程" in prompt
     assert "ready_documents=3" in prompt
     assert "不可信的参考资料" in prompt
+
+
+def test_task_understanding_prompt_defines_provider_specific_query_rewriting():
+    prompt = get_prompt("task_understanding")
+
+    assert "query_hints.memory" in prompt
+    assert "query_hints.knowledge" in prompt
+    assert "query_hints.file" in prompt
+    assert "不要凭空添加事实" in prompt
+    assert "context_requirements" in prompt

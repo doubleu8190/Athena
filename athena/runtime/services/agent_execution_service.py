@@ -39,20 +39,14 @@ class AgentExecutionService:
         llm: LLMProvider,
         tool_manager: UnifiedToolManager,
         db: Database,
-        compressor: ContextCompressor,
         long_term_memory_summarizer: LongTermMemorySummarizer,
         memory_job_repository: MemoryJobRepository,
-        settings: Settings,
-        event_publisher: EventPublisherPort,
     ) -> None:
         self._llm = llm
         self._tool_manager = tool_manager
         self._db = db
-        self._compressor = compressor
         self._long_term_memory_summarizer = long_term_memory_summarizer
         self._memory_job_repository = memory_job_repository
-        self._settings = settings
-        self._events = event_publisher
 
     @staticmethod
     def _build_system_prompt(

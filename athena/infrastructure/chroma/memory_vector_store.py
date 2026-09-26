@@ -7,6 +7,11 @@ from typing import Any
 
 from chromadb.api import ClientAPI
 
+from athena.infrastructure.chroma.embedding import (
+    ChromaEmbeddingConfig,
+    get_or_create_collection,
+)
+
 
 class ChromaMemoryVectorStore:
     """基于 ChromaDB 的长期记忆向量存储适配器。"""
@@ -14,6 +19,7 @@ class ChromaMemoryVectorStore:
         self,
         path: str,
         collection_name: str = "athena_memory",
+        embedding_config: ChromaEmbeddingConfig | None = None,
     ) -> None:
         """
 
@@ -31,6 +37,8 @@ class ChromaMemoryVectorStore:
         self._client: ClientAPI | None = None
         self._collection_name = collection_name
         self._collection: Any | None = None
+        self._embedding_config = embedding_config
+        self._client_injected = False
 
     @classmethod
     def with_client(
@@ -38,10 +46,13 @@ class ChromaMemoryVectorStore:
         path: str,
         client: ClientAPI,
         collection_name: str = "athena_memory",
+        embedding_config: ChromaEmbeddingConfig | None = None,
     ) -> "ChromaMemoryVectorStore":
         """使用显式提供的 Chroma 客户端创建存储。"""
         store = cls(path=path, collection_name=collection_name)
         store._client = client
+        store._client_injected = True
+        store._embedding_config = embedding_config
         return store
 
     async def initialize(self) -> None:
@@ -59,9 +70,19 @@ class ChromaMemoryVectorStore:
             import chromadb
 
             self._client = chromadb.PersistentClient(path=self._path)
-        self._collection = self._client.get_or_create_collection(
-            name=self._collection_name,
-            metadata={"hnsw:space": "cosine"},
+        if self._client_injected and self._embedding_config is None:
+            # 测试替身不需要实际加载 embedding 模型。
+            self._collection = self._client.get_or_create_collection(
+                name=self._collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+            return
+        config = self._embedding_config or ChromaEmbeddingConfig(
+            provider="sentence_transformers",
+            model="paraphrase-multilingual-MiniLM-L12-v2",
+        )
+        self._collection = get_or_create_collection(
+            self._client, self._collection_name, config
         )
 
     @property

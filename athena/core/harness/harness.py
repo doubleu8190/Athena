@@ -134,7 +134,7 @@ class Harness:
         self._llm = llm
         self._tool_manager = tool_manager
         self._db = db
-        self._events = event_publisher
+        self._event_publisher = event_publisher
         self._compressor = compressor
         self._error_handler = error_handler or ToolErrorHandler()
         self._harness_settings = harness_settings or HarnessSettings(
@@ -243,11 +243,15 @@ class Harness:
             stream_id=self._answer_stream_id,
             stream_type="answer",
             message_id=self._message_id,
-            publish_realtime=self._events.publish_realtime,
+            publish_realtime=self._event_publisher.publish_realtime,
         )
         await self._emit(
             EventType.STREAM_START,
-            {"run_id": rid, "stream_id": self._answer_stream_id, "stream_type": "answer"},
+            {
+                "run_id": rid,
+                "stream_id": self._answer_stream_id,
+                "stream_type": "answer",
+            },
             session_id,
             rid,
         )
@@ -295,7 +299,9 @@ class Harness:
                 lc_messages: list[BaseMessage] = []
                 if system_prompt:
                     lc_messages.append(SystemMessage(content=system_prompt))
-                lc_messages.extend(dict_to_message(message) for message in domain_messages)
+                lc_messages.extend(
+                    dict_to_message(message) for message in domain_messages
+                )
 
                 # LLM 调用事件使用稳定的调用 ID 关联生命周期。
                 llm_call_id = generate_time_id()
@@ -550,7 +556,11 @@ class Harness:
                 rid,
             )
         except Exception as e:
-            error_msg = f"Harness 执行异常: {e}" if str(e) else f"Harness 执行异常: {type(e).__name__}"
+            error_msg = (
+                f"Harness 执行异常: {e}"
+                if str(e)
+                else f"Harness 执行异常: {type(e).__name__}"
+            )
             error_detail = ExecutionError.from_exception(
                 e,
                 code="harness_failed",
@@ -658,7 +668,10 @@ class Harness:
             async def ensure_tool_message(content: str, record_id: str) -> None:
                 message_id = self._tool_message_id(run_id, record_id)
                 get_message = getattr(self._db.messages, "get", None)
-                if get_message is not None and await get_message(message_id) is not None:
+                if (
+                    get_message is not None
+                    and await get_message(message_id) is not None
+                ):
                     return
                 await self._db.messages.save(
                     Message(
@@ -1071,7 +1084,9 @@ class Harness:
                         record_id,
                         duration_ms,
                     )
-                raise RuntimeError(error_message or f"工具 {current_tool_name} 执行失败")
+                raise RuntimeError(
+                    error_message or f"工具 {current_tool_name} 执行失败"
+                )
             except Exception as e:
                 last_error = e
                 last_stack = traceback.format_exc()
@@ -1220,7 +1235,11 @@ class Harness:
                 "error_detail": (
                     ExecutionError.from_legacy_value(
                         error,
-                        code="tool_timeout" if status == ToolCallStatus.TIMEOUT.value else "tool_failed",
+                        code=(
+                            "tool_timeout"
+                            if status == ToolCallStatus.TIMEOUT.value
+                            else "tool_failed"
+                        ),
                         retryable=status == ToolCallStatus.TIMEOUT.value,
                         phase="tool_execution",
                     ).model_dump(mode="json")
@@ -1351,24 +1370,35 @@ class Harness:
                 data.setdefault("message_id", self._message_id)
             if event_type == EventType.LLM_TOKEN:
                 if self._answer_stream is not None:
-                    await self._answer_stream.append(str(data.get("token", data.get("delta", ""))))
+                    await self._answer_stream.append(
+                        str(data.get("token", data.get("delta", "")))
+                    )
                 return
-            durability = EventDurability.REALTIME if event_type in {EventType.LLM_TOKEN} else EventDurability.DURABLE
-            await self._events.publish(ApplicationEvent(
-                event_type=event_type, durability=durability,
-                session_id=session_id,
-                run_id=run_id,
-                message_id=self._message_id,
-                stream_id=str(data["stream_id"]) if data.get("stream_id") else None,
-                stream_type=str(data["stream_type"]) if data.get("stream_type") else None,
-                parent_run_id=self._parent_run_id,
-                transition_id=(
-                    str(data["transition_id"])
-                    if data.get("transition_id")
-                    else self._event_transition_id(event_type, data)
-                ),
-                payload=data,
-            ))
+            durability = (
+                EventDurability.REALTIME
+                if event_type in {EventType.LLM_TOKEN}
+                else EventDurability.DURABLE
+            )
+            await self._event_publisher.publish(
+                ApplicationEvent(
+                    event_type=event_type,
+                    durability=durability,
+                    session_id=session_id,
+                    run_id=run_id,
+                    message_id=self._message_id,
+                    stream_id=str(data["stream_id"]) if data.get("stream_id") else None,
+                    stream_type=(
+                        str(data["stream_type"]) if data.get("stream_type") else None
+                    ),
+                    parent_run_id=self._parent_run_id,
+                    transition_id=(
+                        str(data["transition_id"])
+                        if data.get("transition_id")
+                        else self._event_transition_id(event_type, data)
+                    ),
+                    payload=data,
+                )
+            )
         except Exception as e:
             logger.warning(
                 "emit_event_failed", event_type=str(event_type), error=str(e)
@@ -1388,7 +1418,7 @@ class Harness:
         """
         stream_id = f"thinking-{run_id}"
         try:
-            await self._events.publish(
+            await self._event_publisher.publish(
                 ApplicationEvent(
                     event_type=event_type,
                     durability=EventDurability.DURABLE,
@@ -1408,12 +1438,12 @@ class Harness:
                 )
             )
         except Exception as exc:
-            logger.warning("emit_thinking_failed", event_type=str(event_type), error=str(exc))
+            logger.warning(
+                "emit_thinking_failed", event_type=str(event_type), error=str(exc)
+            )
 
     @staticmethod
-    def _event_transition_id(
-        event_type: EventType, data: dict[str, Any]
-    ) -> str | None:
+    def _event_transition_id(event_type: EventType, data: dict[str, Any]) -> str | None:
         """Derive stable IDs for low-frequency lifecycle events."""
         if event_type in {EventType.LLM_CALL_START, EventType.LLM_CALL_END}:
             call_id = data.get("call_id")

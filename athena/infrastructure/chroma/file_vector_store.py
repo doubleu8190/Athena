@@ -11,6 +11,10 @@ import chromadb
 from chromadb.api import ClientAPI
 
 from athena.core.files.ports import FileVectorStore
+from athena.infrastructure.chroma.embedding import (
+    ChromaEmbeddingConfig,
+    get_or_create_collection,
+)
 from athena.models.json_models import FileLocator
 
 
@@ -21,13 +25,17 @@ class ChromaFileVectorStore(FileVectorStore):
         self,
         path: str,
         collection_name: str = "athena_file_chunks",
+        embedding_config: ChromaEmbeddingConfig | None = None,
     ) -> None:
         self._path = path
         self._collection_name = collection_name
         self._client: ClientAPI = chromadb.PersistentClient(path=self._path)
-        self._collection: chromadb.Collection = self._client.get_or_create_collection(
-            name=self._collection_name,
-            metadata={"hnsw:space": "cosine"},
+        config = embedding_config or ChromaEmbeddingConfig(
+            provider="sentence_transformers",
+            model="paraphrase-multilingual-MiniLM-L12-v2",
+        )
+        self._collection: chromadb.Collection = get_or_create_collection(
+            self._client, self._collection_name, config
         )
 
     async def replace_attachment(

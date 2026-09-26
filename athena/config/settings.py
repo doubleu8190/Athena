@@ -120,6 +120,13 @@ class Settings(BaseSettings):
     postgres_pool_size: int = Field(default=10, ge=1)
     postgres_max_overflow: int = Field(default=10, ge=0)
     chromadb_path: str = "./data/chromadb"
+    # Chroma 向量模型。默认模型覆盖中文和英文，避免使用 Chroma 的英文默认模型。
+    chroma_embedding_provider: str = "sentence_transformers"
+    chroma_embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
+    chroma_embedding_device: str = "cpu"
+    chroma_embedding_version: str = "v1"
+    chroma_embedding_api_key: str = ""
+    chroma_embedding_base_url: str = ""
 
     # --- 文件智能 ---
     file_storage_path: str = "./data/files"

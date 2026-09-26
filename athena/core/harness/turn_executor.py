@@ -140,7 +140,7 @@ class HarnessTurnExecutor(Harness):
             stream_id=self._answer_stream_id,
             stream_type="answer",
             message_id=message_id,
-            publish_realtime=self._events.publish_realtime,
+            publish_realtime=self._event_publisher.publish_realtime,
             initial_version=stream_version,
             initial_offset=stream_offset,
         )
@@ -386,7 +386,10 @@ class HarnessTurnExecutor(Harness):
             )
         except Exception as exc:
             return await self._failed_llm_outcome(
-                context, f"LLM 调用失败: {exc}", failure_detail=str(exc), failure_exception=exc
+                context,
+                f"LLM 调用失败: {exc}",
+                failure_detail=str(exc),
+                failure_exception=exc,
             )
 
     async def _compress_messages(
@@ -537,7 +540,11 @@ class HarnessTurnExecutor(Harness):
         detail = (
             ExecutionError.from_exception(
                 failure_exception,
-                code="llm_timeout" if isinstance(failure_exception, TimeoutError) else "llm_call_failed",
+                code=(
+                    "llm_timeout"
+                    if isinstance(failure_exception, TimeoutError)
+                    else "llm_call_failed"
+                ),
                 retryable=retryable,
                 phase="llm_call",
             )
@@ -657,7 +664,13 @@ class HarnessTurnExecutor(Harness):
                 messages=message_dicts,
                 content=content,
                 error="submit_plan 只能由顶层 Agent 调用",
-                error_detail=ExecutionError(code="invalid_plan_submission", message="submit_plan 只能由顶层 Agent 调用", error_type="PlanProtocolError", retryable=False, phase="llm_call"),
+                error_detail=ExecutionError(
+                    code="invalid_plan_submission",
+                    message="submit_plan 只能由顶层 Agent 调用",
+                    error_type="PlanProtocolError",
+                    retryable=False,
+                    phase="llm_call",
+                ),
                 retryable=False,
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,
@@ -668,7 +681,13 @@ class HarnessTurnExecutor(Harness):
                 messages=message_dicts,
                 content=content,
                 error="submit_plan 不能与普通工具调用混用",
-                error_detail=ExecutionError(code="invalid_plan_submission", message="submit_plan 不能与普通工具调用混用", error_type="PlanProtocolError", retryable=False, phase="llm_call"),
+                error_detail=ExecutionError(
+                    code="invalid_plan_submission",
+                    message="submit_plan 不能与普通工具调用混用",
+                    error_type="PlanProtocolError",
+                    retryable=False,
+                    phase="llm_call",
+                ),
                 retryable=False,
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,
@@ -683,7 +702,12 @@ class HarnessTurnExecutor(Harness):
                 messages=message_dicts,
                 content=content,
                 error=f"submit_plan 参数无效: {exc}",
-                error_detail=ExecutionError.from_exception(exc, code="invalid_plan_submission", retryable=False, phase="llm_call"),
+                error_detail=ExecutionError.from_exception(
+                    exc,
+                    code="invalid_plan_submission",
+                    retryable=False,
+                    phase="llm_call",
+                ),
                 retryable=False,
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,

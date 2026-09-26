@@ -37,19 +37,20 @@ class RetrievalTraceRepository:
         now = _now_iso()
 
         async with get_session() as session:
-            row = RetrievalRunModel(
-                run_id=run_id,
-                query=request.query,
-                scope=request.scope,
-                status="running",
-                config_json=_json_dumps(request.config),
-                index_generation=request.index_generation,
-                session_id=request.session_id,
-                agent_run_id=request.agent_run_id,
-                message_id=request.message_id,
-                created_at=now,
-            )
-            session.add(row)
+            async with session.begin():
+                row = RetrievalRunModel(
+                    run_id=run_id,
+                    query=request.query,
+                    scope=request.scope,
+                    status="running",
+                    config_json=_json_dumps(request.config),
+                    index_generation=request.index_generation,
+                    session_id=request.session_id,
+                    agent_run_id=request.agent_run_id,
+                    message_id=request.message_id,
+                    created_at=now,
+                )
+                session.add(row)
         return run_id
 
     async def record_candidates(

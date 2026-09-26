@@ -20,9 +20,9 @@ logger = get_logger(__name__)
 class PlanMaterializer:
     """只负责处理顶层 Agent LLM 已经决定提交的执行计划。"""
 
-    def __init__(self, db: Database, events: OrchestrationEventPublisher) -> None:
+    def __init__(self, db: Database, event_publisher: OrchestrationEventPublisher) -> None:
         self._db = db
-        self._events = events
+        self._event_publisher = event_publisher
 
     async def materialize_submission(
         self,
@@ -66,7 +66,7 @@ class PlanMaterializer:
             max_parallelism=draft.max_parallelism,
         )
         await self._db.orchestration.create_plan(session_id, plan)
-        await self._events.publish_plan(
+        await self._event_publisher.publish_plan(
             EventType.PLAN_CREATED,
             session_id=session_id,
             plan_id=plan.plan_id,

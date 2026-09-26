@@ -375,7 +375,7 @@ export interface MemoryListResponse {
 
 // ─── 审批日志 ────────────────────────────────────────────────────
 
-export type ApprovalDecision = "approved" | "denied" | "timeout"
+export type ApprovalDecision = "approved" | "denied" | "timeout" | "cancelled"
 
 export interface ApprovalLog {
   id: string

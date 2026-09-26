@@ -952,6 +952,49 @@ class AgentStore:
             result = await db.execute(query.order_by(ApprovalRecordModel.created_at))
             return list(result.scalars())
 
+    async def list_approval_history(
+        self,
+        *,
+        session_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ApprovalRecordModel]:
+        """分页查询已完成的审批记录。
+
+        参数：
+            session_id: 可选会话标识；为空时查询全部会话。
+            limit: 返回数量上限。
+            offset: 分页偏移量。
+
+        返回值：
+            list[ApprovalRecordModel]: 按创建时间倒序排列的审批记录。
+
+        异常：
+            数据库查询失败时传播 SQLAlchemy 异常。
+        """
+        async with get_session() as db:
+            query = select(ApprovalRecordModel).where(
+                ApprovalRecordModel.status == AgentApprovalStatus.RESOLVED.value
+            )
+            if session_id:
+                query = query.where(ApprovalRecordModel.session_id == session_id)
+            result = await db.execute(
+                query.order_by(ApprovalRecordModel.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            return list(result.scalars())
+
+    async def list_resolved_approvals(self) -> list[ApprovalRecordModel]:
+        """读取全部已完成审批记录，用于统计审批结果。"""
+        async with get_session() as db:
+            result = await db.execute(
+                select(ApprovalRecordModel)
+                .where(ApprovalRecordModel.status == AgentApprovalStatus.RESOLVED.value)
+                .order_by(ApprovalRecordModel.created_at.desc())
+            )
+            return list(result.scalars())
+
     async def resolve_approval(
         self, approval_id: str, decision: AgentApprovalDecision
     ) -> bool:

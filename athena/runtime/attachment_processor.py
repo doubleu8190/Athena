@@ -78,7 +78,7 @@ class AttachmentProcessor(
                 status=AttachmentStatus.PROCESSING.value,
                 error_message=None,
             )
-        await self._runtime._events.publish(
+        await self._runtime._event_publisher.publish(
             ApplicationEvent(
                 event_type=EventType.FILE_PROCESSING_STARTED,
                 durability=EventDurability.DURABLE,

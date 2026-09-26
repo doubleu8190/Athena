@@ -100,7 +100,7 @@ class SubAgentManager:
         self._llm = llm
         self._tool_manager = tool_manager
         self._db = db
-        self._events = event_publisher
+        self._event_publisher = event_publisher
         self._compressor = compressor
         self._settings = settings
         self._main_run_id = main_run_id
@@ -157,9 +157,9 @@ class SubAgentManager:
             sub_run_id, AgentRunStatus.RUNNING
         )
 
-        await self._events.publish(
+        await self._event_publisher.publish(
             ApplicationEvent(
-                event_type=EventType.SUB_AGENT_STARTED,
+                event_type=EventType.SUB_AGENT_SPAWNED,
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=sub_run_id,
@@ -179,7 +179,7 @@ class SubAgentManager:
             tool_manager=self._tool_manager,
             settings=self._settings,
             db=self._db,
-            event_publisher=self._events,
+            event_publisher=self._event_publisher,
             compressor=self._compressor,
             harness_settings=HarnessSettings(
                 max_turns_per_run=max_turns,
@@ -218,7 +218,7 @@ class SubAgentManager:
                 ),
                 result.error,
             )
-            await self._events.publish(
+            await self._event_publisher.publish(
                 ApplicationEvent(
                     event_type=EventType.SUB_AGENT_COMPLETE,
                     durability=EventDurability.DURABLE,
@@ -237,7 +237,7 @@ class SubAgentManager:
             await self._agent_store.update_run_status(
                 sub_run_id, AgentRunStatus.FAILED, str(e)
             )
-            await self._events.publish(
+            await self._event_publisher.publish(
                 ApplicationEvent(
                     event_type=EventType.SUB_AGENT_FAILED,
                     durability=EventDurability.DURABLE,

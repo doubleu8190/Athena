@@ -141,6 +141,7 @@ async def lifespan(app: FastAPI):
     # ── 5.1 文件智能 ──
     from athena.core.files.runtime import FileIntelligenceRuntime
     from athena.infrastructure.chroma.file_vector_store import ChromaFileVectorStore
+    from athena.infrastructure.chroma.embedding import embedding_config_from_settings
     from athena.core.tools.catalog import ToolRegistry
     from athena.core.tools.providers.files import build_file_tool_specs
 
@@ -151,7 +152,10 @@ async def lifespan(app: FastAPI):
         settings=settings,
         event_publisher=event_publisher,
         trace_writer=db.retrieval,
-        vector_store=ChromaFileVectorStore(path=str(settings.chroma_path)),
+        vector_store=ChromaFileVectorStore(
+            path=str(settings.chroma_path),
+            embedding_config=embedding_config_from_settings(settings),
+        ),
     )
     await file_runtime.initialize()
 
@@ -184,7 +188,10 @@ async def lifespan(app: FastAPI):
     memory_service = LongTermMemoryService(
         settings=settings,
         repository=PostgresMemoryRepository(),
-        vector_store=ChromaMemoryVectorStore(path=str(settings.chroma_path)),
+        vector_store=ChromaMemoryVectorStore(
+            path=str(settings.chroma_path),
+            embedding_config=embedding_config_from_settings(settings),
+        ),
     )
     try:
         await memory_service.initialize()

@@ -23,7 +23,7 @@ class EventType(StrEnum):
     AGENT_WAITING_FILE = "agent.waiting_for_files"
     SUB_AGENT_COMPLETE = "subagent.completed"
     SUB_AGENT_FAILED = "subagent.failed"
-    SUB_AGENT_SPAWNED = "subagent.started"
+    SUB_AGENT_SPAWNED = "subagent.spawned"
     PLAN_CREATED = "plan.created"
     PLAN_COMPLETED = "plan.completed"
     PLAN_FAILED = "plan.failed"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from athena.config.settings import Settings
 from athena.contracts.ports import AgentStorePort, EventPublisherPort
 from athena.contracts.statuses import AgentRunStatus
 from athena.core.compression.compressor import ContextCompressor
@@ -43,9 +44,9 @@ class WorkerExecutor:
         tool_manager: UnifiedToolManager,
         db: Database,
         compressor: ContextCompressor,
-        events: EventPublisherPort,
+        event_publisher: EventPublisherPort,
         agent_store: AgentStorePort,
-        settings: Any,
+        settings: Settings,
         root_run_id: str,
     ) -> None:
         """绑定 Worker 运行所需的依赖。
@@ -56,7 +57,7 @@ class WorkerExecutor:
             tool_manager: 当前 Runtime 的统一工具管理器。
             db: 数据库门面。
             compressor: 上下文压缩器，在每轮 LLM 调用前压缩消息列表。
-            events: 应用事件发布器。
+            event_publisher: 应用事件发布器。
             agent_store: 用于创建和更新独立 Worker Run。
             settings: 全局配置。
             root_run_id: Worker 所属的 Root Run 标识。
@@ -72,7 +73,7 @@ class WorkerExecutor:
         self._tool_manager = tool_manager
         self._db = db
         self._compressor = compressor
-        self._events = events
+        self._event_publisher = event_publisher
         self._agent_store = agent_store
         self._settings = settings
         self._root_run_id = root_run_id
@@ -128,7 +129,7 @@ class WorkerExecutor:
             settings=self._settings,
             db=self._db,
             compressor=self._compressor,
-            event_publisher=self._events,
+            event_publisher=self._event_publisher,
             harness_settings=HarnessSettings(
                 max_turns_per_run=task.max_turns,
                 tool_timeout=self._settings.tool_timeout,

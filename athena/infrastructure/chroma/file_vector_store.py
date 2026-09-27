@@ -11,6 +11,7 @@ import chromadb
 from chromadb.api import ClientAPI
 
 from athena.core.files.ports import FileVectorStore
+from athena.core.files.contracts import FileRetrievalCandidate
 from athena.core.llm.tokens import EmbeddingTokenCounter, conservative_text_token_count
 from athena.infrastructure.chroma.embedding import (
     ChromaEmbeddingConfig,
@@ -78,7 +79,7 @@ class ChromaFileVectorStore(FileVectorStore):
         query: str,
         limit: int,
         where: Mapping[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[FileRetrievalCandidate]:
         kwargs: dict[str, Any] = {
             "query_texts": [query],
             "n_results": limit,
@@ -91,7 +92,7 @@ class ChromaFileVectorStore(FileVectorStore):
         documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
-        items: list[dict[str, Any]] = []
+        items: list[FileRetrievalCandidate] = []
         for item_id, document, raw_metadata, distance in zip(
             ids, documents, metadatas, distances
         ):
@@ -108,19 +109,18 @@ class ChromaFileVectorStore(FileVectorStore):
             except Exception:
                 locator = {}
             items.append(
-                {
-                    "id": str(item_id),
-                    "content": document,
-                    "locator": locator,
-                    "metadata": metadata,
-                    "attachment_id": metadata.get("attachment_id", ""),
-                    "document_version": metadata.get("document_version"),
-                    "native_score": (
+                FileRetrievalCandidate(
+                    source_id=str(item_id),
+                    content=str(document or ""),
+                    locator=locator,
+                    metadata=metadata,
+                    attachment_id=str(metadata.get("attachment_id", "")),
+                    document_version=metadata.get("document_version"),
+                    vector_score=(
                         1.0 - float(distance)
                         if distance is not None
                         else None
                     ),
-                }
+                )
             )
-            items[-1]["score"] = items[-1]["native_score"]
         return items

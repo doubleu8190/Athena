@@ -140,6 +140,7 @@ async def lifespan(app: FastAPI):
 
     # ── 5.1 文件智能 ──
     from athena.core.files.runtime import FileIntelligenceRuntime
+    from athena.core.files.reranking import CrossEncoderFileReranker
     from athena.infrastructure.chroma.file_vector_store import ChromaFileVectorStore
     from athena.infrastructure.chroma.embedding import embedding_config_from_settings
     from athena.core.tools.catalog import ToolRegistry
@@ -149,6 +150,21 @@ async def lifespan(app: FastAPI):
         path=str(settings.chroma_path),
         embedding_config=embedding_config_from_settings(settings),
     )
+    file_reranker = None
+    if settings.file_rerank_enabled:
+        file_reranker = CrossEncoderFileReranker(
+            settings.file_rerank_model,
+            batch_size=settings.file_rerank_batch_size,
+            max_chars=settings.file_rerank_max_chars,
+            device=settings.file_rerank_device,
+        )
+        try:
+            await file_reranker.initialize()
+        except Exception:
+            if settings.file_rerank_required:
+                raise
+            logger.exception("file_reranker_initialization_failed_fallback_enabled")
+            file_reranker = None
     file_runtime = FileIntelligenceRuntime(
         db.files,
         llm_primary,
@@ -158,6 +174,7 @@ async def lifespan(app: FastAPI):
         trace_writer=db.retrieval,
         vector_store=file_vector_store,
         file_token_counter=file_vector_store.token_counter,
+        reranker=file_reranker,
     )
     await file_runtime.initialize()
 

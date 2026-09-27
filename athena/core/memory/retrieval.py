@@ -561,7 +561,7 @@ class MemoryRetrievalService:
 
     def __init__(
         self,
-        retrieval_manager: HybridMemoryRetriever,
+        memory_retriever: HybridMemoryRetriever,
         token_counter: TokenCounter,
         settings: Settings,
     ) -> None:
@@ -578,7 +578,7 @@ class MemoryRetrievalService:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        self._manager = retrieval_manager
+        self._memory_retriever = memory_retriever
         self._token_counter = token_counter
         self._max_tokens = settings.memory_max_tokens
 
@@ -606,7 +606,7 @@ class MemoryRetrievalService:
                 }.items()
                 if value is not None
             }
-            results = await self._manager.retrieve(
+            results = await self._memory_retriever.retrieve(
                 query=request.query, mode=request.mode, **trace_kwargs
             )
         except Exception as e:
@@ -649,7 +649,7 @@ class MemoryRetrievalService:
         if not selected:
             return []
         if record_access:
-            self._manager.record_selected_access(selected_ids)
+            self._memory_retriever.record_selected_access(selected_ids)
         return selected
 
     def record_selected_access(self, memory_ids: Iterable[str]) -> None:
@@ -664,4 +664,4 @@ class MemoryRetrievalService:
         异常：
             底层记忆服务不支持访问统计时传播属性错误。
         """
-        self._manager.record_selected_access(memory_ids)
+        self._memory_retriever.record_selected_access(memory_ids)

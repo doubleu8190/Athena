@@ -31,6 +31,8 @@ from athena.core.retrieval import RetrievalCandidate, RetrievalRunRequest
 from athena.core.retrieval.ports import RetrievalTraceWriter
 from athena.core.files.extraction import ExtractedUnit, ExtractionContext
 from athena.core.files.ports import FileVectorStore
+from athena.core.files.ports import FileReranker
+from athena.core.files.contracts import FileRetrievalCandidate
 from athena.core.files.attachment_serialization import attachment_to_payload
 from athena.core.files.adapter_registry import AdapterRegistry
 from athena.infrastructure.postgre.repositories.file_repository import FileRepository
@@ -96,6 +98,7 @@ class FileIntelligenceRuntime:
         trace_writer: RetrievalTraceWriter,
         vector_store: FileVectorStore,
         file_token_counter: EmbeddingTokenCounter | None = None,
+        reranker: FileReranker | None = None,
     ) -> None:
         """
 
@@ -123,6 +126,7 @@ class FileIntelligenceRuntime:
         self._event_publisher = event_publisher
         self._trace_writer = trace_writer
         self._vector_store = vector_store
+        self._reranker = reranker
         self.file_token_counter = file_token_counter or EmbeddingTokenCounter(
             conservative_text_token_count
         )
@@ -175,6 +179,8 @@ class FileIntelligenceRuntime:
         await self.repository.sync_adapters(
             adapter.info for adapter in self.adapter_registry.list()
         )
+        if self._reranker is not None:
+            await self._reranker.initialize()
 
     async def cleanup_unreferenced_blobs(self) -> int:
         """回收无引用的内容寻址 blob（附件软删除后调用）。
@@ -773,6 +779,8 @@ class FileIntelligenceRuntime:
                     config={
                         "file_id": file_id,
                         "limit": limit,
+                        "candidate_k": self.settings.file_rerank_candidate_k,
+                        "rerank_k": self.settings.file_rerank_k,
                         "fusion": "rrf",
                         "rrf_k": 60,
                     },
@@ -795,13 +803,27 @@ class FileIntelligenceRuntime:
             )
             return self._failed_file_search_response(attachment, query)
 
-        limit = min(max(limit, 1), 50)
+        # API 调用方的 limit 仍然是最终返回上限；上下文 Provider 会自行传入更小的 limit。
+        result_k = min(max(limit, 1), 50)
+        candidate_k = max(result_k, self.settings.file_rerank_candidate_k)
+        rerank_k = min(candidate_k, self.settings.file_rerank_k)
         try:
-            keyword = await self._search_file_keywords(file_id, query, limit)
-            vector = await self._search_file_vectors(file_id, query, limit)
-            ordered = self._fuse_file_results(keyword, vector, limit)
-            for item in ordered:
-                item["document_version"] = attachment.document_version
+            keyword = await self._search_file_keywords(file_id, query, candidate_k)
+            vector = await self._search_file_vectors(file_id, query, candidate_k)
+            fused = self._fuse_file_results(
+                keyword,
+                vector,
+                candidate_k,
+                source_title=attachment.filename,
+                document_version=attachment.document_version,
+            )
+            reranked = await self._rerank_file_results(
+                query, fused[:rerank_k], rerank_k
+            )
+            ordered = reranked[:result_k]
+            selected_ids = {item.source_id for item in ordered}
+            for item in fused:
+                item.selected_for_result = item.source_id in selected_ids
         except asyncio.CancelledError:
             await self._complete_retrieval_trace(
                 run_id,
@@ -826,13 +848,13 @@ class FileIntelligenceRuntime:
                     provider="keyword",
                     stage="native",
                     source_type="chunk",
-                    source_id=chunk.id,
+                    source_id=chunk.source_id,
                     native_rank=rank,
-                    native_score=chunk.native_score,
+                    native_score=chunk.keyword_score,
                     content_preview=chunk.content,
                     source_title=attachment.filename,
                     metadata={"document_version": attachment.document_version},
-                    locator=chunk.locator.model_dump(mode="json", exclude_none=True),
+                    locator=chunk.locator,
                 )
                 for rank, chunk in enumerate(keyword, 1)
             ]
@@ -841,13 +863,13 @@ class FileIntelligenceRuntime:
                     provider="vector",
                     stage="native",
                     source_type="chunk",
-                    source_id=str(item.get("id", "")),
+                    source_id=item.source_id,
                     native_rank=rank,
-                    native_score=item.get("native_score"),
-                    content_preview=str(item.get("content", "")),
+                    native_score=item.vector_score,
+                    content_preview=item.content,
                     source_title=attachment.filename,
                     metadata={"document_version": attachment.document_version},
-                    locator=item.get("locator", {}),
+                    locator=item.locator,
                 )
                 for rank, item in enumerate(vector, 1)
             )
@@ -856,28 +878,48 @@ class FileIntelligenceRuntime:
                     provider="fusion",
                     stage="fused",
                     source_type="chunk",
-                    source_id=str(item.get("id", "")),
-                    fused_rank=rank,
-                    fused_score=item.get("fused_score"),
-                    selected_for_result=True,
-                    content_preview=str(item.get("content", "")),
+                    source_id=item.source_id,
+                    fused_rank=item.fused_rank or rank,
+                    fused_score=item.fused_score,
+                    selected_for_result=item.selected_for_result,
+                    content_preview=item.content,
                     source_title=attachment.filename,
-                    locator=item.get("locator", {}),
+                    locator=item.locator,
                     metadata={
                         "document_version": attachment.document_version,
-                        "keyword_rank": item.get("keyword_rank"),
-                        "vector_rank": item.get("vector_rank"),
+                        "keyword_rank": item.keyword_rank,
+                        "vector_rank": item.vector_rank,
+                        "keyword_score": item.keyword_score,
+                        "vector_score": item.vector_score,
                     },
                 )
-                for rank, item in enumerate(ordered, 1)
+                for rank, item in enumerate(fused, 1)
+            ]
+            reranked_candidates = [
+                RetrievalCandidate(
+                    provider="reranker",
+                    stage="reranked",
+                    source_type="chunk",
+                    source_id=item.source_id,
+                    fused_rank=item.fused_rank,
+                    fused_score=item.fused_score,
+                    rerank_rank=item.rerank_rank,
+                    rerank_score=item.rerank_score,
+                    selected_for_result=item.selected_for_result,
+                    content_preview=item.content,
+                    source_title=attachment.filename,
+                    locator=item.locator,
+                    metadata={"document_version": attachment.document_version},
+                )
+                for item in reranked
             ]
             await self._trace_writer.record_candidates(
-                run_id, [*raw_candidates, *fused_candidates]
+                run_id, [*raw_candidates, *fused_candidates, *reranked_candidates]
             )
             await self._complete_retrieval_trace(
                 run_id,
                 started,
-                candidate_count=len(ordered),
+                candidate_count=len(fused),
                 selected_count=len(ordered),
                 status="succeeded",
             )
@@ -886,14 +928,17 @@ class FileIntelligenceRuntime:
             await self._complete_retrieval_trace(
                 run_id,
                 started,
-                candidate_count=len(ordered),
+                candidate_count=len(fused),
                 selected_count=len(ordered),
                 status="partial",
                 error_message=str(exc),
             )
         for item in ordered:
-            item["retrieval_run_id"] = run_id
-        response: dict[str, Any] = {"query": query, "results": ordered}
+            item.retrieval_run_id = run_id
+        response: dict[str, Any] = {
+            "query": query,
+            "results": [item.to_dict() for item in ordered],
+        }
         if not ordered and attachment.adapter_name == "image":
             response["message"] = (
                 "图片没有可搜索的 OCR 文本；搜索工具无法检索视觉元素，请改用 analyze_file。"
@@ -922,7 +967,9 @@ class FileIntelligenceRuntime:
         异常：
             PostgreSQL 读取失败时向上抛出；向量检索失败时降级为关键词结果。
         """
-        limit = min(max(limit, 1), 50)
+        result_k = min(max(limit, 1), self.settings.knowledge_result_k, 50)
+        candidate_k = max(result_k, self.settings.knowledge_rerank_candidate_k)
+        rerank_k = min(candidate_k, self.settings.knowledge_rerank_k)
         if knowledge_base_ids is not None:
             documents = await self.repository.list_knowledge_ready_documents(
                 knowledge_base_ids
@@ -938,7 +985,13 @@ class FileIntelligenceRuntime:
                 RetrievalRunRequest(
                     query=query,
                     scope="knowledge",
-                    config={"limit": limit, "fusion": "rrf", "rrf_k": 60},
+                    config={
+                        "limit": result_k,
+                        "candidate_k": candidate_k,
+                        "rerank_k": rerank_k,
+                        "fusion": "rrf",
+                        "rrf_k": 60,
+                    },
                     index_generation="file_chunks/current",
                     session_id=session_id,
                     agent_run_id=agent_run_id,
@@ -951,33 +1004,44 @@ class FileIntelligenceRuntime:
         vector_error: str | None = None
         try:
             keyword = [
-                chunk
+                FileRetrievalCandidate(
+                    source_id=chunk.id,
+                    content=chunk.content,
+                    attachment_id=chunk.attachment_id,
+                    locator=chunk.locator.model_dump(mode="json", exclude_none=True),
+                    keyword_score=chunk.native_score,
+                )
                 for chunk in await self.repository.search_knowledge_chunks(
-                    query, allowed_documents, limit
+                    query, allowed_documents, candidate_k
                 )
                 if chunk.attachment_id in allowed_documents
             ]
-            vector: list[dict[str, Any]] = []
+            vector: list[FileRetrievalCandidate] = []
             try:
-                vector = await self._vector_store.query(query, max(limit * 3, limit))
+                vector = await self._vector_store.query(query, candidate_k)
             except Exception as exc:
                 vector_error = str(exc)
                 logger.warning("knowledge_vector_search_failed", error=vector_error)
             live_ids = allowed_documents
             vector_before_filter = list(vector)
-            vector = [
-                item
-                for item in vector
-                if str(item.get("attachment_id", "")) in live_ids
-            ]
-            fused = self._fuse_file_results(keyword, vector, limit)
+            vector = [item for item in vector if item.attachment_id in live_ids]
+            fused_pool = self._fuse_file_results(keyword, vector, candidate_k)
             document_versions = {
                 document.id: document.document_version for document in documents
             }
-            for item in fused:
-                item["document_version"] = document_versions.get(
-                    str(item.get("attachment_id", ""))
-                )
+            titles = {document.id: document.filename for document in documents}
+            for item in fused_pool:
+                item.document_version = document_versions.get(item.attachment_id)
+                item.source_title = titles.get(item.attachment_id)
+            reranked = await self._rerank_file_results(
+                query, fused_pool[:rerank_k], rerank_k
+            )
+            selected_ids = {item.source_id for item in reranked[:result_k]}
+            for item in fused_pool:
+                item.selected_for_result = item.source_id in selected_ids
+            selected_results = self._diversify_knowledge_results(
+                reranked, result_k, max_per_document=3
+            )
         except asyncio.CancelledError:
             await self._complete_retrieval_trace(
                 run_id,
@@ -1002,11 +1066,11 @@ class FileIntelligenceRuntime:
                     provider="keyword",
                     stage="native",
                     source_type="chunk",
-                    source_id=chunk.id,
+                    source_id=chunk.source_id,
                     native_rank=rank,
-                    native_score=chunk.native_score,
+                    native_score=chunk.keyword_score,
                     content_preview=chunk.content,
-                    locator=chunk.locator.model_dump(mode="json", exclude_none=True),
+                    locator=chunk.locator,
                     source_title=next(
                         (
                             document.filename
@@ -1024,31 +1088,29 @@ class FileIntelligenceRuntime:
                     provider="vector",
                     stage="native",
                     source_type="chunk",
-                    source_id=str(item.get("id", "")),
+                    source_id=item.source_id,
                     native_rank=rank,
-                    native_score=item.get("native_score"),
+                    native_score=item.vector_score,
                     filter_reason=(
-                        None
-                        if str(item.get("attachment_id", "")) in live_ids
-                        else "document_not_live"
+                        None if item.attachment_id in live_ids else "document_not_live"
                     ),
-                    content_preview=str(item.get("content", "")),
-                    locator=item.get("locator", {}),
+                    content_preview=item.content,
+                    locator=item.locator,
                     source_title=next(
                         (
                             document.filename
                             for document in documents
-                            if document.id == item.get("attachment_id")
+                            if document.id == item.attachment_id
                         ),
                         None,
                     ),
                     metadata={
-                        "attachment_id": item.get("attachment_id", ""),
+                        "attachment_id": item.attachment_id,
                         "document_version": next(
                             (
                                 document.document_version
                                 for document in documents
-                                if document.id == item.get("attachment_id")
+                                if document.id == item.attachment_id
                             ),
                             None,
                         ),
@@ -1061,44 +1123,50 @@ class FileIntelligenceRuntime:
                     provider="fusion",
                     stage="fused",
                     source_type="chunk",
-                    source_id=str(item.get("id", "")),
-                    fused_rank=rank,
-                    fused_score=item.get("fused_score"),
-                    selected_for_result=True,
-                    content_preview=str(item.get("content", "")),
-                    locator=item.get("locator", {}),
-                    source_title=next(
-                        (
-                            document.filename
-                            for document in documents
-                            if document.id == item.get("attachment_id")
-                        ),
-                        None,
-                    ),
+                    source_id=item.source_id,
+                    fused_rank=item.fused_rank or rank,
+                    fused_score=item.fused_score,
+                    selected_for_result=item.selected_for_result,
+                    content_preview=item.content,
+                    locator=item.locator,
+                    source_title=item.source_title,
                     metadata={
-                        "attachment_id": item.get("attachment_id", ""),
-                        "document_version": next(
-                            (
-                                document.document_version
-                                for document in documents
-                                if document.id == item.get("attachment_id")
-                            ),
-                            None,
-                        ),
-                        "keyword_rank": item.get("keyword_rank"),
-                        "vector_rank": item.get("vector_rank"),
+                        "attachment_id": item.attachment_id,
+                        "document_version": item.document_version,
+                        "keyword_rank": item.keyword_rank,
+                        "vector_rank": item.vector_rank,
+                        "keyword_score": item.keyword_score,
+                        "vector_score": item.vector_score,
                     },
                 )
-                for rank, item in enumerate(fused, 1)
+                for rank, item in enumerate(fused_pool, 1)
+            ]
+            reranked_candidates = [
+                RetrievalCandidate(
+                    provider="reranker",
+                    stage="reranked",
+                    source_type="chunk",
+                    source_id=item.source_id,
+                    fused_rank=item.fused_rank,
+                    fused_score=item.fused_score,
+                    rerank_rank=item.rerank_rank,
+                    rerank_score=item.rerank_score,
+                    selected_for_result=item.selected_for_result,
+                    content_preview=item.content,
+                    source_title=item.source_title,
+                    locator=item.locator,
+                    metadata={"attachment_id": item.attachment_id},
+                )
+                for item in reranked
             ]
             await self._trace_writer.record_candidates(
-                run_id, [*raw_candidates, *fused_candidates]
+                run_id, [*raw_candidates, *fused_candidates, *reranked_candidates]
             )
             await self._complete_retrieval_trace(
                 run_id,
                 started,
-                candidate_count=len(fused),
-                selected_count=len(fused),
+                candidate_count=len(fused_pool),
+                selected_count=len(selected_results),
                 status="partial" if vector_error else "succeeded",
                 error_message=vector_error,
             )
@@ -1107,14 +1175,14 @@ class FileIntelligenceRuntime:
             await self._complete_retrieval_trace(
                 run_id,
                 started,
-                candidate_count=len(fused),
-                selected_count=len(fused),
+                candidate_count=len(fused_pool),
+                selected_count=len(selected_results),
                 status="partial",
                 error_message=str(exc),
             )
-        for item in fused:
-            item["retrieval_run_id"] = run_id
-        return fused
+        for item in selected_results:
+            item.retrieval_run_id = run_id
+        return [item.to_dict() for item in selected_results]
 
     def _failed_file_search_response(
         self,
@@ -1144,7 +1212,7 @@ class FileIntelligenceRuntime:
         file_id: str,
         query: str,
         limit: int,
-    ) -> list[FileChunk]:
+    ) -> list[FileRetrievalCandidate]:
         """
 
         参数：
@@ -1152,7 +1220,7 @@ class FileIntelligenceRuntime:
             query (str): 检索或搜索文本；应为非空字符串。
             limit (int): 最大返回数量；应为非负整数。
         返回值：
-            list[FileChunk]: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            list[FileRetrievalCandidate]: 返回关键词候选。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
@@ -1161,14 +1229,23 @@ class FileIntelligenceRuntime:
             keyword = await self.repository.search_chunks(file_id, query, limit=limit)
         except Exception:
             raise
-        return keyword
+        return [
+            FileRetrievalCandidate(
+                source_id=chunk.id,
+                content=chunk.content,
+                attachment_id=chunk.attachment_id,
+                locator=chunk.locator.model_dump(mode="json", exclude_none=True),
+                keyword_score=chunk.native_score,
+            )
+            for chunk in keyword
+        ]
 
     async def _search_file_vectors(
         self,
         file_id: str,
         query: str,
         limit: int,
-    ) -> list[dict[str, Any]]:
+    ) -> list[FileRetrievalCandidate]:
         """
 
         参数：
@@ -1176,12 +1253,12 @@ class FileIntelligenceRuntime:
             query (str): 检索或搜索文本；应为非空字符串。
             limit (int): 最大返回数量；应为非负整数。
         返回值：
-            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            list[FileRetrievalCandidate]: 返回向量候选。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        vector: list[dict[str, Any]] = []
+        vector: list[FileRetrievalCandidate] = []
         try:
             vector = await self._vector_store.query(
                 query, limit, where={"attachment_id": file_id}
@@ -1193,10 +1270,13 @@ class FileIntelligenceRuntime:
 
     def _fuse_file_results(
         self,
-        keyword: list[FileChunk],
-        vector: list[dict[str, Any]],
+        keyword: list[FileRetrievalCandidate],
+        vector: list[FileRetrievalCandidate],
         limit: int,
-    ) -> list[dict[str, Any]]:
+        *,
+        source_title: str | None = None,
+        document_version: int | None = None,
+    ) -> list[FileRetrievalCandidate]:
         """
 
         参数：
@@ -1204,40 +1284,105 @@ class FileIntelligenceRuntime:
             vector (list[dict[str, Any]]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             limit (int): 最大返回数量；应为非负整数。
         返回值：
-            list[dict[str, Any]]: 返回该方法声明类型的业务结果，内容由方法职责确定。
+            list[FileRetrievalCandidate]: RRF 融合后的候选。
 
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
         scores: dict[str, float] = {}
-        values: dict[str, dict[str, Any]] = {}
+        values: dict[str, FileRetrievalCandidate] = {}
         for rank, chunk in enumerate(keyword, 1):
-            scores[chunk.id] = scores.get(chunk.id, 0) + 1 / (60 + rank)
-            values[chunk.id] = {
-                "id": chunk.id,
-                "content": chunk.content,
-                "attachment_id": chunk.attachment_id,
-                "locator": chunk.locator.model_dump(mode="json", exclude_none=True),
-                "native_score": chunk.native_score,
-                "keyword_rank": rank,
-            }
+            scores[chunk.source_id] = scores.get(chunk.source_id, 0) + 1 / (60 + rank)
+            values[chunk.source_id] = FileRetrievalCandidate(
+                source_id=chunk.source_id,
+                content=chunk.content,
+                attachment_id=chunk.attachment_id,
+                locator=chunk.locator,
+                source_title=chunk.source_title or source_title,
+                document_version=chunk.document_version or document_version,
+                keyword_score=chunk.keyword_score,
+                keyword_rank=rank,
+            )
         for rank, item in enumerate(vector, 1):
-            scores[item["id"]] = scores.get(item["id"], 0) + 1 / (60 + rank)
-            previous = values.get(item["id"], {})
-            values[item["id"]] = {
-                **previous,
-                **item,
-                "keyword_native_score": previous.get("native_score"),
-                "vector_native_score": item.get("native_score"),
-                "vector_rank": rank,
-            }
+            scores[item.source_id] = scores.get(item.source_id, 0) + 1 / (60 + rank)
+            previous = values.get(item.source_id)
+            if previous is None:
+                values[item.source_id] = FileRetrievalCandidate(
+                    source_id=item.source_id,
+                    content=item.content,
+                    attachment_id=item.attachment_id,
+                    locator=item.locator,
+                    source_title=item.source_title or source_title,
+                    document_version=item.document_version or document_version,
+                    metadata=dict(item.metadata),
+                    vector_score=item.vector_score,
+                )
+                previous = values[item.source_id]
+            else:
+                previous.vector_score = item.vector_score
+            previous.vector_rank = rank
         ordered = sorted(
-            values.values(), key=lambda item: scores[item["id"]], reverse=True
+            values.values(), key=lambda item: scores[item.source_id], reverse=True
         )[:limit]
         for rank, item in enumerate(ordered, 1):
-            item["fused_score"] = scores[item["id"]]
-            item["fused_rank"] = rank
+            item.fused_score = scores[item.source_id]
+            item.fused_rank = rank
+            if item.source_title is None:
+                item.source_title = source_title
+            if item.document_version is None:
+                item.document_version = document_version
         return ordered
+
+    async def _rerank_file_results(
+        self,
+        query: str,
+        candidates: list[FileRetrievalCandidate],
+        limit: int,
+    ) -> list[FileRetrievalCandidate]:
+        """重排文件候选；模型失败时保留 RRF 顺序并记录降级。"""
+        if not candidates or limit <= 0:
+            return []
+        if self._reranker is None:
+            for rank, candidate in enumerate(candidates[:limit], 1):
+                candidate.rerank_score = candidate.fused_score
+                candidate.rerank_rank = rank
+            return candidates[:limit]
+        try:
+            return await self._reranker.rerank(query, candidates, limit)
+        except Exception as exc:
+            logger.warning("file_rerank_failed", error=str(exc))
+            for rank, candidate in enumerate(candidates[:limit], 1):
+                candidate.rerank_score = candidate.fused_score
+                candidate.rerank_rank = rank
+            return candidates[:limit]
+
+    @staticmethod
+    def _diversify_knowledge_results(
+        candidates: list[FileRetrievalCandidate],
+        limit: int,
+        *,
+        max_per_document: int,
+    ) -> list[FileRetrievalCandidate]:
+        """限制单文档占比，避免知识库结果被单一文档垄断。"""
+        selected: list[FileRetrievalCandidate] = []
+        counts: dict[str, int] = {}
+        for candidate in candidates:
+            count = counts.get(candidate.attachment_id, 0)
+            if count >= max_per_document:
+                continue
+            selected.append(candidate)
+            counts[candidate.attachment_id] = count + 1
+            if len(selected) >= limit:
+                return selected
+        if len(selected) < limit:
+            selected_ids = {candidate.source_id for candidate in selected}
+            for candidate in candidates:
+                if candidate.source_id in selected_ids:
+                    continue
+                selected.append(candidate)
+                if len(selected) >= limit:
+                    break
+        return selected
 
     async def extract_table(self, session_id: str, file_id: str) -> dict[str, Any]:
         """提取文件的表格数据（从解析阶段缓存的 artifact 读取）。"""

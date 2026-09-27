@@ -174,6 +174,20 @@ class Settings(BaseSettings):
     knowledge_context_max_items: int = Field(default=12, ge=1, le=50)
     knowledge_context_max_tokens: int = Field(default=4000, ge=100, le=20000)
 
+    # --- 文件/知识库检索重排 ---
+    file_rerank_enabled: bool = True
+    file_rerank_required: bool = False
+    file_rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # sentence-transformers 设备名，例如 cpu、cuda 或 mps。
+    file_rerank_device: str | None = None
+    file_rerank_batch_size: int = Field(default=16, ge=1, le=128)
+    file_rerank_max_chars: int = Field(default=4000, ge=256, le=20000)
+    file_rerank_candidate_k: int = Field(default=50, ge=1, le=200)
+    file_rerank_k: int = Field(default=20, ge=1, le=100)
+    knowledge_rerank_candidate_k: int = Field(default=100, ge=1, le=500)
+    knowledge_rerank_k: int = Field(default=30, ge=1, le=200)
+    knowledge_result_k: int = Field(default=12, ge=1, le=50)
+
     # --- 上下文压缩 ---
     max_context_tokens: int = 128000
     compression_threshold: float = 0.8  # 上下文使用率阈值

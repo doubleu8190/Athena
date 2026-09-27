@@ -12,8 +12,8 @@ from .contracts import (
     ProviderResult,
     TaskMode,
     TaskQueryHints,
-    TeachingDomain,
-    TeachingSlots,
+    TaskDomain,
+    TaskSlots,
     UserTaskSpec,
 )
 from .fast_path import build_fast_path_task
@@ -27,8 +27,8 @@ __all__ = [
     "ProviderResult",
     "TaskQueryHints",
     "TaskMode",
-    "TeachingDomain",
-    "TeachingSlots",
+    "TaskDomain",
+    "TaskSlots",
     "ContentType",
     "OutputFormat",
     "OutputTarget",

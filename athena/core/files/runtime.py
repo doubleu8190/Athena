@@ -461,7 +461,9 @@ class FileIntelligenceRuntime:
         for group in self._group_units_for_chunking(units):
             # 二进制文档中的 NUL 不是可见文本，且 PostgreSQL TEXT 不允许保存；
             # 在分块前清理可使 token 计数和字符定位都对应最终落库内容。
-            content = "\n\n".join(unit.content for unit in group).replace("\x00", "").strip()
+            content = (
+                "\n\n".join(unit.content for unit in group).replace("\x00", "").strip()
+            )
             if not content:
                 continue
             start = 0
@@ -825,9 +827,7 @@ class FileIntelligenceRuntime:
                     content_preview=chunk.content,
                     source_title=attachment.filename,
                     metadata={"document_version": attachment.document_version},
-                    locator=chunk.locator.model_dump(
-                        mode="json", exclude_none=True
-                    ),
+                    locator=chunk.locator.model_dump(mode="json", exclude_none=True),
                 )
                 for rank, chunk in enumerate(keyword, 1)
             ]
@@ -1001,9 +1001,7 @@ class FileIntelligenceRuntime:
                     native_rank=rank,
                     native_score=chunk.native_score,
                     content_preview=chunk.content,
-                    locator=chunk.locator.model_dump(
-                        mode="json", exclude_none=True
-                    ),
+                    locator=chunk.locator.model_dump(mode="json", exclude_none=True),
                     source_title=next(
                         (
                             document.filename

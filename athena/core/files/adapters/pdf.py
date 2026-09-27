@@ -18,41 +18,8 @@ from athena.models.file import AdapterInfo
 
 from .common import _pil_image_png_bytes, _rapidocr_text, logger
 
-
-# The HanyuXi font embedded by several Chinese textbooks stores tone-marked
-# vowels in ASCII slots.  pypdf therefore returns values such as ``xiAo`` for
-# ``xiǎo``.  Keep the table local to the PDF adapter because it describes a
-# source-PDF encoding, rather than a general text normalization rule.
-_HANYUXI_PINYIN = {
-    "A": "ǎ",
-    "C": "ǜ",
-    "D": "ě",
-    "E": "ē",
-    "F": "è",
-    "G": "ǒ",
-    "H": "ò",
-    "I": "í",
-    "J": "ǐ",
-    "K": "ì",
-    "L": "ǔ",
-    "M": "ù",
-    "N": "ū",
-    "O": "ū",
-    "P": "ú",
-    "Q": "ā",
-    "R": "é",
-    "S": "à",
-    "T": "ō",
-    "U": "ī",
-    "V": "ǘ",
-    "W": "á",
-    "Y": "ó",
-}
-_PINYIN_TOKEN = re.compile(r"(?<![A-Za-z])[A-Za-z]*[A-Z][A-Za-z]*(?![A-Za-z])")
 _PAGE_NUMBER = re.compile(r"^\s*\d+\s*$")
-_SECTION_START = re.compile(
-    r"^(?:第[一二三四五六七八九十百]+单元|语文园地|目录|识字表|写字表|词语表|分角色朗读|朗读课文|读一读)"
-)
+_SECTION_START = re.compile(r"^(?:chapter|section|part|contents?)\b", re.IGNORECASE)
 _NON_PROSE_PAGE = re.compile(
     r"^(?:contents?|table of contents|copyright|isbn|目录|版权|定价|出版)\b",
     re.IGNORECASE,
@@ -60,25 +27,13 @@ _NON_PROSE_PAGE = re.compile(
 
 
 def _clean_pdf_text(text: str) -> str:
-    """Remove hidden PDF trailer data and decode textbook pinyin glyphs."""
-    # Some textbook PDFs append a hidden printing string containing C0/C1
-    # controls to every page.  It starts on its own line (or after a newline),
-    # so discard that line and everything after the first forbidden control.
+    """Remove hidden PDF trailer data and normalize invisible characters."""
+    # Some PDFs append hidden printing data containing C0/C1 controls to every
+    # page. It starts on its own line, so discard it and everything after it.
     controls = re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", text)
     if controls:
         text = text[: text.rfind("\n", 0, controls.start()) + 1]
 
-    def decode(match: re.Match[str]) -> str:
-        token = match.group(0)
-        # Headings such as YUWEN and ordinary Latin words are not HanyuXi
-        # pinyin tokens.  A lowercase consonant/vowel context is required.
-        if not any(char.islower() for char in token):
-            if len(token) == 1 and token in _HANYUXI_PINYIN:
-                return _HANYUXI_PINYIN[token]
-            return token
-        return "".join(_HANYUXI_PINYIN.get(char, char) for char in token)
-
-    text = _PINYIN_TOKEN.sub(decode, text)
     # Keep output stable for token counting and remove other invisible format
     # controls without touching ordinary whitespace used by PDF layout.
     return "".join(
@@ -122,10 +77,7 @@ def _is_structural_page(lines: list[str]) -> bool:
         and long_lines == 0
         and sentence_marks == 0
         and cjk_chars == 0
-    ) or (
-        digit_lines >= max(3, len(lines) // 3)
-        and sentence_marks == 0
-    )
+    ) or (digit_lines >= max(3, len(lines) // 3) and sentence_marks == 0)
 
 
 def _page_can_merge_before(content: str) -> bool:

@@ -248,7 +248,7 @@ def test_task_route_clarifies_before_attachment_processing():
     from athena.runtime.nodes.conditions import route_after_task_understanding
 
     assert route_after_task_understanding({
-        "clarification_question": "请提供年级",
+        "clarification_question": "请补充目标",
         "task_spec": {"mode": "clarify", "context_requirements": ["file"]},
         "requested_attachment_refs": [{"id": "file-1"}],
     }) == "clarification_response"

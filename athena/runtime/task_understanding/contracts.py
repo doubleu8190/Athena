@@ -1,4 +1,4 @@
-"""教育场景任务理解与上下文获取契约。"""
+"""通用任务理解与上下文获取契约。"""
 
 from __future__ import annotations
 
@@ -6,35 +6,29 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-TeachingDomain = Literal[
-    "lesson_planning", "teaching_material", "assignment", "assessment",
-    "student_analysis", "resource_retrieval", "document_editing",
-    "classroom_activity", "general",
+TaskDomain = Literal[
+    "writing", "analysis", "research", "planning", "coding",
+    "data_processing", "document_editing", "resource_retrieval", "general",
 ]
 TaskMode = Literal["answer", "retrieve", "generate", "act", "plan", "clarify"]
 ContextRequirement = Literal["conversation", "memory", "knowledge", "file"]
 ContentType = Literal[
-    "lesson_plan", "slide_deck", "worksheet", "test_paper", "answer_key",
-    "assessment_report", "rubric", "teaching_script", "resource_summary",
-    "general_text",
+    "document", "presentation", "spreadsheet", "report", "summary",
+    "code", "data", "general_text",
 ]
 OutputFormat = Literal["chat", "markdown", "docx", "pptx", "xlsx", "pdf", "txt"]
 OutputTarget = Literal["inline", "file", "inline_and_file"]
 ProviderStatus = Literal["succeeded", "failed", "timeout", "skipped"]
 
 
-class TeachingSlots(BaseModel):
+class TaskSlots(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    grade: str | None = None
-    subject: str | None = None
-    textbook_version: str | None = None
     topic: str | None = None
-    lesson_period: str | None = None
     duration_minutes: int | None = Field(default=None, ge=1, le=480)
     difficulty: str | None = None
-    question_count: int | None = Field(default=None, ge=1, le=200)
-    student_level: str | None = None
+    item_count: int | None = Field(default=None, ge=1, le=200)
+    audience: str | None = None
     target_file_ids: list[str] = Field(default_factory=list)
     knowledge_base_ids: list[str] = Field(default_factory=list)
 
@@ -59,11 +53,11 @@ class UserTaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(min_length=1, max_length=1000)
-    domain: TeachingDomain
+    domain: TaskDomain
     mode: TaskMode
     confidence: float = Field(ge=0, le=1)
     context_requirements: list[ContextRequirement] = Field(default_factory=list)
-    slots: TeachingSlots = Field(default_factory=TeachingSlots)
+    slots: TaskSlots = Field(default_factory=TaskSlots)
     output: OutputSpec = Field(default_factory=OutputSpec)
     constraints: list[str] = Field(default_factory=list, max_length=20)
     query_hints: TaskQueryHints = Field(default_factory=TaskQueryHints)

@@ -85,10 +85,9 @@ def _context(
     )
 
 
-def test_pdf_text_cleaner_decodes_textbook_pinyin_and_drops_hidden_trailer():
-    source = "小\nxiAo\n找\nzhAo\n阿\nQ\n\nNÅO\x9bN*Nº"
-
-    assert _clean_pdf_text(source) == "小\nxiǎo\n找\nzhǎo\n阿\nā"
+def test_pdf_text_cleaner_drops_hidden_trailer_and_preserves_text():
+    source = "标题\nSection 1\n\x00hidden"
+    assert _clean_pdf_text(source) == "标题\nSection 1"
 
 
 @pytest.mark.asyncio
@@ -698,8 +697,8 @@ def test_pdf_page_merge_flags_stop_at_headings_and_closed_sentences(tmp_path):
 
     assert not _page_can_merge_after("上一页已经结束了。\n\n6")
     assert _page_can_merge_after("上一页还没有结束\n内容还没有结束\n\n6")
-    assert not _page_can_merge_before("第一单元·阅读\n小蝌蚪找妈妈")
-    assert _page_can_merge_before("小蝌蚪游哇游，过了几天")
+    assert not _page_can_merge_before("Chapter 1\nOverview")
+    assert _page_can_merge_before("The process continues on this page")
 
 
 def test_pdf_page_merge_flags_are_content_based_not_position_based():

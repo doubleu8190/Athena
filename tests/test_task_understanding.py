@@ -67,15 +67,15 @@ async def test_task_understanding_uses_structured_llm_and_normalizes_requirement
 async def test_task_understanding_preserves_llm_query_hints_per_provider():
     llm = _FakeStructuredLLM(
         result=UserTaskSpec(
-            goal="继续设计分数乘法练习课",
-            domain="lesson_planning",
+            goal="继续完善产品发布计划",
+            domain="planning",
             mode="retrieve",
             confidence=0.9,
             context_requirements=["memory", "knowledge", "file"],
             query_hints={
-                "memory": "五年级 分数乘法 教案风格 练习课",
-                "knowledge": "五年级数学 分数乘法 练习课 教学目标",
-                "file": "分数乘法 练习题 第三单元",
+                "memory": "产品发布计划 风格 偏好",
+                "knowledge": "产品发布流程 风险清单",
+                "file": "发布说明 版本检查",
             },
         )
     )
@@ -84,15 +84,15 @@ async def test_task_understanding_preserves_llm_query_hints_per_provider():
     result = await service.understand(
         session_id="s1",
         user_message=(
-            "请根据之前关于五年级数学分数乘法的教案，继续设计一节练习课，"
-            "并参考附件中的第三单元练习题。"
+            "请根据之前约定的产品发布计划风格继续完善，"
+            "并参考附件中的版本检查说明。"
         ),
-        attachment_refs=[{"id": "file-1", "filename": "练习题.docx", "status": "ready"}],
+        attachment_refs=[{"id": "file-1", "filename": "发布说明.docx", "status": "ready"}],
     )
 
-    assert result.task.query_hints.memory == "五年级 分数乘法 教案风格 练习课"
-    assert result.task.query_hints.knowledge == "五年级数学 分数乘法 练习课 教学目标"
-    assert result.task.query_hints.file == "分数乘法 练习题 第三单元"
+    assert result.task.query_hints.memory == "产品发布计划 风格 偏好"
+    assert result.task.query_hints.knowledge == "产品发布流程 风险清单"
+    assert result.task.query_hints.file == "发布说明 版本检查"
 
 
 @pytest.mark.asyncio
@@ -175,14 +175,14 @@ def test_user_task_spec_serializes_to_json():
 
 def test_output_spec_separates_content_type_from_file_format():
     task = UserTaskSpec(
-        goal="制作数学课件",
-        domain="teaching_material",
+        goal="制作产品介绍",
+        domain="writing",
         mode="generate",
         confidence=0.95,
-        output={"content_type": "slide_deck", "format": "pptx", "target": "file"},
+        output={"content_type": "presentation", "format": "pptx", "target": "file"},
     )
 
-    assert task.output.content_type == "slide_deck"
+    assert task.output.content_type == "presentation"
     assert task.output.format == "pptx"
     assert task.output.target == "file"
 

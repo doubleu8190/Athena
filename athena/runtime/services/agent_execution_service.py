@@ -64,7 +64,7 @@ class AgentExecutionService:
             slots = task_spec.get("slots", {})
             output = task_spec.get("output", {})
             system += (
-                "\n\n[Teaching Task]\n"
+                "\n\n[Task Context]\n"
                 f"goal: {goal}\n"
                 f"domain: {domain}\n"
                 f"mode: {mode}\n"

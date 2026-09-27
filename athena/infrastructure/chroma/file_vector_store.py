@@ -11,8 +11,10 @@ import chromadb
 from chromadb.api import ClientAPI
 
 from athena.core.files.ports import FileVectorStore
+from athena.core.llm.tokens import EmbeddingTokenCounter, conservative_text_token_count
 from athena.infrastructure.chroma.embedding import (
     ChromaEmbeddingConfig,
+    build_embedding_function,
     get_or_create_collection,
 )
 from athena.models.json_models import FileLocator
@@ -34,8 +36,17 @@ class ChromaFileVectorStore(FileVectorStore):
             provider="sentence_transformers",
             model="paraphrase-multilingual-MiniLM-L12-v2",
         )
+        embedding_function = build_embedding_function(config)
+        embedding_model = getattr(embedding_function, "_model", None)
+        tokenizer = getattr(embedding_model, "tokenizer", None)
+        self.token_counter = EmbeddingTokenCounter(
+            tokenizer if tokenizer is not None else conservative_text_token_count
+        )
         self._collection: chromadb.Collection = get_or_create_collection(
-            self._client, self._collection_name, config
+            self._client,
+            self._collection_name,
+            config,
+            embedding_function=embedding_function,
         )
 
     async def replace_attachment(

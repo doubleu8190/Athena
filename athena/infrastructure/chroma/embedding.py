@@ -98,9 +98,12 @@ def get_or_create_collection(
     client: Any,
     name: str,
     config: ChromaEmbeddingConfig,
+    *,
+    embedding_function: Any | None = None,
 ) -> Any:
     """创建 collection，并拒绝与当前模型不兼容的历史向量。"""
-    embedding_function = build_embedding_function(config)
+    if embedding_function is None:
+        embedding_function = build_embedding_function(config)
     metadata = collection_metadata(config)
     collection = client.get_or_create_collection(
         name=name,

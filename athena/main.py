@@ -145,6 +145,10 @@ async def lifespan(app: FastAPI):
     from athena.core.tools.catalog import ToolRegistry
     from athena.core.tools.providers.files import build_file_tool_specs
 
+    file_vector_store = ChromaFileVectorStore(
+        path=str(settings.chroma_path),
+        embedding_config=embedding_config_from_settings(settings),
+    )
     file_runtime = FileIntelligenceRuntime(
         db.files,
         llm_primary,
@@ -152,10 +156,8 @@ async def lifespan(app: FastAPI):
         settings=settings,
         event_publisher=event_publisher,
         trace_writer=db.retrieval,
-        vector_store=ChromaFileVectorStore(
-            path=str(settings.chroma_path),
-            embedding_config=embedding_config_from_settings(settings),
-        ),
+        vector_store=file_vector_store,
+        file_token_counter=file_vector_store.token_counter,
     )
     await file_runtime.initialize()
 
@@ -232,10 +234,11 @@ async def lifespan(app: FastAPI):
 
     # ── 5.3 上下文压缩 ──
     from athena.core.compression.compressor import ContextCompressor
+    from athena.core.llm.tokens import ModelTokenCounter
 
     compressor = ContextCompressor(
         llm=llm_secondary,
-        token_counter=llm_primary,
+        token_counter=ModelTokenCounter(llm_secondary.model),
         db=db,
         settings=settings,
     )

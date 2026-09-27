@@ -220,14 +220,13 @@ class EmbeddingTokenCounter:
             encoded = encode(text, add_special_tokens=True, truncation=False)
         except TypeError:
             encoded = encode(text)
+        if isinstance(encoded, int):
+            return max(0, encoded)
         if isinstance(encoded, dict):
             encoded = encoded.get("input_ids", ())
         if encoded and isinstance(encoded[0], (list, tuple)):
             encoded = encoded[0]
         return len(encoded)
-
-    def count_message_tokens(self, messages: Sequence[BaseMessage]) -> int:
-        return sum(self.count_text_tokens(_message_text(message)) for message in messages)
 
 
 def _is_openai_model(model: object) -> bool:

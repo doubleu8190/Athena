@@ -36,6 +36,7 @@ from athena.core.files.adapter_registry import AdapterRegistry
 from athena.infrastructure.postgre.repositories.file_repository import FileRepository
 from athena.core.files.storage import StorageLayer
 from athena.core.llm.provider import LLMProvider
+from athena.core.llm.tokens import EmbeddingTokenCounter, conservative_text_token_count
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.models.file import (
     Attachment,
@@ -94,6 +95,7 @@ class FileIntelligenceRuntime:
         event_publisher: FileEventPublisher,
         trace_writer: RetrievalTraceWriter,
         vector_store: FileVectorStore,
+        file_token_counter: EmbeddingTokenCounter | None = None,
     ) -> None:
         """
 
@@ -121,6 +123,9 @@ class FileIntelligenceRuntime:
         self._event_publisher = event_publisher
         self._trace_writer = trace_writer
         self._vector_store = vector_store
+        self.file_token_counter = file_token_counter or EmbeddingTokenCounter(
+            conservative_text_token_count
+        )
         self._knowledge_document_locks: dict[str, asyncio.Lock] = {}
 
     async def _complete_retrieval_trace(
@@ -472,7 +477,7 @@ class FileIntelligenceRuntime:
                 end = self._prefer_semantic_boundary(content, start, end)
                 piece = content[start:end].strip()
                 if piece:
-                    token_count = self.secondary_llm.count_text_tokens(piece)
+                    token_count = self.file_token_counter.count_text_tokens(piece)
                     chunks.append(
                         FileChunk(
                             id=generate_time_id(),
@@ -573,7 +578,7 @@ class FileIntelligenceRuntime:
 
     def _find_chunk_end(self, content: str, start: int, max_tokens: int) -> int:
         """查找适合 token 预算的最长字符切片。"""
-        if self.secondary_llm.count_text_tokens(content[start:]) <= max_tokens:
+        if self.file_token_counter.count_text_tokens(content[start:]) <= max_tokens:
             return len(content)
         low = start + 1
         high = len(content)
@@ -581,7 +586,7 @@ class FileIntelligenceRuntime:
         while low <= high:
             middle = (low + high) // 2
             if (
-                self.secondary_llm.count_text_tokens(content[start:middle])
+                self.file_token_counter.count_text_tokens(content[start:middle])
                 <= max_tokens
             ):
                 best = middle
@@ -602,7 +607,7 @@ class FileIntelligenceRuntime:
         while low <= high:
             middle = (low + high) // 2
             if (
-                self.secondary_llm.count_text_tokens(content[middle:chunk_end])
+                self.file_token_counter.count_text_tokens(content[middle:chunk_end])
                 <= overlap_tokens
             ):
                 best = middle

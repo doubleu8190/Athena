@@ -135,6 +135,10 @@ class Settings(BaseSettings):
     file_chunk_overlap_tokens: int = 80  # 分块重叠 token 数
     file_parse_concurrency: int = 2
     file_embedding_concurrency: int = 2
+    # PDF 混合页 OCR：保留原生文本，同时识别页面内嵌图片中的文字。
+    pdf_ocr_mixed_pages: bool = True
+    pdf_ocr_min_image_pixels: int = Field(default=4096, ge=0)
+    pdf_ocr_max_images_per_page: int = Field(default=20, ge=1, le=100)
 
     # --- Harness 执行引擎 ---
     max_turns_per_run: int = 20

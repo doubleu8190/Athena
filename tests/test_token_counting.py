@@ -74,6 +74,7 @@ def test_embedding_counter_uses_embedding_tokenizer():
     counter = EmbeddingTokenCounter(_EmbeddingTokenizer())
 
     assert counter.count_text_tokens("abcd") == 6
+    assert not hasattr(counter, "count_message_tokens")
 
 
 def test_stream_usage_is_accumulated_across_chunks():

@@ -590,6 +590,81 @@ def test_pdf_ocr_page_encodes_rendered_image_as_bytes(tmp_path, monkeypatch):
     assert seen["img_content"].startswith(b"\x89PNG\r\n\x1a\n")
 
 
+def test_pdf_mixed_page_ocr_keeps_native_text_and_indexes_embedded_image(
+    tmp_path, monkeypatch
+):
+    """混合页应保留原生文本，并补充内嵌图片中的 OCR 文本。"""
+    from athena.core.files.adapters import pdf as pdf_module
+
+    class FakeImage:
+        data = b"embedded-image"
+
+    class FakePage:
+        images = [FakeImage()]
+
+        def extract_text(self):
+            return "原生页面文字"
+
+    class FakeReader:
+        def __init__(self, _path):
+            self.pages = [FakePage()]
+
+    pypdf = types.ModuleType("pypdf")
+    pypdf.PdfReader = FakeReader
+    monkeypatch.setitem(sys.modules, "pypdf", pypdf)
+    monkeypatch.setattr(pdf_module, "_rapidocr_text", lambda _data: "图片中的文字")
+
+    result = PdfAdapter()._extract(
+        tmp_path / "mixed.pdf",
+        Settings(_env_file=None, pdf_ocr_min_image_pixels=0),
+    )
+
+    assert result.units[0].content == "原生页面文字\n\n图片中的文字"
+    assert result.units[0].metadata["ocr"] is True
+    assert result.units[0].metadata["ocr_source"] == "embedded_image"
+    assert result.metadata["image_ocr_pages"] == [1]
+    assert result.metadata["ocr_image_count"] == 1
+    assert result.metadata["full_page_ocr_pages"] == []
+
+
+def test_pdf_mixed_page_does_not_run_full_page_ocr_when_native_text_exists(
+    tmp_path, monkeypatch
+):
+    """原生文本存在时，图片 OCR 失败也不应重复执行整页 OCR。"""
+    from athena.core.files.adapters import pdf as pdf_module
+
+    class FakeImage:
+        data = b"embedded-image"
+
+    class FakePage:
+        images = [FakeImage()]
+
+        def extract_text(self):
+            return "native"
+
+    class FakeReader:
+        def __init__(self, _path):
+            self.pages = [FakePage()]
+
+    pypdf = types.ModuleType("pypdf")
+    pypdf.PdfReader = FakeReader
+    monkeypatch.setitem(sys.modules, "pypdf", pypdf)
+    monkeypatch.setattr(pdf_module, "_rapidocr_text", lambda _data: "")
+    monkeypatch.setattr(
+        PdfAdapter,
+        "_ocr_page",
+        lambda *_args: pytest.fail("mixed page should not use full-page OCR"),
+    )
+
+    result = PdfAdapter()._extract(
+        tmp_path / "mixed.pdf",
+        Settings(_env_file=None, pdf_ocr_min_image_pixels=0),
+    )
+
+    assert result.units[0].content == "native"
+    assert result.metadata["full_page_ocr_pages"] == []
+
+
 @pytest.mark.asyncio
 async def test_file_capability_governance_is_applied_to_runtime_manager(tmp_path):
     db = Database(str(tmp_path / "tools.db"))
@@ -649,6 +724,26 @@ def test_file_chunks_respect_token_limit(tmp_path):
 
     assert len(chunks) > 1
     assert all(0 < chunk.token_count <= settings.file_chunk_tokens for chunk in chunks)
+
+
+def test_file_chunking_uses_embedding_token_counter(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        file_storage_path=str(tmp_path / "storage"),
+        file_chunk_tokens=3,
+        file_chunk_overlap_tokens=0,
+    )
+    runtime = _make_runtime(AsyncMock(), settings)
+    calls: list[str] = []
+
+    class _EmbeddingCounter:
+        def count_text_tokens(self, text: str) -> int:
+            calls.append(text)
+            return len(text)
+
+    runtime.file_token_counter = _EmbeddingCounter()
+    assert runtime._find_chunk_end("abcdef", 0, 3) == 3
+    assert calls
 
 
 def test_pdf_units_can_cross_page_boundaries(tmp_path):

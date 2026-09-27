@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 import unicodedata
 from pathlib import Path
@@ -100,7 +101,7 @@ class PdfAdapter:
 
     info = AdapterInfo(
         name="pdf",
-        version="3.0",
+        version="3.1",
         mime_types=["application/pdf"],
         extensions=[".pdf"],
         capabilities=["read", "search", "summarize", "analyze", "extract_table"],
@@ -110,26 +111,76 @@ class PdfAdapter:
         self, context: ExtractionContext, settings: Settings
     ) -> ExtractionResult:
         """提取 PDF 内容。"""
-        return await asyncio.to_thread(self._extract, context.path)
+        return await asyncio.to_thread(self._extract, context.path, settings)
 
-    def _extract(self, path: Path) -> ExtractionResult:
+    def _extract(
+        self, path: Path, settings: Settings | None = None
+    ) -> ExtractionResult:
         """同步提取 PDF 文本、OCR 和表格数据。"""
         from pypdf import PdfReader
 
         reader = PdfReader(str(path))
         units: list[ExtractedUnit] = []
         empty_pages: list[int] = []
+        image_ocr_pages: list[int] = []
+        full_page_ocr_pages: list[int] = []
+        embedded_image_count = 0
+        ocr_image_count = 0
+        ocr_mixed_pages = bool(
+            getattr(settings, "pdf_ocr_mixed_pages", True)
+        )
+        min_image_pixels = int(
+            getattr(settings, "pdf_ocr_min_image_pixels", 4096)
+        )
+        max_images_per_page = int(
+            getattr(settings, "pdf_ocr_max_images_per_page", 20)
+        )
         for index, page in enumerate(reader.pages, 1):
-            content = _clean_pdf_text(page.extract_text() or "")
-            if not content:
+            native_content = _clean_pdf_text(page.extract_text() or "")
+            embedded_images = self._page_images(page)
+            embedded_image_count += len(embedded_images)
+            image_ocr: list[str] = []
+            if ocr_mixed_pages and embedded_images:
+                for image in embedded_images[:max_images_per_page]:
+                    image_text = self._ocr_embedded_image(
+                        image, min_image_pixels=min_image_pixels
+                    )
+                    if image_text:
+                        image_ocr.append(image_text)
+                ocr_image_count += len(image_ocr)
+                if image_ocr:
+                    image_ocr_pages.append(index)
+
+            # A full-page OCR fallback is only needed when native extraction and
+            # embedded-image OCR both produced no usable text. This preserves
+            # native text on mixed pages and avoids indexing it twice.
+            full_page_ocr = ""
+            if not native_content and not image_ocr:
                 empty_pages.append(index)
-                content = _clean_pdf_text(self._ocr_page(path, index - 1))
+                full_page_ocr = _clean_pdf_text(self._ocr_page(path, index - 1))
+                if full_page_ocr:
+                    full_page_ocr_pages.append(index)
+
+            content = self._merge_page_text(
+                native_content,
+                [*image_ocr, full_page_ocr] if full_page_ocr else image_ocr,
+            )
             if content:
+                ocr_sources = []
+                if image_ocr:
+                    ocr_sources.append("embedded_image")
+                if full_page_ocr:
+                    ocr_sources.append("full_page")
                 units.append(
                     ExtractedUnit(
                         content,
                         {"page": index},
-                        {"kind": "page", "ocr": index in empty_pages},
+                        {
+                            "kind": "page",
+                            "ocr": bool(ocr_sources),
+                            "ocr_source": "+".join(ocr_sources) or None,
+                            "image_count": len(embedded_images),
+                        },
                         kind="page",
                         block_id=f"page-{index:04d}",
                         can_merge_before=_page_can_merge_before(content),
@@ -153,10 +204,71 @@ class PdfAdapter:
             metadata={
                 "pages": len(reader.pages),
                 "ocr_pages": empty_pages,
+                "full_page_ocr_pages": full_page_ocr_pages,
+                "image_ocr_pages": image_ocr_pages,
+                "embedded_image_count": embedded_image_count,
+                "ocr_image_count": ocr_image_count,
                 "table_count": len(tables),
             },
             tables=tables,
         )
+
+    @staticmethod
+    def _page_images(page: Any) -> list[Any]:
+        """读取页面内嵌图片，遇到不支持的 PDF image object 时降级为空。"""
+        try:
+            return list(page.images)
+        except Exception as exc:
+            logger.warning("pdf_image_enumeration_failed", error=str(exc))
+            return []
+
+    @staticmethod
+    def _ocr_embedded_image(image: Any, *, min_image_pixels: int) -> str:
+        """对单个内嵌图片执行 OCR，并过滤过小的装饰图片。"""
+        data = getattr(image, "data", b"")
+        if not data:
+            return ""
+        if min_image_pixels > 0:
+            try:
+                from PIL import Image
+
+                with Image.open(io.BytesIO(data)) as decoded:
+                    if decoded.width * decoded.height < min_image_pixels:
+                        return ""
+            except Exception:
+                # OCR can still understand formats Pillow cannot inspect; let
+                # RapidOCR decide whether the raw image bytes are usable.
+                pass
+        try:
+            return _clean_pdf_text(_rapidocr_text(data))
+        except Exception as exc:
+            logger.warning("pdf_embedded_image_ocr_failed", error=str(exc))
+            return ""
+
+    @staticmethod
+    def _merge_page_text(native_text: str, ocr_texts: list[str]) -> str:
+        """合并原生文本和 OCR 文本，避免完全重复的识别结果。"""
+        parts = [native_text] if native_text else []
+        normalized_parts = {
+            re.sub(r"\s+", " ", native_text).strip().casefold()
+        } if native_text else set()
+        for text in ocr_texts:
+            cleaned = _clean_pdf_text(text)
+            if not cleaned:
+                continue
+            normalized = re.sub(r"\s+", " ", cleaned).strip().casefold()
+            if not normalized or normalized in normalized_parts:
+                continue
+            # Some PDF producers expose the same image text as native text.
+            # Skip an OCR fragment only when it is wholly contained in the
+            # native text; unrelated image text must still be retained.
+            if native_text and normalized in re.sub(
+                r"\s+", " ", native_text
+            ).strip().casefold():
+                continue
+            parts.append(cleaned)
+            normalized_parts.add(normalized)
+        return "\n\n".join(parts).strip()
 
     @staticmethod
     def _ocr_page(path: Path, page_index: int) -> str:

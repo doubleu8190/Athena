@@ -17,6 +17,7 @@ dependencies = [
     "langchain-anthropic==1.7.1",
     "langchain-community==0.4.2",
     "langchain-ollama==1.1.0",
+    "langsmith>=0.3.0",
     # OpenAI token accounting is model-specific and uses the official tokenizer.
     "tiktoken>=0.7.0",
     # LangGraph runtime and PostgreSQL checkpointer.

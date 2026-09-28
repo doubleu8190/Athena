@@ -11,6 +11,7 @@ Athena 是一个面向本地运行的自主 AI Agent 桌面应用。项目将 LL
 - 文件智能：支持文本、PDF、Word、Excel、图片和代码文件的上传、解析、检索与分析。
 - 浏览器体验：React Web 前端通过 HTTP Command 和 SSE 接收 LLM 流式输出、工具执行、审批和文件处理事件。
 - 可选安全能力：路径安全过滤和 Docker 沙箱执行。沙箱默认关闭。
+- 可选可观测性：LangSmith 会话、LangGraph 节点、LLM 流式调用与重试、工具调用和 fallback 链路追踪。
 
 ## 技术架构
 
@@ -101,6 +102,21 @@ cp .env.example .env            # Windows 可手动复制文件
 ```
 
 编辑 `.env`，至少配置一个可用的 LLM Provider。不要把包含真实 API Key 的 `.env` 提交到版本库。
+
+### LangSmith 追踪（可选）
+
+在 `.env` 中配置以下变量后重启后端：
+
+```env
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=你的 LangSmith API Key
+LANGCHAIN_PROJECT=athena
+LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+```
+
+追踪树以 `athena.session` 为根，包含 `node.<节点名>`、`llm.turn.<轮次>`、
+`llm.stream.attempt.<次数>`、`llm.fallback`、`tool.<工具名>` 和每次 LLM 重试
+span。追踪服务不可用时，Athena 会记录本地日志但不会阻断 Agent 执行。
 
 ### 启动
 

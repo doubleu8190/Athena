@@ -26,6 +26,7 @@ from enum import StrEnum
 from typing import Any, TYPE_CHECKING, Awaitable, Callable
 
 from athena.utils.logging import get_logger
+from athena.observability.langsmith import finish_span, trace_span
 
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
@@ -267,8 +268,17 @@ async def retry_with_backoff(
 
     for attempt in range(retry_config.max_attempts):
         attempts = attempt + 1
+        trace = None
         try:
-            result = await func(*args, **kwargs)
+            async with trace_span(
+                name=f"llm.attempt.{attempts}",
+                run_type="llm",
+                inputs={"attempt": attempts},
+                metadata={"attempt": attempts, "retry": attempts > 1},
+                tags=["athena", "llm", "retry" if attempts > 1 else "initial"],
+            ) as trace:
+                result = await func(*args, **kwargs)
+                finish_span(trace, outputs={"status": "success", "attempt": attempts})
             total_duration = (time.time() * 1000) - start_time
             return RetryResult(
                 success=True,
@@ -277,6 +287,7 @@ async def retry_with_backoff(
                 total_duration_ms=total_duration,
             )
         except Exception as e:
+            finish_span(trace, error=str(e))
             last_error = e
             category = categorize_error(e)
 
@@ -407,11 +418,19 @@ class LLMRetryManager:
                     "trying_fallback_provider", provider=type(fallback).__name__
                 )
                 try:
-                    fallback_result = (
-                        await fallback_invoke(fallback)
-                        if fallback_invoke is not None
-                        else await fallback.ainvoke(*args, **kwargs)
-                    )
+                    async with trace_span(
+                        name="llm.fallback",
+                        run_type="llm",
+                        inputs={"provider": type(fallback).__name__},
+                        metadata={"fallback": True, "provider": type(fallback).__name__},
+                        tags=["athena", "llm", "fallback"],
+                    ) as trace:
+                        fallback_result = (
+                            await fallback_invoke(fallback)
+                            if fallback_invoke is not None
+                            else await fallback.ainvoke(*args, **kwargs)
+                        )
+                        finish_span(trace, outputs={"status": "success"})
                     return RetryResult(
                         success=True,
                         result=fallback_result,
@@ -419,6 +438,7 @@ class LLMRetryManager:
                         total_duration_ms=result.total_duration_ms,
                     )
                 except Exception as e:
+                    finish_span(trace if "trace" in locals() else None, error=str(e))
                     logger.warning("fallback_failed", error=str(e))
                     continue
 

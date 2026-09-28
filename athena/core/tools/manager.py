@@ -23,6 +23,7 @@ from athena.core.tools.tool_definitions import (
 from athena.gateway.approval import ApprovalManager
 from athena.models.tool import RiskLevel, ToolResult, ToolSchema
 from athena.utils.logging import get_logger
+from athena.observability.langsmith import finish_span, trace_span
 
 if TYPE_CHECKING:
     from athena.core.tools.spec import ToolSpec
@@ -334,11 +335,33 @@ class UnifiedToolManager:
                 if self._tool_runtime is not None
                 else None
             )
+        trace = None
         try:
-            execution = tool.execute(**params)
-            if execution_timeout is not None:
-                return await asyncio.wait_for(execution, timeout=execution_timeout)
-            return await execution
+            async with trace_span(
+                name=f"tool.{name}",
+                run_type="tool",
+                inputs=params,
+                run_id=f"{run_id}:tool:{tool_call_id}",
+                metadata={
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": name,
+                    "agent_role": agent_role,
+                    "requires_approval": tool.schema.require_approval,
+                },
+                tags=["athena", "tool", name],
+            ) as trace:
+                execution = tool.execute(**params)
+                if execution_timeout is not None:
+                    result = await asyncio.wait_for(execution, timeout=execution_timeout)
+                else:
+                    result = await execution
+                finish_span(trace, outputs={"status": result.status, "output": result.output, "error": result.error})
+                return result
+        except Exception as exc:
+            finish_span(trace, error=str(exc))
+            raise
         finally:
             if token is not None:
                 from athena.core.tools.spec import reset_tool_context

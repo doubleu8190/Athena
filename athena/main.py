@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -60,6 +61,13 @@ async def lifespan(app: FastAPI):
         异常: 任何子系统初始化失败时向上抛出，阻止应用启动。
     """
     settings = get_settings()
+    # LangChain/LangSmith reads these process variables when it creates
+    # callback managers. Keep them aligned with Athena's typed configuration.
+    if settings.langchain_tracing_v2 and settings.langchain_api_key:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
+        os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
+        os.environ["LANGCHAIN_ENDPOINT"] = settings.langchain_endpoint
     loopback = settings.host in {"127.0.0.1", "localhost", "::1"}
     if not loopback and not settings.auth_enabled:
         raise RuntimeError("AUTH_ENABLED must be true when binding beyond loopback")

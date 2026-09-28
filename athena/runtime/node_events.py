@@ -19,6 +19,7 @@ from athena.contracts.errors import ExecutionError
 from athena.contracts.events import ApplicationEvent, EventDurability, EventType
 from athena.contracts.ports import EventPublisherPort
 from athena.utils.logging import get_logger
+from athena.observability.langsmith import finish_span, trace_span
 
 logger = get_logger(__name__)
 
@@ -54,6 +55,7 @@ def instrument_graph_node(
         execution_id = uuid4().hex
         session_id, run_id, parent_run_id = _resolve_execution_identity(state, config)
         started_at = time.monotonic()
+        trace = None
         await _publish_node_event(
             event_publisher,
             event_type=EventType.NODE_STARTED,
@@ -64,8 +66,18 @@ def instrument_graph_node(
             parent_run_id=parent_run_id,
         )
         try:
-            result = await _invoke_node(node, state, config)
+            async with trace_span(
+                name=f"node.{node_name}",
+                run_type="chain",
+                inputs={"session_id": session_id, "run_id": run_id, "node": node_name},
+                run_id=f"{run_id}:node:{node_name}:{execution_id}",
+                metadata={"session_id": session_id, "run_id": run_id, "node_name": node_name},
+                tags=["athena", "node", node_name],
+            ) as trace:
+                result = await _invoke_node(node, state, config)
+                finish_span(trace, outputs={"status": "completed", "duration_ms": _duration_ms(started_at)})
         except BaseException as exc:
+            finish_span(trace, error=str(exc))
             detail = ExecutionError.from_exception(
                 exc,
                 code="graph_node_failed",

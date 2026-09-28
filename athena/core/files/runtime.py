@@ -20,16 +20,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
-from pathlib import Path
 from typing import Any, Protocol
-
-from langchain_core.messages import HumanMessage
 
 from athena.config.settings import Settings
 from athena.core.retrieval import RetrievalCandidate, RetrievalRunRequest
 from athena.core.retrieval.ports import RetrievalTraceWriter
-from athena.core.files.extraction import ExtractedUnit, ExtractionContext
+from athena.core.files.extraction import ExtractedUnit
+from athena.core.files.chunking import FileChunker
+from athena.core.files.retrieval_pipeline import (
+    HybridCandidatePipeline,
+    RetrievalTraceRecorder,
+)
+from athena.core.files.ingestion import FileIngestionService
+from athena.core.files.analysis import FileAnalysisService
 from athena.core.files.ports import FileVectorStore
 from athena.core.files.ports import FileReranker
 from athena.core.files.contracts import FileRetrievalCandidate
@@ -45,9 +48,6 @@ from athena.models.file import (
     AttachmentStatus,
     FileChunk,
 )
-from athena.models.json_models import FileLocator, FileMetadata
-from athena.utils.id_generation import generate_time_id
-from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -121,8 +121,6 @@ class FileIntelligenceRuntime:
             self.settings.files_path, self.settings.file_max_upload_bytes
         )
         self.adapter_registry = AdapterRegistry()
-        self.primary_llm = primary_llm
-        self.secondary_llm = secondary_llm
         self._event_publisher = event_publisher
         self._trace_writer = trace_writer
         self._vector_store = vector_store
@@ -130,7 +128,29 @@ class FileIntelligenceRuntime:
         self.file_token_counter = file_token_counter or EmbeddingTokenCounter(
             conservative_text_token_count
         )
-        self._knowledge_document_locks: dict[str, asyncio.Lock] = {}
+        self._chunker = FileChunker(self.file_token_counter)
+        self._candidate_pipeline = HybridCandidatePipeline(reranker)
+        self._trace_recorder = RetrievalTraceRecorder(trace_writer)
+        self._ingestion = FileIngestionService(
+            repository,
+            settings=settings,
+            storage=self.storage,
+            adapter_registry=self.adapter_registry,
+            vector_store=vector_store,
+            chunker=self._chunker,
+            cache_key=self.cache_key,
+            emit_attachment=self.emit_attachment,
+            initialize=self.initialize,
+        )
+        self._analysis = FileAnalysisService(
+            repository,
+            settings=settings,
+            primary_llm=primary_llm,
+            secondary_llm=secondary_llm,
+            adapter_registry=self.adapter_registry,
+            storage=self.storage,
+            cache_key=self.cache_key,
+        )
 
     async def _complete_retrieval_trace(
         self,
@@ -142,37 +162,14 @@ class FileIntelligenceRuntime:
         status: str,
         error_message: str | None = None,
     ) -> None:
-        """安全写入文件检索终态，避免轨迹故障影响搜索结果。
-
-        参数：
-            run_id: 召回运行标识；为空时跳过写入。
-            started: 运行计时起点。
-            candidate_count: 融合候选数量。
-            selected_count: 通过 provider 筛选的候选数量。
-            status: 运行终态。
-            error_message: 可选的错误说明。
-
-        返回值：
-            None。
-
-        异常：
-            轨迹写入异常只记录日志，不覆盖搜索本身的结果或错误。
-        """
-        if run_id is None or self._trace_writer is None:
-            return
-        try:
-            await self._trace_writer.complete_run(
-                run_id,
-                candidate_count=candidate_count,
-                selected_count=selected_count,
-                status=status,
-                duration_ms=round(
-                    (asyncio.get_running_loop().time() - started) * 1000, 2
-                ),
-                error_message=error_message,
-            )
-        except Exception as exc:
-            logger.warning("retrieval_trace_complete_failed", error=str(exc))
+        await self._trace_recorder.complete(
+            run_id,
+            started,
+            candidate_count=candidate_count,
+            selected_count=selected_count,
+            status=status,
+            error_message=error_message,
+        )
 
     async def initialize(self) -> None:
         """初始化运行时：同步适配器注册表和文件向量索引。"""
@@ -220,124 +217,10 @@ class FileIntelligenceRuntime:
     async def parse_attachment(
         self, attachment_id: str, *, run_id: str | None = None
     ) -> dict[str, Any]:
-        """解析附件：提取内容、分块、构建符号索引和表格缓存。"""
-        attachment = await self.repository.get_attachment(attachment_id)
-        if attachment is None:
-            raise FileNotFoundError("附件不存在")
-        adapter = self.adapter_registry.select(
-            attachment.filename, attachment.mime_type
-        )
-        processing = await self.repository.update_attachment(
-            attachment.id,
-            status=AttachmentStatus.PROCESSING.value,
-            adapter_name=adapter.info.name,
-            adapter_version=adapter.info.version,
-            capabilities=adapter.info.capabilities,
-            error_message=None,
-        )
-        if processing is None:
-            raise RuntimeError("无法更新附件状态")
-        logger.info(
-            "file_processing_started", attachment_id=attachment.id, run_id=run_id
-        )
-        await self.emit_attachment(processing, run_id=run_id)
-        path = self.storage.resolve(attachment.storage_key)
-        workspace = self.storage.create_workspace(attachment.id)
-        try:
-            context = ExtractionContext(
-                path=path,
-                workspace=workspace,
-                filename=attachment.filename,
-                mime_type=attachment.mime_type,
-            )
-            result = await adapter.extract(context, self.settings)
-            # 适配器接收内容寻址的 blob 路径。持久化前，将这一实现细节替换为
-            # 用户可见的文件名，并应用到所有定位器和代码索引中。
-            for unit in result.units:
-                if unit.locator.get("path") == path.name:
-                    unit.locator["path"] = attachment.filename
-            for symbol in result.symbols:
-                if symbol.get("path") == path.name:
-                    symbol["path"] = attachment.filename
-            for dependency in result.dependencies:
-                if dependency.get("source") == path.name:
-                    dependency["source"] = attachment.filename
-            chunks = self._chunk_units(attachment.id, result.units)
-            await self.repository.replace_chunks(attachment.id, chunks)
-            await self.repository.replace_code_index(
-                attachment.id, result.symbols, result.dependencies
-            )
-            if result.tables:
-                cache_key = self.cache_key(
-                    attachment,
-                    "tables",
-                    {},
-                    adapter.info.version,
-                    self.settings.primary_llm.model,
-                )
-                await self.repository.put_artifact(
-                    attachment.id,
-                    "tables",
-                    cache_key,
-                    json.dumps(result.tables, ensure_ascii=False, default=str),
-                    {"count": len(result.tables)},
-                )
-            metadata = {
-                **result.metadata,
-                "chunk_count": len(chunks),
-                "symbol_count": len(result.symbols),
-                "dependency_count": len(result.dependencies),
-                "document_version": attachment.document_version,
-            }
-            await self.repository.update_attachment(attachment.id, metadata=metadata)
-            return metadata
-        finally:
-            self.storage.cleanup_workspace(workspace)
+        return await self._ingestion.parse_attachment(attachment_id, run_id=run_id)
 
     async def index_attachment(self, attachment_id: str) -> dict[str, Any]:
-        """将附件分块写入 ChromaDB 向量索引。
-
-        按 100 个分块一批写入；失败时抛出异常，由调用方统一更新附件状态。
-
-        参数：
-            attachment_id: 附件 ID。
-        返回值：
-            包含 chunks 数量和 vector_indexed 标志的字典。
-        """
-        attachment = await self.repository.get_attachment(attachment_id)
-        if attachment is None:
-            raise FileNotFoundError("附件不存在")
-        chunks = await self.repository.get_chunks(attachment_id, limit=100_000)
-        try:
-            await self._vector_store.replace_attachment(
-                attachment_id,
-                [
-                    {
-                        "id": chunk.id,
-                        "content": chunk.content,
-                        "metadata": {
-                            "attachment_id": attachment_id,
-                            "document_version": attachment.document_version,
-                            "ordinal": chunk.ordinal,
-                            "locator_json": json.dumps(
-                                chunk.locator.model_dump(
-                                    mode="json", exclude_none=True
-                                ),
-                                ensure_ascii=False,
-                            ),
-                        },
-                    }
-                    for chunk in chunks
-                ],
-            )
-        except Exception as exc:
-            logger.warning(
-                "file_embedding_index_failed",
-                attachment_id=attachment_id,
-                error=str(exc),
-            )
-            raise
-        return {"chunks": len(chunks)}
+        return await self._ingestion.index_attachment(attachment_id)
 
     async def process_knowledge_document(self, attachment_id: str) -> dict[str, Any]:
         """幂等完成知识库文档解析和向量索引。
@@ -351,27 +234,7 @@ class FileIntelligenceRuntime:
         异常：
             解析、PostgreSQL 写入或向量索引失败时向上抛出，由任务 worker 负责重试。
         """
-        async with self._knowledge_lock(attachment_id):
-            await self.initialize()
-            attachment = await self.repository.get_attachment(attachment_id)
-            if attachment is None or attachment.knowledge_base_id is None:
-                raise FileNotFoundError("知识库文档不存在")
-            metadata = await self.parse_attachment(attachment_id)
-            # 删除请求可能在解析耗时阶段完成。再次读取附件能阻止后续向量
-            # 写入，并由删除路径清理本轮已经生成的 PostgreSQL 派生数据。
-            attachment = await self.repository.get_attachment(attachment_id)
-            if attachment is None or attachment.knowledge_base_id is None:
-                raise FileNotFoundError("知识库文档已删除")
-            indexed = await self.index_attachment(attachment_id)
-            updated = await self.repository.update_attachment(
-                attachment_id,
-                status=AttachmentStatus.READY.value,
-                error_message=None,
-            )
-            if updated is None:
-                await self.delete_attachment_vectors(attachment_id)
-                raise FileNotFoundError("知识库文档已删除")
-            return {**metadata, **indexed}
+        return await self._ingestion.process_knowledge_document(attachment_id)
 
     async def delete_knowledge_document(
         self, attachment_id: str, knowledge_base_id: str
@@ -388,37 +251,9 @@ class FileIntelligenceRuntime:
         异常：
             Chroma 删除失败时不会继续删除 PostgreSQL 数据，避免留下无法重建的状态。
         """
-        async with self._knowledge_lock(attachment_id):
-            attachment = await self.repository.get_attachment(attachment_id)
-            if attachment is None or attachment.knowledge_base_id != knowledge_base_id:
-                return False
-            await self.initialize()
-            try:
-                await self.delete_attachment_vectors(attachment_id)
-                deleted = await self.repository.soft_delete_knowledge_base_attachment(
-                    attachment_id, knowledge_base_id
-                )
-            except Exception:
-                # Chroma 先于 PostgreSQL 清理；PostgreSQL 失败时以仍在库中的分块重建向量。
-                try:
-                    current = await self.repository.get_attachment(
-                        attachment_id, include_deleted=True
-                    )
-                    if current is not None and current.deleted_time is None:
-                        await self.index_attachment(attachment_id)
-                except Exception:
-                    logger.exception(
-                        "knowledge_delete_vector_compensation_failed",
-                        attachment_id=attachment_id,
-                    )
-                raise
-            if not deleted:
-                current = await self.repository.get_attachment(
-                    attachment_id, include_deleted=True
-                )
-                if current is not None and current.deleted_time is None:
-                    await self.index_attachment(attachment_id)
-            return deleted
+        return await self._ingestion.delete_knowledge_document(
+            attachment_id, knowledge_base_id
+        )
 
     async def delete_attachment_vectors(self, attachment_id: str) -> None:
         """删除某附件在 Chroma 中的全部向量。
@@ -432,195 +267,28 @@ class FileIntelligenceRuntime:
         异常：
             Chroma 删除失败时向上抛出异常。
         """
-        await self._vector_store.delete_attachment(attachment_id)
-
-    def _knowledge_lock(self, attachment_id: str) -> asyncio.Lock:
-        """返回同一知识库文档共享的异步互斥锁。
-
-        参数：
-            attachment_id：附件唯一标识。
-
-        返回：
-            当前进程内用于串行化解析和删除的锁。
-
-        异常：
-            不主动抛出业务异常。
-        """
-        return self._knowledge_document_locks.setdefault(attachment_id, asyncio.Lock())
+        await self._ingestion.delete_attachment_vectors(attachment_id)
 
     def _chunk_units(
         self, attachment_id: str, units: list[ExtractedUnit]
     ) -> list[FileChunk]:
-        """将内容单元分块，支持换行符边界和重叠窗口。
-
-        分块策略：
-        - 使用次要 LLM 对应的 token 计数器限制每个块的 token 数。
-        - 优先在换行符处断开（避免拆断行）。
-        - 相邻块按 token 数保留重叠窗口，确保跨块搜索不丢失上下文。
-
-        参数：
-            attachment_id: 附件 ID，写入每个分块的元数据。
-            units: 提取的内容单元列表。
-
-        返回值：
-            分块后的 ``FileChunk`` 列表，按序号排列。
-        """
-        max_tokens = max(1, self.settings.file_chunk_tokens)
-        overlap_tokens = min(max_tokens // 3, self.settings.file_chunk_overlap_tokens)
-        chunks: list[FileChunk] = []
-        ordinal = 0
-        for group in self._group_units_for_chunking(units):
-            # 二进制文档中的 NUL 不是可见文本，且 PostgreSQL TEXT 不允许保存；
-            # 在分块前清理可使 token 计数和字符定位都对应最终落库内容。
-            content = (
-                "\n\n".join(unit.content for unit in group).replace("\x00", "").strip()
-            )
-            if not content:
-                continue
-            start = 0
-            while start < len(content):
-                end = self._find_chunk_end(content, start, max_tokens)
-                end = self._prefer_semantic_boundary(content, start, end)
-                piece = content[start:end].strip()
-                if piece:
-                    token_count = self.file_token_counter.count_text_tokens(piece)
-                    chunks.append(
-                        FileChunk(
-                            id=generate_time_id(),
-                            attachment_id=attachment_id,
-                            ordinal=ordinal,
-                            content=piece,
-                            token_count=token_count,
-                            locator=FileLocator.model_validate(
-                                self._chunk_locator(group, start, end)
-                            ),
-                            metadata=FileMetadata.model_validate(
-                                self._group_metadata(group)
-                            ),
-                        )
-                    )
-                    ordinal += 1
-                if end >= len(content):
-                    break
-                overlap_start = self._find_overlap_start(
-                    content, start, end, overlap_tokens
-                )
-                start = max(start + 1, overlap_start)
-        return chunks
-
-    @staticmethod
-    def _group_units_for_chunking(
-        units: list[ExtractedUnit],
-    ) -> list[list[ExtractedUnit]]:
-        groups: list[list[ExtractedUnit]] = []
-        current: list[ExtractedUnit] = []
-        for unit in units:
-            is_pdf_page = unit.kind == "page" or unit.metadata.get("kind") == "page"
-            if current and (
-                not is_pdf_page
-                or not current[-1].can_merge_after
-                or not unit.can_merge_before
-            ):
-                groups.append(current)
-                current = []
-            if not is_pdf_page:
-                groups.append([unit])
-            else:
-                current.append(unit)
-        if current:
-            groups.append(current)
-        return groups
-
-    @staticmethod
-    def _group_metadata(group: list[ExtractedUnit]) -> dict[str, Any]:
-        if len(group) == 1:
-            return dict(group[0].metadata)
-        return {
-            "kind": "pdf_document",
-            "ocr": any(bool(unit.metadata.get("ocr")) for unit in group),
-            "chunk_strategy": "pdf-semantic-v1",
-        }
+        self._chunker = FileChunker(self.file_token_counter)
+        return self._chunker.chunk(
+            attachment_id,
+            units,
+            max_tokens=self.settings.file_chunk_tokens,
+            overlap_tokens=self.settings.file_chunk_overlap_tokens,
+        )
 
     @staticmethod
     def _chunk_locator(
         group: list[ExtractedUnit], start: int, end: int
     ) -> dict[str, Any]:
-        if len(group) == 1:
-            locator = dict(group[0].locator)
-            page = locator.get("page")
-            if page is not None:
-                locator.setdefault("page_start", page)
-                locator.setdefault("page_end", page)
-            locator.update(char_start=start, char_end=end)
-            return locator
-        cursor = 0
-        pages: list[int] = []
-        for unit in group:
-            unit_start = cursor
-            cursor += len(unit.content) + 2
-            unit_end = cursor
-            if end > unit_start and start < unit_end:
-                page = unit.locator.get("page")
-                if isinstance(page, int):
-                    pages.append(page)
-        locator = {
-            "page_start": min(pages) if pages else None,
-            "page_end": max(pages) if pages else None,
-            "char_start": start,
-            "char_end": end,
-        }
-        return {key: value for key, value in locator.items() if value is not None}
-
-    @staticmethod
-    def _prefer_semantic_boundary(content: str, start: int, end: int) -> int:
-        if end >= len(content):
-            return end
-        midpoint = start + max(1, (end - start) // 2)
-        newline = content.rfind("\n", midpoint, end)
-        if newline > start:
-            return newline
-        matches = list(re.finditer(r"[。！？；!?;]\s*", content[midpoint:end]))
-        return midpoint + matches[-1].end() if matches else end
+        return FileChunker.chunk_locator(group, start, end)
 
     def _find_chunk_end(self, content: str, start: int, max_tokens: int) -> int:
-        """查找适合 token 预算的最长字符切片。"""
-        if self.file_token_counter.count_text_tokens(content[start:]) <= max_tokens:
-            return len(content)
-        low = start + 1
-        high = len(content)
-        best = low
-        while low <= high:
-            middle = (low + high) // 2
-            if (
-                self.file_token_counter.count_text_tokens(content[start:middle])
-                <= max_tokens
-            ):
-                best = middle
-                low = middle + 1
-            else:
-                high = middle - 1
-        return best
-
-    def _find_overlap_start(
-        self, content: str, chunk_start: int, chunk_end: int, overlap_tokens: int
-    ) -> int:
-        """查找适合重叠 token 预算的最早后缀。"""
-        if overlap_tokens <= 0:
-            return chunk_end
-        low = chunk_start
-        high = chunk_end
-        best = chunk_end
-        while low <= high:
-            middle = (low + high) // 2
-            if (
-                self.file_token_counter.count_text_tokens(content[middle:chunk_end])
-                <= overlap_tokens
-            ):
-                best = middle
-                high = middle - 1
-            else:
-                low = middle + 1
-        return best
+        self._chunker = FileChunker(self.file_token_counter)
+        return self._chunker.find_chunk_end(content, start, max_tokens)
 
     async def list_files(self, session_id: str) -> list[dict[str, Any]]:
         """列出会话附件和全局知识库文档（公开字段）。"""
@@ -913,15 +581,12 @@ class FileIntelligenceRuntime:
                 )
                 for item in reranked
             ]
-            await self._trace_writer.record_candidates(
-                run_id, [*raw_candidates, *fused_candidates, *reranked_candidates]
-            )
-            await self._complete_retrieval_trace(
+            await self._trace_recorder.record(
                 run_id,
-                started,
+                [*raw_candidates, *fused_candidates, *reranked_candidates],
                 candidate_count=len(fused),
                 selected_count=len(ordered),
-                status="succeeded",
+                started=started,
             )
         except Exception as exc:
             logger.warning("retrieval_trace_record_failed", error=str(exc))
@@ -1159,15 +824,12 @@ class FileIntelligenceRuntime:
                 )
                 for item in reranked
             ]
-            await self._trace_writer.record_candidates(
-                run_id, [*raw_candidates, *fused_candidates, *reranked_candidates]
-            )
-            await self._complete_retrieval_trace(
+            await self._trace_recorder.record(
                 run_id,
-                started,
+                [*raw_candidates, *fused_candidates, *reranked_candidates],
                 candidate_count=len(fused_pool),
                 selected_count=len(selected_results),
-                status="partial" if vector_error else "succeeded",
+                started=started,
                 error_message=vector_error,
             )
         except Exception as exc:
@@ -1289,49 +951,16 @@ class FileIntelligenceRuntime:
         异常：
             异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
         """
-        scores: dict[str, float] = {}
-        values: dict[str, FileRetrievalCandidate] = {}
-        for rank, chunk in enumerate(keyword, 1):
-            scores[chunk.source_id] = scores.get(chunk.source_id, 0) + 1 / (60 + rank)
-            values[chunk.source_id] = FileRetrievalCandidate(
-                source_id=chunk.source_id,
-                content=chunk.content,
-                attachment_id=chunk.attachment_id,
-                locator=chunk.locator,
-                source_title=chunk.source_title or source_title,
-                document_version=chunk.document_version or document_version,
-                keyword_score=chunk.keyword_score,
-                keyword_rank=rank,
-            )
-        for rank, item in enumerate(vector, 1):
-            scores[item.source_id] = scores.get(item.source_id, 0) + 1 / (60 + rank)
-            previous = values.get(item.source_id)
-            if previous is None:
-                values[item.source_id] = FileRetrievalCandidate(
-                    source_id=item.source_id,
-                    content=item.content,
-                    attachment_id=item.attachment_id,
-                    locator=item.locator,
-                    source_title=item.source_title or source_title,
-                    document_version=item.document_version or document_version,
-                    metadata=dict(item.metadata),
-                    vector_score=item.vector_score,
-                )
-                previous = values[item.source_id]
-            else:
-                previous.vector_score = item.vector_score
-            previous.vector_rank = rank
-        ordered = sorted(
-            values.values(), key=lambda item: scores[item.source_id], reverse=True
-        )[:limit]
-        for rank, item in enumerate(ordered, 1):
-            item.fused_score = scores[item.source_id]
-            item.fused_rank = rank
-            if item.source_title is None:
-                item.source_title = source_title
-            if item.document_version is None:
-                item.document_version = document_version
-        return ordered
+        pipeline = getattr(self, "_candidate_pipeline", None)
+        if pipeline is None:
+            pipeline = HybridCandidatePipeline(getattr(self, "_reranker", None))
+        return pipeline.fuse(
+            keyword,
+            vector,
+            limit,
+            source_title=source_title,
+            document_version=document_version,
+        )
 
     async def _rerank_file_results(
         self,
@@ -1340,21 +969,10 @@ class FileIntelligenceRuntime:
         limit: int,
     ) -> list[FileRetrievalCandidate]:
         """重排文件候选；模型失败时保留 RRF 顺序并记录降级。"""
-        if not candidates or limit <= 0:
-            return []
-        if self._reranker is None:
-            for rank, candidate in enumerate(candidates[:limit], 1):
-                candidate.rerank_score = candidate.fused_score
-                candidate.rerank_rank = rank
-            return candidates[:limit]
-        try:
-            return await self._reranker.rerank(query, candidates, limit)
-        except Exception as exc:
-            logger.warning("file_rerank_failed", error=str(exc))
-            for rank, candidate in enumerate(candidates[:limit], 1):
-                candidate.rerank_score = candidate.fused_score
-                candidate.rerank_rank = rank
-            return candidates[:limit]
+        pipeline = getattr(self, "_candidate_pipeline", None)
+        if pipeline is None:
+            pipeline = HybridCandidatePipeline(getattr(self, "_reranker", None))
+        return await pipeline.rerank(query, candidates, limit)
 
     @staticmethod
     def _diversify_knowledge_results(
@@ -1364,42 +982,14 @@ class FileIntelligenceRuntime:
         max_per_document: int,
     ) -> list[FileRetrievalCandidate]:
         """限制单文档占比，避免知识库结果被单一文档垄断。"""
-        selected: list[FileRetrievalCandidate] = []
-        counts: dict[str, int] = {}
-        for candidate in candidates:
-            count = counts.get(candidate.attachment_id, 0)
-            if count >= max_per_document:
-                continue
-            selected.append(candidate)
-            counts[candidate.attachment_id] = count + 1
-            if len(selected) >= limit:
-                return selected
-        if len(selected) < limit:
-            selected_ids = {candidate.source_id for candidate in selected}
-            for candidate in candidates:
-                if candidate.source_id in selected_ids:
-                    continue
-                selected.append(candidate)
-                if len(selected) >= limit:
-                    break
-        return selected
+        return HybridCandidatePipeline.diversify(
+            candidates, limit, max_per_document=max_per_document
+        )
 
     async def extract_table(self, session_id: str, file_id: str) -> dict[str, Any]:
         """提取文件的表格数据（从解析阶段缓存的 artifact 读取）。"""
         attachment = await self.require_attachment(session_id, file_id)
-        key = self.cache_key(
-            attachment,
-            "tables",
-            {},
-            attachment.adapter_version or "",
-            self.settings.primary_llm.model,
-        )
-        artifact = await self.repository.get_artifact(key)
-        return {
-            "tables": (
-                json.loads(artifact.content) if artifact and artifact.content else []
-            )
-        }
+        return await self._analysis.extract_table(attachment)
 
     async def summarize_file(
         self, session_id: str, file_id: str, summary_type: str = "general"
@@ -1418,53 +1008,7 @@ class FileIntelligenceRuntime:
             包含 summary 和 cached 标志的字典。
         """
         attachment = await self.require_attachment(session_id, file_id)
-        key = self.cache_key(
-            attachment,
-            "summary",
-            {"summary_type": summary_type},
-            attachment.adapter_version or "",
-            self.settings.primary_llm.model,
-        )
-        cached = await self.repository.get_artifact(key)
-        if cached:
-            return {"summary": cached.content or "", "cached": True}
-        chunks = await self.repository.get_chunks(file_id, limit=100_000)
-        if not chunks:
-            if attachment.adapter_name == "image":
-                message = (
-                    "图片未识别出可总结的 OCR 文本。"
-                    "如果需要描述截图画面，请使用 analyze_file；若未配置视觉模型，只能返回图片尺寸等元数据。"
-                )
-                await self.repository.put_artifact(
-                    file_id, "summary", key, message, {"summary_type": summary_type}
-                )
-                return {"summary": message, "cached": False, "no_text": True}
-            raise ValueError("文件尚未解析完成或没有可总结内容")
-        summaries: list[str] = []
-        for start in range(0, len(chunks), 8):
-            summaries.append(
-                await self._llm_summary(
-                    self.secondary_llm,
-                    "\n\n".join(c.content for c in chunks[start : start + 8]),
-                    "分块摘要",
-                )
-            )
-        while len(summaries) > 8:
-            summaries = [
-                await self._llm_summary(
-                    self.secondary_llm,
-                    "\n\n".join(summaries[start : start + 8]),
-                    "章节摘要",
-                )
-                for start in range(0, len(summaries), 8)
-            ]
-        final = await self._llm_summary(
-            self.primary_llm, "\n\n".join(summaries), f"{summary_type} 文档摘要"
-        )
-        await self.repository.put_artifact(
-            file_id, "summary", key, final, {"summary_type": summary_type}
-        )
-        return {"summary": final, "cached": False}
+        return await self._analysis.summarize(attachment, summary_type)
 
     async def analyze_file(
         self, session_id: str, file_id: str, task: str
@@ -1483,45 +1027,19 @@ class FileIntelligenceRuntime:
             分析结果字典，图片文件可能包含 ``vision`` 字段。
         """
         attachment = await self.require_attachment(session_id, file_id)
-        adapter = self.adapter_registry.select(
-            attachment.filename, attachment.mime_type
-        )
-        path = self.storage.resolve(attachment.storage_key)
-        result = await adapter.analyze(path, task)
-        if adapter.info.name == "image" and self.settings.primary_llm.supports_vision:
-            result["vision"] = await self._vision_analysis(path, task)
-        elif adapter.info.name == "image":
-            result["can_describe_visual_content"] = False
-            if str(result.get("ocr_text", "")).strip():
-                result["analysis_source"] = "ocr"
-                result["message"] = (
-                    "当前主模型未声明支持视觉输入，因此无法描述图片画面；"
-                    "本次使用 OCR 识别出的文字作为 fallback，仅能分析图片中的可识别文本。"
-                )
-            else:
-                result["message"] = (
-                    "当前主模型未声明支持视觉输入，因此无法描述图片画面；"
-                    "图片也未识别出可用的 OCR 文本，只能返回尺寸、模式和 OCR 可用性。"
-                )
-        return result
+        return await self._analysis.analyze(attachment, task)
 
     async def analyze_codebase(self, session_id: str, file_id: str) -> dict[str, Any]:
         """分析代码项目：返回语言分布、文件数、符号数和依赖数。"""
         attachment = await self.require_attachment(session_id, file_id)
-        return {
-            "file": attachment_to_payload(attachment),
-            "languages": attachment.metadata.languages,
-            "files": attachment.metadata.files or 1,
-            "symbols": attachment.metadata.symbol_count or 0,
-            "dependencies": attachment.metadata.dependency_count or 0,
-        }
+        return self._analysis.codebase_overview(attachment)
 
     async def find_symbol(
         self, session_id: str, file_id: str, name: str
     ) -> list[dict[str, Any]]:
         """在代码附件中按名称搜索符号（模糊匹配）。"""
         await self.require_attachment(session_id, file_id)
-        return await self.repository.find_symbols(file_id, name)
+        return await self._analysis.find_symbol(file_id, name)
 
     async def get_call_graph(
         self, session_id: str, file_id: str, symbol: str, direction: str = "both"
@@ -1536,60 +1054,7 @@ class FileIntelligenceRuntime:
                 ``"both"``（双向）。
         """
         await self.require_attachment(session_id, file_id)
-        return await self.repository.find_dependencies(file_id, symbol, direction)
-
-    async def _llm_summary(
-        self, provider: LLMProvider, content: str, label: str
-    ) -> str:
-        """调用 LLM 生成文本摘要。
-
-        参数：
-            provider: LLM 提供者实例。
-            content: 待摘要的文本内容。
-            label: 摘要类型标签（如 ``"分块摘要"``、``"文档摘要"``）。
-
-        返回值：
-            生成的摘要文本。
-        """
-        response = await provider.ainvoke(
-            [
-                HumanMessage(
-                    content=f"请生成忠实、紧凑的{label}。保留事实、数字、风险和结论，不添加原文没有的信息。\n\n{content}"
-                )
-            ]
-        )
-        return extract_message_text(response).strip()
-
-    async def _vision_analysis(self, path: Path, task: str) -> str:
-        """调用视觉模型分析图片内容。
-
-        将图片编码为 base64 后通过多模态消息发送给 LLM。
-
-        参数：
-            path: 图片文件路径。
-            task: 分析任务描述。
-
-        返回值：
-            视觉模型的分析结果文本。
-        """
-        import base64
-
-        mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        response = await self.primary_llm.ainvoke(
-            [
-                HumanMessage(
-                    content=[
-                        {"type": "text", "text": task or "请描述并分析这张图片。"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime};base64,{encoded}"},
-                        },
-                    ]
-                )
-            ]
-        )
-        return extract_message_text(response)
+        return await self._analysis.call_graph(file_id, symbol, direction)
 
     @staticmethod
     def cache_key(

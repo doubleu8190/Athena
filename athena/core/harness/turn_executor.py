@@ -34,6 +34,7 @@ from athena.runtime.orchestration import (
     PLAN_SUBMISSION_TOOL_NAME,
     PlanSubmission,
 )
+from athena.observability.langsmith import finish_span, trace_span
 
 
 def _to_domain_messages(
@@ -471,22 +472,35 @@ class HarnessTurnExecutor(Harness):
         )
         bound_llm = self._llm.bind_tools(bound_tools) if bound_tools else self._llm
         chunks: list[AIMessageChunk] = []
-        async with asyncio.timeout(self._harness_settings.llm_stream_timeout):
-            async for chunk in bound_llm.astream(context.compressed):
-                if self._should_stop():
-                    break
-                if isinstance(chunk, AIMessageChunk):
-                    chunks.append(chunk)
-                chunk_content = extract_message_text(chunk)
-                if not chunk_content:
-                    continue
-                # 首轮顶层 Agent 的内容在完整响应生成后一次性写入流，
-                # 避免同一答案在流式边界中被重复展示。
-                if (
-                    not (context.next_turn == 1 and context.parent_run_id is None)
-                    and self._answer_stream is not None
-                ):
-                    await self._answer_stream.append(chunk_content)
+        async with trace_span(
+            name=f"llm.turn.{context.next_turn}",
+            run_type="llm",
+            inputs={"messages": [m.model_dump(mode="json") for m in context.compressed]},
+            run_id=f"{context.run_id}:llm:{context.llm_call_id}",
+            metadata={"session_id": context.session_id, "run_id": context.run_id, "turn": context.next_turn},
+            tags=["athena", "llm", "stream"],
+        ) as trace:
+            try:
+                async with asyncio.timeout(self._harness_settings.llm_stream_timeout):
+                    async for chunk in bound_llm.astream(context.compressed):
+                        if self._should_stop():
+                            break
+                        if isinstance(chunk, AIMessageChunk):
+                            chunks.append(chunk)
+                        chunk_content = extract_message_text(chunk)
+                        if not chunk_content:
+                            continue
+                        # 首轮顶层 Agent 的内容在完整响应生成后一次性写入流，
+                        # 避免同一答案在流式边界中被重复展示。
+                        if (
+                            not (context.next_turn == 1 and context.parent_run_id is None)
+                            and self._answer_stream is not None
+                        ):
+                            await self._answer_stream.append(chunk_content)
+                finish_span(trace, outputs={"status": "success", "chunks": len(chunks)})
+            except Exception as exc:
+                finish_span(trace, error=str(exc))
+                raise
         return chunks
 
     async def _interrupted_llm_outcome(

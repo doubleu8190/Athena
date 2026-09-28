@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph, RunnableConfig
 
 from athena.utils.logging import get_logger
+from athena.observability.langsmith import start_trace
 
 from .nodes import (
     route_after_attachment_processing,
@@ -167,6 +168,38 @@ def build_graph(
 
 
 async def invoke_graph(
+    graph: CompiledStateGraph,
+    *,
+    session_id: str,
+    user_message: str,
+    run_id: str = "",
+    attachment_ids: list[str] | None = None,
+    message_id: str = "",
+    stop_signal: asyncio.Event | None = None,
+) -> Any:
+    async with start_trace(
+        name="athena.session",
+        inputs={"user_message": user_message, "attachment_ids": attachment_ids or []},
+        run_id=run_id,
+        metadata={"session_id": session_id, "run_id": run_id},
+        tags=["athena", "session"],
+    ) as trace:
+        result = await _invoke_graph(
+            graph,
+            session_id=session_id,
+            user_message=user_message,
+            run_id=run_id,
+            attachment_ids=attachment_ids,
+            message_id=message_id,
+            stop_signal=stop_signal,
+        )
+        from athena.observability.langsmith import finish_span
+
+        finish_span(trace, outputs={"status": "completed"})
+        return result
+
+
+async def _invoke_graph(
     graph: CompiledStateGraph,
     *,
     session_id: str,

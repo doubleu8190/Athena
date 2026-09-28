@@ -37,6 +37,7 @@ from athena.core.llm.retry import (
 )
 from athena.core.llm.tokens import ModelTokenCounter, TokenCounter
 from athena.utils.logging import get_logger
+from athena.observability.langsmith import finish_span, trace_span
 
 logger = get_logger(__name__)
 
@@ -212,12 +213,22 @@ class LLMProvider:
         config = self._retry_manager.config
 
         for attempt in range(config.max_attempts):
+            trace = None
             try:
-                gen = self._model.astream(messages, **kwargs)
-                async for chunk in gen:
-                    yield chunk
+                async with trace_span(
+                    name=f"llm.stream.attempt.{attempt + 1}",
+                    run_type="llm",
+                    inputs={"message_count": len(messages)},
+                    metadata={"attempt": attempt + 1, "retry": attempt > 0},
+                    tags=["athena", "llm", "stream", "retry" if attempt > 0 else "initial"],
+                ) as trace:
+                    gen = self._model.astream(messages, **kwargs)
+                    async for chunk in gen:
+                        yield chunk
+                    finish_span(trace, outputs={"status": "success", "attempt": attempt + 1})
                 return  # 正常结束
             except Exception as e:
+                finish_span(trace, error=str(e))
                 last_error = e
                 category = ErrorCategory.TRANSIENT
                 from athena.core.llm.retry import categorize_error

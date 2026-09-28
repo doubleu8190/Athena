@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     debug: bool = True
+    langchain_tracing_v2: bool = False
+    langchain_project: str = "athena"
+    langchain_endpoint: str = "https://api.smith.langchain.com"
+    langchain_api_key: str = ""
     auth_enabled: bool = False
     auth_username: str = "athena"
     auth_password: str = "change-me"

@@ -87,6 +87,11 @@ async def lifespan(app: FastAPI):
     await db.connect(
         pool_size=settings.postgres_pool_size,
         max_overflow=settings.postgres_max_overflow,
+        embedding_dimension=settings.embedding_dimension,
+        embedding_signature=(
+            f"{settings.embedding_provider}:{settings.embedding_model}:"
+            f"{settings.embedding_version}:{settings.embedding_dimension}"
+        ),
     )
 
     # Neo4j remains optional; the existing RAG path runs without it.
@@ -168,8 +173,8 @@ async def lifespan(app: FastAPI):
     # ── 5.1 文件智能 ──
     from athena.core.files.runtime import FileIntelligenceRuntime
     from athena.core.files.reranking import CrossEncoderFileReranker
-    from athena.infrastructure.chroma.file_vector_store import ChromaFileVectorStore
-    from athena.infrastructure.chroma.embedding import embedding_config_from_settings
+    from athena.infrastructure.embedding import embedding_config_from_settings
+    from athena.infrastructure.pgvector.file_vector_store import PgVectorFileVectorStore
     from athena.core.tools.catalog import ToolRegistry
     from athena.core.tools.providers.files import build_file_tool_specs
 
@@ -183,8 +188,7 @@ async def lifespan(app: FastAPI):
             settings,
         )
 
-    file_vector_store = ChromaFileVectorStore(
-        path=str(settings.chroma_path),
+    file_vector_store = PgVectorFileVectorStore(
         embedding_config=embedding_config_from_settings(settings),
     )
     file_reranker = None
@@ -233,7 +237,7 @@ async def lifespan(app: FastAPI):
     # ── 5.2 记忆系统 ──
     from athena.core.memory.long_term_memory import LongTermMemoryService
 
-    from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
+    from athena.infrastructure.pgvector.memory_vector_store import PgVectorMemoryVectorStore
     from athena.infrastructure.postgre.repositories.memory_repository import (
         PostgresMemoryRepository,
     )
@@ -245,8 +249,7 @@ async def lifespan(app: FastAPI):
     memory_service = LongTermMemoryService(
         settings=settings,
         repository=PostgresMemoryRepository(),
-        vector_store=ChromaMemoryVectorStore(
-            path=str(settings.chroma_path),
+        vector_store=PgVectorMemoryVectorStore(
             embedding_config=embedding_config_from_settings(settings),
         ),
     )

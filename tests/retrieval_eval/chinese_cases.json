@@ -1,9 +1,9 @@
 {
   "corpus": [
     {"id": "db", "content": "系统使用 PostgreSQL 保存业务数据，并通过 zhparser 提供中文全文检索。"},
-    {"id": "embedding", "content": "向量索引使用多语言 embedding 模型，将中文文档编码后写入 Chroma。"},
+    {"id": "embedding", "content": "向量索引使用多语言 embedding 模型，将中文文档编码后写入 PostgreSQL pgvector。"},
     {"id": "chunking", "content": "文件按 token 预算切分，并保留重叠窗口，避免跨分块内容丢失。"},
-    {"id": "memory", "content": "长期记忆同时保存到 PostgreSQL 和 Chroma，检索时融合关键词与语义结果。"},
+    {"id": "memory", "content": "长期记忆保存在 PostgreSQL pgvector 中，检索时融合关键词与语义结果。"},
     {"id": "ocr", "content": "图片和扫描 PDF 通过 OCR 提取中文文本后再进入知识库索引。"},
     {"id": "security", "content": "工具执行默认受到审批和沙箱策略约束，避免未经授权的副作用。"}
   ],

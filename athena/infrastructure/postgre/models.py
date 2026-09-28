@@ -26,12 +26,22 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, column_property, mapped_column
 from sqlalchemy.dialects.postgresql import TSVECTOR
+from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
     """ORM 模型基类."""
 
     pass
+
+
+class EmbeddingMetadataModel(Base):
+    """Records the embedding contract used to populate pgvector columns."""
+
+    __tablename__ = "embedding_metadata"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    signature: Mapped[str] = mapped_column(Text, nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 memory_relations_table = Table(
@@ -431,7 +441,7 @@ class ToolCallModel(Base):
 
 
 class MemoryModel(Base):
-    """记忆表模型，与 ChromaDB 双写并由 PostgreSQL 原生 FTS 索引。"""
+    """记忆表模型，包含 PostgreSQL 原生 FTS 和 pgvector 索引字段。"""
 
     __tablename__ = "memories"
     __table_args__ = (
@@ -445,6 +455,9 @@ class MemoryModel(Base):
     )
     session_id: Mapped[str] = mapped_column(String, comment="所属会话标识")
     content: Mapped[str] = mapped_column(Text, comment="记忆内容")
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(1024), nullable=True, comment="记忆内容的 cosine embedding"
+    )
     content_fts: Mapped[str] = mapped_column(
         TSVECTOR,
         Computed("to_tsvector('chinese'::regconfig, content)", persisted=True),
@@ -696,6 +709,9 @@ class FileChunkModel(Base):
     )
     ordinal: Mapped[int] = mapped_column(Integer, comment="分块在附件中的顺序号")
     content: Mapped[str] = mapped_column(Text, comment="分块文本内容")
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(1024), nullable=True, comment="文件分块的 cosine embedding"
+    )
     content_fts: Mapped[str] = mapped_column(
         TSVECTOR,
         Computed("to_tsvector('chinese'::regconfig, content)", persisted=True),

@@ -66,6 +66,8 @@ class Database:
         *,
         pool_size: int = 10,
         max_overflow: int = 10,
+        embedding_dimension: int = 1024,
+        embedding_signature: str = "BAAI/bge-m3:v2:1024",
     ) -> None:
         """建立核心数据库连接，并按需初始化独立的记忆数据库。
 
@@ -80,7 +82,11 @@ class Database:
             数据库初始化失败时传播底层异常。
         """
         await initialize_postgres_engine(
-            self._database_url, pool_size=pool_size, max_overflow=max_overflow
+            self._database_url,
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            embedding_dimension=embedding_dimension,
+            embedding_signature=embedding_signature,
         )
         logger.info("database_connected", database="postgresql")
 

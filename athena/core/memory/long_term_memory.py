@@ -24,10 +24,10 @@ class _AccessStat:
 
 
 class LongTermMemoryService:
-    """长期记忆双写应用服务。
+    """长期记忆应用服务。
 
-    PostgreSQL 是生命周期管理和关键词搜索的事实来源，Chroma 是可替换的向量索引。
-    跨存储操作使用显式的补偿机制，因为两种技术之间不存在原子事务。
+    PostgreSQL 是生命周期管理、关键词搜索和向量索引的事实来源。
+    PostgreSQL 事务负责正文、生命周期字段和向量索引的一致性边界。
     """
 
     def __init__(
@@ -70,7 +70,7 @@ class LongTermMemoryService:
         self._initialized = True
         logger.info(
             "long_term_memory_service_initialized",
-            path=str(self._settings.chroma_path),
+            backend="pgvector",
         )
 
     def _record_access(self, memory_id: str) -> None:
@@ -149,7 +149,7 @@ class LongTermMemoryService:
                     },
                 )
         except Exception:
-            logger.exception("memory_flush_chromadb_failed")
+            logger.exception("memory_flush_pgvector_failed")
             raise
         return len(stats)
 

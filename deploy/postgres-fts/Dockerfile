@@ -43,7 +43,7 @@ RUN curl -fsSL https://github.com/hightman/scws/archive/refs/tags/1.2.3.tar.gz \
     && mkdir pgvector-src \
     && tar -xzf pgvector.tar.gz --strip-components=1 -C pgvector-src \
     && cd pgvector-src \
-    && make -j"$(nproc)" \
+    && make OPTFLAGS="" -j"$(nproc)" \
     && make install \
     && rm -rf /usr/src/scws-src /usr/src/zhparser-src /usr/src/pgvector-src /usr/src/*.tar.gz
 

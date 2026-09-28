@@ -11,48 +11,40 @@ from fastapi.testclient import TestClient
 from athena.config.settings import Settings
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.postgre.database import Database
-from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
 from athena.infrastructure.postgre.repositories.memory_repository import PostgresMemoryRepository
 from tests.fakes import install_runtime
 
 
-class _FakeCollection:
-    """最小化的 Chroma collection 假实现 — 记录 add/update，支持 get."""
+class _FakeVectorStore:
+    """最小化的存储无关向量替身。"""
 
     def __init__(self) -> None:
         self._store: dict[str, dict] = {}
 
-    def add(self, ids=None, documents=None, metadatas=None) -> None:
-        metas = list(metadatas or [])
-        for i, doc in zip(ids or [], documents or []):
-            meta = metas[len(self._store)] if len(self._store) < len(metas) else {}
-            self._store[i] = {"document": doc, "metadata": meta}
+    async def initialize(self) -> None:
+        return None
 
-    def update(self, ids=None, documents=None, metadatas=None) -> None:
-        for i, doc in zip(ids or [], documents or []):
-            if i in self._store:
-                self._store[i]["document"] = doc
+    async def add(self, memory_id, content, metadata) -> None:
+        self._store[memory_id] = {"document": content, "metadata": dict(metadata)}
 
-    def delete(self, ids=None) -> None:
-        for i in ids or []:
+    async def update(self, memory_id, content=None, metadata=None) -> None:
+        if memory_id in self._store:
+            if content is not None:
+                self._store[memory_id]["document"] = content
+            self._store[memory_id]["metadata"].update(metadata or {})
+
+    async def delete(self, memory_ids) -> None:
+        for i in memory_ids:
             self._store.pop(i, None)
 
-    def get(self, ids=None):
+    async def get(self, memory_id):
         out: dict[str, list] = {"ids": [], "documents": [], "metadatas": []}
-        for i in ids or []:
+        for i in [memory_id]:
             if i in self._store:
                 out["ids"].append(i)
                 out["documents"].append(self._store[i]["document"])
                 out["metadatas"].append(self._store[i]["metadata"])
         return out
-
-
-class _FakeClient:
-    def __init__(self) -> None:
-        self.collection = _FakeCollection()
-
-    def get_or_create_collection(self, name=None, metadata=None):
-        return self.collection
 
 
 @pytest.fixture
@@ -76,15 +68,12 @@ async def db(db_path):
 
 @pytest.fixture
 def manager(db):
-    """为端点测试显式注入 PostgreSQL 和 Chroma 存储端口."""
+    """为端点测试显式注入 PostgreSQL 和向量存储端口."""
     settings = Settings(_env_file=None)
     return LongTermMemoryService(
         settings=settings,
         repository=PostgresMemoryRepository(),
-        vector_store=ChromaMemoryVectorStore.with_client(
-            path=str(settings.chroma_path),
-            client=_FakeClient(),
-        ),
+        vector_store=_FakeVectorStore(),
     )
 
 

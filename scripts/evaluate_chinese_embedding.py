@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""在固定中文语料上评估当前 Chroma embedding 配置。"""
+"""在固定中文语料上评估当前 pgvector embedding 配置。"""
 
 from __future__ import annotations
 
@@ -7,15 +7,9 @@ import asyncio
 import json
 from pathlib import Path
 
-import chromadb
-
 from athena.config.settings import get_settings
 from athena.core.retrieval.evaluation import RetrievalEvaluationCase, evaluate_rankings
-from athena.infrastructure.chroma.embedding import (
-    collection_metadata,
-    embedding_config_from_settings,
-    get_or_create_collection,
-)
+from athena.infrastructure.embedding import EmbeddingProvider, embedding_config_from_settings
 
 
 async def main() -> None:
@@ -23,21 +17,19 @@ async def main() -> None:
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     settings = get_settings()
     config = embedding_config_from_settings(settings)
-    client = chromadb.EphemeralClient()
-    collection = get_or_create_collection(client, "athena_chinese_eval", config)
-    collection.add(
-        ids=[item["id"] for item in fixture["corpus"]],
-        documents=[item["content"] for item in fixture["corpus"]],
-        metadatas=[{"eval": True} for _ in fixture["corpus"]],
+    provider = EmbeddingProvider(config)
+    corpus_ids = [item["id"] for item in fixture["corpus"]]
+    corpus_vectors = await asyncio.to_thread(
+        provider.embed_documents, [item["content"] for item in fixture["corpus"]]
     )
     rankings: dict[str, list[str]] = {}
     for item in fixture["cases"]:
-        result = collection.query(
-            query_texts=[item["query"]],
-            n_results=len(fixture["corpus"]),
-            include=["distances"],
+        query_vector = await asyncio.to_thread(provider.embed_query, item["query"])
+        ranked = sorted(
+            zip(corpus_ids, corpus_vectors),
+            key=lambda candidate: _cosine_distance(query_vector, candidate[1]),
         )
-        rankings[item["query"]] = [str(source_id) for source_id in result["ids"][0]]
+        rankings[item["query"]] = [source_id for source_id, _ in ranked]
     cases = [
         RetrievalEvaluationCase.from_ids(item["query"], item["relevant_source_ids"])
         for item in fixture["cases"]
@@ -50,6 +42,15 @@ async def main() -> None:
         "mrr": metrics.mrr,
         "ndcg_at_k": metrics.ndcg_at_k,
     }, ensure_ascii=False, indent=2))
+
+
+def _cosine_distance(left: list[float], right: list[float]) -> float:
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = sum(value * value for value in left) ** 0.5
+    right_norm = sum(value * value for value in right) ** 0.5
+    if not left_norm or not right_norm:
+        return 1.0
+    return 1.0 - dot / (left_norm * right_norm)
 
 
 if __name__ == "__main__":

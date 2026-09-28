@@ -7,7 +7,7 @@ Athena 是一个面向本地运行的自主 AI Agent 桌面应用。项目将 LL
 - Agent 工作流：支持工具调用、重试、预算控制、错误处理和子 Agent 并行执行。
 - 工具系统：统一管理内置工具与 MCP 工具，支持启用/禁用、风险等级和人工审批。
 - 会话与恢复：持久化消息、步骤和工具调用，支持中断会话恢复或放弃。
-- 记忆与检索：PostgreSQL 保存统一持久化数据，ChromaDB 保存向量；支持向量检索、关键词检索、融合排序、摘要和事实提取。
+- 记忆与检索：PostgreSQL 统一保存业务数据、全文索引和 pgvector 向量；支持向量检索、关键词检索、融合排序、摘要和事实提取。
 - 文件智能：支持文本、PDF、Word、Excel、图片和代码文件的上传、解析、检索与分析。
 - 浏览器体验：React Web 前端通过 HTTP Command 和 SSE 接收 LLM 流式输出、工具执行、审批和文件处理事件。
 - 可选安全能力：路径安全过滤和 Docker 沙箱执行。沙箱默认关闭。
@@ -21,7 +21,7 @@ flowchart TB
     API[FastAPI 网关]
     Agent[AgentWorkflow + Harness]
     Tools[工具管理器]
-    Storage[PostgreSQL + ChromaDB]
+    Storage[PostgreSQL + pgvector]
     Files[文件智能运行时]
     Runtime[LangGraph Runtime]
 
@@ -40,7 +40,7 @@ flowchart TB
 | 后端 | Python 3.11+、FastAPI、Uvicorn、Pydantic Settings |
 | Agent 与 LLM | LangChain、OpenAI、Anthropic、Ollama 适配器 |
 | 工具 | 内置异步工具、MCP SDK、可选 Docker 沙箱 |
-| 持久化 | PostgreSQL、SQLAlchemy、ChromaDB |
+| 持久化 | PostgreSQL、SQLAlchemy、pgvector |
 | 文件处理 | pypdf、pdfplumber、python-docx、openpyxl、Pillow、RapidOCR、Tree-sitter |
 | 前端 | React 18、TypeScript、Vite、Zustand、Tailwind CSS |
 
@@ -53,7 +53,7 @@ Athena/
 │   ├── core/                 # Agent、Harness、LLM、记忆、检索、工具、文件和安全能力
 │   ├── contracts/            # Command/Event 协议与端口
 │   ├── gateway/              # REST API、SSE 和认证
-│   ├── infrastructure/       # PostgreSQL、ChromaDB 等基础设施
+│   ├── infrastructure/       # PostgreSQL、pgvector 等基础设施
 │   ├── models/               # 领域模型
 │   └── main.py               # FastAPI 应用入口
 ├── agent_runtime/            # LangGraph、命令消费和恢复
@@ -188,11 +188,11 @@ POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_POOL_SIZE=10
 POSTGRES_MAX_OVERFLOW=10
-CHROMADB_PATH=./data/chromadb
-CHROMA_EMBEDDING_PROVIDER=sentence_transformers
-CHROMA_EMBEDDING_MODEL=paraphrase-multilingual-MiniLM-L12-v2
-CHROMA_EMBEDDING_DEVICE=cpu
-CHROMA_EMBEDDING_VERSION=v1
+EMBEDDING_PROVIDER=sentence_transformers
+EMBEDDING_MODEL=BAAI/bge-m3
+EMBEDDING_DEVICE=cpu
+EMBEDDING_VERSION=v2
+EMBEDDING_DIMENSION=1024
 FILE_STORAGE_PATH=./data/files
 
 MAX_TURNS_PER_RUN=20
@@ -212,14 +212,7 @@ SANDBOX_ENABLED=false
 
 完整配置项和默认值请参见 [.env.example](.env.example) 与 [athena/config/settings.py](athena/config/settings.py)。文件上传大小、分块、并发、检索、上下文压缩、影子评估和审批等参数也都可以通过环境变量调整。
 
-Chroma 默认使用覆盖中文和英文的多语言 embedding 模型。切换 `CHROMA_EMBEDDING_MODEL`、`CHROMA_EMBEDDING_PROVIDER` 或版本后，先删除旧向量 collection，再重启应用让文件和记忆重新建立索引：
-
-```bash
-python scripts/reset_chroma_vectors.py --yes
-python scripts/rebuild_chroma_vectors.py
-```
-
-第一个命令只删除 `athena_file_chunks` 和 `athena_memory` 两个 Chroma collection，不删除 PostgreSQL 中的原始文件分块或记忆记录。第二个命令从 PostgreSQL 重新写入文件分块和长期记忆；完成后再启动或重启 Athena。
+默认使用 BGE-M3 多语言 embedding 模型（1024 维）。首次切换模型或维度时，应用会清空旧向量；保留的原始记忆和文件内容需要重新执行知识库处理或重新写入记忆后才会生成新向量。
 
 可以用固定中文/中英混合评测集检查模型质量：
 

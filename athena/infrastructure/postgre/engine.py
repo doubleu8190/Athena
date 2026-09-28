@@ -14,9 +14,16 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 async def initialize_postgres_engine(
-    database_url: str, *, pool_size: int = 10, max_overflow: int = 10
+    database_url: str,
+    *,
+    pool_size: int = 10,
+    max_overflow: int = 10,
+    embedding_dimension: int = 1024,
+    embedding_signature: str = "BAAI/bge-m3:v2:1024",
 ) -> None:
     """连接 PostgreSQL 并创建完整的单库 schema。"""
+    if embedding_dimension < 1:
+        raise ValueError("embedding_dimension must be positive")
     global _engine, _session_factory
     _engine = create_async_engine(
         database_url,
@@ -27,7 +34,44 @@ async def initialize_postgres_engine(
     )
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     async with _engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("DROP INDEX IF EXISTS idx_memories_embedding_hnsw"))
+        await conn.execute(text("DROP INDEX IF EXISTS idx_file_chunks_embedding_hnsw"))
+        metadata = await conn.execute(
+            text("SELECT signature, dimension FROM embedding_metadata WHERE id = 1")
+        )
+        current = metadata.first()
+        if current is None or current.dimension != embedding_dimension or current.signature != embedding_signature:
+            # The user-approved model switch invalidates every stored vector, while
+            # preserving the source memories and file chunks for re-indexing.
+            await conn.execute(text("UPDATE memories SET embedding = NULL"))
+            await conn.execute(text("UPDATE file_chunks SET embedding = NULL"))
+            await conn.execute(text(
+                f"ALTER TABLE memories ALTER COLUMN embedding TYPE vector({embedding_dimension}) USING NULL::vector({embedding_dimension})"
+            ))
+            await conn.execute(text(
+                f"ALTER TABLE file_chunks ALTER COLUMN embedding TYPE vector({embedding_dimension}) USING NULL::vector({embedding_dimension})"
+            ))
+            await conn.execute(
+                text("""
+                    INSERT INTO embedding_metadata (id, signature, dimension)
+                    VALUES (1, :signature, :dimension)
+                    ON CONFLICT (id) DO UPDATE
+                    SET signature = EXCLUDED.signature, dimension = EXCLUDED.dimension
+                """),
+                {"signature": embedding_signature, "dimension": embedding_dimension},
+            )
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_memories_embedding_hnsw
+            ON memories USING hnsw (embedding vector_cosine_ops)
+            WHERE embedding IS NOT NULL AND deleted_time IS NULL
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_file_chunks_embedding_hnsw
+            ON file_chunks USING hnsw (embedding vector_cosine_ops)
+            WHERE embedding IS NOT NULL AND deleted_time IS NULL
+        """))
         # File chunks inherit their version from AttachmentModel. Migrate the
         # old per-chunk version/current markers to soft deletion before dropping
         # them; historical rows remain available for audit, while only rows

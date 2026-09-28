@@ -3,7 +3,7 @@
 ``FileIntelligenceRuntime`` 是文件智能系统的中枢，协调以下能力：
 
 - **解析**：通过适配器提取文件内容、符号和表格，分块存储到 PostgreSQL。
-- **索引**：将分块写入 ChromaDB 向量索引，支持语义搜索。
+- **索引**：将分块写入 PostgreSQL pgvector 索引，支持语义搜索。
 - **读取**：按定位器（页码、工作表、路径）精准读取文件分块。
 - **搜索**：融合 PostgreSQL FTS 关键词搜索和向量语义搜索的混合检索。
 - **摘要**：多级 LLM 摘要（分块 → 章节 → 文档），支持缓存。
@@ -78,7 +78,7 @@ class FileIntelligenceRuntime:
     """File Intelligence 运行时，协调文件的解析、索引、搜索和分析。
 
     通过依赖注入获取 Repository、LLM 和事件发布器，
-    内部管理 StorageLayer、AdapterRegistry 和 ChromaDB 向量索引。
+    内部管理 StorageLayer、AdapterRegistry 和 PostgreSQL 向量索引。
 
     参数：
         repository: 文件持久化仓库。
@@ -253,14 +253,14 @@ class FileIntelligenceRuntime:
             成功删除时返回 ``True``；文档不存在或不属于该知识库时返回 ``False``。
 
         异常：
-            Chroma 删除失败时不会继续删除 PostgreSQL 数据，避免留下无法重建的状态。
+            pgvector 删除失败时不会继续删除 PostgreSQL 数据，避免留下无法重建的状态。
         """
         return await self._ingestion.delete_knowledge_document(
             attachment_id, knowledge_base_id
         )
 
     async def delete_attachment_vectors(self, attachment_id: str) -> None:
-        """删除某附件在 Chroma 中的全部向量。
+        """删除某附件在 PostgreSQL 中的全部向量。
 
         参数：
             attachment_id：附件唯一标识。
@@ -269,7 +269,7 @@ class FileIntelligenceRuntime:
             None。
 
         异常：
-            Chroma 删除失败时向上抛出异常。
+            pgvector 删除失败时向上抛出异常。
         """
         await self._ingestion.delete_attachment_vectors(attachment_id)
 
@@ -426,7 +426,7 @@ class FileIntelligenceRuntime:
         agent_run_id: str | None = None,
         message_id: str | None = None,
     ) -> dict[str, Any]:
-        """混合搜索文件内容（PostgreSQL FTS 关键词 + ChromaDB 向量语义）。
+        """混合搜索文件内容（PostgreSQL FTS 关键词 + pgvector 语义）。
 
         使用 RRF (Reciprocal Rank Fusion) 融合两种搜索结果，
         公式：score = Σ 1/(60 + rank)。

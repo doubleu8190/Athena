@@ -1,7 +1,6 @@
 """记忆管理测试 — 访问追踪、滑动 TTL、记忆度加权.
 
-用 FakeChromaClient 替代真实 ChromaDB（真实默认 embedding 需下载 ONNX 模型，
-网络不稳定且现有测试从不触碰 Chroma）；PostgreSQL 走真实 initialize_postgres_engine + PostgreSQL FTS。
+用内存向量替身隔离 embedding 模型；PostgreSQL 走真实 initialize_postgres_engine + PostgreSQL FTS。
 """
 
 from __future__ import annotations
@@ -17,29 +16,24 @@ from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalResult
 from athena.infrastructure.postgre.engine import close_postgres_engine, get_session, initialize_postgres_engine
 from athena.infrastructure.postgre.models import MemoryModel
-from athena.infrastructure.chroma.memory_vector_store import ChromaMemoryVectorStore
 from athena.infrastructure.postgre.repositories.memory_repository import PostgresMemoryRepository
 
 
 # ---------------------------------------------------------------------------
-# 伪 Chroma 客户端（覆盖 LongTermMemoryService 使用的全部表面，update 为逐 key 合并）
+# 内存向量替身（覆盖 LongTermMemoryService 使用的全部表面）
 # ---------------------------------------------------------------------------
 
-class _FakeCollection:
+class _FakeVectorStore:
     def __init__(self) -> None:
         self._items: dict[str, dict[str, Any]] = {}
 
-    def add(self, ids: list[str], documents: list[str], metadatas: list[Any]) -> None:
-        for mid, doc, meta in zip(ids, documents, metadatas):
-            self._items[mid] = {"document": doc, "metadata": meta}
+    async def initialize(self) -> None:
+        return None
 
-    def query(
-        self,
-        query_texts: list[str] | None = None,
-        n_results: int = 5,
-        include: list[str] | None = None,
-        where: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    async def add(self, memory_id: str, content: str, metadata: dict[str, Any]) -> None:
+        self._items[memory_id] = {"document": content, "metadata": dict(metadata)}
+
+    async def query(self, query: str, limit: int, where: dict[str, Any] | None) -> dict[str, Any]:
         items = list(self._items.items())
         if where:
             items = [
@@ -47,7 +41,7 @@ class _FakeCollection:
                 for i, d in items
                 if all(d["metadata"].get(k) == v for k, v in where.items())
             ]
-        items = items[:n_results]
+        items = items[:limit]
         ids = [i for i, _ in items]
         docs = [d["document"] for _, d in items]
         metas = [d["metadata"] for _, d in items]
@@ -60,39 +54,23 @@ class _FakeCollection:
             "distances": [dists],
         }
 
-    def get(
-        self, ids: list[str] | None = None, include: list[str] | None = None
-    ) -> dict[str, Any]:
-        if ids is None:
-            selected = list(self._items.items())
-        else:
-            selected = [(i, d) for i, d in self._items.items() if i in ids]
+    async def get(self, memory_id: str) -> dict[str, Any]:
+        selected = [(i, d) for i, d in self._items.items() if i == memory_id]
         return {
             "ids": [i for i, _ in selected],
             "documents": [d["document"] for _, d in selected],
             "metadatas": [d["metadata"] for _, d in selected],
         }
 
-    def update(self, ids: list[str], metadatas: list[Any] | None = None) -> None:
-        for mid, meta in zip(ids, metadatas or []):
-            if mid in self._items:
-                self._items[mid]["metadata"].update(meta)
+    async def update(self, memory_id: str, content: str | None = None, metadata: dict[str, Any] | None = None) -> None:
+        if memory_id in self._items:
+            if content is not None:
+                self._items[memory_id]["document"] = content
+            self._items[memory_id]["metadata"].update(metadata or {})
 
-    def delete(self, ids: list[str]) -> None:
-        for mid in ids:
+    async def delete(self, memory_ids: list[str]) -> None:
+        for mid in memory_ids:
             self._items.pop(mid, None)
-
-
-class _FakeChromaClient:
-    def __init__(self) -> None:
-        self._collection: _FakeCollection | None = None
-
-    def get_or_create_collection(
-        self, name: str, metadata: dict[str, Any] | None = None
-    ) -> _FakeCollection:
-        if self._collection is None:
-            self._collection = _FakeCollection()
-        return self._collection
 
 
 # ---------------------------------------------------------------------------
@@ -141,10 +119,7 @@ def _make_settings(**overrides: Any) -> Settings:
 
 @pytest.fixture
 def vector_store(tmp_path):
-    return ChromaMemoryVectorStore.with_client(
-        path=str(tmp_path / "chroma"),
-        client=_FakeChromaClient(),
-    )
+    return _FakeVectorStore()
 
 
 @pytest.fixture
@@ -185,8 +160,8 @@ async def test_only_selected_context_records_access(mm: LongTermMemoryService):
 
 
 @pytest.mark.asyncio
-async def test_flush_updates_postgresql_and_chroma(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
+async def test_flush_updates_postgresql_and_pgvector(
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
 ):
     mid = await mm.add_memory(
         content="技术决策：采用微服务架构", metadata={"session_id": "s1"}
@@ -202,8 +177,7 @@ async def test_flush_updates_postgresql_and_chroma(
     assert row.access_count == 2
     assert row.last_accessed_at is not None
 
-    # Chroma 元数据同步
-    meta = vector_store.collection._items[mid]["metadata"]
+    meta = vector_store._items[mid]["metadata"]
     assert meta["access_count"] == 2
     assert meta["last_accessed_at"] is not None
     # 访问热度不会改变事实有效期。
@@ -212,7 +186,7 @@ async def test_flush_updates_postgresql_and_chroma(
 
 @pytest.mark.asyncio
 async def test_flush_pinned_keeps_expires_at(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
 ):
     mid = await mm.add_memory(
         content="固定记忆", metadata={"session_id": "s1"}, pinned=True
@@ -226,14 +200,14 @@ async def test_flush_pinned_keeps_expires_at(
     assert row.expires_at is None  # PostgreSQL 保持 NULL
     assert row.access_count == 1
 
-    meta = vector_store.collection._items[mid]["metadata"]
-    assert meta["expires_at"] == ""  # Chroma 保持空串
+    meta = vector_store._items[mid]["metadata"]
+    assert meta["expires_at"] == ""
     assert meta["access_count"] == 1
 
 
 @pytest.mark.asyncio
 async def test_flush_after_delete_is_safe(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
 ):
     mid = await mm.add_memory(content="将被删除的记忆", metadata={"session_id": "s1"})
     mm.record_selected_access([mid])
@@ -243,7 +217,7 @@ async def test_flush_after_delete_is_safe(
     row = await _get_row(mid)
     assert row is not None
     assert row.deleted_time is not None  # 保持软删，未被复活
-    assert mid not in vector_store.collection._items
+    assert mid not in vector_store._items
 
 
 @pytest.mark.asyncio
@@ -253,15 +227,15 @@ async def test_flush_empty_stats_noop(mm: LongTermMemoryService):
 
 @pytest.mark.asyncio
 async def test_clear_all_removes_postgresql_and_vector_records(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
 ):
     await mm.add_memory(content="第一条记忆", metadata={"session_id": "s1"})
     await mm.add_memory(content="第二条记忆", metadata={"session_id": "s1"})
 
     result = await mm.clear_all()
 
-    assert result == {"postgresql": 2, "chroma": 2}
-    assert vector_store.collection._items == {}
+    assert result == {"postgresql": 2, "pgvector": 2}
+    assert vector_store._items == {}
     assert await mm.list_memories() == []
 
 
@@ -356,7 +330,7 @@ async def test_memory_update_creates_revision_and_preserves_old_content(
 
 @pytest.mark.asyncio
 async def test_cleanup_expired_respects_expires_at(
-    mm: LongTermMemoryService, vector_store: ChromaMemoryVectorStore
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
 ):
     expired_mid = await mm.add_memory(content="过期记忆", metadata={"session_id": "s1"})
     keep_mid = await mm.add_memory(content="保留记忆", metadata={"session_id": "s1"})
@@ -368,7 +342,7 @@ async def test_cleanup_expired_respects_expires_at(
                 .where(MemoryModel.id == expired_mid)
                 .values(expires_at=past)
             )
-    vector_store.collection._items[expired_mid]["metadata"]["expires_at"] = past
+    vector_store._items[expired_mid]["metadata"]["expires_at"] = past
 
     assert await mm.cleanup_expired() == 1
     assert await mm.get_memory(expired_mid) is None

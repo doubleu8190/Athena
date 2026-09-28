@@ -11,7 +11,6 @@ import pytest
 
 # 确保使用临时数据目录，避免污染工作区
 os.environ.setdefault("DATABASE_URL", "/tmp/athena_test.db")
-os.environ.setdefault("CHROMADB_PATH", "/tmp/athena_test_chromadb")
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ["DEBUG"] = "false"
 

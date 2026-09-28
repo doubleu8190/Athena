@@ -36,13 +36,13 @@ def _imports(path: Path) -> set[str]:
 
 def test_memory_core_has_no_storage_sdk_dependencies():
     imports = _imports(ROOT / "athena/core/memory/long_term_memory.py")
-    forbidden = ("sqlalchemy", "chromadb", "athena.db")
+    forbidden = ("sqlalchemy", "pgvector", "athena.db")
     assert not any(module.startswith(forbidden) for module in imports)
 
 
 def test_file_runtime_has_no_vector_store_sdk_dependencies():
     imports = _imports(ROOT / "athena/core/files/runtime.py")
-    forbidden = ("chromadb", "sqlalchemy", "athena.infrastructure.chroma")
+    forbidden = ("pgvector", "sqlalchemy", "athena.infrastructure.pgvector")
     assert not any(module.startswith(forbidden) for module in imports)
 
 

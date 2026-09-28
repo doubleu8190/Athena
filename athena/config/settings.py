@@ -6,7 +6,7 @@
 配置分组：
 - 服务端: 服务端口、调试模式
 - LLM 提供者: 主/副/兜底 LLM 配置
-- 数据库: PostgreSQL 和 ChromaDB 配置
+- 数据库: PostgreSQL 和 pgvector 配置
 - File Intelligence: 文件处理参数
 - Harness: Agent 执行参数
 - Memory: 记忆系统参数
@@ -123,17 +123,17 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
     postgres_pool_size: int = Field(default=10, ge=1)
     postgres_max_overflow: int = Field(default=10, ge=0)
-    chromadb_path: str = "./data/chromadb"
-    # Chroma 向量模型。默认模型覆盖中文和英文，避免使用 Chroma 的英文默认模型。
-    chroma_embedding_provider: str = "sentence_transformers"
-    chroma_embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
-    chroma_embedding_device: str = "cpu"
-    chroma_embedding_version: str = "v1"
-    chroma_embedding_api_key: str = ""
-    chroma_embedding_base_url: str = ""
+    # pgvector embedding model. BGE-M3 produces 1024-dimensional vectors.
+    embedding_provider: str = "sentence_transformers"
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_device: str = "cpu"
+    embedding_version: str = "v2"
+    embedding_dimension: int = Field(default=1024, ge=1)
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
 
     # --- Neo4j / Graph RAG ---
-    # Graph RAG is opt-in. The existing PostgreSQL + Chroma RAG remains the
+    # Graph RAG is opt-in. The existing PostgreSQL RAG remains the
     # source of answers when Neo4j is disabled or unavailable.
     neo4j_enabled: bool = False
     neo4j_uri: str = "bolt://127.0.0.1:7687"
@@ -295,10 +295,6 @@ class Settings(BaseSettings):
         return self.postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
 
     @property
-    def chroma_path(self) -> Path:
-        """ChromaDB 持久化目录路径。"""
-        return Path(self.chromadb_path)
-
     @property
     def files_path(self) -> Path:
         """文件存储根目录路径。"""

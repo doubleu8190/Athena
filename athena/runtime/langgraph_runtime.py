@@ -55,6 +55,7 @@ from .task_understanding import TaskUnderstandingService
 from .context import ContextAcquisitionService, ContextPlanner
 from .context.providers.file import FileContextProvider
 from .context.providers.knowledge import KnowledgeContextProvider
+from .context.providers.graph import GraphContextProvider
 from .context.providers.memory import MemoryContextProvider
 
 logger = get_logger(__name__)
@@ -94,6 +95,7 @@ class LangGraphRuntime:
         file_runtime: FileIntelligenceRuntime,
         memory_job_repository: MemoryJobRepository,
         agent_store: AgentStorePort,
+        graph_store: Any | None = None,
     ) -> None:
         """组装所有聚焦服务并保留直接依赖。
 
@@ -130,9 +132,21 @@ class LangGraphRuntime:
             file_runtime,
             timeout_seconds=settings.memory_retrieval_timeout_seconds,
         )
+        graph_provider = (
+            GraphContextProvider(
+                graph_store=graph_store,
+                file_repository=db.files,
+                trace_writer=db.retrieval,
+                timeout_seconds=settings.graph_timeout_seconds,
+                min_confidence=settings.graph_min_confidence,
+            )
+            if graph_store is not None and settings.graph_rag_enabled
+            else None
+        )
         self._context_acquisition_service = ContextAcquisitionService(
             memory_provider=memory_provider,
             knowledge_provider=knowledge_provider,
+            graph_provider=graph_provider,
             file_provider=file_provider,
             token_counter=llm,
             trace_writer=db.retrieval,
@@ -391,6 +405,9 @@ class LangGraphRuntime:
             limit_per_file=self._settings.knowledge_context_limit_per_file,
             max_items=self._settings.knowledge_context_max_items,
             max_tokens=self._settings.knowledge_context_max_tokens,
+            graph_max_hops=self._settings.graph_max_hops,
+            graph_entity_limit=self._settings.graph_entity_limit,
+            graph_path_limit=self._settings.graph_path_limit,
         )
         return {"context_plan": plan.model_dump(mode="json")}
 

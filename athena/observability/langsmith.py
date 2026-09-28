@@ -14,11 +14,13 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 from uuid import UUID, uuid5
 
+from langsmith import RunTree
+
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)
 _TRACE_NAMESPACE = UUID("6f4f1c6b-7a8e-4cc7-b6af-0e5c1ed98d2b")
-_current_run: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+_current_run: contextvars.ContextVar[RunTree | None] = contextvars.ContextVar(
     "athena_langsmith_run", default=None
 )
 
@@ -26,10 +28,11 @@ _current_run: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
 def langsmith_enabled() -> bool:
     """Return whether explicit LangSmith tracing is configured."""
 
-    return (
-        os.getenv("LANGCHAIN_TRACING_V2", "").lower() in {"1", "true", "yes"}
-        and bool(os.getenv("LANGCHAIN_API_KEY"))
-    )
+    return os.getenv("LANGCHAIN_TRACING_V2", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    } and bool(os.getenv("LANGCHAIN_API_KEY"))
 
 
 def _run_id(value: str) -> UUID:
@@ -46,14 +49,13 @@ def _new_run(
     run_type: str,
     inputs: dict[str, Any],
     run_id: str | None = None,
-    parent: Any | None = None,
+    parent: RunTree | None = None,
     metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
-) -> Any | None:
+) -> RunTree | None:
     if not langsmith_enabled():
         return None
     try:
-        from langsmith.run_trees import RunTree
 
         kwargs: dict[str, Any] = {
             "name": name,
@@ -75,7 +77,7 @@ def _new_run(
         return None
 
 
-async def _post(run: Any, *, recursive: bool = False) -> None:
+async def _post(run: RunTree, *, recursive: bool = False) -> None:
     try:
         await asyncio.to_thread(run.post, exclude_child_runs=not recursive)
     except Exception:
@@ -90,7 +92,7 @@ async def start_trace(
     run_id: str,
     metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
-) -> AsyncGenerator[Any | None, None]:
+) -> AsyncGenerator[RunTree | None, None]:
     """Create a root trace and post it together with all completed children."""
 
     run = _new_run(
@@ -136,7 +138,7 @@ async def trace_span(
     run_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
-) -> AsyncGenerator[Any | None, None]:
+) -> AsyncGenerator[RunTree | None, None]:
     """Create a child span under the current trace, if one exists."""
 
     parent = _current_run.get()
@@ -175,7 +177,7 @@ async def trace_span(
 
 
 def finish_span(
-    run: Any | None,
+    run: RunTree | None,
     *,
     outputs: dict[str, Any] | None = None,
     error: str | None = None,
@@ -183,6 +185,11 @@ def finish_span(
     """Update a span without making tracing a required dependency."""
 
     if run is None:
+        return
+    # ``trace_span`` ends the run automatically when its body raises.  Callers
+    # may still invoke ``finish_span`` from an outer exception handler, so do
+    # not submit a second end update for an already-finalized run.
+    if run.end_time is not None:
         return
     try:
         run.end(outputs=outputs, error=error)

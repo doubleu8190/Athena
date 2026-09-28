@@ -15,6 +15,7 @@ from athena.runtime.context.contracts import (
     ProviderResult,
 )
 from athena.runtime.context.providers.file import FileContextProvider
+from athena.runtime.context.providers.graph import GraphContextProvider
 from athena.runtime.context.providers.knowledge import KnowledgeContextProvider
 from athena.runtime.context.providers.memory import MemoryContextProvider
 from athena.runtime.task_understanding.contracts import UserTaskSpec
@@ -50,6 +51,7 @@ class ContextAcquisitionService:
         memory_provider: MemoryContextProvider | None = None,
         knowledge_provider: KnowledgeContextProvider | None = None,
         file_provider: FileContextProvider | None = None,
+        graph_provider: GraphContextProvider | None = None,
         token_counter: TokenCounter | None = None,
         trace_writer: RetrievalTraceWriter | None = None,
     ) -> None:
@@ -68,7 +70,12 @@ class ContextAcquisitionService:
             不主动抛出业务异常。
         """
         self._providers: dict[str, _ContextProvider] = {}
-        for provider in (memory_provider, knowledge_provider, file_provider):
+        for provider in (
+            memory_provider,
+            knowledge_provider,
+            graph_provider,
+            file_provider,
+        ):
             if provider is not None:
                 self._providers[provider.name] = provider
         self._token_counter = token_counter

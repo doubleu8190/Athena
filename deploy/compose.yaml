@@ -1,0 +1,55 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: athena-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH_FILE: /run/secrets/neo4j_auth
+    secrets:
+      - neo4j_auth
+    ports:
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - ../data/neo4j:/data
+      - ../data/neo4j-logs:/logs
+      - ../data/neo4j-import:/import
+      - ../data/neo4j-plugins:/plugins
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    build:
+      context: ./postgres-fts
+      dockerfile: Dockerfile
+      args:
+        POSTGRES_BASE_IMAGE: ${POSTGRES_BASE_IMAGE:-postgres:18.6-trixie}
+        PGVECTOR_VERSION: ${PGVECTOR_VERSION:-0.8.1}
+    image: doubleu8190/athena-postgres-zhparser
+    container_name: athena-postgres-zhparser
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-doubleu}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: ${POSTGRES_DB:-athena}
+    secrets:
+      - postgres_password
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ../data/postgresql:/var/lib/postgresql
+      - ./postgres-fts/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+secrets:
+  neo4j_auth:
+    file: ./neo4j/secrets/neo4j_auth
+  postgres_password:
+    file: ./postgres-fts/secrets/postgres_password

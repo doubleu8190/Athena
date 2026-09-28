@@ -13,6 +13,7 @@ from athena.core.files.chunking import FileChunker
 from athena.core.files.extraction import ExtractionContext
 from athena.core.files.storage import StorageLayer
 from athena.core.files.ports import FileVectorStore
+from athena.core.graph.indexing import GraphDocumentIndexer
 from athena.infrastructure.postgre.repositories.file_repository import FileRepository
 from athena.models.file import AttachmentStatus
 from athena.utils.logging import get_logger
@@ -35,6 +36,7 @@ class FileIngestionService:
         cache_key: Callable[..., str],
         emit_attachment: Callable[..., Awaitable[None]],
         initialize: Callable[[], Awaitable[None]],
+        graph_indexer: GraphDocumentIndexer | None = None,
     ) -> None:
         self.repository = repository
         self.settings = settings
@@ -45,6 +47,7 @@ class FileIngestionService:
         self.cache_key = cache_key
         self.emit_attachment = emit_attachment
         self.initialize = initialize
+        self.graph_indexer = graph_indexer
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def parse_attachment(
@@ -173,7 +176,24 @@ class FileIngestionService:
             if updated is None:
                 await self.delete_attachment_vectors(attachment_id)
                 raise FileNotFoundError("知识库文档已删除")
-            return {**metadata, **indexed}
+            result: dict[str, Any] = {**metadata, **indexed}
+            if self.graph_indexer is not None:
+                try:
+                    graph = await self.graph_indexer.index_document(
+                        updated,
+                        await self.repository.get_chunks(attachment_id, limit=100_000),
+                    )
+                    result["graph"] = {"status": "succeeded", **graph}
+                except Exception as exc:
+                    # Graph indexing is optional; vector and keyword RAG remain
+                    # usable when extraction or Neo4j writes fail.
+                    logger.warning(
+                        "knowledge_graph_index_failed",
+                        attachment_id=attachment_id,
+                        error=str(exc),
+                    )
+                    result["graph"] = {"status": "failed", "error": str(exc)}
+            return result
 
     async def delete_knowledge_document(
         self, attachment_id: str, knowledge_base_id: str
@@ -185,6 +205,8 @@ class FileIngestionService:
             await self.initialize()
             try:
                 await self.delete_attachment_vectors(attachment_id)
+                if self.graph_indexer is not None:
+                    await self.graph_indexer.delete_document(attachment_id)
                 deleted = await self.repository.soft_delete_knowledge_base_attachment(
                     attachment_id, knowledge_base_id
                 )

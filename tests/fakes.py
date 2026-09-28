@@ -60,6 +60,7 @@ def install_runtime(app: Any, **overrides: Any) -> RuntimeContainer:
         "memory_service": MagicMock(),
         "agent_store": MagicMock(),
         "realtime_transport": MagicMock(),
+        "neo4j_graph_store": None,
     }
     dependencies.update(overrides)
     runtime = RuntimeContainer(**dependencies)

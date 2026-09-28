@@ -18,6 +18,9 @@ class ContextPlanner:
         limit_per_file: int = 5,
         max_items: int = 12,
         max_tokens: int = 4000,
+        graph_max_hops: int = 2,
+        graph_entity_limit: int = 8,
+        graph_path_limit: int = 12,
     ) -> ContextPlan:
         """推导 Provider 列表和检索参数。
 
@@ -45,6 +48,7 @@ class ContextPlanner:
             providers=providers,
             memory_query=task.query_hints.memory,
             knowledge_query=task.query_hints.knowledge,
+            graph_query=task.query_hints.graph or task.goal,
             file_query=task.query_hints.file,
             file_ids=requested_file_ids,
             knowledge_base_ids=task.slots.knowledge_base_ids,
@@ -52,4 +56,7 @@ class ContextPlanner:
             limit_per_file=limit_per_file,
             max_items=max_items,
             max_tokens=max_tokens,
+            graph_max_hops=graph_max_hops,
+            graph_entity_limit=graph_entity_limit,
+            graph_path_limit=graph_path_limit,
         )

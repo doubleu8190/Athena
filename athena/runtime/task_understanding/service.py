@@ -230,6 +230,10 @@ class TaskUnderstandingService:
                             if "knowledge" in requirements_set
                             else None
                         ),
+                        "graph": hints.graph
+                        or (
+                            user_message[:500] if "graph" in requirements_set else None
+                        ),
                         "file": hints.file
                         or (user_message[:500] if "file" in requirements_set else None),
                     }

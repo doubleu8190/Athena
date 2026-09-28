@@ -11,7 +11,9 @@ TaskDomain = Literal[
     "data_processing", "document_editing", "resource_retrieval", "general",
 ]
 TaskMode = Literal["answer", "retrieve", "generate", "act", "plan", "clarify"]
-ContextRequirement = Literal["conversation", "memory", "knowledge", "file"]
+ContextRequirement = Literal[
+    "conversation", "memory", "knowledge", "graph", "file"
+]
 ContentType = Literal[
     "document", "presentation", "spreadsheet", "report", "summary",
     "code", "data", "general_text",
@@ -46,6 +48,7 @@ class TaskQueryHints(BaseModel):
 
     memory: str | None = Field(default=None, max_length=500)
     knowledge: str | None = Field(default=None, max_length=500)
+    graph: str | None = Field(default=None, max_length=500)
     file: str | None = Field(default=None, max_length=500)
 
 
@@ -73,7 +76,8 @@ class UserTaskSpec(BaseModel):
         if not self.requires_clarification and self.clarification_question:
             raise ValueError("clarification_question must be empty")
         if self.mode == "retrieve" and not any(
-            item in self.context_requirements for item in ("memory", "knowledge", "file")
+            item in self.context_requirements
+            for item in ("memory", "knowledge", "graph", "file")
         ):
             raise ValueError("retrieve mode requires a retrieval context")
         return self
@@ -85,6 +89,7 @@ class ContextPlan(BaseModel):
     providers: list[ContextRequirement] = Field(default_factory=list)
     memory_query: str | None = None
     knowledge_query: str | None = None
+    graph_query: str | None = None
     file_query: str | None = None
     file_ids: list[str] = Field(default_factory=list)
     knowledge_base_ids: list[str] = Field(default_factory=list)
@@ -92,6 +97,9 @@ class ContextPlan(BaseModel):
     limit_per_file: int = Field(default=5, ge=1, le=20)
     max_items: int = Field(default=12, ge=1, le=50)
     max_tokens: int = Field(default=4000, ge=100, le=20000)
+    graph_max_hops: int = Field(default=2, ge=1, le=2)
+    graph_entity_limit: int = Field(default=8, ge=1, le=50)
+    graph_path_limit: int = Field(default=12, ge=1, le=100)
 
 
 class ContextItem(BaseModel):

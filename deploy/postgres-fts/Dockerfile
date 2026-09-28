@@ -1,8 +1,10 @@
 ARG POSTGRES_BASE_IMAGE=postgres:18.6-trixie
+ARG PGVECTOR_VERSION=0.8.1
 
 FROM ${POSTGRES_BASE_IMAGE} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG PGVECTOR_VERSION
 
 RUN apt-get update -o Acquire::Retries=5 \
     && apt-get install -y -o Acquire::Retries=5 --no-install-recommends \
@@ -35,7 +37,15 @@ RUN curl -fsSL https://github.com/hightman/scws/archive/refs/tags/1.2.3.tar.gz \
     && cd zhparser-src \
     && SCWS_HOME=/usr/local make -j"$(nproc)" \
     && SCWS_HOME=/usr/local make install \
-    && rm -rf /usr/src/scws-src /usr/src/zhparser-src /usr/src/*.tar.gz
+    && cd /usr/src \
+    && curl -fsSL "https://github.com/pgvector/pgvector/archive/refs/tags/v${PGVECTOR_VERSION}.tar.gz" \
+        -o pgvector.tar.gz \
+    && mkdir pgvector-src \
+    && tar -xzf pgvector.tar.gz --strip-components=1 -C pgvector-src \
+    && cd pgvector-src \
+    && make -j"$(nproc)" \
+    && make install \
+    && rm -rf /usr/src/scws-src /usr/src/zhparser-src /usr/src/pgvector-src /usr/src/*.tar.gz
 
 FROM ${POSTGRES_BASE_IMAGE}
 
@@ -45,5 +55,8 @@ COPY --from=builder /usr/lib/postgresql/18/lib/zhparser.so /usr/lib/postgresql/1
 COPY --from=builder /usr/share/postgresql/18/extension/zhparser* /usr/share/postgresql/18/extension/
 COPY --from=builder /usr/share/postgresql/18/tsearch_data/dict.utf8.xdb /usr/share/postgresql/18/tsearch_data/
 COPY --from=builder /usr/share/postgresql/18/tsearch_data/rules.utf8.ini /usr/share/postgresql/18/tsearch_data/
+COPY --from=builder /usr/lib/postgresql/18/lib/vector.so /usr/lib/postgresql/18/lib/
+COPY --from=builder /usr/share/postgresql/18/extension/vector.control /usr/share/postgresql/18/extension/
+COPY --from=builder /usr/share/postgresql/18/extension/vector--*.sql /usr/share/postgresql/18/extension/
 
 RUN ldconfig

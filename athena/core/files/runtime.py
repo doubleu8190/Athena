@@ -35,6 +35,7 @@ from athena.core.files.ingestion import FileIngestionService
 from athena.core.files.analysis import FileAnalysisService
 from athena.core.files.ports import FileVectorStore
 from athena.core.files.ports import FileReranker
+from athena.core.graph.indexing import GraphDocumentIndexer
 from athena.core.files.contracts import FileRetrievalCandidate
 from athena.core.files.attachment_serialization import attachment_to_payload
 from athena.core.files.adapter_registry import AdapterRegistry
@@ -99,6 +100,7 @@ class FileIntelligenceRuntime:
         vector_store: FileVectorStore,
         file_token_counter: EmbeddingTokenCounter | None = None,
         reranker: FileReranker | None = None,
+        graph_indexer: GraphDocumentIndexer | None = None,
     ) -> None:
         """
 
@@ -125,6 +127,7 @@ class FileIntelligenceRuntime:
         self._trace_writer = trace_writer
         self._vector_store = vector_store
         self._reranker = reranker
+        self._graph_indexer = graph_indexer
         self.file_token_counter = file_token_counter or EmbeddingTokenCounter(
             conservative_text_token_count
         )
@@ -141,6 +144,7 @@ class FileIntelligenceRuntime:
             cache_key=self.cache_key,
             emit_attachment=self.emit_attachment,
             initialize=self.initialize,
+            graph_indexer=graph_indexer,
         )
         self._analysis = FileAnalysisService(
             repository,

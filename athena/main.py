@@ -88,6 +88,25 @@ async def lifespan(app: FastAPI):
         pool_size=settings.postgres_pool_size,
         max_overflow=settings.postgres_max_overflow,
     )
+
+    # Neo4j remains optional; the existing RAG path runs without it.
+    neo4j_graph_store = None
+    if settings.neo4j_enabled:
+        from athena.infrastructure.neo4j import Neo4jGraphStore
+
+        neo4j_graph_store = Neo4jGraphStore.from_settings(settings)
+        try:
+            await neo4j_graph_store.initialize()
+        except Exception as exc:
+            if not settings.neo4j_fail_open:
+                await db.close()
+                raise
+            logger.warning(
+                "neo4j_initialization_failed_graph_disabled",
+                error=str(exc),
+            )
+            await neo4j_graph_store.close()
+            neo4j_graph_store = None
     command_notifier = CommandNotifier()
     agent_store = AgentStore(command_notifier=command_notifier)
 
@@ -154,6 +173,16 @@ async def lifespan(app: FastAPI):
     from athena.core.tools.catalog import ToolRegistry
     from athena.core.tools.providers.files import build_file_tool_specs
 
+    graph_indexer = None
+    if neo4j_graph_store is not None:
+        from athena.core.graph.indexing import GraphDocumentIndexer
+
+        graph_indexer = GraphDocumentIndexer(
+            neo4j_graph_store,
+            llm_secondary,
+            settings,
+        )
+
     file_vector_store = ChromaFileVectorStore(
         path=str(settings.chroma_path),
         embedding_config=embedding_config_from_settings(settings),
@@ -183,6 +212,7 @@ async def lifespan(app: FastAPI):
         vector_store=file_vector_store,
         file_token_counter=file_vector_store.token_counter,
         reranker=file_reranker,
+        graph_indexer=graph_indexer,
     )
     await file_runtime.initialize()
 
@@ -283,6 +313,7 @@ async def lifespan(app: FastAPI):
         file_runtime=file_runtime,
         memory_job_repository=memory_job_repository,
         agent_store=agent_store,
+        graph_store=neo4j_graph_store,
     )
     # Access the runtime property so the workflow is constructed before the
     # worker starts claiming queued turns.  The backing attribute is lazily
@@ -310,6 +341,7 @@ async def lifespan(app: FastAPI):
         realtime_transport=realtime_transport,
         sandbox_runner=sandbox_runner,
         workspace_manager=workspace_manager,
+        neo4j_graph_store=neo4j_graph_store,
     )
 
     # 目的是将没来得及取消的run，在重启的时候取消掉
@@ -369,6 +401,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("mcp_shutdown_failed", error=str(e))
     await sandbox_runner.close_all()
+    if app.state.runtime.neo4j_graph_store is not None:
+        await app.state.runtime.neo4j_graph_store.close()
     await db.close()
     logger.info("athena_stopped")
 

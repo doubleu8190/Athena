@@ -24,6 +24,7 @@ data/
 
 # Local Docker Compose secrets
 deploy/postgres-fts/secrets/
+deploy/neo4j/secrets/
 
 # IDE
 .idea/

@@ -18,6 +18,7 @@ from athena.infrastructure.postgre.repositories.agent_store import AgentStore
 
 if TYPE_CHECKING:
     from athena.core.files.runtime import FileIntelligenceRuntime
+    from athena.core.graph.ports import GraphStore
     from athena.core.llm.provider import LLMProvider
     from athena.core.memory.long_term_memory import LongTermMemoryService
     from athena.core.tools.catalog import ToolCatalogService
@@ -46,6 +47,7 @@ class RuntimeContainer:
     realtime_transport: SessionEventBus
     sandbox_runner: SandboxRunner
     workspace_manager: WorkspaceManager
+    neo4j_graph_store: GraphStore | None
 
 
 def get_runtime_container(connection: HTTPConnection) -> RuntimeContainer:

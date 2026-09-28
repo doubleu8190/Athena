@@ -132,6 +132,26 @@ class Settings(BaseSettings):
     chroma_embedding_api_key: str = ""
     chroma_embedding_base_url: str = ""
 
+    # --- Neo4j / Graph RAG ---
+    # Graph RAG is opt-in. The existing PostgreSQL + Chroma RAG remains the
+    # source of answers when Neo4j is disabled or unavailable.
+    neo4j_enabled: bool = False
+    neo4j_uri: str = "bolt://127.0.0.1:7687"
+    neo4j_username: str = "neo4j"
+    neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
+    neo4j_max_connection_pool_size: int = Field(default=20, ge=1, le=200)
+    neo4j_connection_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    neo4j_query_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    neo4j_fail_open: bool = True
+    graph_rag_enabled: bool = False
+    graph_max_hops: int = Field(default=2, ge=1, le=2)
+    graph_entity_limit: int = Field(default=8, ge=1, le=50)
+    graph_path_limit: int = Field(default=12, ge=1, le=100)
+    graph_min_confidence: float = Field(default=0.65, ge=0, le=1)
+    graph_extraction_concurrency: int = Field(default=2, ge=1, le=16)
+    graph_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+
     # --- 文件智能 ---
     file_storage_path: str = "./data/files"
     file_max_upload_bytes: int = 512 * 1024 * 1024  # 512MB

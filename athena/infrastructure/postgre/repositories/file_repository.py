@@ -881,6 +881,62 @@ class FileRepository:
                 for r in rows
             ]
 
+    async def get_chunks_by_ids(
+        self,
+        chunk_ids: Iterable[str],
+        *,
+        knowledge_base_ids: Iterable[str] | None = None,
+    ) -> list[FileChunk]:
+        """Load live evidence chunks while enforcing knowledge-base scope."""
+
+        ids = list(dict.fromkeys(str(value) for value in chunk_ids if value))
+        if not ids:
+            return []
+        async with get_session() as session:
+            conditions = [
+                FileChunkModel.id.in_(ids),
+                FileChunkModel.deleted_time.is_(None),
+                AttachmentModel.deleted_time.is_(None),
+                AttachmentModel.status == AttachmentStatus.READY.value,
+                AttachmentModel.knowledge_base_id.is_not(None),
+            ]
+            if knowledge_base_ids is not None:
+                kb_ids = list(dict.fromkeys(str(value) for value in knowledge_base_ids))
+                if not kb_ids:
+                    return []
+                conditions.append(AttachmentModel.knowledge_base_id.in_(kb_ids))
+            rows = (
+                (
+                    await session.execute(
+                        select(FileChunkModel)
+                        .join(
+                            AttachmentModel,
+                            AttachmentModel.id == FileChunkModel.attachment_id,
+                        )
+                        .where(*conditions)
+                        .order_by(FileChunkModel.attachment_id, FileChunkModel.ordinal)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                FileChunk(
+                    id=row.id,
+                    attachment_id=row.attachment_id,
+                    ordinal=row.ordinal,
+                    content=row.content,
+                    token_count=row.token_count,
+                    locator=_json_loads_model(
+                        row.locator_json, FileLocator, FileLocator()
+                    ),
+                    metadata=_json_loads_model(
+                        row.metadata_json, FileMetadata, FileMetadata()
+                    ),
+                )
+                for row in rows
+            ]
+
     async def search_chunks(
         self, attachment_id: str, query: str, limit: int = 10
     ) -> list[FileChunk]:

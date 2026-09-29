@@ -19,7 +19,6 @@ from .processor_lifecycle import (
     ProcessorLifecycleRunner,
     run_with_lifecycle,
 )
-from .attachment_processor import AttachmentProcessContext, AttachmentProcessor
 
 # ── 懒加载：避免循环导入（command_consumer → agent_graph → ... → harness → tools.manager） ──
 
@@ -59,8 +58,6 @@ __all__ = [
     "ProcessorBlocked",
     "ProcessorLifecycleRunner",
     "run_with_lifecycle",
-    "AttachmentProcessContext",
-    "AttachmentProcessor",
     "CommandConsumer",
     "RecoveryReconciler",
     "AgentState",

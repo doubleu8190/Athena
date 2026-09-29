@@ -12,13 +12,13 @@ from athena.core.compression.compressor import ContextCompressor
 from athena.core.harness.harness import Harness, HarnessSettings
 from athena.core.tools.manager import UnifiedToolManager
 from athena.infrastructure.postgre.database import Database
-from athena.runtime.orchestration.contracts import (
+from athena.contracts.orchestration import (
     AgentRole,
     TaskSpec,
     WorkerResult,
     WorkerResultStatus,
 )
-from athena.runtime.orchestration.policies import ToolPolicy
+from athena.contracts.tool_policy import ToolPolicy
 from athena.runtime.orchestration.structured_llm import StructuredLLMService
 from athena.utils.id_generation import generate_sub_run_id
 from athena.utils.logging import get_logger

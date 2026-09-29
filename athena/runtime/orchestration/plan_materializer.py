@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from athena.contracts.events import EventType
 from athena.infrastructure.postgre.database import Database
-from athena.runtime.orchestration.contracts import (
+from athena.contracts.orchestration import (
     ExecutionPlan,
     PLAN_SUBMISSION_TOOL_NAME,
     PlanSubmission,
     TaskSpec,
 )
 from athena.runtime.orchestration.events import OrchestrationEventPublisher
-from athena.runtime.orchestration.policies import DELEGATION_TOOL_NAMES
+from athena.contracts.tool_policy import DELEGATION_TOOL_NAMES
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)

@@ -255,7 +255,8 @@ class UnifiedToolManager:
             return ToolResult(status="failed", error=f"Tool '{name}' not registered")
 
         # 委派能力只属于顶层规划者，Worker 即使伪造工具调用也不能递归派生。
-        from athena.runtime.orchestration import AgentRole, DELEGATION_TOOL_NAMES
+        from athena.contracts.orchestration import AgentRole
+        from athena.contracts.tool_policy import DELEGATION_TOOL_NAMES
 
         if name in DELEGATION_TOOL_NAMES and (
             agent_role == AgentRole.WORKER.value or depth > 0

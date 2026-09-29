@@ -144,19 +144,15 @@ class ApiClient {
    * @returns Promise 包含命令 ID、运行 ID及排队状态。
    * @throws Error 当会话不存在、命令冲突或会话不可并行运行时抛出。
    */
-  async submitRun(sessionId: string, payload: { message: string; files?: File[]; command_id?: string }): Promise<{ command_id: string; run_id?: string; message_id: string; status: string; deduplicated?: boolean }> {
+  async submitRun(sessionId: string, payload: { message: string; attachment_ids?: string[]; command_id?: string }): Promise<{ command_id: string; run_id?: string; message_id: string; attachment_ids: string[]; status: string; deduplicated?: boolean }> {
     const commandId = payload.command_id || `cmd_${crypto.randomUUID()}`
-    if (payload.files && payload.files.length > 0) {
-      const form = new FormData()
-      form.append("message", payload.message)
-      form.append("command_id", commandId)
-      payload.files.forEach((file) => form.append("files", file))
-      return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/runs`, {
-        method: "POST", body: form,
-      })
-    }
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/runs`, {
-      method: "POST", body: JSON.stringify({ message: payload.message, command_id: commandId }),
+      method: "POST",
+      body: JSON.stringify({
+        message: payload.message,
+        command_id: commandId,
+        attachment_ids: payload.attachment_ids ?? [],
+      }),
     })
   }
 
@@ -181,6 +177,16 @@ class ApiClient {
   /** 列出会话附件。 */
   async listAttachments(sessionId: string): Promise<Attachment[]> {
     return this.request<Attachment[]>(`/api/sessions/${sessionId}/attachments`)
+  }
+
+  /** Upload session attachments immediately; processing continues in the background. */
+  async uploadSessionAttachments(sessionId: string, files: File[]): Promise<Attachment[]> {
+    const form = new FormData()
+    files.forEach((file) => form.append("files", file))
+    return this.request<Attachment[]>(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+      method: "POST",
+      body: form,
+    })
   }
 
   /** 获取当前后端支持的附件类型。 */

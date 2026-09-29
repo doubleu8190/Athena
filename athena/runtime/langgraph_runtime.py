@@ -36,9 +36,7 @@ from athena.contracts.ports import AgentStorePort
 from athena.utils.logging import get_logger
 from athena.utils.prompt_loader import get_prompt
 
-from .attachment_processor import AttachmentProcessContext, AttachmentProcessor
-from .processor_lifecycle import ProcessorLifecycleRunner
-from .state import AgentState, FileProcessResult
+from .state import AgentState
 from .sub_agent_manager import SubAgentManager
 from .services.session_context_service import SessionContextService
 from .services.agent_execution_service import AgentExecutionService
@@ -76,7 +74,6 @@ class LangGraphRuntime:
     - ``AgentExecutionService`` — Harness 执行编排与后处理
 
     保留在运行时的职责：
-    - 附件处理（依赖 ``FileIntelligenceRuntime`` 的信号量和生命周期）
     - 子 Agent 工具处理器（依赖会话级停止信号）
     - 依赖组装与验证
     """
@@ -160,7 +157,7 @@ class LangGraphRuntime:
             memory_job_repository=memory_job_repository,
         )
 
-        # ── 直接依赖（用于附件处理、子 Agent、图组装） ──
+        # ── 直接依赖（用于子 Agent、图组装） ──
         self._llm = llm
         self._tool_manager = tool_manager
         self._db = db
@@ -170,14 +167,11 @@ class LangGraphRuntime:
         self._long_term_memory_summarizer = long_term_memory_summarizer
         self._fact_extractor = fact_extractor
         self._settings = settings
-        self._file_runtime = file_runtime
         self._memory_job_repository = memory_job_repository
         self._agent_store = agent_store
 
         # ── 运行时状态 ──
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
-        self._file_parse_semaphore = asyncio.Semaphore(2)
-        self._file_embedding_semaphore = asyncio.Semaphore(3)
         self._memory_trigger = MemoryWriteTrigger()
         self._memory_resolver = MemoryCandidateResolver(
             memory_service=self._memory_service, llm_provider=llm
@@ -447,52 +441,6 @@ class LangGraphRuntime:
     ) -> str:
         """使用内置系统提示词，并注入任务理解和上下文包。"""
         return AgentExecutionService._build_system_prompt(task_spec, context_bundle)
-
-    # ------------------------------------------------------------------
-    # 附件处理（依赖 FileIntelligenceRuntime，保留在此）
-    # ------------------------------------------------------------------
-
-    async def process_attachment(
-        self, attachment_id: str, message_id: str, session_id: str, run_id: str
-    ) -> FileProcessResult:
-        """在统一 Graph 内完成一个附件的解析和向量索引。"""
-        context = AttachmentProcessContext(
-            attachment_id=attachment_id,
-            message_id=message_id,
-            session_id=session_id,
-            run_id=run_id,
-        )
-        return await ProcessorLifecycleRunner(AttachmentProcessor(self)).execute(
-            context
-        )
-
-    async def _process_attachment_once(
-        self, attachment_id: str, message_id: str, session_id: str, run_id: str
-    ) -> FileProcessResult:
-        """Execute attachment parsing/indexing after Processor inspection."""
-        if self._file_runtime is None:
-            raise RuntimeError("file runtime is not configured")
-        async with self._file_parse_semaphore:
-            metadata = await self._file_runtime.parse_attachment(
-                attachment_id, run_id=run_id
-            )
-        async with self._file_embedding_semaphore:
-            indexed = await self._file_runtime.index_attachment(attachment_id)
-
-        ready = await self._db.files.update_attachment(
-            attachment_id,
-            status="ready",
-            error_message=None,
-        )
-        if ready is not None:
-            await self._file_runtime.emit_attachment(ready, run_id=run_id)
-        return {
-            "message_id": message_id,
-            "attachment_id": attachment_id,
-            "status": "ready",
-            "error": None,
-            "chunk_count": int(metadata.get("chunk_count", indexed.get("chunks", 0))),
-        }
 
     # ------------------------------------------------------------------
     # 子 Agent 工具处理器

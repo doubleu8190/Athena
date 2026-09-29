@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from athena.core.llm.provider import LLMProvider
-from athena.runtime.orchestration.contracts import ExecutionPlan, WorkerResult
+from athena.contracts.orchestration import ExecutionPlan, WorkerResult
 from athena.utils.logging import get_logger
 
 logger = get_logger(__name__)

@@ -29,11 +29,11 @@ from athena.models import Message, MessageRole
 from athena.utils.llm_response import extract_message_text
 from athena.utils.message_conversion import dict_to_message, message_to_dict
 from athena.runtime.stream_coalescer import StreamCoalescer
-from athena.runtime.orchestration import (
-    DELEGATION_TOOL_NAMES,
+from athena.contracts.orchestration import (
     PLAN_SUBMISSION_TOOL_NAME,
     PlanSubmission,
 )
+from athena.contracts.tool_policy import DELEGATION_TOOL_NAMES
 from athena.observability.langsmith import finish_span, trace_span
 
 

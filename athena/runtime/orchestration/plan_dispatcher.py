@@ -6,7 +6,7 @@ import asyncio
 from typing import Callable, Awaitable
 
 from athena.infrastructure.postgre.database import Database
-from athena.runtime.orchestration.contracts import (
+from athena.contracts.orchestration import (
     ExecutionPlan,
     TaskSpec,
     TaskStatus,

@@ -231,20 +231,20 @@ async def test_prepare_request_and_persist_message_merges_prepared_and_persisted
     assert result["requested_attachment_refs"][0]["id"] == "file-1"
 
 
-def test_task_route_processes_files_only_when_task_requires_file():
+def test_task_route_sends_all_non_clarifying_requests_to_context_planning():
     from athena.runtime.nodes.conditions import route_after_task_understanding
 
     assert route_after_task_understanding({
         "task_spec": {"mode": "retrieve", "context_requirements": ["file"]},
         "requested_attachment_refs": [{"id": "file-1"}],
-    }) == "process_attachments"
+    }) == "plan_context"
     assert route_after_task_understanding({
         "task_spec": {"mode": "generate", "context_requirements": ["conversation"]},
         "requested_attachment_refs": [{"id": "file-1"}],
     }) == "plan_context"
 
 
-def test_task_route_clarifies_before_attachment_processing():
+def test_task_route_clarifies_before_context_planning():
     from athena.runtime.nodes.conditions import route_after_task_understanding
 
     assert route_after_task_understanding({
@@ -254,12 +254,85 @@ def test_task_route_clarifies_before_attachment_processing():
     }) == "clarification_response"
 
 
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (AttachmentStatus.UPLOADED, "尚未处理完成"),
+        (AttachmentStatus.PROCESSING, "尚未处理完成"),
+        (AttachmentStatus.FAILED, "处理失败"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_session_context_rejects_attachments_that_are_not_ready(status, message):
+    from types import SimpleNamespace
+
+    from athena.runtime.services.session_context_service import SessionContextService
+
+    attachment = Attachment(
+        id="file-1",
+        session_id="session-1",
+        filename="notes.txt",
+        mime_type="text/plain",
+        size_bytes=10,
+        sha256="a" * 64,
+        storage_key="blob",
+        status=status,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+
+    class FileRepository:
+        async def get_attachments(self, session_id, attachment_ids):
+            assert session_id == "session-1"
+            assert attachment_ids == ["file-1"]
+            return [attachment]
+
+    service = SessionContextService(
+        db=SimpleNamespace(files=FileRepository()),
+        event_publisher=None,
+    )
+    with pytest.raises(ValueError, match=message):
+        await service.load_and_validate_attachments("session-1", ["file-1"])
+
+
+@pytest.mark.asyncio
+async def test_session_context_accepts_ready_attachments():
+    from types import SimpleNamespace
+
+    from athena.runtime.services.session_context_service import SessionContextService
+
+    attachment = Attachment(
+        id="file-1",
+        session_id="session-1",
+        filename="notes.txt",
+        mime_type="text/plain",
+        size_bytes=10,
+        sha256="a" * 64,
+        storage_key="blob",
+        status=AttachmentStatus.READY,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+
+    class FileRepository:
+        async def get_attachments(self, session_id, attachment_ids):
+            return [attachment]
+
+    service = SessionContextService(
+        db=SimpleNamespace(files=FileRepository()),
+        event_publisher=None,
+    )
+    assert await service.load_and_validate_attachments("session-1", ["file-1"]) == [
+        attachment
+    ]
+
+
 def test_graph_compiles_with_minimal_runtime():
     from types import SimpleNamespace
     from athena.runtime.agent_graph import build_graph
 
     runtime = SimpleNamespace(
-        _events=None,
+        _event_publisher=None,
         session_context_service=SimpleNamespace(),
         agent_execution_service=SimpleNamespace(),
     )

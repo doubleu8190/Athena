@@ -7,7 +7,7 @@ import { ExecutionTimeline } from "./ExecutionTimeline"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { ApprovalRequest, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
+import type { ApprovalRequest, Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
 
 interface ChatProps {
   sendEvent: (type: string, data?: Record<string, unknown>) => boolean
@@ -41,6 +41,7 @@ function Chat({ sendEvent }: ChatProps) {
     clearError,
     attachments,
     setAttachments,
+    upsertAttachment,
     removeAttachment,
   } = useChatStore()
 
@@ -49,7 +50,7 @@ function Chat({ sendEvent }: ChatProps) {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [showActivity, setShowActivity] = useState(false)
   const [showFiles, setShowFiles] = useState(false)
-  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [supportedAttachmentTypes, setSupportedAttachmentTypes] = useState<SupportedAttachmentTypes | null>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -60,6 +61,35 @@ function Chat({ sendEvent }: ChatProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const loadingSessionIdRef = useRef<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const selectedAttachments = selectedAttachmentIds
+    .map((id) => attachments.find((item) => item.id === id))
+    .filter((item): item is Attachment => item !== undefined)
+  const hasPendingSelectedAttachments = selectedAttachmentIds.some((id) => {
+    const item = attachments.find((attachment) => attachment.id === id)
+    return !item || item.status !== "ready"
+  })
+  const canSend = (input.trim().length > 0 || selectedAttachmentIds.length > 0)
+    && !hasPendingSelectedAttachments
+    && !isSending
+    && !isUploading
+  const hasPendingAttachmentProcessing = attachments.some(
+    (item) => item.status === "uploaded" || item.status === "processing",
+  )
+
+  useEffect(() => {
+    if (!activeSessionId || !hasPendingAttachmentProcessing) return
+    const sessionId = activeSessionId
+    const refreshAttachments = async () => {
+      try {
+        const items = await apiClient.listAttachments(sessionId)
+        if (useChatStore.getState().activeSessionId === sessionId) setAttachments(items)
+      } catch {
+        // Keep the current status visible and try again on the next poll.
+      }
+    }
+    const timer = window.setInterval(() => void refreshAttachments(), 1000)
+    return () => window.clearInterval(timer)
+  }, [activeSessionId, hasPendingAttachmentProcessing, setAttachments])
 
   // 加载会话历史消息 — 切换 session 时完全重置状态
   useEffect(() => {
@@ -79,7 +109,7 @@ function Chat({ sendEvent }: ChatProps) {
       loadingSessionIdRef.current = activeSessionId
       setIsLoadingHistory(true)
       loadHistory(activeSessionId, () => cancelled)
-      setPendingFiles([])
+      setSelectedAttachmentIds([])
       setSupportedAttachmentTypes(null)
       apiClient.listAttachments(activeSessionId)
         .then((items) => { if (!cancelled) setAttachments(items) })
@@ -97,7 +127,7 @@ function Chat({ sendEvent }: ChatProps) {
       setAgentStatus("idle")
       clearError()
       setAttachments([])
-      setPendingFiles([])
+      setSelectedAttachmentIds([])
       setSupportedAttachmentTypes(null)
     }
 
@@ -174,44 +204,44 @@ function Chat({ sendEvent }: ChatProps) {
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
-    if ((!text && pendingFiles.length === 0) || !activeSessionId || isSending || isUploading) return
+    if ((!text && selectedAttachmentIds.length === 0) || !activeSessionId || isSending || isUploading || hasPendingSelectedAttachments) return
 
     setIsSending(true)
     setInput("")
 
-    // 添加用户消息到 UI
+    const messageAttachments = selectedAttachments.map((item) => ({
+      id: item.id,
+      filename: item.filename,
+      mime_type: item.mime_type,
+      size_bytes: item.size_bytes,
+      status: item.status,
+    }))
     const userMsg = {
       id: crypto.randomUUID(),
       role: "user" as const,
       content: text || "Please process the attached files.",
       timestamp: new Date().toISOString(),
       session_id: activeSessionId,
-      attachments: [],
+      attachments: messageAttachments,
     }
     addMessage(userMsg)
 
-    // 乐观反馈：立即进入 running，不等后端首事件（STREAM_START / LLM_CALL_START）。
-    // 后端在 LLM 调用前有记忆检索、历史加载、提示词构建等处理窗口，若 UI 保持
-    // idle，用户会感觉"发送完消息后没有任何反应"。置为 running 后处理中指示器
-    // 与停止按钮立刻出现，消息送达的确定性也随即传达。
     setAgentStatus("running")
     clearThinking()
 
-    // 只提交命令；执行结果统一通过当前会话的 SSE 流返回，避免重复写入消息。
     const sent = sendEvent(ClientEventType.USER_COMMAND, {
       message: text || "Please process the attached files.",
       session_id: activeSessionId,
-      files: pendingFiles,
+      attachment_ids: selectedAttachmentIds,
     })
 
     if (!sent) {
-      // 命令未被接受时回滚乐观写入的用户消息。
       setAgentStatus("idle")
       setError("Connection lost. Your message was not sent — please try again.")
       removeMessage(userMsg.id)
       setInput(text)
     } else {
-      setPendingFiles([])
+      setSelectedAttachmentIds([])
     }
 
     setIsSending(false)
@@ -225,8 +255,9 @@ function Chat({ sendEvent }: ChatProps) {
     setError,
     clearThinking,
     sendEvent,
-    pendingFiles,
-    attachments,
+    selectedAttachmentIds,
+    selectedAttachments,
+    hasPendingSelectedAttachments,
     isUploading,
   ])
 
@@ -243,17 +274,26 @@ function Chat({ sendEvent }: ChatProps) {
       if (fileInputRef.current) fileInputRef.current.value = ""
       return
     }
+    const sessionId = activeSessionId
     setIsUploading(true)
     clearError()
     try {
-      setPendingFiles((current) => [...current, ...files])
+      const created = await apiClient.uploadSessionAttachments(sessionId, files)
+      if (useChatStore.getState().activeSessionId !== sessionId) return
+      created.forEach(upsertAttachment)
+      setSelectedAttachmentIds((current) => [
+        ...current,
+        ...created.map((item) => item.id).filter((id) => !current.includes(id)),
+      ])
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Attachment upload failed")
+      if (useChatStore.getState().activeSessionId === sessionId) {
+        setError(err instanceof Error ? err.message : "Attachment upload failed")
+      }
     } finally {
       setIsUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ""
     }
-  }, [activeSessionId, clearError, isUploading, setError, supportedAttachmentTypes])
+  }, [activeSessionId, clearError, isUploading, setError, supportedAttachmentTypes, upsertAttachment])
 
   const filesFromClipboard = useCallback((clipboardData: DataTransfer): File[] => {
     const fromItems = Array.from(clipboardData.items ?? [])
@@ -305,6 +345,7 @@ function Chat({ sendEvent }: ChatProps) {
   const handleDeleteAttachment = useCallback(async (fileId: string) => {
     if (!activeSessionId) return
     await apiClient.deleteAttachment(activeSessionId, fileId)
+    setSelectedAttachmentIds((current) => current.filter((id) => id !== fileId))
     removeAttachment(fileId)
   }, [activeSessionId, removeAttachment])
 
@@ -673,22 +714,30 @@ function Chat({ sendEvent }: ChatProps) {
         }}
       >
         <div className="max-w-3xl mx-auto">
-          {pendingFiles.length > 0 && (
+          {selectedAttachmentIds.length > 0 && (
             <div className="flex flex-wrap gap-2 mb-2">
-              {pendingFiles.map((file, index) => (
-                <div key={`${file.name}-${file.lastModified}-${index}`} className="flex items-center gap-2 max-w-full rounded-md border border-athena-border bg-athena-bg px-2 py-1.5 text-xs">
-                  <Paperclip className="w-3.5 h-3.5 text-athena-accent flex-shrink-0" />
-                  <span className="truncate max-w-[220px]">{file.name}</span>
-                  <button
-                    type="button"
-                    title="Remove from message"
-                    onClick={() => setPendingFiles((files) => files.filter((_, fileIndex) => fileIndex !== index))}
-                    className="text-athena-muted hover:text-athena-text"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
+              {selectedAttachmentIds.map((id) => {
+                const item = attachments.find((attachment) => attachment.id === id)
+                return (
+                  <div key={id} className="flex items-center gap-2 max-w-full rounded-md border border-athena-border bg-athena-bg px-2 py-1.5 text-xs">
+                    {item && (item.status === "uploaded" || item.status === "processing")
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin text-athena-accent flex-shrink-0" />
+                      : <Paperclip className="w-3.5 h-3.5 text-athena-accent flex-shrink-0" />}
+                    <span className="truncate max-w-[220px]">{item?.filename ?? "Attachment"}</span>
+                    <span className={item?.status === "failed" ? "text-athena-danger" : "text-athena-muted"}>
+                      {item?.status ?? "unavailable"}
+                    </span>
+                    <button
+                      type="button"
+                      title="Remove from message"
+                      onClick={() => setSelectedAttachmentIds((current) => current.filter((attachmentId) => attachmentId !== id))}
+                      className="text-athena-muted hover:text-athena-text"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )
+              })}
             </div>
           )}
           <div className="flex items-stretch gap-2">
@@ -744,7 +793,7 @@ function Chat({ sendEvent }: ChatProps) {
                 </button>
                 <button
                   onClick={handleSend}
-                  disabled={(!input.trim() && pendingFiles.length === 0) || !activeSessionId || isSending || isUploading}
+                  disabled={!canSend || !activeSessionId}
                   className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
                   title="Send"
                   aria-label="Send"
@@ -776,7 +825,7 @@ function Chat({ sendEvent }: ChatProps) {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={(!input.trim() && pendingFiles.length === 0) || !activeSessionId || isSending || isUploading}
+                disabled={!canSend || !activeSessionId}
                 className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
                 title="Send"
               >
@@ -809,6 +858,16 @@ function Chat({ sendEvent }: ChatProps) {
                       <div className="truncate text-xs text-athena-text">{item.filename}</div>
                       <div className="text-[11px] text-athena-muted">{item.status}</div>
                     </div>
+                    {item.message_id == null && !selectedAttachmentIds.includes(item.id) && (
+                      <button
+                        type="button"
+                        title="Add to message"
+                        onClick={() => setSelectedAttachmentIds((current) => [...current, item.id])}
+                        className="text-athena-muted hover:text-athena-accent text-[11px]"
+                      >
+                        Add
+                      </button>
+                    )}
                     <button type="button" title="Delete" onClick={() => void handleDeleteAttachment(item.id)} className="text-athena-muted hover:text-athena-danger">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

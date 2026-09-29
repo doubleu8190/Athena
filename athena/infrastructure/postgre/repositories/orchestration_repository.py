@@ -15,8 +15,12 @@ from athena.infrastructure.postgre.models import (
     AgentTaskResultModel,
 )
 from .repository_utils import _json_dumps, _now_iso
-from athena.runtime.orchestration import ExecutionPlan, TaskStatus, WorkerResult
-from athena.runtime.orchestration.contracts import ensure_task_transition
+from athena.contracts.orchestration import (
+    ExecutionPlan,
+    TaskStatus,
+    WorkerResult,
+    ensure_task_transition,
+)
 from datetime import datetime, timedelta
 
 

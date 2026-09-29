@@ -30,7 +30,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
   const lastSeqRef = useRef(0)
   const streamsRef = useRef(new Map<string, StreamProjection>())
   const {
-    setConnectionStatus, setAgentStatus, addMessage, updateMessage,
+    setConnectionStatus, setAgentStatus, addMessage, updateMessage, setAttachments,
     addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval,
     updateSession,
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
@@ -119,6 +119,11 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           timestamp: envelope.occurred_at || now,
         })
         if (timelineEntry) upsertExecutionTimelineEntry(timelineEntry)
+        if (type === "message.persisted" && Array.isArray(data.attachment_ids) && data.attachment_ids.length > 0) {
+          void apiClient.listAttachments(sessionId).then((items) => {
+            if (useChatStore.getState().activeSessionId === sessionId) setAttachments(items)
+          }).catch(() => {})
+        }
 
         if (type === "stream.snapshot") {
           const version = Number(data.version || 0)
@@ -298,7 +303,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "node.started", "node.completed", "node.failed",
       "llm.started", "llm.completed", "tool.started", "tool.completed",
       "approval.required", "approval.resolved", "approval.expired",
-      "message.started", "message.completed", "message.delta", "stream.snapshot",
+      "message.started", "message.persisted", "message.completed", "message.delta", "stream.snapshot",
       "thinking.started", "thinking.summary", "thinking.completed",
       "plan.created", "plan.completed", "plan.failed", "plan.cancelled",
       "task.queued", "task.started", "task.retrying", "task.completed", "task.failed",
@@ -308,7 +313,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "file_processing_started", "file_processing_completed", "file_processing_failed",
     ].forEach((name) => source.addEventListener(name, parse))
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, upsertOrchestrationTask, clearOrchestrationTasks, upsertExecutionTimelineEntry, clearExecutionTimeline])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertExecutionTimelineEntry, clearExecutionTimeline])
 
   return sourceRef
 }

@@ -23,7 +23,8 @@ from athena.infrastructure.postgre.database import Database
 from athena.utils.id_generation import generate_sub_run_id
 from athena.utils.logging import get_logger
 from athena.utils.prompt_loader import get_prompt
-from athena.runtime.orchestration import AgentRole, ToolPolicy
+from athena.contracts.orchestration import AgentRole
+from athena.contracts.tool_policy import ToolPolicy
 
 logger = get_logger(__name__)
 

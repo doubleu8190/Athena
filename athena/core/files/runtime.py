@@ -227,10 +227,10 @@ class FileIntelligenceRuntime:
         return await self._ingestion.index_attachment(attachment_id)
 
     async def process_knowledge_document(self, attachment_id: str) -> dict[str, Any]:
-        """幂等完成知识库文档解析和向量索引。
+        """幂等完成知识库文档或会话附件的解析和向量索引。
 
         参数：
-            attachment_id：知识库文档附件 ID。
+            attachment_id：文档或会话附件 ID。
 
         返回：
             解析和索引阶段的统计信息。

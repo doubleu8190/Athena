@@ -5,16 +5,6 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal, TypedDict
 
 
-class FileProcessResult(TypedDict):
-    """单个附件在统一 Run 中的最终处理结果。"""
-
-    message_id: str
-    attachment_id: str
-    status: Literal["ready", "failed"]
-    error: str | None
-    chunk_count: int | None
-
-
 AgentExecutionStatus = Literal[
     "running",
     "waiting_approval",
@@ -139,7 +129,6 @@ class AgentState(TypedDict, total=False):
     user_message: str
     attachment_ids: list[str]
     requested_attachment_refs: list[dict[str, Any]]
-    file_results: list[FileProcessResult]
     task_spec: dict[str, Any] | None
     context_plan: dict[str, Any] | None
     context_bundle: dict[str, Any] | None

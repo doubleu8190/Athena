@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TypeGuard
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from athena.infrastructure.postgre.database import Database
 from athena.models import CommandPayload, Message, Session
@@ -46,6 +46,7 @@ class SendMessageRequest(BaseModel):
 
     message: str
     command_id: str
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 @dataclass
@@ -91,7 +92,11 @@ async def _parse_json_run_submission(request: Request) -> ParsedRunSubmission:
         req = SendMessageRequest.model_validate(await request.json())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return ParsedRunSubmission(message=req.message, command_id=req.command_id)
+    return ParsedRunSubmission(
+        message=req.message,
+        command_id=req.command_id,
+        attachment_ids=req.attachment_ids,
+    )
 
 
 async def _parse_multipart_run_submission(
@@ -274,7 +279,7 @@ async def submit_run(session_id: str, request: Request) -> SubmitRunResponse:
 
     参数:
         session_id (str): 目标会话 ID。
-        请求体：JSON 请求或 multipart 表单，包含消息、文件和命令 ID。
+        请求体：JSON 消息、附件 ID 列表和命令 ID；保留 multipart 兼容旧客户端。
         request (Request): 当前请求，用于获取运行时容器。
     返回值:
         SubmitRunResponse: 命令 ID、运行 ID、待处理状态和幂等去重标志。

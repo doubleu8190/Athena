@@ -49,8 +49,8 @@ class Database:
         self.tool_calls = ToolCallRepository()
         self.mcp_servers = MCPServerRepository()
         self.tools = ToolRepository()
-        # 编排仓库依赖 runtime.orchestration；延迟导入可避免数据库门面和
-        # 编排包在模块加载阶段形成循环依赖。
+        # Repository implementations are loaded after the database facade is
+        # constructed; their stable contracts live in ``athena.contracts``.
         from athena.infrastructure.postgre.repositories.orchestration_repository import (
             OrchestrationRepository,
         )

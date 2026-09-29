@@ -1,5 +1,4 @@
 from __future__ import annotations
-import asyncio
 from datetime import datetime
 import sys
 import types
@@ -8,7 +7,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from athena.config.settings import Settings
-from athena.runtime.langgraph_runtime import LangGraphRuntime
 from athena.core.files.adapters import (
     ExcelAdapter,
     ImageAdapter,
@@ -203,62 +201,6 @@ async def test_attachment_table_uses_final_independent_ownership_schema(tmp_path
         )
         assert document.session_id is None
         assert document.knowledge_base_id == knowledge_base.id
-    finally:
-        await db.close()
-
-
-@pytest.mark.asyncio
-async def test_process_attachment_index_failure_marks_attachment_failed(tmp_path):
-    db = Database(str(tmp_path / "index-failure.db"))
-    await db.connect()
-    try:
-        await db.sessions.create("session")
-        settings = Settings(
-            _env_file=None,
-            database_url=str(tmp_path / "index-failure.db"),
-            file_storage_path=str(tmp_path / "storage"),
-        )
-        runtime = _make_runtime(db.files, settings)
-        attachment = await db.files.create_attachment(
-            session_id="session",
-            filename="notes.txt",
-            mime_type="text/plain",
-            size_bytes=1,
-            sha256="5" * 64,
-            storage_key="blobs/55/placeholder",
-        )
-        await db.files.replace_chunks(
-            attachment.id,
-            [
-                FileChunk(
-                    id="chunk", attachment_id=attachment.id, ordinal=0, content="text"
-                )
-            ],
-        )
-
-        class BrokenVectorStore(_FakeFileVectorStore):
-            async def replace_attachment(self, _attachment_id, _chunks):
-                raise RuntimeError("vector index unavailable")
-
-        runtime._vector_store = BrokenVectorStore()
-
-        runtime.parse_attachment = AsyncMock(return_value={"chunk_count": 1})
-        graph_runtime = LangGraphRuntime.__new__(LangGraphRuntime)
-        graph_runtime._db = db
-        graph_runtime._events = AsyncMock()
-        graph_runtime._file_runtime = runtime
-        graph_runtime._file_parse_semaphore = asyncio.Semaphore(1)
-        graph_runtime._file_embedding_semaphore = asyncio.Semaphore(1)
-
-        result = await graph_runtime.process_attachment(
-            attachment.id, "message-1", "session", "run-1"
-        )
-
-        current = await db.files.get_attachment(attachment.id)
-        assert current is not None
-        assert result["status"] == "failed"
-        assert current.status.value == "failed"
-        assert current.error_message == "vector index unavailable"
     finally:
         await db.close()
 

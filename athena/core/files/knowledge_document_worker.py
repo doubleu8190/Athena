@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 
 
 class KnowledgeDocumentWorker:
-    """消费持久知识库文档任务，并管理失败重试。"""
+    """消费持久文件解析任务，并管理失败重试。"""
 
     def __init__(
         self,

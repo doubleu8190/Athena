@@ -47,8 +47,62 @@ from athena.utils.logging import configure_logging, get_logger
 logger = get_logger(__name__)
 
 
+async def _cleanup_failed_startup(app: FastAPI) -> None:
+    """Best-effort reverse cleanup when startup fails before ``yield``."""
+
+    async def _run(name: str, callback) -> None:
+        if callback is None:
+            return
+        try:
+            await callback()
+        except Exception as exc:
+            logger.warning("startup_cleanup_failed", resource=name, error=str(exc))
+
+    knowledge_worker = getattr(app.state, "_startup_knowledge_worker", None)
+    await _run("knowledge_document_worker", knowledge_worker.stop if knowledge_worker else None)
+
+    command_consumer = getattr(app.state, "_startup_command_consumer", None)
+    await _run("command_consumer", command_consumer.stop if command_consumer else None)
+
+    memory_job_worker = getattr(app.state, "_startup_memory_job_worker", None)
+    await _run("memory_job_worker", memory_job_worker.stop if memory_job_worker else None)
+
+    checkpointer_context = getattr(app.state, "_startup_checkpointer_context", None)
+    await _run(
+        "checkpointer",
+        (lambda: checkpointer_context.__aexit__(None, None, None))
+        if checkpointer_context
+        else None,
+    )
+
+    memory_flush_task = getattr(app.state, "_startup_memory_flush_task", None)
+    if memory_flush_task is not None:
+        memory_flush_task.cancel()
+        try:
+            await memory_flush_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("startup_cleanup_failed", resource="memory_flush_task", error=str(exc))
+
+    memory_service = getattr(app.state, "_startup_memory_service", None)
+    await _run("memory_flush", memory_service.flush_access_stats if memory_service else None)
+
+    mcp_manager = getattr(app.state, "_startup_mcp_manager", None)
+    await _run("mcp_manager", mcp_manager.shutdown if mcp_manager else None)
+
+    sandbox_runner = getattr(app.state, "_startup_sandbox_runner", None)
+    await _run("sandbox_runner", sandbox_runner.close_all if sandbox_runner else None)
+
+    neo4j_graph_store = getattr(app.state, "_startup_neo4j_graph_store", None)
+    await _run("neo4j_graph_store", neo4j_graph_store.close if neo4j_graph_store else None)
+
+    db = getattr(app.state, "_startup_db", None)
+    await _run("database", db.close if db else None)
+
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _lifespan_body(app: FastAPI):
     """应用生命周期管理 — 启动初始化与关闭清理。
 
     启动阶段按依赖顺序初始化所有子系统，关闭阶段按逆序释放资源。
@@ -60,6 +114,7 @@ async def lifespan(app: FastAPI):
     异常：
         异常: 任何子系统初始化失败时向上抛出，阻止应用启动。
     """
+    app.state._startup_complete = False
     settings = get_settings()
     # LangChain/LangSmith reads these process variables when it creates
     # callback managers. Keep them aligned with Athena's typed configuration.
@@ -84,6 +139,7 @@ async def lifespan(app: FastAPI):
 
     # ── 1. 数据库 ──
     db = Database(settings.postgres_url)
+    app.state._startup_db = db
     await db.connect(
         pool_size=settings.postgres_pool_size,
         max_overflow=settings.postgres_max_overflow,
@@ -99,6 +155,7 @@ async def lifespan(app: FastAPI):
     from athena.infrastructure.neo4j import Neo4jGraphStore
 
     neo4j_graph_store = Neo4jGraphStore.from_settings(settings)
+    app.state._startup_neo4j_graph_store = neo4j_graph_store
     await neo4j_graph_store.initialize()
     command_notifier = CommandNotifier()
     agent_store = AgentStore(command_notifier=command_notifier)
@@ -120,6 +177,7 @@ async def lifespan(app: FastAPI):
     from athena.core.tools.builtin.registry import register_builtin_tools
 
     sandbox_runner = DockerRunner(settings)
+    app.state._startup_sandbox_runner = sandbox_runner
     workspace_manager = WorkspaceManager(settings.sandbox_workspace_root)
     if settings.sandbox_required and not await sandbox_runner.health():
         raise RuntimeError("Docker sandbox is required but unavailable")
@@ -149,6 +207,7 @@ async def lifespan(app: FastAPI):
         sandbox_image=settings.sandbox_shell_image,
     )
     mcp_manager = MCPManager(tool_manager=tool_manager, db=db, adapter=mcp_adapter)
+    app.state._startup_mcp_manager = mcp_manager
     await mcp_manager.load_persisted()
 
     # ── 5. LLM / 记忆 / 压缩 ──
@@ -233,10 +292,12 @@ async def lifespan(app: FastAPI):
         ),
         graph_store=neo4j_graph_store,
     )
+    app.state._startup_memory_service = memory_service
     await memory_service.initialize()
 
     # 后台看门狗：周期 flush 访问统计 + 清理过期记忆
     memory_flush_task = asyncio.create_task(memory_service.run_periodic_flush())
+    app.state._startup_memory_flush_task = memory_flush_task
 
     from athena.core.memory.retrieval import (
         HybridMemoryRetriever,
@@ -265,6 +326,7 @@ async def lifespan(app: FastAPI):
         # Workflow is created by LangGraphRuntime; worker is attached below.
         None,
     )
+    app.state._startup_memory_job_worker = memory_job_worker
 
     # ── 5.3 上下文压缩 ──
     from athena.core.compression.compressor import ContextCompressor
@@ -333,6 +395,7 @@ async def lifespan(app: FastAPI):
     checkpointer_context = AsyncPostgresSaver.from_conn_string(
         settings.postgres_conn_string
     )
+    app.state._startup_checkpointer_context = checkpointer_context
     checkpointer = await checkpointer_context.__aenter__()
     await checkpointer.setup()
 
@@ -346,11 +409,14 @@ async def lifespan(app: FastAPI):
         approval_manager=approval_manager,
         sandbox_runner=sandbox_runner,
     )
+    app.state._startup_command_consumer = command_consumer
     await command_consumer.start()
     # 所有运行时依赖和路由容器均就绪后，再开始领取持久化知识库任务。
+    app.state._startup_knowledge_worker = knowledge_document_worker
     await knowledge_document_worker.start()
 
     logger.info("athena_started")
+    app.state._startup_complete = True
     yield
 
     # ── 关闭清理（按初始化逆序释放资源） ──
@@ -384,6 +450,19 @@ async def lifespan(app: FastAPI):
         await app.state.runtime.neo4j_graph_store.close()
     await db.close()
     logger.info("athena_stopped")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Guard startup so partially initialized resources are always released."""
+
+    try:
+        async with _lifespan_body(app):
+            yield
+    except BaseException:
+        if not getattr(app.state, "_startup_complete", False):
+            await _cleanup_failed_startup(app)
+        raise
 
 
 # ---------------------------------------------------------------------------

@@ -51,7 +51,7 @@ class SessionContextService:
             list[Attachment]: 按请求顺序返回属于当前会话的附件。
 
         异常：
-            ValueError: 附件不存在、不属于当前会话，或首次提交时附件处理已失败。
+            ValueError: 附件不存在、不属于当前会话，或附件处理尚未完成/已失败。
             其他异常: 数据库读取失败时向上传播。
         """
         if not attachment_ids:
@@ -65,6 +65,10 @@ class SessionContextService:
                 raise ValueError("附件不存在或不属于当前会话")
             if attachment.status == AttachmentStatus.FAILED:
                 raise ValueError(f"附件 {attachment.filename} 处理失败，不能随消息提交")
+            if attachment.status != AttachmentStatus.READY:
+                raise ValueError(
+                    f"附件 {attachment.filename} 尚未处理完成，不能随消息提交"
+                )
             result.append(attachment)
         return result
 

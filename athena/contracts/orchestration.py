@@ -1,0 +1,185 @@
+"""Stable orchestration contracts shared by runtime and persistence adapters."""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class StrictContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AgentRole(StrEnum):
+    ROOT = "root"
+    PLANNER = "planner"
+    WORKER = "worker"
+    SYNTHESIZER = "synthesizer"
+
+
+class PlanStatus(StrEnum):
+    PLANNING = "planning"
+    RUNNING = "running"
+    SYNTHESIZING = "synthesizing"
+    CANCEL_REQUESTED = "cancel_requested"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class TaskStatus(StrEnum):
+    QUEUED = "queued"
+    CLAIMED = "claimed"
+    RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
+    RETRY_WAIT = "retry_wait"
+    CANCEL_REQUESTED = "cancel_requested"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    INVALID_OUTPUT = "invalid_output"
+    CANCELLED = "cancelled"
+
+
+class WorkerResultStatus(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
+    INVALID_OUTPUT = "invalid_output"
+
+
+TERMINAL_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.TIMED_OUT,
+        TaskStatus.INVALID_OUTPUT,
+        TaskStatus.CANCELLED,
+    }
+)
+
+ALLOWED_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
+    TaskStatus.QUEUED: frozenset({TaskStatus.CLAIMED, TaskStatus.CANCELLED}),
+    TaskStatus.CLAIMED: frozenset(
+        {TaskStatus.RUNNING, TaskStatus.QUEUED, TaskStatus.CANCEL_REQUESTED}
+    ),
+    TaskStatus.RUNNING: frozenset(
+        {
+            TaskStatus.WAITING_APPROVAL,
+            TaskStatus.RETRY_WAIT,
+            TaskStatus.CANCEL_REQUESTED,
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.TIMED_OUT,
+            TaskStatus.INVALID_OUTPUT,
+        }
+    ),
+    TaskStatus.WAITING_APPROVAL: frozenset(
+        {TaskStatus.RUNNING, TaskStatus.CANCEL_REQUESTED}
+    ),
+    TaskStatus.RETRY_WAIT: frozenset({TaskStatus.QUEUED, TaskStatus.CANCELLED}),
+    TaskStatus.CANCEL_REQUESTED: frozenset({TaskStatus.CANCELLED}),
+    **{status: frozenset() for status in TERMINAL_TASK_STATUSES},
+}
+
+
+def ensure_task_transition(current: TaskStatus, target: TaskStatus) -> None:
+    if target not in ALLOWED_TASK_TRANSITIONS[current]:
+        raise ValueError(f"invalid task transition: {current.value} -> {target.value}")
+
+
+class TaskSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    objective: str = Field(min_length=1)
+    input_context: str = ""
+    expected_output: dict[str, Any] = Field(default_factory=dict)
+    allowed_tools: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list, max_length=0)
+    max_turns: int = Field(default=5, ge=1, le=20)
+    timeout_seconds: int = Field(default=120, ge=1, le=1800)
+    retry_limit: int = Field(default=1, ge=0, le=3)
+
+
+class ExecutionPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    plan_id: str = Field(min_length=1)
+    root_run_id: str = Field(min_length=1)
+    goal: str = Field(min_length=1)
+    tasks: list[TaskSpec] = Field(min_length=1, max_length=6)
+    max_parallelism: int = Field(default=4, ge=1, le=6)
+
+    @model_validator(mode="after")
+    def validate_v1_tasks(self) -> ExecutionPlan:
+        task_ids = [task.task_id for task in self.tasks]
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("task_id must be unique within a plan")
+        if any(task.plan_id != self.plan_id for task in self.tasks):
+            raise ValueError("every task must belong to the execution plan")
+        if any(task.depends_on for task in self.tasks):
+            raise ValueError("V1 execution plans do not support task dependencies")
+        return self
+
+
+class TaskDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    objective: str = Field(min_length=1)
+    input_context: str = ""
+    expected_output: dict[str, Any] = Field(default_factory=dict)
+    allowed_tools: list[str] = Field(default_factory=list)
+    max_turns: int = Field(default=5, ge=1, le=20)
+    timeout_seconds: int = Field(default=120, ge=1, le=1800)
+    retry_limit: int = Field(default=1, ge=0, le=3)
+
+
+class PlanSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    plan_id: str = Field(min_length=1)
+    goal: str = ""
+    tasks: list[TaskDraft] = Field(min_length=1, max_length=6)
+    max_parallelism: int = Field(default=4, ge=1, le=6)
+
+
+PLAN_SUBMISSION_TOOL_NAME = "submit_plan"
+
+
+class WorkerResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    plan_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    status: WorkerResultStatus
+    output: dict[str, Any] = Field(default_factory=dict)
+    raw_text: str = ""
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    turn_count: int = Field(default=0, ge=0)
+    error_code: str | None = None
+    error_message: str | None = None
+
+    @model_validator(mode="after")
+    def validate_result_shape(self) -> WorkerResult:
+        if self.status == WorkerResultStatus.COMPLETED and not self.output:
+            raise ValueError("completed worker result must contain output")
+        if self.status != WorkerResultStatus.COMPLETED and not (
+            self.error_code or self.error_message
+        ):
+            raise ValueError("non-completed worker result must describe the error")
+        return self
+

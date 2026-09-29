@@ -52,6 +52,47 @@ def test_postgres_implementation_does_not_import_file_core_repository():
     assert "athena.core.files.repository" not in imports
 
 
+def test_stable_layers_do_not_depend_on_runtime_orchestration():
+    """Contracts flow inward; adapters and core helpers must not import runtime."""
+
+    paths = [
+        *(ROOT / "athena/infrastructure/postgre/repositories").rglob("*.py"),
+        ROOT / "athena/core/tools/manager.py",
+        ROOT / "athena/core/harness/turn_executor.py",
+        ROOT / "athena/runtime/sub_agent_manager.py",
+    ]
+    forbidden = "athena.runtime.orchestration"
+    violations = {
+        str(path.relative_to(ROOT)): sorted(
+            module for module in _imports(path) if module.startswith(forbidden)
+        )
+        for path in paths
+        if any(module.startswith(forbidden) for module in _imports(path))
+    }
+    assert not violations, violations
+
+
+def test_orchestration_runtime_uses_stable_contracts_directly():
+    """Runtime implementations must not make the compatibility module canonical."""
+
+    paths = (
+        ROOT / "athena/runtime/orchestration/plan_dispatcher.py",
+        ROOT / "athena/runtime/orchestration/plan_materializer.py",
+        ROOT / "athena/runtime/orchestration/plan_result_synthesizer.py",
+        ROOT / "athena/runtime/orchestration/worker.py",
+    )
+    forbidden = {
+        "athena.runtime.orchestration.contracts",
+        "athena.runtime.orchestration.policies",
+    }
+    violations = {
+        str(path.relative_to(ROOT)): sorted(_imports(path) & forbidden)
+        for path in paths
+        if _imports(path) & forbidden
+    }
+    assert not violations, violations
+
+
 def test_database_compatibility_and_migration_hooks_are_absent():
     python_sources = "\n".join(
         path.read_text(encoding="utf-8")

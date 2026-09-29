@@ -12,16 +12,13 @@ from athena.utils.logging import get_logger
 from athena.observability.langsmith import start_trace
 
 from .nodes import (
-    route_after_attachment_processing,
     route_after_task_understanding,
-    create_handle_attachment_failure_node,
     create_agent_loop_node,
     create_post_process_and_build_result_node,
     route_after_agent_loop,
     create_assemble_final_response_node,
     create_prepare_harness_input_node,
     create_prepare_request_and_persist_message_node,
-    create_process_attachments_node,
     create_understand_task_node,
     create_plan_context_node,
     create_acquire_context_node,
@@ -74,14 +71,6 @@ def build_graph(
             runtime.session_context_service
         ),
     )
-    # 附件处理 → 使用完整 runtime（需要 FileIntelligenceRuntime 等）
-    add_instrumented_node(
-        "process_attachments", create_process_attachments_node(runtime)
-    )
-    # 附件失败处理 → 无依赖
-    add_instrumented_node(
-        "handle_attachment_failure", create_handle_attachment_failure_node()
-    )
     # 任务理解 → 生成 UserTaskSpec
     add_instrumented_node("understand_task", create_understand_task_node(runtime))
     # 上下文计划 → 推导 Provider
@@ -131,19 +120,9 @@ def build_graph(
         route_after_task_understanding,
         {
             "clarification_response": "clarification_response",
-            "process_attachments": "process_attachments",
             "plan_context": "plan_context",
         },
     )
-    graph.add_conditional_edges(
-        "process_attachments",
-        route_after_attachment_processing,
-        {
-            "plan_context": "plan_context",
-            "handle_attachment_failure": "handle_attachment_failure",
-        },
-    )
-    graph.add_edge("handle_attachment_failure", "assemble_final_response")
     graph.add_edge("clarification_response", "assemble_final_response")
     graph.add_edge("plan_context", "acquire_context")
     graph.add_edge("acquire_context", "prepare_harness_input")

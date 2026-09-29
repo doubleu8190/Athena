@@ -160,24 +160,31 @@ class FileIngestionService:
         return {"chunks": len(chunks)}
 
     async def process_knowledge_document(self, attachment_id: str) -> dict[str, Any]:
+        """Process a knowledge-base document or a session-scoped chat attachment."""
         async with self._lock(attachment_id):
             await self.initialize()
             attachment = await self.repository.get_attachment(attachment_id)
-            if attachment is None or attachment.knowledge_base_id is None:
-                raise FileNotFoundError("知识库文档不存在")
+            if attachment is None or (
+                attachment.knowledge_base_id is None and attachment.session_id is None
+            ):
+                raise FileNotFoundError("文件附件不存在")
             metadata = await self.parse_attachment(attachment_id)
             attachment = await self.repository.get_attachment(attachment_id)
-            if attachment is None or attachment.knowledge_base_id is None:
-                raise FileNotFoundError("知识库文档已删除")
+            if attachment is None or (
+                attachment.knowledge_base_id is None and attachment.session_id is None
+            ):
+                raise FileNotFoundError("文件附件已删除")
             indexed = await self.index_attachment(attachment_id)
             updated = await self.repository.update_attachment(
                 attachment_id, status=AttachmentStatus.READY.value, error_message=None
             )
             if updated is None:
                 await self.delete_attachment_vectors(attachment_id)
-                raise FileNotFoundError("知识库文档已删除")
+                raise FileNotFoundError("文件附件已删除")
             result: dict[str, Any] = {**metadata, **indexed}
-            if self.graph_indexer is not None:
+            # Session attachments are private to one conversation. Keep them out
+            # of the shared graph index, which is reserved for knowledge bases.
+            if self.graph_indexer is not None and updated.knowledge_base_id is not None:
                 try:
                     graph = await self.graph_indexer.index_document(
                         updated,

@@ -55,7 +55,9 @@ function AppContent() {
         if (type === ClientEventType.USER_COMMAND) {
           await apiClient.submitRun(activeSessionId, {
             message: String(data.message || ""),
-            files: Array.isArray(data.files) ? data.files as File[] : undefined,
+            attachment_ids: Array.isArray(data.attachment_ids)
+              ? data.attachment_ids.map(String)
+              : [],
           })
         } else if (type === ClientEventType.SESSION_STOP) {
           await apiClient.cancelSession(activeSessionId)

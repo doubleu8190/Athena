@@ -18,7 +18,6 @@ class CommandType(StrEnum):
     RUN_RESUME = "run.resume"
     APPROVAL_RESOLVE = "approval.resolve"
     APPROVAL_CANCEL = "approval.cancel"
-    MEMORY_CREATE = "memory.create"
 
 
 class Command(BaseModel):
@@ -47,7 +46,6 @@ class Command(BaseModel):
             CommandType.MESSAGE_SUBMIT: ("message",),
             CommandType.APPROVAL_RESOLVE: ("approval_id", "decision"),
             CommandType.APPROVAL_CANCEL: ("approval_id",),
-            CommandType.MEMORY_CREATE: ("content",),
         }
         missing = [
             key

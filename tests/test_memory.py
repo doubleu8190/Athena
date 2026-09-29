@@ -17,6 +17,7 @@ from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalR
 from athena.infrastructure.postgre.engine import close_postgres_engine, get_session, initialize_postgres_engine
 from athena.infrastructure.postgre.models import MemoryModel
 from athena.infrastructure.postgre.repositories.memory_repository import PostgresMemoryRepository
+from tests.fakes import FakeMemoryGraphStore
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +130,7 @@ async def mm(tmp_path, vector_store):
         settings=_make_settings(),
         repository=PostgresMemoryRepository(),
         vector_store=vector_store,
+        graph_store=FakeMemoryGraphStore(),
     )
     await manager.initialize()
     yield manager
@@ -185,26 +187,6 @@ async def test_flush_updates_postgresql_and_pgvector(
 
 
 @pytest.mark.asyncio
-async def test_flush_pinned_keeps_expires_at(
-    mm: LongTermMemoryService, vector_store: _FakeVectorStore
-):
-    mid = await mm.add_memory(
-        content="固定记忆", metadata={"session_id": "s1"}, pinned=True
-    )
-    mm.record_selected_access([mid])
-    await mm.flush_access_stats()
-
-    row = await _get_row(mid)
-    assert row is not None
-    assert row.pinned == 1
-    assert row.expires_at is None  # PostgreSQL 保持 NULL
-    assert row.access_count == 1
-
-    meta = vector_store._items[mid]["metadata"]
-    assert meta["expires_at"] == ""
-    assert meta["access_count"] == 1
-
-
 @pytest.mark.asyncio
 async def test_flush_after_delete_is_safe(
     mm: LongTermMemoryService, vector_store: _FakeVectorStore

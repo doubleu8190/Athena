@@ -326,7 +326,7 @@ class LongTermMemorySummarizer:
 
         # ── 5. 写入记忆条目 ──
         saved_texts: list[str] = []
-        for s in summaries:
+        for index, s in enumerate(summaries):
             content = f"{s.topic}: {s.content}"
             try:
                 await self._memory.add_memory(
@@ -338,7 +338,10 @@ class LongTermMemorySummarizer:
                         "confidence": s.confidence,
                         "source": "threshold",
                     },
-                    pinned=False,
+                    operation_key=(
+                        f"summary:{session_id}:{last_msg_id}:{index}:"
+                        f"{s.topic}:{s.category}"
+                    ),
                 )
                 saved_texts.append(content)
             except Exception as e:

@@ -47,7 +47,7 @@ class RuntimeContainer:
     realtime_transport: SessionEventBus
     sandbox_runner: SandboxRunner
     workspace_manager: WorkspaceManager
-    neo4j_graph_store: GraphStore | None
+    neo4j_graph_store: GraphStore
 
 
 def get_runtime_container(connection: HTTPConnection) -> RuntimeContainer:

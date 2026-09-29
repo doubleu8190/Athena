@@ -29,7 +29,6 @@ class CommandPayload(ExtensibleJsonModel):
     attachment_ids: list[str] = Field(default_factory=list)
     content: str | None = None
     metadata: dict[str, Any] | None = None
-    pinned: bool | None = None
     approval_id: str | None = None
     decision: str | None = None
     plan_id: str | None = None

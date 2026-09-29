@@ -9,7 +9,7 @@ from athena.core.graph.contracts import GraphPathCandidate
 from athena.core.graph.ports import GraphStore
 from athena.core.retrieval.contracts import RetrievalCandidate, RetrievalRunRequest
 from athena.core.retrieval.ports import RetrievalTraceWriter
-from athena.infrastructure.postgre.repositories.file_repository import FileRepository
+from athena.infrastructure.postgre.repositories.file_repository import FileChunk, FileRepository
 from athena.runtime.context.contracts import ContextItem, ContextPlan, ProviderResult
 from athena.runtime.task_understanding.contracts import UserTaskSpec
 from athena.utils.logging import get_logger
@@ -49,7 +49,7 @@ class GraphContextProvider:
         started = time.perf_counter()
         query = (plan.graph_query or task.goal).strip()
         if not query:
-            return ProviderResult(provider=self.name, status="succeeded")
+            return ProviderResult(provider="graph", status="succeeded")
         run_id: str | None = None
         try:
             if self._trace_writer is not None:
@@ -90,7 +90,7 @@ class GraphContextProvider:
             ]
             await self._record_trace(run_id, paths, started, len(items), None)
             return ProviderResult(
-                provider=self.name,
+                provider="graph",
                 status="succeeded",
                 items=items,
                 candidate_count=len(paths),
@@ -100,7 +100,7 @@ class GraphContextProvider:
         except TimeoutError:
             await self._record_trace(run_id, [], started, 0, "graph retrieval timed out")
             return ProviderResult(
-                provider=self.name,
+                provider="graph",
                 status="timeout",
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 error_message="graph retrieval timed out",
@@ -109,7 +109,7 @@ class GraphContextProvider:
             logger.warning("graph_context_provider_failed", error=str(exc))
             await self._record_trace(run_id, [], started, 0, str(exc))
             return ProviderResult(
-                provider=self.name,
+                provider="graph",
                 status="failed",
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 error_message=str(exc),
@@ -118,7 +118,7 @@ class GraphContextProvider:
     @staticmethod
     def _to_context_item(
         path: GraphPathCandidate,
-        chunks_by_id: dict[str, object],
+        chunks_by_id: dict[str, FileChunk],
         run_id: str | None,
     ) -> ContextItem | None:
         path_text = " -> ".join(path.entity_names)
@@ -129,14 +129,9 @@ class GraphContextProvider:
             chunk = chunks_by_id.get(chunk_id)
             if chunk is None:
                 continue
-            evidence_parts.append(f"[{chunk_id}] {getattr(chunk, 'content', '')}")
+            evidence_parts.append(f"[{chunk_id}] {chunk.content}")
             if not locator:
-                raw_locator = getattr(chunk, "locator", {})
-                locator = (
-                    raw_locator.model_dump(mode="json", exclude_none=True)
-                    if hasattr(raw_locator, "model_dump")
-                    else dict(raw_locator)
-                )
+                locator = chunk.locator.model_dump(mode="json", exclude_none=True)
         if not evidence_parts:
             return None
         content = f"[Graph Path]\n{path_text}\n[Relations]\n{relation_text}"

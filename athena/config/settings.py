@@ -132,10 +132,8 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_base_url: str = ""
 
-    # --- Neo4j / Graph RAG ---
-    # Graph RAG is opt-in. The existing PostgreSQL RAG remains the
-    # source of answers when Neo4j is disabled or unavailable.
-    neo4j_enabled: bool = False
+    # --- Neo4j graph store ---
+    # Neo4j is a required runtime dependency and is initialized on every start.
     neo4j_uri: str = "bolt://127.0.0.1:7687"
     neo4j_username: str = "neo4j"
     neo4j_password: str = ""
@@ -143,8 +141,6 @@ class Settings(BaseSettings):
     neo4j_max_connection_pool_size: int = Field(default=20, ge=1, le=200)
     neo4j_connection_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     neo4j_query_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
-    neo4j_fail_open: bool = True
-    graph_rag_enabled: bool = False
     graph_max_hops: int = Field(default=2, ge=1, le=2)
     graph_entity_limit: int = Field(default=8, ge=1, le=50)
     graph_path_limit: int = Field(default=12, ge=1, le=100)
@@ -187,8 +183,8 @@ class Settings(BaseSettings):
     retrieval_context_k: int = 5
     memory_vector_min_score: float = 0.70
     memory_max_tokens: int = 2000
-    # Memory is an optional enhancement. It must not hold the first answer
-    # indefinitely when the vector backend or embedding service is slow.
+    # Memory is a required runtime subsystem. Retrieval still has a bounded
+    # timeout so a slow vector backend cannot hold the first answer indefinitely.
     memory_retrieval_timeout_seconds: float = Field(default=60.0, ge=0.1, le=60.0)
 
     # --- Task Understanding / Context Providers ---
@@ -199,8 +195,8 @@ class Settings(BaseSettings):
     knowledge_context_max_tokens: int = Field(default=4000, ge=100, le=20000)
 
     # --- 文件/知识库检索重排 ---
-    file_rerank_enabled: bool = True
-    file_rerank_required: bool = False
+    # Cross-Encoder reranking is a required startup dependency because file
+    # and knowledge-base retrieval rely on its ranking contract.
     file_rerank_model: str = "BAAI/bge-reranker-v2-m3"
     # sentence-transformers 设备名，例如 cpu、cuda 或 mps。
     file_rerank_device: str | None = None
@@ -294,7 +290,6 @@ class Settings(BaseSettings):
         """Return the native psycopg connection string used by LangGraph."""
         return self.postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
 
-    @property
     @property
     def files_path(self) -> Path:
         """文件存储根目录路径。"""

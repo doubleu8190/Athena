@@ -324,18 +324,16 @@ class ApiClient {
 
   // ─── 记忆管理 ─────────────────────────────────────────────────
 
-  /** 分页查询记忆，并应用固定、过期和会话过滤条件。 */
+  /** 分页查询记忆，并应用过期和会话过滤条件。 */
   async listMemories(opts?: {
     limit?: number
     offset?: number
-    pinned?: boolean
     expired?: boolean
     session_id?: string
   }): Promise<MemoryListResponse> {
     const params = new URLSearchParams()
     if (opts?.limit != null) params.set("limit", String(opts.limit))
     if (opts?.offset != null) params.set("offset", String(opts.offset))
-    if (opts?.pinned) params.set("pinned", "true")
     if (opts?.expired) params.set("expired", "true")
     if (opts?.session_id) params.set("session_id", opts.session_id)
     const qs = params.toString()
@@ -347,50 +345,6 @@ class ApiClient {
   /** 按 ID 获取记忆详情。 */
   async getMemory(memoryId: string): Promise<MemoryEntry> {
     return this.request<MemoryEntry>(`/api/memory/${memoryId}`)
-  }
-
-  /** 删除记忆条目。 */
-  async deleteMemory(memoryId: string): Promise<{ status: string }> {
-    return this.request<{ status: string }>(`/api/memory/${memoryId}`, {
-      method: "DELETE",
-    })
-  }
-
-  /** 设置记忆的固定状态。 */
-  async setMemoryPinned(
-    memoryId: string,
-    pinned: boolean,
-  ): Promise<{ status: string }> {
-    return this.request<{ status: string }>(
-      `/api/memory/${memoryId}/pin?pinned=${pinned}`,
-      { method: "POST" },
-    )
-  }
-
-  /** 更新记忆正文。 */
-  async updateMemory(
-    memoryId: string,
-    content: string,
-  ): Promise<{ status: string; memory_id: string; revised_from: string }> {
-    return this.request<{ status: string; memory_id: string; revised_from: string }>(
-      `/api/memory/${memoryId}`,
-      { method: "PATCH", body: JSON.stringify({ content }) },
-    )
-  }
-
-  /** 更新记忆的事实有效性，不影响访问热度和保留期限。 */
-  async setMemoryValidity(
-    memoryId: string,
-    validityStatus: "valid" | "uncertain" | "invalid",
-    validUntil?: string | null,
-  ): Promise<{ status: string; memory_id: string; validity_status: string; valid_until: string | null }> {
-    return this.request(
-      `/api/memory/${memoryId}/validity`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({ validity_status: validityStatus, valid_until: validUntil ?? null }),
-      },
-    )
   }
 
   // ─── 审批日志 ─────────────────────────────────────────────────

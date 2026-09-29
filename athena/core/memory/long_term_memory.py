@@ -1,14 +1,19 @@
 """协调关键词存储和向量存储的长期记忆服务。"""
-
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 
+
 from athena.config.settings import Settings
-from athena.core.memory.ports import MemoryRepository, MemoryVectorStore
+from athena.core.memory.ports import (
+    MemoryGraphStore,
+    MemoryRepository,
+    MemoryVectorStore,
+)
 from athena.utils.id_generation import generate_time_id
 from athena.utils.logging import get_logger
 
@@ -35,6 +40,7 @@ class LongTermMemoryService:
         settings: Settings,
         repository: MemoryRepository,
         vector_store: MemoryVectorStore,
+        graph_store: MemoryGraphStore,
     ) -> None:
         """
 
@@ -42,6 +48,7 @@ class LongTermMemoryService:
             settings (Settings): 全局配置对象。
             repository (MemoryRepository): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             vector_store (MemoryVectorStore): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            graph_store (MemoryGraphStore): Neo4j 图投影端口，负责记忆节点、关系和 revision 链。
 
         返回值：
             None: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -52,6 +59,7 @@ class LongTermMemoryService:
         self._settings = settings
         self._repository = repository
         self._vectors = vector_store
+        self._graph = graph_store
         self._initialized = False
         self._access_stats: dict[str, _AccessStat] = {}
 
@@ -176,15 +184,16 @@ class LongTermMemoryService:
     async def add_memory(
         self,
         content: str,
-        metadata: dict[str, Any] | None = None,
-        pinned: bool = False,
+        metadata: dict[str, Any],
+        *,
+        operation_key: str = "",
     ) -> str:
         """
 
         参数：
             content (str): 待保存或处理的内容。
-            metadata (dict[str, Any] | None): 附加元数据字典。
-            pinned (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            metadata (dict[str, Any]): 附加元数据字典。
+            operation_key (str): 可选的幂等写入键；为空时生成普通时间序列 ID。
 
         返回值：
             str: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -205,7 +214,6 @@ class LongTermMemoryService:
                 datetime.fromisoformat(str(valid_until))
             except ValueError as exc:
                 raise ValueError("valid_until must be an ISO-8601 datetime") from exc
-        revision_of = input_metadata.get("revision_of")
         logical_memory_id = str(
             input_metadata.get("logical_memory_id") or generate_time_id()
         )
@@ -217,63 +225,90 @@ class LongTermMemoryService:
             "created_at",
             "last_accessed_at",
             "access_count",
-            "pinned",
             "expires_at",
             "status",
             "last_observed_at",
             "validity_status",
             "valid_until",
-            "revision_of",
             "revision",
             "logical_memory_id",
             "source_turn_id",
-            "superseded_by",
-            "superseded_at",
         }
         metadata = {
             key: value for key, value in input_metadata.items() if key not in reserved
         }
-        memory_id = generate_time_id()
+        memory_id = (
+            "mem_" + hashlib.sha256(operation_key.encode("utf-8")).hexdigest()[:32]
+            if operation_key
+            else generate_time_id()
+        )
         now = datetime.now().isoformat()
         metadata.update(
             {
                 "source_turn_id": input_metadata.get("source_turn_id"),
                 "validity_status": validity_status,
                 "valid_until": valid_until,
-                "revision_of": revision_of,
                 "revision": revision,
                 "logical_memory_id": logical_memory_id,
                 "last_observed_at": last_observed_at,
             }
         )
         expires_at = (
-            None
-            if pinned
-            else (
-                datetime.now() + timedelta(days=self._settings.memory_ttl_days)
-            ).isoformat()
-        )
+            datetime.now() + timedelta(days=self._settings.memory_ttl_days)
+        ).isoformat()
         record = {
             "id": memory_id,
             "logical_memory_id": logical_memory_id,
             "content": content,
             "metadata": metadata,
             "source_turn_id": input_metadata.get("source_turn_id"),
-            "pinned": pinned,
             "expires_at": expires_at,
             "created_at": now,
         }
+        if operation_key:
+            existing = await self._repository.get_active_memory(memory_id)
+            if existing is not None:
+                logger.info(
+                    "memory_write_reused",
+                    memory_id=memory_id,
+                    operation_key=operation_key,
+                )
+                metadata = existing["metadata"]
+                await self._vectors.add(
+                    memory_id,
+                    content,
+                    {
+                        "created_at": metadata.get("created_at", now),
+                        "last_accessed_at": metadata.get("last_accessed_at", now),
+                        "access_count": metadata.get("access_count", 0),
+                        "expires_at": metadata.get("expires_at", ""),
+                        **metadata,
+                    },
+                )
+
+                await self._graph.upsert_memory_node(
+                    {
+                        "id": memory_id,
+                        "logical_memory_id": existing["logical_memory_id"],
+                        "session_id": metadata.get("session_id", ""),
+                        "revision": metadata.get("revision", 1),
+                        "status": "active",
+                        "created_at": metadata.get("created_at", now),
+                        "source_turn_id": metadata.get("source_turn_id"),
+                        "validity_status": metadata.get("validity_status", "valid"),
+                        "valid_until": metadata.get("valid_until") or None,
+                    }
+                )
+                return memory_id
         await self._repository.add(record)
         vector_metadata = {
             "created_at": now,
             "last_accessed_at": now,
             "access_count": 0,
-            "pinned": pinned,
             "expires_at": expires_at or "",
             "last_observed_at": last_observed_at,
             "validity_status": validity_status,
             "valid_until": valid_until or "",
-            "revision_of": revision_of or "",
             "revision": revision,
             "logical_memory_id": logical_memory_id,
             "status": "active",
@@ -281,9 +316,32 @@ class LongTermMemoryService:
         }
         try:
             await self._vectors.add(memory_id, content, vector_metadata)
+            await self._graph.upsert_memory_node(
+                {
+                    "id": memory_id,
+                    "logical_memory_id": logical_memory_id,
+                    "session_id": input_metadata.get("session_id", ""),
+                    "revision": revision,
+                    "status": "active",
+                    "created_at": now,
+                    "source_turn_id": input_metadata.get("source_turn_id"),
+                    "validity_status": validity_status,
+                    "valid_until": valid_until,
+                }
+            )
         except Exception:
+            try:
+                await self._graph.delete_memory_node(memory_id)
+            except Exception:
+                logger.exception("memory_add_graph_cleanup_failed", memory_id=memory_id)
+            try:
+                await self._vectors.delete([memory_id])
+            except Exception:
+                logger.exception(
+                    "memory_add_vector_cleanup_failed", memory_id=memory_id
+                )
             await self._repository.hard_delete(memory_id)
-            logger.exception("memory_add_vector_failed", memory_id=memory_id)
+            logger.exception("memory_add_projection_failed", memory_id=memory_id)
             raise
         return memory_id
 
@@ -407,7 +465,6 @@ class LongTermMemoryService:
         self,
         limit: int = 50,
         offset: int = 0,
-        pinned_only: bool = False,
         expired_only: bool = False,
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -416,7 +473,6 @@ class LongTermMemoryService:
         参数：
             limit (int): 最大返回数量；应为非负整数。
             offset (int): 分页偏移量；应为非负整数。
-            pinned_only (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             expired_only (bool): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             session_id (str | None): 会话唯一标识。
 
@@ -429,7 +485,6 @@ class LongTermMemoryService:
         return await self._repository.list(
             limit=limit,
             offset=offset,
-            pinned_only=pinned_only,
             expired_only=expired_only,
             session_id=session_id,
         )
@@ -457,22 +512,16 @@ class LongTermMemoryService:
         异常：
             PostgreSQL 读取失败时向上抛出异常。
         """
-        return await self._repository.list_revisions(memory_id)
-
-    async def update_memory(self, memory_id: str, content: str) -> str | None:
-        """
-
-        参数：
-            memory_id (str): 记忆记录唯一标识。
-            content (str): 待保存或处理的内容。
-
-        返回值：
-            str | None: 新修订版 ID；目标不存在或已不是活跃版本时返回 None。
-
-        异常：
-            异常: 底层校验、存储、网络或服务调用失败且未被当前方法处理时向上传播。
-        """
-        return await self.revise_memory(memory_id, content)
+        rows = await self._graph.list_revisions(memory_id)
+        hydrated: list[dict[str, Any]] = []
+        for row in rows:
+            memory = await self._repository.get_memory(row["id"])
+            if memory is None:
+                continue
+            hydrated.append(
+                {**row, "content": memory["content"], "metadata": memory["metadata"]}
+            )
+        return hydrated
 
     async def revise_memory(
         self,
@@ -480,6 +529,7 @@ class LongTermMemoryService:
         content: str,
         *,
         metadata_overrides: dict[str, Any] | None = None,
+        operation_key: str | None = None,
     ) -> str | None:
         """以不可变修订版替换一条活跃记忆。
 
@@ -496,6 +546,8 @@ class LongTermMemoryService:
         """
         await self.initialize()
         previous = await self._repository.get_active_memory(memory_id)
+        if previous is None and operation_key:
+            previous = await self._repository.get_memory(memory_id)
         if previous is None:
             return None
         old_metadata = dict(previous["metadata"])
@@ -509,7 +561,6 @@ class LongTermMemoryService:
         revision_metadata.update(overrides)
         revision_metadata.update(
             {
-                "revision_of": memory_id,
                 "revision": revision,
                 # 只有新的事实观测才更新该时间；纯访问不会影响它。
                 "last_observed_at": datetime.now().isoformat(),
@@ -533,7 +584,7 @@ class LongTermMemoryService:
         new_memory_id = await self.add_memory(
             content=content,
             metadata=revision_metadata,
-            pinned=bool(previous["pinned"]),
+            operation_key=operation_key,
         )
         try:
             if not await self.supersede_memory(memory_id, new_memory_id):
@@ -542,7 +593,26 @@ class LongTermMemoryService:
         except Exception:
             await self.delete_memory(new_memory_id)
             raise
+        try:
+            await self._graph.add_relation(
+                new_memory_id,
+                memory_id,
+                "supersedes",
+                {"operation_key": operation_key} if operation_key else None,
+            )
+        except Exception:
+            await self._repository.restore_active(memory_id)
+            await self._vectors.update(
+                memory_id,
+                metadata={"status": "active"},
+            )
+            await self.delete_memory(new_memory_id)
+            raise
         return new_memory_id
+
+    async def update_memory(self, memory_id: str, content: str) -> str | None:
+        """兼容旧调用方，将正文更新转发为不可变修订。"""
+        return await self.revise_memory(memory_id, content)
 
     async def set_memory_validity(
         self,
@@ -598,6 +668,22 @@ class LongTermMemoryService:
             )
             logger.exception("memory_validity_vector_failed", memory_id=memory_id)
             raise
+        current = await self._repository.get_memory(memory_id)
+        if current is not None:
+            current_metadata = current["metadata"]
+            await self._graph.upsert_memory_node(
+                {
+                    "id": memory_id,
+                    "logical_memory_id": current["logical_memory_id"],
+                    "session_id": current_metadata.get("session_id", ""),
+                    "revision": current_metadata.get("revision", 1),
+                    "status": current.get("status", "active"),
+                    "created_at": current_metadata.get("created_at", ""),
+                    "source_turn_id": current_metadata.get("source_turn_id"),
+                    "validity_status": validity_status,
+                    "valid_until": valid_until,
+                }
+            )
         return True
 
     async def supersede_memory(self, old_memory_id: str, new_memory_id: str) -> bool:
@@ -620,6 +706,25 @@ class LongTermMemoryService:
                     old_memory_id,
                     metadata={"status": "superseded"},
                 )
+                current = await self._repository.get_memory(old_memory_id)
+                if current is not None:
+                    current_metadata = current["metadata"]
+                    await self._graph.upsert_memory_node(
+                        {
+                            "id": old_memory_id,
+                            "logical_memory_id": current["logical_memory_id"],
+                            "session_id": current_metadata.get("session_id", ""),
+                            "revision": current_metadata.get("revision", 1),
+                            "status": "superseded",
+                            "created_at": current_metadata.get("created_at", ""),
+                            "source_turn_id": current_metadata.get("source_turn_id"),
+                            "validity_status": current_metadata.get(
+                                "validity_status", "valid"
+                            ),
+                            "valid_until": current_metadata.get("valid_until")
+                            or None,
+                        }
+                    )
             except Exception:
                 await self._repository.restore_active(old_memory_id)
                 raise
@@ -641,7 +746,7 @@ class LongTermMemoryService:
         异常：
             关系写入失败时向上抛出异常。
         """
-        await self._repository.add_relation(
+        await self._graph.add_relation(
             source_memory_id, target_memory_id, relation_type
         )
 
@@ -661,46 +766,10 @@ class LongTermMemoryService:
         await self._repository.soft_delete([memory_id])
         try:
             await self._vectors.delete([memory_id])
+            await self._graph.delete_memory_node(memory_id)
         except Exception:
             await self._repository.restore_deleted([memory_id])
-            logger.exception("memory_delete_vector_failed", memory_id=memory_id)
-            raise
-
-    async def set_memory_pinned(self, memory_id: str, pinned: bool = True) -> None:
-        """设置长期记忆的固定状态和对应过期时间。
-
-        参数：
-            memory_id: 要更新的长期记忆 ID。
-            pinned: ``True`` 时固定且不设过期时间，``False`` 时恢复 TTL。
-
-        返回值：
-            无；记录不存在时不做修改。
-
-        异常：
-            向量索引更新失败时恢复 PostgreSQL 中的固定状态并向上抛出异常。
-        """
-        await self.initialize()
-        expires_at = (
-            None
-            if pinned
-            else (
-                datetime.now() + timedelta(days=self._settings.memory_ttl_days)
-            ).isoformat()
-        )
-        previous = await self._repository.set_pin(memory_id, pinned, expires_at)
-        if previous is None:
-            return
-        try:
-            await self._vectors.update(
-                memory_id,
-                metadata={
-                    "pinned": pinned,
-                    "expires_at": expires_at or "",
-                },
-            )
-        except Exception:
-            await self._repository.set_pin(memory_id, previous[0], previous[1])
-            logger.exception("memory_pin_vector_failed", memory_id=memory_id)
+            logger.exception("memory_delete_projection_failed", memory_id=memory_id)
             raise
 
     async def cleanup_expired(self) -> int:
@@ -719,8 +788,10 @@ class LongTermMemoryService:
         await self._repository.soft_delete(ids)
         try:
             await self._vectors.delete(ids)
+            for memory_id in ids:
+                await self._graph.delete_memory_node(memory_id)
         except Exception:
             await self._repository.restore_deleted(ids)
-            logger.exception("memory_cleanup_vector_failed")
+            logger.exception("memory_cleanup_projection_failed")
             raise
         return len(ids)

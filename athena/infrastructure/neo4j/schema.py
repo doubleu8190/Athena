@@ -24,6 +24,18 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     FOR (n:Entity)
     ON EACH [n.canonical_name, n.aliases, n.description]
     """,
+    """
+    CREATE CONSTRAINT athena_memory_id_unique IF NOT EXISTS
+    FOR (n:Memory) REQUIRE n.id IS UNIQUE
+    """,
+    """
+    CREATE INDEX athena_memory_logical_id_index IF NOT EXISTS
+    FOR (n:Memory) ON (n.logical_memory_id)
+    """,
+    """
+    CREATE INDEX athena_memory_session_id_index IF NOT EXISTS
+    FOR (n:Memory) ON (n.session_id)
+    """,
 )
 
 

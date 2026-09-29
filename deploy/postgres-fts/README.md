@@ -60,17 +60,18 @@ remove `data/postgresql` from the existing local database container.
 ## Neo4j
 
 The repository-level Compose file also provides the optional Neo4j service. Its
-password is supplied through a local Docker secret rather than an environment
-variable:
+authentication is read from `deploy/neo4j/secrets/neo4j_auth`:
 
 ```sh
-mkdir -p deploy/neo4j/secrets
-umask 077
-printf 'neo4j/%s\n' "$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)" \
-  > deploy/neo4j/secrets/neo4j_auth
-docker compose -f deploy/compose.yaml up -d neo4j
+docker compose -f deploy/compose.yaml up -d --force-recreate neo4j
 ```
 
-The secret file is ignored by Git. The value must use Neo4j's `username/password`
-format and should match `NEO4J_USERNAME` and `NEO4J_PASSWORD` in the Athena
-application environment when graph retrieval is enabled.
+The secret can contain either `neo4j/<password>` or only `<password>`; the
+startup wrapper handles both formats. Keep the file readable by Docker and
+recreate the container after changing it:
+
+```sh
+test -r deploy/neo4j/secrets/neo4j_auth
+docker compose -f deploy/compose.yaml config >/dev/null
+docker compose -f deploy/compose.yaml up -d --force-recreate neo4j
+```

@@ -5,8 +5,6 @@ import FilterRow from "../ui/FilterRow"
 interface MemoryFiltersProps {
   search: string
   onSearchChange: (value: string) => void
-  pinnedOnly: boolean
-  onPinnedChange: (value: boolean) => void
   expiredOnly: boolean
   onExpiredChange: (value: boolean) => void
   onRefresh: () => void
@@ -15,8 +13,6 @@ interface MemoryFiltersProps {
 function MemoryFilters({
   search,
   onSearchChange,
-  pinnedOnly,
-  onPinnedChange,
   expiredOnly,
   onExpiredChange,
   onRefresh,
@@ -39,7 +35,6 @@ function MemoryFilters({
         placeholder="搜索记忆内容…"
       />
       <div className="space-y-2">
-        <FilterRow label="仅固定" checked={pinnedOnly} onChange={onPinnedChange} />
         <FilterRow label="仅已过期" checked={expiredOnly} onChange={onExpiredChange} />
       </div>
     </div>

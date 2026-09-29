@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import inspect
 
 from athena.core.memory.distillation import FactExtractor
 from athena.core.memory.long_term_memory import LongTermMemoryService
@@ -59,9 +61,14 @@ class FactMemoryWriteWorkflow:
         resolutions = await self._resolver.resolve(
             candidates, related_memories=related_memories
         )
-        for resolution in resolutions:
+        for index, resolution in enumerate(resolutions):
+            candidate = resolution.candidate
+            digest = hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()[:16]
+            operation_key = (
+                f"turn:{turn.turn_id}:resolution:{index}:"
+                f"{resolution.action.value}:{resolution.target_memory_id or 'new'}:{digest}"
+            )
             if resolution.action is ResolutionAction.CREATE:
-                candidate = resolution.candidate
                 new_id = await self._memory.add_memory(
                     content=candidate.content,
                     metadata={
@@ -72,6 +79,7 @@ class FactMemoryWriteWorkflow:
                         "confidence": candidate.confidence,
                         "source": "extraction",
                     },
+                    operation_key=operation_key,
                 )
                 if resolution.relation_type and resolution.target_memory_id:
                     await self._memory.add_memory_relation(
@@ -87,20 +95,26 @@ class FactMemoryWriteWorkflow:
                 }
                 and resolution.target_memory_id
             ):
-                candidate = resolution.candidate
                 # 自动更新从不覆写旧文本。即使解析器给出 UPDATE，也以新版本
                 # supersede 旧版本，保留冲突判断、回滚和审计所需的历史。
-                await self._memory.revise_memory(
-                    resolution.target_memory_id,
-                    resolution.final_content or candidate.content,
-                    metadata_overrides={
+                revision_kwargs = {
+                    "metadata_overrides": {
                         "session_id": turn.session_id,
                         "source_turn_id": turn.turn_id,
                         "type": candidate.memory_type,
                         "category": candidate.category,
                         "confidence": candidate.confidence,
                         "source": "extraction",
-                    },
+                    }
+                }
+                if "operation_key" in inspect.signature(
+                    self._memory.revise_memory
+                ).parameters:
+                    revision_kwargs["operation_key"] = operation_key
+                await self._memory.revise_memory(
+                    resolution.target_memory_id,
+                    resolution.final_content or candidate.content,
+                    **revision_kwargs,
                 )
         return FactMemoryWriteOutcome(True, candidates, resolutions)
 

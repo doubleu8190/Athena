@@ -17,6 +17,7 @@ from typing import Any, Literal, cast
 from athena.config.settings import Settings
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.files.runtime import FileIntelligenceRuntime
+from athena.core.graph.ports import GraphStore
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import MemoryRetrievalService
@@ -95,7 +96,7 @@ class LangGraphRuntime:
         file_runtime: FileIntelligenceRuntime,
         memory_job_repository: MemoryJobRepository,
         agent_store: AgentStorePort,
-        graph_store: Any | None = None,
+        graph_store: GraphStore,
     ) -> None:
         """组装所有聚焦服务并保留直接依赖。
 
@@ -132,16 +133,12 @@ class LangGraphRuntime:
             file_runtime,
             timeout_seconds=settings.memory_retrieval_timeout_seconds,
         )
-        graph_provider = (
-            GraphContextProvider(
-                graph_store=graph_store,
-                file_repository=db.files,
-                trace_writer=db.retrieval,
-                timeout_seconds=settings.graph_timeout_seconds,
-                min_confidence=settings.graph_min_confidence,
-            )
-            if graph_store is not None and settings.graph_rag_enabled
-            else None
+        graph_provider = GraphContextProvider(
+            graph_store=graph_store,
+            file_repository=db.files,
+            trace_writer=db.retrieval,
+            timeout_seconds=settings.graph_timeout_seconds,
+            min_confidence=settings.graph_min_confidence,
         )
         self._context_acquisition_service = ContextAcquisitionService(
             memory_provider=memory_provider,

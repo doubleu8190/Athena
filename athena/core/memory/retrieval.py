@@ -514,8 +514,6 @@ class HybridMemoryRetriever:
         if not created_at:
             return 1.0
         try:
-            if metadata.get("pinned"):
-                return 1.0
             created = datetime.fromisoformat(created_at)
             age_days = (datetime.now() - created).days
             decay = max(0.1, 1.0 - (age_days / max(self._ttl_days, 1)))

@@ -18,13 +18,11 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
-    Table,
     Text,
     UniqueConstraint,
-    select,
     text,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, column_property, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from pgvector.sqlalchemy import Vector
 
@@ -42,17 +40,6 @@ class EmbeddingMetadataModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     signature: Mapped[str] = mapped_column(Text, nullable=False)
     dimension: Mapped[int] = mapped_column(Integer, nullable=False)
-
-
-memory_relations_table = Table(
-    "memory_relations",
-    Base.metadata,
-    Column("source_memory_id", String, primary_key=True),
-    Column("target_memory_id", String, primary_key=True),
-    Column("relation_type", String, primary_key=True),
-    Column("created_at", String, nullable=False),
-    Column("metadata_json", Text, nullable=False, server_default=text("'{}'")),
-)
 
 
 class AgentRunModel(Base):
@@ -466,9 +453,6 @@ class MemoryModel(Base):
     metadata_json: Mapped[str] = mapped_column(
         Text, default="{}", comment="用户自定义的额外信息（JSON 格式）"
     )
-    pinned: Mapped[int] = mapped_column(
-        Integer, default=0, comment="是否固定，0 表示否，1 表示是"
-    )
     expires_at: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="过期时间（UTC）"
     )
@@ -495,17 +479,6 @@ class MemoryModel(Base):
     status: Mapped[str] = mapped_column(
         String, default="active", comment="生命周期状态"
     )
-    superseded_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    # 兼容旧 ORM 调用方；替代关系实际唯一存储在 memory_relations。
-    superseded_by: Mapped[str | None] = column_property(
-        select(memory_relations_table.c.source_memory_id)
-        .where(
-            memory_relations_table.c.target_memory_id == id,
-            memory_relations_table.c.relation_type == "supersedes",
-        )
-        .correlate_except(memory_relations_table)
-        .scalar_subquery()
-    )
     source_turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
     last_observed_at: Mapped[str | None] = mapped_column(String, nullable=True)
     # 事实有效性不等同于保留期限或访问热度。invalid 记录保留用于历史追溯，
@@ -515,9 +488,6 @@ class MemoryModel(Base):
     )
     valid_until: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="事实确认的有效截止时间（UTC）"
-    )
-    revision_of: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="被本条修订替代的上一版本记忆 ID"
     )
     revision: Mapped[int] = mapped_column(
         Integer, default=1, comment="同一记忆版本链中的修订序号"

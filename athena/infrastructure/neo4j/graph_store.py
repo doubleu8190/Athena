@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Sequence
 import hashlib
+import json
 from typing import Any
 
 from athena.config.settings import Settings
@@ -110,8 +111,8 @@ class Neo4jGraphConfig:
 class Neo4jGraphStore:
     """Manage an async Neo4j driver and Athena's graph schema.
 
-    The Neo4j package is imported only when ``connect`` is called so the
-    default, disabled Graph RAG path does not require a running server.
+    The Neo4j package is imported only when ``connect`` is called. The
+    application lifecycle treats a failed connection as a startup error.
     """
 
     def __init__(self, config: Neo4jGraphConfig) -> None:
@@ -119,7 +120,7 @@ class Neo4jGraphStore:
         self._driver: Any | None = None
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "Neo4jGraphStore":
+    def from_settings(cls, settings: Settings) -> Neo4jGraphStore:
         return cls(Neo4jGraphConfig.from_settings(settings))
 
     @property
@@ -196,6 +197,130 @@ class Neo4jGraphStore:
         if driver is not None:
             await driver.close()
             logger.info("neo4j_disconnected")
+
+    async def upsert_memory_node(self, record: dict[str, Any]) -> None:
+        """Create or update the graph projection for one memory revision."""
+        driver = self._require_driver()
+        missing = {"id", "logical_memory_id"}.difference(record)
+        if missing:
+            raise ValueError(f"memory graph record missing fields: {sorted(missing)}")
+        async with driver.session(database=self.config.database) as session:
+            result = await session.run(
+                """
+                MERGE (m:Memory {id: $id})
+                SET m.logical_memory_id = $logical_memory_id,
+                    m.session_id = $session_id,
+                    m.revision = $revision,
+                    m.status = $status,
+                    m.created_at = $created_at,
+                    m.source_turn_id = $source_turn_id,
+                    m.validity_status = $validity_status,
+                    m.valid_until = $valid_until
+                """,
+                id=str(record["id"]),
+                logical_memory_id=str(record["logical_memory_id"]),
+                session_id=record.get("session_id", ""),
+                revision=int(record.get("revision", 1)),
+                status=record.get("status", "active"),
+                created_at=record.get("created_at", ""),
+                source_turn_id=record.get("source_turn_id"),
+                validity_status=record.get("validity_status", "valid"),
+                valid_until=record.get("valid_until"),
+                timeout=self.config.query_timeout_seconds,
+            )
+            await result.consume()
+
+    async def delete_memory_node(self, memory_id: str) -> None:
+        """Remove one memory projection and its incident relationships."""
+        driver = self._require_driver()
+        async with driver.session(database=self.config.database) as session:
+            result = await session.run(
+                "MATCH (m:Memory {id: $id}) DETACH DELETE m",
+                id=memory_id,
+                timeout=self.config.query_timeout_seconds,
+            )
+            await result.consume()
+
+    @staticmethod
+    def _memory_relation_label(relation_type: str) -> str:
+        labels = {
+            "supports": "SUPPORTS",
+            "contradicts": "CONTRADICTS",
+            "supersedes": "SUPERSEDES",
+        }
+        try:
+            return labels[relation_type.strip().lower()]
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported memory relation type: {relation_type}"
+            ) from exc
+
+    async def add_relation(
+        self,
+        source_id: str,
+        target_id: str,
+        relation_type: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Create an idempotent semantic relationship between memory nodes."""
+        label = self._memory_relation_label(relation_type)
+        driver = self._require_driver()
+        async with driver.session(database=self.config.database) as session:
+            result = await session.run(
+                f"""
+                MATCH (source:Memory {{id: $source_id}})
+                MATCH (target:Memory {{id: $target_id}})
+                MERGE (source)-[r:{label}]->(target)
+                SET r.metadata_json = $metadata_json,
+                    r.updated_at = $updated_at
+                """,
+                source_id=source_id,
+                target_id=target_id,
+                metadata_json=json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
+                updated_at=(metadata or {}).get("updated_at"),
+                timeout=self.config.query_timeout_seconds,
+            )
+            await result.consume()
+
+    async def remove_relation(
+        self, source_id: str, target_id: str, relation_type: str
+    ) -> None:
+        label = self._memory_relation_label(relation_type)
+        driver = self._require_driver()
+        async with driver.session(database=self.config.database) as session:
+            result = await session.run(
+                f"""
+                MATCH (:Memory {{id: $source_id}})-[r:{label}]->(:Memory {{id: $target_id}})
+                DELETE r
+                """,
+                source_id=source_id,
+                target_id=target_id,
+                timeout=self.config.query_timeout_seconds,
+            )
+            await result.consume()
+
+    async def list_revisions(self, memory_id: str) -> list[dict[str, Any]]:
+        """List all revisions in a logical memory chain."""
+        driver = self._require_driver()
+        async with driver.session(database=self.config.database) as session:
+            result = await session.run(
+                """
+                MATCH (root:Memory {id: $memory_id})
+                MATCH (memory:Memory {logical_memory_id: root.logical_memory_id})
+                RETURN memory.id AS id,
+                       memory.logical_memory_id AS logical_memory_id,
+                       memory.revision AS revision,
+                       memory.status AS status,
+                       memory.created_at AS created_at,
+                       memory.source_turn_id AS source_turn_id,
+                       memory.validity_status AS validity_status,
+                       memory.valid_until AS valid_until
+                ORDER BY memory.revision ASC, memory.created_at ASC
+                """,
+                memory_id=memory_id,
+                timeout=self.config.query_timeout_seconds,
+            )
+            return [dict(row) for row in await result.data()]
 
     async def replace_document_graph(
         self,

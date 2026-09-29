@@ -1,4 +1,4 @@
-"""Tests for the optional Neo4j connection and schema adapter."""
+"""Tests for the required Neo4j connection and schema adapter."""
 
 from __future__ import annotations
 
@@ -50,11 +50,9 @@ class _Driver:
         self.closed = True
 
 
-def test_settings_expose_opt_in_graph_configuration():
+def test_settings_expose_required_graph_configuration():
     settings = Settings(_env_file=None)
 
-    assert settings.neo4j_enabled is False
-    assert settings.graph_rag_enabled is False
     assert settings.graph_max_hops == 2
     assert Neo4jGraphConfig.from_settings(settings).uri == settings.neo4j_uri
 

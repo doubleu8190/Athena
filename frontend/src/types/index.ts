@@ -358,7 +358,6 @@ export interface MemoryEntry {
   id: string
   content: string
   metadata: Record<string, unknown>
-  pinned: boolean
   expires_at: string | null
   created_at: string
   last_accessed: string | null
@@ -368,7 +367,6 @@ export interface MemoryEntry {
 export interface MemoryListResponse {
   items: MemoryEntry[]
   total: number
-  pinned: number
   expired: number
   recent_week: number
 }

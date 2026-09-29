@@ -37,9 +37,7 @@ class MemoryRepository(Protocol):
         """读取一条可以建立新修订版本的活跃记忆。"""
         ...
 
-    async def list_revisions(self, memory_id: str) -> list[dict[str, Any]]:
-        """读取一条逻辑记忆的完整 revision 链。"""
-        ...
+    async def get_memory(self, memory_id: str) -> dict[str, Any] | None: ...
 
     async def mark_superseded(self, old_id: str, new_id: str) -> bool: ...
 
@@ -57,18 +55,8 @@ class MemoryRepository(Protocol):
         """更新事实有效性，并返回更新前的字段用于双写补偿。"""
         ...
 
-    async def add_relation(
-        self, source_id: str, target_id: str, relation_type: str
-    ) -> None: ...
-
     async def soft_delete(self, memory_ids: list[str]) -> None:
         """软删除指定记忆。"""
-        ...
-
-    async def set_pin(
-        self, memory_id: str, pinned: bool, expires_at: str | None
-    ) -> tuple[bool, str | None] | None:
-        """更新固定状态并返回旧状态；记录不存在时返回 ``None``。"""
         ...
 
     async def expired_ids(self, now_iso: str) -> list[str]:
@@ -82,6 +70,28 @@ class MemoryRepository(Protocol):
     async def restore_deleted(self, memory_ids: list[str]) -> None:
         """恢复指定的软删除记忆。"""
         ...
+
+
+class MemoryGraphStore(Protocol):
+    """记忆节点、语义关系和 revision 链的图存储端口。"""
+
+    async def upsert_memory_node(self, record: dict[str, Any]) -> None: ...
+
+    async def delete_memory_node(self, memory_id: str) -> None: ...
+
+    async def add_relation(
+        self,
+        source_id: str,
+        target_id: str,
+        relation_type: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    async def remove_relation(
+        self, source_id: str, target_id: str, relation_type: str
+    ) -> None: ...
+
+    async def list_revisions(self, memory_id: str) -> list[dict[str, Any]]: ...
 
 
 class MemoryVectorStore(Protocol):

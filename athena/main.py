@@ -72,9 +72,9 @@ async def lifespan(app: FastAPI):
     if not loopback and not settings.auth_enabled:
         raise RuntimeError("AUTH_ENABLED must be true when binding beyond loopback")
     if settings.auth_enabled and (
-        not settings.auth_username
-        or not settings.auth_password
-        or len(settings.auth_session_secret) < 32
+            not settings.auth_username
+            or not settings.auth_password
+            or len(settings.auth_session_secret) < 32
     ):
         raise RuntimeError(
             "Authentication requires username, password and a 32+ byte session secret"
@@ -94,24 +94,12 @@ async def lifespan(app: FastAPI):
         ),
     )
 
-    # Neo4j remains optional; the existing RAG path runs without it.
-    neo4j_graph_store = None
-    if settings.neo4j_enabled:
-        from athena.infrastructure.neo4j import Neo4jGraphStore
+    # Neo4j is a required runtime dependency. A failed connection or schema
+    # initialization must prevent the application from accepting work.
+    from athena.infrastructure.neo4j import Neo4jGraphStore
 
-        neo4j_graph_store = Neo4jGraphStore.from_settings(settings)
-        try:
-            await neo4j_graph_store.initialize()
-        except Exception as exc:
-            if not settings.neo4j_fail_open:
-                await db.close()
-                raise
-            logger.warning(
-                "neo4j_initialization_failed_graph_disabled",
-                error=str(exc),
-            )
-            await neo4j_graph_store.close()
-            neo4j_graph_store = None
+    neo4j_graph_store = Neo4jGraphStore.from_settings(settings)
+    await neo4j_graph_store.initialize()
     command_notifier = CommandNotifier()
     agent_store = AgentStore(command_notifier=command_notifier)
 
@@ -167,7 +155,7 @@ async def lifespan(app: FastAPI):
     llm_primary = LLMProvider.from_primary_settings(settings=settings)
     # 副 Provider：用于检索、摘要、事实提取、压缩等轻量任务
     llm_secondary = (
-        LLMProvider.from_secondary_settings(settings=settings) or llm_primary
+            LLMProvider.from_secondary_settings(settings=settings) or llm_primary
     )
 
     # ── 5.1 文件智能 ──
@@ -178,34 +166,25 @@ async def lifespan(app: FastAPI):
     from athena.core.tools.catalog import ToolRegistry
     from athena.core.tools.providers.files import build_file_tool_specs
 
-    graph_indexer = None
-    if neo4j_graph_store is not None:
-        from athena.core.graph.indexing import GraphDocumentIndexer
+    from athena.core.graph.indexing import GraphDocumentIndexer
 
-        graph_indexer = GraphDocumentIndexer(
-            neo4j_graph_store,
-            llm_secondary,
-            settings,
-        )
+    graph_indexer = GraphDocumentIndexer(
+        neo4j_graph_store,
+        llm_secondary,
+        settings,
+    )
 
     file_vector_store = PgVectorFileVectorStore(
         embedding_config=embedding_config_from_settings(settings),
     )
-    file_reranker = None
-    if settings.file_rerank_enabled:
-        file_reranker = CrossEncoderFileReranker(
-            settings.file_rerank_model,
-            batch_size=settings.file_rerank_batch_size,
-            max_chars=settings.file_rerank_max_chars,
-            device=settings.file_rerank_device,
-        )
-        try:
-            await file_reranker.initialize()
-        except Exception:
-            if settings.file_rerank_required:
-                raise
-            logger.exception("file_reranker_initialization_failed_fallback_enabled")
-            file_reranker = None
+    file_reranker = CrossEncoderFileReranker(
+        settings.file_rerank_model,
+        batch_size=settings.file_rerank_batch_size,
+        max_chars=settings.file_rerank_max_chars,
+        device=settings.file_rerank_device,
+    )
+    await file_reranker.initialize()
+
     file_runtime = FileIntelligenceRuntime(
         db.files,
         llm_primary,
@@ -252,12 +231,9 @@ async def lifespan(app: FastAPI):
         vector_store=PgVectorMemoryVectorStore(
             embedding_config=embedding_config_from_settings(settings),
         ),
+        graph_store=neo4j_graph_store,
     )
-    try:
-        await memory_service.initialize()
-    except Exception as e:
-        logger.warning("memory_init_skipped", error=str(e))
-        raise e
+    await memory_service.initialize()
 
     # 后台看门狗：周期 flush 访问统计 + 清理过期记忆
     memory_flush_task = asyncio.create_task(memory_service.run_periodic_flush())
@@ -421,7 +397,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
 app.add_middleware(AuthenticationMiddleware)
 
 app.add_middleware(
@@ -446,14 +421,14 @@ def run() -> None:
 
     settings = get_settings()
     if (
-        settings.host not in {"127.0.0.1", "localhost", "::1"}
-        and settings.auth_enabled is False
+            settings.host not in {"127.0.0.1", "localhost", "::1"}
+            and settings.auth_enabled is False
     ):
         raise RuntimeError("AUTH_ENABLED must be true when binding beyond loopback")
     if settings.host not in {"127.0.0.1", "localhost", "::1"} and (
-        len(settings.auth_session_secret) < 32
-        or not settings.auth_username
-        or not settings.auth_password
+            len(settings.auth_session_secret) < 32
+            or not settings.auth_username
+            or not settings.auth_password
     ):
         raise RuntimeError(
             "LAN binding requires AUTH_USERNAME, AUTH_PASSWORD and a 32+ byte AUTH_SESSION_SECRET"

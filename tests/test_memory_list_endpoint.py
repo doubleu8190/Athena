@@ -1,4 +1,4 @@
-"""记忆管理端点测试 — GET /memory 列表/统计 + PATCH /memory/{id} 编辑."""
+"""记忆管理端点测试 — GET /memory 列表和统计."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.infrastructure.postgre.database import Database
 from athena.infrastructure.postgre.repositories.memory_repository import PostgresMemoryRepository
 from tests.fakes import install_runtime
+from tests.fakes import FakeMemoryGraphStore
 
 
 class _FakeVectorStore:
@@ -74,6 +75,7 @@ def manager(db):
         settings=settings,
         repository=PostgresMemoryRepository(),
         vector_store=_FakeVectorStore(),
+        graph_store=FakeMemoryGraphStore(),
     )
 
 
@@ -91,7 +93,7 @@ def client(manager):
 @pytest.mark.asyncio
 async def test_list_memories_and_stats(manager, client):
     await manager.add_memory(
-        content="用户偏好暗色主题", metadata={"session_id": "s1"}, pinned=True
+        content="用户偏好暗色主题", metadata={"session_id": "s1"}
     )
     await manager.add_memory(
         content="项目使用 FastAPI", metadata={"session_id": "s2"}
@@ -101,26 +103,12 @@ async def test_list_memories_and_stats(manager, client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 2
-    assert data["pinned"] == 1
     assert data["expired"] == 0
     assert data["recent_week"] == 2
     assert len(data["items"]) == 2
     # 新→旧
     assert data["items"][0]["content"] == "项目使用 FastAPI"
-    assert data["items"][0]["pinned"] is False
-    assert data["items"][1]["pinned"] is True
     assert data["items"][0]["metadata"]["session_id"] == "s2"
-
-
-@pytest.mark.asyncio
-async def test_list_memories_pinned_filter(manager, client):
-    await manager.add_memory(content="A", metadata={"session_id": "s1"})
-    await manager.add_memory(content="B", metadata={"session_id": "s1"}, pinned=True)
-
-    resp = client.get("/memory", params={"pinned": "true"})
-    data = resp.json()
-    assert len(data["items"]) == 1
-    assert data["items"][0]["content"] == "B"
 
 
 @pytest.mark.asyncio
@@ -136,29 +124,6 @@ async def test_list_memories_pagination(manager, client):
     assert data["total"] == 5
 
 
-@pytest.mark.asyncio
-async def test_patch_memory_updates_content(manager, client):
-    memory_id = await manager.add_memory(
-        content="旧内容", metadata={"session_id": "s1"}
-    )
-
-    resp = client.patch(f"/memory/{memory_id}", json={"content": "新内容"})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "updated"
-    revised_memory_id = resp.json()["memory_id"]
-    assert resp.json()["revised_from"] == memory_id
-
-    fetched = await manager.get_memory(revised_memory_id)
-    assert fetched is not None
-    assert fetched["content"] == "新内容"
-
-
-@pytest.mark.asyncio
-async def test_patch_memory_not_found(client):
-    resp = client.patch("/memory/no_such_id", json={"content": "x"})
-    assert resp.status_code == 404
-
-
-def test_patch_memory_empty_content(client):
-    resp = client.patch("/memory/whatever", json={"content": "  "})
-    assert resp.status_code == 400
+def test_memory_mutation_routes_are_not_exposed(client):
+    assert client.patch("/memory/whatever", json={"content": "x"}).status_code == 405
+    assert client.post("/memory/whatever/pin").status_code == 405

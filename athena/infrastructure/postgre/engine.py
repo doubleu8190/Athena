@@ -129,33 +129,6 @@ async def initialize_postgres_engine(
                 text("ALTER TABLE agent_task_results DROP COLUMN plan_id")
             )
         await conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS memory_relations (
-                source_memory_id VARCHAR NOT NULL, target_memory_id VARCHAR NOT NULL,
-                relation_type VARCHAR NOT NULL, created_at VARCHAR NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                PRIMARY KEY (source_memory_id, target_memory_id, relation_type)
-            )
-        """))
-        # 将旧版本 memories.superseded_by 迁移为关系表记录，再移除重复列。
-        # 这使 memory_relations 成为 supersede 关系的唯一事实来源。
-        memory_columns = await conn.run_sync(
-            lambda sync_conn: {
-                column["name"] for column in inspect(sync_conn).get_columns("memories")
-            }
-        )
-        if "superseded_by" in memory_columns:
-            await conn.execute(text("""
-                INSERT INTO memory_relations
-                    (source_memory_id, target_memory_id, relation_type, created_at)
-                SELECT superseded_by, id, 'supersedes',
-                       COALESCE(superseded_at, created_at)
-                  FROM memories
-                 WHERE superseded_by IS NOT NULL
-                ON CONFLICT (source_memory_id, target_memory_id, relation_type)
-                DO NOTHING
-            """))
-            await conn.execute(text("ALTER TABLE memories DROP COLUMN superseded_by"))
-        await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS memory_processing_jobs (
                 job_id VARCHAR PRIMARY KEY, turn_id VARCHAR NOT NULL UNIQUE,
                 session_id VARCHAR NOT NULL, status VARCHAR NOT NULL,

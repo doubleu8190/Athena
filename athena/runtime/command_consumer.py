@@ -173,7 +173,6 @@ class CommandConsumer:
             CommandType.RUN_CANCEL: self._handle_run_cancel,
             CommandType.APPROVAL_RESOLVE: self._handle_approval,
             CommandType.APPROVAL_CANCEL: self._handle_approval,
-            CommandType.MEMORY_CREATE: self._handle_memory_create,
             CommandType.MESSAGE_SUBMIT: self._handle_message_submit,
         }
         handler = handlers.get(command.command_type)
@@ -303,20 +302,6 @@ class CommandConsumer:
             ),
             result={"resolved": True} if resolved else None,
             error=None if resolved else {"code": "approval_already_resolved"},
-        )
-
-    async def _handle_memory_create(
-        self, command: AgentCommandRecord, payload: CommandPayload
-    ) -> None:
-        memory_id = await self._memory_service.add_memory(
-            payload.content or "",
-            payload.metadata,
-            bool(payload.pinned),
-        )
-        await self.store.complete_command(
-            command.command_id,
-            status=AgentCommandStatus.SUCCEEDED,
-            result={"memory_id": memory_id},
         )
 
     async def _handle_message_submit(

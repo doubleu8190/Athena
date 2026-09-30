@@ -32,8 +32,7 @@ class SettingsView(BaseModel):
     max_turns_per_run: int
     retry_budget: int
     tool_timeout: int
-    llm_stream_timeout: int
-    approval_timeout: int
+    llm_timeout: int
 
     # LLM 全局参数
     llm_temperature: float
@@ -78,8 +77,7 @@ async def get_settings_view() -> SettingsView:
         max_turns_per_run=s.max_turns_per_run,
         retry_budget=s.retry_budget,
         tool_timeout=s.tool_timeout,
-        llm_stream_timeout=s.llm_stream_timeout,
-        approval_timeout=s.approval_timeout,
+        llm_timeout=s.llm_timeout,
         llm_temperature=s.llm_temperature,
         llm_max_tokens=s.llm_max_tokens,
         llm_retry=s.llm_retry,

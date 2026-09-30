@@ -19,7 +19,7 @@ from athena.contracts.ports import EventPublisherPort
 from athena.utils.id_generation import generate_time_id
 from athena.utils.logging import get_logger
 
-from ..state import AgentState
+from ..state import AgentRequestState
 
 logger = get_logger(__name__)
 
@@ -109,7 +109,7 @@ class SessionContextService:
         )
         return [summary, *history_after]
 
-    async def persist_message_and_attachments(self, state: AgentState):
+    async def persist_message_and_attachments(self, state: AgentRequestState):
         """幂等持久化当前用户消息及其附件关系。"""
         message_id = state.get("message_id", "")
         message = Message(

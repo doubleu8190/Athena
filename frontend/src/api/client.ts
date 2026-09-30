@@ -266,10 +266,13 @@ class ApiClient {
     )
   }
 
-  /** 提交取消审批命令。 */
-  async cancelApproval(approvalId: string): Promise<{ status: string }> {
-    return this.request<{ status: string }>(`/api/approvals/${approvalId}/cancel`, {
+  async respondApprovalBatch(
+    approvalBatchId: string,
+    decisions: Record<string, "approved" | "denied" | "cancelled">,
+  ): Promise<{ status: string }> {
+    return this.request<{ status: string }>(`/api/approvals/batches/${approvalBatchId}/respond`, {
       method: "POST",
+      body: JSON.stringify({ decisions }),
     })
   }
 

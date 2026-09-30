@@ -1,7 +1,7 @@
 """LLM 抽象层 — 多 Provider 配置化切换，避免厂商锁定.
 
-支持 OpenAI / Anthropic / DeepSeek / Ollama，所有 Provider 以 streaming=True 初始化。
-统一接口：ainvoke / astream / bind_tools / with_structured_output。
+支持 OpenAI / Anthropic / DeepSeek / Ollama。
+统一接口：ainvoke / bind_tools / with_structured_output。
 集成 LLMRetryManager 实现指数退避重试与多级故障转移。
 """
 
@@ -11,7 +11,6 @@ import asyncio
 from collections.abc import Sequence
 from typing import (
     Any,
-    AsyncIterator,
     Awaitable,
     Callable,
     Protocol,
@@ -21,7 +20,7 @@ from typing import (
 )
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessageChunk, BaseMessage
+from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel
 
@@ -55,12 +54,6 @@ class LLMProviderProtocol(Protocol):
 
     async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> BaseMessage:
         """异步调用模型并返回消息结果。"""
-        ...
-
-    def astream(
-        self, messages: list[BaseMessage], **kwargs: Any
-    ) -> AsyncIterator[AIMessageChunk]:
-        """以异步迭代器流式返回模型消息块。"""
         ...
 
     def bind_tools(self, tools: list[BaseTool]) -> "LLMProviderProtocol":
@@ -188,72 +181,6 @@ class LLMProvider:
             raise RuntimeError("LLM returned None result despite success")
         return result.result
 
-    def astream(
-        self, messages: list[BaseMessage], **kwargs: Any
-    ) -> AsyncIterator[BaseMessage]:
-        """流式调用模型，返回带重试能力的 async generator."""
-        return self._retry_astream(messages, **kwargs)
-
-    async def _retry_astream(
-        self, messages: list[BaseMessage], **kwargs: Any
-    ) -> AsyncIterator[AIMessageChunk]:
-        """带重试的流式输出.
-
-        当 astream 创建 generator 失败时进行重试；
-        迭代过程中的异常由调用方（Harness）处理。
-        """
-        if self._retry_manager is None:
-            gen = self._model.astream(messages, **kwargs)
-            async for chunk in gen:
-                yield chunk
-            return
-
-        # 重试 generator 创建
-        last_error: Exception | None = None
-        config = self._retry_manager.config
-
-        for attempt in range(config.max_attempts):
-            trace = None
-            try:
-                async with trace_span(
-                    name=f"llm.stream.attempt.{attempt + 1}",
-                    run_type="llm",
-                    inputs={"message_count": len(messages)},
-                    metadata={"attempt": attempt + 1, "retry": attempt > 0},
-                    tags=["athena", "llm", "stream", "retry" if attempt > 0 else "initial"],
-                ) as trace:
-                    gen = self._model.astream(messages, **kwargs)
-                    async for chunk in gen:
-                        yield chunk
-                    finish_span(trace, outputs={"status": "success", "attempt": attempt + 1})
-                return  # 正常结束
-            except Exception as e:
-                finish_span(trace, error=str(e))
-                last_error = e
-                category = ErrorCategory.TRANSIENT
-                from athena.core.llm.retry import categorize_error
-
-                category = categorize_error(e)
-
-                if (
-                    attempt < config.max_attempts - 1
-                    and category != ErrorCategory.PERMANENT
-                ):
-                    delay_ms = config.min_delay_ms * (2**attempt)
-                    delay_s = min(delay_ms, config.max_delay_ms) / 1000
-                    logger.warning(
-                        "llm_astream_retry",
-                        attempt=attempt + 1,
-                        error=str(e),
-                        category=category,
-                    )
-                    await asyncio.sleep(delay_s)
-                    continue
-                raise
-
-        if last_error:
-            raise last_error
-
     def bind_tools(self, tools: list[StructuredTool]) -> LLMProvider:
         """绑定工具到模型，返回新的 provider 实例（不可变）.
 
@@ -263,7 +190,7 @@ class LLMProvider:
         互不污染；严禁原地改写 self._model（并发 run 绑定不同工具集会竞态）。
         """
         # LangChain 把 bind_tools 返回类型标注为 Runnable（运行期实为
-        # _ChatModelBinding），但其方法面（ainvoke/astream/bind_tools/
+        # _ChatModelBinding），但其方法面（ainvoke/bind_tools/
         # with_structured_output）与 BaseChatModel 一致，故 cast 收窄仅为
         # 消除类型标注差异，运行期安全。
         bound_model = cast(BaseChatModel, self._model.bind_tools(tools))
@@ -400,7 +327,7 @@ def _create_chat_model(config: LLMProviderConfig, settings: Settings) -> BaseCha
     )
 
     # 注意：各 Provider 的参数名不一致。max_tokens 只对 openai/anthropic 有效；
-    # ChatOllama 用 num_predict（且无 streaming 字段，流式由 .astream() 方法控制），
+    # ChatOllama 使用 num_predict（且无 streaming 字段）。
     # 直接传 max_tokens/streaming 会被 pydantic 静默忽略，导致 max_tokens 配置不生效。
     if provider == "openai":
         from langchain_openai import ChatOpenAI

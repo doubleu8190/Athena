@@ -31,24 +31,29 @@ async def prepare_harness_input(
         运行时异常: Harness 输入准备失败时传播底层异常。
     """
 
-    if not state.get("session_id"):
+    request = state.get("request", {})
+    if not request.get("session_id"):
         raise ValueError("AgentState missing required field: session_id")
-    session_id = state.get("session_id", "")
-    run_id = state.get("run_id", "")
-    message_id = state.get("message_id", "")
-    message_content = state.get("user_message", "")
-    history = [Message.model_validate(item) for item in state.get("history", [])]
+    session_id = request["session_id"]
+    run_id = request.get("run_id", "")
+    message_id = request.get("message_id", "")
+    message_content = request.get("user_message", "")
+    history = [Message.model_validate(item) for item in request.get("history", [])]
     attachment_refs, harness_messages = await session_context_service.prepare_harness_input(
         session_id,
         message_content,
-        state.get("attachment_ids", []),
+        request.get("attachment_ids", []),
         history,
         run_id=run_id,
         message_id=message_id,
     )
     return {
-        "attachment_refs": [item.model_dump(mode="json") for item in attachment_refs],
-        "harness_messages": [item.model_dump(mode="json") for item in harness_messages],
+        "phase": "agent_loop",
+        "context": {
+            **state.get("context", {}),
+            "attachment_refs": [item.model_dump(mode="json") for item in attachment_refs],
+            "harness_messages": [item.model_dump(mode="json") for item in harness_messages],
+        },
     }
 
 

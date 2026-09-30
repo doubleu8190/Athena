@@ -1,37 +1,16 @@
-"""Harness 执行引擎 — Agent 运行的核心编排器.
-
-核心职责:
-- 执行 LLM 调用（流式输出，支持超时兜底）
-- 编排工具调用（asyncio.gather 并行执行无依赖工具）
-- 预算控制（max_turns + retry_budget 双重限制）
-- 发布应用事件到 Gateway
-- 执行过程日志通过 Application Event 发布，并持久化消息与工具账本
-
-执行流程:
-    用户消息 → LLM 流式调用 → 工具调用（并行） → LLM 再调用 → ... → 终止
-
-"""
+"""Agent execution support shared by the LangGraph execution-loop nodes."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
 import time
-import traceback
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import (
-    AIMessageChunk,
-    BaseMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from langchain_core.messages import ToolMessage
 
 from athena.config.settings import Settings
-from athena.core.compression.compressor import ContextCompressor
-from athena.core.harness.budget import Budget, BudgetExceeded
 from athena.core.harness.error_handler import ToolErrorHandler
 from athena.core.llm.provider import LLMProvider
 from athena.core.tools.manager import UnifiedToolManager
@@ -43,70 +22,14 @@ from athena.contracts.errors import ExecutionError
 from athena.contracts.events import ApplicationEvent, EventDurability
 from athena.contracts.ports import EventPublisherPort
 from athena.utils.id_generation import generate_time_id
-from athena.utils.llm_response import extract_message_text
 from athena.utils.logging import get_logger
-from athena.utils.message_conversion import dict_to_message, normalize_tool_calls
 from athena.runtime.stream_coalescer import StreamCoalescer
 
 logger = get_logger(__name__)
 
 
-@dataclass
-class HarnessSettings:
-    """Harness 运行时配置.
-
-    属性：
-        max_turns_per_run: 单次 run 的最大 LLM 调用轮次。
-        retry_budget: 工具调用失败后的最大重试次数（工具成功后重置）。
-        tool_timeout: 单个工具调用的超时时间（秒）。
-        llm_stream_timeout: LLM 流式调用的整体超时时间（秒），
-            防止流挂死导致 run 无法终止。
-    """
-
-    max_turns_per_run: int = 20
-    retry_budget: int = 3
-    tool_timeout: int = 60
-    llm_stream_timeout: int = 120
-
-
-@dataclass
-class HarnessRunResult:
-    """单次 Harness 运行结果.
-
-    属性：
-        content: 最后一轮 LLM 返回的文本内容。
-        run_id: 本次运行的唯一标识。
-        turn_count: 实际 LLM 调用轮次。
-        tool_results: 所有工具调用的结果列表，每项包含
-            tool_name / arguments / output / status / duration_ms / error。
-        error: 错误信息（成功时为 None）。
-        interrupted: 是否因用户停止信号而中断。
-    """
-
-    content: str
-    run_id: str
-    turn_count: int
-    tool_results: list[dict[str, Any]] = field(default_factory=list)
-    error: str | None = None
-    error_detail: dict[str, Any] | None = None
-    interrupted: bool = False
-
-
-class Harness:
-    """Agent 执行引擎 — 编排 LLM 调用与工具执行的核心循环.
-
-    典型用法::
-
-        harness = Harness(
-            llm=provider,
-            tool_manager=manager,
-            settings=settings,
-            db=db,
-            event_publisher=publisher,
-            compressor=compressor,
-        )
-        result = await harness.run(messages=msgs, session_id="s1")
-    """
+class ExecutionSupport:
+    """为 LangGraph 节点提供工具账本和事件发布支持。"""
 
     def __init__(
         self,
@@ -114,35 +37,31 @@ class Harness:
         tool_manager: UnifiedToolManager,
         settings: Settings,
         db: Database,
-        compressor: ContextCompressor,
         event_publisher: EventPublisherPort,
         error_handler: ToolErrorHandler | None = None,
-        harness_settings: HarnessSettings | None = None,
+        tool_timeout: int | None = None,
+        llm_timeout: int | None = None,
     ) -> None:
-        """初始化 Harness 实例.
+        """初始化执行支持。
 
         参数：
-            llm: LLM Provider，负责模型调用（流式/非流式）。
+            llm: LLM Provider，用于单轮节点中的非流式调用。
             tool_manager: 统一工具管理器，负责工具注册与调用。
             settings: 全局配置。
             db: 数据库实例，用于持久化消息与工具调用账本。
-            event_publisher: Runtime event publisher; no transport details leak into the harness.
-            compressor: 上下文压缩器，在每轮 LLM 调用前压缩消息列表。
+            event_publisher: Runtime event publisher; no transport details leak into execution support.
             error_handler: 工具错误自愈路由器（含熔断器）。未提供时使用默认实例。
-            harness_settings: Harness 运行时配置。未提供时从全局 Settings 派生。
+            tool_timeout: 工具执行超时时间；未传入时读取全局设置。
         """
         self._llm = llm
         self._tool_manager = tool_manager
         self._db = db
         self._event_publisher = event_publisher
-        self._compressor = compressor
         self._error_handler = error_handler or ToolErrorHandler()
-        self._harness_settings = harness_settings or HarnessSettings(
-            max_turns_per_run=settings.max_turns_per_run,
-            retry_budget=settings.retry_budget,
-            tool_timeout=settings.tool_timeout,
-            llm_stream_timeout=settings.llm_stream_timeout,
+        self._tool_timeout = (
+            tool_timeout if tool_timeout is not None else settings.tool_timeout
         )
+        self._llm_timeout = llm_timeout if llm_timeout is not None else settings.llm_timeout
         self._stop_signal: asyncio.Event | None = None
         self._allowed_tool_names: set[str] | None = None
         self._parent_run_id: str | None = None
@@ -179,450 +98,6 @@ class Harness:
         )
 
     # ------------------------------------------------------------------
-    # 主执行循环
-    # ------------------------------------------------------------------
-
-    async def run(
-        self,
-        messages: Sequence[Message | dict[str, Any]],
-        session_id: str,
-        system_prompt: str = "",
-        run_id: str | None = None,
-        parent_run_id: str | None = None,
-        tool_names: list[str] | None = None,
-        stop_signal: asyncio.Event | None = None,
-        agent_role: str = "root",
-        plan_id: str | None = None,
-        task_id: str | None = None,
-        depth: int = 0,
-    ) -> HarnessRunResult:
-        """执行单次 Agent 运行.
-
-        主循环流程: LLM 流式调用 → 工具并行执行 → LLM 再调用 → ...
-        终止条件: LLM 无工具调用 / 预算超限 / 停止信号 / 异常。
-
-        参数：
-            messages: 对话历史（含最新用户消息）。支持 Message 对象或 dict 格式。
-            session_id: 会话 ID，用于关联消息与事件推送。
-            system_prompt: 系统提示词，作为第一条 SystemMessage 注入。
-            run_id: 可选 run_id（子 Agent 使用），未提供则自动生成。
-            parent_run_id: 父 run_id（子 Agent 运行时指向其父 run；主 run 为 None），
-                发布每个调用事件，使执行过程能显式追溯。
-            tool_names: 可选工具白名单（子 Agent 使用），None 表示允许全部工具。
-            stop_signal: 外部停止信号（会话级 stop 事件），由 gateway 层注入；
-                置位后终止当前运行。
-
-        返回值：
-            HarnessRunResult，包含最终文本、run_id、轮次、工具结果、错误和中断状态。
-
-        异常：
-            BudgetExceeded: 预算超限且无剩余重试次数时抛出。
-            异常: 未预期的执行异常（会被捕获并记录到 error 字段）。
-        """
-        rid = run_id or generate_time_id()
-        self._parent_run_id = parent_run_id
-        self._agent_role = agent_role
-        self._plan_id = plan_id
-        self._task_id = task_id
-        self._depth = depth
-        self._message_id = self._message_id_from_messages(messages)
-        budget = Budget(
-            max_turns=self._harness_settings.max_turns_per_run,
-            retry_budget=self._harness_settings.retry_budget,
-        )
-        self._stop_signal = stop_signal
-
-        # 更新会话状态为 running
-        if parent_run_id is None:
-            await self._db.sessions.update(session_id, status="running", run_id=rid)
-
-        self._answer_stream_id = f"answer-{rid}"
-        self._answer_stream = StreamCoalescer(
-            session_id=session_id,
-            run_id=rid,
-            stream_id=self._answer_stream_id,
-            stream_type="answer",
-            message_id=self._message_id,
-            publish_realtime=self._event_publisher.publish_realtime,
-        )
-        await self._emit(
-            EventType.STREAM_START,
-            {
-                "run_id": rid,
-                "stream_id": self._answer_stream_id,
-                "stream_type": "answer",
-            },
-            session_id,
-            rid,
-        )
-        await self._emit_thinking(
-            EventType.THINKING_STARTED,
-            "正在准备请求",
-            session_id,
-            rid,
-        )
-
-        # 压缩阶段使用领域消息；只有在调用 LLM 前才转换为 LangChain 消息。
-        domain_messages: list[Message] = []
-        for m in messages:
-            if isinstance(m, Message):
-                domain_messages.append(m)
-                continue
-            payload = dict(m)
-            payload.setdefault("id", f"{rid}:message:{len(domain_messages)}")
-            payload.setdefault("session_id", session_id)
-            payload.setdefault("run_id", rid)
-            payload.setdefault("timestamp", datetime.now())
-            domain_messages.append(Message.model_validate(payload))
-
-        # 绑定工具（子 Agent 按 tool_names 白名单过滤，None = 全部）
-        self._allowed_tool_names = set(tool_names) if tool_names else None
-        lc_tools = self._tool_manager.get_langchain_tools(names=tool_names)
-        bound_llm = self._llm.bind_tools(lc_tools) if lc_tools else self._llm
-
-        tool_results_all: list[dict[str, Any]] = []
-        last_content = ""
-        error_msg: str | None = None
-        error_detail: ExecutionError | None = None
-        interrupted = False
-
-        try:
-            while not self._should_stop():
-                # 上下文压缩
-                compressed_domain = await self._compressor.compress(
-                    domain_messages,
-                    session_id=session_id,
-                )
-                if len(compressed_domain) < len(domain_messages):
-                    domain_messages = compressed_domain
-
-                lc_messages: list[BaseMessage] = []
-                if system_prompt:
-                    lc_messages.append(SystemMessage(content=system_prompt))
-                lc_messages.extend(
-                    dict_to_message(message) for message in domain_messages
-                )
-
-                # LLM 调用事件使用稳定的调用 ID 关联生命周期。
-                llm_call_id = generate_time_id()
-                budget.increment_turn()
-
-                await self._emit(
-                    EventType.LLM_CALL_START,
-                    {"call_id": llm_call_id, "turn": budget.turn_count},
-                    session_id,
-                    rid,
-                )
-                await self._emit_thinking(
-                    EventType.THINKING_SUMMARY,
-                    "正在生成回答",
-                    session_id,
-                    rid,
-                )
-
-                start_time = time.time()
-                full_content = ""
-                stream_chunks: list[AIMessageChunk] = []
-                try:
-                    # 流式调用整体包超时兜底：流挂死时无法依靠 stop_signal break
-                    # 永远等不到 __anext__，只有超时能终态化当前 LLM 调用
-                    async with asyncio.timeout(
-                        self._harness_settings.llm_stream_timeout
-                    ):
-                        async for chunk in bound_llm.astream(lc_messages):
-                            if self._should_stop():
-                                break
-                            if isinstance(chunk, AIMessageChunk):
-                                stream_chunks.append(chunk)
-                            chunk_content = extract_message_text(chunk)
-                            if chunk_content:
-                                full_content += chunk_content
-                                if self._answer_stream is not None:
-                                    await self._answer_stream.append(chunk_content)
-
-                        # 合并流式 chunk → 完整响应（content + tool_calls）
-                        merged_content, final_tc = self._assemble_response(
-                            stream_chunks, full_content
-                        )
-                    if merged_content:
-                        full_content = merged_content
-
-                    # 停止信号在流式中途置位 → 结束本轮 run
-                    # （不落库残缺 assistant 消息、不执行残缺 tool_calls；
-                    #   必须终态化当前 LLM 调用并补发 LLM_CALL_END，
-                    #   否则前端气泡无法结束）
-                    if self._should_stop():
-                        interrupted = True
-                        error_detail = ExecutionError(
-                            code="run_interrupted",
-                            message="运行被用户中断",
-                            error_type="CancelledError",
-                            retryable=True,
-                            phase="llm_call",
-                        )
-                        await self._emit_llm_call_end(
-                            llm_call_id,
-                            status="failed",
-                            session_id=session_id,
-                            run_id=rid,
-                        )
-                        break
-
-                    # 空响应检测：无文本且无工具调用 → 不落库、有界重试
-                    if not full_content.strip() and not final_tc:
-                        error_msg = "LLM 返回空响应（无内容且无工具调用）"
-                        error_detail = ExecutionError(
-                            code="llm_empty_response",
-                            message=error_msg,
-                            error_type="LLMEmptyResponse",
-                            retryable=budget.remaining_retries() > 0,
-                            phase="llm_call",
-                        )
-                        logger.warning(
-                            "llm_empty_response", run_id=rid, error=error_msg
-                        )
-                        await self._emit(
-                            EventType.RUN_FAILED,
-                            {
-                                "call_id": llm_call_id,
-                                "error": error_msg,
-                                "phase": "llm_call",
-                            },
-                            session_id,
-                            rid,
-                        )
-                        # 失败路径同样需结束 LLM 调用生命周期：前端据此移除
-                        # 本次调用创建的流式气泡，避免重试残留空气泡
-                        await self._emit_llm_call_end(
-                            llm_call_id,
-                            status="failed",
-                            session_id=session_id,
-                            run_id=rid,
-                        )
-                        if budget.remaining_retries() > 0:
-                            budget.increment_retry()
-                            continue
-                        break
-
-                    domain_messages.append(
-                        Message(
-                            id=generate_time_id(),
-                            session_id=session_id,
-                            role=MessageRole.ASSISTANT,
-                            content=full_content,
-                            tool_calls=final_tc,
-                            run_id=rid,
-                            timestamp=datetime.now(),
-                        )
-                    )
-                    last_content = full_content
-                    error_msg = None
-                    error_detail = None
-
-                except TimeoutError:
-                    error_msg = f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）"
-                    error_detail = ExecutionError(
-                        code="llm_timeout",
-                        message=error_msg,
-                        error_type="TimeoutError",
-                        retryable=True,
-                        phase="llm_call",
-                    )
-                    logger.warning("llm_stream_timeout", run_id=rid, error=error_msg)
-                    await self._emit(
-                        EventType.RUN_FAILED,
-                        {
-                            "call_id": llm_call_id,
-                            "error": error_msg,
-                            "phase": "llm_call",
-                        },
-                        session_id,
-                        rid,
-                    )
-                    await self._emit_llm_call_end(
-                        llm_call_id, status="failed", session_id=session_id, run_id=rid
-                    )
-                    budget.increment_retry()
-                    continue
-                except Exception as e:
-                    logger.error("llm_call_failed", error=str(e), run_id=rid)
-                    error_msg = f"LLM 调用失败: {e}"
-                    error_detail = ExecutionError.from_exception(
-                        e,
-                        code="llm_call_failed",
-                        retryable=not isinstance(e, BudgetExceeded),
-                        phase="llm_call",
-                        stack=traceback.format_exc(),
-                    )
-                    await self._emit(
-                        EventType.RUN_FAILED,
-                        {
-                            "call_id": llm_call_id,
-                            "error": str(e) or type(e).__name__,
-                            "error_detail": error_detail.model_dump(mode="json"),
-                            "phase": "llm_call",
-                        },
-                        session_id,
-                        rid,
-                    )
-                    await self._emit_llm_call_end(
-                        llm_call_id, status="failed", session_id=session_id, run_id=rid
-                    )
-                    budget.increment_retry()
-                    if not isinstance(e, BudgetExceeded):
-                        continue
-                    raise
-
-                duration_ms = (time.time() - start_time) * 1000
-
-                await self._emit_llm_call_end(
-                    llm_call_id,
-                    status="completed",
-                    session_id=session_id,
-                    run_id=rid,
-                    duration_ms=duration_ms,
-                    tool_calls_count=len(final_tc),
-                    tool_calls=final_tc,
-                )
-
-                # 持久化 assistant 消息（中断恢复关键）
-                # 守卫：仅在确实有输出（文本或工具调用）时落库，避免空消息污染对话
-                if full_content.strip() or final_tc:
-                    await self._db.messages.save(
-                        Message(
-                            id=generate_time_id(),
-                            session_id=session_id,
-                            role=MessageRole.ASSISTANT,
-                            content=full_content,
-                            tool_calls=final_tc,
-                            run_id=rid,
-                            timestamp=datetime.now(),
-                        )
-                    )
-
-                # 没有工具调用 → 终止循环
-                if not final_tc:
-                    break
-
-                # 工具执行（并行）；调用 ID 在事件和工具账本中保持稳定。
-                await self._emit_thinking(
-                    EventType.THINKING_SUMMARY,
-                    "正在执行工具",
-                    session_id,
-                    rid,
-                )
-                tool_calls: list[tuple[str, dict[str, Any]]] = []
-                for tc in final_tc:
-                    tool_calls.append((generate_time_id(), tc))
-
-                tool_messages = await self._execute_tool_calls(
-                    tool_calls=tool_calls,
-                    session_id=session_id,
-                    run_id=rid,
-                    turn_count=budget.turn_count,
-                    tool_results_all=tool_results_all,
-                )
-
-                for tm in tool_messages:
-                    domain_messages.append(
-                        Message(
-                            id=generate_time_id(),
-                            session_id=session_id,
-                            role=MessageRole.TOOL,
-                            content=str(tm.content),
-                            tool_call_id=tm.tool_call_id,
-                            run_id=rid,
-                            timestamp=datetime.now(),
-                        )
-                    )
-
-                # 工具调用成功 → 重置重试计数
-                budget.reset_retries()
-
-                if self._should_stop():
-                    interrupted = True
-                    break
-
-        except BudgetExceeded as e:
-            error_msg = str(e) or type(e).__name__
-            error_detail = ExecutionError.from_exception(
-                e, code="budget_exceeded", retryable=False, phase="harness"
-            )
-            logger.warning("budget_exceeded", run_id=rid, error=error_msg)
-            await self._emit(
-                EventType.BUDGET_EXCEEDED,
-                {"reason": error_msg, "turn_count": budget.turn_count},
-                session_id,
-                rid,
-            )
-        except Exception as e:
-            error_msg = (
-                f"Harness 执行异常: {e}"
-                if str(e)
-                else f"Harness 执行异常: {type(e).__name__}"
-            )
-            error_detail = ExecutionError.from_exception(
-                e,
-                code="harness_failed",
-                retryable=False,
-                phase="harness",
-                stack=traceback.format_exc(),
-            )
-            logger.exception("harness_failed", run_id=rid)
-            await self._emit(
-                EventType.RUN_FAILED,
-                {
-                    "error": error_msg,
-                    "error_detail": error_detail.model_dump(mode="json"),
-                    "phase": "harness",
-                },
-                session_id,
-                rid,
-            )
-
-        # 停止信号触发的提前退出：统一标记 interrupted（覆盖 while 顶部退出路径）
-        if self._should_stop():
-            interrupted = True
-
-        # 后处理
-        if self._answer_stream is not None:
-            await self._answer_stream.flush(is_complete=True)
-        await self._emit_thinking(
-            EventType.THINKING_COMPLETED,
-            "",
-            session_id,
-            rid,
-        )
-        await self._emit(
-            EventType.STREAM_END,
-            {
-                "run_id": rid,
-                "stream_id": self._answer_stream_id,
-                "stream_type": "answer",
-                "turn_count": budget.turn_count,
-                "content": full_content,
-                "error": error_msg,
-            },
-            session_id,
-            rid,
-        )
-
-        if parent_run_id is None:
-            await self._db.sessions.update(
-                session_id, status="idle" if not interrupted else "interrupted"
-            )
-
-        return HarnessRunResult(
-            content=last_content,
-            run_id=rid,
-            turn_count=budget.turn_count,
-            tool_results=tool_results_all,
-            error=error_msg,
-            error_detail=error_detail.model_dump(mode="json") if error_detail else None,
-            interrupted=interrupted,
-        )
-
-    # ------------------------------------------------------------------
     # 工具执行
     # ------------------------------------------------------------------
 
@@ -633,6 +108,7 @@ class Harness:
         run_id: str,
         tool_results_all: list[dict[str, Any]],
         turn_count: int = 0,
+        approval_decisions: dict[str, str] | None = None,
     ) -> list[ToolMessage]:
         """并行执行所有工具调用，同时记录日志与推送事件.
 
@@ -703,6 +179,8 @@ class Harness:
                     call_id=call_id,
                     tool_call_id=tc_id,
                     turn_count=turn_count,
+                    approval_id=tc.get("approval_id"),
+                    approval_decision=(approval_decisions or {}).get(tc_id),
                 )
                 append_result(
                     {
@@ -771,6 +249,8 @@ class Harness:
         call_id: str = "tool-call",
         tool_call_id: str = "",
         turn_count: int = 0,
+        approval_id: str | None = None,
+        approval_decision: str | None = None,
     ) -> tuple[str, str, str | None, str | None, str, float]:
         """执行工具尝试并为每次重试建立独立审批和账本记录。
 
@@ -883,6 +363,7 @@ class Harness:
                         run_id=run_id,
                         attempt_number=attempt_number,
                         tool_name=current_tool_name,
+                        approval_id=approval_id,
                         arguments=dict(current_params),
                         status=ToolCallStatus.PENDING,
                         started_at=datetime.now(),
@@ -890,12 +371,6 @@ class Harness:
                 )
 
             execution_started_at: float | None = None
-
-            async def on_approval_created(new_approval_id: str) -> None:
-                """把本次尝试的审批 ID 写回账本。"""
-                await self._db.tool_calls.update(
-                    record_id, {"approval_id": new_approval_id}
-                )
 
             async def on_execution_start() -> bool:
                 """原子领取 PENDING 账本并发布真实执行开始事件。"""
@@ -927,7 +402,6 @@ class Harness:
                 )
                 return True
 
-            approval_id = record.approval_id if record is not None else None
             try:
                 result = await self._tool_manager.call_tool(
                     name=current_tool_name,
@@ -940,9 +414,8 @@ class Harness:
                     task_id=self._task_id,
                     worker_run_id=(run_id if self._agent_role == "worker" else None),
                     depth=self._depth,
-                    execution_timeout=self._harness_settings.tool_timeout,
-                    approval_id=approval_id,
-                    on_approval_created=on_approval_created,
+                    execution_timeout=self._tool_timeout,
+                    approval_decision=approval_decision,
                     on_execution_start=on_execution_start,
                 )
             except Exception as exc:
@@ -1252,41 +725,6 @@ class Harness:
             run_id,
         )
 
-    def _assemble_response(
-        self,
-        stream_chunks: list[AIMessageChunk],
-        fallback_content: str = "",
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """合并流式 chunk，提取完整 content 与 tool_calls.
-
-        利用 langchain 的 AIMessageChunk.__add__ 拼接文本分片并累加 tool_call
-        的 args JSON 分片，比手动拼装可靠。空流时回退到已累积的 fallback_content。
-
-        参数：
-            stream_chunks: LLM 流式返回的 AIMessageChunk 列表。
-            fallback_content: 流为空时的回退文本（来自已累积的 full_content）。
-
-        返回值：
-            二元组 ``(content, tool_calls)``:
-            - content: 合并后的完整文本内容。
-            - tool_calls: 归一化后的工具调用列表，每项含 id / name / args。
-        """
-        if not stream_chunks:
-            return fallback_content, []
-        merged = stream_chunks[0]
-        for c in stream_chunks[1:]:
-            merged = merged + c
-        content = extract_message_text(merged) or fallback_content
-        raw_tcs = getattr(merged, "tool_calls", None) or []
-        return content, self._normalize_tool_calls(raw_tcs)
-
-    @staticmethod
-    def _normalize_tool_calls(
-        tool_calls: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """将 langchain tool_calls 归一化为统一的内部格式."""
-        return normalize_tool_calls(tool_calls)
-
     def _tool_record_id(
         self,
         *,
@@ -1331,7 +769,7 @@ class Harness:
     def _message_id_from_messages(
         messages: Sequence[Message | dict[str, Any]],
     ) -> str | None:
-        """从本次 Harness 输入中提取最新用户消息 ID。"""
+        """从本次执行输入中提取最新用户消息 ID。"""
         for message in reversed(messages):
             if isinstance(message, Message):
                 if message.role == MessageRole.USER:

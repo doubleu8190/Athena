@@ -13,17 +13,72 @@ AgentExecutionStatus = Literal[
     "interrupted",
 ]
 
+AgentPhase = Literal[
+    "request_preparation",
+    "task_understanding",
+    "context_planning",
+    "context_acquisition",
+    "harness_preparation",
+    "agent_loop",
+    "orchestration",
+    "response",
+    "completed",
+]
 
-class AgentExecutionContext(TypedDict, total=False):
-    """Run identity and prompt context."""
+class AgentRequestState(TypedDict, total=False):
+    """Fields produced while normalizing and persisting the user request."""
 
     session_id: str
     run_id: str
     message_id: str
-    parent_run_id: str | None
     user_message: str
+    attachment_ids: list[str]
+    history: list[dict[str, Any]]
+    requested_attachment_refs: list[dict[str, Any]]
+
+
+class AgentUnderstandingState(TypedDict, total=False):
+    """Task understanding output and clarification decision."""
+
     task_spec: dict[str, Any] | None
+    task_understanding_source: Literal["fast_path", "llm", "fallback"] | None
+    clarification_question: str | None
+
+
+class AgentContextState(TypedDict, total=False):
+    """Context planning and acquisition output."""
+
+    context_plan: dict[str, Any] | None
     context_bundle: dict[str, Any] | None
+    attachment_refs: list[dict[str, Any]]
+    harness_messages: list[dict[str, Any]]
+
+
+class AgentOrchestrationState(TypedDict, total=False):
+    """Plan materialization and worker aggregation output."""
+
+    plan_request: dict[str, Any] | None
+    execution_plan: dict[str, Any] | None
+    orchestration_result: dict[str, Any] | None
+
+
+class AgentResponseState(TypedDict, total=False):
+    """Final response projection exposed to callers."""
+
+    result: dict[str, Any] | None
+    error: str | None
+    error_detail: dict[str, Any] | None
+    harness_result: dict[str, Any] | None
+
+
+class AgentExecutionContext(TypedDict, total=False):
+    """Execution-only prompt and hierarchy context.
+
+    Run/request identity and task context belong to ``AgentState``.  Keeping
+    them here would create a second source of truth inside checkpoints.
+    """
+
+    parent_run_id: str | None
     system_prompt: str
     tool_names: list[str] | None
 
@@ -32,15 +87,18 @@ class AgentExecutionMessages(TypedDict, total=False):
     """Conversation and attachment data."""
 
     messages: list[dict[str, Any]]
-    attachment_refs: list[dict[str, Any]]
 
 
 class AgentExecutionTools(TypedDict, total=False):
     """Tool calls and their durable results."""
 
     pending_tool_calls: list[dict[str, Any]]
-    pending_approvals: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
+    tool_result_deltas: list[dict[str, Any]]
+    tool_message_deltas: list[dict[str, Any]]
+    approval_batch: dict[str, Any] | None
+    approval_decisions: dict[str, str]
+    approval_ids: dict[str, str]
 
 
 class AgentExecutionBudget(TypedDict, total=False):
@@ -53,12 +111,10 @@ class AgentExecutionBudget(TypedDict, total=False):
 
 
 class AgentExecutionOutput(TypedDict, total=False):
-    """Generated content and final serialized result."""
+    """Generated content produced during the loop."""
 
     last_content: str
     final_content: str
-    harness_result: dict[str, Any]
-    plan_request: dict[str, Any] | None
 
 
 class AgentExecutionStream(TypedDict, total=False):
@@ -72,29 +128,76 @@ class AgentExecutionStream(TypedDict, total=False):
 class AgentExecutionLifecycle(TypedDict, total=False):
     """Execution lifecycle."""
 
-    error: str | None
-    error_detail: dict[str, Any] | None
+    llm_result_status: Literal[
+        "completed", "semantic_retry", "technical_failure", "interrupted"
+    ]
+    llm_retry_reason: str
+    retry_feedback: str | None
     retryable: bool
     interrupted: bool
     status: AgentExecutionStatus
     route: str
 
 
-class AgentExecutionState(
+class AgentExecutionRecoverableState(
     AgentExecutionContext,
     AgentExecutionMessages,
     AgentExecutionTools,
     AgentExecutionBudget,
     AgentExecutionOutput,
     AgentExecutionStream,
-    AgentExecutionLifecycle,
 ):
-    """Agent loop 的扁平、可检查点化执行状态。
+    """Values required to resume the loop after a checkpoint restore."""
 
-    字段按职责由基类分组，但组合后的运行时值仍是一个普通字典。该状态
-    只包含 JSON 安全值；LLM、工具管理器和停止事件通过节点依赖及
-    ``RunnableConfig`` 注入，不写入检查点。
+
+class AgentExecutionDerivedState(AgentExecutionLifecycle):
+    """Values that can be recomputed from the recoverable execution state."""
+
+
+def split_execution_state(
+    state: AgentExecutionState | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the two explicit execution state containers."""
+
+    source = state or {}
+    return dict(source.get("recoverable", {})), dict(source.get("derived", {}))
+
+
+def derive_execution_state(
+    recoverable: AgentExecutionRecoverableState | None,
+    derived: AgentExecutionDerivedState | None = None,
+) -> AgentExecutionDerivedState:
+    """Compute lifecycle fields from recoverable execution inputs."""
+
+    source = recoverable or {}
+    previous = derived or {}
+    interrupted = bool(previous.get("interrupted", False))
+    if interrupted:
+        status: AgentExecutionStatus = "interrupted"
+    elif source.get("approval_batch") and not source.get("approval_decisions"):
+        status = "waiting_approval"
+    else:
+        status = previous.get("status", "running")  # type: ignore[assignment]
+    return {
+        "status": status,
+        "route": previous.get("route", "agent_loop"),
+        "retryable": bool(previous.get("retryable", False)),
+        "interrupted": interrupted,
+        "llm_result_status": previous.get("llm_result_status", "completed"),
+        "llm_retry_reason": previous.get("llm_retry_reason", "none"),
+        "retry_feedback": previous.get("retry_feedback"),
+    }
+
+
+class AgentExecutionState(TypedDict, total=False):
+    """Agent loop 的可检查点化执行状态。
+
+    ``recoverable`` 和 ``derived`` 是两个独立的检查点容器。LLM、工具管理器和
+    停止事件通过节点依赖及 ``RunnableConfig`` 注入，不写入检查点。
     """
+
+    recoverable: AgentExecutionRecoverableState
+    derived: AgentExecutionDerivedState
 
 
 def merge_execution_state(
@@ -103,46 +206,42 @@ def merge_execution_state(
 ) -> AgentExecutionState:
     """合并 Agent loop 内部节点的局部状态更新。
 
-    ``execution`` 是主图中的嵌套状态通道。LangGraph 默认会用节点返回值
-    替换整个字典；该 reducer 改为按字段合并，使每个内部节点仅声明自己
-    实际改变的状态，避免回写无关字段。
+    ``execution`` 是主图中的嵌套状态通道；两个子容器分别合并，避免节点
+    回写无关字段。
     """
 
-    merged = {**(current or {}), **(update or {})}
-    # 清理 thinking 状态迁移前写入的旧 checkpoint 字段。thinking 现在只
-    # 通过 durable events 传输，不能因恢复旧 checkpoint 而重新进入状态。
-    merged.pop("thinking_chunk_id", None)
-    merged.pop("thinking_content", None)
-    return merged
+    current_recoverable, current_derived = split_execution_state(current)
+    update_recoverable, update_derived = split_execution_state(update)
+    recoverable = {**current_recoverable, **update_recoverable}
+    derived = {**current_derived, **update_derived}
+    for field in ("tool_result_deltas", "tool_message_deltas"):
+        if field in update_recoverable:
+            recoverable[field] = [
+                *current_recoverable.get(field, []),
+                *update_recoverable.get(field, []),
+            ]
+    return {"recoverable": recoverable, "derived": derived}
 
 
-class AgentState(TypedDict, total=False):
+class AgentState(
+    AgentRequestState,
+    AgentUnderstandingState,
+    AgentContextState,
+    AgentOrchestrationState,
+    AgentResponseState,
+    total=False,
+):
     """在图节点之间传递的 JSON 安全状态字段。
 
-    ``session_id`` 和 ``run_id`` 是必填字段；其余字段由不同节点按执行阶段逐步补充。
+    ``request`` 是入口阶段状态；其余阶段容器由对应节点逐步补充。
     状态中的消息、附件和结果均使用 JSON 安全的字典结构，领域对象不应直接写入。
     """
 
-    session_id: str
-    run_id: str
-    message_id: str
-    user_message: str
-    attachment_ids: list[str]
-    requested_attachment_refs: list[dict[str, Any]]
-    task_spec: dict[str, Any] | None
-    context_plan: dict[str, Any] | None
-    context_bundle: dict[str, Any] | None
-    task_understanding_source: Literal["fast_path", "llm", "fallback"] | None
-    clarification_question: str | None
-    history: list[dict[str, Any]]
-    attachment_refs: list[dict[str, Any]]
-    harness_messages: list[dict[str, Any]]
+    phase: AgentPhase
+    request: AgentRequestState
+    understanding: AgentUnderstandingState
+    context: AgentContextState
     execution: Annotated[AgentExecutionState, merge_execution_state]
-    harness_result: dict[str, Any] | None
-    planning_decision: dict[str, Any] | None
-    plan_request: dict[str, Any] | None
-    execution_plan: dict[str, Any] | None
-    orchestration_result: dict[str, Any] | None
-    result: dict[str, Any] | None
-    error: str | None
-    error_detail: dict[str, Any] | None
+    orchestration: AgentOrchestrationState
+    response: AgentResponseState
+    tool_call: dict[str, Any]

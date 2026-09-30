@@ -29,11 +29,11 @@ class CommandPayload(ExtensibleJsonModel):
     attachment_ids: list[str] = Field(default_factory=list)
     content: str | None = None
     metadata: dict[str, Any] | None = None
-    approval_id: str | None = None
-    decision: str | None = None
     plan_id: str | None = None
     task_id: str | None = None
     worker_run_id: str | None = None
+    approval_batch_id: str | None = None
+    decisions: dict[str, str] | None = None
 
 
 class ToolCall(ExtensibleJsonModel):

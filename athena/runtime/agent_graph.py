@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph, RunnableConfig
+from langgraph.types import Command, StateSnapshot
 
 from athena.utils.logging import get_logger
 from athena.observability.langsmith import start_trace
@@ -38,7 +39,7 @@ logger = get_logger(__name__)
 
 
 def build_graph(
-    runtime: LangGraphRuntime, checkpointer: Any = None
+        runtime: LangGraphRuntime, checkpointer: Any = None
 ) -> CompiledStateGraph:
     """构建并编译 Agent 执行图。
 
@@ -49,6 +50,7 @@ def build_graph(
         CompiledStateGraph: 已连接并编译完成的 LangGraph 图对象。
     """
     graph = StateGraph(AgentState)
+
     # 所有主图节点都在注册边界统一包装，保证普通节点和嵌套 Agent loop
     # 具有一致的 started/completed/failed 事件生命周期。
 
@@ -59,7 +61,7 @@ def build_graph(
             instrument_graph_node(
                 node_name,
                 node,
-                event_publisher=runtime._event_publisher,
+                event_publisher=runtime.event_publisher,
             ),
         )
 
@@ -81,7 +83,7 @@ def build_graph(
     add_instrumented_node(
         "clarification_response", create_clarification_response_node(runtime)
     )
-    # 准备 Harness 输入 → 使用 SessionContextService
+    # 准备执行输入 → 使用 SessionContextService
     add_instrumented_node(
         "prepare_harness_input",
         create_prepare_harness_input_node(runtime.session_context_service),
@@ -102,7 +104,7 @@ def build_graph(
         "close_execution_stream", create_close_execution_stream_node(runtime)
     )
 
-    # 后处理并组装 Harness 结果 → 使用 AgentExecutionService
+    # 后处理并组装执行结果 → 使用 AgentExecutionService
     add_instrumented_node(
         "post_process_and_build_result",
         create_post_process_and_build_result_node(runtime.agent_execution_service),
@@ -147,21 +149,22 @@ def build_graph(
 
 
 async def invoke_graph(
-    graph: CompiledStateGraph,
-    *,
-    session_id: str,
-    user_message: str,
-    run_id: str = "",
-    attachment_ids: list[str] | None = None,
-    message_id: str = "",
-    stop_signal: asyncio.Event | None = None,
+        graph: CompiledStateGraph,
+        *,
+        session_id: str,
+        user_message: str,
+        run_id: str = "",
+        attachment_ids: list[str] | None = None,
+        message_id: str = "",
+        stop_signal: asyncio.Event | None = None,
+        resume_value: dict[str, Any] | None = None,
 ) -> Any:
     async with start_trace(
-        name="athena.session",
-        inputs={"user_message": user_message, "attachment_ids": attachment_ids or []},
-        run_id=run_id,
-        metadata={"session_id": session_id, "run_id": run_id},
-        tags=["athena", "session"],
+            name="athena.session",
+            inputs={"user_message": user_message, "attachment_ids": attachment_ids or []},
+            run_id=run_id,
+            metadata={"session_id": session_id, "run_id": run_id},
+            tags=["athena", "session"],
     ) as trace:
         result = await _invoke_graph(
             graph,
@@ -171,6 +174,7 @@ async def invoke_graph(
             attachment_ids=attachment_ids,
             message_id=message_id,
             stop_signal=stop_signal,
+            resume_value=resume_value,
         )
         from athena.observability.langsmith import finish_span
 
@@ -179,14 +183,15 @@ async def invoke_graph(
 
 
 async def _invoke_graph(
-    graph: CompiledStateGraph,
-    *,
-    session_id: str,
-    user_message: str,
-    run_id: str = "",
-    attachment_ids: list[str] | None = None,
-    message_id: str = "",
-    stop_signal: asyncio.Event | None = None,
+        graph: CompiledStateGraph,
+        *,
+        session_id: str,
+        user_message: str,
+        run_id: str = "",
+        attachment_ids: list[str] | None = None,
+        message_id: str = "",
+        stop_signal: asyncio.Event | None = None,
+        resume_value: dict[str, Any] | None = None,
 ) -> Any:
     """以指定会话配置执行已编译的 Agent 图。
 
@@ -210,8 +215,8 @@ async def _invoke_graph(
     }
 
     snapshot = await _try_get_snapshot(graph, config)
-    values = getattr(snapshot, "values", None) if snapshot else None
-    pending = getattr(snapshot, "next", ()) if snapshot else ()
+    values = snapshot.values if snapshot else None
+    pending = snapshot.next if snapshot else ()
 
     # 已终态：直接返回历史结果
     if values and not pending:
@@ -231,45 +236,48 @@ async def _invoke_graph(
         )
     )
 
-    state = await graph.ainvoke(initial_state, config=config)
+    invoke_input = Command(resume=resume_value) if resume_value is not None else initial_state
+    state = await graph.ainvoke(invoke_input, config=config)
+    if isinstance(state, dict) and state.get("__interrupt__"):
+        return {"waiting_approval": True, "interrupts": state["__interrupt__"]}
     return _unwrap(state or {})
 
 
 async def _try_get_snapshot(
-    graph: CompiledStateGraph, config: RunnableConfig
-) -> Any | None:
+        graph: CompiledStateGraph, config: RunnableConfig
+) -> StateSnapshot | None:
     """读取检查点快照；不支持或读取失败时返回 None（视为全新运行）。"""
-    get_state = getattr(graph, "aget_state", None)
-    if get_state is None:
-        return None
     try:
-        return await get_state(config)
+        return await graph.get_state(config)
     except Exception:
         # 首次运行时存储可能未初始化，属正常情况，降级为全新运行
-        logger.debug("invoke_graph.get_state_failed", exc_info=True)
+        logger.error("invoke_graph.get_state_failed", exc_info=True)
         return None
 
 
 def _build_initial_state(
-    *,
-    session_id: str,
-    run_id: str,
-    message_id: str,
-    user_message: str,
-    attachment_ids: list[str] | None,
+        *,
+        session_id: str,
+        run_id: str,
+        message_id: str,
+        user_message: str,
+        attachment_ids: list[str] | None,
 ) -> dict[str, Any]:
     return {
-        "session_id": session_id,
-        "run_id": run_id,
-        "message_id": message_id,
-        "user_message": user_message,
-        # 防御性复制：避免外部修改原列表影响状态
-        "attachment_ids": list(attachment_ids or []),
+        "phase": "request_preparation",
+        "request": {
+            "session_id": session_id,
+            "run_id": run_id,
+            "message_id": message_id,
+            "user_message": user_message,
+            "attachment_ids": list(attachment_ids or []),
+        },
     }
 
 
 def _unwrap(state: dict[str, Any]) -> Any:
     """统一从状态中提取 error 或 result。"""
-    if state.get("error"):
-        raise RuntimeError(state["error"])
-    return state.get("result")
+    response = state.get("response", {})
+    if response.get("error"):
+        raise RuntimeError(response["error"])
+    return response.get("result")

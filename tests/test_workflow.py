@@ -23,7 +23,7 @@ class _RecordingGraph:
     async def ainvoke(self, state, *, config):
         self.state = state
         self.config = config
-        return {"result": "ok"}
+        return {"response": {"result": "ok"}}
 
 
 @pytest.mark.asyncio
@@ -212,11 +212,13 @@ async def test_prepare_request_and_persist_message_merges_prepared_and_persisted
 
     result = await prepare_request_and_persist_message(
         {
-            "session_id": "session-1",
-            "run_id": "run-1",
-            "message_id": "message-1",
-            "user_message": "read this",
-            "attachment_ids": ["file-1", "file-1"],
+            "request": {
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "message_id": "message-1",
+                "user_message": "read this",
+                "attachment_ids": ["file-1", "file-1"],
+            }
         },
         session_context_service=SessionContextService(),
     )
@@ -226,21 +228,21 @@ async def test_prepare_request_and_persist_message_merges_prepared_and_persisted
         ("load_history", "session-1"),
         ("persist", "message-1", ["file-1"]),
     ]
-    assert result["history"] == []
-    assert result["message_id"] == "message-1"
-    assert result["requested_attachment_refs"][0]["id"] == "file-1"
+    assert result["request"]["history"] == []
+    assert result["request"]["message_id"] == "message-1"
+    assert result["request"]["requested_attachment_refs"][0]["id"] == "file-1"
 
 
 def test_task_route_sends_all_non_clarifying_requests_to_context_planning():
     from athena.runtime.nodes.conditions import route_after_task_understanding
 
     assert route_after_task_understanding({
-        "task_spec": {"mode": "retrieve", "context_requirements": ["file"]},
-        "requested_attachment_refs": [{"id": "file-1"}],
+        "understanding": {"task_spec": {"mode": "retrieve", "context_requirements": ["file"]}},
+        "request": {"requested_attachment_refs": [{"id": "file-1"}]},
     }) == "plan_context"
     assert route_after_task_understanding({
-        "task_spec": {"mode": "generate", "context_requirements": ["conversation"]},
-        "requested_attachment_refs": [{"id": "file-1"}],
+        "understanding": {"task_spec": {"mode": "generate", "context_requirements": ["conversation"]}},
+        "request": {"requested_attachment_refs": [{"id": "file-1"}]},
     }) == "plan_context"
 
 
@@ -248,9 +250,11 @@ def test_task_route_clarifies_before_context_planning():
     from athena.runtime.nodes.conditions import route_after_task_understanding
 
     assert route_after_task_understanding({
-        "clarification_question": "请补充目标",
-        "task_spec": {"mode": "clarify", "context_requirements": ["file"]},
-        "requested_attachment_refs": [{"id": "file-1"}],
+        "understanding": {
+            "clarification_question": "请补充目标",
+            "task_spec": {"mode": "clarify", "context_requirements": ["file"]},
+        },
+        "request": {"requested_attachment_refs": [{"id": "file-1"}]},
     }) == "clarification_response"
 
 
@@ -332,7 +336,7 @@ def test_graph_compiles_with_minimal_runtime():
     from athena.runtime.agent_graph import build_graph
 
     runtime = SimpleNamespace(
-        _event_publisher=None,
+        event_publisher=None,
         session_context_service=SimpleNamespace(),
         agent_execution_service=SimpleNamespace(),
     )

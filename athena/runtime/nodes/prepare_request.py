@@ -28,29 +28,35 @@ async def prepare_request_and_persist_message(
         KeyError: ``state`` 缺少 ``session_id`` 时抛出。
         运行时异常: 附件或历史加载失败时传播底层运行时异常。
     """
-    if not state.get("session_id"):
+    request = state.get("request", {})
+    if not request.get("session_id"):
         raise ValueError("AgentState missing required field: session_id")
-    session_id = state.get("session_id", "")
+    session_id = request["session_id"]
     # Attachment IDs are a set-like request field; preserve first-seen order
     # so retries produce the same durable message projection.
-    attachment_ids = list(dict.fromkeys(state.get("attachment_ids", [])))
+    attachment_ids = list(dict.fromkeys(request.get("attachment_ids", [])))
     attachments = await session_context_service.load_and_validate_attachments(
         session_id, attachment_ids
     )
 
     history = await session_context_service.load_history(session_id)
     prepared_state: AgentState = {
-        "session_id": session_id,
-        "run_id": state.get("run_id", ""),
-        "message_id": str(state.get("message_id") or ""),
-        "user_message": state.get("user_message", ""),
-        "attachment_ids": attachment_ids,
-        "history": [item.model_dump(mode="json") for item in history],
-        "requested_attachment_refs": [
-            item.to_reference().model_dump(mode="json") for item in attachments
-        ],
+        "phase": "task_understanding",
+        "request": {
+            "session_id": session_id,
+            "run_id": request.get("run_id", ""),
+            "message_id": str(request.get("message_id") or ""),
+            "user_message": request.get("user_message", ""),
+            "attachment_ids": attachment_ids,
+            "history": [item.model_dump(mode="json") for item in history],
+            "requested_attachment_refs": [
+                item.to_reference().model_dump(mode="json") for item in attachments
+            ],
+        },
     }
-    await session_context_service.persist_message_and_attachments(prepared_state)
+    await session_context_service.persist_message_and_attachments(
+        prepared_state["request"]
+    )
     return prepared_state
 
 

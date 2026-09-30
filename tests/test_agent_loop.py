@@ -5,7 +5,6 @@ import pytest
 
 from athena.runtime.langgraph_runtime import DEFAULT_SYSTEM_PROMPT
 from athena.runtime.agent_graph import build_graph, invoke_graph
-from athena.runtime.sub_agent_manager import SubAgentManager, SubAgentResult
 from athena.runtime.services.session_context_service import SessionContextService
 from athena.runtime.services.agent_execution_service import AgentExecutionService
 
@@ -18,7 +17,7 @@ class _RecordingGraph:
     async def ainvoke(self, state, *, config):
         self.state = state
         self.config = config
-        return {"result": {"content": "ok"}}
+        return {"response": {"result": {"content": "ok"}}}
 
 
 class TestModuleStructure:
@@ -37,10 +36,6 @@ class TestModuleStructure:
     def test_agent_execution_service_exists(self):
         assert AgentExecutionService is not None
         assert callable(AgentExecutionService.build_result_payload)
-
-    def test_sub_agent_extracted(self):
-        assert SubAgentManager is not None
-        assert SubAgentResult is not None
 
     def test_default_system_prompt_accessible(self):
         assert DEFAULT_SYSTEM_PROMPT is not None

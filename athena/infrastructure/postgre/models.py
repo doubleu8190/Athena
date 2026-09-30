@@ -242,6 +242,7 @@ class ApprovalRecordModel(Base):
         String, comment="所属会话标识；由核心库维护"
     )
     run_id: Mapped[str] = mapped_column(String, comment="所属运行标识")
+    approval_batch_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     plan_id: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="审批所属执行计划"
     )
@@ -264,9 +265,6 @@ class ApprovalRecordModel(Base):
         String, nullable=True, comment="审批决定"
     )
     created_at: Mapped[str] = mapped_column(String, comment="创建时间（UTC）")
-    expires_at: Mapped[str | None] = mapped_column(
-        String, nullable=True, comment="审批截止时间（UTC）"
-    )
     decided_at: Mapped[str | None] = mapped_column(
         String, nullable=True, comment="审批决定时间（UTC）"
     )

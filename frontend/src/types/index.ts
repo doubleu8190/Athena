@@ -207,15 +207,14 @@ export interface ApprovalRequest {
   tool_name: string
   arguments: Record<string, unknown>
   risk_level: "low" | "medium" | "high"
-  timeout: number
-  expires_at?: string | null
+  approval_batch_id?: string | null
   description?: string
   session_id?: string
 }
 
 export interface ApprovalResult {
   approval_id: string
-  decision: "approved" | "denied" | "timeout"
+  decision: "approved" | "denied" | "cancelled"
 }
 
 // ─── 事件相关 ────────────────────────────────────────────────────
@@ -373,7 +372,7 @@ export interface MemoryListResponse {
 
 // ─── 审批日志 ────────────────────────────────────────────────────
 
-export type ApprovalDecision = "approved" | "denied" | "timeout" | "cancelled"
+export type ApprovalDecision = "approved" | "denied" | "cancelled"
 
 export interface ApprovalLog {
   id: string
@@ -391,7 +390,6 @@ export interface ApprovalStats {
   today_total: number
   today_approved: number
   today_denied: number
-  today_timeout: number
   approval_rate: number
 }
 
@@ -472,8 +470,7 @@ export interface SettingsView {
   max_turns_per_run: number
   retry_budget: number
   tool_timeout: number
-  llm_stream_timeout: number
-  approval_timeout: number
+  llm_timeout: number
   llm_temperature: number
   llm_max_tokens: number
   memory_ttl_days: number

@@ -158,25 +158,26 @@ def _resolve_execution_identity(
     configurable = _mapping_value(config, "configurable")
     metadata = _mapping_value(config, "metadata")
     execution_state = state_mapping.get("execution")
-    execution_mapping = (
-        execution_state if isinstance(execution_state, Mapping) else {}
-    )
+    execution_mapping = execution_state if isinstance(execution_state, Mapping) else {}
+    recoverable_mapping = execution_mapping.get("recoverable", {})
+    if not isinstance(recoverable_mapping, Mapping):
+        recoverable_mapping = {}
+    request_state = state_mapping.get("request")
+    request_mapping = request_state if isinstance(request_state, Mapping) else {}
     session_id = _first_text(
-        state_mapping.get("session_id"),
-        execution_mapping.get("session_id"),
+        request_mapping.get("session_id"),
         metadata.get("session_id"),
         configurable.get("session_id"),
     )
     run_id = _first_text(
-        state_mapping.get("run_id"),
-        execution_mapping.get("run_id"),
+        request_mapping.get("run_id"),
         metadata.get("run_id"),
         configurable.get("run_id"),
         configurable.get("thread_id"),
     ) or None
     parent_run_id = _first_text(
-        state_mapping.get("parent_run_id"),
-        execution_mapping.get("parent_run_id"),
+        request_mapping.get("parent_run_id"),
+        recoverable_mapping.get("parent_run_id"),
     ) or None
     return session_id, run_id, parent_run_id
 

@@ -6,7 +6,6 @@
 """
 
 from athena.models.approval import (
-    ApprovalDecision,
     ApprovalRequest,
 )
 from athena.models.mcp import MCPServer, MCPServerConfig
@@ -57,7 +56,6 @@ __all__ = [
     "ToolCall",
     "JsonSchema",
     # 审批
-    "ApprovalDecision",
     "ApprovalRequest",
     # MCP
     "MCPServer",

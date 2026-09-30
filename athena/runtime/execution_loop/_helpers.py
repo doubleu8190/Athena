@@ -9,7 +9,7 @@ from langchain_core.runnables import RunnableConfig
 
 if TYPE_CHECKING:
     from ..langgraph_runtime import LangGraphRuntime
-    from athena.core.harness.turn_executor import HarnessTurnExecutor
+    from athena.core.harness.turn_executor import TurnExecutor
 
 
 def _stop_signal(config: RunnableConfig) -> asyncio.Event:
@@ -22,12 +22,12 @@ def _stop_signal(config: RunnableConfig) -> asyncio.Event:
     return signal
 
 
-def _executor(runtime: LangGraphRuntime) -> HarnessTurnExecutor:
+def _executor(runtime: LangGraphRuntime) -> TurnExecutor:
     """为当前节点创建轮次执行器。"""
 
-    from athena.core.harness.turn_executor import HarnessTurnExecutor
+    from athena.core.harness.turn_executor import TurnExecutor
 
-    return HarnessTurnExecutor(
+    return TurnExecutor(
         llm=runtime._llm,
         tool_manager=runtime._tool_manager,
         settings=runtime._settings,

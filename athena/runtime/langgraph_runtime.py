@@ -37,7 +37,6 @@ from athena.utils.logging import get_logger
 from athena.utils.prompt_loader import get_prompt
 
 from .state import AgentState
-from .sub_agent_manager import SubAgentManager
 from .services.session_context_service import SessionContextService
 from .services.agent_execution_service import AgentExecutionService
 from .orchestration.events import OrchestrationEventPublisher
@@ -70,11 +69,10 @@ class LangGraphRuntime:
     领域逻辑已拆分至：
     - ``TaskUnderstandingService`` — 用户任务理解
     - ``ContextAcquisitionService`` — Memory / Knowledge / File 上下文获取
-    - ``SessionContextService`` — 会话历史、消息持久化、附件绑定和 Harness 输入准备
-    - ``AgentExecutionService`` — Harness 执行编排与后处理
+    - ``SessionContextService`` — 会话历史、消息持久化、附件绑定和执行输入准备
+    - ``AgentExecutionService`` — execution-loop 结果后处理
 
     保留在运行时的职责：
-    - 子 Agent 工具处理器（依赖会话级停止信号）
     - 依赖组装与验证
     """
 
@@ -82,6 +80,7 @@ class LangGraphRuntime:
         self,
         llm: LLMProvider,
         tool_manager: UnifiedToolManager,
+        approval_manager: Any,
         db: Database,
         event_publisher: EventPublisherPort,
         compressor: ContextCompressor,
@@ -94,6 +93,7 @@ class LangGraphRuntime:
         memory_job_repository: MemoryJobRepository,
         agent_store: AgentStorePort,
         graph_store: GraphStore,
+        checkpointer: Any = None,
     ) -> None:
         """组装所有聚焦服务并保留直接依赖。
 
@@ -157,9 +157,10 @@ class LangGraphRuntime:
             memory_job_repository=memory_job_repository,
         )
 
-        # ── 直接依赖（用于子 Agent、图组装） ──
+        # ── 直接依赖（用于 Worker、图组装） ──
         self._llm = llm
         self._tool_manager = tool_manager
+        self._approval_manager = approval_manager
         self._db = db
         self._event_publisher = event_publisher
         self._compressor = compressor
@@ -169,6 +170,7 @@ class LangGraphRuntime:
         self._settings = settings
         self._memory_job_repository = memory_job_repository
         self._agent_store = agent_store
+        self._checkpointer = checkpointer
 
         # ── 运行时状态 ──
         self._session_stop_signals: dict[str, asyncio.Event | None] = {}
@@ -181,14 +183,10 @@ class LangGraphRuntime:
         orchestration_events = OrchestrationEventPublisher(event_publisher)
         self._plan_materializer = PlanMaterializer(db, orchestration_events)
         self._worker_executor = WorkerExecutor(
-            llm=llm,
+            graph_runtime=self,
             structured_llm=structured_llm,
-            tool_manager=tool_manager,
-            db=db,
-            compressor=compressor,
             event_publisher=event_publisher,
             agent_store=agent_store,
-            settings=settings,
             root_run_id="",
         )
         self._plan_dispatcher = PlanDispatcher(
@@ -290,12 +288,13 @@ class LangGraphRuntime:
 
     async def understand_task(self, state: AgentState) -> AgentState:
         """生成当前请求的 UserTaskSpec。"""
-        history = state.get("history", [])
-        attachment_refs = state.get("requested_attachment_refs", [])
+        request = state.get("request", {})
+        history = request.get("history", [])
+        attachment_refs = request.get("requested_attachment_refs", [])
         knowledge_bases = await self._db.knowledge_bases.list_all()
         result = await self._task_understanding_service.understand(
-            session_id=state.get("session_id", ""),
-            user_message=state.get("user_message", ""),
+            session_id=request.get("session_id", ""),
+            user_message=request.get("user_message", ""),
             history=history,
             attachment_refs=attachment_refs,
             knowledge_bases=[
@@ -305,11 +304,11 @@ class LangGraphRuntime:
         )
         logger.info(
             "task_understanding_completed",
-            session_id=state.get("session_id", ""),
-            run_id=state.get("run_id", ""),
+            session_id=request.get("session_id", ""),
+            run_id=request.get("run_id", ""),
             result=result,
         )
-        update: AgentState = {
+        update: dict[str, Any] = {
             "task_spec": result.task.model_dump(mode="json"),
             "task_understanding_source": cast(
                 Literal["fast_path", "llm", "fallback"], result.source
@@ -323,10 +322,12 @@ class LangGraphRuntime:
         """把澄清问题持久化为一次普通 assistant 回答。"""
         from athena.models import Message, MessageRole
 
-        session_id = state.get("session_id", "")
-        run_id = state.get("run_id", "")
-        message_id = state.get("message_id", "")
-        clarification = state.get("clarification_question") or "请补充说明你的目标。"
+        request = state.get("request", {})
+        understanding = state.get("understanding", {})
+        session_id = request.get("session_id", "")
+        run_id = request.get("run_id", "")
+        message_id = request.get("message_id", "")
+        clarification = understanding.get("clarification_question") or "请补充说明你的目标。"
         assistant_message_id = f"{run_id}:assistant:clarification"
         message = Message(
             id=assistant_message_id,
@@ -357,15 +358,17 @@ class LangGraphRuntime:
         )
         await self._db.sessions.update(session_id, status="idle")
         return {
-            "result": {
-                "content": clarification,
-                "run_id": run_id,
-                "turn_count": 0,
-                "tool_results": [],
-                "error": None,
-                "error_detail": None,
-                "interrupted": False,
-                "attachments": state.get("requested_attachment_refs", []),
+            "response": {
+                "result": {
+                    "content": clarification,
+                    "run_id": run_id,
+                    "turn_count": 0,
+                    "tool_results": [],
+                    "error": None,
+                    "error_detail": None,
+                    "interrupted": False,
+                    "attachments": request.get("requested_attachment_refs", []),
+                },
             }
         }
 
@@ -373,10 +376,12 @@ class LangGraphRuntime:
         """根据任务理解结果生成上下文获取计划。"""
         from athena.runtime.task_understanding import UserTaskSpec
 
-        task_payload = state.get("task_spec")
+        request = state.get("request", {})
+        understanding = state.get("understanding", {})
+        task_payload = understanding.get("task_spec")
         if task_payload is None:
             task = UserTaskSpec(
-                goal=state.get("user_message", "")[:1000] or "answer the user",
+                goal=request.get("user_message", "")[:1000] or "answer the user",
                 domain="general",
                 mode="answer",
                 confidence=0.0,
@@ -386,7 +391,7 @@ class LangGraphRuntime:
             task = UserTaskSpec.model_validate(task_payload)
         requested_file_ids = [
             ref.get("id", "")
-            for ref in state.get("requested_attachment_refs", [])
+            for ref in request.get("requested_attachment_refs", [])
             if ref.get("id")
         ]
         plan = self._context_planner.plan(
@@ -407,13 +412,16 @@ class LangGraphRuntime:
         from athena.runtime.context.contracts import ContextPlan
         from athena.runtime.task_understanding import UserTaskSpec
 
-        task_payload = state.get("task_spec")
-        plan_payload = state.get("context_plan")
+        request = state.get("request", {})
+        understanding = state.get("understanding", {})
+        context = state.get("context", {})
+        task_payload = understanding.get("task_spec")
+        plan_payload = context.get("context_plan")
         task = (
             UserTaskSpec.model_validate(task_payload)
             if task_payload is not None
             else UserTaskSpec(
-                goal=state.get("user_message", "")[:1000] or "answer the user",
+                goal=request.get("user_message", "")[:1000] or "answer the user",
                 domain="general",
                 mode="answer",
                 confidence=0.0,
@@ -426,9 +434,9 @@ class LangGraphRuntime:
             else ContextPlan()
         )
         bundle = await self._context_acquisition_service.acquire(
-            session_id=state.get("session_id", ""),
-            agent_run_id=state.get("run_id"),
-            message_id=state.get("message_id"),
+            session_id=request.get("session_id", ""),
+            agent_run_id=request.get("run_id"),
+            message_id=request.get("message_id"),
             task=task,
             plan=plan,
         )
@@ -441,156 +449,6 @@ class LangGraphRuntime:
     ) -> str:
         """使用内置系统提示词，并注入任务理解和上下文包。"""
         return AgentExecutionService._build_system_prompt(task_spec, context_bundle)
-
-    # ------------------------------------------------------------------
-    # 子 Agent 工具处理器
-    # ------------------------------------------------------------------
-
-    def build_delegation_tool_specs(self) -> list:
-        """构建供组合根注册的 Agent 委派工具声明。"""
-        from athena.core.tools.providers.agents import build_agent_tool_specs
-
-        return build_agent_tool_specs(
-            self._spawn_sub_agent_handler,
-            self._spawn_parallel_handler,
-            self._build_parallel_spawn_description(),
-        )
-
-    @staticmethod
-    def _build_parallel_spawn_description() -> str:
-        """构建 ``spawn_parallel_agents`` 工具描述。"""
-        return (
-            "Spawn multiple independent sub-agents that run concurrently. "
-            "Use this when a task can be decomposed into independent subtasks "
-            "that have no data dependencies between them and each can be "
-            "completed in isolation. This reduces total execution time by "
-            "running them in parallel.\n\n"
-            "Do NOT use when:\n"
-            "- Subtasks depend on each other's results\n"
-            "- The task requires sequential reasoning\n"
-            "- Only one subtask is needed (use spawn_sub_agent instead)\n\n"
-            "Each sub-agent runs independently with its own LLM context. "
-            "Results are returned as a JSON array after ALL agents complete."
-        )
-
-    async def _spawn_parallel_handler(
-        self,
-        tasks: list[str],
-        session_id: str,
-        parent_run_id: str,
-        max_turns: int = 5,
-    ) -> str:
-        """``spawn_parallel_agents`` 工具的执行处理器。"""
-        if len(tasks) < 2:
-            return json.dumps(
-                {"error": "Need at least 2 tasks for parallel execution"},
-                ensure_ascii=False,
-            )
-        if len(tasks) > 6:
-            return json.dumps(
-                {"error": "Maximum 6 parallel tasks allowed"},
-                ensure_ascii=False,
-            )
-
-        logger.info(
-            "parallel_agents_invoked",
-            session_id=session_id,
-            parent_run_id=parent_run_id,
-            task_count=len(tasks),
-        )
-
-        await self._event_publisher.publish(
-            ApplicationEvent(
-                event_type=EventType.SUB_AGENT_SPAWNED,
-                durability=EventDurability.DURABLE,
-                session_id=session_id,
-                run_id=parent_run_id,
-                payload={"task_count": len(tasks), "tasks": [t[:500] for t in tasks]},
-            )
-        )
-
-        try:
-            manager = self.create_sub_agent_manager(main_run_id=parent_run_id)
-            stop_signal = self._session_stop_signals.get(session_id)
-            results = await manager.spawn_parallel(
-                tasks=tasks,
-                session_id=session_id,
-                max_turns=max_turns,
-                stop_signal=stop_signal,
-            )
-
-            output = [
-                {
-                    "task": r.task,
-                    "status": "success" if not r.error else "error",
-                    "output": r.content[:2000] if r.content else "",
-                    "error": r.error,
-                    "turns_used": r.turn_count,
-                }
-                for r in results
-            ]
-
-            success_count = sum(1 for r in results if not r.error)
-            logger.info(
-                "parallel_agents_completed",
-                session_id=session_id,
-                total=len(tasks),
-                success=success_count,
-                failed=len(tasks) - success_count,
-            )
-            return json.dumps(output, ensure_ascii=False)
-        except Exception as e:
-            logger.exception("parallel_agents_exception", session_id=session_id)
-            return json.dumps(
-                {"error": f"[PARALLEL AGENTS ERROR] {e}"},
-                ensure_ascii=False,
-            )
-
-    async def _spawn_sub_agent_handler(
-        self, task: str, session_id: str, parent_run_id: str
-    ) -> str:
-        """``spawn_sub_agent`` 工具的执行处理器。"""
-        logger.info(
-            "sub_agent_tool_invoked",
-            session_id=session_id,
-            parent_run_id=parent_run_id,
-            task=task[:200],
-        )
-        try:
-            manager = self.create_sub_agent_manager(main_run_id=parent_run_id)
-            stop_signal = self._session_stop_signals.get(session_id)
-            result = await manager.spawn(
-                task=task, session_id=session_id, stop_signal=stop_signal
-            )
-            if result.error:
-                logger.warning(
-                    "sub_agent_tool_error",
-                    session_id=session_id,
-                    error=result.error,
-                )
-                return f"[SUB-AGENT ERROR] {result.error}"
-            logger.info(
-                "sub_agent_tool_success",
-                session_id=session_id,
-                turn_count=result.turn_count,
-            )
-            return result.content or "[SUB-AGENT] Completed with no output."
-        except Exception as e:
-            logger.exception("sub_agent_tool_exception", session_id=session_id)
-            return f"[SUB-AGENT ERROR] {e}"
-
-    def create_sub_agent_manager(self, main_run_id: str) -> SubAgentManager:
-        """创建子 Agent 管理器实例。"""
-        return SubAgentManager(
-            llm=self._llm,
-            tool_manager=self._tool_manager,
-            db=self._db,
-            event_publisher=self._event_publisher,
-            compressor=self._compressor,
-            settings=self._settings,
-            main_run_id=main_run_id,
-            agent_store=self._agent_store,
-        )
 
     # ------------------------------------------------------------------
     # 记忆工作流
@@ -609,5 +467,9 @@ class LangGraphRuntime:
 
     def validate_session_state(self, state: AgentState) -> None:
         """Validate minimum required state fields exist."""
-        if state.get("session_id") is None:
+        if state.get("request", {}).get("session_id") is None:
             raise ValueError("AgentState missing required field: session_id")
+
+    @property
+    def event_publisher(self):
+        return self._event_publisher

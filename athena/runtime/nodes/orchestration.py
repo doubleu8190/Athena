@@ -18,16 +18,24 @@ async def materialize_execution_plan(
     state: AgentState, *, runtime: LangGraphRuntime
 ) -> AgentState:
     """校验并持久化顶层 LLM 提交的计划，不再调用模型。"""
-    request = state.get("plan_request")
+    orchestration = state.get("orchestration", {})
+    request_state = state.get("request", {})
+    request = orchestration.get("plan_request")
     if not request:
         raise ValueError("materialize_execution_plan requires plan_request")
     plan = await runtime.materialize_plan(
-        session_id=state.get("session_id", ""),
-        root_run_id=state.get("run_id", ""),
-        user_goal=state.get("user_message", ""),
+        session_id=request_state.get("session_id", ""),
+        root_run_id=request_state.get("run_id", ""),
+        user_goal=request_state.get("user_message", ""),
         submission=request,
     )
-    return {"execution_plan": plan.model_dump(mode="json")}
+    return {
+        "phase": "orchestration",
+        "orchestration": {
+            **orchestration,
+            "execution_plan": plan.model_dump(mode="json"),
+        },
+    }
 
 
 async def run_planned_orchestration(
@@ -49,16 +57,21 @@ async def run_planned_orchestration(
     异常：
         ValueError: 顶层 Agent 的决策缺少计划。
     """
-    plan_payload = state.get("execution_plan")
+    orchestration = state.get("orchestration", {})
+    request_state = state.get("request", {})
+    plan_payload = orchestration.get("execution_plan")
     if plan_payload is None:
         raise ValueError("run_planned_orchestration route requires a persisted plan")
 
     result = await runtime.execute_planned_orchestration(
         plan_payload=plan_payload,
-        session_id=state.get("session_id", ""),
+        session_id=request_state.get("session_id", ""),
         stop_signal=_stop_signal(config),
     )
-    return {"orchestration_result": result}
+    return {
+        "phase": "response",
+        "orchestration": {**orchestration, "orchestration_result": result},
+    }
 
 
 async def close_execution_stream(
@@ -69,9 +82,18 @@ async def close_execution_stream(
 ) -> AgentState:
     """计划汇总完成后关闭顶层 Agent 决策打开的回答流。"""
     execution = state.get("execution", {})
+    request_state = state.get("request", {})
+    response = state.get("response", {})
     return {
         "execution": await finish_execution(
-            execution, config, graph_runtime=runtime
+            execution,
+            config,
+            graph_runtime=runtime,
+            session_id=request_state.get("session_id", ""),
+            run_id=request_state.get("run_id", ""),
+            message_id=request_state.get("message_id"),
+            error=response.get("error"),
+            error_detail=response.get("error_detail"),
         )
     }
 
@@ -90,14 +112,17 @@ async def build_orchestration_response(
     异常：
         ValueError: 编排结果缺少必要字段。
     """
-    orchestration = state.get("orchestration_result") or {}
+    orchestration_state = state.get("orchestration", {})
+    request_state = state.get("request", {})
+    orchestration = orchestration_state.get("orchestration_result") or {}
     content = orchestration.get("content")
     if content is None:
         raise ValueError("orchestration result missing content")
     return {
-        "result": {
+        "phase": "response",
+        "response": {"result": {
             "content": content,
-            "run_id": state.get("run_id", ""),
+            "run_id": request_state.get("run_id", ""),
             "turn_count": 0,
             "tool_results": [],
             "error": None,
@@ -105,7 +130,7 @@ async def build_orchestration_response(
             "attachments": [],
             "plan_id": orchestration.get("plan_id"),
             "worker_results": orchestration.get("results", {}),
-        }
+        }}
     }
 
 

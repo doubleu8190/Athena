@@ -1,11 +1,10 @@
-import { AlertTriangle, Check, Clock, Shield, X } from "lucide-react"
-import { useEffect, useMemo, useState } from "react"
+import { AlertTriangle, Check, Shield, X } from "lucide-react"
+import { useEffect, useState } from "react"
 import type { ApprovalRequest } from "../types"
 
 interface ApprovalCardProps {
   requests: ApprovalRequest[]
-  onApprove: (request: ApprovalRequest) => void
-  onDeny: (request: ApprovalRequest) => void
+  onSubmit: (decisions: Record<string, "approved" | "denied">) => void
 }
 
 function riskClass(risk: ApprovalRequest["risk_level"]): string {
@@ -14,38 +13,27 @@ function riskClass(risk: ApprovalRequest["risk_level"]): string {
   return "text-green-400 bg-green-500/20 border-green-500/50"
 }
 
-export function ApprovalCard({ requests, onApprove, onDeny }: ApprovalCardProps) {
+export function ApprovalCard({ requests, onSubmit }: ApprovalCardProps) {
   const [resolving, setResolving] = useState<Set<string>>(new Set())
-  const [now, setNow] = useState(() => Date.now())
+  const [decisions, setDecisions] = useState<Record<string, "approved" | "denied">>({})
 
   useEffect(() => {
     setResolving(new Set())
-    setNow(Date.now())
-    const interval = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(interval)
+    setDecisions({})
   }, [requests.length])
 
-  const remaining = useMemo(
-    () => Math.max(0, Math.min(...requests.map((request) => {
-      if (request.expires_at) {
-        const expiresAt = new Date(request.expires_at).getTime()
-        if (Number.isFinite(expiresAt)) return Math.ceil((expiresAt - now) / 1000)
-      }
-      return request.timeout || 120
-    }))),
-    [now, requests],
-  )
-
   const resolve = (request: ApprovalRequest, action: "allow" | "deny") => {
+    const next = { ...decisions, [request.approval_id]: action === "allow" ? "approved" : "denied" }
+    setDecisions(next)
     setResolving((current) => new Set(current).add(request.approval_id))
-    if (action === "allow") onApprove(request)
-    else onDeny(request)
+    if (Object.keys(next).length === requests.length) onSubmit(next)
   }
 
   const resolveAll = (action: "allow" | "deny") => {
-    requests.forEach((request) => {
-      if (!resolving.has(request.approval_id)) resolve(request, action)
-    })
+    const next = Object.fromEntries(requests.map((request) => [request.approval_id, action === "allow" ? "approved" : "denied"])) as Record<string, "approved" | "denied">
+    setDecisions(next)
+    setResolving(new Set(requests.map((request) => request.approval_id)))
+    onSubmit(next)
   }
 
   return (
@@ -62,10 +50,6 @@ export function ApprovalCard({ requests, onApprove, onDeny }: ApprovalCardProps)
             </span>
           </h3>
           <p className="text-xs text-athena-muted">Review these actions before Athena continues.</p>
-        </div>
-        <div className={`ml-auto flex items-center gap-1 text-xs ${remaining <= 10 ? "text-athena-danger" : "text-athena-muted"}`}>
-          <Clock className="h-3.5 w-3.5" />
-          {remaining}s
         </div>
       </div>
 

@@ -40,7 +40,6 @@ class CommandConsumer:
         notifier: CommandNotifier | None = None,
         cancellation_registry: CancellationRegistry | None = None,
         memory_service: LongTermMemoryService,
-        approval_manager: Any | None = None,
         sandbox_runner: SandboxRunner | None = None,
     ) -> None:
         """创建命令消费者。
@@ -52,7 +51,6 @@ class CommandConsumer:
             notifier (CommandNotifier | None): Command 提交后的进程内唤醒通知器。
             cancellation_registry (CancellationRegistry | None): 可选取消注册表。
             memory_service (LongTermMemoryService): 处理主动保存记忆命令的服务。
-            approval_manager (Any | None): 可选审批协调器，用于停止等待中的审批。
         返回值:
             None: 消费循环尚未启动。
         异常:
@@ -69,7 +67,6 @@ class CommandConsumer:
         self.notifier = notifier
         self._cancellation_registry = cancellation_registry or CancellationRegistry()
         self._memory_service = memory_service
-        self._approval_manager = approval_manager
         self._sandbox_runner = sandbox_runner
 
     async def start(self) -> None:
@@ -172,7 +169,6 @@ class CommandConsumer:
             CommandType.RUN_RESUME: self._handle_run_resume,
             CommandType.RUN_CANCEL: self._handle_run_cancel,
             CommandType.APPROVAL_RESOLVE: self._handle_approval,
-            CommandType.APPROVAL_CANCEL: self._handle_approval,
             CommandType.MESSAGE_SUBMIT: self._handle_message_submit,
         }
         handler = handlers.get(command.command_type)
@@ -254,10 +250,6 @@ class CommandConsumer:
     ) -> None:
         if command.run_id:
             await self._cancellation_registry.request_cancellation(command.run_id)
-        if self._approval_manager is not None:
-            cancel_pending = getattr(self._approval_manager, "cancel_pending_approvals", None)
-            if cancel_pending is not None:
-                await cancel_pending(command.session_id)
         if command.run_id:
             await self.store.update_run_control(
                 command.run_id,
@@ -273,26 +265,55 @@ class CommandConsumer:
     async def _handle_approval(
         self, command: AgentCommandRecord, payload: CommandPayload
     ) -> None:
-        approval_id = payload.approval_id or ""
-        expected_worker_run_id = payload.worker_run_id or None
-        expected_task_id = payload.task_id or None
-        expected_plan_id = payload.plan_id or None
-        expected_run_id = command.run_id
-        decision = (
-            AgentApprovalDecision.CANCELLED
-            if command.command_type == CommandType.APPROVAL_CANCEL
-            else AgentApprovalDecision(str(payload.decision))
-        )
-        resolved = await self.store.resolve_approval_for_attempt(
-            approval_id,
-            decision,
-            expected_run_id=expected_run_id,
-            expected_worker_run_id=expected_worker_run_id,
-            expected_task_id=expected_task_id,
-            expected_plan_id=expected_plan_id,
-        )
-        # 审批响应现在由 Gateway 直接写入 DB 并唤醒 Future。保留该 handler
-        # 仅用于兼容历史命令，不再发布重复事件或触发 LangGraph resume。
+        decisions = dict(payload.decisions or {})
+        batch_id = payload.approval_batch_id
+        resolved = False
+        if batch_id and decisions:
+            resolved = await self.store.resolve_approval_batch(
+                batch_id,
+                {key: AgentApprovalDecision(value) for key, value in decisions.items()},
+                expected_run_id=command.run_id,
+            )
+        if resolved and command.run_id and batch_id:
+            await self.store.publish(
+                ApplicationEvent(
+                    event_type=EventType.APPROVAL_RESOLVED,
+                    durability=EventDurability.DURABLE,
+                    session_id=command.session_id,
+                    run_id=command.run_id,
+                    payload={
+                        "approval_batch_id": batch_id,
+                        "decisions": decisions,
+                    },
+                )
+            )
+            message_row = await self.store.get_message_command_for_run(command.run_id)
+            if message_row is not None:
+                original = AgentCommandRecord(
+                    command_id=message_row.command_id,
+                    session_id=message_row.session_id,
+                    run_id=message_row.run_id,
+                    command_type=CommandType(message_row.command_type),
+                    schema_version=message_row.schema_version,
+                    payload_json=message_row.payload_json,
+                )
+                original_payload = CommandPayload.model_validate_json(message_row.payload_json)
+                await self.store.update_run_status(command.run_id, AgentRunStatus.RUNNING)
+                result = await invoke_graph(
+                    self.graph,
+                    session_id=command.session_id,
+                    run_id=command.run_id,
+                    user_message=original_payload.message or "",
+                    message_id=original_payload.message_id or "",
+                    attachment_ids=original_payload.attachment_ids,
+                    resume_value={"batch_id": batch_id, "decisions": decisions},
+                )
+                if isinstance(result, dict) and result.get("waiting_approval"):
+                    await self.store.update_run_status(
+                        command.run_id, AgentRunStatus.WAITING_APPROVAL
+                    )
+                elif isinstance(result, dict):
+                    await self._complete_message(original, command.run_id, result)
         await self.store.complete_command(
             command.command_id,
             status=(
@@ -301,7 +322,9 @@ class CommandConsumer:
                 else AgentCommandStatus.REJECTED
             ),
             result={"resolved": True} if resolved else None,
-            error=None if resolved else {"code": "approval_already_resolved"},
+            error=None
+            if resolved
+            else {"code": "approval_batch_incomplete_or_already_resolved"},
         )
 
     async def _handle_message_submit(
@@ -341,6 +364,10 @@ class CommandConsumer:
                 attachment_ids=payload.attachment_ids,
                 stop_signal=cancel_event,
             )
+            if isinstance(result, dict) and result.get("waiting_approval"):
+                await self.store.update_run_status(run_id, AgentRunStatus.WAITING_APPROVAL)
+                await self._publish_run_event(command, EventType.RUN_PAUSED)
+                return
             if cancel_event.is_set():
                 run = await self.store.get_run(run_id)
                 if run is not None and run.status == AgentRunStatus.PAUSED:

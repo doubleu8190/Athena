@@ -33,4 +33,3 @@ class AgentApprovalDecision(StrEnum):
     APPROVED = "approved"
     DENIED = "denied"
     CANCELLED = "cancelled"
-    EXPIRED = "expired"

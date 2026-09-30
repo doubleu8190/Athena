@@ -42,11 +42,11 @@ def route_after_agent_loop(
 
     若子图产出了 ``harness_result`` 则进入后处理，否则直接收尾。
     """
-    if state.get("plan_request") is not None:
+    if state.get("orchestration", {}).get("plan_request") is not None:
         return "materialize_execution_plan"
     return (
         "post_process_and_build_result"
-        if state.get("harness_result") is not None
+        if state.get("response", {}).get("harness_result") is not None
         else "assemble_final_response"
     )
 
@@ -65,27 +65,30 @@ async def post_process_and_build_result(
     返回值：
         AgentState: 仅包含 ``result`` 字段。
     """
-    if not state.get("session_id"):
+    request = state.get("request", {})
+    if not request.get("session_id"):
         raise ValueError("AgentState missing required field: session_id")
-    payload = state.get("harness_result")
+    payload = state.get("response", {}).get("harness_result")
     if payload is None:
         return {}
-    from athena.core.harness.harness import HarnessRunResult
+    from athena.runtime.execution_loop.results import AgentExecutionResult
     from ..services.agent_execution_service import AgentExecutionService
 
-    result = HarnessRunResult(**payload)
+    result = AgentExecutionResult(**payload)
     attachment_refs = AgentExecutionService.deserialize_attachment_refs(
-        state.get("attachment_refs", [])
+        state.get("context", {}).get("attachment_refs", [])
     )
     if result.error is None and not result.interrupted:
         await agent_execution_service.process_completed_run(
-            state.get("session_id", ""),
-            state.get("user_message", ""),
+            request.get("session_id", ""),
+            request.get("user_message", ""),
             result,
-            turn_id=state.get("run_id", ""),
+            turn_id=request.get("run_id", ""),
         )
     return {
-        "result": AgentExecutionService.build_result_payload(result, attachment_refs)
+        "response": {
+            "result": AgentExecutionService.build_result_payload(result, attachment_refs)
+        }
     }
 
 

@@ -376,11 +376,10 @@ function Chat({ sendEvent }: ChatProps) {
   }
 
   const handleApproval = useCallback(
-    (approval: ApprovalRequest, action: "allow" | "deny") => {
-      sendEvent(ClientEventType.APPROVAL_RESPONSE, {
-        approval_id: approval.approval_id,
-        action,
-      })
+    (decisions: Record<string, "approved" | "denied">) => {
+      const approval = pendingApprovals[0]
+      if (!approval?.approval_batch_id) return
+      void apiClient.respondApprovalBatch(approval.approval_batch_id, decisions)
     },
     [sendEvent],
   )
@@ -695,8 +694,7 @@ function Chat({ sendEvent }: ChatProps) {
             <div className="my-4">
               <ApprovalCard
                 requests={pendingApprovals}
-                onApprove={(approval) => handleApproval(approval, "allow")}
-                onDeny={(approval) => handleApproval(approval, "deny")}
+                onSubmit={handleApproval}
               />
             </div>
           )}

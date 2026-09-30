@@ -41,8 +41,7 @@ const SECTIONS: { id: string; title: string; fields: Field[] }[] = [
       { key: "max_turns_per_run", label: "单次最大轮数" },
       { key: "retry_budget", label: "重试预算" },
       { key: "tool_timeout", label: "工具超时（秒）" },
-      { key: "llm_stream_timeout", label: "LLM 流式超时（秒）" },
-      { key: "approval_timeout", label: "审批超时（秒）" },
+      { key: "llm_timeout", label: "LLM 调用超时（秒）" },
     ],
   },
   {

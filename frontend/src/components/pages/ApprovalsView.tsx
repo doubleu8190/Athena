@@ -3,7 +3,6 @@ import {
   ClipboardCheck,
   ThumbsUp,
   ThumbsDown,
-  Timer,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react"
@@ -24,7 +23,6 @@ const PAGE_SIZE = 20
 const DECISION_META = {
   approved: { tone: "success", label: "通过" },
   denied: { tone: "danger", label: "拒绝" },
-  timeout: { tone: "warning", label: "超时" },
   cancelled: { tone: "default", label: "取消" },
 } as const
 
@@ -137,11 +135,10 @@ function ApprovalsView() {
           <div className="text-sm text-athena-danger">加载失败：{error}</div>
         ) : (
           <>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
               <StatCard label="今日审批" value={stats?.today_total ?? "—"} icon={ClipboardCheck} />
               <StatCard label="通过率" value={stats ? `${Math.round((stats.approval_rate ?? 0) * 100)}%` : "—"} icon={ThumbsUp} />
               <StatCard label="今日拒绝" value={stats?.today_denied ?? "—"} icon={ThumbsDown} />
-              <StatCard label="今日超时" value={stats?.today_timeout ?? "—"} icon={Timer} />
             </div>
 
             <DataTable

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from athena.core.compression.compressor import ContextCompressor
 from athena.core.files.runtime import FileIntelligenceRuntime
-from athena.core.harness.harness import Harness
+from athena.core.harness.execution_support import ExecutionSupport
 from athena.core.memory.long_term_memory import LongTermMemoryService
 from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalService
 from athena.core.memory.distillation import LongTermMemorySummarizer
@@ -16,7 +16,6 @@ from athena.core.tools.catalog import ToolRegistry
 from athena.core.tools.manager import UnifiedToolManager
 from athena.core.tools.mcp.adapter import MCPToolAdapter
 from athena.core.tools.mcp.manager import MCPManager
-from athena.core.tools.providers.agents import build_agent_tool_specs
 from athena.gateway.approval import ApprovalManager
 from athena.container import RuntimeContainer
 
@@ -59,7 +58,6 @@ def test_stable_layers_do_not_depend_on_runtime_orchestration():
         *(ROOT / "athena/infrastructure/postgre/repositories").rglob("*.py"),
         ROOT / "athena/core/tools/manager.py",
         ROOT / "athena/core/harness/turn_executor.py",
-        ROOT / "athena/runtime/sub_agent_manager.py",
     ]
     forbidden = "athena.runtime.orchestration"
     violations = {
@@ -116,23 +114,6 @@ def test_tool_manager_has_no_concrete_tool_name_branches():
     assert "spawn_parallel_agents" not in source
 
 
-def test_agent_tool_schema_hides_trusted_runtime_context():
-    async def single(task: str, session_id: str, run_id: str) -> str:
-        return task
-
-    async def parallel(
-        tasks: list[str], session_id: str, run_id: str, max_turns: int
-    ) -> str:
-        return str(tasks)
-
-    specs = build_agent_tool_specs(single, parallel, "parallel")
-    for spec in specs:
-        properties = (spec.parameters or {}).get("properties", {})
-        assert "session_id" not in properties
-        assert "run_id" not in properties
-        assert "tool_call_id" not in properties
-
-
 def test_main_uses_runtime_container_not_service_setters():
     source = (ROOT / "athena/main.py").read_text(encoding="utf-8")
     assert "RuntimeContainer" in source
@@ -146,11 +127,10 @@ def test_main_uses_runtime_container_not_service_setters():
 def test_runtime_dependencies_are_required():
     required_parameters = {
         RuntimeContainer: tuple(RuntimeContainer.__dataclass_fields__),
-        UnifiedToolManager: ("approval_manager",),
-        ApprovalManager: ("event_publisher", "db"),
+        ApprovalManager: ("event_publisher", "agent_store"),
         LongTermMemoryService: ("settings", "repository", "vector_store"),
         FileIntelligenceRuntime: ("settings", "event_publisher"),
-        Harness: ("settings", "db", "event_publisher", "compressor"),
+        ExecutionSupport: ("settings", "db", "event_publisher"),
         ContextCompressor: ("settings",),
         HybridMemoryRetriever: ("settings",),
         MemoryRetrievalService: ("settings",),

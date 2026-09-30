@@ -3,38 +3,20 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import StrEnum
 from typing import Any
 
-
-class ApprovalDecision(StrEnum):
-    """审批结果枚举。"""
-    APPROVED = "approved"
-    DENIED = "denied"
-    CANCELLED = "cancelled"
-    TIMEOUT = "timeout"
-
-
 class ApprovalRequest:
-    """审批请求的完整数据结构.
-
-    运行时请求对象仅保存展示信息；审批决定以 PostgreSQL Approval Record 为准。
-    """
+    """审批记录展示模型。审批状态和决定以持久化记录为准。"""
 
     __slots__ = (
         "id",
         "tool_name",
         "arguments",
         "risk_level",
-        "timeout",
         "created_at",
         "session_id",
         "run_id",
-        "resolved",
-        "resolution",
         "tool_call_id",
-        "expires_at",
-        "decided_at",
     )
 
     def __init__(
@@ -43,12 +25,10 @@ class ApprovalRequest:
         tool_name: str,
         arguments: dict[str, Any],
         risk_level: str,
-        timeout: int,
         created_at: datetime,
         session_id: str,
         run_id: str,
         tool_call_id: str,
-        expires_at: datetime | None = None,
     ) -> None:
         """
 
@@ -57,12 +37,10 @@ class ApprovalRequest:
             tool_name (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             arguments (dict[str, Any]): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             risk_level (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            timeout (int): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             created_at (datetime): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
             session_id (str): 会话唯一标识。
             run_id (str): 运行唯一标识。
             tool_call_id (str): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
-            expires_at (datetime | None): 审批截止时间；恢复任务时仍沿用原截止时间。
 
         返回值：
             None: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -74,12 +52,7 @@ class ApprovalRequest:
         self.tool_name = tool_name
         self.arguments = arguments
         self.risk_level = risk_level
-        self.timeout = timeout
         self.created_at = created_at
         self.session_id = session_id
         self.run_id = run_id
         self.tool_call_id = tool_call_id
-        self.expires_at = expires_at
-        self.resolved: bool = False
-        self.resolution: str = "pending"  # approved/denied/timeout（已批准 / 已拒绝 / 超时）
-        self.decided_at: datetime | None = None

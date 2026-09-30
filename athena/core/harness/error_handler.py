@@ -5,7 +5,7 @@
 - 熔断器: 滑动窗口跟踪失败率，三态切换（CLOSED → OPEN → HALF_OPEN）
 
 集成方式:
-    集成到 ``Harness._execute_single_tool()``，工具失败时先查 Fallback 路由表
+    集成到 ``ExecutionSupport._execute_single_tool()``，工具失败时先查 Fallback 路由表
     进行确定性恢复（retry / alternate / passthrough），无可行 Fallback 时
     才将错误返回给 LLM。
 
@@ -235,7 +235,7 @@ class FallbackRoute:
 class ToolErrorHandler:
     """工具错误自愈路由器.
 
-    组合熔断器（CircuitBreaker）与 Fallback 路由表，为 Harness 提供
+    组合熔断器（CircuitBreaker）与 Fallback 路由表，为 ExecutionSupport 提供
     工具失败时的确定性恢复能力。
 
     典型用法::

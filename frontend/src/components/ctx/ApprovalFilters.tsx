@@ -1,6 +1,6 @@
 import { RefreshCw } from "lucide-react"
 
-type DecisionFilter = "all" | "approved" | "denied" | "timeout"
+type DecisionFilter = "all" | "approved" | "denied"
 
 interface ApprovalFiltersProps {
   decision: DecisionFilter
@@ -60,7 +60,6 @@ function ApprovalFilters({
             { value: "all", label: "全部" },
             { value: "approved", label: "通过" },
             { value: "denied", label: "拒绝" },
-            { value: "timeout", label: "超时" },
           ]}
           value={decision}
           onChange={onDecisionChange}

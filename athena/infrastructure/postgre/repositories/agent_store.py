@@ -477,6 +477,16 @@ class AgentStore:
         async with get_session() as db:
             return await db.get(AgentCommandModel, command_id)
 
+    async def get_message_command_for_run(self, run_id: str) -> AgentCommandModel | None:
+        """查找某个运行对应的原始 message.submit 命令。"""
+        async with get_session() as db:
+            return await db.scalar(
+                select(AgentCommandModel).where(
+                    AgentCommandModel.run_id == run_id,
+                    AgentCommandModel.command_type == CommandType.MESSAGE_SUBMIT.value,
+                ).order_by(AgentCommandModel.issued_at).limit(1)
+            )
+
     async def list_events_between(
         self, session_id: str, after: int = 0, upto: int | None = None
     ) -> list[AgentEventModel]:
@@ -814,7 +824,7 @@ class AgentStore:
         plan_id: str | None = None,
         task_id: str | None = None,
         worker_run_id: str | None = None,
-        expires_at: str | None = None,
+        approval_batch_id: str | None = None,
     ) -> bool:
         """创建待审批记录并持久化工具参数。
 
@@ -826,7 +836,6 @@ class AgentStore:
             tool_name (str): 工具名称。
             arguments (dict): 工具参数，可 JSON 序列化。
             risk_level (RiskLevel): 工具风险等级。
-            expires_at (str | None): 审批截止时间；恢复任务时沿用原截止时间。
         返回值:
             bool: 首次插入返回 ``True``；同一工具尝试已有记录时返回 ``False``。
         异常:
@@ -847,6 +856,7 @@ class AgentStore:
                         approval_id=approval_id,
                         session_id=session_id,
                         run_id=run_id,
+                        approval_batch_id=approval_batch_id,
                         plan_id=plan_id,
                         task_id=task_id,
                         worker_run_id=worker_run_id,
@@ -855,7 +865,6 @@ class AgentStore:
                         arguments_json=_json_dumps(arguments),
                         risk_level=risk_level.value,
                         created_at=_now(),
-                        expires_at=expires_at,
                     )
                 )
                 await db.commit()
@@ -874,6 +883,49 @@ class AgentStore:
                 raise
             return True
 
+    async def list_approvals_by_batch(
+        self, approval_batch_id: str, *, include_resolved: bool = False
+    ) -> list[ApprovalRecordModel]:
+        """读取一个审批批次中的全部审批项。"""
+        async with get_session() as db:
+            query = select(ApprovalRecordModel).where(
+                ApprovalRecordModel.approval_batch_id == approval_batch_id
+            )
+            if not include_resolved:
+                query = query.where(
+                    ApprovalRecordModel.status == AgentApprovalStatus.PENDING.value
+                )
+            result = await db.execute(query.order_by(ApprovalRecordModel.created_at))
+            return list(result.scalars())
+
+    async def resolve_approval_batch(
+        self,
+        approval_batch_id: str,
+        decisions: dict[str, AgentApprovalDecision],
+        *,
+        expected_run_id: str | None = None,
+    ) -> bool:
+        """在一个事务内原子解析完整审批批次。"""
+        async with get_session() as db:
+            rows = list((await db.execute(
+                select(ApprovalRecordModel).where(
+                    ApprovalRecordModel.approval_batch_id == approval_batch_id
+                )
+            )).scalars())
+            if not rows or expected_run_id and any(r.run_id != expected_run_id for r in rows):
+                return False
+            if {r.approval_id for r in rows} != set(decisions):
+                return False
+            if any(r.status != AgentApprovalStatus.PENDING.value for r in rows):
+                return False
+            now = _now()
+            for row in rows:
+                row.status = AgentApprovalStatus.RESOLVED.value
+                row.decision = decisions[row.approval_id].value
+                row.decided_at = now
+            await db.commit()
+            return True
+
     async def get_approval(self, approval_id: str) -> ApprovalRecordModel | None:
         """按 ID 查询审批记录。
 
@@ -886,50 +938,6 @@ class AgentStore:
         """
         async with get_session() as db:
             return await db.get(ApprovalRecordModel, approval_id)
-
-    async def resolve_approval_for_attempt(
-        self,
-        approval_id: str,
-        decision: AgentApprovalDecision,
-        *,
-        expected_run_id: str | None = None,
-        expected_worker_run_id: str | None = None,
-        expected_task_id: str | None = None,
-        expected_plan_id: str | None = None,
-    ) -> bool:
-        """原子解析审批，并校验其仍属于预期的编排尝试。
-
-        参数:
-            approval_id: 审批主键。
-            decision: 用户或系统作出的审批决定。
-            expected_run_id: 当前期望的 Root/Worker 运行标识。
-            expected_worker_run_id: 当前期望的 Worker 尝试标识。
-            expected_task_id: 当前期望的稳定任务标识。
-            expected_plan_id: 当前期望的执行计划标识。
-
-        返回值:
-            bool: 审批仍为待处理且运行归属匹配时返回 True；否则返回 False。
-
-        异常:
-            数据库写入失败时传播 SQLAlchemy 异常。
-        """
-        async with get_session() as db:
-            row = await db.get(ApprovalRecordModel, approval_id)
-            if row is None or row.status != AgentApprovalStatus.PENDING.value:
-                return False
-            if expected_run_id and row.run_id != expected_run_id:
-                return False
-            if expected_plan_id and row.plan_id != expected_plan_id:
-                return False
-            if expected_task_id and row.task_id != expected_task_id:
-                return False
-            if expected_worker_run_id and row.worker_run_id != expected_worker_run_id:
-                return False
-            row.status = AgentApprovalStatus.RESOLVED.value
-            row.decision = decision.value
-            row.decided_at = _now()
-            await db.commit()
-            return True
 
     async def list_pending_approvals(
         self, session_id: str | None = None
@@ -994,31 +1002,3 @@ class AgentStore:
                 .order_by(ApprovalRecordModel.created_at.desc())
             )
             return list(result.scalars())
-
-    async def resolve_approval(
-        self, approval_id: str, decision: AgentApprovalDecision
-    ) -> bool:
-        """原子地将待审批记录解析为已处理状态。
-
-        参数:
-            approval_id (str): 审批 ID。
-            decision (AgentApprovalDecision): 审批决定。
-        返回值:
-            bool: 成功解析待处理记录时返回 ``True``；不存在或已解析时返回 ``False``。
-        异常:
-            数据库写入失败时传播 SQLAlchemy 异常。
-        """
-        async with get_session() as db:
-            row = await db.scalar(
-                select(ApprovalRecordModel).where(
-                    ApprovalRecordModel.approval_id == approval_id,
-                    ApprovalRecordModel.status == AgentApprovalStatus.PENDING.value,
-                )
-            )
-            if row is None:
-                return False
-            row.status = AgentApprovalStatus.RESOLVED.value
-            row.decision = decision.value
-            row.decided_at = _now()
-            await db.commit()
-            return True

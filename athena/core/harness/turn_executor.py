@@ -1,9 +1,4 @@
-"""可被 LangGraph 单轮节点复用的 Harness 执行器。
-
-``Harness`` 保留旧的整轮兼容入口；本模块只抽取一次 LLM 调用、一次工具
-批次和一次执行收尾。所有跨节点状态都由调用方显式传入，避免把 Python
-运行时对象写入 LangGraph checkpoint。
-"""
+"""LangGraph execution-loop 的单轮 LLM 和工具执行器。"""
 
 from __future__ import annotations
 
@@ -14,17 +9,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence
 
-from langchain_core.messages import (
-    AIMessage,
-    AIMessageChunk,
-    BaseMessage,
-    SystemMessage,
-)
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 
 from athena.contracts.events import EventType
 from athena.contracts.errors import ExecutionError
-from athena.core.harness.harness import Harness
+from athena.core.harness.execution_support import ExecutionSupport
 from athena.models import Message, MessageRole
 from athena.utils.llm_response import extract_message_text
 from athena.utils.message_conversion import dict_to_message, message_to_dict
@@ -68,6 +58,9 @@ class LlmTurnOutcome:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     error_detail: dict[str, Any] | None = None
+    llm_result_status: str = "completed"
+    llm_retry_reason: str = "none"
+    retry_feedback: str | None = None
     interrupted: bool = False
     retryable: bool = False
     turn_count: int = 0
@@ -80,8 +73,8 @@ class LlmTurnOutcome:
 
 
 @dataclass
-class ToolBatchOutcome:
-    """一批并行工具调用的 JSON 边界结果。"""
+class ToolCallOutcome:
+    """单个工具调用节点的 JSON 边界结果。"""
 
     # messages 只包含本批次新增的 ToolMessage，由执行节点追加到已有会话上下文。
     messages: list[dict[str, Any]]
@@ -114,8 +107,13 @@ class _LlmTurnContext:
         return (time.time() - self.started_at) * 1000
 
 
-class HarnessTurnExecutor(Harness):
-    """将旧 Harness 的一次调用拆成可检查点化的执行步骤。"""
+class TurnExecutor(ExecutionSupport):
+    """执行一次 LLM 调用、一次工具批次或一次执行收尾。"""
+
+    def __init__(self, *, compressor, **kwargs: Any) -> None:
+        """绑定单轮 LLM 所需的上下文压缩器。"""
+        super().__init__(**kwargs)
+        self._compressor = compressor
 
     def _configure_context(
         self,
@@ -175,23 +173,13 @@ class HarnessTurnExecutor(Harness):
     ) -> bool:
         if stream_started:
             return True
-        await self._emit(
-            EventType.STREAM_START,
-            {
-                "run_id": run_id,
-                "stream_id": self._answer_stream_id,
-                "stream_type": "answer",
-            },
-            session_id,
-            run_id,
-        )
         await self._emit_thinking(
             EventType.THINKING_STARTED,
             "正在准备请求",
             session_id,
             run_id,
         )
-        return True
+        return stream_started
 
     def _llm_outcome(
         self,
@@ -208,6 +196,9 @@ class HarnessTurnExecutor(Harness):
         retryable: bool = False,
         route: str = "agent_loop",
         plan_request: dict[str, Any] | None = None,
+        llm_result_status: str = "completed",
+        llm_retry_reason: str = "none",
+        retry_feedback: str | None = None,
     ) -> LlmTurnOutcome:
         """构造单轮结果并集中复制回答流的检查点状态。"""
 
@@ -225,6 +216,9 @@ class HarnessTurnExecutor(Harness):
                 if isinstance(error_detail, ExecutionError)
                 else error_detail
             ),
+            llm_result_status=llm_result_status,
+            llm_retry_reason=llm_retry_reason,
+            retry_feedback=retry_feedback,
             interrupted=interrupted,
             retryable=retryable,
             turn_count=turn_count,
@@ -243,35 +237,6 @@ class HarnessTurnExecutor(Harness):
         raw = f"{run_id}:{turn_count}:{index}:{tool_call.get('name', '')}:{tool_call.get('args', {})}"
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
         return f"{run_id}:tool:{turn_count}:{index}:{digest}"
-
-    def _assemble_stable_response(
-        self,
-        chunks: list[AIMessageChunk],
-        *,
-        run_id: str,
-        turn_count: int,
-    ) -> tuple[str, list[dict[str, Any]]]:
-        if not chunks:
-            return "", []
-        merged = chunks[0]
-        for chunk in chunks[1:]:
-            merged = merged + chunk
-        content = extract_message_text(merged)
-        raw_tool_calls = merged.tool_calls or []
-        tool_calls: list[dict[str, Any]] = []
-        for index, raw in enumerate(raw_tool_calls):
-            args = raw.get("args", {}) or {}
-            tool_call = {
-                "id": raw.get("id") or "",
-                "name": raw.get("name", ""),
-                "args": args,
-            }
-            if not tool_call["id"]:
-                tool_call["id"] = self._stable_tool_call_id(
-                    run_id, turn_count, index, tool_call
-                )
-            tool_calls.append(tool_call)
-        return content, tool_calls
 
     @staticmethod
     async def _submit_plan_placeholder(**_: Any) -> str:
@@ -320,6 +285,7 @@ class HarnessTurnExecutor(Harness):
         stream_offset: int,
         parent_run_id: str | None = None,
         tool_names: list[str] | None = None,
+        retry_feedback: str | None = None,
     ) -> LlmTurnOutcome:
         """执行一次 LLM 调用，返回下一图节点所需的 JSON 状态。"""
 
@@ -344,6 +310,7 @@ class HarnessTurnExecutor(Harness):
             session_id=session_id,
             run_id=run_id,
             system_prompt=system_prompt,
+            retry_feedback=retry_feedback,
         )
 
         context = _LlmTurnContext(
@@ -368,21 +335,36 @@ class HarnessTurnExecutor(Harness):
 
         await self._emit_llm_call_started(context)
         try:
-            content, tool_calls = self._assemble_stable_response(
-                await self._collect_llm_chunks(context, tool_names),
-                run_id=run_id,
-                turn_count=context.next_turn,
-            )
+            content, tool_calls = await self._collect_llm_response(context, tool_names)
 
             if self._should_stop():
                 return await self._interrupted_llm_outcome(context)
             if not content.strip() and not tool_calls:
                 return await self._empty_llm_outcome(context)
+            invalid_tool_call = next(
+                (
+                    call
+                    for call in tool_calls
+                    if not call.get("name") or not isinstance(call.get("args"), dict)
+                ),
+                None,
+            )
+            if invalid_tool_call is not None:
+                return await self._failed_llm_outcome(
+                    context,
+                    "LLM 返回的工具调用缺少有效名称或参数对象",
+                    failure_detail=str(invalid_tool_call),
+                    business_reason="invalid_tool_call",
+                    feedback=(
+                        "上一次工具调用格式无效。每个工具调用都必须包含有效工具名，"
+                        "并且 args 必须是 JSON 对象。请重新生成。"
+                    ),
+                )
             return await self._complete_llm_outcome(context, content, tool_calls)
         except TimeoutError:
             return await self._failed_llm_outcome(
                 context,
-                f"LLM 流式调用超时（{self._harness_settings.llm_stream_timeout}s）",
+                f"LLM 调用超时（{self._llm_timeout}s）",
                 failure_exception=TimeoutError("LLM stream timeout"),
             )
         except Exception as exc:
@@ -400,6 +382,7 @@ class HarnessTurnExecutor(Harness):
         session_id: str,
         run_id: str,
         system_prompt: str,
+        retry_feedback: str | None = None,
     ) -> list[BaseMessage]:
         """将 checkpoint 消息压缩为可发送给 LLM 的消息列表。"""
 
@@ -412,8 +395,56 @@ class HarnessTurnExecutor(Harness):
         result: list[BaseMessage] = []
         if system_prompt:
             result.append(SystemMessage(content=system_prompt))
+        if retry_feedback:
+            result.append(SystemMessage(content=retry_feedback))
         result.extend(dict_to_message(message) for message in compressed_domain)
         return result
+
+    async def _collect_llm_response(
+        self, context: _LlmTurnContext, tool_names: list[str] | None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """调用一次完整 LLM 响应；技术重试由 Provider 层负责。"""
+
+        bound_tools = self._get_llm_tools(
+            tool_names=tool_names, parent_run_id=context.parent_run_id
+        )
+        bound_llm = self._llm.bind_tools(bound_tools) if bound_tools else self._llm
+        async with trace_span(
+            name=f"llm.turn.{context.next_turn}",
+            run_type="llm",
+            inputs={"messages": [m.model_dump(mode="json") for m in context.compressed]},
+            run_id=f"{context.run_id}:llm:{context.llm_call_id}",
+            metadata={
+                "session_id": context.session_id,
+                "run_id": context.run_id,
+                "turn": context.next_turn,
+            },
+            tags=["athena", "llm", "invoke"],
+        ) as trace:
+            try:
+                async with asyncio.timeout(self._llm_timeout):
+                    response = await bound_llm.ainvoke(context.compressed)
+                finish_span(trace, outputs={"status": "success"})
+            except Exception as exc:
+                finish_span(trace, error=str(exc))
+                raise
+
+        content = extract_message_text(response)
+        raw_tool_calls = getattr(response, "tool_calls", None) or []
+        tool_calls: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_tool_calls):
+            args = raw.get("args", {}) or {}
+            tool_call = {
+                "id": raw.get("id") or "",
+                "name": raw.get("name", ""),
+                "args": args,
+            }
+            if not tool_call["id"]:
+                tool_call["id"] = self._stable_tool_call_id(
+                    context.run_id, context.next_turn, index, tool_call
+                )
+            tool_calls.append(tool_call)
+        return content, tool_calls
 
     async def _turn_budget_outcome(
         self, context: _LlmTurnContext
@@ -462,47 +493,6 @@ class HarnessTurnExecutor(Harness):
             context.run_id,
         )
 
-    async def _collect_llm_chunks(
-        self, context: _LlmTurnContext, tool_names: list[str] | None
-    ) -> list[AIMessageChunk]:
-        """在超时和停止信号约束下流式收集 LLM 响应块。"""
-
-        bound_tools = self._get_llm_tools(
-            tool_names=tool_names, parent_run_id=context.parent_run_id
-        )
-        bound_llm = self._llm.bind_tools(bound_tools) if bound_tools else self._llm
-        chunks: list[AIMessageChunk] = []
-        async with trace_span(
-            name=f"llm.turn.{context.next_turn}",
-            run_type="llm",
-            inputs={"messages": [m.model_dump(mode="json") for m in context.compressed]},
-            run_id=f"{context.run_id}:llm:{context.llm_call_id}",
-            metadata={"session_id": context.session_id, "run_id": context.run_id, "turn": context.next_turn},
-            tags=["athena", "llm", "stream"],
-        ) as trace:
-            try:
-                async with asyncio.timeout(self._harness_settings.llm_stream_timeout):
-                    async for chunk in bound_llm.astream(context.compressed):
-                        if self._should_stop():
-                            break
-                        if isinstance(chunk, AIMessageChunk):
-                            chunks.append(chunk)
-                        chunk_content = extract_message_text(chunk)
-                        if not chunk_content:
-                            continue
-                        # 首轮顶层 Agent 的内容在完整响应生成后一次性写入流，
-                        # 避免同一答案在流式边界中被重复展示。
-                        if (
-                            not (context.next_turn == 1 and context.parent_run_id is None)
-                            and self._answer_stream is not None
-                        ):
-                            await self._answer_stream.append(chunk_content)
-                finish_span(trace, outputs={"status": "success", "chunks": len(chunks)})
-            except Exception as exc:
-                finish_span(trace, error=str(exc))
-                raise
-        return chunks
-
     async def _interrupted_llm_outcome(
         self, context: _LlmTurnContext
     ) -> LlmTurnOutcome:
@@ -546,11 +536,24 @@ class HarnessTurnExecutor(Harness):
         *,
         failure_detail: str | None = None,
         failure_exception: BaseException | None = None,
+        business_reason: str | None = None,
+        feedback: str | None = None,
     ) -> LlmTurnOutcome:
         """发布失败事件并构造按重试预算可重试的结果。"""
 
-        next_retry = context.retry_count + 1
-        retryable = next_retry <= context.max_retries
+        semantic_failure = failure_exception is None
+        next_retry = context.retry_count + 1 if semantic_failure else context.retry_count
+        retryable = semantic_failure and next_retry <= context.max_retries
+        result_status = "semantic_retry" if semantic_failure else "technical_failure"
+        retry_reason = business_reason or (
+            "empty_response" if "空响应" in error else "provider_exhausted"
+        )
+        feedback = (
+            feedback
+            or "上一次响应为空，请直接生成有效的最终回答或合法的工具调用。"
+            if semantic_failure
+            else None
+        )
         detail = (
             ExecutionError.from_exception(
                 failure_exception,
@@ -559,7 +562,7 @@ class HarnessTurnExecutor(Harness):
                     if isinstance(failure_exception, TimeoutError)
                     else "llm_call_failed"
                 ),
-                retryable=retryable,
+                retryable=False,
                 phase="llm_call",
             )
             if failure_exception is not None
@@ -570,14 +573,15 @@ class HarnessTurnExecutor(Harness):
                 phase="llm_call",
             )
         )
-        # 空响应的错误文本已经包含业务上下文；底层异常则发布更精确的原始异常。
+        event_type = EventType.LLM_VALIDATION_FAILED if semantic_failure else EventType.RUN_FAILED
         await self._emit(
-            EventType.RUN_FAILED,
+            event_type,
             {
                 "call_id": context.llm_call_id,
                 "error": failure_detail or error,
                 "error_detail": detail.model_dump(mode="json"),
                 "phase": "llm_call",
+                "retryable": retryable,
             },
             context.session_id,
             context.run_id,
@@ -597,6 +601,9 @@ class HarnessTurnExecutor(Harness):
             error=error,
             error_detail=detail,
             retryable=retryable,
+            llm_result_status=result_status,
+            llm_retry_reason=retry_reason,
+            retry_feedback=feedback,
             stream_started=context.stream_started,
             turn_count=context.next_turn,
             retry_count=next_retry,
@@ -647,17 +654,30 @@ class HarnessTurnExecutor(Harness):
             )
         if (
             content
-            and context.next_turn == 1
+            and not tool_calls
             and context.parent_run_id is None
             and self._answer_stream is not None
         ):
+            if not context.stream_started:
+                await self._emit(
+                    EventType.STREAM_START,
+                    {
+                        "run_id": context.run_id,
+                        "stream_id": self._answer_stream_id,
+                        "stream_type": "answer",
+                    },
+                    context.session_id,
+                    context.run_id,
+                )
             await self._answer_stream.append(content)
             await self._answer_stream.flush()
         return self._llm_outcome(
             messages=message_dicts,
             content=content,
             tool_calls=tool_calls,
-            stream_started=context.stream_started,
+            retry_feedback=None,
+            stream_started=bool(content and not tool_calls)
+            or context.stream_started,
             turn_count=context.next_turn,
             retry_count=context.retry_count,
         )
@@ -674,6 +694,8 @@ class HarnessTurnExecutor(Harness):
         """校验计划提交协议并构造计划请求或协议错误结果。"""
 
         if context.parent_run_id is not None:
+            next_retry = context.retry_count + 1
+            retryable = next_retry <= context.max_retries
             return self._llm_outcome(
                 messages=message_dicts,
                 content=content,
@@ -682,15 +704,23 @@ class HarnessTurnExecutor(Harness):
                     code="invalid_plan_submission",
                     message="submit_plan 只能由顶层 Agent 调用",
                     error_type="PlanProtocolError",
-                    retryable=False,
+                    retryable=retryable,
                     phase="llm_call",
                 ),
-                retryable=False,
+                retryable=retryable,
+                llm_result_status="semantic_retry",
+                llm_retry_reason="invalid_plan_submission",
+                retry_feedback=(
+                    "上一次调用了仅允许顶层 Agent 使用的 submit_plan。"
+                    "请改用可用工具，或直接回答。"
+                ),
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,
-                retry_count=context.retry_count,
+                retry_count=next_retry,
             )
         if len(plan_calls) != 1 or len(plan_calls) != len(tool_calls):
+            next_retry = context.retry_count + 1
+            retryable = next_retry <= context.max_retries
             return self._llm_outcome(
                 messages=message_dicts,
                 content=content,
@@ -699,19 +729,27 @@ class HarnessTurnExecutor(Harness):
                     code="invalid_plan_submission",
                     message="submit_plan 不能与普通工具调用混用",
                     error_type="PlanProtocolError",
-                    retryable=False,
+                    retryable=retryable,
                     phase="llm_call",
                 ),
-                retryable=False,
+                retryable=retryable,
+                llm_result_status="semantic_retry",
+                llm_retry_reason="invalid_plan_submission",
+                retry_feedback=(
+                    "上一次把 submit_plan 与普通工具调用混用。"
+                    "请单独提交计划，或只调用普通工具。"
+                ),
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,
-                retry_count=context.retry_count,
+                retry_count=next_retry,
             )
         try:
             plan_request = PlanSubmission.model_validate(
                 plan_calls[0].get("args") or {}
             )
         except Exception as exc:
+            next_retry = context.retry_count + 1
+            retryable = next_retry <= context.max_retries
             return self._llm_outcome(
                 messages=message_dicts,
                 content=content,
@@ -719,13 +757,17 @@ class HarnessTurnExecutor(Harness):
                 error_detail=ExecutionError.from_exception(
                     exc,
                     code="invalid_plan_submission",
-                    retryable=False,
+                    retryable=retryable,
                     phase="llm_call",
                 ),
-                retryable=False,
+                retryable=retryable,
+                llm_result_status="semantic_retry",
+                llm_retry_reason="invalid_plan_submission",
+                retry_feedback=f"上一次 submit_plan 参数无效：{exc}。"
+                "请重新生成符合 schema 的计划。",
                 stream_started=context.stream_started,
                 turn_count=context.next_turn,
-                retry_count=context.retry_count,
+                retry_count=next_retry,
             )
         return self._llm_outcome(
             messages=message_dicts,
@@ -737,7 +779,7 @@ class HarnessTurnExecutor(Harness):
             retry_count=context.retry_count,
         )
 
-    async def execute_tool_batch(
+    async def execute_tool_call(
         self,
         *,
         tool_calls: list[dict[str, Any]],
@@ -749,8 +791,9 @@ class HarnessTurnExecutor(Harness):
         stop_signal: asyncio.Event,
         parent_run_id: str | None = None,
         tool_names: list[str] | None = None,
-    ) -> ToolBatchOutcome:
-        """并行执行当前 LLM 响应中的工具调用批次。"""
+        approval_decisions: dict[str, str] | None = None,
+    ) -> ToolCallOutcome:
+        """执行当前 Send 分支中的单个工具调用。"""
 
         self._configure_tool_context(
             message_id=message_id,
@@ -781,8 +824,9 @@ class HarnessTurnExecutor(Harness):
             run_id=run_id,
             turn_count=turn_count,
             tool_results_all=tool_results,
+            approval_decisions=approval_decisions,
         )
-        return ToolBatchOutcome(
+        return ToolCallOutcome(
             messages=[message_to_dict(item) for item in tool_messages],
             tool_results=tool_results,
             interrupted=self._should_stop(),
@@ -803,6 +847,7 @@ class HarnessTurnExecutor(Harness):
         error_detail: dict[str, Any] | None = None,
         parent_run_id: str | None = None,
         content: str = "",
+        stream_started: bool = False,
     ) -> None:
         """关闭流、发布带完整内容的终态事件并更新会话运行状态。"""
 
@@ -824,20 +869,21 @@ class HarnessTurnExecutor(Harness):
             session_id,
             run_id,
         )
-        await self._emit(
-            EventType.STREAM_END,
-            {
-                "run_id": run_id,
-                "stream_id": self._answer_stream_id,
-                "stream_type": "answer",
-                "turn_count": turn_count,
-                "content": content,
-                "error": error,
-                "error_detail": error_detail,
-            },
-            session_id,
-            run_id,
-        )
+        if stream_started:
+            await self._emit(
+                EventType.STREAM_END,
+                {
+                    "run_id": run_id,
+                    "stream_id": self._answer_stream_id,
+                    "stream_type": "answer",
+                    "turn_count": turn_count,
+                    "content": content,
+                    "error": error,
+                    "error_detail": error_detail,
+                },
+                session_id,
+                run_id,
+            )
         if parent_run_id is None:
             await self._db.sessions.update(
                 session_id,
@@ -874,12 +920,8 @@ class HarnessTurnExecutor(Harness):
     ) -> list[dict[str, Any]]:
         """去掉本轮临时注入的系统提示，只保存可恢复的会话消息。"""
 
-        start = 0
-        if (
-            system_prompt
-            and messages
-            and isinstance(messages[0], SystemMessage)
-            and str(messages[0].content) == system_prompt
-        ):
-            start = 1
-        return [message_to_dict(item) for item in messages[start:]]
+        return [
+            message_to_dict(item)
+            for item in messages
+            if not isinstance(item, SystemMessage)
+        ]

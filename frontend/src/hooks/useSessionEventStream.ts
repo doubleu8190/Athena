@@ -65,7 +65,6 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (useChatStore.getState().activeSessionId !== sessionId) return
           const pending = approvals.map((approval) => ({
             ...approval,
-            timeout: approval.timeout || 120,
             session_id: approval.session_id || sessionId,
           }))
           mergeApprovals(pending)
@@ -195,12 +194,14 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
 
         if (type === "approval.required") {
-          addApproval({ approval_id: String(data.approval_id || ""), tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, risk_level: (String(data.risk_level || "low") as "low" | "medium" | "high"), timeout: Number(data.timeout || 120), expires_at: data.expires_at ? String(data.expires_at) : null, session_id: sessionId })
+          addApproval({ approval_id: String(data.approval_id || ""), tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, risk_level: (String(data.risk_level || "low") as "low" | "medium" | "high"), approval_batch_id: data.approval_batch_id ? String(data.approval_batch_id) : null, session_id: sessionId })
           setAgentStatus("waiting_approval")
-        } else if (type === "approval.resolved" || type === "approval.expired") {
+        } else if (type === "approval.resolved") {
+          const decisions = (data.decisions as Record<string, string> | undefined) || {}
           const approvalId = String(data.approval_id || "")
-          if (approvalId) resolveApproval(approvalId, String(data.decision || "denied"))
-          if (useChatStore.getState().pendingApprovals.length <= 1) setAgentStatus("running")
+          if (approvalId) decisions[approvalId] = String(data.decision || "denied")
+          Object.entries(decisions).forEach(([id, decision]) => resolveApproval(id, decision))
+          if (useChatStore.getState().pendingApprovals.length <= Object.keys(decisions).length) setAgentStatus("running")
         }
         if (
           type === "task.queued" ||
@@ -302,13 +303,12 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "run.started", "run.resumed", "run.paused", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded",
       "node.started", "node.completed", "node.failed",
       "llm.started", "llm.completed", "tool.started", "tool.completed",
-      "approval.required", "approval.resolved", "approval.expired",
+      "approval.required", "approval.resolved",
       "message.started", "message.persisted", "message.completed", "message.delta", "stream.snapshot",
       "thinking.started", "thinking.summary", "thinking.completed",
       "plan.created", "plan.completed", "plan.failed", "plan.cancelled",
       "task.queued", "task.started", "task.retrying", "task.completed", "task.failed",
       "synthesis.started", "synthesis.completed",
-      "subagent.started", "subagent.completed", "subagent.failed",
       "agent.waiting_for_files", "attachment_updated",
       "file_processing_started", "file_processing_completed", "file_processing_failed",
     ].forEach((name) => source.addEventListener(name, parse))
@@ -385,7 +385,7 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
   })
 
   if (type === "approval.required") return base({ id: `approval:${text(data.approval_id)}`, label: `Approval required: ${text(data.tool_name) || "tool"}`, status: "waiting", metadata: data.arguments ? { arguments: data.arguments } : undefined })
-  if (type === "approval.resolved" || type === "approval.expired") return base({ id: `approval:${text(data.approval_id)}`, label: type === "approval.expired" ? "Approval expired" : "Approval resolved", status: type === "approval.expired" ? "failed" : "completed" })
+  if (type === "approval.resolved") return base({ id: `approval:${text(data.approval_id)}`, label: "Approval resolved", status: "completed" })
 
   if (type.startsWith("plan.")) {
     const planId = text(data.plan_id)
@@ -398,13 +398,6 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
     return base({ id: `task:${taskId}`, label: `${type === "task.completed" ? "Task completed" : type === "task.failed" ? "Task failed" : type === "task.started" ? "Task started" : "Task queued"}: ${text(data.title) || taskId || "task"}`, detail, status })
   }
   if (type.startsWith("synthesis.")) return base({ id: `synthesis:${text(data.plan_id)}`, label: type === "synthesis.started" ? "Combining task results" : "Task results combined", status: type === "synthesis.started" ? "running" : "completed" })
-
-  if (type.startsWith("subagent.")) {
-    const subRunId = text(data.sub_run_id) || runId
-    const status = type === "subagent.failed" ? "failed" : type === "subagent.completed" ? "completed" : "running"
-    const label = type === "subagent.failed" ? "Sub-agent failed" : type === "subagent.completed" ? "Sub-agent completed" : "Sub-agent started"
-    return base({ id: `subagent:${subRunId}`, label, detail: error || text(data.task) || undefined, status })
-  }
 
   if (type === "agent.waiting_for_files") return base({ id: `files:${runId}`, label: "Waiting for files to finish processing", status: "waiting" })
   if (type.startsWith("file_processing")) {

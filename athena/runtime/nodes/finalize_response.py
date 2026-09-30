@@ -18,23 +18,26 @@ async def assemble_final_response(state: AgentState) -> AgentState:
     异常：
         运行时异常: 后处理或结果序列化失败时传播底层异常。
     """
-    result = state.get("result")
-    if result is None and state.get("error"):
+    request = state.get("request", {})
+    response = state.get("response", {})
+    result = response.get("result")
+    if result is None and response.get("error"):
         result = {
             "content": "",
-            "run_id": state["run_id"],
+            "run_id": request["run_id"],
             "turn_count": 0,
             "tool_results": [],
-            "error": state["error"],
-            "error_detail": state.get("error_detail"),
+            "error": response["error"],
+            "error_detail": response.get("error_detail"),
             "interrupted": False,
             "attachments": [],
         }
     return {
-        "session_id": state["session_id"],
-        "run_id": state["run_id"],
-        "message_id": state.get("message_id"),
-        "result": result,
+        "phase": "completed",
+        "response": {
+            **response,
+            "result": result,
+        },
     }
 
 

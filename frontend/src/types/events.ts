@@ -21,7 +21,6 @@ export const ApplicationEventType = {
   RUN_COMPLETED: "run.completed",
   APPROVAL_REQUIRED: "approval.required",
   APPROVAL_RESOLVED: "approval.resolved",
-  APPROVAL_EXPIRED: "approval.expired",
   MESSAGE_DELTA: "message.delta",
   MESSAGE_COMPLETED: "message.completed",
   MESSAGE_STARTED: "message.started",

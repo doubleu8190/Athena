@@ -159,23 +159,14 @@ async def test_approval_cannot_be_resolved_for_stale_worker_attempt(agent_store)
         plan_id="plan-1",
         task_id="task-1",
         worker_run_id="worker-1",
+        approval_batch_id="batch-1",
     )
 
-    assert await store.resolve_approval_for_attempt(
-        "approval-1",
-        AgentApprovalDecision.APPROVED,
-        expected_run_id="root-1",
-        expected_plan_id="plan-1",
-        expected_task_id="task-1",
-        expected_worker_run_id="worker-1",
+    assert await store.resolve_approval_batch(
+        "batch-1", {"approval-1": AgentApprovalDecision.APPROVED}, expected_run_id="root-1"
     ) is True
-    assert await store.resolve_approval_for_attempt(
-        "approval-1",
-        AgentApprovalDecision.APPROVED,
-        expected_run_id="root-1",
-        expected_plan_id="plan-1",
-        expected_task_id="task-1",
-        expected_worker_run_id="worker-1",
+    assert await store.resolve_approval_batch(
+        "batch-1", {"approval-1": AgentApprovalDecision.APPROVED}, expected_run_id="root-1"
     ) is False
 
     approval = await store.get_approval("approval-1")

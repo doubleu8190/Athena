@@ -20,7 +20,6 @@ from athena.core.tools.tool_definitions import (
     NativeTool,
     ToolProtocol,
 )
-from athena.gateway.approval import ApprovalManager
 from athena.models.tool import RiskLevel, ToolResult, ToolSchema
 from athena.utils.logging import get_logger
 from athena.observability.langsmith import finish_span, trace_span
@@ -34,11 +33,11 @@ logger = get_logger(__name__)
 class UnifiedToolManager:
     """统一工具管理器."""
 
-    def __init__(self, approval_manager: ApprovalManager, tool_runtime: Any = None) -> None:
+    def __init__(self, tool_runtime: Any = None) -> None:
         """
 
         参数：
-            approval_manager (ApprovalManager): 调用方必须传入符合类型注解的值；可选参数按默认值处理，其他约束由方法内部校验。
+            tool_runtime (Any): 工具执行所需的受信运行时依赖。
 
         返回值：
             None: 返回该方法声明类型的业务结果，内容由方法职责确定。
@@ -48,7 +47,6 @@ class UnifiedToolManager:
         """
         self._tools: dict[str, ToolProtocol] = {}
         self._disabled: set[str] = set()
-        self._approval_manager = approval_manager
         self._tool_runtime = tool_runtime
 
     def set_tool_runtime(self, runtime: Any) -> None:
@@ -232,18 +230,16 @@ class UnifiedToolManager:
         worker_run_id: str | None = None,
         depth: int = 0,
         execution_timeout: float | None = None,
-        approval_id: str | None = None,
-        on_approval_created: Callable[[str], Awaitable[None]] | None = None,
+        approval_decision: str | None = None,
         on_execution_start: Callable[[], Awaitable[bool]] | None = None,
     ) -> ToolResult:
         """统一工具调用入口，含审批检查.
 
-        审批请求立即持久化，调用方等待 PostgreSQL Approval Record 的决定。
+        审批决定由 Graph 的 interrupt/resume 流程在调用前注入。
 
         session_id / run_id / tool_call_id 为必填：标识本次工具调用归属的会话、运行与
         具体工具调用，用于审批留痕与子代理父链上下文。
 
-        ``on_approval_created`` 用于把审批 ID 写回工具尝试账本；
         ``on_execution_start`` 在真正调用工具前原子领取账本，返回 ``False`` 时
         不会执行工具。
         """
@@ -271,39 +267,13 @@ class UnifiedToolManager:
             logger.info("tool_call_disabled", tool=name, session_id=session_id)
             return ToolResult(status="failed", error=f"Tool '{name}' is disabled")
 
-        # 审批检查
+        # 审批结果已经由 Graph 的 approval_gate 注入；工具层不再创建审批或等待审批。
         if tool.schema.require_approval:
-            try:
-                approval_kwargs: dict[str, Any] = {
-                    "tool_name": name,
-                    "arguments": params,
-                    "risk_level": tool.schema.risk_level,
-                    "session_id": session_id,
-                    "run_id": run_id,
-                    "tool_call_id": tool_call_id,
-                    "plan_id": plan_id,
-                    "task_id": task_id,
-                    "worker_run_id": worker_run_id,
-                }
-                if approval_id is not None:
-                    approval_kwargs["approval_id"] = approval_id
-                request = await self._approval_manager.request_approval(
-                    **approval_kwargs,
-                )
-                if on_approval_created is not None:
-                    await on_approval_created(request.id)
-                approved = await self._approval_manager.wait_for_decision(
-                    request.id, request.timeout
-                )
-                if not approved:
-                    logger.info("tool_call_denied", tool=name, session_id=session_id)
-                    return ToolResult(
-                        status="denied",
-                        output="用户拒绝了该操作",
-                    )
-            except Exception as e:
-                logger.error("approval_failed", tool=name, error=str(e))
-                return ToolResult(status="failed", error=f"审批流程异常: {e}")
+            if approval_decision is None:
+                return ToolResult(status="failed", error="缺少审批结果，工具未执行")
+            if approval_decision != "approved":
+                logger.info("tool_call_denied", tool=name, session_id=session_id)
+                return ToolResult(status="denied", output="用户拒绝了该操作")
 
         if on_execution_start is not None:
             claimed = await on_execution_start()

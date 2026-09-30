@@ -28,7 +28,7 @@ async def test_node_events_are_started_then_completed() -> None:
 
     wrapped = instrument_graph_node("demo", node, event_publisher=publisher)
     result = await wrapped(
-        {"session_id": "session-1", "run_id": "run-1"},
+        {"request": {"session_id": "session-1", "run_id": "run-1"}},
         {"metadata": {"session_id": "session-1", "run_id": "run-1"}},
     )
 
@@ -51,7 +51,7 @@ async def test_node_failure_publishes_structured_error_and_reraises() -> None:
 
     wrapped = instrument_graph_node("failing_node", node, event_publisher=publisher)
     with pytest.raises(ValueError, match="invalid input"):
-        await wrapped({"session_id": "session-1", "run_id": "run-1"}, {})
+        await wrapped({"request": {"session_id": "session-1", "run_id": "run-1"}}, {})
 
     assert [event.event_type.value for event in publisher.events] == [
         "node.started",
@@ -77,4 +77,4 @@ async def test_event_publish_failure_does_not_change_node_result() -> None:
     wrapped = instrument_graph_node(
         "observable_node", node, event_publisher=BrokenPublisher()
     )
-    assert await wrapped({"session_id": "session-1"}, {}) == {"ok": True}
+    assert await wrapped({"request": {"session_id": "session-1"}}, {}) == {"ok": True}

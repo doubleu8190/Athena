@@ -103,17 +103,21 @@ class AgentStorePort(Protocol):
         ...
 
 
-    async def resolve_approval_for_attempt(
+    async def list_approvals_by_batch(
+        self, approval_batch_id: str, *, include_resolved: bool = False
+    ) -> list[Any]:
+        ...
+
+    async def resolve_approval_batch(
         self,
-        approval_id: str,
-        decision: AgentApprovalDecision,
+        approval_batch_id: str,
+        decisions: dict[str, AgentApprovalDecision],
         *,
         expected_run_id: str | None = None,
-        expected_worker_run_id: str | None = None,
-        expected_task_id: str | None = None,
-        expected_plan_id: str | None = None,
     ) -> bool:
-        """解析审批并校验其仍属于预期的运行归属。"""
+        ...
+
+    async def get_message_command_for_run(self, run_id: str) -> AgentCommandRecord | None:
         ...
 
 

@@ -3,22 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
-from athena.config.settings import Settings
 from athena.contracts.ports import AgentStorePort, EventPublisherPort
 from athena.contracts.statuses import AgentRunStatus
-from athena.core.compression.compressor import ContextCompressor
-from athena.core.harness.harness import Harness, HarnessSettings
-from athena.core.tools.manager import UnifiedToolManager
-from athena.infrastructure.postgre.database import Database
 from athena.contracts.orchestration import (
-    AgentRole,
     TaskSpec,
     WorkerResult,
     WorkerResultStatus,
 )
 from athena.contracts.tool_policy import ToolPolicy
+from athena.runtime.execution_loop.runner import run_agent_loop
 from athena.runtime.orchestration.structured_llm import StructuredLLMService
 from athena.utils.id_generation import generate_sub_run_id
 from athena.utils.logging import get_logger
@@ -35,31 +29,23 @@ expected_output；如果执行失败，使用 error_code 和 error_message 说�
 
 
 class WorkerExecutor:
-    """执行单个任务的 Worker，复用 Harness 的 LLM/工具循环。"""
+    """执行单个任务的 Worker，复用 LangGraph execution-loop。"""
 
     def __init__(
         self,
-        llm: Any,
+        graph_runtime: object,
         structured_llm: StructuredLLMService,
-        tool_manager: UnifiedToolManager,
-        db: Database,
-        compressor: ContextCompressor,
         event_publisher: EventPublisherPort,
         agent_store: AgentStorePort,
-        settings: Settings,
         root_run_id: str,
     ) -> None:
         """绑定 Worker 运行所需的依赖。
 
         参数：
-            llm: 用于 Worker 对话的 LLM Provider。
+            graph_runtime: 统一的 LangGraph Agent loop 运行时。
             structured_llm: 用于最终结果结构化归一的调用服务。
-            tool_manager: 当前 Runtime 的统一工具管理器。
-            db: 数据库门面。
-            compressor: 上下文压缩器，在每轮 LLM 调用前压缩消息列表。
             event_publisher: 应用事件发布器。
             agent_store: 用于创建和更新独立 Worker Run。
-            settings: 全局配置。
             root_run_id: Worker 所属的 Root Run 标识。
 
         返回值：
@@ -68,14 +54,11 @@ class WorkerExecutor:
         异常：
             不主动抛出业务异常。
         """
-        self._llm = llm
+        self._graph_runtime = graph_runtime
         self._structured_llm = structured_llm
-        self._tool_manager = tool_manager
-        self._db = db
-        self._compressor = compressor
+        self._tool_manager = graph_runtime._tool_manager
         self._event_publisher = event_publisher
         self._agent_store = agent_store
-        self._settings = settings
         self._root_run_id = root_run_id
         self._structured_llm.validate_primary(WorkerResult)
 
@@ -123,76 +106,68 @@ class WorkerExecutor:
         )
         await self._agent_store.update_run_status(run_id, AgentRunStatus.RUNNING)
 
-        harness = Harness(
-            llm=self._llm,
-            tool_manager=self._tool_manager,
-            settings=self._settings,
-            db=self._db,
-            compressor=self._compressor,
-            event_publisher=self._event_publisher,
-            harness_settings=HarnessSettings(
-                max_turns_per_run=task.max_turns,
-                tool_timeout=self._settings.tool_timeout,
-            ),
-        )
-        result = await harness.run(
-            messages=[{"role": "user", "content": task.objective}],
+        result = await run_agent_loop(
+            self._graph_runtime,
             session_id=session_id,
-            system_prompt=get_prompt("sub_agent"),
             run_id=run_id,
-            parent_run_id=parent_run_id,
+            user_message=task.objective,
+            system_prompt=get_prompt("sub_agent"),
             tool_names=sorted(policy.allowed_tools),
+            max_turns=task.max_turns,
+            parent_run_id=parent_run_id,
             stop_signal=stop_signal,
-            agent_role=AgentRole.WORKER.value,
             plan_id=task.plan_id,
             task_id=task.task_id,
-            depth=1,
         )
 
-        if result.interrupted:
+        result_content = str(result.get("content") or "")
+        result_error = result.get("error")
+        result_turn_count = int(result.get("turn_count", 0))
+        result_tool_calls = list(result.get("tool_results") or [])
+        if result.get("interrupted", False):
             await self._agent_store.update_run_status(run_id, AgentRunStatus.CANCELLED)
             return WorkerResult(
                 plan_id=task.plan_id,
                 task_id=task.task_id,
                 run_id=run_id,
                 status=WorkerResultStatus.CANCELLED,
-                raw_text=result.content,
-                turn_count=result.turn_count,
-                tool_calls=result.tool_results,
+                raw_text=result_content,
+                turn_count=result_turn_count,
+                tool_calls=result_tool_calls,
                 error_code="worker_cancelled",
                 error_message="worker cancelled",
             )
 
-        if result.error:
+        if result_error:
             await self._agent_store.update_run_status(
-                run_id, AgentRunStatus.FAILED, result.error
+                run_id, AgentRunStatus.FAILED, str(result_error)
             )
             return WorkerResult(
                 plan_id=task.plan_id,
                 task_id=task.task_id,
                 run_id=run_id,
                 status=WorkerResultStatus.FAILED,
-                raw_text=result.content,
-                turn_count=result.turn_count,
-                tool_calls=result.tool_results,
+                raw_text=result_content,
+                turn_count=result_turn_count,
+                tool_calls=result_tool_calls,
                 error_code="worker_failed",
-                error_message=result.error,
+                error_message=str(result_error),
             )
 
         await self._agent_store.update_run_status(run_id, AgentRunStatus.COMPLETED)
         structured = await self._structured_llm.generate(
             WorkerResult,
             WORKER_SYSTEM_PROMPT,
-            f"任务ID: {task.task_id}\n任务目标: {task.objective}\n\n执行结果:\n{result.content}",
+            f"任务ID: {task.task_id}\n任务目标: {task.objective}\n\n执行结果:\n{result_content}",
         )
         return structured.model_copy(
             update={
                 "plan_id": task.plan_id,
                 "task_id": task.task_id,
                 "run_id": run_id,
-                "raw_text": result.content,
-                "turn_count": result.turn_count,
-                "tool_calls": result.tool_results,
+                "raw_text": result_content,
+                "turn_count": result_turn_count,
+                "tool_calls": result_tool_calls,
             }
         )
 

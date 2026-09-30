@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
+from athena.contracts.commands import Command, CommandType
+from athena.models.json_models import CommandPayload
+from athena.utils.id_generation import generate_time_id
 
 from athena.utils.logging import get_logger
 from athena.container import get_runtime_container
 from athena.contracts.errors import ErrorDetail
 from athena.infrastructure.postgre.repositories import _json_loads
-
-if TYPE_CHECKING:
-    from athena.gateway.approval import ApprovalManager
 
 logger = get_logger(__name__)
 
@@ -30,19 +30,8 @@ class ApprovalDecisionRequest(BaseModel):
     action: str  # allow / deny（允许 / 拒绝）
 
 
-async def _get_approval_manager(request: Request) -> ApprovalManager:
-    """从请求应用状态获取审批管理器。
-
-    参数：
-        request (Request): 当前 HTTP 请求对象。
-
-    返回值：
-        ApprovalManager: 应用启动时注入的审批管理器。
-
-    异常：
-        RuntimeError: 应用运行时未初始化。
-    """
-    return get_runtime_container(request).approval_manager
+class ApprovalBatchDecisionRequest(BaseModel):
+    decisions: dict[str, str]
 
 
 @router.get("")
@@ -62,8 +51,7 @@ async def list_pending_approvals(
             "session_id": row.session_id,
             "run_id": row.run_id,
             "tool_call_id": row.tool_call_id,
-            "timeout": runtime.approval_manager.timeout,
-            "expires_at": row.expires_at,
+            "approval_batch_id": getattr(row, "approval_batch_id", None),
             "resolved": False,
             "resolution": "pending",
         }
@@ -76,7 +64,6 @@ def _approval_log_payload(row: Any) -> dict[str, Any]:
     created_at = _parse_datetime(row.created_at)
     decided_at = _parse_datetime(row.decided_at) if row.decided_at else created_at
     decision = {
-        "expired": "timeout",
         "approved": "approved",
         "denied": "denied",
         "cancelled": "cancelled",
@@ -137,16 +124,13 @@ async def get_approval_stats(request: Request) -> dict[str, float | int]:
     today_rows = [row for row in rows if _parse_datetime(row.created_at).date() == today]
     approved = sum(row.decision == "approved" for row in rows)
     denied = sum(row.decision == "denied" for row in rows)
-    timeout = sum(row.decision == "expired" for row in rows)
     today_approved = sum(row.decision == "approved" for row in today_rows)
     today_denied = sum(row.decision == "denied" for row in today_rows)
-    today_timeout = sum(row.decision == "expired" for row in today_rows)
-    total = approved + denied + timeout
+    total = approved + denied
     return {
         "today_total": len(today_rows),
         "today_approved": today_approved,
         "today_denied": today_denied,
-        "today_timeout": today_timeout,
         "approval_rate": approved / total if total else 0.0,
     }
 
@@ -162,36 +146,110 @@ async def submit_approval_decision(
     approval = await runtime.agent_store.get_approval(approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail=ErrorDetail.APPROVAL_NOT_FOUND)
-    resolved = await runtime.approval_manager.submit_approval_decision(
-        approval_id, req.action
+    decision = "approved" if req.action == "allow" else "denied"
+    batch_id = getattr(approval, "approval_batch_id", None)
+    if not batch_id:
+        raise HTTPException(status_code=409, detail="approval_batch_required")
+    batch_rows = await runtime.agent_store.list_approvals_by_batch(batch_id)
+    if {row.approval_id for row in batch_rows} != {approval_id}:
+        raise HTTPException(status_code=409, detail="approval_batch_required")
+    command = Command(
+        command_id=f"cmd_{generate_time_id()}",
+        command_type=CommandType.APPROVAL_RESOLVE,
+        session_id=approval.session_id,
+        run_id=approval.run_id,
+        payload=CommandPayload(
+            approval_batch_id=batch_id,
+            decisions={approval_id: decision},
+        ),
     )
-    if not resolved:
-        raise HTTPException(status_code=409, detail="approval_already_resolved")
+    await runtime.agent_store.enqueue_command(command)
     return {
-        "status": "resolved",
+        "status": "pending",
         "approval_id": approval_id,
+        "command_id": command.command_id,
     }
+
+
+@router.post("/batches/{approval_batch_id}/respond")
+async def submit_approval_batch(
+    approval_batch_id: str,
+    req: ApprovalBatchDecisionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """一次提交当前批次全部审批决定，并只恢复一次图。"""
+    runtime = get_runtime_container(request)
+    rows = await runtime.agent_store.list_approvals_by_batch(approval_batch_id)
+    if not rows or {row.approval_id for row in rows} != set(req.decisions):
+        raise HTTPException(status_code=409, detail="approval_batch_incomplete")
+    if any(value not in {"approved", "denied", "cancelled"} for value in req.decisions.values()):
+        raise HTTPException(status_code=400, detail="invalid_approval_decision")
+    first = rows[0]
+    command = Command(
+        command_id=f"cmd_{generate_time_id()}",
+        command_type=CommandType.APPROVAL_RESOLVE,
+        session_id=first.session_id,
+        run_id=first.run_id,
+        payload=CommandPayload(
+            approval_batch_id=approval_batch_id,
+            decisions=req.decisions,
+        ),
+    )
+    await runtime.agent_store.enqueue_command(command)
+    return {"status": "pending", "approval_batch_id": approval_batch_id, "command_id": command.command_id}
 
 
 @router.post("/{approval_id}/cancel")
 async def cancel_approval(approval_id: str, request: Request) -> dict[str, Any]:
-    """提交审批取消命令，由 Runtime 条件更新持久化记录。"""
+    """提交单项审批批次的取消命令。"""
     runtime = get_runtime_container(request)
     approval = await runtime.agent_store.get_approval(approval_id)
     if approval is None:
         raise HTTPException(status_code=404, detail=ErrorDetail.APPROVAL_NOT_FOUND)
-    resolved = await runtime.approval_manager.cancel_approval(approval_id)
-    if not resolved:
-        raise HTTPException(status_code=409, detail="approval_already_resolved")
+    batch_id = getattr(approval, "approval_batch_id", None)
+    if not batch_id:
+        raise HTTPException(status_code=409, detail="approval_batch_required")
+    batch_rows = await runtime.agent_store.list_approvals_by_batch(batch_id)
+    if {row.approval_id for row in batch_rows} != {approval_id}:
+        raise HTTPException(status_code=409, detail="approval_batch_required")
+    command = Command(
+        command_id=f"cmd_{generate_time_id()}",
+        command_type=CommandType.APPROVAL_RESOLVE,
+        session_id=approval.session_id,
+        run_id=approval.run_id,
+        payload=CommandPayload(
+            approval_batch_id=batch_id,
+            decisions={approval_id: "cancelled"},
+        ),
+    )
+    await runtime.agent_store.enqueue_command(command)
     return {
-        "status": "resolved",
+        "status": "pending",
         "approval_id": approval_id,
+        "command_id": command.command_id,
     }
 
 
 @router.post("/session/{session_id}/cancel-all")
 async def cancel_session_approvals(session_id: str, request: Request) -> dict[str, Any]:
-    """取消指定会话的所有待审批请求."""
-    manager = await _get_approval_manager(request)
-    await manager.cancel_pending_approvals(session_id)
-    return {"status": "cancelled", "session_id": session_id}
+    """按审批批次取消指定会话的待审批请求。"""
+    runtime = get_runtime_container(request)
+    rows = await runtime.agent_store.list_pending_approvals(session_id)
+    batches: dict[str, list[Any]] = {}
+    for row in rows:
+        if row.approval_batch_id:
+            batches.setdefault(row.approval_batch_id, []).append(row)
+    for batch_id, batch_rows in batches.items():
+        first = batch_rows[0]
+        command = Command(
+            command_id=f"cmd_{generate_time_id()}",
+            command_type=CommandType.APPROVAL_RESOLVE,
+            session_id=first.session_id,
+            run_id=first.run_id,
+            payload=CommandPayload(
+                approval_batch_id=batch_id,
+                decisions={row.approval_id: "cancelled" for row in batch_rows},
+            ),
+        )
+        await runtime.agent_store.enqueue_command(command)
+    return {"status": "pending", "session_id": session_id, "batches": len(batches)}

@@ -3,7 +3,6 @@
 重量级模块通过 ``__getattr__`` 延迟加载，避免与 ``athena.core.harness`` /
 ``tools.manager`` 形成循环导入。仅直接导入无外部依赖的轻量模块。
 """
-
 # ── 轻量模块（直接导入，不触发循环） ──
 
 from .stream_coalescer import StreamCoalescer
@@ -25,12 +24,10 @@ from .processor_lifecycle import (
 _lazy = {
     "CommandConsumer": ".command_consumer",
     "RecoveryReconciler": ".recovery_reconciler",
-    "AgentState": ".agent_graph",
+    "AgentState": ".state",
     "build_graph": ".agent_graph",
     "invoke_graph": ".agent_graph",
     "LangGraphRuntime": ".langgraph_runtime",
-    "SubAgentManager": ".sub_agent_manager",
-    "SubAgentResult": ".sub_agent_manager",
 }
 
 
@@ -64,6 +61,4 @@ __all__ = [
     "build_graph",
     "invoke_graph",
     "LangGraphRuntime",
-    "SubAgentManager",
-    "SubAgentResult",
 ]

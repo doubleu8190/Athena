@@ -277,8 +277,8 @@ async def test_native_tool_receives_coroutine_local_context():
     m = make_tool_manager()
     m.register(
         ToolSpec(
-            name="spawn_sub_agent",
-            description="spawn sub agent",
+            name="context_probe",
+            description="inspect tool execution context",
             handler=spawn_handler,
             parameters={
                 "type": "object",
@@ -290,7 +290,7 @@ async def test_native_tool_receives_coroutine_local_context():
         )
     )
     result = await m.call_tool(
-        "spawn_sub_agent",
+        "context_probe",
         {"task": "t"},
         session_id="s",
         run_id="20260809_abc",
@@ -302,113 +302,6 @@ async def test_native_tool_receives_coroutine_local_context():
         "run_id": "20260809_abc",
         "tool_call_id": "tc-parent",
     }
-
-
-# ---------------------------------------------------------------------------
-# spawn_parallel_agents 工具测试
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_parallel_handler_rejects_single_task():
-    """只有 1 个任务时应返回错误。"""
-    import json as json_mod
-
-    async def handler(tasks: list[str], session_id: str, **kwargs: Any) -> str:
-        if len(tasks) < 2:
-            return json_mod.dumps({"error": "Need at least 2 tasks"})
-        return "ok"
-
-    result = await handler(tasks=["single"], session_id="s")
-    data = json_mod.loads(result)
-    assert "error" in data
-
-
-@pytest.mark.asyncio
-async def test_parallel_handler_rejects_too_many_tasks():
-    """超过 6 个任务时应返回错误。"""
-    import json as json_mod
-
-    async def handler(tasks: list[str], session_id: str, **kwargs: Any) -> str:
-        if len(tasks) > 6:
-            return json_mod.dumps({"error": "Maximum 6 parallel tasks allowed"})
-        return "ok"
-
-    result = await handler(tasks=[f"task{i}" for i in range(7)], session_id="s")
-    data = json_mod.loads(result)
-    assert "error" in data
-    assert "6" in data["error"]
-
-
-@pytest.mark.asyncio
-async def test_parallel_handler_aggregates_results():
-    """正常情况下应返回包含所有子任务结果的 JSON 数组。"""
-    import json as json_mod
-
-    # 模拟 SubAgentResult
-    class FakeResult:
-        def __init__(
-            self, task: str, content: str, error: str | None = None, turn_count: int = 1
-        ):
-            self.task = task
-            self.content = content
-            self.error = error
-            self.turn_count = turn_count
-
-    results = [
-        FakeResult("研究方案A", "方案A的结论"),
-        FakeResult("研究方案B", "方案B的结论"),
-    ]
-
-    # 验证输出格式
-    output = [
-        {
-            "task": r.task,
-            "status": "success" if not r.error else "error",
-            "output": r.content[:2000] if r.content else "",
-            "error": r.error,
-            "turns_used": r.turn_count,
-        }
-        for r in results
-    ]
-    data = json_mod.loads(json_mod.dumps(output, ensure_ascii=False))
-    assert len(data) == 2
-    assert data[0]["task"] == "研究方案A"
-    assert data[0]["status"] == "success"
-    assert data[0]["output"] == "方案A的结论"
-
-
-@pytest.mark.asyncio
-async def test_parallel_handler_reports_partial_failures():
-    """部分子任务失败时，成功的任务结果仍然应被返回。"""
-
-    class FakeResult:
-        def __init__(
-            self, task: str, content: str, error: str | None = None, turn_count: int = 1
-        ):
-            self.task = task
-            self.content = content
-            self.error = error
-            self.turn_count = turn_count
-
-    results = [
-        FakeResult("task1", "ok"),
-        FakeResult("task2", "", error="LLM timeout"),
-    ]
-
-    output = [
-        {
-            "task": r.task,
-            "status": "success" if not r.error else "error",
-            "output": r.content[:2000] if r.content else "",
-            "error": r.error,
-            "turns_used": r.turn_count,
-        }
-        for r in results
-    ]
-    assert output[0]["status"] == "success"
-    assert output[1]["status"] == "error"
-    assert output[1]["error"] == "LLM timeout"
 
 
 @pytest.mark.asyncio

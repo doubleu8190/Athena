@@ -1,6 +1,6 @@
 """执行收尾节点。
 
-关闭回答流、发布终态事件并打包 Harness 结果。
+关闭回答流、发布终态事件并打包 execution-loop 结果。
 """
 
 from __future__ import annotations
@@ -21,33 +21,29 @@ async def finish_execution(
     config: RunnableConfig,
     *,
     graph_runtime: LangGraphRuntime,
+    session_id: str,
+    run_id: str,
+    message_id: str | None,
+    error: str | None,
+    error_detail: dict[str, object] | None,
 ) -> AgentExecutionState:
     """关闭流、发布终态事件并标记执行完成。"""
-    harness = _executor(graph_runtime)
-    tool_results = state.get("tool_results", [])
-    await harness.finish_execution(
-        session_id=state.get("session_id", ""),
-        run_id=state.get("run_id", ""),
-        message_id=state.get("message_id"),
+    executor = _executor(graph_runtime)
+    recoverable = state.get("recoverable", {})
+    derived = state.get("derived", {})
+    await executor.finish_execution(
+        session_id=session_id,
+        run_id=run_id,
+        message_id=message_id,
         stop_signal=_stop_signal(config),
-        stream_version=int(state.get("stream_version", 0)),
-        stream_offset=int(state.get("stream_offset", 0)),
-        turn_count=int(state.get("turn_count", 0)),
-        error=state.get("error"),
-        error_detail=state.get("error_detail"),
-        interrupted=bool(state.get("interrupted", False)),
-        parent_run_id=state.get("parent_run_id"),
-        content=state.get("final_content", state.get("last_content", "")),
+        stream_version=int(recoverable.get("stream_version", 0)),
+        stream_offset=int(recoverable.get("stream_offset", 0)),
+        stream_started=bool(recoverable.get("stream_started", False)),
+        turn_count=int(recoverable.get("turn_count", 0)),
+        error=error,
+        error_detail=error_detail,
+        interrupted=bool(derived.get("interrupted", False)),
+        parent_run_id=recoverable.get("parent_run_id"),
+        content=recoverable.get("final_content", recoverable.get("last_content", "")),
     )
-    return {
-        "status": "completed" if not state.get("error") else "failed",
-        "harness_result": {
-            "content": state.get("final_content", state.get("last_content", "")),
-            "run_id": state.get("run_id", ""),
-            "turn_count": state.get("turn_count", 0),
-            "tool_results": tool_results,
-            "error": state.get("error"),
-            "error_detail": state.get("error_detail"),
-            "interrupted": state.get("interrupted", False),
-        },
-    }
+    return {"derived": {"status": "completed" if not error else "failed"}}

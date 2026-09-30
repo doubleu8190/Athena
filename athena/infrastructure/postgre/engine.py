@@ -36,6 +36,15 @@ async def initialize_postgres_engine(
     async with _engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+        approval_columns = await conn.run_sync(
+            lambda sync_conn: {
+                column["name"]
+                for column in inspect(sync_conn).get_columns("approvals")
+            }
+        )
+        if "approval_batch_id" not in approval_columns:
+            await conn.execute(text("ALTER TABLE approvals ADD COLUMN approval_batch_id VARCHAR"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_approvals_batch ON approvals (approval_batch_id)"))
         await conn.execute(text("DROP INDEX IF EXISTS idx_memories_embedding_hnsw"))
         await conn.execute(text("DROP INDEX IF EXISTS idx_file_chunks_embedding_hnsw"))
         metadata = await conn.execute(

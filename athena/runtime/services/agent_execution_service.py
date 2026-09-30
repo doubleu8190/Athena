@@ -1,15 +1,13 @@
-"""Harness 执行与后处理服务。
+"""Agent 执行与后处理服务。
 
-从 ``LangGraphRuntime`` 提取出的 Harness 执行、结果序列化和后处理逻辑。
+从 ``LangGraphRuntime`` 提取出的执行、结果序列化和后处理逻辑。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from athena.config.settings import Settings
-from athena.core.compression.compressor import ContextCompressor
-from athena.core.harness.harness import Harness, HarnessRunResult, HarnessSettings
+from athena.runtime.execution_loop.results import AgentExecutionResult
 from athena.core.llm.provider import LLMProvider
 from athena.core.memory.distillation import LongTermMemorySummarizer
 from athena.core.memory.contracts import CompletedTurn
@@ -28,9 +26,9 @@ logger = get_logger(__name__)
 
 
 class AgentExecutionService:
-    """Harness 执行编排与后处理服务。
+    """Agent 执行编排与后处理服务。
 
-    负责创建 Harness 实例、执行 LLM/工具循环、序列化结果为 JSON 安全格式，
+    负责序列化 execution-loop 结果为 JSON 安全格式，
     以及在执行完成后触发记忆写入和摘要生成。
     """
 
@@ -134,16 +132,16 @@ class AgentExecutionService:
         self,
         session_id: str,
         user_message: str,
-        result: HarnessRunResult,
+        result: AgentExecutionResult,
         *,
         turn_id: str,
     ) -> None:
-        """在 Harness 执行完成后触发记忆写入和摘要检查。
+        """在 Agent 执行完成后触发记忆写入和摘要检查。
 
         参数：
             session_id: 会话唯一标识。
             user_message: 本轮用户消息文本。
-            result: Harness 执行返回的领域结果。
+            result: execution-loop 返回的领域结果。
             turn_id: 本轮运行 ID。
         """
         turn = CompletedTurn(
@@ -166,12 +164,12 @@ class AgentExecutionService:
 
     @classmethod
     def build_result_payload(
-        cls, result: HarnessRunResult, attachment_refs: list[AttachmentRef]
+        cls, result: AgentExecutionResult, attachment_refs: list[AttachmentRef]
     ) -> dict[str, Any]:
-        """将 Harness 运行结果序列化为 JSON 安全的字典负载。
+        """将 Agent 运行结果序列化为 JSON 安全的字典负载。
 
         参数：
-            result: Harness 执行返回的领域结果。
+            result: execution-loop 返回的领域结果。
             attachment_refs: 本轮关联的附件引用列表。
 
         返回值：
@@ -197,7 +195,7 @@ class AgentExecutionService:
 
     @staticmethod
     def deserialize_messages(payload: list[dict[str, Any]]) -> list[Message]:
-        """从 LangGraph 状态恢复 Harness 消息。"""
+        """从 LangGraph 状态恢复执行消息。"""
         return [Message.model_validate(item) for item in payload]
 
     @staticmethod

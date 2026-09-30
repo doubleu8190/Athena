@@ -16,34 +16,44 @@ async def understand_task(
     state: AgentState, *, runtime: LangGraphRuntime
 ) -> AgentState:
     """生成当前请求的任务理解结果。"""
-    if not state.get("session_id"):
+    if not state.get("request", {}).get("session_id"):
         raise ValueError("AgentState missing required field: session_id")
-    return await runtime.understand_task(state)
+    update = await runtime.understand_task(state)
+    return {
+        "understanding": update,
+        "phase": "response" if update.get("clarification_question") else "context_planning",
+    }
 
 
 async def plan_context(state: AgentState, *, runtime: LangGraphRuntime) -> AgentState:
     """根据任务理解结果生成上下文获取计划。"""
-    if not state.get("session_id"):
+    if not state.get("request", {}).get("session_id"):
         raise ValueError("AgentState missing required field: session_id")
-    return runtime.plan_context(state)
+    return {
+        "context": {**state.get("context", {}), **runtime.plan_context(state)},
+        "phase": "context_acquisition",
+    }
 
 
 async def acquire_context(
     state: AgentState, *, runtime: LangGraphRuntime
 ) -> AgentState:
     """并发获取计划中的上下文。"""
-    if not state.get("session_id"):
+    if not state.get("request", {}).get("session_id"):
         raise ValueError("AgentState missing required field: session_id")
-    return await runtime.acquire_context(state)
+    return {
+        "context": {**state.get("context", {}), **(await runtime.acquire_context(state))},
+        "phase": "harness_preparation",
+    }
 
 
 async def clarification_response(
     state: AgentState, *, runtime: LangGraphRuntime
 ) -> AgentState:
     """把澄清问题作为普通回答持久化并完成当前 run。"""
-    if not state.get("session_id"):
+    if not state.get("request", {}).get("session_id"):
         raise ValueError("AgentState missing required field: session_id")
-    return await runtime.complete_clarification(state)
+    return {"phase": "response", **(await runtime.complete_clarification(state))}
 
 
 def create_understand_task_node(

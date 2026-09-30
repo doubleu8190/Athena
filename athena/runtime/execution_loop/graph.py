@@ -13,14 +13,19 @@ from ..node_events import instrument_graph_node
 
 from .initialize import initialize_execution
 from .llm_call import llm_call
-from .execute_tools import execute_tool_batch
+from .prepare_tools import prepare_tool_batch
+from .approval_gate import approval_gate
+from .dispatch_tools import dispatch_tool_calls
+from .tool_call import tool_call
+from .collect_tools import collect_tool_results
 from .finish import finish_execution
 
 if TYPE_CHECKING:
     from ..langgraph_runtime import LangGraphRuntime
 
 AgentLoopRoute = Literal[
-    "llm_call", "execute_tool_batch", "finish_execution", "plan_requested"
+    "llm_call", "prepare_tool_batch", "approval_gate", "tool_call",
+    "collect_tool_results", "finish_execution", "plan_requested"
 ]
 
 # ── 主图适配器（包装 AgentExecutionState → AgentState） ──
@@ -31,33 +36,30 @@ async def _initialize_wrapper(
     *,
     graph_runtime: LangGraphRuntime,
 ) -> AgentState:
-    """将主图状态映射为子图内部的执行状态。"""
-    exec_state: AgentExecutionState = state.get("execution", {})
+    """将阶段状态映射为执行循环状态。"""
+    execution: AgentExecutionState = state.get("execution", {})
+    exec_state = execution.get("recoverable", {})
+    request = state.get("request", {})
+    understanding = state.get("understanding", {})
+    context = state.get("context", {})
     return {
+        "phase": "agent_loop",
         "execution": initialize_execution(
             {
-                "session_id": state.get("session_id", exec_state.get("session_id", "")),
-                "run_id": state.get("run_id", exec_state.get("run_id", "")),
-                "message_id": state.get("message_id", exec_state.get("message_id", "")),
-                "user_message": state.get(
-                    "user_message", exec_state.get("user_message", "")
-                ),
-                "task_spec": state.get("task_spec", exec_state.get("task_spec")),
-                "context_bundle": state.get(
-                    "context_bundle", exec_state.get("context_bundle")
-                ),
-                "system_prompt": graph_runtime.build_system_prompt(
-                    state.get("task_spec", exec_state.get("task_spec")),
-                    state.get("context_bundle", exec_state.get("context_bundle")),
-                ),
-                "messages": list(
-                    state.get("harness_messages", exec_state.get("messages", []))
-                ),
-                "attachment_refs": list(
-                    state.get("attachment_refs", exec_state.get("attachment_refs", []))
-                ),
-                "max_turns": graph_runtime._settings.max_turns_per_run,
-                "max_retries": graph_runtime._settings.retry_budget,
+                "recoverable": {
+                    "system_prompt": graph_runtime.build_system_prompt(
+                        understanding.get("task_spec"), context.get("context_bundle")
+                    ),
+                    "messages": list(
+                        context.get("harness_messages", exec_state.get("messages", []))
+                    ),
+                    "max_turns": int(
+                        exec_state.get("max_turns", graph_runtime._settings.max_turns_per_run)
+                    ),
+                    "max_retries": int(
+                        exec_state.get("max_retries", graph_runtime._settings.retry_budget)
+                    ),
+                },
             }
         )
     }
@@ -69,55 +71,100 @@ async def _llm_wrapper(
     *,
     graph_runtime: LangGraphRuntime,
 ) -> AgentState:
+    execution_update, error, error_detail, plan_request = await llm_call(
+        state.get("execution", {}),
+        config,
+        graph_runtime=graph_runtime,
+        session_id=state.get("request", {}).get("session_id", ""),
+        run_id=state.get("request", {}).get("run_id", ""),
+    )
     return {
-        "execution": await llm_call(
-            state.get("execution", {}), config, graph_runtime=graph_runtime
-        )
+        "execution": execution_update,
+        "response": {"error": error, "error_detail": error_detail},
+        "orchestration": {"plan_request": plan_request},
     }
 
 
 def _route_after_llm(state: AgentState) -> AgentLoopRoute:
-    exec_state: AgentExecutionState = state.get("execution", {})
-    if exec_state.get("interrupted"):
+    execution: AgentExecutionState = state.get("execution", {})
+    recoverable = execution.get("recoverable", {})
+    derived = execution.get("derived", {})
+    error = state.get("response", {}).get("error")
+    if derived.get("interrupted"):
         return "finish_execution"
-    if exec_state.get("route") == "plan_requested":
+    if derived.get("route") == "plan_requested":
         return "plan_requested"
-    if exec_state.get("pending_tool_calls"):
-        return "execute_tool_batch"
-    if exec_state.get("error"):
-        # 协议错误（例如无效的 submit_plan）明确不可重试；不能仅依据
-        # retry_count/max_retries 再次调用 LLM，否则模型可能继续产生错误调用。
-        if not exec_state.get("retryable", False):
+    if recoverable.get("pending_tool_calls"):
+        return "prepare_tool_batch"
+    if error:
+        # 只有业务结果错误允许回到 LLM；Provider 技术失败已经在节点内
+        # 完成重试，不能再次由 Graph 放大真实请求次数。
+        if derived.get("llm_result_status") == "technical_failure":
             return "finish_execution"
-        if int(exec_state.get("turn_count", 0)) < int(
-            exec_state.get("max_turns", 20)
-        ) and int(exec_state.get("retry_count", 0)) < int(
-            exec_state.get("max_retries", 3)
+        if not derived.get("retryable", False):
+            return "finish_execution"
+        if int(recoverable.get("turn_count", 0)) < int(
+            recoverable.get("max_turns", 20)
+        ) and int(recoverable.get("retry_count", 0)) < int(
+            recoverable.get("max_retries", 3)
         ):
             return "llm_call"
     return "finish_execution"
 
 
-async def _tools_wrapper(
+async def _prepare_tools_wrapper(
     state: AgentState,
     config,
     *,
     graph_runtime: LangGraphRuntime,
 ) -> AgentState:
     return {
-        "execution": await execute_tool_batch(
-            state.get("execution", {}), config, graph_runtime=graph_runtime
+        "execution": await prepare_tool_batch(
+            state.get("execution", {}),
+            config,
+            graph_runtime=graph_runtime,
+            session_id=state.get("request", {}).get("session_id", ""),
+            run_id=state.get("request", {}).get("run_id", ""),
         )
     }
 
 
-def _route_after_tools(state: AgentState) -> AgentLoopRoute:
-    exec_state: AgentExecutionState = state.get("execution", {})
-    return (
-        "finish_execution"
-        if exec_state.get("interrupted") or exec_state.get("error")
-        else "llm_call"
+async def _approval_gate_wrapper(
+    state: AgentState,
+    config,
+    *,
+    graph_runtime: LangGraphRuntime,
+) -> AgentState:
+    return {
+        "execution": await approval_gate(
+            state.get("execution", {}),
+            config,
+            graph_runtime=graph_runtime,
+            run_id=state.get("request", {}).get("run_id", ""),
+        )
+    }
+
+
+async def _tool_call_wrapper(
+    state: AgentState,
+    config,
+    *,
+    graph_runtime: LangGraphRuntime,
+) -> AgentState:
+    return await tool_call(
+        state,
+        config,
+        graph_runtime=graph_runtime,
+        session_id=state.get("request", {}).get("session_id", ""),
+        run_id=state.get("request", {}).get("run_id", ""),
+        message_id=state.get("request", {}).get("message_id"),
     )
+
+
+async def _collect_tools_wrapper(
+    state: AgentState, config, *, graph_runtime: LangGraphRuntime
+) -> AgentState:
+    return {"execution": await collect_tool_results(state.get("execution", {}), config)}
 
 
 async def _finish_wrapper(
@@ -127,13 +174,31 @@ async def _finish_wrapper(
     graph_runtime: LangGraphRuntime,
 ) -> AgentState:
     result = await finish_execution(
-        state.get("execution", {}), config, graph_runtime=graph_runtime
+        state.get("execution", {}),
+        config,
+        graph_runtime=graph_runtime,
+        session_id=state.get("request", {}).get("session_id", ""),
+        run_id=state.get("request", {}).get("run_id", ""),
+        message_id=state.get("request", {}).get("message_id"),
+        error=state.get("response", {}).get("error"),
+        error_detail=state.get("response", {}).get("error_detail"),
     )
+    execution = state.get("execution", {})
+    recoverable = execution.get("recoverable", {})
+    derived = execution.get("derived", {})
+    harness_result = {
+        "content": recoverable.get("final_content", recoverable.get("last_content", "")),
+        "run_id": state.get("request", {}).get("run_id", ""),
+        "turn_count": recoverable.get("turn_count", 0),
+        "tool_results": recoverable.get("tool_results", []),
+        "error": state.get("response", {}).get("error"),
+        "error_detail": state.get("response", {}).get("error_detail"),
+        "interrupted": derived.get("interrupted", False),
+    }
     return {
+        "phase": "response",
         "execution": result,
-        "harness_result": result.get("harness_result"),
-        "error": (result.get("harness_result") or {}).get("error"),
-        "error_detail": (result.get("harness_result") or {}).get("error_detail"),
+        "response": {"harness_result": harness_result},
     }
 
 
@@ -146,22 +211,25 @@ async def _plan_requested_wrapper(
     """把顶层 Agent 的计划请求交回外层主图，计划分支统一负责收尾。"""
     execution = state.get("execution", {})
     return {
+        "phase": "orchestration",
         "execution": execution,
-        "plan_request": execution.get("plan_request"),
+        "orchestration": {"plan_request": state.get("orchestration", {}).get("plan_request")},
     }
 
 
 # ── 图构建 ──
 
 
-def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
+def build_agent_loop(
+    runtime: LangGraphRuntime, checkpointer: object | None = None
+) -> CompiledStateGraph:
     """构建可检查点化的 LLM/工具循环子图。
 
     图结构：
-        START → initialize → llm_call ⇄ execute_tool_batch → finish → END
+        START → initialize → llm_call → prepare → approval_gate →
+        Send(tool_call) → collect → llm_call → finish → END
     """
     graph = StateGraph(AgentState)
-    event_publisher = getattr(runtime, "_events", None)
 
     def add_instrumented_node(node_name: str, node: object) -> None:
         """注册一个带生命周期事件的执行循环节点。"""
@@ -170,7 +238,7 @@ def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
             instrument_graph_node(
                 node_name,
                 node,  # type: ignore[arg-type]
-                event_publisher=event_publisher,
+                event_publisher=runtime.event_publisher,
             ),
         )
 
@@ -179,10 +247,10 @@ def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
         partial(_initialize_wrapper, graph_runtime=runtime),
     )
     add_instrumented_node("llm_call", partial(_llm_wrapper, graph_runtime=runtime))
-    add_instrumented_node(
-        "execute_tool_batch",
-        partial(_tools_wrapper, graph_runtime=runtime),
-    )
+    add_instrumented_node("prepare_tool_batch", partial(_prepare_tools_wrapper, graph_runtime=runtime))
+    add_instrumented_node("approval_gate", partial(_approval_gate_wrapper, graph_runtime=runtime))
+    add_instrumented_node("tool_call", partial(_tool_call_wrapper, graph_runtime=runtime))
+    add_instrumented_node("collect_tool_results", partial(_collect_tools_wrapper, graph_runtime=runtime))
     add_instrumented_node(
         "finish_execution", partial(_finish_wrapper, graph_runtime=runtime)
     )
@@ -197,16 +265,18 @@ def build_agent_loop(runtime: LangGraphRuntime) -> CompiledStateGraph:
         _route_after_llm,
         {
             "llm_call": "llm_call",
-            "execute_tool_batch": "execute_tool_batch",
+            "prepare_tool_batch": "prepare_tool_batch",
             "finish_execution": "finish_execution",
             "plan_requested": "plan_requested",
         },
     )
+    graph.add_edge("prepare_tool_batch", "approval_gate")
     graph.add_conditional_edges(
-        "execute_tool_batch",
-        _route_after_tools,
-        {"llm_call": "llm_call", "finish_execution": "finish_execution"},
+        "approval_gate",
+        partial(dispatch_tool_calls, graph_runtime=runtime),
     )
+    graph.add_edge("tool_call", "collect_tool_results")
+    graph.add_edge("collect_tool_results", "llm_call")
     graph.add_edge("finish_execution", END)
     graph.add_edge("plan_requested", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

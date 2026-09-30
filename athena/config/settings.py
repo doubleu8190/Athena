@@ -164,8 +164,7 @@ class Settings(BaseSettings):
     max_turns_per_run: int = 20
     retry_budget: int = 3
     tool_timeout: int = 60  # 秒
-    llm_stream_timeout: int = 120  # 秒
-    approval_timeout: int = 120  # 秒
+    llm_timeout: int = 120  # 秒
 
     # --- 记忆 ---
     summary_threshold: int = 10  # 每 N 轮对话触发摘要

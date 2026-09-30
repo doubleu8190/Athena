@@ -165,9 +165,7 @@ async def _lifespan_body(app: FastAPI):
 
     # ── 3. 审批管理器（绑定事件发布器与数据库） ──
     approval_manager = ApprovalManager(
-        approval_timeout=settings.approval_timeout,
         event_publisher=event_publisher,
-        db=db,
         agent_store=agent_store,
     )
 
@@ -187,10 +185,7 @@ async def _lifespan_body(app: FastAPI):
         sandbox_runner=sandbox_runner,
         settings=settings,
     )
-    tool_manager = UnifiedToolManager(
-        approval_manager=approval_manager,
-        tool_runtime=tool_runtime,
-    )
+    tool_manager = UnifiedToolManager(tool_runtime=tool_runtime)
     tool_catalog = ToolCatalogService(db.tools)
     builtin_tool_names = register_builtin_tools(tool_manager)
     await tool_catalog.reconcile(tool_manager, names=builtin_tool_names)
@@ -343,6 +338,7 @@ async def _lifespan_body(app: FastAPI):
     graph_runtime = LangGraphRuntime(
         llm=llm_primary,
         tool_manager=tool_manager,
+        approval_manager=approval_manager,
         db=db,
         event_publisher=event_publisher,
         compressor=compressor,
@@ -361,9 +357,6 @@ async def _lifespan_body(app: FastAPI):
     # initialized and is None during runtime construction.
     memory_job_worker.configure_workflow(graph_runtime.fact_memory_write_workflow)
     await memory_job_worker.start()
-    # 注册子 Agent 派生工具到工具管理器
-    await tool_registry.install(graph_runtime.build_delegation_tool_specs())
-
     # ── 6.1 RuntimeContainer（路由层依赖注入容器） ──
     realtime_transport = SessionEventBus()
     agent_store.transport = realtime_transport
@@ -371,7 +364,6 @@ async def _lifespan_body(app: FastAPI):
         db=db,
         retrieval_trace_reader=db.retrieval,
         event_publisher=event_publisher,
-        approval_manager=approval_manager,
         tool_manager=tool_manager,
         tool_catalog=tool_catalog,
         mcp_manager=mcp_manager,
@@ -398,7 +390,6 @@ async def _lifespan_body(app: FastAPI):
     app.state._startup_checkpointer_context = checkpointer_context
     checkpointer = await checkpointer_context.__aenter__()
     await checkpointer.setup()
-
     graph = build_graph(graph_runtime, checkpointer)
     command_consumer = CommandConsumer(
         app.state.runtime.agent_store,
@@ -406,7 +397,6 @@ async def _lifespan_body(app: FastAPI):
         graph=graph,
         cancellation_registry=CancellationRegistry(),
         memory_service=memory_service,
-        approval_manager=approval_manager,
         sandbox_runner=sandbox_runner,
     )
     app.state._startup_command_consumer = command_consumer

@@ -17,7 +17,6 @@ class CommandType(StrEnum):
     RUN_PAUSE = "run.pause"
     RUN_RESUME = "run.resume"
     APPROVAL_RESOLVE = "approval.resolve"
-    APPROVAL_CANCEL = "approval.cancel"
 
 
 class Command(BaseModel):
@@ -44,8 +43,7 @@ class Command(BaseModel):
         """
         required: dict[CommandType, tuple[str, ...]] = {
             CommandType.MESSAGE_SUBMIT: ("message",),
-            CommandType.APPROVAL_RESOLVE: ("approval_id", "decision"),
-            CommandType.APPROVAL_CANCEL: ("approval_id",),
+            CommandType.APPROVAL_RESOLVE: ("approval_batch_id", "decisions"),
         }
         missing = [
             key
@@ -55,8 +53,11 @@ class Command(BaseModel):
         if missing:
             raise ValueError(f"missing command payload: {', '.join(missing)}")
         if self.command_type == CommandType.APPROVAL_RESOLVE:
+            if not self.payload.decisions:
+                raise ValueError("approval resolve requires complete decisions")
             try:
-                AgentApprovalDecision(str(self.payload.decision))
+                for decision in self.payload.decisions.values():
+                    AgentApprovalDecision(str(decision))
             except ValueError as exc:
                 raise ValueError("invalid approval decision") from exc
 

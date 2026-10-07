@@ -7,7 +7,7 @@ import { ExecutionTimeline } from "./ExecutionTimeline"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { ApprovalRequest, Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
+import type { Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
 
 interface ChatProps {
   sendEvent: (type: string, data?: Record<string, unknown>) => boolean
@@ -381,7 +381,7 @@ function Chat({ sendEvent }: ChatProps) {
       if (!approval?.approval_batch_id) return
       void apiClient.respondApprovalBatch(approval.approval_batch_id, decisions)
     },
-    [sendEvent],
+    [pendingApprovals],
   )
 
   const isAgentActive =

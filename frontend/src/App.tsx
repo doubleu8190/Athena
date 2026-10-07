@@ -65,8 +65,6 @@ function AppContent() {
           await apiClient.pauseSession(activeSessionId)
         } else if (type === ClientEventType.SESSION_RESUME) {
           await apiClient.resumeSession(activeSessionId)
-        } else if (type === ClientEventType.APPROVAL_RESPONSE) {
-          await apiClient.respondApproval(String(data.approval_id), data.action === "allow" ? "allow" : "deny")
         }
       } catch (error) { console.error("Command failed", error) }
     }

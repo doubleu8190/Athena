@@ -1,7 +1,6 @@
 /** 浏览器命令分发器和 SSE 投影使用的客户端事件名称。 */
 export const ClientEventType = {
   USER_COMMAND: "user_command",
-  APPROVAL_RESPONSE: "approval_response",
   SESSION_STOP: "session_stop",
   SESSION_RESUME: "session_resume",
   SESSION_PAUSE: "session_pause",

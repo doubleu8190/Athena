@@ -1,0 +1,23 @@
+"""审批外部能力端口。"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from .entities import ApprovalDecision, ApprovalRequest
+
+
+class ApprovalRepository(Protocol):
+    async def create(self, request: ApprovalRequest) -> bool: ...
+    async def get(self, approval_id: str) -> ApprovalRequest | None: ...
+    async def list_pending(self, session_id: str | None = None) -> list[ApprovalRequest]: ...
+    async def list_history(self, session_id: str | None = None, *, limit: int = 50, offset: int = 0) -> list[ApprovalRequest]: ...
+    async def resolve(self, approval_id: str, *, run_id: str, task_id: str, decision: ApprovalDecision) -> bool: ...
+    async def resolve_batch(self, batch_id: str, decisions: dict[str, ApprovalDecision], *, run_id: str | None = None) -> bool: ...
+
+
+class ApprovalEventPort(Protocol):
+    async def required(self, request: ApprovalRequest) -> None: ...
+
+
+__all__ = ["ApprovalEventPort", "ApprovalRepository"]

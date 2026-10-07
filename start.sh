@@ -48,7 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
 
 # 各子路径常量
-BACKEND_DIR="${PROJECT_ROOT}"                              # 后端 Python 项目根
+BACKEND_DIR="${PROJECT_ROOT}/backend"                     # 后端 Python 项目根
 FRONTEND_DIR="${PROJECT_ROOT}/frontend"                     # React Web 前端根目录
 RUN_DIR="${PROJECT_ROOT}/.run"                             # PID / 锁 / 临时文件
 LOG_DIR="${PROJECT_ROOT}/logs"                             # 运行日志
@@ -211,10 +211,10 @@ check_dependencies_core() {
   log_success "基础命令就绪：python3=$(python3 --version | awk '{print $2}')  node=$(node --version)"
 }
 
-# 后端 Python 依赖是否就绪（通过 import athena.main 判断是否有缺包）
+# 后端 Python 依赖是否就绪（通过目标入口判断是否有缺包）
 check_dependencies_backend() {
   log_step "后端 Python 依赖检查"
-  if ! PYTHONPATH="${PROJECT_ROOT}" "${PYTHON_BIN}" -c "import athena.main, fastapi, uvicorn, pydantic_settings, structlog, langchain" >/dev/null 2>&1; then
+  if ! PYTHONPATH="${PROJECT_ROOT}" "${PYTHON_BIN}" -c "import backend.src.main, fastapi, uvicorn, pydantic_settings, structlog, langchain" >/dev/null 2>&1; then
     log_warn "后端依赖缺失，建议先执行：${C_BOLD}./start.sh install${C_RESET}"
     return 1
   fi
@@ -333,7 +333,7 @@ cmd_install() {
     py_pip="${PROJECT_ROOT}/.venv/bin/pip"
     log_info "检测到虚拟环境 .venv，使用 ${py_pip}"
   fi
-  ${py_pip} install -e "${PROJECT_ROOT}[dev]" \
+  ${py_pip} install -e "${BACKEND_DIR}[dev]" \
     || fatal "后端依赖安装失败，请检查 pip 源或网络。"
   log_success "后端依赖安装完成"
 
@@ -364,8 +364,8 @@ cmd_test() {
   check_dependencies_core
   check_dependencies_backend || true
   (
-    cd "${BACKEND_DIR}"
-    PYTHONPATH="${BACKEND_DIR}" "${PYTHON_BIN}" -m pytest tests/ -v --tb=short \
+    cd "${PROJECT_ROOT}"
+    PYTHONPATH="${PROJECT_ROOT}" "${PYTHON_BIN}" -m pytest backend/tests/ -v --tb=short \
       || fatal "测试失败，请查看上方输出。"
   )
   log_success "后端测试全部通过"
@@ -411,16 +411,16 @@ start_backend() {
 
   # 以前台 + 日志文件双重方式运行（teeing），然后用 nohup 分离
   (
-    cd "${BACKEND_DIR}"
+    cd "${PROJECT_ROOT}"
     # 脚本子 shell 退出后父进程仍存活：使用 exec nohup 形式
-    nohup env PYTHONPATH="${BACKEND_DIR}" \
+    nohup env PYTHONPATH="${PROJECT_ROOT}" \
       HOST="${HOST}" PORT="${PORT}" DEBUG="${DEBUG}" \
       LLM_PROVIDER="${LLM_PROVIDER}" LLM_MODEL="${LLM_MODEL}" \
       LLM_API_KEY="${LLM_API_KEY}" LLM_BASE_URL="${LLM_BASE_URL}" \
       POSTGRES_USER="${POSTGRES_USER}" POSTGRES_DB="${POSTGRES_DB}" \
       POSTGRES_HOST="${POSTGRES_HOST}" POSTGRES_PORT="${POSTGRES_PORT}" \
       CHROMADB_PATH="${CHROMADB_PATH}" \
-      "${PYTHON_BIN}" -u athena/main.py \
+      "${PYTHON_BIN}" -u backend/src/main.py \
       >> "${LOG_BACKEND}" 2>&1 &
     echo $! > "${PID_BACKEND}"
   )

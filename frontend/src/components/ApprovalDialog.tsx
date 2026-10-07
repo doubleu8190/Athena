@@ -23,7 +23,10 @@ export function ApprovalCard({ requests, onSubmit }: ApprovalCardProps) {
   }, [requests.length])
 
   const resolve = (request: ApprovalRequest, action: "allow" | "deny") => {
-    const next = { ...decisions, [request.approval_id]: action === "allow" ? "approved" : "denied" }
+    const next: Record<string, "approved" | "denied"> = {
+      ...decisions,
+      [request.approval_id]: action === "allow" ? "approved" : "denied",
+    }
     setDecisions(next)
     setResolving((current) => new Set(current).add(request.approval_id))
     if (Object.keys(next).length === requests.length) onSubmit(next)

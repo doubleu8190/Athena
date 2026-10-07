@@ -1,0 +1,525 @@
+"""记忆管理测试 — 访问追踪、滑动 TTL、记忆度加权.
+
+用内存向量替身隔离 embedding 模型；PostgreSQL 走真实 initialize_postgres_engine + PostgreSQL FTS。
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import Any, Iterable
+
+import pytest
+from sqlalchemy import select, update
+
+from athena.config.settings import Settings
+from athena.core.memory.long_term_memory import LongTermMemoryService
+from athena.core.memory.retrieval import HybridMemoryRetriever, MemoryRetrievalResult
+from athena.infrastructure.postgre.engine import close_postgres_engine, get_session, initialize_postgres_engine
+from athena.infrastructure.postgre.models import MemoryModel
+from athena.infrastructure.postgre.repositories.memory_repository import PostgresMemoryRepository
+from tests.fakes import FakeMemoryGraphStore
+
+
+# ---------------------------------------------------------------------------
+# 内存向量替身（覆盖 LongTermMemoryService 使用的全部表面）
+# ---------------------------------------------------------------------------
+
+class _FakeVectorStore:
+    def __init__(self) -> None:
+        self._items: dict[str, dict[str, Any]] = {}
+
+    async def initialize(self) -> None:
+        return None
+
+    async def add(self, memory_id: str, content: str, metadata: dict[str, Any]) -> None:
+        self._items[memory_id] = {"document": content, "metadata": dict(metadata)}
+
+    async def query(self, query: str, limit: int, where: dict[str, Any] | None) -> dict[str, Any]:
+        items = list(self._items.items())
+        if where:
+            items = [
+                (i, d)
+                for i, d in items
+                if all(d["metadata"].get(k) == v for k, v in where.items())
+            ]
+        items = items[:limit]
+        ids = [i for i, _ in items]
+        docs = [d["document"] for _, d in items]
+        metas = [d["metadata"] for _, d in items]
+        dists = [0.0] * len(items)
+        # LongTermMemoryService.search 按单行查询读取首元素，故用嵌套列表
+        return {
+            "ids": [ids],
+            "documents": [docs],
+            "metadatas": [metas],
+            "distances": [dists],
+        }
+
+    async def get(self, memory_id: str) -> dict[str, Any]:
+        selected = [(i, d) for i, d in self._items.items() if i == memory_id]
+        return {
+            "ids": [i for i, _ in selected],
+            "documents": [d["document"] for _, d in selected],
+            "metadatas": [d["metadata"] for _, d in selected],
+        }
+
+    async def update(self, memory_id: str, content: str | None = None, metadata: dict[str, Any] | None = None) -> None:
+        if memory_id in self._items:
+            if content is not None:
+                self._items[memory_id]["document"] = content
+            self._items[memory_id]["metadata"].update(metadata or {})
+
+    async def delete(self, memory_ids: list[str]) -> None:
+        for mid in memory_ids:
+            self._items.pop(mid, None)
+
+
+# ---------------------------------------------------------------------------
+# 检索测试用 stub
+# ---------------------------------------------------------------------------
+
+class _StubMemory:
+    def __init__(
+        self,
+        vector_results: list[dict[str, Any]],
+        pending: dict[str, tuple[int, str]] | None = None,
+    ) -> None:
+        self._vector_results = vector_results
+        self.pending = pending or {}
+
+    async def search(
+        self, query: str, n_results: int = 5, where: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        return self._vector_results
+
+    async def keyword_search(
+        self, query: str, n_results: int = 10, where: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        return []
+
+    def pending_access_stats(self, ids: Iterable[str]) -> dict[str, tuple[int, str]]:
+        return {i: self.pending[i] for i in ids if i in self.pending}
+
+
+# ---------------------------------------------------------------------------
+# fixture
+# ---------------------------------------------------------------------------
+
+def _make_settings(**overrides: Any) -> Settings:
+    # 显式覆盖权重，避免测试受本机 .env（VECTOR_WEIGHT/KEYWORD_WEIGHT）影响
+    defaults: dict[str, Any] = {
+        "memory_ttl_days": 90,
+        "memory_sync_interval": 900,
+        "memory_access_window_days": 7,
+        "vector_weight": 0.75,
+        "keyword_weight": 0.25,
+    }
+    defaults.update(overrides)
+    return Settings(**defaults)
+
+
+@pytest.fixture
+def vector_store():
+    return _FakeVectorStore()
+
+
+@pytest.fixture
+async def mm(postgres_url, vector_store):
+    await initialize_postgres_engine(postgres_url)
+    manager = LongTermMemoryService(
+        settings=_make_settings(),
+        repository=PostgresMemoryRepository(),
+        vector_store=vector_store,
+        graph_store=FakeMemoryGraphStore(),
+    )
+    await manager.initialize()
+    yield manager
+    await close_postgres_engine()
+
+
+async def _get_row(memory_id: str) -> MemoryModel | None:
+    async with get_session() as session:
+        result = await session.execute(
+            select(MemoryModel).where(MemoryModel.id == memory_id)
+        )
+        return result.scalars().first()
+
+
+# ---------------------------------------------------------------------------
+# 访问追踪
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_only_selected_context_records_access(mm: LongTermMemoryService):
+    mid = await mm.add_memory(content="用户偏好简洁回答", metadata={"session_id": "s1"})
+    mm.record_selected_access([mid])
+    await mm.get_memory(mid)
+    st = mm._access_stats.get(mid)
+    assert st is not None
+    assert st.count == 1
+    # last_accessed_at 必须可解析为 isoformat
+    datetime.fromisoformat(st.last_accessed_at)
+
+
+@pytest.mark.asyncio
+async def test_flush_updates_postgresql_and_pgvector(
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
+):
+    mid = await mm.add_memory(
+        content="技术决策：采用微服务架构", metadata={"session_id": "s1"}
+    )
+    mm.record_selected_access([mid])
+    mm.record_selected_access([mid])
+
+    assert await mm.flush_access_stats() == 1
+    assert mm._access_stats == {}
+
+    row = await _get_row(mid)
+    assert row is not None
+    assert row.access_count == 2
+    assert row.last_accessed_at is not None
+
+    meta = vector_store._items[mid]["metadata"]
+    assert meta["access_count"] == 2
+    assert meta["last_accessed_at"] is not None
+    # 访问热度不会改变事实有效期。
+    assert datetime.fromisoformat(meta["expires_at"]) > datetime.now() + timedelta(days=89)
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_flush_after_delete_is_safe(
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
+):
+    mid = await mm.add_memory(content="将被删除的记忆", metadata={"session_id": "s1"})
+    mm.record_selected_access([mid])
+    await mm.delete_memory(mid)
+    # 已删除记忆的统计落盘不应抛异常
+    assert await mm.flush_access_stats() == 1
+    row = await _get_row(mid)
+    assert row is not None
+    assert row.deleted_time is not None  # 保持软删，未被复活
+    assert mid not in vector_store._items
+
+
+@pytest.mark.asyncio
+async def test_flush_empty_stats_noop(mm: LongTermMemoryService):
+    assert await mm.flush_access_stats() == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_all_removes_postgresql_and_vector_records(
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
+):
+    await mm.add_memory(content="第一条记忆", metadata={"session_id": "s1"})
+    await mm.add_memory(content="第二条记忆", metadata={"session_id": "s1"})
+
+    result = await mm.clear_all()
+
+    assert result == {"postgresql": 2, "pgvector": 2}
+    assert vector_store._items == {}
+    assert await mm.list_memories() == []
+
+
+# ---------------------------------------------------------------------------
+# 滑动 TTL 与清理
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_access_does_not_refresh_fact_validity(mm: LongTermMemoryService):
+    mid = await mm.add_memory(content="过期测试记忆", metadata={"session_id": "s1"})
+    # 强制到期（模拟创建久远、TTL 已过）
+    past = (datetime.now() - timedelta(days=1)).isoformat()
+    async with get_session() as session:
+        async with session.begin():
+            await session.execute(
+                update(MemoryModel)
+                .where(MemoryModel.id == mid)
+                .values(expires_at=past)
+            )
+    # 最终注入上下文只增加热度，不会把事实重新判定为有效。
+    mm.record_selected_access([mid])
+    await mm.flush_access_stats()
+
+    row = await _get_row(mid)
+    assert row is not None
+    assert row.expires_at == past
+    assert row.access_count == 1
+    assert await mm.cleanup_expired() == 1
+    assert await mm.get_memory(mid) is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_fact_is_not_retrieved_but_is_retained(mm: LongTermMemoryService):
+    mid = await mm.add_memory(
+        content="用户当前所在地是上海",
+        metadata={"session_id": "s1", "validity_status": "invalid"},
+    )
+
+    assert await mm.search("当前所在地", n_results=5) == []
+    row = await _get_row(mid)
+    assert row is not None
+    assert row.validity_status == "invalid"
+    assert row.deleted_time is None
+
+
+@pytest.mark.asyncio
+async def test_fact_validity_can_be_changed_without_touching_retention_or_heat(
+    mm: LongTermMemoryService,
+):
+    mid = await mm.add_memory(
+        content="用户当前使用 PostgreSQL",
+        metadata={"session_id": "s1"},
+    )
+    row_before = await _get_row(mid)
+    assert row_before is not None
+    expires_at = row_before.expires_at
+
+    assert await mm.set_memory_validity(mid, "invalid") is True
+    assert await mm.search("当前使用", n_results=5) == []
+    row_invalid = await _get_row(mid)
+    assert row_invalid is not None
+    assert row_invalid.validity_status == "invalid"
+    assert row_invalid.expires_at == expires_at
+    assert row_invalid.access_count == 0
+
+    assert await mm.set_memory_validity(mid, "valid") is True
+    results = await mm.search("当前使用", n_results=5)
+    assert results and results[0]["id"] == mid
+
+
+@pytest.mark.asyncio
+async def test_memory_update_creates_revision_and_preserves_old_content(
+    mm: LongTermMemoryService,
+):
+    old_id = await mm.add_memory(
+        content="后端使用 Python", metadata={"session_id": "s1", "type": "fact"}
+    )
+
+    assert await mm.update_memory(old_id, "后端使用 Rust") is not None
+
+    old_row = await _get_row(old_id)
+    assert old_row is not None
+    assert old_row.content == "后端使用 Python"
+    assert old_row.status == "superseded"
+    assert old_row.superseded_by
+    new_row = await _get_row(old_row.superseded_by)
+    assert new_row is not None
+    assert new_row.content == "后端使用 Rust"
+    assert new_row.revision_of == old_id
+    assert new_row.revision == 2
+
+
+@pytest.mark.asyncio
+async def test_cleanup_expired_respects_expires_at(
+    mm: LongTermMemoryService, vector_store: _FakeVectorStore
+):
+    expired_mid = await mm.add_memory(content="过期记忆", metadata={"session_id": "s1"})
+    keep_mid = await mm.add_memory(content="保留记忆", metadata={"session_id": "s1"})
+    past = (datetime.now() - timedelta(days=1)).isoformat()
+    async with get_session() as session:
+        async with session.begin():
+            await session.execute(
+                update(MemoryModel)
+                .where(MemoryModel.id == expired_mid)
+                .values(expires_at=past)
+            )
+    vector_store._items[expired_mid]["metadata"]["expires_at"] = past
+
+    assert await mm.cleanup_expired() == 1
+    assert await mm.get_memory(expired_mid) is None
+    assert await mm.get_memory(keep_mid) is not None
+
+
+# ---------------------------------------------------------------------------
+# keyword 路径访问字段取自 live 列（非 metadata_json 冻结值）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_keyword_search_returns_fresh_access_fields(mm: LongTermMemoryService):
+    mid = await mm.add_memory(content="weather in shanghai is humid", metadata={"session_id": "s1"})
+    mm.record_selected_access([mid])
+    await mm.flush_access_stats()
+
+    results = await mm.keyword_search(query="shanghai", where={"session_id": "s1"})
+    assert results
+    assert results[0]["id"] == mid
+    assert results[0]["metadata"]["access_count"] == 1
+    assert results[0]["metadata"]["last_accessed_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# FTS 职责边界：精确词/整段/前缀召回（不做中文语义分词，子串交由向量路）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_keyword_cjk_prefix_recall(mm: LongTermMemoryService):
+    # 旧实现（"北京" 精确词）对 "北京烤鸭好吃" 无法命中；前缀形式 "北京"* 可召回
+    await mm.add_memory(content="北京烤鸭好吃", metadata={"session_id": "s1"})
+    results = await mm.keyword_search(query="北京", where={"session_id": "s1"})
+    assert [r["content"] for r in results] == ["北京烤鸭好吃"]
+
+
+@pytest.mark.asyncio
+async def test_keyword_no_substring_recall(mm: LongTermMemoryService):
+    # "烤鸭" 是 "北京烤鸭好吃" 的子串而非前缀 → FTS 不召回（边界职责：交给向量路）
+    await mm.add_memory(content="北京烤鸭好吃", metadata={"session_id": "s1"})
+    results = await mm.keyword_search(query="烤鸭", where={"session_id": "s1"})
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_keyword_mixed_run_prefix_recall(mm: LongTermMemoryService):
+    # 中英混排整段为单 token；"ipv6" 通过前缀召回 "ipv6配置完成"
+    await mm.add_memory(content="ipv6配置完成", metadata={"session_id": "s1"})
+    results = await mm.keyword_search(query="ipv6", where={"session_id": "s1"})
+    assert [r["content"] for r in results] == ["ipv6配置完成"]
+
+
+@pytest.mark.asyncio
+async def test_keyword_search_orders_by_relevance_not_insertion(mm: LongTermMemoryService):
+    # 回归：PostgreSQL FTS 无 ORDER BY 时按 rowid/插入序返回（弱命中可能排强命中前），
+    # keyword_search 必须显式 ORDER BY rank(ts_rank_cd)。先插入"仅前缀命中"（弱）、
+    # 后插入"精确命中"（强），断言强命中排前且 score 更高（与向量路径语义一致）。
+    await mm.add_memory(content="北京烤鸭好吃", metadata={"session_id": "s1"})
+    await mm.add_memory(content="北京 天气", metadata={"session_id": "s1"})
+    await mm.add_memory(content="无关记忆内容", metadata={"session_id": "s1"})
+
+    results = await mm.keyword_search(query="北京", where={"session_id": "s1"})
+    contents = [r["content"] for r in results]
+    assert contents[0] == "北京 天气"  # 精确命中 > 仅前缀命中（而非插入序）
+    assert "北京烤鸭好吃" in contents
+    # score 单调递增：相关者分数更高（修复前的反相公式会给弱命中更高分）
+    assert results[0]["score"] > results[1]["score"]
+
+
+# ---------------------------------------------------------------------------
+# 记忆度加权
+# ---------------------------------------------------------------------------
+
+def _retrieval_manager() -> HybridMemoryRetriever:
+    return HybridMemoryRetriever(
+        memory_service=_StubMemory(vector_results=[]),
+        settings=_make_settings(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_memorability_scoring():
+    mgr = _retrieval_manager()
+    assert mgr._calculate_memorability({}) == pytest.approx(1.0)
+    assert mgr._calculate_memorability({"access_count": 0}) == pytest.approx(1.0)
+
+    now = datetime.now().isoformat()
+    hot = mgr._calculate_memorability(
+        {"access_count": 50, "last_accessed_at": now}
+    )
+    assert hot == pytest.approx(2.10, abs=0.01)
+
+    old = (datetime.now() - timedelta(days=10)).isoformat()
+    stale = mgr._calculate_memorability(
+        {"access_count": 5, "last_accessed_at": old}
+    )
+    assert stale == pytest.approx(1.27, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_ranks_hot_memory_higher():
+    now = datetime.now().isoformat()
+    hot = {
+        "id": "hot",
+        "content": "hot memory",
+        "metadata": {
+            "created_at": now,
+            "access_count": 50,
+            "last_accessed_at": now,
+        },
+        "score": 1.0,
+    }
+    cold = {
+        "id": "cold",
+        "content": "cold memory",
+        "metadata": {"created_at": now, "access_count": 0},
+        "score": 0.9,
+    }
+    mgr = HybridMemoryRetriever(
+        memory_service=_StubMemory(vector_results=[hot, cold], pending={}),
+        settings=_make_settings(),
+    )
+    results = await mgr.retrieve("query")
+    # 阈值修复 canary：旧 0.07 阈值下两者都会被滤掉而返回空
+    assert len(results) == 2
+    assert results[0].memory_id == "hot"
+    assert (results[0].rerank_score or 0.0) > (results[1].rerank_score or 0.0)
+
+
+class _WhereCapturingMemory(_StubMemory):
+    """记录每次检索传入的 where，用于断言检索不再按会话过滤."""
+
+    def __init__(
+        self,
+        vector_results: list[dict[str, Any]],
+        keyword_results: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(vector_results)
+        self._keyword_results = keyword_results or []
+        self.search_wheres: list[dict[str, Any] | None] = []
+        self.keyword_wheres: list[dict[str, Any] | None] = []
+
+    async def search(
+        self, query: str, n_results: int = 5, where: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        self.search_wheres.append(where)
+        return self._vector_results
+
+    async def keyword_search(
+        self, query: str, n_results: int = 10, where: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        self.keyword_wheres.append(where)
+        return self._keyword_results
+
+
+@pytest.mark.asyncio
+async def test_retrieve_is_cross_session_without_session_filter():
+    """跨会话回归：检索不再按 session_id 过滤，其它会话的记忆也可召回."""
+    now = datetime.now().isoformat()
+    other = {
+        "id": "other",
+        "content": "来自其它会话的记忆",
+        "metadata": {
+            "session_id": "other-sess",
+            "created_at": now,
+            "access_count": 0,
+        },
+        "score": 1.0,
+    }
+    mem = _WhereCapturingMemory(vector_results=[other])
+    mgr = HybridMemoryRetriever(
+        memory_service=mem,
+        settings=_make_settings(),
+    )
+    results = await mgr.retrieve("query")
+    # 其它会话的记忆未被过滤掉，可被召回
+    assert len(results) == 1
+    assert results[0].memory_id == "other"
+    assert results[0].metadata.get("session_id") == "other-sess"
+    # 向量/关键词两条路径都不再携带 session 过滤条件
+    assert all(w is None or "session_id" not in w for w in mem.search_wheres)
+    assert all(w is None or "session_id" not in w for w in mem.keyword_wheres)
+
+
+@pytest.mark.asyncio
+async def test_weighted_rrf_ranks_vector_first():
+    # 权重必须真正生效：同 rank 的向量命中应高于关键词命中（0.75 > 0.25）
+    v = MemoryRetrievalResult(
+        content="v", native_score=0.5, source="vector", metadata={}, memory_id="v"
+    )
+    k = MemoryRetrievalResult(
+        content="k", native_score=0.5, source="keyword", metadata={}, memory_id="k"
+    )
+    mgr = _retrieval_manager()
+    fused = mgr._reciprocal_rank_fusion([v], [k])
+    scores = {r.memory_id: r.fused_score for r in fused}
+    assert scores["v"] == pytest.approx(0.75 / 61)
+    assert scores["k"] == pytest.approx(0.25 / 61)
+    assert scores["v"] > scores["k"]

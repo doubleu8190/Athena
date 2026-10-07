@@ -1,0 +1,53 @@
+"""文件和知识库领域。"""
+
+from .entities import (
+    AdapterInfo,
+    Attachment,
+    AttachmentStatus,
+    FileChunk,
+    FileArtifact,
+    FileLocator,
+    FileMetadata,
+    KnowledgeBase,
+)
+from .ports import (
+    AdapterRegistryRepository,
+    AttachmentRepository,
+    FileArtifactRepository,
+    FileChunkRepository,
+    KnowledgeBaseRepository,
+    KnowledgeDocumentRepository,
+    DocumentParserPort,
+    ParsedDocument,
+    VectorIndexerPort,
+    GraphIndexerPort,
+    DocumentJobPort,
+    FileAdapterRegistryPort,
+    FileStoragePort,
+    StoredBlob,
+)
+
+__all__ = [
+    "Attachment",
+    "AdapterInfo",
+    "AdapterRegistryRepository",
+    "AttachmentRepository",
+    "AttachmentStatus",
+    "FileChunk",
+    "FileArtifact",
+    "FileArtifactRepository",
+    "FileChunkRepository",
+    "DocumentJobPort",
+    "FileAdapterRegistryPort",
+    "FileStoragePort",
+    "FileLocator",
+    "FileMetadata",
+    "KnowledgeBase",
+    "KnowledgeBaseRepository",
+    "KnowledgeDocumentRepository",
+    "DocumentParserPort",
+    "ParsedDocument",
+    "VectorIndexerPort",
+    "GraphIndexerPort",
+    "StoredBlob",
+]

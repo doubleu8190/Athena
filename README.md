@@ -48,25 +48,20 @@ flowchart TB
 
 ```text
 Athena/
-├── athena/
-│   ├── config/               # 环境配置
-│   ├── core/                 # Agent、Harness、LLM、记忆、检索、工具、文件和安全能力
-│   ├── contracts/            # Command/Event 协议与端口
-│   ├── gateway/              # REST API、SSE 和认证
-│   ├── infrastructure/       # PostgreSQL、pgvector 等基础设施
-│   ├── models/               # 领域模型
-│   └── main.py               # FastAPI 应用入口
-├── agent_runtime/            # LangGraph、命令消费和恢复
-├── desktop/                  # React Web 前端
+├── backend/                  # Python 后端
+│   ├── src/                  # Domain、Application、Infrastructure、HTTP 和 Bootstrap
+│   ├── tests/                # 后端单元、集成和架构边界测试
+│   ├── docs/                 # 后端架构、API、文件智能和运行时文档
+│   ├── prompt/               # 系统提示词和摘要/恢复提示词
+│   ├── sql/                  # SQL Schema
+│   ├── scripts/              # 后端评测和维护脚本
+│   └── pyproject.toml        # Python 项目与依赖配置
+├── frontend/                 # React Web 前端、文档和静态预览
 │   └── src/                  # 页面、组件、状态、SSE 和 API 客户端
-├── tests/                    # 后端测试
-├── prompt/                   # 系统提示词和摘要/恢复提示词
-├── doc/                      # 架构、文件智能和检索评估文档
-├── sql/                      # SQL Schema
+├── deploy/                   # 部署文件
 ├── data/                     # 本地数据库、文件和评估数据
 ├── logs/                     # 启动脚本生成的日志
 ├── .env.example              # 环境变量模板
-├── pyproject.toml            # Python 项目与依赖配置
 └── start.sh                  # 开发环境统一启动脚本
 ```
 
@@ -90,10 +85,10 @@ python3 -m venv .venv
 source .venv/bin/activate       # Windows: .venv\Scripts\activate
 
 # 安装后端及开发依赖
-python -m pip install -e ".[dev]"
+python -m pip install -e "backend[dev]"
 
-# 安装桌面端依赖
-cd desktop
+# 安装前端依赖
+cd frontend
 npm install
 cd ..
 
@@ -130,10 +125,10 @@ span。追踪服务不可用时，Athena 会记录本地日志但不会阻断 Ag
 
 ```bash
 # 终端 1：后端
-python -m athena.main
+PYTHONPATH=. python -m backend.src.main
 
 # 终端 2：Web 前端
-cd desktop
+cd frontend
 npm run dev
 ```
 
@@ -147,7 +142,7 @@ npm run dev
 | Vite Web 开发服务器 | http://127.0.0.1:5173 |
 | SSE 事件流 | http://127.0.0.1:8000/api/sessions/{id}/events |
 
-5173 是前端 Vite 开发服务器地址；生产构建产物位于 `desktop/dist`。
+5173 是前端 Vite 开发服务器地址；生产构建产物位于 `frontend/dist`。
 
 ### 启动脚本命令
 
@@ -210,17 +205,17 @@ SANDBOX_ENABLED=false
 
 `LLM_PROVIDERS` 是 JSON 数组，列表顺序决定 Provider 优先级。当前代码支持 `openai`、`anthropic`、`deepseek` 和 `ollama`；`ollama` 可以不填写 API Key，并可通过 `base_url` 指定地址。
 
-完整配置项和默认值请参见 [.env.example](.env.example) 与 [athena/config/settings.py](athena/config/settings.py)。文件上传大小、分块、并发、检索、上下文压缩、影子评估和审批等参数也都可以通过环境变量调整。
+完整配置项和默认值请参见 [.env.example](.env.example) 与 [Settings](backend/src/bootstrap/config/settings.py)。文件上传大小、分块、并发、检索、上下文压缩、影子评估和审批等参数也都可以通过环境变量调整。
 
 默认使用 BGE-M3 多语言 embedding 模型（1024 维）。首次切换模型或维度时，应用会清空旧向量；保留的原始记忆和文件内容需要重新执行知识库处理或重新写入记忆后才会生成新向量。
 
 可以用固定中文/中英混合评测集检查模型质量：
 
 ```bash
-python scripts/evaluate_chinese_embedding.py
+python backend/scripts/evaluate_chinese_embedding.py
 ```
 
-评测集位于 `tests/retrieval_eval/chinese_cases.json`，输出 Recall@K、HitRate@K、MRR 和 nDCG。更换模型后应保留旧结果并比较这些指标。
+评测集位于 `backend/tests/retrieval_eval/chinese_cases.json`，输出 Recall@K、HitRate@K、MRR 和 nDCG。更换模型后应保留旧结果并比较这些指标。
 
 ## API 与事件协议
 
@@ -236,7 +231,7 @@ python scripts/evaluate_chinese_embedding.py
 | 工具 | `GET/PATCH /api/tools` | 查询和治理工具 |
 | MCP | `GET/POST /api/mcp/servers` | 查询或注册 MCP 服务 |
 | 审批 | `GET /api/approvals` | 查询待处理审批 |
-| 审批 | `POST /api/approvals/{id}/respond` | 允许或拒绝审批 |
+| 审批 | `POST /api/approvals/batches/{batch_id}/respond` | 提交审批批次决定 |
 | 记忆 | `GET /api/memory`、`POST /api/memory/search` | 管理和搜索记忆 |
 | 文件 | `/api/sessions/{id}/attachments` | 上传和管理附件 |
 客户端通过 HTTP 提交版本化 Command，通过 SSE 接收 Application Event。Durable Event 使用会话内 `session_seq` 重放，Realtime Delta 仅用于低延迟展示。
@@ -248,13 +243,13 @@ python scripts/evaluate_chinese_embedding.py
 pytest
 
 # 指定测试
-pytest tests/test_harness.py -q
+pytest backend/tests -q
 
 # 覆盖率
-pytest --cov=athena --cov-report=html
+pytest --cov=backend --cov-report=html
 
 # 前端类型检查
-cd desktop
+cd frontend
 npm run typecheck
 
 # 前端生产构建
@@ -264,14 +259,14 @@ npm run build
 npm run build
 ```
 
-`./start.sh build` 会依次运行后端测试、前端类型检查和 Vite 生产构建，输出前端构建产物到 `desktop/dist`。当前版本不再依赖 Electron 打包流程。
+`./start.sh build` 会依次运行后端测试、前端类型检查和 Vite 生产构建，输出前端构建产物到 `frontend/dist`。当前版本不再依赖 Electron 打包流程。
 
 ## 相关文档
 
-- [系统架构](doc/architecture.md)
-- [技术规格文档](doc/Athena技术规格文档.md)
-- [文件智能设计](doc/文件系统设计v2.md)
-- [SQLAlchemy 迁移说明](doc/sqlalchemy-migration.md)
+- [系统架构](backend/docs/architecture.md)
+- [后端 API](backend/docs/athena-api.md)
+- [文件智能设计](backend/docs/athena-files-knowledge.md)
+- [前端说明](frontend/docs/athena-frontend.md)
 
 ## 贡献
 

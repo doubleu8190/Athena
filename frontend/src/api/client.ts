@@ -252,20 +252,6 @@ class ApiClient {
     return this.request<ApprovalRequest[]>(`/api/approvals${params}`)
   }
 
-  /** 提交审批允许或拒绝动作。 */
-  async respondApproval(
-    approvalId: string,
-    action: "allow" | "deny",
-  ): Promise<{ status: string }> {
-    return this.request<{ status: string }>(
-      `/api/approvals/${approvalId}/respond`,
-      {
-        method: "POST",
-        body: JSON.stringify({ action }),
-      },
-    )
-  }
-
   async respondApprovalBatch(
     approvalBatchId: string,
     decisions: Record<string, "approved" | "denied" | "cancelled">,
@@ -274,11 +260,6 @@ class ApiClient {
       method: "POST",
       body: JSON.stringify({ decisions }),
     })
-  }
-
-  /** 查询指定会话的审批日志。 */
-  async getApprovalLogs(sessionId: string): Promise<unknown[]> {
-    return this.request<unknown[]>(`/api/approvals/logs/${sessionId}`)
   }
 
   /** 修改会话标题。 */

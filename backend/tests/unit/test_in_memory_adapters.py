@@ -2,13 +2,13 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.src.domain.approval import ApprovalDecision, ApprovalRequest
-from backend.src.domain.events import ApplicationEvent, EventDurability, EventType
-from backend.src.domain.files import Attachment, AttachmentStatus, FileMetadata, KnowledgeBase
-from backend.src.domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
-from backend.src.domain.runs import CommandType, RunCommand, RunStatus
-from backend.src.domain.tools import MCPServerConfig, ToolExecutionRequest
-from backend.src.infrastructure.in_memory import *
+from domain.approval import ApprovalDecision, ApprovalRequest
+from domain.events import ApplicationEvent, EventDurability, EventType
+from domain.files import Attachment, AttachmentStatus, FileMetadata, KnowledgeBase
+from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
+from domain.runs import CommandType, RunCommand, RunStatus
+from domain.tools import MCPServerConfig, ToolExecutionRequest
+from backend.tests.fakes.in_memory import *
 
 NOW = datetime.now(timezone.utc)
 
@@ -16,7 +16,7 @@ NOW = datetime.now(timezone.utc)
 @pytest.mark.asyncio
 async def test_default_session_message_run_and_tool_adapters():
     sessions, messages, runs = InMemorySessionRepository(), InMemoryMessageRepository(), InMemoryRunStore()
-    session = __import__("backend.src.domain.sessions", fromlist=["Session"]).Session.create(session_id="s", title="x", now=NOW)
+    session = __import__("domain.sessions", fromlist=["Session"]).Session.create(session_id="s", title="x", now=NOW)
     await sessions.create(session); assert await sessions.get("s") == session
     assert await sessions.list_all() == [session]; await sessions.save(session.rename("y", now=NOW)); assert await sessions.delete("missing") is False
     command = RunCommand("c", CommandType.RUN_START, "s", "r", {"message_id": "m"}, NOW)
@@ -27,7 +27,7 @@ async def test_default_session_message_run_and_tool_adapters():
     assert await runs.complete("missing", {}) is False
     tool_repo = InMemoryToolRepository(); assert await tool_repo.get("noop")
     tool = InMemoryToolExecution(); assert (await tool.execute(ToolExecutionRequest("noop", {}, "s", "r", "t"))).status == "success"
-    message = __import__("backend.src.domain.sessions", fromlist=["Message", "MessageRole"]).Message("m", "s", __import__("backend.src.domain.sessions", fromlist=["MessageRole"]).MessageRole.USER, "hi", NOW)
+    message = __import__("domain.sessions", fromlist=["Message", "MessageRole"]).Message("m", "s", __import__("domain.sessions", fromlist=["MessageRole"]).MessageRole.USER, "hi", NOW)
     await messages.save(message); assert await messages.list_by_session("s") == [message]
     assert await messages.get("m") == message
     assert await messages.list_after("s", "a") == [message]

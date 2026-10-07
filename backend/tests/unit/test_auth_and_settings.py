@@ -10,15 +10,15 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 from fastapi import FastAPI
 
-from backend.src.bootstrap import create_app
-from backend.src.bootstrap.config import Settings
-from backend.src.interfaces.http.auth.routes import (
+from bootstrap import create_app
+from bootstrap.config import Settings
+from interfaces.http.auth.routes import (
     SESSION_COOKIE_NAME,
     build_auth_router,
     is_authenticated,
 )
-from backend.src.interfaces.http.auth import middleware as auth_middleware
-from backend.src.interfaces.http.auth import routes as auth_routes
+from interfaces.http.auth import middleware as auth_middleware
+from interfaces.http.auth import routes as auth_routes
 
 
 def test_target_settings_keep_database_and_provider_contract() -> None:

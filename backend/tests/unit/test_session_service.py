@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.src.application.sessions import SessionNotFoundError, SessionService
-from backend.src.domain.sessions import Session
+from application.sessions import SessionNotFoundError, SessionService
+from domain.sessions import Session
 
 
 class FakeSessionRepository:

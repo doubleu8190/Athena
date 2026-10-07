@@ -8,16 +8,16 @@ from io import BytesIO
 
 from fastapi.testclient import TestClient
 
-from backend.src.application.files import AttachmentService
-from backend.src.bootstrap import create_app
-from backend.src.domain.files import (
+from application.files import AttachmentService
+from bootstrap import create_app
+from domain.files import (
     AdapterInfo,
     Attachment,
     AttachmentStatus,
     FileMetadata,
     StoredBlob,
 )
-from backend.src.domain.sessions import Session
+from domain.sessions import Session
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)

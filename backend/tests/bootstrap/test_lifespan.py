@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from backend.src.bootstrap import build_dependencies, create_app
+from bootstrap import build_dependencies, create_app
 
 
 class Resource:

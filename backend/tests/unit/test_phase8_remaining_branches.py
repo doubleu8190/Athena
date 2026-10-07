@@ -8,15 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.src.application.orchestration import WorkerSchedulerService
-from backend.src.application.runs import CommandConsumer, RunExecutionService, RunQueryService
-from backend.src.application.sessions import SessionNotFoundError
-from backend.src.bootstrap import create_app
-from backend.src.bootstrap.lifespan import lifespan
-from backend.src.domain.events import ApplicationEvent
-from backend.src.domain.orchestration import Plan, Task, TaskExecution, TaskResult, TaskStatus
-from backend.src.domain.runs import CommandType, RunCommand, RunSummary
-from backend.src.domain.sessions import Session
+from application.orchestration import WorkerSchedulerService
+from application.runs import RunExecutionService, RunQueryService
+from workers import CommandConsumer
+from application.sessions import SessionNotFoundError
+from bootstrap import create_app
+from bootstrap.lifespan import lifespan
+from domain.events import ApplicationEvent
+from domain.orchestration import Plan, Task, TaskExecution, TaskResult, TaskStatus
+from domain.runs import CommandType, RunCommand, RunSummary
+from domain.sessions import Session
 from fastapi.testclient import TestClient
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)

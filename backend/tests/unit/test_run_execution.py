@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.src.application.runs import CommandConsumer, RunExecutionService
-from backend.src.domain.events import ApplicationEvent
-from backend.src.domain.runs import (
+from application.runs import RunExecutionService
+from workers import CommandConsumer
+from domain.events import ApplicationEvent
+from domain.runs import (
     CommandExecutionResult,
     CommandStatus,
     CommandType,

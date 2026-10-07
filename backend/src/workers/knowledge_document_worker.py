@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
-from .ingestion_service import IngestionService
-import asyncio
+from application.files.ingestion_service import IngestionService
 
 
 class DocumentJobQueue(Protocol):

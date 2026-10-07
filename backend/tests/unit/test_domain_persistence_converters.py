@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from backend.src.domain.files import (
+from domain.files import (
     AdapterInfo,
     Attachment,
     AttachmentStatus,
@@ -14,7 +14,7 @@ from backend.src.domain.files import (
     FileMetadata,
     KnowledgeBase,
 )
-from backend.src.domain.tools import (
+from domain.tools import (
     JsonSchema,
     MCPServer,
     MCPServerConfig,
@@ -22,7 +22,7 @@ from backend.src.domain.tools import (
     ToolConfig,
     ToolExecutionMode,
 )
-from backend.src.infrastructure.persistence.postgres.repositories.converters import (
+from infrastructure.persistence.postgres.repositories.converters import (
     adapter_domain_to_model,
     adapter_model_to_domain,
     attachment_domain_to_model,

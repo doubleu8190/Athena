@@ -13,21 +13,22 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from backend.src.application.events import EventStreamService
-from backend.src.application.files import IngestionService, KnowledgeDocumentWorker
-from backend.src.application.memory import MemoryWorker, MemoryWriteWorkflow
-from backend.src.application.orchestration import OrchestrationService, WorkerSchedulerService
-from backend.src.application.runs import RunCommandService, RunNotFoundError, CommandNotFoundError
-from backend.src.application.sessions import SessionNotFoundError
-from backend.src.application.approval import ApprovalService
-from backend.src.bootstrap import create_app
-from backend.src.domain.events import ApplicationEvent, EventDurability, EventType
-from backend.src.domain.files import Attachment, AttachmentStatus, FileChunk, FileLocator, FileMetadata, ParsedDocument
-from backend.src.domain.memory import CompletedTurn, MemoryCandidate, MemoryResolution, ResolutionAction
-from backend.src.domain.orchestration import Plan, Task, TaskExecution, TaskResult, TaskStatus
-from backend.src.domain.sessions import Session
-from backend.src.domain.approval import ApprovalDecision, ApprovalRequest
-from backend.src.domain.runs import CommandEnqueueResult, CommandStatus, CommandStatusRecord, CommandType, RunSummary
+from application.events import EventStreamService
+from application.files import IngestionService
+from application.memory import MemoryWriteWorkflow
+from application.orchestration import OrchestrationService, WorkerSchedulerService
+from application.runs import RunCommandService, RunNotFoundError, CommandNotFoundError
+from workers import KnowledgeDocumentWorker, MemoryWorker
+from application.sessions import SessionNotFoundError
+from application.approval import ApprovalService
+from bootstrap import create_app
+from domain.events import ApplicationEvent, EventDurability, EventType
+from domain.files import Attachment, AttachmentStatus, FileChunk, FileLocator, FileMetadata, ParsedDocument
+from domain.memory import CompletedTurn, MemoryCandidate, MemoryResolution, ResolutionAction
+from domain.orchestration import Plan, Task, TaskExecution, TaskResult, TaskStatus
+from domain.sessions import Session
+from domain.approval import ApprovalDecision, ApprovalRequest
+from domain.runs import CommandEnqueueResult, CommandStatus, CommandStatusRecord, CommandType, RunSummary
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -41,7 +42,7 @@ def test_file_and_knowledge_controller_error_mappings() -> None:
         async def list_for_session(self, key): return []
         async def supported_extensions(self, key): return [".txt"]
         async def get(self, *args):
-            from backend.src.application.files import AttachmentNotFoundError
+            from  application.files import AttachmentNotFoundError
             raise AttachmentNotFoundError("a")
         async def upload(self, *args, **kwargs): raise ValueError("unsupported")
         async def delete(self, *args): return None
@@ -180,7 +181,7 @@ def test_approval_controller_maps_conflicts_and_serializes_history() -> None:
 
 @pytest.mark.asyncio
 async def test_sse_heartbeat_and_untagged_event_paths() -> None:
-    from backend.src.interfaces.http.sse.events import build_events_router
+    from  interfaces.http.sse.events import build_events_router
     class Sessions:
         async def get(self, key): return Session.create(session_id=key, title="s", now=NOW)
     class Events:
@@ -201,8 +202,8 @@ async def test_sse_heartbeat_and_untagged_event_paths() -> None:
 
 @pytest.mark.asyncio
 async def test_attachment_compensation_and_ingestion_failure_paths() -> None:
-    from backend.src.application.files import AttachmentService
-    from backend.src.domain.files import AdapterInfo, StoredBlob
+    from  application.files import AttachmentService
+    from  domain.files import AdapterInfo, StoredBlob
     class Sessions:
         async def get(self, key): return Session.create(session_id=key, title="s", now=NOW)
     class Attachments:
@@ -226,4 +227,3 @@ async def test_attachment_compensation_and_ingestion_failure_paths() -> None:
     with pytest.raises(RuntimeError): await service.upload("s", filename="x.txt", mime_type="text/plain", chunks=chunks())
     assert storage.discarded and jobs.cancelled
     with pytest.raises(Exception): await service.get("s", "missing")
-

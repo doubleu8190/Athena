@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from backend.src.application.approval import ApprovalService
-from backend.src.application.tools import MCPService, ToolService
-from backend.src.bootstrap import create_app
-from backend.src.domain.tools import JsonSchema, RiskLevel, ToolConfig, ToolExecutionMode, ToolExecutionResult
+from application.approval import ApprovalService
+from application.tools import MCPService, ToolService
+from bootstrap import create_app
+from domain.tools import JsonSchema, RiskLevel, ToolConfig, ToolExecutionMode, ToolExecutionResult
 
 
 class ApprovalRepo:

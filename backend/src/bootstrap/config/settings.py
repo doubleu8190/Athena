@@ -56,11 +56,7 @@ class Settings(BaseSettings):
     auth_session_secret: str = ""
     auth_session_ttl_hours: int = Field(default=24, ge=1)
 
-    # ``memory`` keeps the importable local smoke application deterministic.
-    # Deployments select ``postgres`` explicitly (or via
-    # ATHENA_DATABASE_BACKEND) so production never silently falls back to an
-    # in-process store.
-    database_backend: Literal["memory", "postgres"] = "memory"
+    database_backend: Literal["postgres"] = "postgres"
     postgres_create_schema: bool = True
     workers_enabled: bool = False
 

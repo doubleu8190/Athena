@@ -7,17 +7,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.src.application.approval import ApprovalService
-from backend.src.application.memory import MemoryWorker, MemoryWriteWorkflow
-from backend.src.application.tools import MCPService, ToolService
-from backend.src.domain.approval import ApprovalDecision
-from backend.src.domain.memory import (
+from application.approval import ApprovalService
+from application.memory import MemoryWriteWorkflow
+from workers import MemoryWorker
+from application.tools import MCPService, ToolService
+from domain.approval import ApprovalDecision
+from domain.memory import (
     CompletedTurn,
     MemoryCandidate,
     MemoryResolution,
     ResolutionAction,
 )
-from backend.src.domain.tools import (
+from domain.tools import (
     JsonSchema,
     MCPServerConfig,
     RiskLevel,

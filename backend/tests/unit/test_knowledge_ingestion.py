@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.src.application.files import IngestionService, KnowledgeDocumentWorker
-from backend.src.application.knowledge import KnowledgeBaseService
-from backend.src.bootstrap import create_app
-from backend.src.domain.files import (
+from application.files import IngestionService
+from workers import KnowledgeDocumentWorker
+from application.knowledge import KnowledgeBaseService
+from bootstrap import create_app
+from domain.files import (
     AdapterInfo,
     Attachment,
     AttachmentStatus,
@@ -19,7 +20,7 @@ from backend.src.domain.files import (
     ParsedDocument,
     StoredBlob,
 )
-from backend.src.domain.files import KnowledgeBase
+from domain.files import KnowledgeBase
 from fastapi.testclient import TestClient
 from io import BytesIO
 

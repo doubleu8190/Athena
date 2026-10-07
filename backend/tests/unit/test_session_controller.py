@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from backend.src.application.sessions import SessionService
-from backend.src.bootstrap import create_app
-from backend.src.domain.sessions import Session
+from application.sessions import SessionService
+from bootstrap import create_app
+from domain.sessions import Session
 
 
 class FakeSessionRepository:

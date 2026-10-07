@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from backend.src.application.orchestration import RootExecutionService, WorkerSchedulerService
-from backend.src.domain.orchestration import (
+from application.orchestration import RootExecutionService, WorkerSchedulerService
+from domain.orchestration import (
     Plan,
     Task,
     TaskExecution,

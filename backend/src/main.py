@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from bootstrap import create_app
+from bootstrap import build_default_dependencies, create_app
 
 
-app = create_app()
+app = create_app(dependencies=build_default_dependencies())
 
 
 def run() -> None:

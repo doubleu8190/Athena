@@ -6,12 +6,10 @@ from .attachment_service import (
     SessionNotFoundError,
 )
 from .ingestion_service import IngestionService
-from .worker import KnowledgeDocumentWorker
 
 __all__ = [
     "AttachmentNotFoundError",
     "AttachmentService",
     "IngestionService",
-    "KnowledgeDocumentWorker",
     "SessionNotFoundError",
 ]

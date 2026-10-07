@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from backend.src.domain.sessions import (
+from domain.sessions import (
     AttachmentRef,
     AttachmentStatus,
     Message,
@@ -13,11 +13,11 @@ from backend.src.domain.sessions import (
     SessionStatus,
     ToolCall,
 )
-from backend.src.infrastructure.persistence.postgres.models import (
+from infrastructure.persistence.postgres.models import (
     MessageModel,
     SessionModel,
 )
-from backend.src.infrastructure.persistence.postgres.repositories.converters import (
+from infrastructure.persistence.postgres.repositories.converters import (
     message_domain_to_model,
     message_model_to_domain,
     session_domain_to_model,

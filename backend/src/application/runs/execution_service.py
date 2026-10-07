@@ -9,6 +9,7 @@ from domain.events import (
     EventType,
 )
 from domain.runs import (
+    CommandType,
     CommandStatus,
     CommandQueuePort,
     RunCommand,
@@ -34,7 +35,7 @@ class RunExecutionService:
         self._events = events
 
     async def execute(self, command: RunCommand) -> None:
-        if command.command_type.value == "run.cancel":
+        if command.command_type.value == CommandType.RUN_CANCEL.value:
             await self._executor.cancel(command.run_id)
             if command.run_id:
                 await self._lifecycle.cancel(command.run_id)
@@ -55,7 +56,7 @@ class RunExecutionService:
         await self._lifecycle.update_status(command.run_id, RunStatus.RUNNING)
         start_event = (
             EventType.RUN_RESUMED
-            if command.command_type.value == "run.resume"
+            if command.command_type.value == CommandType.RUN_RESUME.value
             else EventType.RUN_STARTED
         )
         await self._publish(command, start_event)

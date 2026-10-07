@@ -1,6 +1,6 @@
 """Coverage for the complete target ORM table inventory."""
 
-from backend.src.infrastructure.persistence.postgres.models import Base
+from infrastructure.persistence.postgres.models import Base
 
 
 EXPECTED_TABLES = {

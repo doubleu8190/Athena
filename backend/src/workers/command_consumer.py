@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+from application.runs.execution_service import RunExecutionService
 from domain.runs import CommandQueuePort
-from .execution_service import RunExecutionService
 
 
 class CommandConsumer:
@@ -21,7 +21,7 @@ class CommandConsumer:
 
     async def start(self) -> None:
         self._stop.clear()
-        self._task = asyncio.create_task(self.run(), name="athena-restructured-command-consumer")
+        self._task = asyncio.create_task(self.run(), name="athena-command-consumer")
 
     async def stop(self) -> None:
         self._stop.set()

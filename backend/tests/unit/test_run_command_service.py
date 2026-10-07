@@ -6,21 +6,21 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.src.application.runs import (
+from application.runs import (
     CommandNotFoundError,
     CommandRejectedError,
     RunCommandService,
     RunNotFoundError,
 )
-from backend.src.application.sessions import SessionNotFoundError
-from backend.src.domain.runs import (
+from application.sessions import SessionNotFoundError
+from domain.runs import (
     CommandEnqueueResult,
     CommandStatus,
     CommandStatusRecord,
     CommandType,
     RunSummary,
 )
-from backend.src.domain.sessions import Session
+from domain.sessions import Session
 
 
 class Sessions:

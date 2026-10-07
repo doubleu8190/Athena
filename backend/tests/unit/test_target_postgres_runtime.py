@@ -10,32 +10,32 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.src.bootstrap import build_default_dependencies, create_app
-from backend.src.bootstrap.config import Settings
-from backend.src.domain.approval import ApprovalDecision, ApprovalRequest
-from backend.src.domain.events import ApplicationEvent, EventDurability, EventType
-from backend.src.domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
-from backend.src.domain.runs import CommandStatus, CommandType, RunCommand, RunStatus
-from backend.src.infrastructure.integrations.file_parsers.native import (
+from bootstrap import build_default_dependencies, create_app
+from bootstrap.config import Settings
+from domain.approval import ApprovalDecision, ApprovalRequest
+from domain.events import ApplicationEvent, EventDurability, EventType
+from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
+from domain.runs import CommandStatus, CommandType, RunCommand, RunStatus
+from infrastructure.integrations.file_parsers.native import (
     NativeFileAdapterRegistry,
     NativeTextParser,
     NoopGraphIndexer,
     NoopVectorIndexer,
     line_chunker,
 )
-from backend.src.infrastructure.integrations.storage.local import LocalFileStorageAdapter
-from backend.src.infrastructure.persistence.postgres.repositories.document_job_repository import PostgresDocumentJobRepository
-from backend.src.infrastructure.persistence.postgres.repositories.runtime_repositories import (
+from infrastructure.integrations.storage.local import LocalFileStorageAdapter
+from infrastructure.persistence.postgres.repositories.document_job_repository import PostgresDocumentJobRepository
+from infrastructure.persistence.postgres.repositories.runtime_repositories import (
     PostgresApprovalRepository,
     PostgresEventRepository,
     PostgresMemoryRepository,
     PostgresRetrievalQueryRepository,
     PostgresRunRepository,
 )
-from backend.src.infrastructure.persistence.postgres.engine import PostgresResource
-from backend.src.workers import WorkerSupervisor
-from backend.src.application.files import KnowledgeDocumentWorker
-from backend.src.bootstrap.check import check_app
+from infrastructure.persistence.postgres.engine import PostgresResource
+from workers import WorkerSupervisor
+from workers import KnowledgeDocumentWorker
+from bootstrap.check import check_app
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -274,7 +274,7 @@ def test_postgres_dependency_graph_is_explicit(monkeypatch):
     assert len(worker_graph.resources) == 4
     monkeypatch.delenv("ATHENA_WORKERS_ENABLED")
     monkeypatch.delenv("ATHENA_DATABASE_BACKEND")
-    assert Settings().database_backend == "memory"
+    assert Settings().database_backend == "postgres"
 
 
 @pytest.mark.asyncio
@@ -344,7 +344,7 @@ async def test_postgres_resource_lifecycle_without_connecting_to_database(monkey
 
     engine = Engine()
     monkeypatch.setattr(
-        "backend.src.infrastructure.persistence.postgres.engine.create_async_engine",
+        "infrastructure.persistence.postgres.engine.create_async_engine",
         lambda *args, **kwargs: engine,
     )
     resource = PostgresResource(Settings(), create_schema=False)
@@ -388,14 +388,14 @@ async def test_postgres_resource_schema_and_session_context(monkeypatch):
 
     engine = Engine()
     monkeypatch.setattr(
-        "backend.src.infrastructure.persistence.postgres.engine.create_async_engine",
+        "infrastructure.persistence.postgres.engine.create_async_engine",
         lambda *args, **kwargs: engine,
     )
     monkeypatch.setattr(
-        "backend.src.infrastructure.persistence.postgres.engine.async_sessionmaker",
+        "infrastructure.persistence.postgres.engine.async_sessionmaker",
         lambda *args, **kwargs: lambda: Session(),
     )
-    monkeypatch.setattr("backend.src.infrastructure.persistence.postgres.engine.Base.metadata.create_all", lambda _connection: None)
+    monkeypatch.setattr("infrastructure.persistence.postgres.engine.Base.metadata.create_all", lambda _connection: None)
     resource = PostgresResource(Settings(), create_schema=True)
     await resource.start()
     async with resource.session() as value:

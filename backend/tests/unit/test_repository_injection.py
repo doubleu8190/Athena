@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.src.domain.sessions import Session, SessionStatus
-from backend.src.infrastructure.persistence.postgres.repositories import (
+from domain.sessions import Session, SessionStatus
+from infrastructure.persistence.postgres.repositories import (
     PostgresSessionRepository,
 )
 

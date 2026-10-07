@@ -54,6 +54,25 @@ The container receives the database password through the mounted Compose
 secret at `/run/secrets/postgres_password`; it is not stored in this Compose
 file.
 
+## Kafka
+
+The same Compose project provides a single-node Kafka broker in KRaft mode;
+ZooKeeper is not required. Kafka data is persisted under `data/kafka`, which is
+already covered by the repository's local data ignore rule.
+
+Start and verify it from the repository root:
+
+```sh
+docker compose -f deploy/compose.yaml up -d kafka
+docker compose -f deploy/compose.yaml ps kafka
+docker compose -f deploy/compose.yaml exec kafka \
+  /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list
+```
+
+Applications running on the host should use `127.0.0.1:9092`. Other services in
+this Compose project should use `kafka:29092`. The host port can be changed with
+`KAFKA_PORT`, and the image can be overridden with `KAFKA_IMAGE` when needed.
+
 This project uses its own named volume, `postgres_data`; it does not mount or
 remove `data/postgresql` from the existing local database container.
 

@@ -8,13 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.src.infrastructure.integrations.llm.provider import (
+from infrastructure.integrations.llm.provider import (
     RetryPolicy,
     TargetEmbeddingProvider,
     TargetLLMProvider,
 )
-from backend.src.infrastructure.integrations.neo4j.adapter import Neo4jGraphAdapter
-from backend.src.infrastructure.integrations.sandbox.subprocess_runner import SubprocessSandbox
+from infrastructure.integrations.neo4j.adapter import Neo4jGraphAdapter
+from infrastructure.integrations.sandbox.subprocess_runner import SubprocessSandbox
 
 
 @pytest.mark.asyncio

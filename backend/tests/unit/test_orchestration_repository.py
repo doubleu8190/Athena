@@ -5,14 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.src.domain.orchestration import (
+from domain.orchestration import (
     Plan,
     PlanEdge,
     PlanStatus,
     Task,
     TaskStatus,
 )
-from backend.src.infrastructure.persistence.postgres.repositories import (
+from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationRepository,
 )
 

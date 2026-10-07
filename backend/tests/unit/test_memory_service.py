@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from backend.src.application.memory import MemoryService
-from backend.src.domain.memory import (
+from application.memory import MemoryService
+from domain.memory import (
     MemoryListRequest,
     MemoryPage,
     MemoryRecord,

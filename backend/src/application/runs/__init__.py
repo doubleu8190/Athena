@@ -7,12 +7,10 @@ from .command_service import (
     RunCommandService,
     RunNotFoundError,
 )
-from .consumer import CommandConsumer
 from .execution_service import RunExecutionService
 
 __all__ = [
     "CommandNotFoundError",
-    "CommandConsumer",
     "CommandRejectedError",
     "RunCommandService",
     "RunExecutionService",

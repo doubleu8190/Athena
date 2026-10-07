@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from backend.src.application.orchestration import OrchestrationService, PlanNotFoundError
-from backend.src.domain.orchestration import (
+from application.orchestration import OrchestrationService, PlanNotFoundError
+from domain.orchestration import (
     Plan,
     PlanDAG,
     PlanEdge,

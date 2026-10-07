@@ -6,11 +6,11 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from backend.src.application.runs import RunQueryService
-from backend.src.application.sessions import SessionMessageQueryService, SessionService
-from backend.src.bootstrap import create_app
-from backend.src.domain.runs import RunStatus, RunSummary
-from backend.src.domain.sessions import (
+from application.runs import RunQueryService
+from application.sessions import SessionMessageQueryService, SessionService
+from bootstrap import create_app
+from domain.runs import RunStatus, RunSummary
+from domain.sessions import (
     Message,
     MessageRole,
     Session,

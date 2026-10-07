@@ -116,7 +116,6 @@ export LLM_PROVIDER="${LLM_PROVIDER:-openai}"
 export LLM_MODEL="${LLM_MODEL:-gpt-4o}"
 export LLM_API_KEY="${LLM_API_KEY:-}"
 export LLM_BASE_URL="${LLM_BASE_URL:-}"
-export CHROMADB_PATH="${CHROMADB_PATH:-./data/chromadb}"
 # PostgreSQL connection defaults
 export POSTGRES_USER="${POSTGRES_USER:-doubleu}"
 export POSTGRES_DB="${POSTGRES_DB:-athena}"
@@ -214,7 +213,7 @@ check_dependencies_core() {
 # 后端 Python 依赖是否就绪（通过目标入口判断是否有缺包）
 check_dependencies_backend() {
   log_step "后端 Python 依赖检查"
-  if ! PYTHONPATH="${PROJECT_ROOT}" "${PYTHON_BIN}" -c "import backend.src.main, fastapi, uvicorn, pydantic_settings, structlog, langchain" >/dev/null 2>&1; then
+  if ! PYTHONPATH="${PROJECT_ROOT}/backend/src:${PROJECT_ROOT}" "${PYTHON_BIN}" -c "import main, fastapi, uvicorn, pydantic_settings, structlog, langchain" >/dev/null 2>&1; then
     log_warn "后端依赖缺失，建议先执行：${C_BOLD}./start.sh install${C_RESET}"
     return 1
   fi
@@ -419,7 +418,6 @@ start_backend() {
       LLM_API_KEY="${LLM_API_KEY}" LLM_BASE_URL="${LLM_BASE_URL}" \
       POSTGRES_USER="${POSTGRES_USER}" POSTGRES_DB="${POSTGRES_DB}" \
       POSTGRES_HOST="${POSTGRES_HOST}" POSTGRES_PORT="${POSTGRES_PORT}" \
-      CHROMADB_PATH="${CHROMADB_PATH}" \
       "${PYTHON_BIN}" -u backend/src/main.py \
       >> "${LOG_BACKEND}" 2>&1 &
     echo $! > "${PID_BACKEND}"
@@ -582,7 +580,6 @@ ENVIRONMENT (可在 .env 中配置，或执行时临时覆盖):
   POSTGRES_DB          PostgreSQL 数据库        默认 athena
   POSTGRES_HOST        PostgreSQL 主机          默认 localhost
   POSTGRES_PORT        PostgreSQL 端口          默认 5432
-  CHROMADB_PATH        ChromaDB 存储路径       默认 ./data/chromadb
 
 EXAMPLES:
   ./start.sh                         # 一键启动前后端（日常开发）

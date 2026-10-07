@@ -9,8 +9,8 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from backend.src.domain.sessions import Session, SessionStatus
-from backend.src.domain.tools import (
+from domain.sessions import Session, SessionStatus
+from domain.tools import (
     JsonSchema,
     MCPServer,
     MCPServerConfig,
@@ -18,14 +18,14 @@ from backend.src.domain.tools import (
     ToolConfig,
     ToolExecutionMode,
 )
-from backend.src.infrastructure.persistence.postgres.models import (
+from infrastructure.persistence.postgres.models import (
     Base,
     MessageModel,
     SessionModel,
     MCPServerModel,
     ToolModel,
 )
-from backend.src.infrastructure.persistence.postgres.repositories import (
+from infrastructure.persistence.postgres.repositories import (
     PostgresSessionRepository,
     PostgresMCPServerRepository,
     PostgresToolConfigRepository,

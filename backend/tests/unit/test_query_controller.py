@@ -6,19 +6,19 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from backend.src.application.common.query_services import (
+from application.common.query_services import (
     MemoryQueryService,
     ProviderQueryService,
     RetrievalQueryService,
     SettingsQueryService,
 )
-from backend.src.application.knowledge import KnowledgeBaseQueryService
-from backend.src.application.memory import MemoryService
-from backend.src.application.tools import ToolQueryService
-from backend.src.bootstrap import create_app
-from backend.src.domain.files import KnowledgeBase
-from backend.src.domain.memory import MemoryPage, MemoryRecord
-from backend.src.domain.tools import (
+from application.knowledge import KnowledgeBaseQueryService
+from application.memory import MemoryService
+from application.tools import ToolQueryService
+from bootstrap import create_app
+from domain.files import KnowledgeBase
+from domain.memory import MemoryPage, MemoryRecord
+from domain.tools import (
     JsonSchema,
     RiskLevel,
     ToolConfig,

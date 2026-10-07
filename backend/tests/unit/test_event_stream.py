@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from backend.src.application.events import EventStreamService
-from backend.src.bootstrap import create_app
-from backend.src.domain.events import ApplicationEvent, EventDurability, EventType
-from backend.src.domain.sessions import Session
+from application.events import EventStreamService
+from bootstrap import create_app
+from domain.events import ApplicationEvent, EventDurability, EventType
+from domain.sessions import Session
 
 
 class Sessions:
@@ -64,7 +64,7 @@ def make_client():
 
 
 def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
-    from backend.src.interfaces.http.sse.events import build_events_router
+    from  interfaces.http.sse.events import build_events_router
 
     events = Events()
     transport = Transport()

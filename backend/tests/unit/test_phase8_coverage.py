@@ -9,19 +9,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.src.application.approval import ApprovalService
-from backend.src.application.files import IngestionService
-from backend.src.application.knowledge import KnowledgeBaseService
-from backend.src.application.memory import MemoryService
-from backend.src.application.orchestration import OrchestrationService
-from backend.src.application.tools import MCPService, ToolQueryService, ToolService
-from backend.src.domain.approval import ApprovalDecision, ApprovalRequest
-from backend.src.domain.files import (
+from application.approval import ApprovalService
+from application.files import IngestionService
+from application.knowledge import KnowledgeBaseService
+from application.memory import MemoryService
+from application.orchestration import OrchestrationService
+from application.tools import MCPService, ToolQueryService, ToolService
+from domain.approval import ApprovalDecision, ApprovalRequest
+from domain.files import (
     AdapterInfo, Attachment, AttachmentStatus, FileChunk, FileLocator, FileMetadata, ParsedDocument, StoredBlob,
 )
-from backend.src.domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
-from backend.src.domain.orchestration import Plan, Task
-from backend.src.domain.tools import (
+from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
+from domain.orchestration import Plan, Task
+from domain.tools import (
     JsonSchema, MCPServerConfig, RiskLevel, ToolConfig, ToolExecutionMode,
 )
 

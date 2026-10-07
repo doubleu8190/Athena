@@ -9,21 +9,21 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.src.application.runs import (
+from application.runs import (
     CommandRejectedError, RunCommandService, RunExecutionService,
 )
-from backend.src.application.sessions import SessionNotFoundError as SessionMissing
-from backend.src.bootstrap import create_app
-from backend.src.domain.events import ApplicationEvent
-from backend.src.domain.runs import (
+from application.sessions import SessionNotFoundError as SessionMissing
+from bootstrap import create_app
+from domain.events import ApplicationEvent
+from domain.runs import (
     CommandExecutionResult, CommandStatus, CommandStatusRecord, CommandType,
     RunCommand, RunStatus, RunSummary,
 )
-from backend.src.domain.sessions import Session
-from backend.src.bootstrap.check import check_app
-from backend.src.application.approval import ApprovalService
-from backend.src.application.files import AttachmentNotFoundError, SessionNotFoundError
-from backend.src.application.knowledge import KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError
+from domain.sessions import Session
+from bootstrap.check import check_app
+from application.approval import ApprovalService
+from application.files import AttachmentNotFoundError, SessionNotFoundError
+from application.knowledge import KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -93,7 +93,7 @@ async def test_run_execution_cancel_missing_id_and_error_result_paths() -> None:
 def test_bootstrap_probe_and_unconfigured_query_routes() -> None:
     check_app()
     from fastapi import FastAPI
-    from backend.src.interfaces.http.controllers.query_controller import build_query_router
+    from  interfaces.http.controllers.query_controller import build_query_router
     app = FastAPI()
     app.include_router(build_query_router())
     client = TestClient(app)
@@ -128,7 +128,7 @@ def test_controller_error_mappings_for_approval_tools_files_and_knowledge() -> N
         async def list_documents(self, *args): raise KnowledgeBaseNotFoundError("k")
         async def list_versions(self, *args): raise KnowledgeDocumentNotFoundError("a")
         async def delete_document(self, *args): raise KnowledgeDocumentNotFoundError("a")
-    from backend.src.interfaces.http.controllers.files_controller import build_files_router
+    from  interfaces.http.controllers.files_controller import build_files_router
     client = TestClient(create_app(
         approval_service_factory=lambda: Approval(),
         tool_service_factory=lambda: Tool(),

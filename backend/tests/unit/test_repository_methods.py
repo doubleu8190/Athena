@@ -7,26 +7,26 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.src.domain.files import (
+from domain.files import (
     AdapterInfo, Attachment, AttachmentStatus, FileArtifact, FileChunk,
     FileLocator, FileMetadata, KnowledgeBase,
 )
-from backend.src.domain.sessions import Message, MessageRole, Session, SessionStatus
-from backend.src.domain.tools import (
+from domain.sessions import Message, MessageRole, Session, SessionStatus
+from domain.tools import (
     JsonSchema, MCPServer, MCPServerConfig, RiskLevel, ToolConfig, ToolExecutionMode,
 )
-from backend.src.infrastructure.persistence.postgres.repositories.file_artifact_repository import (
+from infrastructure.persistence.postgres.repositories.file_artifact_repository import (
     PostgresAdapterRegistryRepository, PostgresFileArtifactRepository,
 )
-from backend.src.infrastructure.persistence.postgres.repositories.file_repository import (
+from infrastructure.persistence.postgres.repositories.file_repository import (
     PostgresAttachmentRepository, PostgresFileChunkRepository,
 )
-from backend.src.infrastructure.persistence.postgres.repositories.knowledge_base_repository import PostgresKnowledgeBaseRepository
-from backend.src.infrastructure.persistence.postgres.repositories.knowledge_document_repository import PostgresKnowledgeDocumentRepository
-from backend.src.infrastructure.persistence.postgres.repositories.message_repository import PostgresMessageRepository
-from backend.src.infrastructure.persistence.postgres.repositories.mcp_repository import PostgresMCPServerRepository
-from backend.src.infrastructure.persistence.postgres.repositories.session_repository import PostgresSessionRepository
-from backend.src.infrastructure.persistence.postgres.repositories.tool_repository import PostgresToolConfigRepository
+from infrastructure.persistence.postgres.repositories.knowledge_base_repository import PostgresKnowledgeBaseRepository
+from infrastructure.persistence.postgres.repositories.knowledge_document_repository import PostgresKnowledgeDocumentRepository
+from infrastructure.persistence.postgres.repositories.message_repository import PostgresMessageRepository
+from infrastructure.persistence.postgres.repositories.mcp_repository import PostgresMCPServerRepository
+from infrastructure.persistence.postgres.repositories.session_repository import PostgresSessionRepository
+from infrastructure.persistence.postgres.repositories.tool_repository import PostgresToolConfigRepository
 
 
 class Result:

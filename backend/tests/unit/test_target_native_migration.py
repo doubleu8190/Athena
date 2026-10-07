@@ -7,22 +7,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.src.application.retrieval import HybridRetrievalService
-from backend.src.application.runs.context import ContextAcquisitionService, ContextItem, ContextPlan, ProviderResult
-from backend.src.application.runs.task_understanding import TaskUnderstandingService
-from backend.src.domain.retrieval import RetrievalCandidate
-from backend.src.domain.retrieval.evaluation import RetrievalEvaluationCase, evaluate_rankings
-from backend.src.infrastructure.integrations.file_parsers.native import NativeFileAdapterRegistry
-from backend.src.infrastructure.integrations.sandbox.docker_runner import DockerSandbox
-from backend.src.infrastructure.tools.native import NativeToolExecution
-from backend.src.domain.tools import ToolExecutionRequest
-from backend.src.bootstrap.config import Settings, LLMProviderConfig
-from backend.src.infrastructure.integrations.llm.provider import ConfiguredEmbeddingProvider, ConfiguredLLMProvider
-from backend.src.infrastructure.integrations.neo4j.resource import Neo4jResource
-from backend.src.infrastructure.observability import trace_run
-from backend.src.shared import dumps, loads, new_id, now_utc
-from backend.src.application.memory.worker import MemoryWorker as DurableMemoryWorker
-from backend.src.infrastructure.integrations.pgvector import PostgresFileVectorIndexer, PostgresMemoryVectorIndexer
+from application.retrieval import HybridRetrievalService
+from application.runs.context import ContextAcquisitionService, ContextItem, ContextPlan, ProviderResult
+from application.runs.task_understanding import TaskUnderstandingService
+from domain.retrieval import RetrievalCandidate
+from domain.retrieval.evaluation import RetrievalEvaluationCase, evaluate_rankings
+from infrastructure.integrations.file_parsers.native import NativeFileAdapterRegistry
+from infrastructure.integrations.sandbox.docker_runner import DockerSandbox
+from infrastructure.tools.native import NativeToolExecution
+from domain.tools import ToolExecutionRequest
+from bootstrap.config import Settings, LLMProviderConfig
+from infrastructure.integrations.llm.provider import ConfiguredEmbeddingProvider, ConfiguredLLMProvider
+from infrastructure.integrations.neo4j.resource import Neo4jResource
+from infrastructure.observability import trace_run
+from shared import dumps, loads, new_id, now_utc
+from workers import MemoryWorker as DurableMemoryWorker
+from infrastructure.integrations.pgvector import PostgresFileVectorIndexer, PostgresMemoryVectorIndexer
 
 
 @pytest.mark.asyncio
@@ -43,13 +43,13 @@ def test_target_retrieval_evaluation_and_entrypoint(monkeypatch):
     with pytest.raises(ValueError):
         evaluate_rankings([case], {}, ks=(0,))
 
-    import backend.src.main as entrypoint
+    import  main as entrypoint
     observed = {}
     class Uvicorn:
         @staticmethod
         def run(*args, **kwargs): observed.update(args=args, kwargs=kwargs)
     monkeypatch.setitem(sys.modules, "uvicorn", Uvicorn)
-    import backend.src.bootstrap.config as target_config
+    import  bootstrap.config as target_config
     monkeypatch.setattr(target_config, "get_settings", lambda: SimpleNamespace(host="127.0.0.1", port=8123))
     entrypoint.run()
     assert observed["args"] == (entrypoint.app,)
@@ -185,7 +185,7 @@ async def test_durable_memory_worker_success_and_failure():
     class Workflow:
         async def process(self, value): return None
     jobs = Jobs(); worker = DurableMemoryWorker(jobs, Workflow(), poll_interval=0.001)
-    task = asyncio.create_task(worker.run()); await asyncio.sleep(0.005); await worker.stop(); await task
+    task = asyncio.create_task(worker.run()); await asyncio.sleep(0.005); worker.stop(); await task
     assert "recover" in jobs.calls and ("ok", "t") in jobs.calls
 
 

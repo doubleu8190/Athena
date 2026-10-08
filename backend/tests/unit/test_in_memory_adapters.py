@@ -4,7 +4,8 @@ import pytest
 
 from domain.approval import ApprovalDecision, ApprovalRequest
 from domain.events import ApplicationEvent, EventDurability, EventType
-from domain.files import Attachment, AttachmentStatus, FileMetadata, KnowledgeBase
+from domain.files import Attachment, AttachmentStatus, FileMetadata
+from domain.knowledge import KnowledgeBase
 from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
 from domain.runs import CommandType, RunCommand, RunStatus
 from domain.tools import MCPServerConfig, ToolExecutionRequest

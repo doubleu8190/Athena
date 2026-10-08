@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from domain.common.query_ports import ProviderQueryPort, SettingsQueryPort
+from domain.configuration import ProviderQueryPort, SettingsQueryPort
 
 
 class ProviderQueryService:

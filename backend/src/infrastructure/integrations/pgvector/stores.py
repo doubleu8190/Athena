@@ -21,7 +21,7 @@ class PostgresFileVectorIndex:
         self._session_factory = session_factory
         self._embedder = embedder
 
-    async def index(self, attachment: Attachment, chunks: list[FileChunk]) -> None:
+    async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk]) -> None:
         vectors = await self._embedder.embed_documents([item.content for item in chunks])
         async with self._session_factory() as session:
             async with session.begin():
@@ -32,7 +32,7 @@ class PostgresFileVectorIndex:
                         .values(embedding=vector)
                     )
 
-    async def delete(self, attachment_id: str) -> None:
+    async def delete_attachment(self, attachment_id: str) -> None:
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(
@@ -50,6 +50,12 @@ class PostgresFileVectorIndex:
                 statement = statement.where(FileChunkModel.attachment_id.in_(attachment_ids))
             rows = (await session.execute(statement.order_by(distance).limit(max(0, limit)))).all()
         return [{"chunk_id": row[0].id, "content": row[0].content, "score": 1.0 - float(row[1])} for row in rows]
+
+    async def index(self, attachment: Attachment, chunks: list[FileChunk]) -> None:
+        return await self.index_attachment(attachment, chunks)
+
+    async def delete(self, attachment_id: str) -> None:
+        return await self.delete_attachment(attachment_id)
 
 
 class PostgresMemoryVectorIndex:

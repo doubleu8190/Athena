@@ -6,7 +6,8 @@ import asyncio
 
 from domain.events import (
     ApplicationEvent,
-    EventStorePort,
+    EventHistoryPort,
+    EventSubscriptionPort,
     RealtimeTransportPort,
 )
 from domain.sessions import SessionRepository
@@ -22,11 +23,13 @@ class EventStreamService:
     def __init__(
         self,
         sessions: SessionRepository,
-        events: EventStorePort,
+        subscriptions: EventSubscriptionPort,
+        history: EventHistoryPort,
         transport: RealtimeTransportPort,
     ) -> None:
         self._sessions = sessions
-        self._events = events
+        self._subscriptions = subscriptions
+        self._history = history
         self._transport = transport
 
     async def ensure_session(self, session_id: str) -> None:
@@ -37,7 +40,7 @@ class EventStreamService:
         self, session_id: str
     ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
         await self.ensure_session(session_id)
-        return await self._events.open_subscription(session_id)
+        return await self._subscriptions.open_subscription(session_id)
 
     async def open(
         self, session_id: str, after: int | None = None
@@ -48,7 +51,7 @@ class EventStreamService:
     async def replay(
         self, session_id: str, after: int, upto: int
     ) -> list[ApplicationEvent]:
-        return await self._events.list_events_between(session_id, after, upto)
+        return await self._history.list_events_between(session_id, after, upto)
 
     async def close(
         self, session_id: str, queue: asyncio.Queue[ApplicationEvent]

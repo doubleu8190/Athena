@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.files import KnowledgeBase
+from domain.knowledge import KnowledgeBase
 
 from ..models import AttachmentModel, KnowledgeBaseModel
 from ..mappers.converters import knowledge_base_domain_to_model, knowledge_base_model_to_domain
@@ -58,7 +58,7 @@ class PostgresKnowledgeBaseRepository:
             )
         return knowledge_base_model_to_domain(row, documents=documents)
 
-    async def list_all(self) -> list[KnowledgeBase]:
+    async def list_knowledge_bases(self) -> list[KnowledgeBase]:
         """按更新时间倒序列出知识库。"""
         async with self._session_factory() as db:
             rows = (
@@ -92,6 +92,10 @@ class PostgresKnowledgeBaseRepository:
             knowledge_base_model_to_domain(row, documents=by_base.get(row.id, []))
             for row in rows
         ]
+
+    async def list_all(self) -> list[KnowledgeBase]:
+        """兼容旧调用方；新代码使用 ``list_knowledge_bases``。"""
+        return await self.list_knowledge_bases()
 
     async def save(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
         """更新知识库名称和说明。"""

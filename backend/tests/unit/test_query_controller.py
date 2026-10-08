@@ -16,7 +16,7 @@ from application.knowledge import KnowledgeBaseQueryService
 from application.memory import MemoryService
 from application.tools import ToolQueryService
 from bootstrap import create_app
-from domain.files import KnowledgeBase
+from domain.knowledge import KnowledgeBase
 from domain.memory import MemoryPage, MemoryRecord
 from domain.tools import (
     JsonSchema,

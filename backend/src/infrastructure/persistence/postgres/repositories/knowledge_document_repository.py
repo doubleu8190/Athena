@@ -61,7 +61,7 @@ class PostgresKnowledgeDocumentRepository:
             ).scalar_one_or_none()
         return None if row is None else attachment_model_to_domain(row)
 
-    async def list(self, knowledge_base_id: str) -> list[Attachment]:
+    async def list_documents(self, knowledge_base_id: str) -> list[Attachment]:
         async with self._session_factory() as db:
             rows = (
                 (
@@ -78,6 +78,10 @@ class PostgresKnowledgeDocumentRepository:
                 .all()
             )
         return [attachment_model_to_domain(row) for row in rows]
+
+    async def list(self, knowledge_base_id: str) -> list[Attachment]:
+        """兼容旧调用方；新代码使用 ``list_documents``。"""
+        return await self.list_documents(knowledge_base_id)
 
     async def list_versions(
         self, attachment_id: str, *, knowledge_base_id: str

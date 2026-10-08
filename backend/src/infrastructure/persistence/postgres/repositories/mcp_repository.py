@@ -50,7 +50,7 @@ class PostgresMCPServerRepository:
             ).scalar_one_or_none()
         return None if row is None else mcp_server_model_to_domain(row)
 
-    async def list_all(self) -> list[MCPServer]:
+    async def list_servers(self) -> list[MCPServer]:
         """按创建时间列出未删除 MCP 服务端。"""
         async with self._session_factory() as db:
             result = await db.execute(
@@ -60,6 +60,10 @@ class PostgresMCPServerRepository:
             )
             rows = result.scalars().all()
         return [mcp_server_model_to_domain(row) for row in rows]
+
+    async def list_all(self) -> list[MCPServer]:
+        """兼容旧调用方；新代码使用 ``list_servers``。"""
+        return await self.list_servers()
 
     async def delete(self, name: str) -> bool:
         """软删除 MCP 服务端。"""

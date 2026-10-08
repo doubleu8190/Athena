@@ -59,7 +59,7 @@ def build_sessions_router(
         sessions: SessionService = Depends(service),
     ) -> list[SessionResponse]:
         return [
-            SessionResponse.from_domain(item) for item in await sessions.list()
+            SessionResponse.from_domain(item) for item in await sessions.list_sessions()
         ]
 
     @router.get("/{session_id}", response_model=SessionResponse)

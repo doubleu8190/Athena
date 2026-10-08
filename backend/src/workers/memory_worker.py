@@ -21,7 +21,8 @@ class MemoryWorker:
         """持续领取任务，失败时交给队列决定是否重试。"""
         await self._jobs.recover()
         while not self._stop.is_set():
-            job = await self._jobs.claim()
+            claim = getattr(self._jobs, "claim_next_job", None) or self._jobs.claim
+            job = await claim()
             if job is None:
                 try:
                     await asyncio.wait_for(self._stop.wait(), self._poll_interval)
@@ -38,9 +39,11 @@ class MemoryWorker:
                 processor = getattr(self._workflow, "process_completed_turn", None)
                 await (processor or self._workflow.process)(turn)
             except Exception as exc:
-                await self._jobs.fail(turn.turn_id, str(exc), retry=True)
+                fail = getattr(self._jobs, "mark_failed", None) or self._jobs.fail
+                await fail(turn.turn_id, str(exc), retry=True)
             else:
-                await self._jobs.succeed(turn.turn_id)
+                succeed = getattr(self._jobs, "mark_succeeded", None) or self._jobs.succeed
+                await succeed(turn.turn_id)
 
     def stop(self) -> None:
         """请求 worker 在当前任务完成后停止。"""

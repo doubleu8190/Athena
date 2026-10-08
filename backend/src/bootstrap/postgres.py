@@ -292,7 +292,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "run_command_factory": lambda: RunCommandService(
             sessions, runs, runs, id_factory=ids
         ),
-        "event_stream_factory": lambda: EventStreamService(sessions, events, events),
+        "event_stream_factory": lambda: EventStreamService(sessions, events, events, events),
         "tool_query_factory": lambda: ToolQueryService(tools),
         "tool_service_factory": lambda: ToolService(
             tools,

@@ -22,8 +22,8 @@ from domain.files import (
     FileChunk,
     FileLocator,
     FileMetadata,
-    KnowledgeBase,
 )
+from domain.knowledge import KnowledgeBase
 from domain.tools import (
     JsonSchema,
     MCPServer,

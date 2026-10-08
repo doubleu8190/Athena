@@ -8,7 +8,8 @@ import pytest
 
 from application.runs import RunRequestPreparationService
 from application.sessions import SessionNotFoundError
-from domain.files import Attachment, AttachmentStatus, FileMetadata, KnowledgeBase
+from domain.files import Attachment, AttachmentStatus, FileMetadata
+from domain.knowledge import KnowledgeBase
 from domain.sessions import Message, MessageRole, Session
 
 

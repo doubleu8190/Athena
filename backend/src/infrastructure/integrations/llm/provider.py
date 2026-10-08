@@ -49,6 +49,10 @@ class RetryingLLMProvider:
     def count_text_tokens(self, text: str) -> int:
         return int(self._token_counter(text))
 
+    async def complete(self, messages: list[Any], **kwargs: Any) -> Any:
+        """明确表示一次模型补全；``invoke`` 保留为兼容 API。"""
+        return await self.invoke(messages, **kwargs)
+
 
 class EmbeddingProvider:
     """Adapt an injected sync or async embedding callable to a stable API."""

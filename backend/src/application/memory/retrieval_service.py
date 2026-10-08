@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from application.retrieval import RetrievalFusionService
-from domain.memory import MemoryPort, MemorySearchRequest, MemoryVectorSearchPort
+from domain.memory import MemoryRepositoryPort, MemorySearchRequest, MemoryVectorSearchPort
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
 
@@ -27,7 +27,7 @@ class MemoryContextProvider:
 
     def __init__(
         self,
-        repository: MemoryPort,
+        repository: MemoryRepositoryPort,
         vector_indexer: MemoryVectorSearchPort | None = None,
         *,
         limit: int = 8,

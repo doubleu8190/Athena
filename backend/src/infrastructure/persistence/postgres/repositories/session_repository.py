@@ -43,7 +43,7 @@ class PostgresSessionRepository:
             row = result.scalar_one_or_none()
         return None if row is None else session_model_to_domain(row)
 
-    async def list_all(self) -> list[Session]:
+    async def list_sessions(self) -> list[Session]:
         """按更新时间倒序查询未删除会话。"""
         async with self._session_factory() as db:
             result = await db.execute(
@@ -53,6 +53,10 @@ class PostgresSessionRepository:
             )
             rows = result.scalars().all()
         return [session_model_to_domain(row) for row in rows]
+
+    async def list_all(self) -> list[Session]:
+        """兼容旧调用方；新代码使用 ``list_sessions``。"""
+        return await self.list_sessions()
 
     async def save(self, session: Session) -> Session:
         """更新会话业务字段并返回传入领域实体。"""

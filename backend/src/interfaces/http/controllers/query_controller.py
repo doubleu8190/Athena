@@ -13,7 +13,7 @@ from application.memory import MemoryQueryService, MemoryService
 from application.retrieval import RetrievalQueryService
 from application.knowledge import KnowledgeBaseQueryService
 from application.tools import ToolQueryService
-from domain.files import KnowledgeBase
+from domain.knowledge import KnowledgeBase
 from domain.tools import ToolConfig
 from domain.memory import MemoryListRequest, MemorySearchRequest
 
@@ -118,13 +118,13 @@ def build_query_router(
     async def list_providers() -> list[ProviderResponse]:
         if provider_factory is None:
             raise HTTPException(status_code=503, detail="provider_query_not_configured")
-        return [ProviderResponse.model_validate(item) for item in await provider_factory().list()]
+        return [ProviderResponse.model_validate(item) for item in await provider_factory().list_providers()]
 
     @router.post("/providers/test")
     async def test_provider(body: dict[str, Any]) -> dict[str, Any]:
         if provider_factory is None:
             raise HTTPException(status_code=503, detail="provider_query_not_configured")
-        values = await provider_factory().list()
+        values = await provider_factory().list_providers()
         name = str(body.get("provider") or body.get("name") or "")
         matched = next((item for item in values if item.get("name") == name), None)
         return {"status": "ok" if matched is not None else "not_found", "provider": name}
@@ -133,7 +133,7 @@ def build_query_router(
     async def get_settings() -> SettingsResponse:
         if settings_factory is None:
             raise HTTPException(status_code=503, detail="settings_query_not_configured")
-        return SettingsResponse.model_validate(await settings_factory().get())
+        return SettingsResponse.model_validate(await settings_factory().get_settings())
 
     @router.get("/knowledge-bases", response_model=list[KnowledgeBaseResponse])
     async def list_knowledge_bases() -> list[KnowledgeBaseResponse]:
@@ -141,7 +141,7 @@ def build_query_router(
             raise HTTPException(status_code=503, detail="knowledge_query_not_configured")
         return [
             KnowledgeBaseResponse.from_domain(item)
-            for item in await knowledge_factory().list()
+            for item in await (lambda target: (getattr(target, "list_knowledge_bases", None) or target.list)())(knowledge_factory())
         ]
 
     @router.post("/memory/search")
@@ -171,7 +171,7 @@ def build_query_router(
         session_id: str | None = None,
     ) -> dict[str, Any]:
         if memory_service_factory is not None:
-            page = await memory_service_factory().list(
+            page = await memory_service_factory().list_memories(
                 MemoryListRequest(
                     limit=limit,
                     offset=offset,
@@ -182,7 +182,7 @@ def build_query_router(
             return {"items": [_memory_response(value) for value in page.items], **page.stats}
         if memory_factory is None:
             raise HTTPException(status_code=503, detail="memory_query_not_configured")
-        return await memory_factory().list(
+        return await memory_factory().list_memories(
             limit=limit, offset=offset, expired=expired, session_id=session_id
         )
 

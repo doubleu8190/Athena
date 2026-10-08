@@ -19,7 +19,7 @@ class SessionRepository(Protocol):
         """按 ID 查询会话，不存在时返回 None。"""
         ...
 
-    async def list_all(self) -> list[Session]:
+    async def list_sessions(self) -> list[Session]:
         """返回可见会话列表。"""
         ...
 

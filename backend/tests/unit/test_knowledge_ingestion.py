@@ -20,7 +20,7 @@ from domain.files import (
     ParsedDocument,
     StoredBlob,
 )
-from domain.files import KnowledgeBase
+from domain.knowledge import KnowledgeBase
 from fastapi.testclient import TestClient
 from io import BytesIO
 

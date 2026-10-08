@@ -15,15 +15,21 @@ class OptionalNeo4jFileIndexer:
         """保存 Neo4j 生命周期资源；资源未启动时跳过索引操作。"""
         self._resource = resource
 
-    async def index(self, attachment: Attachment, chunks: Sequence[FileChunk]) -> None:
+    async def index_attachment(self, attachment: Attachment, chunks: Sequence[FileChunk]) -> None:
         """将附件及其分块写入已启动的 Neo4j adapter。"""
         if self._resource.adapter is not None:
             await self._resource.adapter.index_attachment(attachment, chunks)
 
-    async def delete(self, attachment_id: str) -> None:
+    async def delete_attachment(self, attachment_id: str) -> None:
         """删除附件对应的 Neo4j 派生节点。"""
         if self._resource.adapter is not None:
             await self._resource.adapter.delete_attachment(attachment_id)
+
+    async def index(self, attachment: Attachment, chunks: Sequence[FileChunk]) -> None:
+        return await self.index_attachment(attachment, chunks)
+
+    async def delete(self, attachment_id: str) -> None:
+        return await self.delete_attachment(attachment_id)
 
 
 OptionalNeo4jAttachmentIndexer = OptionalNeo4jFileIndexer

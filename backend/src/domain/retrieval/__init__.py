@@ -1,25 +1,6 @@
-from dataclasses import dataclass, field
-from typing import Any
+"""检索领域公开类型。"""
 
-from .ports import GraphContextQueryPort
+from .entities import RetrievalCandidate, RetrievalRun
+from .ports import GraphContextQueryPort, GraphSearchPort
 
-
-@dataclass(frozen=True, slots=True)
-class RetrievalCandidate:
-    source_id: str
-    content: str
-    provider: str = "unknown"
-    score: float = 0.0
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class RetrievalRun:
-    run_id: str
-    query: str
-    scope: str
-    status: str = "running"
-    candidates: tuple[RetrievalCandidate, ...] = ()
-
-
-__all__ = ["GraphContextQueryPort", "RetrievalCandidate", "RetrievalRun"]
+__all__ = ["GraphContextQueryPort", "GraphSearchPort", "RetrievalCandidate", "RetrievalRun"]

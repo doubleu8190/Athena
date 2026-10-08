@@ -23,7 +23,7 @@ def build_tools_router(factory: Callable[[], ToolService]) -> APIRouter:
 
     @router.get("")
     async def list_tools() -> dict[str, Any]:
-        values = await factory().list()
+        values = await factory().list_tools()
         items = [
             {
                 "name": value.tool_name,

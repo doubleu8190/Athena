@@ -1,4 +1,4 @@
-"""文件与知识库领域实体。"""
+"""文件与附件领域实体。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,17 @@ class AttachmentStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class AttachmentRef:
+    """供消息引用的轻量附件值对象。"""
+
+    id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    status: AttachmentStatus
+
+
+@dataclass(frozen=True, slots=True)
 class FileLocator:
     """文件内容在原始文档中的位置。"""
 
@@ -34,7 +45,7 @@ class FileMetadata:
 
 @dataclass(frozen=True, slots=True)
 class Attachment:
-    """附件或知识库文档实体。"""
+    """可属于会话或知识库的附件实体。"""
 
     id: str
     logical_document_id: str
@@ -57,10 +68,8 @@ class Attachment:
     updated_at: datetime
     deleted_time: datetime | None = None
 
-    def to_reference(self):
-        """生成消息使用的轻量附件引用。"""
-        from domain.sessions import AttachmentRef
-
+    def to_attachment_reference(self) -> AttachmentRef:
+        """生成供消息使用的轻量附件引用。"""
         return AttachmentRef(
             id=self.id,
             filename=self.filename,
@@ -68,6 +77,10 @@ class Attachment:
             size_bytes=self.size_bytes,
             status=self.status,
         )
+
+    def to_reference(self) -> AttachmentRef:
+        """兼容旧调用方；新代码使用 ``to_attachment_reference``。"""
+        return self.to_attachment_reference()
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,17 +121,3 @@ class AdapterInfo:
     extensions: tuple[str, ...]
     capabilities: tuple[str, ...]
     enabled: bool = True
-
-
-@dataclass(frozen=True, slots=True)
-class KnowledgeBase:
-    """可跨会话复用的知识库。"""
-
-    id: str
-    name: str
-    description: str
-    document_count: int
-    ready_document_count: int
-    total_size_bytes: int
-    created_at: datetime
-    updated_at: datetime

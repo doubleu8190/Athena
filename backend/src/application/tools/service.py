@@ -21,9 +21,14 @@ class ToolService:
         self._repository = repository
         self._execution = execution
 
-    async def list(self) -> list[ToolConfig]:
+    async def list_tools(self) -> list[ToolConfig]:
         """列出工具治理配置。"""
-        return await self._repository.list_all()
+        method = getattr(self._repository, "list_tools", None) or self._repository.list_all
+        return await method()
+
+    async def list(self) -> list[ToolConfig]:
+        """兼容旧 Controller 调用方。"""
+        return await self.list_tools()
 
     async def get(self, name: str) -> ToolConfig | None:
         """读取一个工具配置。"""

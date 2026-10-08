@@ -52,12 +52,16 @@ class PostgresToolConfigRepository:
             row = await db.get(ToolModel, tool_name)
         return None if row is None else tool_model_to_domain(row)
 
-    async def list_all(self) -> list[ToolConfig]:
+    async def list_tools(self) -> list[ToolConfig]:
         """按创建时间列出工具配置。"""
         async with self._session_factory() as db:
             result = await db.execute(select(ToolModel).order_by(ToolModel.created_at.asc()))
             rows = result.scalars().all()
         return [tool_model_to_domain(row) for row in rows]
+
+    async def list_all(self) -> list[ToolConfig]:
+        """兼容旧调用方；新代码使用 ``list_tools``。"""
+        return await self.list_tools()
 
     async def update(self, config: ToolConfig) -> ToolConfig:
         """更新工具治理配置并返回最新领域实体。"""

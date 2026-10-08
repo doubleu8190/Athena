@@ -1,4 +1,4 @@
-"""事件持久化、发布和实时传输端口。"""
+"""事件端口的兼容导出。"""
 
 from __future__ import annotations
 
@@ -6,28 +6,17 @@ import asyncio
 from typing import Protocol
 
 from .entities import ApplicationEvent
+from .publisher_ports import EventPublisherPort
+from .store_ports import EventHistoryPort
+from .subscription_ports import EventSubscriptionPort
 
 
-class EventStorePort(Protocol):
-    async def publish(self, event: ApplicationEvent) -> ApplicationEvent: ...
-
-    async def open_subscription(
-        self, session_id: str
-    ) -> tuple[asyncio.Queue[ApplicationEvent], int]: ...
-
-    async def list_events_between(
-        self, session_id: str, after: int = 0, upto: int | None = None
-    ) -> list[ApplicationEvent]: ...
-
-
-class EventPublisherPort(Protocol):
-    async def publish(self, event: ApplicationEvent) -> ApplicationEvent: ...
-
-    async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent: ...
+class EventStorePort(EventPublisherPort, EventHistoryPort, EventSubscriptionPort, Protocol):
+    """兼容旧调用方的事件组合端口。"""
 
 
 class RealtimeTransportPort(Protocol):
-    async def close_subscription(
-        self, session_id: str, queue: asyncio.Queue[ApplicationEvent]
-    ) -> None: ...
+    async def close_subscription(self, session_id: str, queue: asyncio.Queue[ApplicationEvent]) -> None: ...
 
+
+__all__ = ["EventHistoryPort", "EventPublisherPort", "EventStorePort", "EventSubscriptionPort", "RealtimeTransportPort"]

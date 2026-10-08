@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from domain.files.entities import AttachmentStatus
+from domain.files.entities import AttachmentRef
 
 
 class MessageRole(StrEnum):
@@ -26,17 +26,6 @@ class ToolCall:
     id: str
     name: str
     args: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class AttachmentRef:
-    """消息使用的附件轻量引用，不包含存储层密钥。"""
-
-    id: str
-    filename: str
-    mime_type: str
-    size_bytes: int
-    status: AttachmentStatus
 
 
 @dataclass(frozen=True, slots=True)

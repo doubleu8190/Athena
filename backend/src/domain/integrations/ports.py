@@ -1,31 +1,15 @@
-"""LLM、sandbox 和索引集成端口。"""
+"""集成端口的兼容导出。
 
-from __future__ import annotations
+文件和检索索引端口归属 ``domain.files``；本模块仅保留尚未细分的外部
+集成接口旧导入路径。
+"""
 
-from pathlib import Path
-from typing import Any, Protocol
+from .llm_ports import LLMPort
+from .sandbox_ports import SandboxPort
+from domain.files.indexing_ports import GraphIndexerPort, VectorIndexerPort
 
+# 迁移期兼容名称；正式文件索引端口位于 ``domain.files.indexing_ports``。
+VectorIndexPort = VectorIndexerPort
+GraphIndexPort = GraphIndexerPort
 
-class LLMPort(Protocol):
-    async def invoke(self, messages: list[Any], **kwargs: Any) -> Any: ...
-    def count_text_tokens(self, text: str) -> int: ...
-
-
-class SandboxPort(Protocol):
-    async def execute(self, request: Any) -> Any: ...
-    def build_mcp_process(self, *, server_name: str, image: str, command: list[str], args: list[str], workspace: Path, env: dict[str, str] | None = None, network_policy: str = "none") -> Any: ...
-    async def health(self) -> bool: ...
-    async def close_all(self) -> None: ...
-
-
-class VectorIndexPort(Protocol):
-    async def index_attachment(self, attachment: Any, chunks: list[Any]) -> None: ...
-    async def delete_attachment(self, attachment_id: str) -> None: ...
-
-
-class GraphIndexPort(Protocol):
-    async def index_attachment(self, attachment: Any, chunks: list[Any]) -> None: ...
-    async def delete_attachment(self, attachment_id: str) -> None: ...
-
-
-__all__ = ["GraphIndexPort", "LLMPort", "SandboxPort", "VectorIndexPort"]
+__all__ = ["GraphIndexPort", "GraphIndexerPort", "LLMPort", "SandboxPort", "VectorIndexPort", "VectorIndexerPort"]

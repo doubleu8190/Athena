@@ -9,8 +9,9 @@ import pytest
 
 from domain.files import (
     AdapterInfo, Attachment, AttachmentStatus, FileArtifact, FileChunk,
-    FileLocator, FileMetadata, KnowledgeBase,
+    FileLocator, FileMetadata,
 )
+from domain.knowledge import KnowledgeBase
 from domain.sessions import Message, MessageRole, Session, SessionStatus
 from domain.tools import (
     JsonSchema, MCPServer, MCPServerConfig, RiskLevel, ToolConfig, ToolExecutionMode,

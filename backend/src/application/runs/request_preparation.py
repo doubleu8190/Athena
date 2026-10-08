@@ -6,7 +6,8 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 
 from application.sessions import SessionNotFoundError
-from domain.files import AttachmentRepository, AttachmentStatus, KnowledgeBaseRepository
+from domain.files import AttachmentRepository, AttachmentStatus
+from domain.knowledge import KnowledgeBaseRepository
 from domain.sessions import Message, MessageRepository, MessageRole, SessionRepository
 
 
@@ -66,7 +67,7 @@ class RunRequestPreparationService:
             status = getattr(attachment.status, "value", attachment.status)
             if status != AttachmentStatus.READY.value:
                 raise ValueError(f"attachment_not_ready: {attachment_id}")
-            attachment_values.append(attachment.to_reference())
+            attachment_values.append(attachment.to_attachment_reference())
             attachment_refs.append(
                 {
                     "id": attachment.id,
@@ -187,7 +188,7 @@ class RunRequestPreparationService:
                 "document_count": item.document_count,
                 "ready_document_count": item.ready_document_count,
             }
-            for item in await self._knowledge_bases.list_all()
+            for item in await (getattr(self._knowledge_bases, "list_knowledge_bases", None) or self._knowledge_bases.list_all)()
         ]
 
 

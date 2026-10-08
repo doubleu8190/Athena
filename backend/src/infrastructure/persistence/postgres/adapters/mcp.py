@@ -26,7 +26,8 @@ class PostgresMCPAdapter(MCPPort):
 
     async def list_servers(self) -> list[dict[str, object]]:
         """返回当前未删除 MCP 配置的摘要列表。"""
-        values = await self._repository.list_all()
+        method = getattr(self._repository, "list_servers", None) or self._repository.list_all
+        values = await method()
         return [
             {"name": item.name, "status": "registered", "enabled": item.config.enabled}
             for item in values

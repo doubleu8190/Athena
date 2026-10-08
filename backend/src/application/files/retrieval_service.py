@@ -188,6 +188,8 @@ class KnowledgeContextProvider(FileContextProvider):
                 documents.extend(
                     await self._attachments.list_by_knowledge_base(knowledge_id)
                 )
+        elif hasattr(self._attachments, "list_all_attachments"):
+            documents = await self._attachments.list_all_attachments()
         elif hasattr(self._attachments, "list_all"):
             documents = await self._attachments.list_all()
         else:

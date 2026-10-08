@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from domain.common.query_ports import RetrievalQueryPort
+from domain.retrieval.query_ports import RetrievalQueryPort
 
 
 class RetrievalQueryService:

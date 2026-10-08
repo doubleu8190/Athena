@@ -58,7 +58,7 @@ class Transport:
 def make_client():
     events = Events()
     transport = Transport()
-    service = EventStreamService(Sessions(), events, transport)
+    service = EventStreamService(Sessions(), events, events, transport)
     client = TestClient(create_app(event_stream_factory=lambda: service))
     return client, events, transport
 
@@ -68,7 +68,7 @@ def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
 
     events = Events()
     transport = Transport()
-    service = EventStreamService(Sessions(), events, transport)
+    service = EventStreamService(Sessions(), events, events, transport)
     app = __import__("fastapi").FastAPI()
     app.include_router(build_events_router(lambda: service))
     request = Request(
@@ -101,4 +101,3 @@ def test_sse_rejects_unknown_session_and_negative_cursor() -> None:
     client, _, _ = make_client()
     assert client.get("/api/sessions/missing/events").status_code == 404
     assert client.get("/api/sessions/session-1/events?after=-1").status_code == 422
-

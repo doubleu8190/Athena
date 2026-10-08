@@ -51,6 +51,9 @@ class Neo4jGraphIndex:
                 rows.append(dict(record))
             return rows
 
+    async def search_nodes(self, query: str, *, limit: int = 12) -> list[dict[str, object]]:
+        return await self.query_context(query, limit=limit)
+
 
 Neo4jGraphAdapter = Neo4jGraphIndex
 

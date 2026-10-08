@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from domain.common.query_ports import MemoryQueryPort
+from domain.memory.query_ports import MemoryQueryPort
 
 
 class MemoryQueryService:
@@ -14,8 +14,12 @@ class MemoryQueryService:
     async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
         return await self._port.search(**kwargs)
 
+    async def list_memories(self, **kwargs: Any) -> dict[str, Any]:
+        method = getattr(self._port, "list_memories", None) or self._port.list
+        return await method(**kwargs)
+
     async def list(self, **kwargs: Any) -> dict[str, Any]:
-        return await self._port.list(**kwargs)
+        return await self.list_memories(**kwargs)
 
     async def get(self, memory_id: str) -> dict[str, Any] | None:
         return await self._port.get(memory_id)

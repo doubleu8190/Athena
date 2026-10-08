@@ -1,9 +1,9 @@
 """会话领域。"""
 
 from .entities import Session, SessionStatus
-from domain.files.entities import AttachmentStatus
+from domain.files.entities import AttachmentRef, AttachmentStatus
 
-from .messages import AttachmentRef, Message, MessageRole, ToolCall
+from .messages import Message, MessageRole, ToolCall
 from .ports import MessageRepository, SessionRepository
 
 __all__ = [

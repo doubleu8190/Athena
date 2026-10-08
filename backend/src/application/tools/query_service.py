@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from domain.common.query_ports import ToolUsageQueryPort
+from domain.tools.query_ports import ToolUsageQueryPort
 from domain.tools import ToolConfig, ToolConfigRepository
 
 
@@ -16,7 +16,8 @@ class ToolQueryService:
         self._usage_port = usage_port
 
     async def list_tools(self) -> list[ToolConfig]:
-        return await self._repository.list_all()
+        method = getattr(self._repository, "list_tools", None) or self._repository.list_all
+        return await method()
 
     async def get_tool(self, name: str) -> ToolConfig | None:
         return await self._repository.get(name)

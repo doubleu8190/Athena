@@ -1,30 +1,17 @@
-"""低风险查询用例使用的外部配置和观测端口。"""
+"""查询端口的兼容导出。
 
-from __future__ import annotations
+正式定义按配置、工具、记忆和检索职责放在对应领域包中。
+"""
 
-from typing import Any, Protocol
+from domain.configuration.query_ports import ProviderQueryPort, SettingsQueryPort
+from domain.memory.query_ports import MemoryQueryPort
+from domain.retrieval.query_ports import RetrievalQueryPort
+from domain.tools.query_ports import ToolUsageQueryPort
 
-
-class ProviderQueryPort(Protocol):
-    async def list_providers(self) -> list[dict[str, Any]]: ...
-
-
-class SettingsQueryPort(Protocol):
-    async def get_settings(self) -> dict[str, Any]: ...
-
-
-class ToolUsageQueryPort(Protocol):
-    async def last_called_by_tool(self) -> dict[str, str]: ...
-    async def count_calls_since(self, since: Any) -> int: ...
-
-
-class MemoryQueryPort(Protocol):
-    async def search(self, *, query: str, n_results: int, where: dict[str, Any] | None) -> list[dict[str, Any]]: ...
-    async def list(self, *, limit: int, offset: int, expired: bool, session_id: str | None) -> dict[str, Any]: ...
-    async def get(self, memory_id: str) -> dict[str, Any] | None: ...
-    async def revisions(self, memory_id: str) -> list[dict[str, Any]]: ...
-
-
-class RetrievalQueryPort(Protocol):
-    async def list_runs(self, **filters: Any) -> tuple[list[dict[str, Any]], int]: ...
-    async def get_run(self, run_id: str) -> dict[str, Any] | None: ...
+__all__ = [
+    "MemoryQueryPort",
+    "ProviderQueryPort",
+    "RetrievalQueryPort",
+    "SettingsQueryPort",
+    "ToolUsageQueryPort",
+]

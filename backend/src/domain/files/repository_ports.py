@@ -1,0 +1,29 @@
+"""文件附件及分块的持久化端口。"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from .entities import Attachment, FileChunk
+
+
+class AttachmentRepository(Protocol):
+    """附件持久化能力。"""
+
+    async def create(self, attachment: Attachment) -> Attachment: ...
+    async def get(self, attachment_id: str, *, session_id: str | None = None) -> Attachment | None: ...
+    async def list_by_session(self, session_id: str) -> list[Attachment]: ...
+    async def list_by_knowledge_base(self, knowledge_base_id: str) -> list[Attachment]: ...
+    async def list_all_attachments(self) -> list[Attachment]: ...
+    async def save(self, attachment: Attachment) -> Attachment: ...
+    async def soft_delete(self, attachment_id: str, *, session_id: str) -> bool: ...
+
+
+class FileChunkRepository(Protocol):
+    """文件分块持久化能力。"""
+
+    async def replace_for_attachment(self, attachment_id: str, chunks: list[FileChunk]) -> None: ...
+    async def list_by_attachment(self, attachment_id: str) -> list[FileChunk]: ...
+
+
+__all__ = ["AttachmentRepository", "FileChunkRepository"]

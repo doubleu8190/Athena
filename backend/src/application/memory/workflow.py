@@ -5,7 +5,7 @@ from __future__ import annotations
 from domain.memory import (
     CompletedTurn,
     MemoryFactExtractorPort,
-    MemoryPort,
+    MemoryRepositoryPort,
     MemoryResolverPort,
     MemoryWriteCommand,
     MemoryWriteTriggerPort,
@@ -18,7 +18,7 @@ class MemoryWriteWorkflow:
 
     def __init__(
         self,
-        memory: MemoryPort,
+        memory: MemoryRepositoryPort,
         trigger: MemoryWriteTriggerPort,
         extractor: MemoryFactExtractorPort,
         resolver: MemoryResolverPort,
@@ -37,7 +37,8 @@ class MemoryWriteWorkflow:
         written = 0
         for resolution in resolutions:
             if resolution.action is ResolutionAction.CREATE:
-                await self._memory.add(
+                create_memory = getattr(self._memory, "create_memory", None) or self._memory.add
+                await create_memory(
                     MemoryWriteCommand(
                         content=resolution.candidate.content,
                         metadata={

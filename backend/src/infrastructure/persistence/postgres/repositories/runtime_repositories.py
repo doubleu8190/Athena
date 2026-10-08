@@ -17,7 +17,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.approval import ApprovalDecision, ApprovalRequest, ApprovalStatus
-from domain.common.query_ports import RetrievalQueryPort
+from domain.retrieval.query_ports import RetrievalQueryPort
 from domain.events import ApplicationEvent
 from domain.memory import (
     MemoryListRequest,
@@ -571,7 +571,7 @@ class PostgresMemoryRepository:
             )
         return [self._domain(row, score=1.0) for row in rows]
 
-    async def list(self, request: MemoryListRequest):
+    async def list_memories(self, request: MemoryListRequest):
         async with self._session_factory() as session:
             query = (
                 select(MemoryModel)
@@ -598,6 +598,10 @@ class PostgresMemoryRepository:
             {"total": int(total), "expired": 0, "recent": len(values)},
         )
 
+    async def list(self, request: MemoryListRequest):
+        """兼容旧调用方；新代码使用 ``list_memories``。"""
+        return await self.list_memories(request)
+
     async def get(self, memory_id: str):
         async with self._session_factory() as session:
             row = await session.get(MemoryModel, memory_id)
@@ -607,7 +611,7 @@ class PostgresMemoryRepository:
         value = await self.get(memory_id)
         return [] if value is None else [value]
 
-    async def add(self, command: MemoryWriteCommand) -> str:
+    async def create_memory(self, command: MemoryWriteCommand) -> str:
         key = (
             command.operation_key or f"memory-{datetime.now(timezone.utc).timestamp()}"
         )
@@ -628,6 +632,10 @@ class PostgresMemoryRepository:
                 )
         return key
 
+    async def add(self, command: MemoryWriteCommand) -> str:
+        """兼容旧调用方；新代码使用 ``create_memory``。"""
+        return await self.create_memory(command)
+
     async def revise(
         self, memory_id: str, content: str, *, metadata=None, operation_key=None
     ):
@@ -644,7 +652,7 @@ class PostgresMemoryRepository:
                 )
         return memory_id if result.rowcount else None
 
-    async def set_validity(
+    async def update_validity(
         self, memory_id: str, validity_status: str, *, valid_until=None
     ) -> bool:
         async with self._session_factory() as session:
@@ -655,6 +663,10 @@ class PostgresMemoryRepository:
                     .values(validity_status=validity_status, valid_until=valid_until)
                 )
         return bool(result.rowcount)
+
+    async def set_validity(self, memory_id: str, validity_status: str, *, valid_until=None) -> bool:
+        """兼容旧调用方；新代码使用 ``update_validity``。"""
+        return await self.update_validity(memory_id, validity_status, valid_until=valid_until)
 
     async def delete(self, memory_id: str) -> None:
         async with self._session_factory() as session:

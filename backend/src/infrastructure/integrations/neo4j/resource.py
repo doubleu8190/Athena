@@ -47,5 +47,8 @@ class Neo4jResource:
             return []
         return await self.adapter.query_context(query, limit=limit)
 
+    async def search_nodes(self, query: str, *, limit: int = 12) -> list[dict[str, object]]:
+        return await self.query_context(query, limit=limit)
+
 
 __all__ = ["Neo4jResource"]

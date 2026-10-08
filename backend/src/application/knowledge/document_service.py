@@ -13,9 +13,8 @@ from domain.files import (
     FileAdapterRegistryPort,
     FileMetadata,
     FileStoragePort,
-    KnowledgeBaseRepository,
-    KnowledgeDocumentRepository,
 )
+from domain.knowledge import KnowledgeBaseRepository, KnowledgeDocumentRepository
 
 from .errors import KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError
 
@@ -97,7 +96,7 @@ class KnowledgeDocumentService:
     async def list_documents(self, knowledge_base_id: str) -> list[Attachment]:
         if await self._repositories.get(knowledge_base_id) is None:
             raise KnowledgeBaseNotFoundError(knowledge_base_id)
-        return await self._documents.list(knowledge_base_id)
+        return await self._documents.list_documents(knowledge_base_id)
 
     async def list_versions(
         self, knowledge_base_id: str, attachment_id: str

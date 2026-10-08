@@ -13,13 +13,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from domain.approval import ApprovalDecision, ApprovalRequest
-from domain.common.query_ports import (
-    MemoryQueryPort,
-    ProviderQueryPort,
-    RetrievalQueryPort,
-    SettingsQueryPort,
-    ToolUsageQueryPort,
-)
+from domain.configuration import ProviderQueryPort, SettingsQueryPort
+from domain.memory.query_ports import MemoryQueryPort
+from domain.retrieval.query_ports import RetrievalQueryPort
+from domain.tools.query_ports import ToolUsageQueryPort
 from domain.files import (
     AdapterInfo,
     Attachment,
@@ -28,10 +25,9 @@ from domain.files import (
     DocumentJobPort,
     FileAdapterRegistryPort,
     FileStoragePort,
-    KnowledgeBase,
-    KnowledgeDocumentRepository,
     StoredBlob,
 )
+from domain.knowledge import KnowledgeBase, KnowledgeDocumentRepository
 from domain.events import ApplicationEvent
 import asyncio
 import hashlib
@@ -76,8 +72,10 @@ class InMemorySessionRepository:
     async def get(self, session_id: str) -> Session | None:
         return self.items.get(session_id)
 
-    async def list_all(self) -> list[Session]:
+    async def list_sessions(self) -> list[Session]:
         return sorted(self.items.values(), key=lambda item: item.updated_at, reverse=True)
+
+    async def list_all(self) -> list[Session]: return await self.list_sessions()
 
     async def save(self, session: Session) -> Session:
         self.items[session.id] = session
@@ -184,8 +182,10 @@ class InMemoryToolRepository:
     async def get(self, tool_name: str) -> ToolConfig | None:
         return self.items.get(tool_name)
 
-    async def list_all(self) -> list[ToolConfig]:
+    async def list_tools(self) -> list[ToolConfig]:
         return list(self.items.values())
+
+    async def list_all(self) -> list[ToolConfig]: return await self.list_tools()
 
 
 class InMemoryToolExecution(ToolExecutionPort):
@@ -222,6 +222,7 @@ class InMemoryMemoryPort:
     async def list(self, request: MemoryListRequest) -> MemoryPage:
         values = list(self.items.values())[request.offset:request.offset + request.limit]
         return MemoryPage(tuple(values), len(self.items), {"total": len(self.items), "expired": 0, "recent": len(self.items)})
+    async def list_memories(self, request: MemoryListRequest) -> MemoryPage: return await self.list(request)
     async def get(self, memory_id: str) -> MemoryRecord | None: return self.items.get(memory_id)
     async def revisions(self, memory_id: str) -> list[MemoryRecord]:
         value = self.items.get(memory_id)
@@ -230,11 +231,13 @@ class InMemoryMemoryPort:
         key = command.operation_key or f"memory-{len(self.items) + 1}"
         self.items[key] = MemoryRecord(key, command.content, dict(command.metadata))
         return key
+    async def create_memory(self, command: MemoryWriteCommand) -> str: return await self.add(command)
     async def revise(self, memory_id: str, content: str, *, metadata: dict[str, object] | None = None, operation_key: str | None = None) -> str | None:
         if memory_id not in self.items: return None
         self.items[memory_id] = replace(self.items[memory_id], content=content, metadata=metadata or self.items[memory_id].metadata)
         return memory_id
     async def set_validity(self, memory_id: str, validity_status: str, *, valid_until: str | None = None) -> bool: return memory_id in self.items
+    async def update_validity(self, memory_id: str, validity_status: str, *, valid_until: str | None = None) -> bool: return await self.set_validity(memory_id, validity_status, valid_until=valid_until)
     async def delete(self, memory_id: str) -> None:
         if memory_id in self.items: self.items[memory_id] = replace(self.items[memory_id], status=MemoryStatus.DELETED)
     async def flush_access_stats(self) -> int: return 0
@@ -281,6 +284,7 @@ class InMemoryProviderQueries(ProviderQueryPort, SettingsQueryPort, RetrievalQue
     async def search(self, *, query: str, n_results: int, where: dict[str, Any] | None) -> list[dict[str, Any]]: return [self._record(value) for value in await self.memory.search(MemorySearchRequest(query=query, limit=n_results))]
     async def list(self, *, limit: int, offset: int, expired: bool, session_id: str | None) -> dict[str, Any]:
         page = await self.memory.list(MemoryListRequest(limit=limit, offset=offset, expired_only=expired, session_id=session_id)); return {"items": [self._record(value) for value in page.items], **page.stats}
+    async def list_memories(self, *, limit: int, offset: int, expired: bool, session_id: str | None) -> dict[str, Any]: return await self.list(limit=limit, offset=offset, expired=expired, session_id=session_id)
     async def get(self, memory_id: str) -> dict[str, Any] | None:
         value = await self.memory.get(memory_id); return None if value is None else self._record(value)
     async def revisions(self, memory_id: str) -> list[dict[str, Any]]: return [self._record(value) for value in await self.memory.revisions(memory_id)]
@@ -292,7 +296,8 @@ class InMemoryKnowledgeRepository:
     def __init__(self) -> None: self.items: dict[str, KnowledgeBase] = {}
     async def create(self, item: KnowledgeBase) -> KnowledgeBase: self.items[item.id] = item; return item
     async def get(self, item_id: str) -> KnowledgeBase | None: return self.items.get(item_id)
-    async def list_all(self) -> list[KnowledgeBase]: return list(self.items.values())
+    async def list_knowledge_bases(self) -> list[KnowledgeBase]: return list(self.items.values())
+    async def list_all(self) -> list[KnowledgeBase]: return await self.list_knowledge_bases()
     async def save(self, item: KnowledgeBase) -> KnowledgeBase: self.items[item.id] = item; return item
     async def delete(self, item_id: str) -> bool: return self.items.pop(item_id, None) is not None
 
@@ -336,6 +341,8 @@ class InMemoryAttachmentRepository(AttachmentRepository):
         return value if value and value.deleted_time is None and (session_id is None or value.session_id == session_id) else None
     async def list_by_session(self, session_id: str) -> list[Attachment]: return [v for v in self.items.values() if v.session_id == session_id and v.deleted_time is None]
     async def list_by_knowledge_base(self, knowledge_base_id: str) -> list[Attachment]: return [v for v in self.items.values() if v.knowledge_base_id == knowledge_base_id and v.deleted_time is None]
+    async def list_all_attachments(self) -> list[Attachment]: return [v for v in self.items.values() if v.deleted_time is None]
+    async def list_all(self) -> list[Attachment]: return await self.list_all_attachments()
     async def save(self, attachment: Attachment) -> Attachment: self.items[attachment.id] = attachment; return attachment
     async def soft_delete(self, attachment_id: str, *, session_id: str) -> bool:
         value = await self.get(attachment_id, session_id=session_id)
@@ -347,7 +354,8 @@ class InMemoryKnowledgeDocuments(InMemoryAttachmentRepository, KnowledgeDocument
     async def get(self, attachment_id: str, *, knowledge_base_id: str):
         value = self.items.get(attachment_id)
         return value if value and value.knowledge_base_id == knowledge_base_id and value.deleted_time is None else None
-    async def list(self, knowledge_base_id: str): return await self.list_by_knowledge_base(knowledge_base_id)
+    async def list_documents(self, knowledge_base_id: str): return await self.list_by_knowledge_base(knowledge_base_id)
+    async def list(self, knowledge_base_id: str): return await self.list_documents(knowledge_base_id)
     async def list_versions(self, attachment_id: str, *, knowledge_base_id: str):
         value = self.items.get(attachment_id)
         return [] if value is None else [v for v in self.items.values() if v.logical_document_id == value.logical_document_id and v.knowledge_base_id == knowledge_base_id]

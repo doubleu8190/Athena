@@ -12,8 +12,8 @@ from domain.files import (
     FileArtifact,
     FileLocator,
     FileMetadata,
-    KnowledgeBase,
 )
+from domain.knowledge import KnowledgeBase
 from domain.tools import (
     JsonSchema,
     MCPServer,

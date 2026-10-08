@@ -43,7 +43,7 @@ class SessionService:
         )
         return await self._repository.create(session)
 
-    async def list(self) -> list[Session]:
+    async def list_sessions(self) -> list[Session]:
         """返回所有未删除会话。
 
         参数：无。
@@ -52,7 +52,12 @@ class SessionService:
         异常：
             不主动抛出业务异常。
         """
-        return await self._repository.list_all()
+        method = getattr(self._repository, "list_sessions", None) or self._repository.list_all
+        return await method()
+
+    async def list(self) -> list[Session]:
+        """兼容旧 Controller 调用方。"""
+        return await self.list_sessions()
 
     async def get(self, session_id: str) -> Session:
         """按 ID 获取会话。

@@ -1,14 +1,14 @@
-"""文件和知识库领域。"""
+"""文件和附件领域。"""
 
 from .entities import (
     AdapterInfo,
     Attachment,
+    AttachmentRef,
     AttachmentStatus,
     FileChunk,
     FileArtifact,
     FileLocator,
     FileMetadata,
-    KnowledgeBase,
 )
 from .ports import (
     AdapterRegistryRepository,
@@ -16,8 +16,6 @@ from .ports import (
     FileArtifactRepository,
     FileChunkRepository,
     FileVectorSearchPort,
-    KnowledgeBaseRepository,
-    KnowledgeDocumentRepository,
     DocumentParserPort,
     ParsedDocument,
     VectorIndexerPort,
@@ -28,8 +26,12 @@ from .ports import (
     StoredBlob,
 )
 
+# 迁移期兼容导出。知识库业务代码应从 ``domain.knowledge`` 导入。
+from domain.knowledge import KnowledgeBase, KnowledgeBaseRepository, KnowledgeDocumentRepository
+
 __all__ = [
     "Attachment",
+    "AttachmentRef",
     "AdapterInfo",
     "AdapterRegistryRepository",
     "AttachmentRepository",

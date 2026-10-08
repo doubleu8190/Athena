@@ -11,28 +11,24 @@ from types import SimpleNamespace
 import pytest
 
 from bootstrap import build_default_dependencies, create_app
-from bootstrap.config import Settings
+from configuration.settings import Settings
 from domain.approval import ApprovalDecision, ApprovalRequest
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
 from domain.runs import CommandStatus, CommandType, RunCommand, RunStatus
-from infrastructure.integrations.file_parsers.native import (
-    NativeFileAdapterRegistry,
-    NativeTextParser,
-    NoopGraphIndexer,
-    NoopVectorIndexer,
-    line_chunker,
-)
-from infrastructure.integrations.storage.local import LocalFileStorageAdapter
+from infrastructure.integrations.file_parsers.native import NativeFileAdapterRegistry, NativeFileParser, fixed_size_chunker
+from infrastructure.integrations.indexing import DisabledGraphIndexer, DisabledVectorIndexer
+from infrastructure.integrations.storage.local import LocalFileStorage
 from infrastructure.persistence.postgres.repositories.document_job_repository import PostgresDocumentJobRepository
-from infrastructure.persistence.postgres.repositories.runtime_repositories import (
+from infrastructure.persistence.postgres.repositories import (
     PostgresApprovalRepository,
     PostgresEventRepository,
     PostgresMemoryRepository,
-    PostgresRetrievalQueryRepository,
+    PostgresRetrievalRepository,
     PostgresRunRepository,
 )
-from infrastructure.persistence.postgres.engine import PostgresResource
+from infrastructure.persistence.postgres.engine import PostgresEngine
+from infrastructure.persistence.postgres.options import PostgresOptions
 from workers import WorkerSupervisor
 from workers import KnowledgeDocumentWorker
 from bootstrap.check import check_app
@@ -156,18 +152,18 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     assert (await memory.search(MemorySearchRequest("hello")))[0].id == "m-1"
     db.results = [Result(rows=[mem_row])]
     db.scalar_values = [1]
-    assert (await memory.list(MemoryListRequest())).total == 1
+    assert (await memory.list_memories(MemoryListRequest())).total == 1
     db.get_values = [mem_row]
     assert (await memory.get("m-1")).content == "hello memory"
     db.get_values = [mem_row]
     assert await memory.revisions("m-1")
-    await memory.add(MemoryWriteCommand("created", operation_key="m-2"))
+    await memory.create_memory(MemoryWriteCommand("created", operation_key="m-2"))
     await memory.revise("m-1", "revised", metadata={"x": 2})
-    await memory.set_validity("m-1", "valid")
+    await memory.update_validity("m-1", "valid")
     await memory.delete("m-1")
     assert await memory.flush_access_stats() == 0
 
-    retrieval = PostgresRetrievalQueryRepository(factory(db))
+    retrieval = PostgresRetrievalRepository(factory(db))
     retrieval_row = SimpleNamespace(run_id="rr", query="q", scope="session", status="done", config_json="{}", candidate_count=1, selected_count=1, injected_count=0, created_at=NOW.isoformat(), completed_at=None)
     db.results = [Result(rows=[retrieval_row])]
     db.scalar_values = [1]
@@ -179,28 +175,28 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
 @pytest.mark.asyncio
 async def test_target_file_parser_and_document_job_queue():
     root = Path("/tmp/athena-target-parser")
-    storage = LocalFileStorageAdapter(root, 1024)
+    storage = LocalFileStorage(root, 1024)
 
     async def chunks():
         yield b"hello\nworld"
 
     blob = await storage.save_stream(chunks())
     attachment = SimpleNamespace(storage_key=blob.storage_key, adapter_name="text", adapter_version="1", capabilities=("text",))
-    parsed = await NativeTextParser(storage).parse(attachment)
+    parsed = await NativeFileParser(storage).parse(attachment)
     assert parsed.text == "hello\nworld"
     registry = NativeFileAdapterRegistry()
     assert ".txt" in registry.supported_extensions()
     assert registry.select("a.txt", "text/plain").name == "text"
     assert registry.select("a.pdf", "application/pdf").name == "pdf"
-    await NativeTextParser(storage).parse(SimpleNamespace(filename="data.csv", storage_key=blob.storage_key, adapter_name="csv", adapter_version="1", capabilities=("text",)))
-    values = line_chunker(max_characters=5)("hello world")
+    await NativeFileParser(storage).parse(SimpleNamespace(filename="data.csv", storage_key=blob.storage_key, adapter_name="csv", adapter_version="1", capabilities=("text",)))
+    values = fixed_size_chunker(max_characters=5)("hello world")
     assert [value.ordinal for value in values] == [0, 1, 2]
-    await NoopVectorIndexer().index(attachment, values)
-    await NoopGraphIndexer().delete("a")
+    await DisabledVectorIndexer().index_attachment(attachment, values)
+    await DisabledGraphIndexer().delete_attachment("a")
     with pytest.raises(ValueError):
-        line_chunker(max_characters=0)
-    await NoopVectorIndexer().delete("a")
-    await NoopGraphIndexer().index(attachment, values)
+        fixed_size_chunker(max_characters=0)
+    await DisabledVectorIndexer().delete_attachment("a")
+    await DisabledGraphIndexer().index_attachment(attachment, values)
     await storage.cleanup_unreferenced({blob.storage_key})
     orphan = root / "orphan"
     orphan.write_bytes(b"x")
@@ -208,7 +204,7 @@ async def test_target_file_parser_and_document_job_queue():
     async def too_large():
         yield b"0123456789"
     with pytest.raises(ValueError):
-        await LocalFileStorageAdapter(root, 2).save_stream(too_large())
+        await LocalFileStorage(root, 2).save_stream(too_large())
 
     async def save_body(body):
         async def one():
@@ -217,9 +213,9 @@ async def test_target_file_parser_and_document_job_queue():
     for filename, body in [("data.pdf", b"not-pdf"), ("data.docx", b"not-docx"), ("data.xlsx", b"not-xlsx")]:
         invalid = await save_body(body)
         with pytest.raises(Exception):
-            await NativeTextParser(storage).parse(SimpleNamespace(filename=filename, storage_key=invalid.storage_key, adapter_name="x", adapter_version="1", capabilities=()))
+            await NativeFileParser(storage).parse(SimpleNamespace(filename=filename, storage_key=invalid.storage_key, adapter_name="x", adapter_version="1", capabilities=()))
     image = await save_body(b"image")
-    assert (await NativeTextParser(storage).parse(SimpleNamespace(filename="data.png", storage_key=image.storage_key, adapter_name="x", adapter_version="1", capabilities=()))).metadata.values["format"] == "png"
+    assert (await NativeFileParser(storage).parse(SimpleNamespace(filename="data.png", storage_key=image.storage_key, adapter_name="x", adapter_version="1", capabilities=()))).metadata.values["format"] == "png"
     await storage.discard(blob.storage_key)
     with pytest.raises(FileNotFoundError):
         await storage.read(blob.storage_key)
@@ -239,7 +235,7 @@ async def test_target_file_parser_and_document_job_queue():
     monkeypatch.setitem(sys.modules, "openpyxl", SimpleNamespace(load_workbook=lambda *args, **kwargs: SimpleNamespace(worksheets=[Sheet()])))
     for filename, expected in [("a.pdf", "pdf"), ("a.docx", "docx"), ("a.xlsx", "xlsx"), ("a.csv", "csv"), ("a.json", "json")]:
         value = await save_body(b'{"x": 1}' if expected in {"csv", "json"} else b"data")
-        parsed = await NativeTextParser(storage).parse(SimpleNamespace(filename=filename, storage_key=value.storage_key, adapter_name="x", adapter_version="1", capabilities=()))
+        parsed = await NativeFileParser(storage).parse(SimpleNamespace(filename=filename, storage_key=value.storage_key, adapter_name="x", adapter_version="1", capabilities=()))
         assert parsed.text
     monkeypatch.undo()
 
@@ -347,7 +343,7 @@ async def test_postgres_resource_lifecycle_without_connecting_to_database(monkey
         "infrastructure.persistence.postgres.engine.create_async_engine",
         lambda *args, **kwargs: engine,
     )
-    resource = PostgresResource(Settings(), create_schema=False)
+    resource = PostgresEngine(PostgresOptions(Settings().postgres_url, create_schema=False))
     with pytest.raises(RuntimeError):
         async with resource.session():
             pass
@@ -396,7 +392,7 @@ async def test_postgres_resource_schema_and_session_context(monkeypatch):
         lambda *args, **kwargs: lambda: Session(),
     )
     monkeypatch.setattr("infrastructure.persistence.postgres.engine.Base.metadata.create_all", lambda _connection: None)
-    resource = PostgresResource(Settings(), create_schema=True)
+    resource = PostgresEngine(PostgresOptions(Settings().postgres_url, create_schema=True))
     await resource.start()
     async with resource.session() as value:
         assert isinstance(value, Session)

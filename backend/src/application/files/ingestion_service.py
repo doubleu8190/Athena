@@ -54,11 +54,9 @@ class IngestionService:
                 for value in values
             ]
             await self._chunks.replace_for_attachment(attachment_id, values)
-            index_attachment = getattr(self._vector_indexer, "index_attachment", None) or self._vector_indexer.index
-            await index_attachment(processing, values)
+            await self._vector_indexer.index_attachment(processing, values)
             if self._graph_indexer is not None:
-                graph_index = getattr(self._graph_indexer, "index_attachment", None) or self._graph_indexer.index
-                await graph_index(processing, values)
+                await self._graph_indexer.index_attachment(processing, values)
             ready = self._with_status(
                 processing,
                 AttachmentStatus.READY,
@@ -75,17 +73,11 @@ class IngestionService:
             raise
 
     async def delete_indexes(self, attachment_id: str) -> None:
-        delete_attachment = getattr(self._vector_indexer, "delete_attachment", None) or self._vector_indexer.delete
-        await delete_attachment(attachment_id)
+        await self._vector_indexer.delete_attachment(attachment_id)
         if self._graph_indexer is not None:
-            delete_graph = getattr(self._graph_indexer, "delete_attachment", None) or self._graph_indexer.delete
-            await delete_graph(attachment_id)
+            await self._graph_indexer.delete_attachment(attachment_id)
 
     def _with_status(self, value: Attachment, status: AttachmentStatus, **changes) -> Attachment:
         from dataclasses import replace
 
         return replace(value, status=status, updated_at=self._clock(), **changes)
-
-    async def process(self, attachment_id: str) -> dict[str, int | str]:
-        """Compatibility alias for the old worker entry point."""
-        return await self.process_attachment(attachment_id)

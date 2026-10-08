@@ -93,11 +93,6 @@ class RunCommandService:
                 raise CommandRejectedError(code) from exc
             raise
 
-        if isinstance(result, bool):
-            # Allows a narrow migration adapter to expose the old bool return
-            # while the target port is being introduced.
-            current = await self._commands.get_command(command_id)
-            return self._result_from_command(command, current, deduplicated=not result)
         return result
 
     async def cancel_run(self, run_id: str) -> CommandEnqueueResult:
@@ -114,15 +109,6 @@ class RunCommandService:
             issued_at=self._clock(),
         )
         result = await self._commands.enqueue_command(command)
-        if isinstance(result, bool):
-            return CommandEnqueueResult(
-                command_id=command.command_id,
-                run_id=run_id,
-                message_id=None,
-                attachment_ids=(),
-                status=CommandStatus.QUEUED,
-                deduplicated=not result,
-            )
         return result
 
     async def cancel_session(
@@ -144,15 +130,6 @@ class RunCommandService:
             issued_at=self._clock(),
         )
         result = await self._commands.enqueue_command(command)
-        if isinstance(result, bool):
-            return CommandEnqueueResult(
-                command_id=command.command_id,
-                run_id=target_run_id,
-                message_id=None,
-                attachment_ids=(),
-                status=CommandStatus.QUEUED,
-                deduplicated=not result,
-            )
         return result
 
     async def get_command(self, command_id: str) -> CommandStatusRecord:
@@ -160,31 +137,6 @@ class RunCommandService:
         if value is None:
             raise CommandNotFoundError(command_id)
         return value
-
-    @staticmethod
-    def _result_from_command(
-        command: RunCommand,
-        current: CommandStatusRecord | None,
-        *,
-        deduplicated: bool,
-    ) -> CommandEnqueueResult:
-        payload = current or CommandStatusRecord(
-            command_id=command.command_id,
-            session_id=command.session_id,
-            run_id=command.run_id,
-            command_type=command.command_type,
-            status=CommandStatus.QUEUED,
-        )
-        values = command.payload
-        return CommandEnqueueResult(
-            command_id=payload.command_id,
-            run_id=payload.run_id,
-            message_id=values.get("message_id"),
-            attachment_ids=tuple(values.get("attachment_ids", ())),
-            status=payload.status,
-            deduplicated=deduplicated,
-        )
-
 
 __all__ = [
     "CommandNotFoundError",

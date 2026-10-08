@@ -47,11 +47,11 @@ def test_file_and_knowledge_controller_error_mappings() -> None:
         async def upload(self, *args, **kwargs): raise ValueError("unsupported")
         async def delete(self, *args): return None
     class Knowledge:
-        async def list(self): return []
+        async def list_knowledge_bases(self): return []
         async def supported_extensions(self): return [".txt"]
-        async def create(self, *args): raise ValueError("bad")
-        async def update(self, *args): return SimpleNamespace(id="k", name="k", description="", document_count=0, ready_document_count=0, total_size_bytes=0, created_at=NOW, updated_at=NOW)
-        async def delete(self, *args): return None
+        async def create_knowledge_base(self, *args): raise ValueError("bad")
+        async def update_knowledge_base(self, *args): return SimpleNamespace(id="k", name="k", description="", document_count=0, ready_document_count=0, total_size_bytes=0, created_at=NOW, updated_at=NOW)
+        async def delete_knowledge_base(self, *args): return None
         async def list_documents(self, *args): return []
         async def upload_document(self, *args, **kwargs): raise ValueError("unsupported")
         async def list_versions(self, *args): return []
@@ -79,13 +79,13 @@ async def test_document_worker_and_memory_worker_success_failure_paths() -> None
         async def mark_succeeded(self, *args): self.calls.append(("ok", args))
         async def mark_failed(self, *args, **kwargs): self.calls.append(("fail", args, kwargs))
     class Ingest:
-        async def process(self, key): return {"attachment_id": key}
+        async def process_attachment(self, key): return {"attachment_id": key}
     queue = Queue({"job_id": "j", "attachment_id": "a", "attempt": 1})
     worker = KnowledgeDocumentWorker(queue, Ingest(), max_attempts=2)
     assert await worker.process_one() is True and queue.calls[0][0] == "ok"
     assert await worker.process_one() is False
     class Bad:
-        async def process(self, key): raise RuntimeError("bad")
+        async def process_attachment(self, key): raise RuntimeError("bad")
     queue = Queue({"job_id": "j", "attachment_id": "a", "attempt": 2})
     assert await KnowledgeDocumentWorker(queue, Bad(), max_attempts=2).process_one()
     assert queue.calls[0][0] == "fail" and queue.calls[0][2]["retry"] is False
@@ -93,13 +93,13 @@ async def test_document_worker_and_memory_worker_success_failure_paths() -> None
     class Jobs:
         def __init__(self): self.items = [{"turn_id": "t", "session_id": "s"}]; self.calls=[]
         async def recover(self): self.calls.append("recover")
-        async def claim(self):
+        async def claim_next_job(self):
             if self.items: return self.items.pop(0)
             return None
-        async def succeed(self, key): self.calls.append(("ok", key))
-        async def fail(self, *args, **kwargs): self.calls.append(("fail", args))
+        async def mark_succeeded(self, key): self.calls.append(("ok", key))
+        async def mark_failed(self, *args, **kwargs): self.calls.append(("fail", args))
     class Workflow:
-        async def process(self, turn): return 1
+        async def process_completed_turn(self, turn): return 1
     jobs = Jobs(); memory_worker = MemoryWorker(jobs, Workflow(), poll_interval=0.001)
     task = asyncio.create_task(memory_worker.run()); await asyncio.sleep(0.01); memory_worker.stop(); await task
     assert jobs.calls[0] == "recover" and ("ok", "t") in jobs.calls
@@ -118,14 +118,14 @@ async def test_memory_workflow_create_update_and_skip_paths() -> None:
         async def resolve(self, values): return [MemoryResolution(self.action, candidate, "m-1", "updated")]
     class Memory:
         def __init__(self): self.calls=[]
-        async def add(self, command): self.calls.append(("add", command)); return "m"
+        async def create_memory(self, command): self.calls.append(("add", command)); return "m"
         async def revise(self, *args, **kwargs): self.calls.append(("revise", args)); return "m2"
     turn = CompletedTurn("t", "s", "u", "a")
     memory = Memory()
-    assert await MemoryWriteWorkflow(memory, Trigger(False), Extractor(), Resolver(ResolutionAction.CREATE)).process(turn) == 0
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.CREATE)).process(turn) == 1
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.UPDATE)).process(turn) == 1
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.IGNORE)).process(turn) == 0
+    assert await MemoryWriteWorkflow(memory, Trigger(False), Extractor(), Resolver(ResolutionAction.CREATE)).process_completed_turn(turn) == 0
+    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.CREATE)).process_completed_turn(turn) == 1
+    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.UPDATE)).process_completed_turn(turn) == 1
+    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.IGNORE)).process_completed_turn(turn) == 0
     assert [item[0] for item in memory.calls] == ["add", "revise"]
 
 
@@ -185,10 +185,10 @@ async def test_sse_heartbeat_and_untagged_event_paths() -> None:
     class Sessions:
         async def get(self, key): return Session.create(session_id=key, title="s", now=NOW)
     class Events:
-        async def open_subscription(self, key, after): return asyncio.Queue(), after
+        async def open_subscription(self, key): return asyncio.Queue(), 0
         async def replay(self, *args): return []
         async def close(self, *args): self.closed = True
-    events = Events(); service = SimpleNamespace(open=events.open_subscription, replay=events.replay, close=events.close)
+    events = Events(); service = SimpleNamespace(open_subscription=events.open_subscription, replay=events.replay, close=events.close)
     app = FastAPI(); app.include_router(build_events_router(lambda: service))
     disconnected = iter([False, True])
     request = Request({"type": "http", "method": "GET", "path": "/sessions/s/events", "headers": [], "app": app})

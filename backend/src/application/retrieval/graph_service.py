@@ -27,7 +27,7 @@ class GraphContextProvider:
         self._limit = limit
         self._timeout_seconds = timeout_seconds
 
-    async def acquire(
+    async def retrieve_context(
         self,
         *,
         session_id: str,
@@ -41,8 +41,9 @@ class GraphContextProvider:
         started = time.perf_counter()
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                search = getattr(self._query_port, "search_nodes", None) or self._query_port.query_context
-                rows = await search(query, limit=min(self._limit, plan.max_items))
+                rows = await self._query_port.search_nodes(
+                    query, limit=min(self._limit, plan.max_items)
+                )
             items = tuple(
                 ContextItem(
                     self.name,

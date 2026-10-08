@@ -165,6 +165,16 @@ export interface Session {
   message_count?: number
 }
 
+export interface SessionRunSummary {
+  run_id: string
+  session_id: string
+  status: string
+  root_thread_id: string
+  error?: unknown
+  created_at?: string | null
+  updated_at?: string | null
+}
+
 // ─── 工具调用相关 ────────────────────────────────────────────────
 
 export type ToolCallStatus = "pending" | "running" | "paused" | "success" | "failed" | "denied" | "timeout"

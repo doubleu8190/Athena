@@ -8,11 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from infrastructure.integrations.llm.provider import (
-    RetryPolicy,
-    TargetEmbeddingProvider,
-    TargetLLMProvider,
-)
+from infrastructure.integrations.llm.embedding_provider import EmbeddingProvider
+from infrastructure.integrations.llm.llm_provider import RetryPolicy, RetryingLLMProvider
 from infrastructure.integrations.neo4j.adapter import Neo4jGraphAdapter
 from infrastructure.integrations.sandbox.subprocess_runner import SubprocessSandbox
 
@@ -26,17 +23,17 @@ async def test_target_llm_retries_and_counts_tokens():
             if self.calls == 1: raise RuntimeError("temporary")
             return {"messages": messages}
     model = Model()
-    provider = TargetLLMProvider(model, policy=RetryPolicy(attempts=2, timeout_seconds=1))
+    provider = RetryingLLMProvider(model, policy=RetryPolicy(attempts=2, timeout_seconds=1))
     assert (await provider.invoke(["hello"]))["messages"] == ["hello"]
     assert model.calls == 2
     assert provider.count_text_tokens("one two") == 2
 
     async def embed(texts): return [[float(len(texts[0]))]]
-    embeddings = TargetEmbeddingProvider(embed, dimension=1)
+    embeddings = EmbeddingProvider(embed, dimension=1)
     assert await embeddings.embed_query("abcd") == [4.0]
     assert await embeddings.embed_documents([]) == []
     with pytest.raises(ValueError):
-        await TargetEmbeddingProvider(lambda values: [], dimension=1).embed_query("x")
+        await EmbeddingProvider(lambda values: [], dimension=1).embed_query("x")
 
 
 @pytest.mark.asyncio
@@ -45,7 +42,7 @@ async def test_target_llm_timeout_and_failure_are_bounded():
         async def invoke(self, *_args, **_kwargs):
             await asyncio.sleep(0.02)
     with pytest.raises(RuntimeError):
-        await TargetLLMProvider(Model(), policy=RetryPolicy(attempts=1, timeout_seconds=0.001)).invoke([])
+        await RetryingLLMProvider(Model(), policy=RetryPolicy(attempts=1, timeout_seconds=0.001)).invoke([])
 
 
 @pytest.mark.asyncio

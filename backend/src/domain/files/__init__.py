@@ -10,24 +10,11 @@ from .entities import (
     FileLocator,
     FileMetadata,
 )
-from .ports import (
-    AdapterRegistryRepository,
-    AttachmentRepository,
-    FileArtifactRepository,
-    FileChunkRepository,
-    FileVectorSearchPort,
-    DocumentParserPort,
-    ParsedDocument,
-    VectorIndexerPort,
-    GraphIndexerPort,
-    DocumentJobPort,
-    FileAdapterRegistryPort,
-    FileStoragePort,
-    StoredBlob,
-)
-
-# 迁移期兼容导出。知识库业务代码应从 ``domain.knowledge`` 导入。
-from domain.knowledge import KnowledgeBase, KnowledgeBaseRepository, KnowledgeDocumentRepository
+from .artifact_ports import AdapterRegistryRepository, FileArtifactRepository
+from .indexing_ports import FileVectorSearchPort, GraphIndexerPort, VectorIndexerPort
+from .processing_ports import DocumentJobPort, DocumentParserPort, FileAdapterRegistryPort, ParsedDocument
+from .repository_ports import AttachmentRepository, FileChunkRepository
+from .storage_ports import FileStoragePort, StoredBlob
 
 __all__ = [
     "Attachment",
@@ -46,9 +33,6 @@ __all__ = [
     "FileStoragePort",
     "FileLocator",
     "FileMetadata",
-    "KnowledgeBase",
-    "KnowledgeBaseRepository",
-    "KnowledgeDocumentRepository",
     "DocumentParserPort",
     "ParsedDocument",
     "VectorIndexerPort",

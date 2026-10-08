@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from application.retrieval import HybridRetrievalService
+from application.retrieval import RetrievalFusionService
 from application.runs.context import ContextAcquisitionService, ContextItem, ContextPlan, ProviderResult
 from application.runs.task_understanding import TaskUnderstandingService
 from domain.retrieval import RetrievalCandidate
@@ -16,22 +16,23 @@ from infrastructure.integrations.file_parsers.native import NativeFileAdapterReg
 from infrastructure.integrations.sandbox.docker_runner import DockerSandbox
 from infrastructure.tools.native import NativeToolExecution
 from domain.tools import ToolExecutionRequest
-from bootstrap.config import Settings, LLMProviderConfig
-from infrastructure.integrations.llm.provider import ConfiguredEmbeddingProvider, ConfiguredLLMProvider
+from configuration.settings import Settings, LLMProviderConfig
+from infrastructure.integrations.llm.embedding_provider import ConfiguredEmbeddingProvider
+from infrastructure.integrations.llm.llm_provider import ConfiguredLLMProvider
 from infrastructure.integrations.neo4j.resource import Neo4jResource
 from infrastructure.observability import trace_run
 from shared import dumps, loads, new_id, now_utc
 from workers import MemoryWorker as DurableMemoryWorker
-from infrastructure.integrations.pgvector import PostgresFileVectorIndexer, PostgresMemoryVectorIndexer
+from infrastructure.integrations.pgvector import PostgresFileVectorIndex, PostgresMemoryVectorIndex
 
 
 @pytest.mark.asyncio
 async def test_target_context_and_task_understanding_are_bounded():
     async def provider(**_kwargs):
         return ProviderResult("memory", "succeeded", (ContextItem("memory", "one two", "m1"), ContextItem("memory", "three", "m2")))
-    result = await ContextAcquisitionService({"memory": provider}).acquire(session_id="s", task=object(), plan=ContextPlan(("memory",), max_items=1, max_tokens=2))
+    result = await ContextAcquisitionService({"memory": provider}).retrieve_context(session_id="s", task=object(), plan=ContextPlan(("memory",), max_items=1, max_tokens=2))
     assert len(result.items) == 1 and result.truncated
-    understood = await TaskUnderstandingService().understand(session_id="s", user_message="查找这个", attachment_refs=[{"id": "a"}])
+    understood = await TaskUnderstandingService().understand(user_message="查找这个", attachment_refs=[{"id": "a"}])
     assert understood.source == "fast_path" and understood.task.attachment_ids == ("a",)
 
 
@@ -49,7 +50,7 @@ def test_target_retrieval_evaluation_and_entrypoint(monkeypatch):
         @staticmethod
         def run(*args, **kwargs): observed.update(args=args, kwargs=kwargs)
     monkeypatch.setitem(sys.modules, "uvicorn", Uvicorn)
-    import  bootstrap.config as target_config
+    import configuration.settings as target_config
     monkeypatch.setattr(target_config, "get_settings", lambda: SimpleNamespace(host="127.0.0.1", port=8123))
     entrypoint.run()
     assert observed["args"] == (entrypoint.app,)
@@ -57,8 +58,8 @@ def test_target_retrieval_evaluation_and_entrypoint(monkeypatch):
 
 
 def test_target_retrieval_fuses_rankings_and_registry_supports_formats():
-    service = HybridRetrievalService()
-    values = service.fuse([RetrievalCandidate("a", "a")], [RetrievalCandidate("b", "b"), RetrievalCandidate("a", "a")], limit=2)
+    service = RetrievalFusionService()
+    values = service.fuse_ranked_candidates([RetrievalCandidate("a", "a")], [RetrievalCandidate("b", "b"), RetrievalCandidate("a", "a")], limit=2)
     assert [item.source_id for item in values] == ["a", "b"]
     registry = NativeFileAdapterRegistry()
     assert {registry.select("x.pdf", "application/pdf").name, registry.select("x.docx", "").name} == {"pdf", "word"}
@@ -152,11 +153,11 @@ async def test_configured_llm_retries_after_lazy_model_failure():
 
 @pytest.mark.asyncio
 async def test_context_unknown_and_task_understanding_fallback_paths():
-    result = await ContextAcquisitionService({}).acquire(session_id="s", task=object(), plan=ContextPlan(("missing",), max_items=2, max_tokens=2))
+    result = await ContextAcquisitionService({}).retrieve_context(session_id="s", task=object(), plan=ContextPlan(("missing",), max_items=2, max_tokens=2))
     assert result.providers_failed == () and result.provider_results[0].status == "skipped"
     class BadLLM:
-        async def generate(self, *_args, **_kwargs): raise RuntimeError("bad")
-    understood = await TaskUnderstandingService(BadLLM()).understand(session_id="s", user_message="hello")
+        async def invoke(self, *_args, **_kwargs): raise RuntimeError("bad")
+    understood = await TaskUnderstandingService(BadLLM()).understand(user_message="hello")
     assert understood.source == "fallback"
 
 
@@ -179,11 +180,11 @@ async def test_durable_memory_worker_success_and_failure():
     class Jobs:
         def __init__(self): self.values = [{"turn_id": "t"}]; self.calls=[]
         async def recover(self): self.calls.append("recover")
-        async def claim(self): return self.values.pop(0) if self.values else None
-        async def succeed(self, key): self.calls.append(("ok", key))
-        async def fail(self, *args, **kwargs): self.calls.append(("fail", args))
+        async def claim_next_job(self): return self.values.pop(0) if self.values else None
+        async def mark_succeeded(self, key): self.calls.append(("ok", key))
+        async def mark_failed(self, *args, **kwargs): self.calls.append(("fail", args))
     class Workflow:
-        async def process(self, value): return None
+        async def process_completed_turn(self, value): return None
     jobs = Jobs(); worker = DurableMemoryWorker(jobs, Workflow(), poll_interval=0.001)
     task = asyncio.create_task(worker.run()); await asyncio.sleep(0.005); worker.stop(); await task
     assert "recover" in jobs.calls and ("ok", "t") in jobs.calls
@@ -241,10 +242,10 @@ async def test_target_pgvector_indexers_cover_index_delete_query():
     class Embed:
         async def embed_documents(self, values): return [[1.0, 2.0] for _ in values]
         async def embed_query(self, value): return [1.0, 2.0]
-    file_index = PostgresFileVectorIndexer(factory, Embed())
+    file_index = PostgresFileVectorIndex(factory, Embed())
     chunk = SimpleNamespace(id="c", content="text")
-    await file_index.index(SimpleNamespace(id="a"), [chunk]); await file_index.delete("a")
+    await file_index.index_attachment(SimpleNamespace(id="a"), [chunk]); await file_index.delete_attachment("a")
     assert (await file_index.query("q"))[0]["chunk_id"] == "c"
-    memory_index = PostgresMemoryVectorIndexer(factory, Embed())
+    memory_index = PostgresMemoryVectorIndex(factory, Embed())
     await memory_index.index("m", "memory")
     assert (await memory_index.query("q"))[0]["memory_id"] == "c"

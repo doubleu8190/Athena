@@ -59,10 +59,6 @@ class PostgresToolConfigRepository:
             rows = result.scalars().all()
         return [tool_model_to_domain(row) for row in rows]
 
-    async def list_all(self) -> list[ToolConfig]:
-        """兼容旧调用方；新代码使用 ``list_tools``。"""
-        return await self.list_tools()
-
     async def update(self, config: ToolConfig) -> ToolConfig:
         """更新工具治理配置并返回最新领域实体。"""
         return await self.upsert(config)

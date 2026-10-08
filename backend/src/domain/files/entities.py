@@ -78,10 +78,6 @@ class Attachment:
             status=self.status,
         )
 
-    def to_reference(self) -> AttachmentRef:
-        """兼容旧调用方；新代码使用 ``to_attachment_reference``。"""
-        return self.to_attachment_reference()
-
 
 @dataclass(frozen=True, slots=True)
 class FileChunk:

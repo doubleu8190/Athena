@@ -60,10 +60,6 @@ class PostgresAttachmentRepository:
         """列出所有未删除附件，供跨知识库召回使用。"""
         return await self._list(AttachmentModel.id.is_not(None))
 
-    async def list_all(self) -> list[Attachment]:
-        """兼容旧调用方；新代码使用 ``list_all_attachments``。"""
-        return await self.list_all_attachments()
-
     async def list_by_knowledge_base(self, knowledge_base_id: str) -> list[Attachment]:
         """列出知识库文档。"""
         return await self._list(AttachmentModel.knowledge_base_id == knowledge_base_id)
@@ -141,7 +137,7 @@ class PostgresFileChunkRepository:
     async def replace_for_attachment(
         self, attachment_id: str, chunks: list[FileChunk]
     ) -> None:
-        """软删除旧分块并写入当前分块集合。"""
+        """软删除现有分块并写入当前分块集合。"""
         deleted_at = datetime.now(timezone.utc).isoformat()
         async with self._session_factory() as db:
             async with db.begin():

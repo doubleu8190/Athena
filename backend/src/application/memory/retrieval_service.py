@@ -38,7 +38,7 @@ class MemoryContextProvider:
         self._limit = limit
         self._timeout_seconds = timeout_seconds
 
-    async def acquire(
+    async def retrieve_context(
         self,
         *,
         session_id: str,

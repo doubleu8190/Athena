@@ -29,7 +29,7 @@ class ToolRepo:
     def __init__(self):
         now = datetime.now(timezone.utc)
         self.value = ToolConfig("search", ToolExecutionMode.NATIVE, None, None, "Search", JsonSchema(), RiskLevel.LOW, False, True, now, now)
-    async def list_all(self): return [self.value]
+    async def list_tools(self): return [self.value]
     async def get(self, name): return self.value if name == "search" else None
     async def upsert(self, value): self.value = value; return value
     async def update(self, value): self.value = value; return value

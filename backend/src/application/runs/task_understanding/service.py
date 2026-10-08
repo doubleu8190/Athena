@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from .contracts import QueryHints, UserTaskSpec
+from .specs import QueryHints, UserTaskSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +26,6 @@ class TaskUnderstandingService:
     async def understand(
         self,
         *,
-        session_id: str,
         user_message: str,
         history: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
@@ -77,19 +76,15 @@ class TaskUnderstandingService:
             "attachments": attachments,
             "knowledge_bases": knowledge_bases,
         }
-        if hasattr(self._structured_llm, "generate"):
-            return await self._structured_llm.generate(text, **context)
-        if hasattr(self._structured_llm, "invoke"):
-            value = await self._structured_llm.invoke(
-                [{"role": "user", "content": text}], **context
-            )
-            if isinstance(value, dict) and isinstance(value.get("content"), str):
-                try:
-                    return json.loads(value["content"])
-                except json.JSONDecodeError:
-                    return value
-            return value
-        raise TypeError("structured_llm must provide generate or invoke")
+        value = await self._structured_llm.invoke(
+            [{"role": "user", "content": text}], **context
+        )
+        if isinstance(value, dict) and isinstance(value.get("content"), str):
+            try:
+                return json.loads(value["content"])
+            except json.JSONDecodeError:
+                return value
+        return value
 
     def _normalize(
         self, value: Any, *, text: str, attachment_ids: tuple[str, ...]

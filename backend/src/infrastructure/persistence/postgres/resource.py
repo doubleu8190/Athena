@@ -1,5 +1,5 @@
 """PostgreSQL engine lifecycle resource."""
 
-from .engine import PostgresEngine, PostgresResource
+from .engine import PostgresEngine
 
-__all__ = ["PostgresEngine", "PostgresResource"]
+__all__ = ["PostgresEngine"]

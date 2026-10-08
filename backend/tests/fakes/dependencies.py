@@ -6,12 +6,9 @@ from typing import Any
 from uuid import uuid4
 
 from application.approval import ApprovalService
-from application.common.query_services import (
-    MemoryQueryService,
-    ProviderQueryService,
-    RetrievalQueryService,
-    SettingsQueryService,
-)
+from application.configuration import ProviderQueryService, SettingsQueryService
+from application.memory.query_service import MemoryQueryService
+from application.retrieval import RetrievalQueryService
 from application.events import EventStreamService
 from application.files import AttachmentService
 from application.knowledge import KnowledgeBaseQueryService, KnowledgeBaseService
@@ -20,7 +17,7 @@ from application.runs import RunCommandService, RunQueryService
 from application.sessions import SessionMessageQueryService, SessionService
 from application.tools import MCPService, ToolQueryService, ToolService
 from bootstrap import ApplicationDependencies, build_dependencies
-from bootstrap.config import get_settings
+from configuration import get_settings
 
 from .in_memory import (
     InMemoryApprovalEvents,
@@ -98,8 +95,8 @@ def build_test_dependencies() -> ApplicationDependencies:
         async def get(self, key, *, knowledge_base_id):
             return await documents.get(key, knowledge_base_id=knowledge_base_id)
 
-        async def list(self, key):
-            return await documents.list(key)
+        async def list_documents(self, key):
+            return await documents.list_documents(key)
 
         async def list_versions(self, key, *, knowledge_base_id):
             return await documents.list_versions(key, knowledge_base_id=knowledge_base_id)

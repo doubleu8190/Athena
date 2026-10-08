@@ -33,7 +33,7 @@ class MemoryPort:
     def __init__(self):
         self.writes = []
 
-    async def add(self, command):
+    async def create_memory(self, command):
         self.writes.append(command)
         return "m-1"
 
@@ -60,7 +60,7 @@ class Resolver:
 async def test_memory_workflow_writes_resolved_candidates() -> None:
     memory = MemoryPort()
     workflow = MemoryWriteWorkflow(memory, Trigger(), Extractor(), Resolver())
-    written = await workflow.process(CompletedTurn("t-1", "s-1", "remember python"))
+    written = await workflow.process_completed_turn(CompletedTurn("t-1", "s-1", "remember python"))
     assert written == 1
     assert memory.writes[0].metadata["source_turn_id"] == "t-1"
 
@@ -73,13 +73,13 @@ class Jobs:
     async def recover(self):
         return None
 
-    async def claim(self):
+    async def claim_next_job(self):
         return self.values.pop(0) if self.values else None
 
-    async def succeed(self, turn_id):
+    async def mark_succeeded(self, turn_id):
         self.done.append(turn_id)
 
-    async def fail(self, *args, **kwargs):
+    async def mark_failed(self, *args, **kwargs):
         raise AssertionError("job should succeed")
 
 
@@ -145,7 +145,7 @@ class ToolRepository:
     def __init__(self, config):
         self.config = config
 
-    async def list_all(self): return [self.config]
+    async def list_tools(self): return [self.config]
     async def get(self, name): return self.config if name == self.config.tool_name else None
     async def upsert(self, config): self.config = config; return config
 

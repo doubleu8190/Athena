@@ -93,10 +93,6 @@ class PostgresKnowledgeBaseRepository:
             for row in rows
         ]
 
-    async def list_all(self) -> list[KnowledgeBase]:
-        """兼容旧调用方；新代码使用 ``list_knowledge_bases``。"""
-        return await self.list_knowledge_bases()
-
     async def save(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
         """更新知识库名称和说明。"""
         async with self._session_factory() as db:

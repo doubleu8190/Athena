@@ -52,12 +52,7 @@ class SessionService:
         异常：
             不主动抛出业务异常。
         """
-        method = getattr(self._repository, "list_sessions", None) or self._repository.list_all
-        return await method()
-
-    async def list(self) -> list[Session]:
-        """兼容旧 Controller 调用方。"""
-        return await self.list_sessions()
+        return await self._repository.list_sessions()
 
     async def get(self, session_id: str) -> Session:
         """按 ID 获取会话。

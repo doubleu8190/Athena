@@ -17,7 +17,7 @@ from infrastructure.persistence.postgres.models import (
     MessageModel,
     SessionModel,
 )
-from infrastructure.persistence.postgres.repositories.converters import (
+from infrastructure.persistence.postgres.mappers.converters import (
     message_domain_to_model,
     message_model_to_domain,
     session_domain_to_model,

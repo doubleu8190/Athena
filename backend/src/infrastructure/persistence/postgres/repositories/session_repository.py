@@ -54,10 +54,6 @@ class PostgresSessionRepository:
             rows = result.scalars().all()
         return [session_model_to_domain(row) for row in rows]
 
-    async def list_all(self) -> list[Session]:
-        """兼容旧调用方；新代码使用 ``list_sessions``。"""
-        return await self.list_sessions()
-
     async def save(self, session: Session) -> Session:
         """更新会话业务字段并返回传入领域实体。"""
         async with self._session_factory() as db:

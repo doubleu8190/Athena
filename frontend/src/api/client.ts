@@ -10,6 +10,7 @@ import type {
   ApprovalStats,
   MemoryEntry,
   MemoryListResponse,
+  SessionRunSummary,
   ProviderInfo,
   SettingsView,
   TestProviderResult,
@@ -59,7 +60,14 @@ class ApiClient {
     })
     if (!res.ok) {
       const errorText = await res.text().catch(() => res.statusText)
-      throw new Error(`API ${res.status}: ${errorText}`)
+      let detail = errorText
+      try {
+        const parsed = JSON.parse(errorText) as { detail?: unknown }
+        if (parsed.detail != null) detail = String(parsed.detail)
+      } catch {
+        // Keep the original response body when it is not JSON.
+      }
+      throw new Error(`API ${res.status}: ${detail || res.statusText}`)
     }
     if (res.status === 204) return undefined as T
     return res.json()
@@ -68,8 +76,8 @@ class ApiClient {
   // ─── 健康检查 ─────────────────────────────────────────────────
 
   /** 获取后端健康状态和版本信息。 */
-  async healthCheck(): Promise<{ status: string; version: string }> {
-    return this.request<{ status: string; version: string }>("/api/health")
+  async healthCheck(): Promise<{ status: string; timestamp: string }> {
+    return this.request<{ status: string; timestamp: string }>("/api/health")
   }
 
   // ─── 会话管理 ─────────────────────────────────────────────────
@@ -105,6 +113,10 @@ class ApiClient {
   async getMessages(sessionId: string, limit?: number): Promise<Message[]> {
     const params = limit ? `?limit=${limit}` : ""
     return this.request<Message[]>(`/api/sessions/${sessionId}/messages${params}`)
+  }
+
+  async listSessionRuns(sessionId: string): Promise<SessionRunSummary[]> {
+    return this.request<SessionRunSummary[]>(`/api/sessions/${encodeURIComponent(sessionId)}/runs`)
   }
 
   /** 分页读取召回运行摘要，可按范围、状态、会话或查询文本过滤。 */
@@ -156,16 +168,6 @@ class ApiClient {
     })
   }
 
-  /** 提交暂停会话命令。 */
-  async pauseSession(sessionId: string): Promise<{ command_id: string; status: string }> {
-    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/pause`, { method: "POST" })
-  }
-
-  /** 提交恢复会话命令。 */
-  async resumeSession(sessionId: string): Promise<{ command_id: string; status: string }> {
-    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, { method: "POST" })
-  }
-
   /** 提交取消运行命令。
    * @param runId 可选目标运行 ID；为空时由后端选择当前运行。
    */
@@ -174,9 +176,13 @@ class ApiClient {
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/cancel${suffix}`, { method: "POST" })
   }
 
+  async cancelRun(runId: string): Promise<{ command_id: string; status: string }> {
+    return this.request(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" })
+  }
+
   /** 列出会话附件。 */
   async listAttachments(sessionId: string): Promise<Attachment[]> {
-    return this.request<Attachment[]>(`/api/sessions/${sessionId}/attachments`)
+    return this.request<Attachment[]>(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`)
   }
 
   /** Upload session attachments immediately; processing continues in the background. */
@@ -191,12 +197,12 @@ class ApiClient {
 
   /** 获取当前后端支持的附件类型。 */
   async getSupportedAttachmentTypes(sessionId: string): Promise<SupportedAttachmentTypes> {
-    return this.request<SupportedAttachmentTypes>(`/api/sessions/${sessionId}/attachment-types`)
+    return this.request<SupportedAttachmentTypes>(`/api/sessions/${encodeURIComponent(sessionId)}/attachment-types`)
   }
 
   /** 软删除会话附件。 */
   async deleteAttachment(sessionId: string, fileId: string): Promise<void> {
-    await this.request(`/api/sessions/${sessionId}/attachments/${fileId}`, { method: "DELETE" })
+    await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(fileId)}`, { method: "DELETE" })
   }
 
   // ─── 独立知识库 ───────────────────────────────────────────────
@@ -240,6 +246,10 @@ class ApiClient {
     await this.request(`/api/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(fileId)}`, { method: "DELETE" })
   }
 
+  async getKnowledgeDocumentVersions(knowledgeBaseId: string, attachmentId: string): Promise<Attachment[]> {
+    return this.request<Attachment[]>(`/api/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(attachmentId)}/versions`)
+  }
+
   async getKnowledgeAttachmentTypes(): Promise<SupportedAttachmentTypes> {
     return this.request<SupportedAttachmentTypes>("/api/knowledge-bases/attachment-types")
   }
@@ -248,7 +258,7 @@ class ApiClient {
 
   /** 查询待处理审批，可按会话过滤。 */
   async listPendingApprovals(sessionId?: string): Promise<ApprovalRequest[]> {
-    const params = sessionId ? `?session_id=${sessionId}` : ""
+    const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""
     return this.request<ApprovalRequest[]>(`/api/approvals${params}`)
   }
 
@@ -256,7 +266,7 @@ class ApiClient {
     approvalBatchId: string,
     decisions: Record<string, "approved" | "denied" | "cancelled">,
   ): Promise<{ status: string }> {
-    return this.request<{ status: string }>(`/api/approvals/batches/${approvalBatchId}/respond`, {
+    return this.request<{ status: string }>(`/api/approvals/batches/${encodeURIComponent(approvalBatchId)}/respond`, {
       method: "POST",
       body: JSON.stringify({ decisions }),
     })
@@ -334,7 +344,18 @@ class ApiClient {
 
   /** 按 ID 获取记忆详情。 */
   async getMemory(memoryId: string): Promise<MemoryEntry> {
-    return this.request<MemoryEntry>(`/api/memory/${memoryId}`)
+    return this.request<MemoryEntry>(`/api/memory/${encodeURIComponent(memoryId)}`)
+  }
+
+  async getMemoryRevisions(memoryId: string): Promise<MemoryEntry[]> {
+    return this.request<MemoryEntry[]>(`/api/memory/${encodeURIComponent(memoryId)}/revisions`)
+  }
+
+  async searchMemory(query: string, nResults = 5): Promise<MemoryEntry[]> {
+    return this.request<MemoryEntry[]>("/api/memory/search", {
+      method: "POST",
+      body: JSON.stringify({ query, n_results: nResults }),
+    })
   }
 
   // ─── 审批日志 ─────────────────────────────────────────────────

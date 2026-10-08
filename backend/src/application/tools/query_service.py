@@ -16,8 +16,7 @@ class ToolQueryService:
         self._usage_port = usage_port
 
     async def list_tools(self) -> list[ToolConfig]:
-        method = getattr(self._repository, "list_tools", None) or self._repository.list_all
-        return await method()
+        return await self._repository.list_tools()
 
     async def get_tool(self, name: str) -> ToolConfig | None:
         return await self._repository.get(name)

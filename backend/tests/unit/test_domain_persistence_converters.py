@@ -22,7 +22,7 @@ from domain.tools import (
     ToolConfig,
     ToolExecutionMode,
 )
-from infrastructure.persistence.postgres.repositories.converters import (
+from infrastructure.persistence.postgres.mappers.converters import (
     adapter_domain_to_model,
     adapter_model_to_domain,
     attachment_domain_to_model,

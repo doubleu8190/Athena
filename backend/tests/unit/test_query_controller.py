@@ -6,15 +6,12 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from application.common.query_services import (
-    MemoryQueryService,
-    ProviderQueryService,
-    RetrievalQueryService,
-    SettingsQueryService,
-)
+from application.configuration import ProviderQueryService, SettingsQueryService
+from application.memory.query_service import MemoryQueryService
+from application.retrieval.query_service import RetrievalQueryService
+from application.tools.query_service import ToolQueryService
 from application.knowledge import KnowledgeBaseQueryService
 from application.memory import MemoryService
-from application.tools import ToolQueryService
 from bootstrap import create_app
 from domain.knowledge import KnowledgeBase
 from domain.memory import MemoryPage, MemoryRecord
@@ -27,7 +24,7 @@ from domain.tools import (
 
 
 class ToolRepository:
-    async def list_all(self):
+    async def list_tools(self):
         return [
             ToolConfig(
                 tool_name="search",
@@ -49,7 +46,7 @@ class ToolRepository:
 
 
 class KnowledgeRepository:
-    async def list_all(self):
+    async def list_knowledge_bases(self):
         return [
             KnowledgeBase(
                 id="kb-1",
@@ -81,7 +78,7 @@ class MemoryPort:
     async def search(self, **kwargs):
         return [{"id": "memory-1", "content": "hello"}]
 
-    async def list(self, **kwargs):
+    async def list_memories(self, **kwargs):
         return {"items": [], "total": 0, "expired": 0}
 
     async def get(self, memory_id):
@@ -98,7 +95,7 @@ class TargetMemoryPort:
     async def search(self, request):
         return [MemoryRecord("target-memory", request.query, score=0.9)]
 
-    async def list(self, request):
+    async def list_memories(self, request):
         return MemoryPage((MemoryRecord("target-memory", "hello"),), 1, {"total": 1})
 
     async def get(self, memory_id):
@@ -107,13 +104,13 @@ class TargetMemoryPort:
     async def revisions(self, memory_id):
         return [MemoryRecord(memory_id, "hello")]
 
-    async def add(self, command):
+    async def create_memory(self, command):
         return "target-memory"
 
     async def revise(self, *args, **kwargs):
         return "target-memory-v2"
 
-    async def set_validity(self, *args, **kwargs):
+    async def update_validity(self, *args, **kwargs):
         return True
 
     async def delete(self, memory_id):

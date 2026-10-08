@@ -43,7 +43,7 @@ class FileContextProvider:
         self._limit = limit
         self._timeout_seconds = timeout_seconds
 
-    async def acquire(
+    async def retrieve_context(
         self,
         *,
         session_id: str,
@@ -171,7 +171,7 @@ class KnowledgeContextProvider(FileContextProvider):
         super().__init__(chunks, vector_indexer, **kwargs)
         self._attachments = attachments
 
-    async def acquire(
+    async def retrieve_context(
         self,
         *,
         session_id: str,
@@ -188,17 +188,13 @@ class KnowledgeContextProvider(FileContextProvider):
                 documents.extend(
                     await self._attachments.list_by_knowledge_base(knowledge_id)
                 )
-        elif hasattr(self._attachments, "list_all_attachments"):
-            documents = await self._attachments.list_all_attachments()
-        elif hasattr(self._attachments, "list_all"):
-            documents = await self._attachments.list_all()
         else:
-            return ProviderResult(self.name, "succeeded")
+            documents = await self._attachments.list_all_attachments()
         ready = [item.id for item in documents if item.status == AttachmentStatus.READY]
         knowledge_plan = plan.with_updates(
             file_ids=tuple(ready), file_query=plan.knowledge_query
         )
-        result = await super().acquire(
+        result = await super().retrieve_context(
             session_id=session_id, task=task, plan=knowledge_plan, run_id=run_id
         )
         return ProviderResult(

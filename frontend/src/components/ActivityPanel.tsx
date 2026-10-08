@@ -9,7 +9,7 @@ interface ActivityPanelProps {
   onClose: () => void
 }
 
-/** Activity 面板只做请求索引，执行细节由聊天区的 EXECUTION PROGRESS 展示。 */
+/** 请求面板只做请求索引，执行细节由聊天区的执行进度展示。 */
 export function ActivityPanel({ messages, agentStatus = "idle", onClose }: ActivityPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const groups = useMemo(() => buildActivityGroups(messages, [], []), [messages])
@@ -25,14 +25,14 @@ export function ActivityPanel({ messages, agentStatus = "idle", onClose }: Activ
     <aside className="fixed inset-y-0 right-0 z-30 flex h-full w-[min(92vw,380px)] shrink-0 flex-col border-l border-athena-border bg-athena-surface shadow-2xl lg:relative lg:z-auto lg:w-[360px] lg:bg-athena-surface/40 lg:shadow-none">
       <div className="flex items-center gap-2 border-b border-athena-border px-4 py-3">
         <MessageSquare className="h-4 w-4 text-athena-accent" />
-        <span className="text-sm font-semibold text-athena-text">Requests</span>
-        <span className="text-xs text-athena-muted">{groups.length} request{groups.length === 1 ? "" : "s"}</span>
+        <span className="text-sm font-semibold text-athena-text">请求记录</span>
+        <span className="text-xs text-athena-muted">{groups.length} 项</span>
         <button
           type="button"
           onClick={onClose}
           className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-md text-athena-muted transition-colors hover:bg-athena-bg hover:text-athena-text"
-          title="Close requests"
-          aria-label="Close requests"
+          title="关闭请求记录"
+          aria-label="关闭请求记录"
         >
           <X className="h-4 w-4" />
         </button>
@@ -40,7 +40,7 @@ export function ActivityPanel({ messages, agentStatus = "idle", onClose }: Activ
 
       <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto p-3">
         {groups.length === 0 ? (
-          <p className="text-xs text-athena-muted">No requests yet.</p>
+          <p className="text-xs text-athena-muted">还没有请求记录</p>
         ) : (
           groups.map((group) => {
             const active = group.key === latestGroupKey && isAgentActive
@@ -62,16 +62,16 @@ function RequestItem({ group, active, paused }: { group: ActivityRequestGroup; a
       <div className="flex items-start gap-2">
         <RequestStatusIcon active={active} paused={paused} failed={failed} completed={completed} />
         <div className="min-w-0 flex-1">
-          <div className="text-xs font-semibold uppercase tracking-wide text-athena-muted">User request</div>
+          <div className="text-xs font-semibold tracking-wide text-athena-muted">用户请求</div>
           <div className="mt-1 break-words text-sm leading-5 text-athena-text">
-            {group.userMessage?.content.trim() || "Background request"}
+            {group.userMessage?.content.trim() || "后台任务"}
           </div>
           <div className="mt-2 flex items-center gap-1 text-[11px] text-athena-muted">
             <Clock className="h-3 w-3" />
             {formatTime(group.startedAt)}
             <span className="px-0.5">·</span>
             <span className={failed ? "text-athena-danger" : active ? "text-athena-accent" : paused ? "text-athena-muted" : "text-athena-success"}>
-              {active ? "Running" : paused ? "Paused" : failed ? "Failed" : completed ? "Completed" : "Waiting"}
+              {active ? "处理中" : paused ? "已暂停" : failed ? "失败" : completed ? "已完成" : "等待处理"}
             </span>
           </div>
         </div>

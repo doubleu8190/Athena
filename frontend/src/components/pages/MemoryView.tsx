@@ -5,9 +5,11 @@ import {
   TrendingUp,
   ChevronLeft,
   ChevronRight,
+  X,
 } from "lucide-react"
 import { apiClient } from "../../api/client"
 import type { MemoryEntry, MemoryListResponse } from "../../types"
+import { useChatStore } from "../../store/chatStore"
 import { formatDateTime, truncate } from "../../utils/format"
 import ViewShell from "./ViewShell"
 import MemoryFilters from "../ctx/MemoryFilters"
@@ -26,6 +28,10 @@ function MemoryView() {
   const [search, setSearch] = useState("")
   const [expiredOnly, setExpiredOnly] = useState(false)
   const [page, setPage] = useState(0)
+  const [sessionId, setSessionId] = useState("")
+  const [selected, setSelected] = useState<MemoryEntry | null>(null)
+  const [revisions, setRevisions] = useState<MemoryEntry[]>([])
+  const sessions = useChatStore((state) => state.sessions)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -34,6 +40,7 @@ function MemoryView() {
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
         expired: expiredOnly,
+        session_id: sessionId || undefined,
       })
       setData(res)
       setError(null)
@@ -42,13 +49,22 @@ function MemoryView() {
     } finally {
       setLoading(false)
     }
-  }, [page, expiredOnly])
+  }, [page, expiredOnly, sessionId])
 
   useEffect(() => {
     reload()
   }, [reload])
 
-  const items = (data?.items ?? []).filter(
+  const [searchedItems, setSearchedItems] = useState<MemoryEntry[] | null>(null)
+  useEffect(() => {
+    if (!search.trim()) { setSearchedItems(null); return }
+    const timer = window.setTimeout(() => {
+      void apiClient.searchMemory(search.trim(), 50).then(setSearchedItems).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    }, 350)
+    return () => window.clearTimeout(timer)
+  }, [search])
+
+  const items = (searchedItems ?? data?.items ?? []).filter(
     (m) => !search || m.content.toLowerCase().includes(search.toLowerCase()),
   )
 
@@ -79,6 +95,15 @@ function MemoryView() {
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1
 
+  const openMemory = async (memory: MemoryEntry) => {
+    try {
+      const [detail, history] = await Promise.all([apiClient.getMemory(memory.id), apiClient.getMemoryRevisions(memory.id)])
+      setSelected(detail)
+      setRevisions(history)
+      setError(null)
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  }
+
   return (
     <ViewShell
       side={
@@ -87,6 +112,9 @@ function MemoryView() {
           onSearchChange={setSearch}
           expiredOnly={expiredOnly}
           onExpiredChange={setExpiredOnly}
+          sessionId={sessionId}
+          sessions={sessions}
+          onSessionChange={(value) => { setSessionId(value); setPage(0) }}
           onRefresh={reload}
         />
       }
@@ -112,7 +140,15 @@ function MemoryView() {
               rowKey={(m) => m.id}
               loading={loading}
               emptyText="暂无记忆"
+              onRowClick={(memory) => void openMemory(memory)}
             />
+
+            {selected ? <section className="card p-5 space-y-4">
+              <div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-semibold">记忆详情</h2><p className="mt-1 text-xs text-athena-muted font-mono break-all">{selected.id}</p></div><button type="button" title="关闭详情" aria-label="关闭详情" onClick={() => setSelected(null)} className="btn-ghost p-1.5"><X className="w-4 h-4" /></button></div>
+              <p className="whitespace-pre-wrap break-words text-sm">{selected.content}</p>
+              <details><summary className="cursor-pointer text-xs text-athena-muted">Metadata</summary><pre className="mt-2 max-h-48 overflow-auto rounded bg-athena-bg p-3 text-xs">{JSON.stringify(selected.metadata, null, 2)}</pre></details>
+              <div><h3 className="mb-2 text-xs font-semibold text-athena-muted">修订历史 · {revisions.length}</h3><div className="space-y-2">{revisions.map((revision, index) => <div key={`${revision.id}-${index}`} className="border-l-2 border-athena-border pl-3"><p className="text-xs text-athena-muted">{formatDateTime(revision.created_at)}</p><p className="mt-1 text-sm break-words">{truncate(revision.content, 240)}</p></div>)}</div></div>
+            </section> : null}
 
             <div className="flex items-center justify-between">
               <span className="text-xs text-athena-muted">

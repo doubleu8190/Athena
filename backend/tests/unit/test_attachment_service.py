@@ -141,5 +141,5 @@ def test_attachment_controller_exposes_upload_list_detail_delete() -> None:
     assert client.get(f"/api/sessions/session-1/attachments/{attachment_id}").status_code == 200
     assert client.get("/api/sessions/session-1/attachment-types").json() == {"extensions": [".txt"]}
     assert client.delete(f"/api/sessions/session-1/attachments/{attachment_id}").json() == {
-        "status": "deleted", "file_id": attachment_id
+        "status": "deleted", "attachment_id": attachment_id
     }

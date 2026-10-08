@@ -63,7 +63,7 @@ class KnowledgeRepository:
     async def get(self, key):
         return self.bases.get(key)
 
-    async def list_all(self):
+    async def list_knowledge_bases(self):
         return list(self.bases.values())
 
     async def save(self, value):
@@ -86,7 +86,7 @@ class Documents:
         value = self.items.get(attachment_id)
         return value if value and value.knowledge_base_id == knowledge_base_id else None
 
-    async def list(self, knowledge_base_id):
+    async def list_documents(self, knowledge_base_id):
         return [v for v in self.items.values() if v.knowledge_base_id == knowledge_base_id and v.deleted_time is None]
 
     async def list_versions(self, attachment_id, *, knowledge_base_id):
@@ -94,7 +94,7 @@ class Documents:
         return [value] if value else []
 
     async def latest_for_filename(self, filename, *, knowledge_base_id):
-        values = [v for v in await self.list(knowledge_base_id) if v.filename == filename]
+        values = [v for v in await self.list_documents(knowledge_base_id) if v.filename == filename]
         return max(values, key=lambda v: v.document_version, default=None)
 
     async def soft_delete(self, attachment_id, *, knowledge_base_id):
@@ -230,12 +230,12 @@ class Indexer:
         self.fail = fail
         self.calls = 0
 
-    async def index(self, attachment, chunks):
+    async def index_attachment(self, attachment, chunks):
         self.calls += 1
         if self.fail:
             raise RuntimeError("index failed")
 
-    async def delete(self, attachment_id):
+    async def delete_attachment(self, attachment_id):
         return None
 
 
@@ -276,7 +276,7 @@ async def test_ingestion_marks_ready_and_worker_retries_failures() -> None:
         chunker=lambda text: [FileChunk("chunk-1", "attachment-1", 0, text, 2, {}, {})],
         clock=lambda: NOW,
     )
-    result = await ingestion.process("attachment-1")
+    result = await ingestion.process_attachment("attachment-1")
     assert result["status"] == "ready"
     assert repository.value.status is AttachmentStatus.READY
 

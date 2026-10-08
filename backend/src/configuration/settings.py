@@ -32,8 +32,7 @@ class LLMRetrySettings(BaseModel):
 class Settings(BaseSettings):
     """Configuration needed by bootstrap and infrastructure adapters.
 
-    The names intentionally remain compatible with the deployed environment;
-    changing them during the package migration would be an unrelated API break.
+    Environment variable names are part of the deployment configuration contract.
     """
 
     model_config = SettingsConfigDict(

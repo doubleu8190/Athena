@@ -63,10 +63,7 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
         return {"status": "resolved", "approval_id": approval_id, "decision": body.decision}
 
     @router.post("/batches/{batch_id}/resolve")
-    @router.post("/batches/{approval_batch_id}/respond")
-    async def resolve_batch(batch_id: str | None = None, approval_batch_id: str | None = None, body: ApprovalBatchRequest = None) -> dict[str, Any]:
-        batch_id = batch_id or approval_batch_id
-        assert body is not None and batch_id is not None
+    async def resolve_batch(batch_id: str, body: ApprovalBatchRequest) -> dict[str, Any]:
         decisions = {key: ApprovalDecision(value) for key, value in body.decisions.items()}
         if not await factory().resolve_batch(batch_id, decisions, run_id=body.run_id):
             raise HTTPException(status_code=409, detail="approval_batch_not_pending")
@@ -76,7 +73,7 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
 
 
 def _response(value: ApprovalRequest) -> dict[str, Any]:
-    """转换审批实体为兼容旧接口的 JSON。"""
+    """将审批实体转换为当前 HTTP 响应。"""
     return {
         "approval_id": value.approval_id,
         "tool_name": value.tool_name,

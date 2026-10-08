@@ -1,4 +1,4 @@
-"""迁移期脚手架的最小启动探针。"""
+"""应用启动探针。"""
 
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ def check_app() -> None:
     app = create_app(dependencies=graph)
     routes = {getattr(route, "path", None) for route in app.routes}
     if "/health" not in routes:
-        raise RuntimeError("migration app health route is not registered")
+        raise RuntimeError("health route is not registered")
     if not graph.factories:
-        raise RuntimeError("migration dependency graph is empty")
+        raise RuntimeError("dependency graph is empty")
 
 
 if __name__ == "__main__":

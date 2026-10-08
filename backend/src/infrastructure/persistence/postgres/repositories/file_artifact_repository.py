@@ -119,7 +119,7 @@ class PostgresAdapterRegistryRepository:
                         )
                     )
 
-    async def list_all(self) -> list[AdapterInfo]:
+    async def list_adapters(self) -> list[AdapterInfo]:
         """读取启用和禁用的适配器注册信息。"""
         async with self._session_factory() as db:
             rows = (

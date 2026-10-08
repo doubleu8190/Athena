@@ -1,3 +1,3 @@
-from .stores import PostgresFileVectorIndexer, PostgresMemoryVectorIndexer
+from .indexers import PostgresFileVectorIndex, PostgresMemoryVectorIndex
 
-__all__ = ["PostgresFileVectorIndexer", "PostgresMemoryVectorIndexer"]
+__all__ = ["PostgresFileVectorIndex", "PostgresMemoryVectorIndex"]

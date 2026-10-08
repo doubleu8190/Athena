@@ -13,6 +13,7 @@ import {
   XCircle,
 } from "lucide-react"
 import type { ExecutionTimelineEntry } from "../types"
+import { localizedStatus } from "../utils/executionCopy"
 
 interface ExecutionTimelineProps {
   entries: ExecutionTimelineEntry[]
@@ -40,7 +41,7 @@ export function ExecutionTimeline({ entries, defaultExpanded = false }: Executio
   }
 
   return (
-    <section className="my-5" aria-label="Execution progress">
+    <section className="my-5" aria-label="执行进度">
       <button
         type="button"
         onClick={() => setIsOpen((value) => !value)}
@@ -49,10 +50,10 @@ export function ExecutionTimeline({ entries, defaultExpanded = false }: Executio
       >
         <span className="phase-label phase-processing">
           {isOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-          EXECUTION PROGRESS
+          执行进度
         </span>
         <span className="text-xs text-athena-muted">
-          {entries.length} event{entries.length === 1 ? "" : "s"}
+          {entries.length} 项进度
         </span>
       </button>
       {isOpen && <div className="processing-group py-2">
@@ -88,9 +89,12 @@ export function ExecutionTimeline({ entries, defaultExpanded = false }: Executio
                     </div>
                   )}
                   {isExpanded && entry.metadata && Object.keys(entry.metadata).length > 0 && (
-                    <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-athena-bg px-3 py-2 text-xs text-athena-muted">
-                      {JSON.stringify(entry.metadata, null, 2)}
-                    </pre>
+                    <details className="mt-2 rounded-md bg-athena-bg px-3 py-2">
+                      <summary className="cursor-pointer text-xs text-athena-muted">查看技术详情</summary>
+                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-xs text-athena-muted">
+                        {JSON.stringify(entry.metadata, null, 2)}
+                      </pre>
+                    </details>
                   )}
                 </div>
               </div>
@@ -115,7 +119,7 @@ function EntryIcon({ entry }: { entry: ExecutionTimelineEntry }) {
 }
 
 function StatusLabel({ status }: { status: ExecutionTimelineEntry["status"] }) {
-  const label = status === "running" ? "Running" : status === "completed" ? "Done" : status === "failed" ? "Failed" : status === "waiting" ? "Waiting" : status === "paused" ? "Paused" : "Info"
+  const label = localizedStatus(status)
   const color = status === "failed" ? "text-athena-danger" : status === "completed" ? "text-athena-success" : status === "running" ? "text-athena-accent" : "text-athena-muted"
   return <span className={`shrink-0 text-xs ${color}`}>{label}</span>
 }

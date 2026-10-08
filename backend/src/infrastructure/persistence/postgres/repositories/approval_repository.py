@@ -1,6 +1,6 @@
 """PostgreSQL approval persistence implementation."""
 
-from .runtime_repositories import PostgresApprovalRepository as _RuntimeApprovalRepository
+from ._runtime import PostgresApprovalRepository as _RuntimeApprovalRepository
 
 
 class PostgresApprovalRepository(_RuntimeApprovalRepository):

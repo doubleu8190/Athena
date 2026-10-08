@@ -36,8 +36,8 @@ def _task_spec(value: Any) -> dict[str, Any]:
 class RootGraphDependencies:
     """Application capabilities used by the Root graph.
 
-    All fields are optional to keep the graph useful with focused test doubles
-    and during staged migration.  A missing capability produces a structured
+    All fields are optional to keep the graph useful with focused test doubles.
+    A missing capability produces a structured
     response rather than putting a service object in checkpoint state.
     """
 
@@ -59,18 +59,6 @@ class RootGraphDependencies:
     persist_plan: Callable[..., Any] | None = None
     validate_plan: Callable[..., Any] | None = None
     event_publisher: Any | None = None
-
-
-def _coerce_dependencies(
-    handle_request: Callable[..., Any] | RootGraphDependencies | None,
-    dependencies: RootGraphDependencies | None,
-) -> tuple[Callable[..., Any] | None, RootGraphDependencies]:
-    """兼容旧式首参调用，同时避免依赖对象被误当作回调。"""
-    if isinstance(handle_request, RootGraphDependencies):
-        if dependencies is not None and dependencies is not handle_request:
-            raise TypeError("provide either handle_request or dependencies, not both")
-        return None, handle_request
-    return handle_request, dependencies or RootGraphDependencies()
 
 
 def _plan_dict(plan: Any, tasks: list[Any] | None = None) -> dict[str, Any]:
@@ -235,31 +223,12 @@ def _route_after_wait(state: RootGraphState) -> str:
 
 
 def build_root_graph(
-    handle_request: Callable[..., Any] | None = None,
-    validate_plan_submission: Callable[..., Any] | None = None,
-    persist_plan: Callable[..., Any] | None = None,
-    load_results: Callable[..., Any] | None = None,
-    finalize_response: Callable[..., Any] | None = None,
-    checkpointer: Any = None,
     *,
     dependencies: RootGraphDependencies | None = None,
+    checkpointer: Any = None,
 ) -> Any:
-    """Build the Root Graph from one dependency graph and optional legacy overrides.
-
-    Production callers should pass ``dependencies=RootGraphDependencies(...)``;
-    the remaining positional parameters are retained only for migration callers.
-    """
-    handle_request, deps = _coerce_dependencies(handle_request, dependencies)
-    if handle_request is not None:
-        deps.request_handler = handle_request
-    if persist_plan is not None:
-        deps.persist_plan = persist_plan
-    if load_results is not None:
-        deps.plan_loader = load_results
-    if finalize_response is not None:
-        deps.finalizer = finalize_response
-    if validate_plan_submission is not None:
-        deps.validate_plan = validate_plan_submission
+    """Build the Root Graph from its application dependency graph."""
+    deps = dependencies or RootGraphDependencies()
 
     async def prepare_request(state: RootGraphState) -> dict[str, Any]:
         request = dict(state.get("request", {}))
@@ -391,13 +360,8 @@ def build_root_graph(
             from application.runs.context import ContextPlan
 
             context_plan = ContextPlan(**raw_plan)
-        acquire = getattr(deps.context, "retrieve_context", None)
-        if acquire is None:
-            acquire = getattr(deps.context, "acquire", None)
-        if acquire is None:
-            raise TypeError("context dependency must provide retrieve_context or acquire")
         value = await call(
-            acquire,
+            deps.context.retrieve_context,
             session_id=request.get("session_id", ""),
             task=state.get("understanding", {}).get("task_spec", {}),
             plan=context_plan,

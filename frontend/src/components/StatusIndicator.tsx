@@ -25,13 +25,13 @@ export default function StatusIndicator() {
   const connectionText = () => {
     switch (connectionStatus) {
       case "connected":
-        return "Connected"
+        return "已连接"
       case "connecting":
-        return "Connecting..."
+        return "正在连接"
       case "error":
-        return "Connection Error"
+        return "连接异常"
       default:
-        return "Disconnected"
+        return "未连接"
     }
   }
 
@@ -41,41 +41,41 @@ export default function StatusIndicator() {
         return (
           <span className="flex items-center gap-1.5 text-sm text-yellow-400">
             <Cpu className="w-4 h-4 animate-pulse" />
-            Thinking
+            正在分析
           </span>
         )
       case "running":
         return (
           <span className="flex items-center gap-1.5 text-sm text-athena-accent">
             <Loader2 className="w-4 h-4 animate-spin" />
-            Running
+            正在执行
           </span>
         )
       case "paused":
         return (
           <span className="flex items-center gap-1.5 text-sm text-athena-muted">
             <Pause className="w-4 h-4" />
-            Paused
+            已暂停
           </span>
         )
       case "waiting_approval":
         return (
           <span className="flex items-center gap-1.5 text-sm text-yellow-400">
             <AlertCircle className="w-4 h-4" />
-            Waiting for Approval
+            等待你确认
           </span>
         )
       case "error":
         return (
           <span className="flex items-center gap-1.5 text-sm text-athena-danger">
             <AlertCircle className="w-4 h-4" />
-            Error
+            执行失败
           </span>
         )
       default:
         return (
           <span className="flex items-center gap-1.5 text-sm text-athena-muted">
-            Idle
+            {agentStatus === "completed" ? "任务已完成" : "空闲"}
           </span>
         )
     }
@@ -90,7 +90,7 @@ export default function StatusIndicator() {
             <span className="text-athena-border">|</span>
             <span className="flex items-center gap-1.5 text-xs text-athena-muted">
               <CheckCircle className="w-3.5 h-3.5 text-athena-success" />
-              <span>{completedCount} completed</span>
+              <span>{completedCount} 个会话已完成</span>
             </span>
           </>
         )}

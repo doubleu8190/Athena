@@ -52,7 +52,7 @@ export function summarizeToolCall(data: ToolDisplayData): ToolSummary {
   if (error) {
     return {
       title: data.name,
-      summary: "Failed",
+      summary: "操作未能完成",
       outputPreview: null,
       parsedOutput,
     }
@@ -61,7 +61,7 @@ export function summarizeToolCall(data: ToolDisplayData): ToolSummary {
   if (data.status === "running" || data.status === "pending") {
     return {
       title: data.name,
-      summary: "Waiting for output",
+      summary: "正在等待结果",
       outputPreview: null,
       parsedOutput,
     }
@@ -70,7 +70,7 @@ export function summarizeToolCall(data: ToolDisplayData): ToolSummary {
   if (data.status === "paused") {
     return {
       title: data.name,
-      summary: "Paused",
+      summary: "已暂停，等待继续",
       outputPreview: null,
       parsedOutput,
     }
@@ -80,8 +80,8 @@ export function summarizeToolCall(data: ToolDisplayData): ToolSummary {
     return {
       title: data.name,
       summary: Object.keys(data.arguments).length
-        ? `${Object.keys(data.arguments).length} argument${Object.keys(data.arguments).length === 1 ? "" : "s"}`
-        : "No output",
+        ? `包含 ${Object.keys(data.arguments).length} 项操作参数`
+        : "没有返回内容",
       outputPreview: null,
       parsedOutput,
     }
@@ -97,7 +97,7 @@ export function summarizeToolCall(data: ToolDisplayData): ToolSummary {
     const preview = parsedOutput.slice(0, 3).map(compactValue).filter(Boolean).join("\n")
     return {
       title: data.name,
-      summary: `${parsedOutput.length} item${parsedOutput.length === 1 ? "" : "s"}`,
+      summary: `返回 ${parsedOutput.length} 项结果`,
       outputPreview: preview ? truncate(preview, 260) : null,
       parsedOutput,
     }
@@ -108,7 +108,7 @@ export function summarizeToolCall(data: ToolDisplayData): ToolSummary {
     const keys = Object.keys(record)
     return {
       title: data.name,
-      summary: keys.length ? `Returned ${keys.slice(0, 4).join(", ")}${keys.length > 4 ? "..." : ""}` : "Returned object",
+      summary: keys.length ? `返回 ${keys.slice(0, 4).join("、")}${keys.length > 4 ? "等字段" : ""}` : "返回结构化结果",
       outputPreview: compactObjectPreview(record),
       parsedOutput,
     }
@@ -117,7 +117,7 @@ export function summarizeToolCall(data: ToolDisplayData): ToolSummary {
   const text = String(parsedOutput)
   return {
     title: data.name,
-    summary: firstMeaningfulLine(text) ?? "Completed",
+    summary: firstMeaningfulLine(text) ?? "操作已完成",
     outputPreview: truncate(text, 360),
     parsedOutput,
   }
@@ -148,7 +148,7 @@ function summarizeFileOutput(value: unknown): Pick<ToolSummary, "summary" | "out
   if (!filename && !mime && size == null && !status) return null
 
   const parts = [
-    filename ?? "File",
+    filename ?? "文件",
     mime,
     size != null ? formatBytes(size) : null,
     status,
@@ -160,7 +160,7 @@ function summarizeFileOutput(value: unknown): Pick<ToolSummary, "summary" | "out
 
   return {
     summary: parts.join(" · "),
-    outputPreview: capabilities ? `Capabilities: ${capabilities}` : null,
+    outputPreview: capabilities ? `支持：${capabilities}` : null,
   }
 }
 
@@ -171,7 +171,7 @@ function summarizeShellOutput(value: unknown): Pick<ToolSummary, "summary" | "ou
   const stderr = stringField(record, "stderr")
   const exitCode = numberField(record, "exit_code") ?? numberField(record, "returncode")
   if (stdout == null && stderr == null && exitCode == null) return null
-  const summary = exitCode == null ? "Command completed" : `Exit code ${exitCode}`
+  const summary = exitCode == null ? "命令已完成" : `退出码 ${exitCode}`
   const preview = firstMeaningfulLine(stdout ?? "") ?? firstMeaningfulLine(stderr ?? "")
   return {
     summary,
@@ -190,7 +190,7 @@ function compactValue(value: unknown): string {
   if (value == null) return String(value)
   if (typeof value === "string") return truncate(value.replace(/\s+/g, " ").trim(), 140)
   if (typeof value === "number" || typeof value === "boolean") return String(value)
-  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? "" : "s"}`
+  if (Array.isArray(value)) return `${value.length} 项结果`
   if (typeof value === "object") return `{${Object.keys(value as Record<string, unknown>).slice(0, 3).join(", ")}}`
   return String(value)
 }

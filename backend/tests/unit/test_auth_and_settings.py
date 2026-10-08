@@ -11,7 +11,7 @@ from starlette.requests import Request
 from fastapi import FastAPI
 
 from bootstrap import create_app
-from bootstrap.config import Settings
+from configuration.settings import Settings
 from interfaces.http.auth.routes import (
     SESSION_COOKIE_NAME,
     build_auth_router,

@@ -79,10 +79,6 @@ class PostgresKnowledgeDocumentRepository:
             )
         return [attachment_model_to_domain(row) for row in rows]
 
-    async def list(self, knowledge_base_id: str) -> list[Attachment]:
-        """兼容旧调用方；新代码使用 ``list_documents``。"""
-        return await self.list_documents(knowledge_base_id)
-
     async def list_versions(
         self, attachment_id: str, *, knowledge_base_id: str
     ) -> list[Attachment]:

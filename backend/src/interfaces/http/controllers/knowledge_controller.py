@@ -36,16 +36,15 @@ def build_knowledge_router(
 
     @router.get("")
     async def list_knowledge_bases() -> list[KnowledgeBaseResponse]:
-        target = service()
-        list_knowledge_bases = getattr(target, "list_knowledge_bases", None) or target.list
-        return [KnowledgeBaseResponse.from_domain(value) for value in await list_knowledge_bases()]
+        return [
+            KnowledgeBaseResponse.from_domain(value)
+            for value in await service().list_knowledge_bases()
+        ]
 
     @router.post("", status_code=201)
     async def create_knowledge_base(body: KnowledgeBaseCreateRequest) -> KnowledgeBaseResponse:
         try:
-            target = service()
-            create_knowledge_base = getattr(target, "create_knowledge_base", None) or target.create
-            value = await create_knowledge_base(body.name, body.description)
+            value = await service().create_knowledge_base(body.name, body.description)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return KnowledgeBaseResponse.from_domain(value)
@@ -59,9 +58,9 @@ def build_knowledge_router(
         knowledge_base_id: str, body: KnowledgeBaseUpdateRequest
     ) -> KnowledgeBaseResponse:
         try:
-            target = service()
-            update_knowledge_base = getattr(target, "update_knowledge_base", None) or target.update
-            value = await update_knowledge_base(knowledge_base_id, body.name, body.description)
+            value = await service().update_knowledge_base(
+                knowledge_base_id, body.name, body.description
+            )
         except KnowledgeBaseNotFoundError as exc:
             raise HTTPException(status_code=404, detail="knowledge_base_not_found") from exc
         except ValueError as exc:
@@ -71,9 +70,7 @@ def build_knowledge_router(
     @router.delete("/{knowledge_base_id}")
     async def delete_knowledge_base(knowledge_base_id: str) -> dict[str, str]:
         try:
-            target = service()
-            delete_knowledge_base = getattr(target, "delete_knowledge_base", None) or target.delete
-            await delete_knowledge_base(knowledge_base_id)
+            await service().delete_knowledge_base(knowledge_base_id)
         except KnowledgeBaseNotFoundError as exc:
             raise HTTPException(status_code=404, detail="knowledge_base_not_found") from exc
         return {"status": "deleted", "knowledge_base_id": knowledge_base_id}

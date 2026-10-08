@@ -37,12 +37,7 @@ class MemoryService:
 
     async def list_memories(self, request: MemoryListRequest) -> MemoryPage:
         """分页列出记忆。"""
-        method = getattr(self._port, "list_memories", None) or self._port.list
-        return await method(request)
-
-    async def list(self, request: MemoryListRequest) -> MemoryPage:
-        """兼容旧调用方；新代码使用 ``list_memories``。"""
-        return await self.list_memories(request)
+        return await self._port.list_memories(request)
 
     async def get(self, memory_id: str) -> MemoryRecord | None:
         """按 ID 获取记忆。"""
@@ -54,12 +49,7 @@ class MemoryService:
 
     async def create_memory(self, command: MemoryWriteCommand) -> str:
         """创建记忆并返回稳定 ID。"""
-        method = getattr(self._port, "create_memory", None) or self._port.add
-        return await method(command)
-
-    async def add(self, command: MemoryWriteCommand) -> str:
-        """兼容旧调用方；新代码使用 ``create_memory``。"""
-        return await self.create_memory(command)
+        return await self._port.create_memory(command)
 
     async def revise(
         self,
@@ -87,16 +77,11 @@ class MemoryService:
         valid_until: str | None = None,
     ) -> bool:
         """更新事实有效性。"""
-        method = getattr(self._port, "update_validity", None) or self._port.set_validity
-        return await method(
+        return await self._port.update_validity(
             memory_id,
             validity_status,
             valid_until=valid_until,
         )
-
-    async def set_validity(self, memory_id: str, validity_status: str, *, valid_until: str | None = None) -> bool:
-        """兼容旧调用方；新代码使用 ``update_validity``。"""
-        return await self.update_validity(memory_id, validity_status, valid_until=valid_until)
 
     async def delete(self, memory_id: str) -> None:
         """软删除一条记忆。"""

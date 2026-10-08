@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bootstrap import build_default_dependencies, create_app
-import bootstrap.config as runtime_config
+import configuration.settings as runtime_config
 from interfaces.http.auth import AuthOptions
 
 

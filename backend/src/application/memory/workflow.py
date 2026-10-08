@@ -37,8 +37,7 @@ class MemoryWriteWorkflow:
         written = 0
         for resolution in resolutions:
             if resolution.action is ResolutionAction.CREATE:
-                create_memory = getattr(self._memory, "create_memory", None) or self._memory.add
-                await create_memory(
+                await self._memory.create_memory(
                     MemoryWriteCommand(
                         content=resolution.candidate.content,
                         metadata={
@@ -62,10 +61,6 @@ class MemoryWriteWorkflow:
                 )
                 written += 1
         return written
-
-    async def process(self, turn: CompletedTurn) -> int:
-        """Compatibility alias for the old worker entry point."""
-        return await self.process_completed_turn(turn)
 
 
 __all__ = ["MemoryWriteWorkflow"]

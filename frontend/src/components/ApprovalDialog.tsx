@@ -1,10 +1,12 @@
-import { AlertTriangle, Check, Shield, X } from "lucide-react"
+import { AlertTriangle, Check, Shield, X, Loader2 } from "lucide-react"
 import { useEffect, useState } from "react"
 import type { ApprovalRequest } from "../types"
+import { approvalActionDescription } from "../utils/executionCopy"
 
 interface ApprovalCardProps {
+  batchId: string
   requests: ApprovalRequest[]
-  onSubmit: (decisions: Record<string, "approved" | "denied">) => void
+  onSubmit: (batchId: string, decisions: Record<string, "approved" | "denied" | "cancelled">) => Promise<void>
 }
 
 function riskClass(risk: ApprovalRequest["risk_level"]): string {
@@ -13,30 +15,28 @@ function riskClass(risk: ApprovalRequest["risk_level"]): string {
   return "text-green-400 bg-green-500/20 border-green-500/50"
 }
 
-export function ApprovalCard({ requests, onSubmit }: ApprovalCardProps) {
-  const [resolving, setResolving] = useState<Set<string>>(new Set())
-  const [decisions, setDecisions] = useState<Record<string, "approved" | "denied">>({})
+export function ApprovalCard({ batchId, requests, onSubmit }: ApprovalCardProps) {
+  const [submitting, setSubmitting] = useState(false)
+  const [decisions, setDecisions] = useState<Record<string, "approved" | "denied" | "cancelled">>({})
 
   useEffect(() => {
-    setResolving(new Set())
     setDecisions({})
-  }, [requests.length])
+    setSubmitting(false)
+  }, [batchId, requests.map((request) => request.approval_id).join(":")])
 
-  const resolve = (request: ApprovalRequest, action: "allow" | "deny") => {
-    const next: Record<string, "approved" | "denied"> = {
-      ...decisions,
-      [request.approval_id]: action === "allow" ? "approved" : "denied",
+  const submit = async (next = decisions) => {
+    if (submitting || requests.some((request) => !next[request.approval_id])) return
+    setSubmitting(true)
+    try {
+      await onSubmit(batchId, next)
+    } catch {
+      setSubmitting(false)
     }
-    setDecisions(next)
-    setResolving((current) => new Set(current).add(request.approval_id))
-    if (Object.keys(next).length === requests.length) onSubmit(next)
   }
 
-  const resolveAll = (action: "allow" | "deny") => {
-    const next = Object.fromEntries(requests.map((request) => [request.approval_id, action === "allow" ? "approved" : "denied"])) as Record<string, "approved" | "denied">
+  const decideAll = (decision: "approved" | "denied" | "cancelled") => {
+    const next = Object.fromEntries(requests.map((request) => [request.approval_id, decision])) as Record<string, "approved" | "denied" | "cancelled">
     setDecisions(next)
-    setResolving(new Set(requests.map((request) => request.approval_id)))
-    onSubmit(next)
   }
 
   return (
@@ -47,68 +47,61 @@ export function ApprovalCard({ requests, onSubmit }: ApprovalCardProps) {
         </div>
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-athena-text">
-            Approval required
+            需要你确认操作
             <span className="rounded-full bg-athena-bg px-2 py-0.5 text-xs font-normal text-athena-muted">
-              {requests.length} {requests.length === 1 ? "request" : "requests"}
+              {requests.length} 项
             </span>
           </h3>
-          <p className="text-xs text-athena-muted">Review these actions before Athena continues.</p>
+          <p className="text-xs text-athena-muted">请确认是否允许 Athena 继续执行。</p>
         </div>
       </div>
 
       <div className="divide-y divide-athena-border/70">
         {requests.map((request) => {
-          const isResolving = resolving.has(request.approval_id)
+          const decision = decisions[request.approval_id]
           return (
             <div key={request.approval_id} className="px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <AlertTriangle className="h-4 w-4 text-yellow-400" />
-                <code className="text-sm text-athena-accent">{request.tool_name}</code>
+                <span className="text-sm font-medium text-athena-text">{approvalActionDescription(request.tool_name, request.arguments)}</span>
                 <span className={`rounded border px-2 py-0.5 text-[11px] font-medium ${riskClass(request.risk_level)}`}>
-                  {request.risk_level.toUpperCase()}
+                  {request.risk_level === "high" ? "高风险" : request.risk_level === "medium" ? "中风险" : "低风险"}
                 </span>
                 <div className="ml-auto flex gap-2">
-                  <button
-                    type="button"
-                    className="btn-secondary px-2.5 py-1.5 text-xs"
-                    disabled={isResolving}
-                    onClick={() => resolve(request, "deny")}
-                  >
-                    <X className="h-3.5 w-3.5" /> Deny
+                  <button type="button" className={`btn-secondary px-2.5 py-1.5 text-xs ${decision === "denied" ? "border-athena-danger text-athena-danger" : ""}`} disabled={submitting} onClick={() => setDecisions((current) => ({ ...current, [request.approval_id]: "denied" }))}>
+                    <X className="h-3.5 w-3.5" /> 拒绝
                   </button>
-                  <button
-                    type="button"
-                    className="btn-primary px-2.5 py-1.5 text-xs"
-                    disabled={isResolving}
-                    onClick={() => resolve(request, "allow")}
-                  >
-                    <Check className="h-3.5 w-3.5" /> Allow
+                  <button type="button" className={`btn-primary px-2.5 py-1.5 text-xs ${decision === "approved" ? "ring-2 ring-green-400" : ""}`} disabled={submitting} onClick={() => setDecisions((current) => ({ ...current, [request.approval_id]: "approved" }))}>
+                    <Check className="h-3.5 w-3.5" /> 允许
                   </button>
                 </div>
               </div>
               <details className="mt-2">
                 <summary className="cursor-pointer text-xs text-athena-muted hover:text-athena-text">
-                  Arguments
+                  查看操作参数
                 </summary>
-                <pre className="mt-2 max-h-36 overflow-auto rounded bg-athena-bg p-2 text-xs text-athena-text/90">
-                  {JSON.stringify(request.arguments, null, 2)}
-                </pre>
+                <div className="mt-2 space-y-2">
+                  <div className="text-[11px] text-athena-muted">工具标识：<code className="break-all">{request.tool_name}</code></div>
+                  <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-all rounded bg-athena-bg p-2 text-xs text-athena-text/90">
+                    {JSON.stringify(request.arguments, null, 2)}
+                  </pre>
+                </div>
               </details>
             </div>
           )
         })}
       </div>
 
-      {requests.length > 1 && (
-        <div className="flex justify-end gap-2 border-t border-athena-border px-4 py-3">
-          <button type="button" className="btn-secondary text-xs" onClick={() => resolveAll("deny")}>
-            <X className="h-3.5 w-3.5" /> Deny all
-          </button>
-          <button type="button" className="btn-primary text-xs" onClick={() => resolveAll("allow")}>
-            <Check className="h-3.5 w-3.5" /> Allow all
-          </button>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-athena-border px-4 py-3">
+        <div className="flex gap-2">
+          <button type="button" className="btn-ghost px-2 py-1 text-xs" disabled={submitting} onClick={() => decideAll("denied")}>全部拒绝</button>
+          <button type="button" className="btn-ghost px-2 py-1 text-xs" disabled={submitting} onClick={() => decideAll("approved")}>全部允许</button>
         </div>
-      )}
+        <button type="button" className="btn-primary text-xs" disabled={submitting || requests.some((request) => !decisions[request.approval_id])} onClick={() => void submit()}>
+          {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+          {submitting ? "提交中" : "提交决策"}
+        </button>
+      </div>
     </section>
   )
 }

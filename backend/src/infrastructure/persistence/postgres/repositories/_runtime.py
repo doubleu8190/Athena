@@ -1,8 +1,4 @@
-"""Compatibility exports for the pre-split runtime repository bundle.
-
-Use the capability-level modules in this package for new imports.  The classes
-remain exported here so deployed callers can migrate without a flag day.
-"""
+"""Shared PostgreSQL persistence implementations for runtime capabilities."""
 
 from __future__ import annotations
 
@@ -598,10 +594,6 @@ class PostgresMemoryRepository:
             {"total": int(total), "expired": 0, "recent": len(values)},
         )
 
-    async def list(self, request: MemoryListRequest):
-        """兼容旧调用方；新代码使用 ``list_memories``。"""
-        return await self.list_memories(request)
-
     async def get(self, memory_id: str):
         async with self._session_factory() as session:
             row = await session.get(MemoryModel, memory_id)
@@ -632,10 +624,6 @@ class PostgresMemoryRepository:
                 )
         return key
 
-    async def add(self, command: MemoryWriteCommand) -> str:
-        """兼容旧调用方；新代码使用 ``create_memory``。"""
-        return await self.create_memory(command)
-
     async def revise(
         self, memory_id: str, content: str, *, metadata=None, operation_key=None
     ):
@@ -664,10 +652,6 @@ class PostgresMemoryRepository:
                 )
         return bool(result.rowcount)
 
-    async def set_validity(self, memory_id: str, validity_status: str, *, valid_until=None) -> bool:
-        """兼容旧调用方；新代码使用 ``update_validity``。"""
-        return await self.update_validity(memory_id, validity_status, valid_until=valid_until)
-
     async def delete(self, memory_id: str) -> None:
         async with self._session_factory() as session:
             async with session.begin():
@@ -692,7 +676,7 @@ class PostgresMemoryRepository:
         )
 
 
-class PostgresRetrievalQueryRepository(RetrievalQueryPort):
+class PostgresRetrievalRepository(RetrievalQueryPort):
     def __init__(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     ) -> None:
@@ -798,6 +782,6 @@ __all__ = [
     "PostgresApprovalRepository",
     "PostgresEventRepository",
     "PostgresMemoryRepository",
-    "PostgresRetrievalQueryRepository",
+    "PostgresRetrievalRepository",
     "PostgresRunRepository",
 ]

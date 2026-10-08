@@ -22,7 +22,7 @@ class FakeSessionRepository:
     async def get(self, session_id: str) -> Session | None:
         return self.items.get(session_id)
 
-    async def list_all(self) -> list[Session]:
+    async def list_sessions(self) -> list[Session]:
         return list(self.items.values())
 
     async def save(self, session: Session) -> Session:

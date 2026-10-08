@@ -40,11 +40,11 @@ interface NavRailProps {
 
 function NavRail({ activeView, onSelectView }: NavRailProps) {
   return (
-    <nav className="w-[52px] h-full flex-shrink-0 bg-athena-surface border-r border-athena-border flex flex-col items-center py-3 overflow-y-auto">
-      <div className="mb-4 flex-shrink-0">
+    <nav className="z-40 flex h-12 w-full flex-shrink-0 flex-row items-center justify-between border-t border-athena-border bg-athena-surface px-1 md:h-full md:w-[52px] md:flex-col md:justify-start md:border-r md:border-t-0 md:py-3">
+      <div className="hidden flex-shrink-0 md:mb-4 md:block">
         <Sparkles className="w-6 h-6 text-athena-accent" />
       </div>
-      <div className="flex flex-col items-center gap-1">
+      <div className="flex min-w-0 flex-1 items-center justify-around gap-0.5 overflow-x-auto md:flex-none md:flex-col md:items-center md:justify-start md:gap-1">
         {NAV_ITEMS.map(({ view, label, icon: Icon }) => {
           const active = activeView === view
           return (
@@ -53,7 +53,7 @@ function NavRail({ activeView, onSelectView }: NavRailProps) {
               onClick={() => onSelectView(view)}
               title={label}
               aria-label={label}
-              className={`relative w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
+              className={`relative h-9 w-9 flex-shrink-0 rounded-lg flex items-center justify-center transition-colors md:h-10 md:w-10 ${
                 active
                   ? "bg-athena-accent/15 text-athena-accent"
                   : "text-athena-muted hover:text-athena-text hover:bg-athena-border/40"

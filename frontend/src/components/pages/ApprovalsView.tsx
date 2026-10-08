@@ -17,6 +17,8 @@ import Toolbar from "../ui/Toolbar"
 import Badge from "../ui/Badge"
 import DataTable from "../ui/DataTable"
 import type { Column } from "../ui/DataTable"
+import type { ApprovalRequest } from "../../types"
+import { ApprovalCard } from "../ApprovalDialog"
 
 const PAGE_SIZE = 20
 
@@ -39,13 +41,15 @@ function ApprovalsView() {
   const [error, setError] = useState<string | null>(null)
   const [decision, setDecision] = useState<DecisionFilter>("all")
   const [page, setPage] = useState(0)
+  const [pending, setPending] = useState<ApprovalRequest[]>([])
 
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const [logsRes, statsRes] = await Promise.all([
+      const [logsRes, statsRes, pendingRes] = await Promise.all([
         apiClient.listApprovalLogs({ limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
         apiClient.getApprovalStats(),
+        apiClient.listPendingApprovals(),
       ])
       setLogs(
         decision === "all"
@@ -53,6 +57,7 @@ function ApprovalsView() {
           : logsRes.filter((l) => l.decision === decision),
       )
       setStats(statsRes)
+      setPending(pendingRes)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -135,6 +140,17 @@ function ApprovalsView() {
           <div className="text-sm text-athena-danger">加载失败：{error}</div>
         ) : (
           <>
+            {pending.length ? <section className="space-y-3">
+              <div className="flex items-center justify-between"><h2 className="text-sm font-semibold">待审批</h2><Badge tone="warning">{pending.length}</Badge></div>
+              {Object.entries(pending.reduce<Record<string, ApprovalRequest[]>>((groups, item) => {
+                const key = item.approval_batch_id || item.approval_id
+                groups[key] = [...(groups[key] || []), item]
+                return groups
+              }, {})).map(([batchId, requests]) => <ApprovalCard key={batchId} batchId={batchId} requests={requests} onSubmit={async (id, decisions) => {
+                await apiClient.respondApprovalBatch(id, decisions)
+                await reload()
+              }} />)}
+            </section> : <div className="rounded-md border border-athena-border px-4 py-3 text-sm text-athena-muted">当前没有待审批操作</div>}
             <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
               <StatCard label="今日审批" value={stats?.today_total ?? "—"} icon={ClipboardCheck} />
               <StatCard label="通过率" value={stats ? `${Math.round((stats.approval_rate ?? 0) * 100)}%` : "—"} icon={ThumbsUp} />

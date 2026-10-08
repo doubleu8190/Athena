@@ -55,8 +55,8 @@ from infrastructure.integrations.neo4j.file_indexer import (
     OptionalNeo4jFileIndexer,
 )
 from infrastructure.integrations.pgvector.indexers import (
-    PostgresFileVectorIndexer,
-    PostgresMemoryVectorIndexer,
+    PostgresFileVectorIndex,
+    PostgresMemoryVectorIndex,
 )
 from infrastructure.integrations.sandbox.docker import DockerSandbox
 from infrastructure.integrations.sandbox.options import SandboxOptions
@@ -167,8 +167,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             connection_timeout_seconds=settings.neo4j_connection_timeout_seconds,
         )
     )
-    file_vectors = PostgresFileVectorIndexer(session_factory, embedding)
-    memory_vectors = PostgresMemoryVectorIndexer(session_factory, embedding)
+    file_vectors = PostgresFileVectorIndex(session_factory, embedding)
+    memory_vectors = PostgresMemoryVectorIndex(session_factory, embedding)
     sandbox = DockerSandbox(
         SandboxOptions(
             docker_binary=settings.sandbox_docker_binary,
@@ -323,9 +323,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "llm_provider": lambda: llm_provider,
         "embedding_provider": lambda: embedding,
         "sandbox": lambda: sandbox,
-        "retrieval_service_factory": lambda: __import__(
-            "application.retrieval", fromlist=["HybridRetrievalService"]
-        ).HybridRetrievalService(),
         "context_service_factory": lambda: context_service,
         "task_understanding_factory": lambda: task_understanding,
     }

@@ -19,7 +19,7 @@ async def test_default_session_message_run_and_tool_adapters():
     sessions, messages, runs = InMemorySessionRepository(), InMemoryMessageRepository(), InMemoryRunStore()
     session = __import__("domain.sessions", fromlist=["Session"]).Session.create(session_id="s", title="x", now=NOW)
     await sessions.create(session); assert await sessions.get("s") == session
-    assert await sessions.list_all() == [session]; await sessions.save(session.rename("y", now=NOW)); assert await sessions.delete("missing") is False
+    assert await sessions.list_sessions() == [session]; await sessions.save(session.rename("y", now=NOW)); assert await sessions.delete("missing") is False
     command = RunCommand("c", CommandType.RUN_START, "s", "r", {"message_id": "m"}, NOW)
     result = await runs.enqueue_command(command); assert result.status == "queued"
     assert (await runs.claim_next_command()).command_id == "c"; await runs.complete_command("c", status="completed")
@@ -36,15 +36,15 @@ async def test_default_session_message_run_and_tool_adapters():
     assert await runs.fail("r", {}) and await runs.cancel("r")
     assert await runs.claim_next_command() is None
     assert (await runs.enqueue_command(command)).deduplicated is True
-    await tool_repo.upsert((await tool_repo.get("noop"))); await tool_repo.update((await tool_repo.get("noop"))); assert await tool_repo.list_all()
+    await tool_repo.upsert((await tool_repo.get("noop"))); await tool_repo.update((await tool_repo.get("noop"))); assert await tool_repo.list_tools()
 
 
 @pytest.mark.asyncio
 async def test_memory_approval_mcp_and_event_adapters():
-    memory = InMemoryMemoryPort(); key = await memory.add(MemoryWriteCommand("hello", operation_key="m"))
+    memory = InMemoryMemoryPort(); key = await memory.create_memory(MemoryWriteCommand("hello", operation_key="m"))
     assert (await memory.search(MemorySearchRequest("hel")))[0].id == key
-    assert (await memory.list(MemoryListRequest())).total == 1; assert await memory.revise(key, "updated") == key
-    assert await memory.set_validity(key, "valid"); await memory.delete(key); assert (await memory.get(key)).status.value == "deleted"
+    assert (await memory.list_memories(MemoryListRequest())).total == 1; assert await memory.revise(key, "updated") == key
+    assert await memory.update_validity(key, "valid"); await memory.delete(key); assert (await memory.get(key)).status.value == "deleted"
     approvals = InMemoryApprovalRepository(); request = ApprovalRequest("a", "s", "r", "t", "noop", {}, "low", created_at=NOW)
     assert await approvals.create(request); assert len(await approvals.list_pending()) == 1
     assert await approvals.resolve("a", run_id="r", task_id="", decision=ApprovalDecision.APPROVED)
@@ -69,7 +69,7 @@ async def test_default_file_and_knowledge_adapters():
     await attachments.create(value); assert await attachments.get("a", session_id="s") == value; assert await attachments.soft_delete("a", session_id="s")
     assert await attachments.list_by_session("s") == []; assert await attachments.list_by_knowledge_base("missing") == []; await attachments.save(value)
     assert await attachments.get("a", session_id="s") is not None; await storage.cleanup_unreferenced(set()); await storage.discard(blob.storage_key)
-    bases = InMemoryKnowledgeRepository(); kb = KnowledgeBase("k", "K", "", 0, 0, 0, NOW, NOW); await bases.create(kb); assert await bases.list_all() == [kb]; await bases.delete("k")
+    bases = InMemoryKnowledgeRepository(); kb = KnowledgeBase("k", "K", "", 0, 0, 0, NOW, NOW); await bases.create(kb); assert await bases.list_knowledge_bases() == [kb]; await bases.delete("k")
 
 
 async def _chunks(values):

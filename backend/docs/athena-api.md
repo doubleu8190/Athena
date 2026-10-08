@@ -105,8 +105,8 @@ data envelope 字段为 `schema_version/session_seq/event_type/durability/sessio
 | GET | `/attachments` | 列出该会话直接附件 |
 | POST | `/attachments` | multipart `files`，返回 202 和附件数组，后台解析/索引 |
 | GET | `/attachment-types` | 返回 `{"extensions":[...]}` |
-| GET | `/attachments/{file_id}` | 详情，含解析 metadata |
-| DELETE | `/attachments/{file_id}` | 软删除、删向量和派生数据 |
+| GET | `/attachments/{attachment_id}` | 详情，含解析 metadata |
+| DELETE | `/attachments/{attachment_id}` | 软删除、删向量和派生数据 |
 
 知识库接口：
 
@@ -129,7 +129,7 @@ data envelope 字段为 `schema_version/session_seq/event_type/durability/sessio
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/approvals?session_id=` | 待审批；返回 approval_id、tool_name、arguments、risk_level、session/run/tool_call、approval_batch_id |
-| POST | `/api/approvals/batches/{batch_id}/respond` | body `{"decisions":{"id":"approved|denied|cancelled"}}`，必须覆盖整批 |
+| POST | `/api/approvals/batches/{batch_id}/resolve` | body `{"decisions":{"id":"approved|denied|cancelled"}}`，必须覆盖整批 |
 | GET | `/api/approvals/logs?session_id=&limit=&offset=` | 已完成审批日志 |
 | GET | `/api/approvals/stats` | today_total/today_approved/today_denied/approval_rate |
 

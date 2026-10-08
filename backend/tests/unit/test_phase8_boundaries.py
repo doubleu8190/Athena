@@ -16,7 +16,7 @@ from application.sessions import SessionNotFoundError as SessionMissing
 from bootstrap import create_app
 from domain.events import ApplicationEvent
 from domain.runs import (
-    CommandExecutionResult, CommandStatus, CommandStatusRecord, CommandType,
+    CommandEnqueueResult, CommandExecutionResult, CommandStatus, CommandStatusRecord, CommandType,
     RunCommand, RunStatus, RunSummary,
 )
 from domain.sessions import Session
@@ -55,17 +55,18 @@ def make_run_service(commands=None, sessions=None):
 async def test_run_command_service_validation_bool_and_cancel_paths() -> None:
     with pytest.raises(SessionMissing): await make_run_service().submit("missing", command_id="c", message="x")
     with pytest.raises(ValueError): await make_run_service().submit("s", command_id=" ", message="x")
-    commands = CommandRepo(result=True)
+    commands = CommandRepo(result=CommandEnqueueResult("c", "r", "m", (), CommandStatus.QUEUED, False))
     service = make_run_service(commands)
     accepted = await service.submit("s", command_id="c", message="x")
     assert accepted.deduplicated is False
-    commands = CommandRepo(result=False)
+    commands = CommandRepo(result=CommandEnqueueResult("c", "r", "m", (), CommandStatus.QUEUED, True))
     service = make_run_service(commands)
     accepted = await service.submit("s", command_id="c", message="x")
     assert accepted.deduplicated is True
     commands = CommandRepo(result="session_busy")
     with pytest.raises(CommandRejectedError): await make_run_service(commands).submit("s", command_id="c", message="x")
-    accepted = await make_run_service().cancel_session("s")
+    cancel_commands = CommandRepo(result=CommandEnqueueResult("c", "r", None, (), CommandStatus.QUEUED, False))
+    accepted = await make_run_service(cancel_commands).cancel_session("s")
     assert accepted.status is CommandStatus.QUEUED
 
 
@@ -113,7 +114,7 @@ def test_controller_error_mappings_for_approval_tools_files_and_knowledge() -> N
         async def resolve(self, *args, **kwargs): return False
         async def resolve_batch(self, *args, **kwargs): return False
     class Tool:
-        async def list(self): return []
+        async def list_tools(self): return []
         async def update_governance(self, *args, **kwargs): raise ValueError("bad risk")
     class Files:
         async def list_for_session(self, key): raise SessionNotFoundError(key)
@@ -121,10 +122,10 @@ def test_controller_error_mappings_for_approval_tools_files_and_knowledge() -> N
         async def get(self, *args): raise AttachmentNotFoundError("a")
         async def delete(self, *args): raise AttachmentNotFoundError("a")
     class Knowledge:
-        async def list(self): return []
+        async def list_knowledge_bases(self): return []
         async def supported_extensions(self): return []
-        async def update(self, *args): raise KnowledgeBaseNotFoundError("k")
-        async def delete(self, *args): raise KnowledgeBaseNotFoundError("k")
+        async def update_knowledge_base(self, *args): raise KnowledgeBaseNotFoundError("k")
+        async def delete_knowledge_base(self, *args): raise KnowledgeBaseNotFoundError("k")
         async def list_documents(self, *args): raise KnowledgeBaseNotFoundError("k")
         async def list_versions(self, *args): raise KnowledgeDocumentNotFoundError("a")
         async def delete_document(self, *args): raise KnowledgeDocumentNotFoundError("a")
@@ -146,4 +147,3 @@ def test_controller_error_mappings_for_approval_tools_files_and_knowledge() -> N
     assert client.get("/api/knowledge-bases/k/documents").status_code == 404
     assert client.get("/api/knowledge-bases/k/documents/a/versions").status_code == 404
     assert client.delete("/api/knowledge-bases/k/documents/a").status_code == 404
-

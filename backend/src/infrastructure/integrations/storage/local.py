@@ -1,4 +1,4 @@
-"""旧内容寻址文件存储的迁移适配器。"""
+"""本地内容寻址文件存储。"""
 
 from __future__ import annotations
 
@@ -52,6 +52,3 @@ class LocalFileStorage:
         if not path.is_file():
             raise FileNotFoundError(storage_key)
         return path.read_bytes()
-
-
-LocalFileStorageAdapter = LocalFileStorage

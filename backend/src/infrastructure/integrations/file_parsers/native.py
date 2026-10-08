@@ -1,8 +1,7 @@
 """Small target-owned file ingestion primitives.
 
-The parser deliberately has no dependency on the former ``core.files``
-package.  Rich format-specific parsers can implement the same port and be
-selected by the bootstrap registry later.
+The parser implements the domain file ports directly. Rich format-specific
+parsers can implement the same port and be selected by the bootstrap registry.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from domain.files import (
     FileMetadata,
     ParsedDocument,
 )
-from ..indexing.fallback import DisabledGraphIndexer, DisabledVectorIndexer
 
 
 class NativeFileAdapterRegistry:
@@ -132,26 +130,8 @@ def fixed_size_chunker(*, max_characters: int = 4000) -> Callable[[str], list[Fi
     return chunk
 
 
-# Compatibility aliases for callers created before the naming cleanup.
-NativeTextParser = NativeFileParser
-line_chunker = fixed_size_chunker
-
-
-# Kept as import aliases for existing target tests during the transition. The
-# production dependency graph uses the explicit ``Disabled*`` names only when
-# an external index is deliberately disabled.
-NoopVectorIndexer = DisabledVectorIndexer
-NoopGraphIndexer = DisabledGraphIndexer
-
-
 __all__ = [
     "NativeFileAdapterRegistry",
     "NativeFileParser",
-    "NativeTextParser",
-    "DisabledGraphIndexer",
-    "DisabledVectorIndexer",
-    "NoopGraphIndexer",
-    "NoopVectorIndexer",
     "fixed_size_chunker",
-    "line_chunker",
 ]

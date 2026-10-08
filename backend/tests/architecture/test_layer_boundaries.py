@@ -112,6 +112,27 @@ def test_postgres_bootstrap_only_assembles_dependencies() -> None:
     assert not nested_functions
 
 
+def test_removed_migration_aliases_do_not_return() -> None:
+    """生产源码不能重新注册已删除的迁移别名或隐藏路由。"""
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in ROOT.rglob("*.py")
+    )
+    forbidden = (
+        "TargetLLMProvider",
+        "TargetEmbeddingProvider",
+        "NativeTextParser",
+        "line_chunker",
+        "NoopVectorIndexer",
+        "NoopGraphIndexer",
+        "runtime_repositories",
+        "PostgresRetrievalQueryRepository",
+        "/respond",
+        "{file_id}",
+    )
+    assert not any(value in source for value in forbidden)
+
+
 def test_boundary_checker_rejects_a_deliberate_forbidden_import(tmp_path: Path) -> None:
     """边界检查逻辑必须能捕获一个明确的反向依赖。"""
     violating_module = tmp_path / "violating.py"

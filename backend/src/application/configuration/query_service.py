@@ -14,10 +14,6 @@ class ProviderQueryService:
     async def list_providers(self) -> list[dict[str, Any]]:
         return await self._port.list_providers()
 
-    async def list(self) -> list[dict[str, Any]]:
-        """Compatibility alias for the original controller contract."""
-        return await self.list_providers()
-
 
 class SettingsQueryService:
     def __init__(self, port: SettingsQueryPort) -> None:
@@ -25,10 +21,6 @@ class SettingsQueryService:
 
     async def get_settings(self) -> dict[str, Any]:
         return await self._port.get_settings()
-
-    async def get(self) -> dict[str, Any]:
-        """Compatibility alias for the original controller contract."""
-        return await self.get_settings()
 
 
 __all__ = ["ProviderQueryService", "SettingsQueryService"]

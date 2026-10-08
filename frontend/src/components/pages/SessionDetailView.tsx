@@ -11,7 +11,7 @@ import {
   Bot,
 } from "lucide-react"
 import { apiClient } from "../../api/client"
-import type { Message, Session } from "../../types"
+import type { Message, Session, SessionRunSummary } from "../../types"
 import { formatDateTime } from "../../utils/format"
 import { useChatStore } from "../../store/chatStore"
 import ViewShell from "./ViewShell"
@@ -24,6 +24,7 @@ function SessionDetailView() {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [session, setSession] = useState<Session | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [runs, setRuns] = useState<SessionRunSummary[]>([])
   const steps = useChatStore((state) => state.steps)
   const toolCalls = useChatStore((state) => state.toolCalls)
   const [error, setError] = useState<string | null>(null)
@@ -33,12 +34,14 @@ function SessionDetailView() {
   const reload = useCallback(async () => {
     if (!sessionId) return
     try {
-      const [s, msgs] = await Promise.all([
+      const [s, msgs, runList] = await Promise.all([
         apiClient.getSession(sessionId),
         apiClient.getMessages(sessionId),
+        apiClient.listSessionRuns(sessionId),
       ])
       setSession(s)
       setMessages(msgs)
+      setRuns(runList)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -62,7 +65,7 @@ function SessionDetailView() {
       useChatStore.getState().updateSession(session.id, { title: updated.title })
       setEditing(false)
     } catch (e) {
-      console.error("rename failed", e)
+      setError(e instanceof Error ? e.message : "会话重命名失败")
     }
   }
 
@@ -84,7 +87,10 @@ function SessionDetailView() {
     )
   }
 
-  const tokenStats = steps.reduce(
+  const sessionSteps = steps.filter((step) => step.session_id === sessionId)
+  const sessionRunIds = new Set(runs.map((run) => run.run_id))
+  const sessionToolCalls = toolCalls.filter((call) => call.run_id && sessionRunIds.has(call.run_id))
+  const tokenStats = sessionSteps.reduce(
     (acc, s) => ({
       input: acc.input + (s.llm_input_tokens || 0),
       output: acc.output + (s.llm_output_tokens || 0),
@@ -157,14 +163,30 @@ function SessionDetailView() {
 
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
               <StatCard label="消息数" value={messages.length} icon={MessageSquare} />
-              <StatCard label="步骤数" value={steps.length} icon={ListTree} />
-              <StatCard label="工具调用" value={toolCalls.length} icon={Wrench} />
+              <StatCard label="步骤数" value={sessionSteps.length} icon={ListTree} />
+              <StatCard label="工具调用" value={sessionToolCalls.length} icon={Wrench} />
               <StatCard
                 label="Token 用量"
                 value={`${tokenStats.input.toLocaleString()} / ${tokenStats.output.toLocaleString()}`}
                 icon={Coins}
                 hint="输入 / 输出"
               />
+            </div>
+
+            <div className="card overflow-hidden">
+              <div className="px-5 py-3 border-b border-athena-border flex items-center justify-between">
+                <h3 className="text-sm font-semibold">运行记录</h3>
+                <span className="text-xs text-athena-muted">{runs.length} 次</span>
+              </div>
+              {runs.length === 0 ? <p className="px-5 py-6 text-sm text-athena-muted">暂无运行记录</p> : (
+                <div className="divide-y divide-athena-border/60">
+                  {runs.map((run) => <div key={run.run_id} className="flex flex-wrap items-center gap-3 px-5 py-3 text-xs">
+                    <Badge tone={run.status === "completed" ? "success" : run.status === "failed" ? "danger" : run.status === "running" ? "accent" : "default"}>{run.status}</Badge>
+                    <code className="min-w-0 flex-1 truncate text-athena-muted">{run.run_id}</code>
+                    <span className="text-athena-muted">{run.created_at ? formatDateTime(run.created_at) : "—"}</span>
+                  </div>)}
+                </div>
+              )}
             </div>
 
             {/* 最近消息预览 */}

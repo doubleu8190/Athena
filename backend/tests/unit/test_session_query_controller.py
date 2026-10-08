@@ -34,7 +34,7 @@ class SessionRepository:
     async def get(self, session_id):
         return self.items.get(session_id)
 
-    async def list_all(self):
+    async def list_sessions(self):
         return list(self.items.values())
 
     async def save(self, value):

@@ -1,4 +1,4 @@
-"""Small compatibility layer around LangGraph's StateGraph.
+"""Small adapter around LangGraph's StateGraph with a local fallback.
 
 The production dependency is declared in ``pyproject.toml``.  The fallback is
 intentionally tiny and deterministic so architecture tests can import and
@@ -7,7 +7,6 @@ exercise the graph without installing optional infrastructure dependencies.
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -15,15 +14,8 @@ END = "__end__"
 
 
 async def call(value: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Call a sync/async dependency while tolerating narrow test doubles."""
-    try:
-        result = value(*args, **kwargs)
-    except TypeError:
-        signature = inspect.signature(value)
-        accepted = {
-            key: item for key, item in kwargs.items() if key in signature.parameters
-        }
-        result = value(*args, **accepted)
+    """调用同步或异步依赖。"""
+    result = value(*args, **kwargs)
     if isinstance(result, Awaitable):
         return await result
     return result

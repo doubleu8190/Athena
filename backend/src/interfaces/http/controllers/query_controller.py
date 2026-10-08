@@ -141,7 +141,7 @@ def build_query_router(
             raise HTTPException(status_code=503, detail="knowledge_query_not_configured")
         return [
             KnowledgeBaseResponse.from_domain(item)
-            for item in await (lambda target: (getattr(target, "list_knowledge_bases", None) or target.list)())(knowledge_factory())
+            for item in await knowledge_factory().list_knowledge_bases()
         ]
 
     @router.post("/memory/search")

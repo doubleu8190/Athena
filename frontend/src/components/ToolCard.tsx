@@ -10,6 +10,7 @@ import {
 } from "lucide-react"
 import type { ToolCall, ToolCallInvocation } from "../types"
 import { safeStringify } from "../utils/safeStringify"
+import { toolActionLabel, toolStatusLabel, toolStatusPhase } from "../utils/executionCopy"
 
 interface ToolCardProps {
   toolCall: ToolCall | ToolCallInvocation
@@ -61,23 +62,7 @@ export function ToolCard({ toolCall, compact = false }: ToolCardProps) {
   }
 
   const statusLabel = () => {
-    if (!status) return "CALLED"
-    switch (status) {
-      case "success":
-        return "Success"
-      case "failed":
-        return "Failed"
-      case "denied":
-        return "Denied"
-      case "timeout":
-        return "Timeout"
-      case "running":
-        return "Running"
-      case "paused":
-        return "Paused"
-      default:
-        return "Pending"
-    }
+    return toolStatusLabel(status)
   }
 
   const riskBadge = () => {
@@ -88,13 +73,13 @@ export function ToolCard({ toolCall, compact = false }: ToolCardProps) {
         : riskLevel === "medium"
           ? "risk-medium"
           : "risk-low"
-    return <span className={`risk-badge ${className}`}>{riskLevel.toUpperCase()}</span>
+    return <span className={`risk-badge ${className}`}>{riskLevel === "high" ? "高风险" : riskLevel === "medium" ? "中风险" : "低风险"}</span>
   }
 
   const header = (
     <div className="flex items-center gap-2 px-3 py-2 min-w-0">
       {statusIcon()}
-      <span className="font-mono text-sm font-medium truncate">{name}</span>
+      <span className="min-w-0 flex-1 text-sm font-medium truncate">{toolActionLabel(name, toolStatusPhase(status))}</span>
       {riskBadge()}
       <span className="ml-auto text-xs text-athena-muted flex items-center gap-1 flex-shrink-0">
         {statusLabel()}
@@ -139,7 +124,7 @@ export function ToolCard({ toolCall, compact = false }: ToolCardProps) {
           {argCount > 0 && (
             <div>
               <div className="text-xs text-athena-muted mb-1">
-                Arguments ({argCount})
+                操作参数（{argCount} 项）
               </div>
               <pre className="text-xs bg-athena-bg rounded p-2 overflow-x-auto overflow-y-auto text-athena-text/80 max-h-64">
                 {safeStringify(args)}
@@ -149,7 +134,7 @@ export function ToolCard({ toolCall, compact = false }: ToolCardProps) {
 
           {output && status === "success" && (
             <div>
-              <div className="text-xs text-athena-muted mb-1">Output</div>
+              <div className="text-xs text-athena-muted mb-1">原始返回内容</div>
               <pre className="text-xs bg-athena-bg rounded p-2 overflow-x-auto overflow-y-auto text-athena-text/80 max-h-64 whitespace-pre-wrap">
                 {safeStringify(output)}
               </pre>

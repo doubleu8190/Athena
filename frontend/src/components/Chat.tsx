@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Send, Square, Pause, Play, Loader2, Sparkles, Clock, CheckCircle, PanelRight, Paperclip, Files, X, Trash2 } from "lucide-react"
+import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, PanelLeft, Paperclip, Files, X, Trash2 } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ApprovalCard } from "./ApprovalDialog"
 import { ActivityPanel } from "./ActivityPanel"
@@ -11,6 +11,8 @@ import type { Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTy
 
 interface ChatProps {
   sendEvent: (type: string, data?: Record<string, unknown>) => boolean
+  onOpenSessions?: () => void
+  demoMode?: boolean
 }
 
 function isSupportedAttachment(file: File, supportedTypes: SupportedAttachmentTypes): boolean {
@@ -18,7 +20,7 @@ function isSupportedAttachment(file: File, supportedTypes: SupportedAttachmentTy
   return supportedTypes.extensions.some((extension) => filename.endsWith(extension.toLowerCase()))
 }
 
-function Chat({ sendEvent }: ChatProps) {
+function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
   const {
     messages,
     steps,
@@ -95,6 +97,11 @@ function Chat({ sendEvent }: ChatProps) {
   useEffect(() => {
     let cancelled = false
 
+    if (demoMode) {
+      setIsLoadingHistory(false)
+      return () => { cancelled = true }
+    }
+
     if (activeSessionId) {
       shouldFollowLatestRef.current = true
       // 先完全清除上一个 session 的所有残留状态
@@ -135,7 +142,7 @@ function Chat({ sendEvent }: ChatProps) {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId])
+  }, [activeSessionId, demoMode])
 
   const loadHistory = async (sessionId: string, isCancelled?: () => boolean) => {
     try {
@@ -355,19 +362,6 @@ function Chat({ sendEvent }: ChatProps) {
     sendEvent(ClientEventType.SESSION_STOP, { session_id: activeSessionId })
   }, [activeSessionId, sendEvent])
 
-  const handlePause = useCallback(() => {
-    if (!activeSessionId) return
-    sendEvent(ClientEventType.SESSION_PAUSE, { session_id: activeSessionId })
-    setAgentStatus("paused")
-    clearThinking()
-  }, [activeSessionId, sendEvent, setAgentStatus, clearThinking])
-
-  const handleResume = useCallback(() => {
-    if (!activeSessionId) return
-    sendEvent(ClientEventType.SESSION_RESUME, { session_id: activeSessionId })
-    setAgentStatus("running")
-  }, [activeSessionId, sendEvent, setAgentStatus])
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
@@ -375,14 +369,45 @@ function Chat({ sendEvent }: ChatProps) {
     }
   }
 
-  const handleApproval = useCallback(
-    (decisions: Record<string, "approved" | "denied">) => {
-      const approval = pendingApprovals[0]
-      if (!approval?.approval_batch_id) return
-      void apiClient.respondApprovalBatch(approval.approval_batch_id, decisions)
-    },
-    [pendingApprovals],
-  )
+  const handleApproval = useCallback(async (
+    batchId: string,
+    decisions: Record<string, "approved" | "denied" | "cancelled">,
+  ) => {
+    if (demoMode) {
+      const store = useChatStore.getState()
+      Object.entries(decisions).forEach(([id, decision]) => store.resolveApproval(id, decision))
+      store.setThinking({ active: false, content: "", messageId: null })
+      store.setAgentStatus("completed")
+      const approved = Object.values(decisions).every((decision) => decision === "approved")
+      if (approved) {
+        store.updateToolCall("demo-tool-call", { status: "success", output: "已创建项目事项 ATH-204" })
+        store.updateStep("demo-tool-step", { status: "completed", completed_at: new Date().toISOString(), duration_ms: 430 })
+        store.upsertExecutionTimelineEntry({ id: "demo-run-start", run_id: "demo-run", event_type: "run.started", label: "开始处理你的请求", status: "completed", timestamp: new Date().toISOString() })
+        store.upsertExecutionTimelineEntry({ id: "demo-plan", run_id: "demo-run", event_type: "task.started", label: "客户反馈已归纳", detail: "已汇总反馈内容并提炼主要问题。", status: "completed", timestamp: new Date().toISOString() })
+        store.upsertExecutionTimelineEntry({ id: "demo-tool-start", run_id: "demo-run", event_type: "tool.completed", label: "项目事项已创建", detail: "已在项目看板创建事项 ATH-204。", status: "completed", timestamp: new Date().toISOString() })
+        store.upsertExecutionTimelineEntry({ id: "demo-approval", run_id: "demo-run", event_type: "approval.resolved", label: "确认已提交", detail: "你已允许此操作继续。", status: "completed", timestamp: new Date().toISOString() })
+        store.addMessage({ id: "demo-assistant-message", role: "assistant", content: "已完成本周客户反馈整理：主要问题是响应速度、数据导出和权限配置。我已将高优先级汇总事项写入项目看板（ATH-204）。", timestamp: new Date().toISOString(), session_id: "demo-session", run_id: "demo-run" })
+      } else {
+        store.updateToolCall("demo-tool-call", { status: "denied", error: "操作已由用户拒绝" })
+        store.updateStep("demo-tool-step", { status: "completed", completed_at: new Date().toISOString(), duration_ms: 0 })
+        store.upsertExecutionTimelineEntry({ id: "demo-run-start", run_id: "demo-run", event_type: "run.started", label: "开始处理你的请求", status: "completed", timestamp: new Date().toISOString() })
+        store.upsertExecutionTimelineEntry({ id: "demo-plan", run_id: "demo-run", event_type: "task.started", label: "客户反馈已归纳", detail: "已汇总反馈内容并提炼主要问题。", status: "completed", timestamp: new Date().toISOString() })
+        store.upsertExecutionTimelineEntry({ id: "demo-tool-start", run_id: "demo-run", event_type: "tool.completed", label: "项目事项未创建", detail: "操作已由用户拒绝，项目看板未发生变更。", status: "completed", timestamp: new Date().toISOString() })
+        store.upsertExecutionTimelineEntry({ id: "demo-approval", run_id: "demo-run", event_type: "approval.resolved", label: "确认已提交", detail: "你已拒绝此操作。", status: "completed", timestamp: new Date().toISOString() })
+        store.addMessage({ id: "demo-assistant-message", role: "assistant", content: "反馈整理已完成。我没有创建项目看板事项；你可以继续查看整理结果或调整后再提交。", timestamp: new Date().toISOString(), session_id: "demo-session", run_id: "demo-run" })
+      }
+      store.upsertExecutionTimelineEntry({ id: `demo-run:${batchId}`, run_id: "demo-run", event_type: "run.completed", label: approved ? "任务已完成" : "操作已拒绝", detail: approved ? "已在项目看板创建事项 ATH-204。" : "项目看板未发生变更。", status: "completed", timestamp: new Date().toISOString() })
+      return
+    }
+    try {
+      await apiClient.respondApprovalBatch(batchId, decisions)
+      clearError()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Approval response failed"
+      setError(message)
+      throw err
+    }
+  }, [clearError, demoMode, setError])
 
   const isAgentActive =
     agentStatus === "thinking" ||
@@ -506,8 +531,9 @@ function Chat({ sendEvent }: ChatProps) {
         className="flex-1 overflow-y-auto min-h-0"
       >
         {/* Activity 面板开关，固定在消息区右上角 */}
-        {(messages.length > 0 || isAgentActive) && (
           <div className="absolute top-3 right-4 z-10">
+            <div className="flex items-center gap-2">
+            <button type="button" onClick={onOpenSessions} className="inline-flex items-center justify-center rounded-lg border border-athena-border bg-athena-surface p-1.5 text-athena-muted hover:text-athena-text md:hidden" title="打开会话列表" aria-label="打开会话列表"><PanelLeft className="w-4 h-4" /></button>
             <button
               type="button"
               onClick={() => setShowActivity((v) => !v)}
@@ -516,19 +542,19 @@ function Chat({ sendEvent }: ChatProps) {
                   ? "bg-athena-accent/10 border-athena-accent/40 text-athena-accent"
                   : "bg-athena-surface border-athena-border text-athena-muted hover:text-athena-text hover:bg-athena-bg"
               }`}
-              title="Toggle activity panel"
+              title="切换请求记录"
             >
               <PanelRight className="w-3.5 h-3.5" />
-              Activity
+              请求记录
             </button>
-          </div>
-        )}
+            </div>
+            </div>
         <div className="max-w-3xl mx-auto px-4 py-6">
               {/* 历史消息加载指示器 */}
           {isLoadingHistory && (
             <div className="text-center py-16 text-athena-muted">
               <Loader2 className="w-8 h-8 mx-auto mb-4 text-athena-accent animate-spin" />
-              <p className="text-sm">Loading conversation history…</p>
+              <p className="text-sm">正在加载对话记录…</p>
             </div>
           )}
 
@@ -563,7 +589,7 @@ function Chat({ sendEvent }: ChatProps) {
                   <Clock className="w-3 h-3 text-athena-accent" />
                 )}
                 <span>
-                  {isConversationCompleted ? "Conversation completed" : "Conversation started"}
+                  {isConversationCompleted ? "对话已完成" : "对话进行中"}
                 </span>
                 <span className="text-athena-border">·</span>
                 <span>
@@ -617,7 +643,7 @@ function Chat({ sendEvent }: ChatProps) {
                       <div className="phase-divider">
                         <span className={`phase-label phase-${group.phase === "request" ? "request" : "response"}`}>
                           <span className="dot"></span>
-                          {group.phase === "request" ? "USER REQUEST" : "AGENT RESPONSE"}
+                          {group.phase === "request" ? "用户请求" : "Athena 回复"}
                         </span>
                         {group.messages[0] && (
                           <span className="text-xs text-athena-muted font-mono">
@@ -640,9 +666,9 @@ function Chat({ sendEvent }: ChatProps) {
                                 <div className="timeline-node thinking-node">
                                   <div className="flex items-center gap-3 text-sm text-athena-muted">
                                     {activeRunPaused
-                                      ? <Pause className="h-4 w-4 text-athena-muted" />
+                                      ? <Clock className="h-4 w-4 text-athena-muted" />
                                       : <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />}
-                                    {activeRunPaused ? "Paused" : "Processing request"}
+                                    {activeRunPaused ? "已暂停" : "正在处理你的请求"}
                                   </div>
                                 </div>
                               </div>
@@ -681,9 +707,9 @@ function Chat({ sendEvent }: ChatProps) {
                 <div className="flex justify-center pt-3">
                   <span className="text-xs text-athena-muted flex items-center gap-1.5">
                     <CheckCircle className="w-3.5 h-3.5 text-athena-success" />
-                    Conversation completed · {steps.length} step{steps.length !== 1 ? "s" : ""}
-                    · total {formatTotalDuration(steps)}
-                    {failedStepCount > 0 && <> · {failedStepCount} failed</>}
+                    对话已完成 · 共 {steps.length} 个步骤
+                    · 用时 {formatTotalDuration(steps)}
+                    {failedStepCount > 0 && <> · {failedStepCount} 项未成功</>}
                   </span>
                 </div>
               )}
@@ -691,11 +717,14 @@ function Chat({ sendEvent }: ChatProps) {
           )}
 
           {pendingApprovals.length > 0 && (
-            <div className="my-4">
-              <ApprovalCard
-                requests={pendingApprovals}
-                onSubmit={handleApproval}
-              />
+            <div className="my-4 space-y-3">
+              {Object.entries(pendingApprovals.reduce<Record<string, typeof pendingApprovals>>((groups, approval) => {
+                const batchId = approval.approval_batch_id || approval.approval_id
+                groups[batchId] = [...(groups[batchId] || []), approval]
+                return groups
+              }, {})).map(([batchId, requests]) => (
+                <ApprovalCard key={batchId} batchId={batchId} requests={requests} onSubmit={handleApproval} />
+              ))}
             </div>
           )}
 
@@ -752,11 +781,11 @@ function Chat({ sendEvent }: ChatProps) {
               onClick={() => fileInputRef.current?.click()}
               disabled={!activeSessionId || isUploading || !supportedAttachmentTypes}
               title={
-                !activeSessionId
-                  ? "Select a session to attach files"
+                  !activeSessionId
+                  ? "请选择会话后添加文件"
                   : supportedAttachmentTypes
-                    ? "Attach files"
-                    : "Loading supported file types"
+                    ? "添加文件"
+                    : "正在加载支持的文件类型"
               }
               className="inline-flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg border border-athena-border bg-athena-bg text-athena-muted hover:text-athena-text disabled:opacity-50"
             >
@@ -770,8 +799,8 @@ function Chat({ sendEvent }: ChatProps) {
                 onKeyDown={handleKeyDown}
                 placeholder={
                   activeSessionId
-                    ? "Send a message to Athena… (Enter to send, Shift+Enter for newline)"
-                    : "Select or create a session to start chatting"
+                    ? "向 Athena 发送消息…（Enter 发送，Shift+Enter 换行）"
+                    : "请选择或创建会话开始聊天"
                 }
                 disabled={!activeSessionId}
                 rows={1}
@@ -779,43 +808,13 @@ function Chat({ sendEvent }: ChatProps) {
                 style={{ maxHeight: "200px", minHeight: "48px" }}
               />
             </div>
-            {agentStatus === "paused" ? (
+            {isAgentActive ? (
               <>
-                <button
-                  onClick={handleResume}
-                  className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
-                  title="Resume"
-                  aria-label="Resume"
-                >
-                  <Play className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={handleSend}
-                  disabled={!canSend || !activeSessionId}
-                  className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
-                  title="Send"
-                  aria-label="Send"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </>
-            ) : isAgentActive ? (
-              <>
-                {agentStatus !== "waiting_approval" && (
-                  <button
-                    onClick={handlePause}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 bg-athena-warning text-white hover:opacity-90 flex-shrink-0 min-h-[48px] w-[48px]"
-                    title="Pause"
-                    aria-label="Pause"
-                  >
-                    <Pause className="w-4 h-4" />
-                  </button>
-                )}
                 <button
                   onClick={handleStop}
                   className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-danger text-white hover:opacity-90 flex-shrink-0 min-h-[48px] w-[48px]"
-                  title="Stop"
-                  aria-label="Stop"
+                  title="取消运行"
+                  aria-label="取消运行"
                 >
                   <Square className="w-4 h-4" />
                 </button>
@@ -832,7 +831,7 @@ function Chat({ sendEvent }: ChatProps) {
             )}
           </div>
           <p className="text-xs text-athena-muted mt-2 text-center">
-            Athena may produce incorrect information. Verify important details.
+            Athena 可能会产生错误信息，请核对重要内容。
           </p>
           {activeSessionId && (
             <button
@@ -841,7 +840,7 @@ function Chat({ sendEvent }: ChatProps) {
               className="mt-2 inline-flex items-center gap-1.5 text-xs text-athena-muted hover:text-athena-text"
             >
               <Files className="w-3.5 h-3.5" />
-              {attachments.length} file{attachments.length === 1 ? "" : "s"}
+              {attachments.length} 个文件
             </button>
           )}
           {showFiles && activeSessionId && (

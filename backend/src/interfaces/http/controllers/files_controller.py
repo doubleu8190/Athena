@@ -119,10 +119,7 @@ def build_files_router(
         return {"extensions": values}
 
     @router.get("/attachments/{attachment_id}", response_model=AttachmentResponse)
-    @router.get("/attachments/{file_id}", response_model=AttachmentResponse, include_in_schema=False)
-    async def get_attachment(session_id: str, attachment_id: str | None = None, file_id: str | None = None) -> AttachmentResponse:
-        attachment_id = attachment_id or file_id
-        assert attachment_id is not None
+    async def get_attachment(session_id: str, attachment_id: str) -> AttachmentResponse:
         try:
             value = await service().get(session_id, attachment_id)
         except SessionNotFoundError as exc:
@@ -132,16 +129,13 @@ def build_files_router(
         return AttachmentResponse.from_domain(value)
 
     @router.delete("/attachments/{attachment_id}")
-    @router.delete("/attachments/{file_id}", include_in_schema=False)
-    async def delete_attachment(session_id: str, attachment_id: str | None = None, file_id: str | None = None) -> dict[str, str]:
-        attachment_id = attachment_id or file_id
-        assert attachment_id is not None
+    async def delete_attachment(session_id: str, attachment_id: str) -> dict[str, str]:
         try:
             await service().delete(session_id, attachment_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except AttachmentNotFoundError as exc:
             raise HTTPException(status_code=404, detail="attachment_not_found") from exc
-        return {"status": "deleted", "file_id": attachment_id}
+        return {"status": "deleted", "attachment_id": attachment_id}
 
     return router

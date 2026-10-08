@@ -20,7 +20,4 @@ class MemoryRepositoryPort(Protocol):
     async def flush_access_stats(self) -> int: ...
 
 
-# 旧名称及旧方法由兼容适配器保留；正式端口名称明确其职责。
-MemoryPort = MemoryRepositoryPort
-
-__all__ = ["MemoryPort", "MemoryRepositoryPort"]
+__all__ = ["MemoryRepositoryPort"]

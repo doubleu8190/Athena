@@ -55,22 +55,22 @@ async def test_approval_recovery_and_memory_lifecycle_branches() -> None:
     class Memory:
         async def initialize(self): self.initialized = True
         async def search(self, value): return []
-        async def list(self, value): return SimpleNamespace()
+        async def list_memories(self, value): return SimpleNamespace()
         async def get(self, value): return None
         async def revisions(self, value): return []
-        async def add(self, value): return "m"
+        async def create_memory(self, value): return "m"
         async def revise(self, *args, **kwargs): return None
-        async def set_validity(self, *args, **kwargs): return False
+        async def update_validity(self, *args, **kwargs): return False
         async def delete(self, value): self.deleted = value
         async def flush_access_stats(self): return 3
 
     memory = MemoryService(Memory())
     await memory.initialize()
-    await memory.search(MemorySearchRequest("q")); await memory.list(MemoryListRequest())
+    await memory.search(MemorySearchRequest("q")); await memory.list_memories(MemoryListRequest())
     await memory.get("m"); await memory.revisions("m")
-    assert await memory.add(MemoryWriteCommand("x")) == "m"
+    assert await memory.create_memory(MemoryWriteCommand("x")) == "m"
     assert await memory.revise("m", "x") is None
-    assert await memory.set_validity("m", "expired") is False
+    assert await memory.update_validity("m", "expired") is False
     await memory.delete("m")
     assert await memory.flush_access_stats() == 3
     with pytest.raises(ValueError): await memory.revise("m", " ")
@@ -82,7 +82,7 @@ async def test_tool_and_mcp_service_branches() -> None:
     config = ToolConfig("x", ToolExecutionMode.NATIVE, None, None, "x", JsonSchema(), RiskLevel.LOW, False, True, stamp, stamp)
 
     class Repo:
-        async def list_all(self): return [config]
+        async def list_tools(self): return [config]
         async def get(self, name): return config if name == "x" else None
         async def upsert(self, value): self.value = value; return value
 
@@ -90,7 +90,7 @@ async def test_tool_and_mcp_service_branches() -> None:
         async def execute(self, value): return value
 
     service = ToolService(Repo(), Exec())
-    assert await service.list() == [config]
+    assert await service.list_tools() == [config]
     assert await service.get("x") == config
     assert await service.get("missing") is None
     updated = await service.update_governance("x", risk_level="high", require_approval=True, enabled=False)
@@ -131,24 +131,24 @@ async def test_ingestion_and_knowledge_error_branches() -> None:
         async def parse(self, value): return ParsedDocument("hello", FileMetadata(), adapter_name="parsed", adapter_version="2", capabilities=("text",))
 
     class Index:
-        async def index(self, attachment, chunks): self.indexed = True
-        async def delete(self, key): self.deleted = key
+        async def index_attachment(self, attachment, chunks): self.indexed = True
+        async def delete_attachment(self, key): self.deleted = key
 
     def chunker(text): return [FileChunk("c", "pending", 0, text, 1, FileLocator(), FileMetadata())]
     service = IngestionService(Attachments(), Chunks(), Parser(), Index(), Index(), chunker=chunker, clock=lambda: NOW)
-    result = await service.process("a")
+    result = await service.process_attachment("a")
     assert result["status"] == "ready"
     await service.delete_indexes("a")
-    with pytest.raises(LookupError): await service.process("missing")
+    with pytest.raises(LookupError): await service.process_attachment("missing")
 
     class Bases:
         async def get(self, key): return None
-        async def list_all(self): return []
+        async def list_knowledge_bases(self): return []
         async def create(self, value): return value
         async def save(self, value): return value
         async def delete(self, key): return False
     class Docs:
-        async def list(self, key): return []
+        async def list_documents(self, key): return []
         async def list_versions(self, *args, **kwargs): return []
         async def latest_for_filename(self, *args, **kwargs): return None
         async def create(self, value): return value
@@ -164,9 +164,9 @@ async def test_ingestion_and_knowledge_error_branches() -> None:
         async def cancel(self, key): pass
     kb = KnowledgeBaseService(Bases(), Docs(), Storage(), Adapters(), Jobs(), id_factory=lambda: "id", clock=lambda: NOW)
     with pytest.raises(Exception): await kb.get("missing")
-    with pytest.raises(ValueError): await kb.create(" ")
-    with pytest.raises(Exception): await kb.update("missing", "x")
+    with pytest.raises(ValueError): await kb.create_knowledge_base(" ")
+    with pytest.raises(Exception): await kb.update_knowledge_base("missing", "x")
     with pytest.raises(Exception): await kb.list_documents("missing")
     with pytest.raises(Exception): await kb.list_versions("missing", "a")
     with pytest.raises(Exception): await kb.delete_document("missing", "a")
-    assert await kb.list() == [] and await kb.supported_extensions() == [".txt"]
+    assert await kb.list_knowledge_bases() == [] and await kb.supported_extensions() == [".txt"]

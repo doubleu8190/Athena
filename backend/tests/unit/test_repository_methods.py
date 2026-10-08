@@ -137,7 +137,7 @@ async def test_session_and_message_repositories_cover_crud_and_attachment_reader
         compression_summary=None, last_compressed_message_id=None, last_summarized_message_id=None,
     )
     db.results = [Result(rows=[session_row])]
-    assert len(await repo.list_all()) == 1
+    assert len(await repo.list_sessions()) == 1
     assert await repo.save(value) == value
     db.results = [Result(scalar="s-1")]
     assert await repo.delete("s-1")
@@ -184,7 +184,7 @@ async def test_file_and_knowledge_repositories_cover_versions_and_cleanup():
     db.results = [Result(scalar=attachment_row(doc))]
     assert (await docs.get("a-1", knowledge_base_id="kb-1")).id == "a-1"
     db.results = [Result(rows=[attachment_row(doc)])]
-    assert len(await docs.list("kb-1")) == 1
+    assert len(await docs.list_documents("kb-1")) == 1
     db.results = [Result(scalar=attachment_row(doc)), Result(rows=[attachment_row(doc)])]
     assert len(await docs.list_versions("a-1", knowledge_base_id="kb-1")) == 1
     db.results = [Result(scalar=attachment_row(doc))]
@@ -203,14 +203,14 @@ async def test_tool_mcp_knowledge_and_artifact_repositories_cover_crud():
         description="Search", parameters_schema_json="{}", risk_level="low", require_approval=0,
         enabled=1, created_at=stamp.isoformat(), updated_at=stamp.isoformat())
     db.get_values = [row]; assert (await tools.get("search")).tool_name == "search"
-    db.results = [Result(rows=[row])]; assert len(await tools.list_all()) == 1
+    db.results = [Result(rows=[row])]; assert len(await tools.list_tools()) == 1
     db.get_values = [row]; assert await tools.update(config) == config
 
     server = MCPServer("srv", MCPServerConfig("python", (), {}, None, "none", True), stamp)
     mcp = PostgresMCPServerRepository(factory(db)); db.get_values = [None]; assert await mcp.upsert(server) == server
     mrow = SimpleNamespace(name="srv", config_json='{"command":"python","args":[],"env":{},"enabled":true}', created_at=stamp.isoformat(), deleted_time=None)
     db.results = [Result(scalar=mrow)]; assert (await mcp.get("srv")).name == "srv"
-    db.results = [Result(rows=[mrow])]; assert len(await mcp.list_all()) == 1
+    db.results = [Result(rows=[mrow])]; assert len(await mcp.list_servers()) == 1
     db.results = [Result()]; assert await mcp.delete("srv")
 
     kb = KnowledgeBase("kb-1", "KB", "", 0, 0, 0, stamp, stamp)
@@ -219,7 +219,7 @@ async def test_tool_mcp_knowledge_and_artifact_repositories_cover_crud():
     db.results = [Result(scalar=krow), Result(rows=[attachment_row(attachment(knowledge=True))])]
     assert (await kbr.get("kb-1")).document_count == 1
     db.results = [Result(rows=[krow]), Result(rows=[attachment_row(attachment(knowledge=True))])]
-    assert len(await kbr.list_all()) == 1
+    assert len(await kbr.list_knowledge_bases()) == 1
     assert await kbr.save(kb) == kb
     db.results = [Result(scalar="kb-1")]; assert await kbr.delete("kb-1")
 
@@ -230,4 +230,4 @@ async def test_tool_mcp_knowledge_and_artifact_repositories_cover_crud():
     registry = PostgresAdapterRegistryRepository(factory(db))
     await registry.replace_all([AdapterInfo("text", "1", ("text/plain",), (".txt",), ("text",))])
     db.results = [Result(rows=[SimpleNamespace(name="text", version="1", mime_types_json='["text/plain"]', extensions_json='[".txt"]', capabilities_json='["text"]', enabled=1)])]
-    assert (await registry.list_all())[0].name == "text"
+    assert (await registry.list_adapters())[0].name == "text"

@@ -61,10 +61,6 @@ class PostgresMCPServerRepository:
             rows = result.scalars().all()
         return [mcp_server_model_to_domain(row) for row in rows]
 
-    async def list_all(self) -> list[MCPServer]:
-        """兼容旧调用方；新代码使用 ``list_servers``。"""
-        return await self.list_servers()
-
     async def delete(self, name: str) -> bool:
         """软删除 MCP 服务端。"""
         async with self._session_factory() as db:

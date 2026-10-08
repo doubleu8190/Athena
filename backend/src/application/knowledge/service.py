@@ -53,12 +53,7 @@ class KnowledgeBaseService:
         )
 
     async def list_knowledge_bases(self) -> list[KnowledgeBase]:
-        method = getattr(self._repositories, "list_knowledge_bases", None) or self._repositories.list_all
-        return await method()
-
-    async def list(self) -> list[KnowledgeBase]:
-        """兼容旧 Controller 调用方。"""
-        return await self.list_knowledge_bases()
+        return await self._repositories.list_knowledge_bases()
 
     async def get(self, knowledge_base_id: str) -> KnowledgeBase:
         value = await self._repositories.get(knowledge_base_id)
@@ -103,24 +98,11 @@ class KnowledgeBaseService:
 
     async def delete_knowledge_base(self, knowledge_base_id: str) -> None:
         await self.get(knowledge_base_id)
-        list_documents = getattr(self._documents, "list_documents", None) or self._documents.list
-        for document in await list_documents(knowledge_base_id):
+        for document in await self._documents.list_documents(knowledge_base_id):
             await self._jobs.cancel(document.id)
             await self._documents.soft_delete(document.id, knowledge_base_id=knowledge_base_id)
         if not await self._repositories.delete(knowledge_base_id):
             raise KnowledgeBaseNotFoundError(knowledge_base_id)
-
-    async def create(self, name: str, description: str = "") -> KnowledgeBase:
-        """兼容旧 Controller 调用方。"""
-        return await self.create_knowledge_base(name, description)
-
-    async def update(self, knowledge_base_id: str, name: str, description: str = "") -> KnowledgeBase:
-        """兼容旧 Controller 调用方。"""
-        return await self.update_knowledge_base(knowledge_base_id, name, description)
-
-    async def delete(self, knowledge_base_id: str) -> None:
-        """兼容旧 Controller 调用方。"""
-        await self.delete_knowledge_base(knowledge_base_id)
 
     async def upload_document(
         self,

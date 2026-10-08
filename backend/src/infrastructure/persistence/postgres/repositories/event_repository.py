@@ -1,6 +1,6 @@
 """PostgreSQL durable event-store implementation."""
 
-from .runtime_repositories import PostgresEventRepository as _RuntimeEventRepository
+from ._runtime import PostgresEventRepository as _RuntimeEventRepository
 
 
 class PostgresEventRepository(_RuntimeEventRepository):

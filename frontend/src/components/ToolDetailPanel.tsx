@@ -1,6 +1,6 @@
 import type { ToolCall } from "../types"
 import { safeStringify } from "../utils/safeStringify"
-import { summarizeToolCall, toolDisplayData } from "../utils/toolSummary"
+import { toolActionLabel, toolStatusLabel, toolStatusPhase } from "../utils/executionCopy"
 
 interface ToolDetailPanelProps {
   toolCall: ToolCall
@@ -8,27 +8,22 @@ interface ToolDetailPanelProps {
 }
 
 export function ToolDetailPanel({ toolCall, debug = false }: ToolDetailPanelProps) {
-  const summary = summarizeToolCall(toolDisplayData(toolCall))
   const argCount = Object.keys(toolCall.arguments ?? {}).length
 
   return (
     <div className="space-y-3">
       <div className="rounded-md border border-athena-border/60 bg-athena-bg/30 px-3 py-2">
-        <div className="text-[11px] uppercase text-athena-muted">Summary</div>
-        <div className="mt-1 text-xs text-athena-text/90">{summary.summary}</div>
-        {summary.outputPreview && (
-          <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap rounded bg-athena-bg px-2 py-1.5 text-[11px] text-athena-text/75">
-            {summary.outputPreview}
-          </pre>
-        )}
+        <div className="text-[11px] text-athena-muted">执行情况</div>
+        <div className="mt-1 text-xs text-athena-text/90">{toolActionLabel(toolCall.tool_name, toolStatusPhase(toolCall.status))} · {toolStatusLabel(toolCall.status)}</div>
       </div>
 
+      <div className="text-xs text-athena-muted">技术详情 · 工具标识：<code className="break-all">{toolCall.tool_name}</code></div>
       {argCount > 0 && (
-        <DetailBlock title={`Arguments (${argCount})`} value={toolCall.arguments} />
+        <DetailBlock title={`操作参数（${argCount} 项）`} value={toolCall.arguments} />
       )}
 
       {toolCall.output && (
-        <DetailBlock title="Output" value={toolCall.output} maxLen={debug ? 50000 : 12000} />
+        <DetailBlock title="原始返回内容" value={toolCall.output} maxLen={debug ? 50000 : 12000} />
       )}
 
       {toolCall.error && (
@@ -39,7 +34,7 @@ export function ToolDetailPanel({ toolCall, debug = false }: ToolDetailPanelProp
 
       {debug && (
         <DetailBlock
-          title="Metadata"
+          title="运行元数据"
           value={{
             id: toolCall.id,
             step_id: toolCall.step_id,
@@ -68,7 +63,7 @@ function DetailBlock({
 }) {
   return (
     <div>
-      <div className="mb-1 text-[11px] uppercase text-athena-muted">{title}</div>
+      <div className="mb-1 text-[11px] text-athena-muted">{title}</div>
       <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-athena-bg/80 px-3 py-2 text-xs text-athena-text/80">
         {safeStringify(value, maxLen)}
       </pre>

@@ -15,17 +15,8 @@ from .options import PostgresOptions
 class PostgresEngine:
     """Owns the target SQLAlchemy engine and schema lifecycle."""
 
-    def __init__(self, options: PostgresOptions | object, *, create_schema: bool | None = None) -> None:
-        if isinstance(options, PostgresOptions):
-            self.options = options
-        else:
-            # Compatibility for callers still passing the old Settings object.
-            self.options = PostgresOptions(
-                url=options.postgres_url,
-                pool_size=options.postgres_pool_size,
-                max_overflow=options.postgres_max_overflow,
-                create_schema=options.postgres_create_schema,
-            )
+    def __init__(self, options: PostgresOptions, *, create_schema: bool | None = None) -> None:
+        self.options = options
         self.create_schema = self.options.create_schema if create_schema is None else create_schema
         self.engine: AsyncEngine | None = None
         self.session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -64,6 +55,4 @@ class PostgresEngine:
             yield session
 
 
-PostgresResource = PostgresEngine
-
-__all__ = ["PostgresEngine", "PostgresResource"]
+__all__ = ["PostgresEngine"]

@@ -1,14 +1,16 @@
 """事件领域类型和端口。"""
 
 from .entities import ApplicationEvent, EventDurability, EventType
-from .ports import EventHistoryPort, EventPublisherPort, EventStorePort, EventSubscriptionPort, RealtimeTransportPort
+from .publisher_ports import EventPublisherPort
+from .store_ports import EventHistoryPort
+from .subscription_ports import EventSubscriptionPort
+from .transport_ports import RealtimeTransportPort
 
 __all__ = [
     "ApplicationEvent",
     "EventDurability",
     "EventPublisherPort",
     "EventHistoryPort",
-    "EventStorePort",
     "EventSubscriptionPort",
     "RealtimeTransportPort",
     "EventType",

@@ -51,7 +51,7 @@ class Attachments:
 
 
 class KnowledgeBases:
-    async def list_all(self):
+    async def list_knowledge_bases(self):
         return [KnowledgeBase("kb-1", "Docs", "reference", 4, 3, 100, NOW, NOW)]
 
 

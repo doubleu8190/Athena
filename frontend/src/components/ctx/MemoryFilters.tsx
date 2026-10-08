@@ -7,6 +7,9 @@ interface MemoryFiltersProps {
   onSearchChange: (value: string) => void
   expiredOnly: boolean
   onExpiredChange: (value: boolean) => void
+  sessionId: string
+  sessions: Array<{ id: string; title: string }>
+  onSessionChange: (value: string) => void
   onRefresh: () => void
 }
 
@@ -15,6 +18,9 @@ function MemoryFilters({
   onSearchChange,
   expiredOnly,
   onExpiredChange,
+  sessionId,
+  sessions,
+  onSessionChange,
   onRefresh,
 }: MemoryFiltersProps) {
   return (
@@ -37,6 +43,13 @@ function MemoryFilters({
       <div className="space-y-2">
         <FilterRow label="仅已过期" checked={expiredOnly} onChange={onExpiredChange} />
       </div>
+      <label className="block space-y-1 text-xs text-athena-muted">
+        <span>会话</span>
+        <select value={sessionId} onChange={(event) => onSessionChange(event.target.value)} className="input px-2 py-2 text-xs">
+          <option value="">全部会话</option>
+          {sessions.map((session) => <option key={session.id} value={session.id}>{session.title}</option>)}
+        </select>
+      </label>
     </div>
   )
 }

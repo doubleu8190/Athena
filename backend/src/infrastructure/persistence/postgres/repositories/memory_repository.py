@@ -1,6 +1,6 @@
 """PostgreSQL long-term memory implementation."""
 
-from .runtime_repositories import PostgresMemoryRepository as _RuntimeMemoryRepository
+from ._runtime import PostgresMemoryRepository as _RuntimeMemoryRepository
 
 
 class PostgresMemoryRepository(_RuntimeMemoryRepository):

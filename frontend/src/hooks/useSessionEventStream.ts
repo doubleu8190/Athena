@@ -3,6 +3,7 @@ import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import type { ApplicationEventEnvelope, ExecutionError } from "../types/events"
 import type { ExecutionTimelineEntry, Message, ToolCall } from "../types"
+import { approvalActionDescription, toolActionLabel } from "../utils/executionCopy"
 
 interface StreamProjection {
   nextChunkId: number
@@ -342,71 +343,89 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
   if (type === "thinking.started" || type === "thinking.summary") {
     return base({
       id: `thinking:${envelope.session_seq ?? crypto.randomUUID()}`,
-      label: text(data.content) || "Preparing response",
+      label: "正在分析并整理信息",
       status: "info",
     })
   }
   if (type === "thinking.completed") return null
 
-  if (type === "run.started" || type === "run.resumed") return base({ id: `run:${runId}`, label: "Execution started", status: "running" })
-  if (type === "run.completed") return base({ id: `run:${runId}`, label: "Execution completed", status: "completed" })
-  if (type === "run.paused") return base({ id: `run:${runId}`, label: "Execution paused", status: "paused" })
-  if (type === "run.cancelled") return base({ id: `run:${runId}`, label: "Execution stopped", status: "info" })
-  if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "Execution budget reached" : "Execution failed", detail, status: "failed" })
+  if (type === "run.started") return base({ id: `run:${runId}`, label: "开始处理你的请求", status: "running" })
+  if (type === "run.resumed") return base({ id: `run:${runId}`, label: "继续处理请求", status: "running" })
+  if (type === "run.completed") return base({ id: `run:${runId}`, label: "任务已完成", status: "completed" })
+  if (type === "run.paused") return base({ id: `run:${runId}`, label: "任务已暂停", status: "paused" })
+  if (type === "run.cancelled") return base({ id: `run:${runId}`, label: "任务已取消", status: "info" })
+  if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "任务已达到运行限制" : "任务未能完成", detail, status: "failed" })
 
   if (type === "node.started" || type === "node.completed" || type === "node.failed") {
-    const nodeName = text(data.node_name) || "graph node"
+    const nodeName = text(data.node_name)
     const executionId = text(data.execution_id) || String(envelope.session_seq ?? crypto.randomUUID())
     const status = type === "node.started" ? "running" : type === "node.failed" ? "failed" : "completed"
-    const label = type === "node.started" ? `Node started: ${nodeName}` : type === "node.failed" ? `Node failed: ${nodeName}` : `Node completed: ${nodeName}`
+    const label = type === "node.started" ? "正在处理任务步骤" : type === "node.failed" ? "任务步骤未能完成" : "任务步骤已完成"
     return base({
       id: `node:${executionId}`,
       label,
       detail,
       status,
-      metadata: data.duration_ms !== undefined ? { duration_ms: data.duration_ms, node_name: nodeName } : { node_name: nodeName },
+      metadata: { ...(data.duration_ms !== undefined ? { duration_ms: data.duration_ms } : {}), ...(nodeName ? { node_name: nodeName } : {}) },
     })
   }
 
-  if (type === "llm.started") return base({ id: `llm:${text(data.call_id)}`, label: "Generating response", status: "running" })
-  if (type === "llm.completed") return base({ id: `llm:${text(data.call_id)}`, label: error ? "Response generation failed" : "Response generated", detail, status: error ? "failed" : "completed" })
+  if (type === "llm.started") return base({ id: `llm:${text(data.call_id)}`, label: "正在整理信息", status: "running" })
+  if (type === "llm.completed") return base({ id: `llm:${text(data.call_id)}`, label: error ? "信息整理未能完成" : "信息整理完成", detail, status: error ? "failed" : "completed" })
 
-  if (type === "tool.started") return base({
-    id: `tool:${text(data.tool_call_id)}`,
-    label: `Using tool: ${text(data.tool_name) || "tool"}`,
-    status: "running",
-    metadata: data.arguments ? { arguments: data.arguments } : undefined,
-  })
-  if (type === "tool.completed") return base({
-    id: `tool:${text(data.tool_call_id)}`,
-    label: error ? `Tool failed: ${text(data.tool_name) || "tool"}` : `Tool completed: ${text(data.tool_name) || "tool"}`,
-    detail: error || text(data.output) || undefined,
-    status: error ? "failed" : "completed",
-  })
+  if (type === "tool.started") {
+    const toolName = text(data.tool_name)
+    return base({
+      id: `tool:${text(data.tool_call_id)}`,
+      label: toolActionLabel(toolName, "started"),
+      status: "running",
+      metadata: { ...(toolName ? { tool_name: toolName } : {}), ...(data.arguments ? { arguments: data.arguments } : {}) },
+    })
+  }
+  if (type === "tool.completed") {
+    const toolName = text(data.tool_name)
+    const failed = Boolean(error) || data.status === "failed"
+    return base({
+      id: `tool:${text(data.tool_call_id)}`,
+      label: toolActionLabel(toolName, failed ? "failed" : "completed"),
+      detail: error || undefined,
+      status: failed ? "failed" : "completed",
+      metadata: { ...(toolName ? { tool_name: toolName } : {}), ...(data.output != null ? { output: data.output } : {}) },
+    })
+  }
 
-  if (type === "approval.required") return base({ id: `approval:${text(data.approval_id)}`, label: `Approval required: ${text(data.tool_name) || "tool"}`, status: "waiting", metadata: data.arguments ? { arguments: data.arguments } : undefined })
-  if (type === "approval.resolved") return base({ id: `approval:${text(data.approval_id)}`, label: "Approval resolved", status: "completed" })
+  if (type === "approval.required") {
+    const toolName = text(data.tool_name)
+    const args = (data.arguments as Record<string, unknown> | undefined) || {}
+    return base({ id: `approval:${text(data.approval_id)}`, label: "需要你确认这项操作", detail: approvalActionDescription(toolName, args), status: "waiting", metadata: { ...(toolName ? { tool_name: toolName } : {}), ...(data.arguments ? { arguments: data.arguments } : {}) } })
+  }
+  if (type === "approval.resolved") {
+    const decision = text(data.decision)
+    const detail = decision === "approved" ? "你已允许此操作继续。" : decision === "cancelled" ? "此操作已取消，未继续执行。" : "你已拒绝此操作，未继续执行。"
+    return base({ id: `approval:${text(data.approval_id)}`, label: "确认已提交", detail, status: "completed" })
+  }
 
   if (type.startsWith("plan.")) {
     const planId = text(data.plan_id)
-    const labels: Record<string, string> = { "plan.created": "Execution plan created", "plan.completed": "Execution plan completed", "plan.failed": "Execution plan failed", "plan.cancelled": "Execution plan cancelled" }
-    return base({ id: `plan:${planId}`, label: labels[type] || "Execution plan updated", detail: error || text(data.goal) || undefined, status: type === "plan.failed" ? "failed" : type === "plan.created" ? "running" : "completed" })
+    const labels: Record<string, string> = { "plan.created": "已制定执行计划", "plan.completed": "执行计划已完成", "plan.failed": "执行计划未能完成", "plan.cancelled": "执行计划已取消" }
+    return base({ id: `plan:${planId}`, label: labels[type] || "执行计划已更新", detail: error || undefined, status: type === "plan.failed" ? "failed" : type === "plan.created" ? "running" : "completed" })
   }
   if (type.startsWith("task.")) {
     const taskId = text(data.task_id)
     const status = type === "task.failed" ? "failed" : type === "task.completed" ? "completed" : type === "task.started" ? "running" : "waiting"
-    return base({ id: `task:${taskId}`, label: `${type === "task.completed" ? "Task completed" : type === "task.failed" ? "Task failed" : type === "task.started" ? "Task started" : "Task queued"}: ${text(data.title) || taskId || "task"}`, detail, status })
+    const labels: Record<string, string> = { "task.queued": "子任务已排队", "task.started": "正在处理子任务", "task.retrying": "正在重试子任务", "task.completed": "子任务已完成", "task.failed": "子任务未能完成" }
+    return base({ id: `task:${taskId}`, label: labels[type] || "正在处理子任务", detail, status })
   }
-  if (type.startsWith("synthesis.")) return base({ id: `synthesis:${text(data.plan_id)}`, label: type === "synthesis.started" ? "Combining task results" : "Task results combined", status: type === "synthesis.started" ? "running" : "completed" })
+  if (type.startsWith("synthesis.")) return base({ id: `synthesis:${text(data.plan_id)}`, label: type === "synthesis.started" ? "正在汇总处理结果" : "处理结果已汇总", status: type === "synthesis.started" ? "running" : "completed" })
 
-  if (type === "agent.waiting_for_files") return base({ id: `files:${runId}`, label: "Waiting for files to finish processing", status: "waiting" })
+  if (type === "agent.waiting_for_files") return base({ id: `files:${runId}`, label: "等待文件处理完成后继续", status: "waiting" })
   if (type.startsWith("file_processing")) {
     const attachmentId = text(data.attachment_id)
     const status = type.endsWith("failed") ? "failed" : type.endsWith("completed") ? "completed" : "running"
-    const label = type.endsWith("failed") ? "File processing failed" : type.endsWith("completed") ? "File processing completed" : "Processing file"
+    const label = type.endsWith("failed") ? "文件处理失败" : type.endsWith("completed") ? "文件已处理完成" : "正在处理文件"
     return base({ id: `file:${attachmentId}`, label, detail, status })
   }
-  if (type === "attachment_updated") return base({ id: `attachment:${text(data.attachment_id)}`, label: "File status updated", status: "info" })
+  if (type === "attachment_updated") return base({ id: `attachment:${text(data.attachment_id)}`, label: "附件状态已更新", status: "info" })
 
   return null
 }

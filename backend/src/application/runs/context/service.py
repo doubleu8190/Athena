@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .providers import ContextProvider
+from .protocols import ContextProvider
 
 from .contracts import ContextBundle, ContextItem, ContextPlan, ProviderResult
 
@@ -45,7 +45,7 @@ class ContextAcquisitionService:
                         run_id=run_id,
                     )
                     if callable(provider)
-                    else provider.acquire(
+                    else provider.retrieve_context(
                         session_id=session_id,
                         task=task,
                         plan=plan,
@@ -107,19 +107,6 @@ class ContextAcquisitionService:
             except Exception:
                 pass
         return bundle
-
-    async def acquire(
-        self,
-        *,
-        session_id: str,
-        task: Any,
-        plan: ContextPlan,
-        run_id: str | None = None,
-    ) -> ContextBundle:
-        """Compatibility alias for callers migrated from the original API."""
-        return await self.retrieve_context(
-            session_id=session_id, task=task, plan=plan, run_id=run_id
-        )
 
 
 __all__ = ["ContextAcquisitionService"]

@@ -13,7 +13,7 @@ interface ViewShellProps {
 function ViewShell({ side, children }: ViewShellProps) {
   return (
     <>
-      <aside className="w-[248px] flex-shrink-0 bg-athena-surface border-r border-athena-border overflow-y-auto min-h-0">
+      <aside className="max-h-[28vh] w-full flex-shrink-0 overflow-y-auto border-b border-athena-border bg-athena-surface md:max-h-none md:min-h-0 md:w-[248px] md:border-b-0 md:border-r">
         {side}
       </aside>
       <main className="flex-1 flex flex-col min-w-0 min-h-0">

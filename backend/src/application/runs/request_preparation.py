@@ -188,7 +188,7 @@ class RunRequestPreparationService:
                 "document_count": item.document_count,
                 "ready_document_count": item.ready_document_count,
             }
-            for item in await (getattr(self._knowledge_bases, "list_knowledge_bases", None) or self._knowledge_bases.list_all)()
+            for item in await self._knowledge_bases.list_knowledge_bases()
         ]
 
 

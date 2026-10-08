@@ -12,7 +12,7 @@ class PostgresUnitOfWork:
     """管理一个用例范围内的异步数据库会话和事务。
 
     Repository 通过 ``session_factory`` 注入独立会话；跨 repository 的原子写入
-    使用本类提供的 ``session`` 和事务边界。它不暴露旧 ``Database`` 门面。
+    使用本类提供的 ``session`` 和事务边界。
     """
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:

@@ -42,12 +42,6 @@ class EventStreamService:
         await self.ensure_session(session_id)
         return await self._subscriptions.open_subscription(session_id)
 
-    async def open(
-        self, session_id: str, after: int | None = None
-    ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
-        """Compatibility alias; replay cursors belong to ``replay``."""
-        return await self.open_subscription(session_id)
-
     async def replay(
         self, session_id: str, after: int, upto: int
     ) -> list[ApplicationEvent]:

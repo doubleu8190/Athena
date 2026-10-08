@@ -10,12 +10,7 @@ class KnowledgeBaseQueryService:
         self._repository = repository
 
     async def list_knowledge_bases(self) -> list[KnowledgeBase]:
-        method = getattr(self._repository, "list_knowledge_bases", None) or self._repository.list_all
-        return await method()
-
-    async def list(self) -> list[KnowledgeBase]:
-        """兼容旧 Controller 调用方。"""
-        return await self.list_knowledge_bases()
+        return await self._repository.list_knowledge_bases()
 
     async def get(self, knowledge_base_id: str) -> KnowledgeBase | None:
         return await self._repository.get(knowledge_base_id)

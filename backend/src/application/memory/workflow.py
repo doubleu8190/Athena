@@ -28,7 +28,7 @@ class MemoryWriteWorkflow:
         self._extractor = extractor
         self._resolver = resolver
 
-    async def process(self, turn: CompletedTurn) -> int:
+    async def process_completed_turn(self, turn: CompletedTurn) -> int:
         """处理一轮对话并返回实际写入的候选数量。"""
         if not self._trigger.should_process(turn):
             return 0
@@ -61,6 +61,10 @@ class MemoryWriteWorkflow:
                 )
                 written += 1
         return written
+
+    async def process(self, turn: CompletedTurn) -> int:
+        """Compatibility alias for the old worker entry point."""
+        return await self.process_completed_turn(turn)
 
 
 __all__ = ["MemoryWriteWorkflow"]

@@ -44,7 +44,8 @@ class KnowledgeDocumentWorker:
         attachment_id = str(job["attachment_id"])
         attempt = int(job.get("attempt", 1))
         try:
-            result = await self._ingestion.process(attachment_id)
+            processor = getattr(self._ingestion, "process_attachment", None)
+            result = await (processor or self._ingestion.process)(attachment_id)
             await self._queue.mark_succeeded(job_id, result)
         except Exception as exc:
             await self._queue.mark_failed(

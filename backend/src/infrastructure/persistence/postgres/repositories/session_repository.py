@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from domain.sessions import Session
 
 from ..models import SessionModel
-from .converters import session_domain_to_model, session_model_to_domain
+from ..mappers.converters import session_domain_to_model, session_model_to_domain
 
 
 class PostgresSessionRepository:

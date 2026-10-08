@@ -1,4 +1,7 @@
-"""Provider-neutral LLM and embedding adapters owned by the target package."""
+"""Compatibility module for LLM and embedding providers.
+
+Use ``llm_provider`` and ``embedding_provider`` for new imports.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,13 @@ import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from .options import (
+    EmbeddingOptions,
+    LLMOptions,
+    coerce_embedding_options,
+    coerce_llm_options,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,7 +25,7 @@ class RetryPolicy:
     delay_seconds: float = 0.0
 
 
-class TargetLLMProvider:
+class RetryingLLMProvider:
     """Wrap an injected async model with timeout and bounded retry behavior."""
 
     def __init__(self, model: Any, *, policy: RetryPolicy | None = None, token_counter: Callable[[str], int] | None = None) -> None:
@@ -40,7 +50,7 @@ class TargetLLMProvider:
         return int(self._token_counter(text))
 
 
-class TargetEmbeddingProvider:
+class EmbeddingProvider:
     """Adapt an injected sync or async embedding callable to a stable API."""
 
     def __init__(self, embedder: Callable[[Sequence[str]], Any], *, dimension: int) -> None:
@@ -72,24 +82,24 @@ class _EchoModel:
         return {"content": str(value)}
 
 
-class ConfiguredLLMProvider(TargetLLMProvider):
+class ConfiguredLLMProvider(RetryingLLMProvider):
     """Lazy provider selected from target ``Settings``.
 
     Imports and network clients are created on first invocation, so building
     the dependency graph remains side-effect free and testable.
     """
 
-    def __init__(self, settings: Any) -> None:
-        self._settings = settings
+    def __init__(self, options: LLMOptions | Any) -> None:
+        self._options = coerce_llm_options(options)
         self._loaded = False
         super().__init__(_EchoModel(), policy=RetryPolicy(
-            attempts=settings.llm_retry.max_attempts,
-            timeout_seconds=settings.llm_retry.timeout_ms / 1000,
-            delay_seconds=settings.llm_retry.min_delay_ms / 1000,
+            attempts=self._options.retry.attempts,
+            timeout_seconds=self._options.retry.timeout_seconds,
+            delay_seconds=self._options.retry.delay_seconds,
         ))
 
     def _load_model(self) -> Any:
-        config = self._settings.primary_llm
+        config = self._options.primary
         provider = config.provider.strip().lower()
         if provider in {"echo", "local", "test"} or not config.api_key:
             return _EchoModel()
@@ -125,32 +135,32 @@ class ConfiguredLLMProvider(TargetLLMProvider):
         return await super().invoke(messages, **kwargs)
 
 
-class ConfiguredEmbeddingProvider(TargetEmbeddingProvider):
+class ConfiguredEmbeddingProvider(EmbeddingProvider):
     """Lazy embedding provider selected from target ``Settings``."""
 
-    def __init__(self, settings: Any) -> None:
-        self._settings = settings
+    def __init__(self, options: EmbeddingOptions | Any) -> None:
+        self._options = coerce_embedding_options(options)
         self._loaded = False
-        super().__init__(self._embed, dimension=settings.embedding_dimension)
+        super().__init__(self._embed, dimension=self._options.dimension)
 
     def _load(self) -> Any:
-        config = self._settings
-        provider = config.embedding_provider.strip().lower()
+        config = self._options
+        provider = config.provider.strip().lower()
         if provider in {"echo", "local", "test"}:
-            return lambda values: [[float(len(value))] * config.embedding_dimension for value in values]
+            return lambda values: [[float(len(value))] * config.dimension for value in values]
         if provider in {"sentence_transformers", "sentence-transformers"}:
             from sentence_transformers import SentenceTransformer
-            return SentenceTransformer(config.embedding_model, device=config.embedding_device)
+            return SentenceTransformer(config.model, device=config.device)
         if provider == "openai":
             from langchain_openai import OpenAIEmbeddings
-            kwargs: dict[str, Any] = {"model": config.embedding_model, "api_key": config.embedding_api_key}
-            if config.embedding_base_url:
-                kwargs["base_url"] = config.embedding_base_url
+            kwargs: dict[str, Any] = {"model": config.model, "api_key": config.api_key}
+            if config.base_url:
+                kwargs["base_url"] = config.base_url
             return OpenAIEmbeddings(**kwargs)
         if provider == "ollama":
             from langchain_ollama import OllamaEmbeddings
-            return OllamaEmbeddings(model=config.embedding_model, base_url=config.embedding_base_url or "http://localhost:11434")
-        raise ValueError(f"Unsupported embedding provider: {config.embedding_provider}")
+            return OllamaEmbeddings(model=config.model, base_url=config.base_url or "http://localhost:11434")
+        raise ValueError(f"Unsupported embedding provider: {config.provider}")
 
     def _embed(self, values: Sequence[str]) -> Any:
         if not self._loaded:
@@ -168,6 +178,10 @@ __all__ = [
     "ConfiguredEmbeddingProvider",
     "ConfiguredLLMProvider",
     "RetryPolicy",
-    "TargetEmbeddingProvider",
-    "TargetLLMProvider",
+    "EmbeddingProvider",
+    "RetryingLLMProvider",
 ]
+
+# Compatibility names for clients from the migration period.
+TargetEmbeddingProvider = EmbeddingProvider
+TargetLLMProvider = RetryingLLMProvider

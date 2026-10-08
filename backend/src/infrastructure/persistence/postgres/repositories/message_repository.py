@@ -14,7 +14,7 @@ from domain.sessions import (
 )
 
 from ..models import MessageModel
-from .converters import message_domain_to_model, message_model_to_domain
+from ..mappers.converters import message_domain_to_model, message_model_to_domain
 
 AttachmentReader = Callable[[list[str]], Awaitable[dict[str, list[AttachmentRef]]]]
 

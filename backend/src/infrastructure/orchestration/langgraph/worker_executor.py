@@ -6,7 +6,7 @@ from typing import Any
 
 from domain.orchestration import TaskExecution, TaskResult, TaskStatus, WorkerExecutor
 
-from .worker import build_worker_graph, invoke_worker_graph
+from .worker_graph import build_worker_graph, invoke_worker_graph
 
 
 class LangGraphWorkerExecutor(WorkerExecutor):

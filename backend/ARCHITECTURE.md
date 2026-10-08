@@ -22,6 +22,10 @@ Infrastructure 实现 domain/application 定义的 port，包括 PostgreSQL repo
 
 Bootstrap 负责构建对象图和生命周期。Workers 负责后台循环，但业务动作必须调用 Application Service，不能把业务规则写进消费循环。
 
+### Configuration
+
+`configuration` 负责从环境变量读取并校验完整的进程配置。Bootstrap 只在组装对象图时把配置映射为组件专用 options；Infrastructure 和 Interfaces 不得导入 `bootstrap.config` 或持有完整的 `Settings`。例如 PostgreSQL、LLM、Neo4j、Sandbox 和认证分别接收自己的不可变 options，公开设置查询接收脱敏后的配置快照。
+
 ## 目标结构
 
 ```text

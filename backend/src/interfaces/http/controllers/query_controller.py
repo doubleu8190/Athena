@@ -8,13 +8,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from application.common.query_services import (
-    MemoryQueryService,
-    ProviderQueryService,
-    RetrievalQueryService,
-    SettingsQueryService,
-)
-from application.memory import MemoryService
+from application.configuration import ProviderQueryService, SettingsQueryService
+from application.memory import MemoryQueryService, MemoryService
+from application.retrieval import RetrievalQueryService
 from application.knowledge import KnowledgeBaseQueryService
 from application.tools import ToolQueryService
 from domain.files import KnowledgeBase

@@ -33,11 +33,17 @@ class EventStreamService:
         if await self._sessions.get(session_id) is None:
             raise EventSessionNotFoundError(session_id)
 
-    async def open(
-        self, session_id: str, after: int
+    async def open_subscription(
+        self, session_id: str
     ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
         await self.ensure_session(session_id)
         return await self._events.open_subscription(session_id)
+
+    async def open(
+        self, session_id: str, after: int | None = None
+    ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
+        """Compatibility alias; replay cursors belong to ``replay``."""
+        return await self.open_subscription(session_id)
 
     async def replay(
         self, session_id: str, after: int, upto: int
@@ -48,4 +54,3 @@ class EventStreamService:
         self, session_id: str, queue: asyncio.Queue[ApplicationEvent]
     ) -> None:
         await self._transport.close_subscription(session_id, queue)
-

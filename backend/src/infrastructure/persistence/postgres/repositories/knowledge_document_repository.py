@@ -16,7 +16,7 @@ from ..models import (
     FileArtifactModel,
     FileChunkModel,
 )
-from .converters import attachment_domain_to_model, attachment_model_to_domain
+from ..mappers.converters import attachment_domain_to_model, attachment_model_to_domain
 
 
 class PostgresKnowledgeDocumentRepository:

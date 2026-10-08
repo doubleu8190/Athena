@@ -58,3 +58,6 @@ testpaths = ["tests"]
 markers = [
     "integration: requires ATHENA_TEST_DATABASE_URL and a reachable PostgreSQL instance",
 ]
+
+[tool.pyright]
+extraPaths = ["./src"]

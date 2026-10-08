@@ -10,7 +10,7 @@ from pathlib import Path
 from domain.tools import ToolExecutionPort, ToolExecutionRequest, ToolExecutionResult
 
 
-class NativeToolExecution(ToolExecutionPort):
+class BuiltinToolExecutor(ToolExecutionPort):
     def __init__(self, workspace_root: Path, *, max_output_bytes: int = 1_000_000) -> None:
         self._root = workspace_root.resolve()
         self._max_output_bytes = max_output_bytes
@@ -48,4 +48,6 @@ class NativeToolExecution(ToolExecutionPort):
             return ToolExecutionResult("failed", error=str(exc), duration_ms=(time.monotonic()-started)*1000)
 
 
-__all__ = ["NativeToolExecution"]
+NativeToolExecution = BuiltinToolExecutor
+
+__all__ = ["BuiltinToolExecutor", "NativeToolExecution"]

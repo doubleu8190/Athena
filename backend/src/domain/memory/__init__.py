@@ -13,12 +13,20 @@ from .entities import (
     MemoryResolution,
     ResolutionAction,
 )
-from .ports import MemoryFactExtractorPort, MemoryJobPort, MemoryPort, MemoryResolverPort, MemoryWriteTriggerPort
+from .ports import (
+    MemoryFactExtractorPort,
+    MemoryJobPort,
+    MemoryPort,
+    MemoryResolverPort,
+    MemoryVectorSearchPort,
+    MemoryWriteTriggerPort,
+)
 
 __all__ = [
     "MemoryListRequest",
     "MemoryPage",
     "MemoryPort",
+    "MemoryVectorSearchPort",
     "MemoryRecord",
     "MemorySearchRequest",
     "MemoryStatus",

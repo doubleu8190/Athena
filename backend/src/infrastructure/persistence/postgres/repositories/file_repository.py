@@ -14,7 +14,7 @@ from domain.files.entities import AttachmentStatus
 from ..models import FileChunkModel
 
 from ..models import AttachmentModel
-from .converters import (
+from ..mappers.converters import (
     attachment_domain_to_model,
     attachment_model_to_domain,
     file_chunk_domain_to_model,
@@ -55,6 +55,10 @@ class PostgresAttachmentRepository:
     async def list_by_session(self, session_id: str) -> list[Attachment]:
         """列出会话附件。"""
         return await self._list(AttachmentModel.session_id == session_id)
+
+    async def list_all(self) -> list[Attachment]:
+        """列出所有未删除附件，供跨知识库召回使用。"""
+        return await self._list(AttachmentModel.id.is_not(None))
 
     async def list_by_knowledge_base(self, knowledge_base_id: str) -> list[Attachment]:
         """列出知识库文档。"""

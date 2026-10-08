@@ -75,6 +75,15 @@ def test_interfaces_do_not_depend_on_concrete_repositories_or_old_runtime() -> N
     assert not any(module.startswith(forbidden) for module in imports for forbidden in forbidden_prefixes)
 
 
+def test_outer_layers_do_not_depend_on_bootstrap_configuration() -> None:
+    for directory in ("interfaces", "infrastructure"):
+        imports = _all_imports(directory)
+        assert not any(
+            module == "bootstrap.config" or module.startswith("bootstrap.config.")
+            for module in imports
+        )
+
+
 def test_restructured_tree_does_not_import_outer_athena_package() -> None:
     """整个迁移目标包必须能脱离旧 athena 源码被导入。"""
     imports = set().union(*(_imports(path) for path in ROOT.rglob("*.py")))

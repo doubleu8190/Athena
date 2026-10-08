@@ -53,6 +53,18 @@ class MemoryPort(Protocol):
     async def flush_access_stats(self) -> int: ...
 
 
+class MemoryVectorSearchPort(Protocol):
+    """按查询文本检索记忆向量。"""
+
+    async def query(
+        self,
+        text: str,
+        limit: int = 10,
+        *,
+        session_id: str | None = None,
+    ) -> list[dict[str, object]]: ...
+
+
 class MemoryWriteTriggerPort(Protocol):
     """判断一轮对话是否需要进入事实提取。"""
 
@@ -84,6 +96,7 @@ __all__ = [
     "MemoryFactExtractorPort",
     "MemoryJobPort",
     "MemoryPort",
+    "MemoryVectorSearchPort",
     "MemoryResolverPort",
     "MemoryWriteTriggerPort",
 ]

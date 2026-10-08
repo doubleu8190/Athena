@@ -30,12 +30,13 @@ class MemoryWorker:
                 continue
             turn = CompletedTurn(
                 turn_id=str(job["turn_id"]),
-                session_id=str(job["session_id"]),
+                session_id=str(job.get("session_id", "")),
                 user_text=str(job.get("user_text", "")),
                 assistant_text=str(job.get("assistant_text", "")),
             )
             try:
-                await self._workflow.process(turn)
+                processor = getattr(self._workflow, "process_completed_turn", None)
+                await (processor or self._workflow.process)(turn)
             except Exception as exc:
                 await self._jobs.fail(turn.turn_id, str(exc), retry=True)
             else:

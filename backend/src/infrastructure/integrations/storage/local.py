@@ -9,8 +9,8 @@ from pathlib import Path
 from domain.files import StoredBlob
 
 
-class LocalFileStorageAdapter:
-    """把旧 StorageLayer 隔离在 infrastructure。"""
+class LocalFileStorage:
+    """Store uploaded blobs in a local content-addressed directory."""
 
     def __init__(self, root: Path, max_upload_bytes: int) -> None:
         self._root = root
@@ -52,3 +52,6 @@ class LocalFileStorageAdapter:
         if not path.is_file():
             raise FileNotFoundError(storage_key)
         return path.read_bytes()
+
+
+LocalFileStorageAdapter = LocalFileStorage

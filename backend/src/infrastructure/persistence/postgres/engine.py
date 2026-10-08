@@ -8,17 +8,25 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from bootstrap.config import Settings
-
 from .models import Base
+from .options import PostgresOptions
 
 
-class PostgresResource:
+class PostgresEngine:
     """Owns the target SQLAlchemy engine and schema lifecycle."""
 
-    def __init__(self, settings: Settings, *, create_schema: bool = True) -> None:
-        self.settings = settings
-        self.create_schema = create_schema
+    def __init__(self, options: PostgresOptions | object, *, create_schema: bool | None = None) -> None:
+        if isinstance(options, PostgresOptions):
+            self.options = options
+        else:
+            # Compatibility for callers still passing the old Settings object.
+            self.options = PostgresOptions(
+                url=options.postgres_url,
+                pool_size=options.postgres_pool_size,
+                max_overflow=options.postgres_max_overflow,
+                create_schema=options.postgres_create_schema,
+            )
+        self.create_schema = self.options.create_schema if create_schema is None else create_schema
         self.engine: AsyncEngine | None = None
         self.session_factory: async_sessionmaker[AsyncSession] | None = None
 
@@ -26,10 +34,10 @@ class PostgresResource:
         if self.engine is not None:
             return
         self.engine = create_async_engine(
-            self.settings.postgres_url,
+            self.options.url,
             pool_pre_ping=True,
-            pool_size=self.settings.postgres_pool_size,
-            max_overflow=self.settings.postgres_max_overflow,
+            pool_size=self.options.pool_size,
+            max_overflow=self.options.max_overflow,
         )
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         if self.create_schema:
@@ -51,9 +59,11 @@ class PostgresResource:
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
         if self.session_factory is None:
-            raise RuntimeError("PostgresResource has not been started")
+            raise RuntimeError("PostgresEngine has not been started")
         async with self.session_factory() as session:
             yield session
 
 
-__all__ = ["PostgresResource"]
+PostgresResource = PostgresEngine
+
+__all__ = ["PostgresEngine", "PostgresResource"]

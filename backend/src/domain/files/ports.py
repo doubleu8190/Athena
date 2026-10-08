@@ -140,6 +140,18 @@ class VectorIndexerPort(Protocol):
     async def delete(self, attachment_id: str) -> None: ...
 
 
+class FileVectorSearchPort(Protocol):
+    """按查询文本检索文件分块向量。"""
+
+    async def query(
+        self,
+        text: str,
+        limit: int = 10,
+        *,
+        attachment_ids: set[str] | None = None,
+    ) -> list[dict[str, object]]: ...
+
+
 class GraphIndexerPort(Protocol):
     async def index(self, attachment: Attachment, chunks: list[FileChunk]) -> None: ...
 

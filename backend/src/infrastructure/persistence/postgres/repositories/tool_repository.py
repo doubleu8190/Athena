@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from domain.tools import ToolConfig
 
 from ..models import ToolModel
-from .converters import tool_domain_to_model, tool_model_to_domain
+from ..mappers.converters import tool_domain_to_model, tool_model_to_domain
 
 
 class PostgresToolConfigRepository:

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from domain.files import AdapterInfo, FileArtifact
 
 from ..models import AdapterRegistryModel, FileArtifactModel
-from .converters import (
+from ..mappers.converters import (
     adapter_domain_to_model,
     adapter_model_to_domain,
     file_artifact_domain_to_model,

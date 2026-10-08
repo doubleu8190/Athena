@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from domain.tools import MCPServer
 
 from ..models import MCPServerModel
-from .converters import mcp_server_domain_to_model, mcp_server_model_to_domain
+from ..mappers.converters import mcp_server_domain_to_model, mcp_server_model_to_domain
 
 
 class PostgresMCPServerRepository:

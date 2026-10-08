@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from bootstrap.config import Settings
+from .options import PublicConfiguration
 
 
 class ConfiguredSettingsQueries:
     """Expose provider and runtime settings through query-port methods."""
 
-    def __init__(self, settings: "Settings") -> None:
+    def __init__(self, settings: PublicConfiguration) -> None:
         self._settings = settings
 
     async def list_providers(self) -> list[dict[str, Any]]:
@@ -27,17 +26,17 @@ class ConfiguredSettingsQueries:
                 "temperature": item.temperature,
                 "max_tokens": item.max_tokens,
             }
-            for item in self._settings.llm_providers
+            for item in self._settings.providers
         ]
 
     async def get_settings(self) -> dict[str, Any]:
         """返回运行时设置的公开字段。"""
         return {
-            "host": self._settings.host,
-            "port": self._settings.port,
-            "debug": self._settings.debug,
-            "database_backend": self._settings.database_backend,
-            "workers_enabled": self._settings.workers_enabled,
+            "host": self._settings.runtime.host,
+            "port": self._settings.runtime.port,
+            "debug": self._settings.runtime.debug,
+            "database_backend": self._settings.runtime.database_backend,
+            "workers_enabled": self._settings.runtime.workers_enabled,
         }
 
 

@@ -5,10 +5,18 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from .options import SandboxOptions
+
 
 class DockerSandbox:
-    def __init__(self, settings) -> None:
-        self.settings = settings
+    def __init__(self, options: SandboxOptions | object) -> None:
+        self.options = options if isinstance(options, SandboxOptions) else SandboxOptions(
+            docker_binary=options.sandbox_docker_binary,
+            default_network=options.sandbox_default_network,
+            max_output_bytes=options.sandbox_max_output_bytes,
+            memory_mb=options.sandbox_memory_mb,
+            cpu_limit=options.sandbox_cpu_limit,
+        )
         self._processes: set[asyncio.subprocess.Process] = set()
 
     async def start(self) -> None:
@@ -18,8 +26,8 @@ class DockerSandbox:
         await self.close_all()
 
     async def execute(self, request):
-        argv = [self.settings.sandbox_docker_binary, "run", "--rm", "--network", self.settings.sandbox_default_network]
-        argv.extend(["--memory", f"{self.settings.sandbox_memory_mb}m", "--cpus", str(self.settings.sandbox_cpu_limit)])
+        argv = [self.options.docker_binary, "run", "--rm", "--network", self.options.default_network]
+        argv.extend(["--memory", f"{self.options.memory_mb}m", "--cpus", str(self.options.cpu_limit)])
         argv.extend(["-v", f"{request.workspace}:/workspace", "-w", "/workspace", request.image])
         argv.extend(request.argv)
         try:
@@ -38,12 +46,12 @@ class DockerSandbox:
         return SimpleNamespace(
             status="success" if process.returncode == 0 else "failed",
             exit_code=process.returncode,
-            stdout=stdout[: self.settings.sandbox_max_output_bytes].decode("utf-8", errors="replace"),
-            stderr=stderr[: self.settings.sandbox_max_output_bytes].decode("utf-8", errors="replace"),
+            stdout=stdout[: self.options.max_output_bytes].decode("utf-8", errors="replace"),
+            stderr=stderr[: self.options.max_output_bytes].decode("utf-8", errors="replace"),
         )
 
     async def health(self) -> bool:
-        process = await asyncio.create_subprocess_exec(self.settings.sandbox_docker_binary, "version", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        process = await asyncio.create_subprocess_exec(self.options.docker_binary, "version", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         return await process.wait() == 0
 
     async def close_all(self) -> None:

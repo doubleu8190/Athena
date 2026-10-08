@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from domain.files import KnowledgeBase
 
 from ..models import AttachmentModel, KnowledgeBaseModel
-from .converters import knowledge_base_domain_to_model, knowledge_base_model_to_domain
+from ..mappers.converters import knowledge_base_domain_to_model, knowledge_base_model_to_domain
 
 
 class PostgresKnowledgeBaseRepository:

@@ -19,13 +19,8 @@ from domain.files import (
     KnowledgeDocumentRepository,
 )
 
-
-class KnowledgeBaseNotFoundError(LookupError):
-    """知识库不存在。"""
-
-
-class KnowledgeDocumentNotFoundError(LookupError):
-    """知识库文档不存在。"""
+from .document_service import KnowledgeDocumentService
+from .errors import KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError
 
 
 class KnowledgeBaseService:
@@ -49,6 +44,15 @@ class KnowledgeBaseService:
         self._jobs = jobs
         self._id_factory = id_factory
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._document_service = KnowledgeDocumentService(
+            repositories,
+            documents,
+            storage,
+            adapters,
+            jobs,
+            id_factory=id_factory,
+            clock=self._clock,
+        )
 
     async def list(self) -> list[KnowledgeBase]:
         return await self._repositories.list_all()
@@ -110,68 +114,24 @@ class KnowledgeBaseService:
         mime_type: str,
         chunks: AsyncIterator[bytes],
     ) -> Attachment:
-        await self.get(knowledge_base_id)
-        safe_name = self._normalize_filename(filename)
-        adapter = self._adapters.select(safe_name, mime_type)
-        stored = await self._storage.save_stream(chunks)
-        previous = await self._documents.latest_for_filename(
-            safe_name, knowledge_base_id=knowledge_base_id
+        return await self._document_service.upload_document(
+            knowledge_base_id,
+            filename=filename,
+            mime_type=mime_type,
+            chunks=chunks,
         )
-        attachment_id = self._id_factory()
-        logical_document_id = previous.logical_document_id if previous else self._id_factory()
-        now = self._clock()
-        attachment = Attachment(
-            id=attachment_id,
-            logical_document_id=logical_document_id,
-            document_version=(previous.document_version + 1 if previous else 1),
-            session_id=None,
-            knowledge_base_id=knowledge_base_id,
-            message_id=None,
-            filename=safe_name,
-            mime_type=mime_type or "application/octet-stream",
-            size_bytes=stored.size_bytes,
-            sha256=stored.sha256,
-            storage_key=stored.storage_key,
-            adapter_name=adapter.name,
-            adapter_version=adapter.version,
-            status=AttachmentStatus.UPLOADED,
-            capabilities=adapter.capabilities,
-            metadata=FileMetadata(),
-            error_message=None,
-            created_at=now,
-            updated_at=now,
-        )
-        try:
-            saved = await self._documents.create(attachment)
-            await self._jobs.enqueue(saved.id)
-            return saved
-        except Exception:
-            await self._jobs.cancel(attachment.id)
-            await self._documents.soft_delete(
-                attachment.id, knowledge_base_id=knowledge_base_id
-            )
-            await self._storage.discard(attachment.storage_key)
-            raise
 
     async def list_documents(self, knowledge_base_id: str) -> list[Attachment]:
-        await self.get(knowledge_base_id)
-        return await self._documents.list(knowledge_base_id)
+        return await self._document_service.list_documents(knowledge_base_id)
 
     async def list_versions(self, knowledge_base_id: str, attachment_id: str) -> list[Attachment]:
-        await self.get(knowledge_base_id)
-        values = await self._documents.list_versions(attachment_id, knowledge_base_id=knowledge_base_id)
-        if not values:
-            raise KnowledgeDocumentNotFoundError(attachment_id)
-        return values
+        return await self._document_service.list_versions(knowledge_base_id, attachment_id)
 
     async def delete_document(self, knowledge_base_id: str, attachment_id: str) -> None:
-        await self.get(knowledge_base_id)
-        await self._jobs.cancel(attachment_id)
-        if not await self._documents.soft_delete(attachment_id, knowledge_base_id=knowledge_base_id):
-            raise KnowledgeDocumentNotFoundError(attachment_id)
+        await self._document_service.delete_document(knowledge_base_id, attachment_id)
 
     async def supported_extensions(self) -> list[str]:
-        return self._adapters.supported_extensions()
+        return await self._document_service.supported_extensions()
 
     @staticmethod
     def _normalize_filename(filename: str) -> str:

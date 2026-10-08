@@ -23,6 +23,7 @@ from domain.files import (
     FileMetadata,
     ParsedDocument,
 )
+from ..indexing.fallback import DisabledGraphIndexer, DisabledVectorIndexer
 
 
 class NativeFileAdapterRegistry:
@@ -49,7 +50,7 @@ class NativeFileAdapterRegistry:
         return [extension for adapter in self._adapters for extension in adapter.extensions]
 
 
-class NativeTextParser:
+class NativeFileParser:
     """Parse common text, PDF, Word, Excel and image attachments."""
 
     def __init__(self, storage) -> None:
@@ -105,7 +106,7 @@ class NativeTextParser:
         )
 
 
-def line_chunker(*, max_characters: int = 4000) -> Callable[[str], list[FileChunk]]:
+def fixed_size_chunker(*, max_characters: int = 4000) -> Callable[[str], list[FileChunk]]:
     """Create deterministic chunks without importing a tokenizer SDK."""
 
     if max_characters < 1:
@@ -131,24 +132,9 @@ def line_chunker(*, max_characters: int = 4000) -> Callable[[str], list[FileChun
     return chunk
 
 
-class DisabledVectorIndexer:
-    """Target-owned disabled indexer for deployments without embeddings."""
-
-    async def index(self, attachment: Attachment, chunks: list[FileChunk]) -> None:
-        return None
-
-    async def delete(self, attachment_id: str) -> None:
-        return None
-
-
-class DisabledGraphIndexer:
-    """Target-owned disabled graph indexer for deployments without Neo4j."""
-
-    async def index(self, attachment: Attachment, chunks: list[FileChunk]) -> None:
-        return None
-
-    async def delete(self, attachment_id: str) -> None:
-        return None
+# Compatibility aliases for callers created before the naming cleanup.
+NativeTextParser = NativeFileParser
+line_chunker = fixed_size_chunker
 
 
 # Kept as import aliases for existing target tests during the transition. The
@@ -160,10 +146,12 @@ NoopGraphIndexer = DisabledGraphIndexer
 
 __all__ = [
     "NativeFileAdapterRegistry",
+    "NativeFileParser",
     "NativeTextParser",
     "DisabledGraphIndexer",
     "DisabledVectorIndexer",
     "NoopGraphIndexer",
     "NoopVectorIndexer",
+    "fixed_size_chunker",
     "line_chunker",
 ]

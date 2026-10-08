@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .root import RootGraphDependencies, build_root_graph, invoke_root_graph
+from .root_graph import RootGraphDependencies, build_root_graph, invoke_root_graph
 
 
 class LangGraphRootGraph:

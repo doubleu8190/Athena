@@ -1,17 +1,8 @@
-from __future__ import annotations
+"""任务理解契约的兼容导出。
 
-from dataclasses import dataclass, field
+具体模型位于 ``specs.py``，本模块保留迁移期的旧导入路径。
+"""
 
+from .specs import ContextRequirement, OutputSpec, QueryHints, TaskMode, UserTaskSpec
 
-@dataclass(frozen=True, slots=True)
-class UserTaskSpec:
-    goal: str
-    domain: str = "general"
-    mode: str = "answer"
-    confidence: float = 0.0
-    context_requirements: tuple[str, ...] = ("conversation",)
-    query_hints: tuple[str, ...] = ()
-    attachment_ids: tuple[str, ...] = ()
-
-
-__all__ = ["UserTaskSpec"]
+__all__ = ["ContextRequirement", "OutputSpec", "QueryHints", "TaskMode", "UserTaskSpec"]

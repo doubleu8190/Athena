@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from .ports import GraphContextQueryPort
+
 
 @dataclass(frozen=True, slots=True)
 class RetrievalCandidate:
@@ -20,4 +22,4 @@ class RetrievalRun:
     candidates: tuple[RetrievalCandidate, ...] = ()
 
 
-__all__ = ["RetrievalCandidate", "RetrievalRun"]
+__all__ = ["GraphContextQueryPort", "RetrievalCandidate", "RetrievalRun"]

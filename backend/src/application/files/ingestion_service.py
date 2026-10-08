@@ -40,7 +40,7 @@ class IngestionService:
         self._chunker = chunker
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
-    async def process(self, attachment_id: str) -> dict[str, int | str]:
+    async def process_attachment(self, attachment_id: str) -> dict[str, int | str]:
         attachment = await self._attachments.get(attachment_id)
         if attachment is None:
             raise LookupError(attachment_id)
@@ -81,3 +81,7 @@ class IngestionService:
         from dataclasses import replace
 
         return replace(value, status=status, updated_at=self._clock(), **changes)
+
+    async def process(self, attachment_id: str) -> dict[str, int | str]:
+        """Compatibility alias for the old worker entry point."""
+        return await self.process_attachment(attachment_id)

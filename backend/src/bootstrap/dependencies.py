@@ -59,11 +59,11 @@ def build_default_dependencies() -> ApplicationDependencies:
     import os
 
     from .postgres import build_postgres_dependencies
-    from .config import get_settings
+    from configuration import get_settings
 
     settings = get_settings()
     if os.getenv("ATHENA_WORKERS_ENABLED", "").lower() in {"1", "true", "yes", "on"}:
-        settings.workers_enabled = True
+        settings = settings.model_copy(update={"workers_enabled": True})
     return build_postgres_dependencies(settings)
 
 

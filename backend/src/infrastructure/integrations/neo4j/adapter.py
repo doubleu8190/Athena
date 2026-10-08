@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-class Neo4jGraphAdapter:
+class Neo4jGraphIndex:
     """Keep Neo4j driver details outside domain and application layers."""
 
     def __init__(self, driver, *, database: str = "neo4j") -> None:
@@ -36,5 +36,22 @@ class Neo4jGraphAdapter:
         async with self._driver.session(database=self._database) as session:
             await session.run("MATCH (c:FileChunk {attachment_id: $attachment_id}) DETACH DELETE c", attachment_id=attachment_id)
 
+    async def query_context(self, query: str, *, limit: int = 12) -> list[dict[str, object]]:
+        """按内容匹配返回图节点摘要。"""
+        if not query.strip():
+            return []
+        async with self._driver.session(database=self._database) as session:
+            result = await session.run(
+                "MATCH (c:FileChunk) WHERE toLower(c.content) CONTAINS toLower($query) "
+                "RETURN c.id AS id, c.attachment_id AS attachment_id, c.content AS content LIMIT $limit",
+                query=query.strip(), limit=max(0, limit),
+            )
+            rows = []
+            async for record in result:
+                rows.append(dict(record))
+            return rows
 
-__all__ = ["Neo4jGraphAdapter"]
+
+Neo4jGraphAdapter = Neo4jGraphIndex
+
+__all__ = ["Neo4jGraphIndex", "Neo4jGraphAdapter"]

@@ -8,7 +8,7 @@ from domain.files import Attachment, FileChunk
 
 from .resource import Neo4jResource
 
-class OptionalNeo4jAttachmentIndexer:
+class OptionalNeo4jFileIndexer:
     """Delegate attachment indexing when the Neo4j resource is available."""
 
     def __init__(self, resource: Neo4jResource) -> None:
@@ -26,4 +26,6 @@ class OptionalNeo4jAttachmentIndexer:
             await self._resource.adapter.delete_attachment(attachment_id)
 
 
-__all__ = ["OptionalNeo4jAttachmentIndexer"]
+OptionalNeo4jAttachmentIndexer = OptionalNeo4jFileIndexer
+
+__all__ = ["OptionalNeo4jFileIndexer", "OptionalNeo4jAttachmentIndexer"]

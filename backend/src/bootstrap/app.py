@@ -16,17 +16,13 @@ from interfaces.http.controllers.sessions_controller import (
     build_sessions_router,
 )
 from interfaces.http.controllers.query_controller import build_query_router
-from application.common.query_services import (
-    MemoryQueryService,
-    ProviderQueryService,
-    RetrievalQueryService,
-    SettingsQueryService,
-)
+from application.configuration import ProviderQueryService, SettingsQueryService
 from application.knowledge import KnowledgeBaseQueryService
 from application.tools import ToolQueryService
 from application.tools import ToolService, MCPService
 from application.approval import ApprovalService
-from application.memory import MemoryService
+from application.memory import MemoryQueryService, MemoryService
+from application.retrieval import RetrievalQueryService
 from application.files import AttachmentService
 from interfaces.http.controllers.files_controller import build_files_router
 from application.knowledge import KnowledgeBaseService
@@ -37,7 +33,7 @@ from interfaces.http.sse.events import build_events_router
 from interfaces.http.controllers.approval_controller import build_approval_router
 from interfaces.http.controllers.tools_controller import build_tools_router
 from interfaces.http.controllers.mcp_controller import build_mcp_router
-from interfaces.http.auth import AuthenticationMiddleware, build_auth_router
+from interfaces.http.auth import AuthOptions, AuthenticationMiddleware, build_auth_router
 from .dependencies import ApplicationDependencies, Provider, build_default_dependencies
 from .lifespan import lifespan
 
@@ -62,6 +58,7 @@ def create_app(
     knowledge_query_factory: Callable[[], KnowledgeBaseQueryService] | None = None,
     attachment_service_factory: Callable[[], AttachmentService] | None = None,
     knowledge_service_factory: Callable[[], KnowledgeBaseService] | None = None,
+    auth_options: AuthOptions | None = None,
 ) -> FastAPI:
     """创建无外部副作用的迁移期应用。
 
@@ -84,7 +81,10 @@ def create_app(
         version="0.1.0.dev0",
         lifespan=lambda application: lifespan(application, graph.resources),
     )
-    app.add_middleware(AuthenticationMiddleware)
+    if auth_options is None:
+        app.add_middleware(AuthenticationMiddleware)
+    else:
+        app.add_middleware(AuthenticationMiddleware, options=auth_options)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -130,7 +130,7 @@ def create_app(
     async def api_health() -> dict[str, Any]:
         return {"status": "ok", "architecture": "restructured"}
 
-    app.include_router(build_auth_router(), prefix="/api")
+    app.include_router(build_auth_router(options=auth_options), prefix="/api")
 
     if session_service_factory is not None:
         app.include_router(

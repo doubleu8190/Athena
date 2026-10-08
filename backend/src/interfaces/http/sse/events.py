@@ -67,7 +67,12 @@ def build_events_router(
         if last_header and last_header.isdigit():
             after = int(last_header)
         try:
-            queue, watermark = await events.open(session_id, after)
+            opener = getattr(events, "open_subscription", None)
+            if opener is None:
+                opener = events.open
+                queue, watermark = await opener(session_id, after)
+            else:
+                queue, watermark = await opener(session_id)
         except EventSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
 

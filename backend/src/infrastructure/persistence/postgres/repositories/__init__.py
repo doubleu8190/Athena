@@ -7,13 +7,14 @@ from .file_artifact_repository import (
 from .knowledge_base_repository import PostgresKnowledgeBaseRepository
 from .knowledge_document_repository import PostgresKnowledgeDocumentRepository
 from .document_job_repository import PostgresDocumentJobRepository
-from .runtime_repositories import (
-    PostgresApprovalRepository,
-    PostgresEventRepository,
-    PostgresMemoryRepository,
+from .approval_repository import PostgresApprovalRepository
+from .event_repository import PostgresEventRepository
+from .memory_repository import PostgresMemoryRepository
+from .retrieval_repository import (
+    PostgresRetrievalRepository,
     PostgresRetrievalQueryRepository,
-    PostgresRunRepository,
 )
+from .run_repository import PostgresRunRepository
 from .mcp_repository import PostgresMCPServerRepository
 from .message_repository import PostgresMessageRepository
 from .session_repository import PostgresSessionRepository
@@ -32,6 +33,7 @@ __all__ = [
     "PostgresEventRepository",
     "PostgresMemoryRepository",
     "PostgresRetrievalQueryRepository",
+    "PostgresRetrievalRepository",
     "PostgresRunRepository",
     "PostgresMCPServerRepository",
     "PostgresMessageRepository",

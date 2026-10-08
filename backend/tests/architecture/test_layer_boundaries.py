@@ -93,6 +93,25 @@ def test_restructured_tree_does_not_import_outer_athena_package() -> None:
     )
 
 
+def test_postgres_bootstrap_only_assembles_dependencies() -> None:
+    """生产 bootstrap 不应重新引入嵌套业务用例函数。"""
+    path = ROOT / "bootstrap" / "postgres.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    builder = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "build_postgres_dependencies"
+    )
+    nested_functions = [
+        node
+        for node in ast.walk(builder)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node is not builder
+    ]
+    assert not nested_functions
+
+
 def test_boundary_checker_rejects_a_deliberate_forbidden_import(tmp_path: Path) -> None:
     """边界检查逻辑必须能捕获一个明确的反向依赖。"""
     violating_module = tmp_path / "violating.py"

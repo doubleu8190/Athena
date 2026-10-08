@@ -61,6 +61,18 @@ class RootGraphDependencies:
     event_publisher: Any | None = None
 
 
+def _coerce_dependencies(
+    handle_request: Callable[..., Any] | RootGraphDependencies | None,
+    dependencies: RootGraphDependencies | None,
+) -> tuple[Callable[..., Any] | None, RootGraphDependencies]:
+    """兼容旧式首参调用，同时避免依赖对象被误当作回调。"""
+    if isinstance(handle_request, RootGraphDependencies):
+        if dependencies is not None and dependencies is not handle_request:
+            raise TypeError("provide either handle_request or dependencies, not both")
+        return None, handle_request
+    return handle_request, dependencies or RootGraphDependencies()
+
+
 def _plan_dict(plan: Any, tasks: list[Any] | None = None) -> dict[str, Any]:
     if isinstance(plan, Plan):
         value = {
@@ -194,9 +206,13 @@ def _node(
 
 def _route_after_understanding(state: RootGraphState) -> str:
     understanding = state.get("understanding", {})
+    task_spec = understanding.get("task_spec", {})
     return (
         "clarification_response"
         if understanding.get("clarification_question")
+        or understanding.get("requires_clarification")
+        or task_spec.get("clarification_question")
+        or task_spec.get("requires_clarification")
         else "plan_context"
     )
 
@@ -228,11 +244,12 @@ def build_root_graph(
     *,
     dependencies: RootGraphDependencies | None = None,
 ) -> Any:
-    """Build the Root Graph described by the target architecture."""
-    if isinstance(handle_request, RootGraphDependencies) and dependencies is None:
-        dependencies = handle_request
-        handle_request = None
-    deps = dependencies or RootGraphDependencies()
+    """Build the Root Graph from one dependency graph and optional legacy overrides.
+
+    Production callers should pass ``dependencies=RootGraphDependencies(...)``;
+    the remaining positional parameters are retained only for migration callers.
+    """
+    handle_request, deps = _coerce_dependencies(handle_request, dependencies)
     if handle_request is not None:
         deps.request_handler = handle_request
     if persist_plan is not None:
@@ -316,8 +333,12 @@ def build_root_graph(
         return {"understanding": payload}
 
     async def clarification_response(state: RootGraphState) -> dict[str, Any]:
-        text = state.get("understanding", {}).get(
-            "clarification_question", "请补充任务目标。"
+        understanding = state.get("understanding", {})
+        task_spec = understanding.get("task_spec", {})
+        text = (
+            understanding.get("clarification_question")
+            or task_spec.get("clarification_question")
+            or "请补充任务目标。"
         )
         return {
             "response": {"content": str(text), "kind": "clarification"},
@@ -364,13 +385,19 @@ def build_root_graph(
             return {"context_bundle": {"items": [], "provider_results": []}}
         request = state.get("request", {})
         raw_plan = state.get("context_plan", {})
-        context_plan: Any = (
-            deps.context_plan_factory(raw_plan)
-            if deps.context_plan_factory is not None
-            else raw_plan
-        )
+        if deps.context_plan_factory is not None:
+            context_plan = deps.context_plan_factory(raw_plan)
+        else:
+            from application.runs.context import ContextPlan
+
+            context_plan = ContextPlan(**raw_plan)
+        acquire = getattr(deps.context, "retrieve_context", None)
+        if acquire is None:
+            acquire = getattr(deps.context, "acquire", None)
+        if acquire is None:
+            raise TypeError("context dependency must provide retrieve_context or acquire")
         value = await call(
-            deps.context.retrieve_context,
+            acquire,
             session_id=request.get("session_id", ""),
             task=state.get("understanding", {}).get("task_spec", {}),
             plan=context_plan,

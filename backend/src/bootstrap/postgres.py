@@ -9,8 +9,12 @@ from application.files import AttachmentService, IngestionService
 from application.knowledge import KnowledgeBaseQueryService, KnowledgeBaseService
 from application.memory import MemoryService
 from application.retrieval import RetrievalQueryService
-from application.runs import RunCommandService, RunQueryService
-from application.runs import RunExecutionService
+from application.runs import (
+    RunCommandService,
+    RunExecutionService,
+    RunQueryService,
+    RunRequestPreparationService,
+)
 from application.sessions import SessionMessageQueryService, SessionService
 from application.tools import MCPService, ToolQueryService, ToolService
 from application.orchestration import OrchestrationService, WorkerSchedulerService
@@ -254,12 +258,25 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         },
         trace_repository=retrieval,
     )
+
+    request_preparation = RunRequestPreparationService(
+        sessions,
+        messages,
+        attachments,
+        knowledge,
+        id_factory=ids,
+    )
+
     root_graph = LangGraphRootGraph(
         dependencies=RootGraphDependencies(
             task_understanding=task_understanding,
             context=context_service,
             context_planner=context_planner,
             context_plan_factory=lambda value: ContextPlan(**value),
+            request_handler=request_preparation.prepare,
+            history_loader=request_preparation.load_history,
+            attachment_loader=request_preparation.load_attachments,
+            knowledge_loader=request_preparation.load_knowledge_bases,
             orchestration=OrchestrationService(orchestration),
             plan_repository=orchestration,
             scheduler=WorkerSchedulerService(orchestration, LangGraphWorkerExecutor()),

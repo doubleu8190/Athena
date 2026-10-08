@@ -8,6 +8,7 @@ from .command_service import (
     RunNotFoundError,
 )
 from .execution_service import RunExecutionService
+from .request_preparation import RunRequestPreparationService
 
 __all__ = [
     "CommandNotFoundError",
@@ -16,4 +17,5 @@ __all__ = [
     "RunExecutionService",
     "RunNotFoundError",
     "RunQueryService",
+    "RunRequestPreparationService",
 ]

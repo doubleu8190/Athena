@@ -6,10 +6,10 @@ from collections.abc import AsyncIterator
 import hashlib
 from pathlib import Path
 
-from domain.files import StoredBlob
+from domain.files import FileStoragePort, StoredBlob
 
 
-class LocalFileStorage:
+class LocalFileStorage(FileStoragePort):
     """Store uploaded blobs in a local content-addressed directory."""
 
     def __init__(self, root: Path, max_upload_bytes: int) -> None:

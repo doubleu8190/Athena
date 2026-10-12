@@ -18,6 +18,7 @@ from application.runs import (
 from application.sessions import SessionMessageQueryService, SessionService
 from application.tools import MCPService, ToolQueryService, ToolService
 from application.orchestration import OrchestrationService, WorkerSchedulerService
+from application.orchestration import RootWorkflow, RootWorkflowDependencies, WorkerWorkflow
 from application.runs.context import (
     ContextAcquisitionService,
     ContextPlan,
@@ -64,17 +65,17 @@ from infrastructure.tools.executor import BuiltinToolExecutor
 from infrastructure.integrations.storage.storage import LocalFileStorage
 from infrastructure.orchestration.langgraph import (
     ConfiguredRootAgent,
+    ConfiguredWorkerAgent,
     LangGraphRootGraph,
     LangGraphRunExecutor,
     LangGraphWorkerExecutor,
-    RootGraphDependencies,
 )
 from infrastructure.configuration import (
     ConfiguredSettingsQueries,
     PublicConfiguration,
     PublicRuntimeOptions,
 )
-from infrastructure.persistence.postgres.resource import PostgresEngine
+from infrastructure.persistence.postgres.resource import PostgresCheckpointer, PostgresEngine
 from infrastructure.persistence.postgres.options import PostgresOptions
 from infrastructure.approval import ApprovalEventPublisher
 from infrastructure.persistence.postgres.adapters import (
@@ -96,6 +97,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresToolConfigRepository,
     PostgresFileChunkRepository,
     PostgresOrchestrationRepository,
+    PostgresPlanLoader,
 )
 from workers import CommandConsumer, KnowledgeDocumentWorker, WorkerSupervisor
 
@@ -118,6 +120,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             create_schema=settings.postgres_create_schema,
         )
     )
+    checkpointer = PostgresCheckpointer(settings.postgres_conn_string)
     session_factory = postgres.session
     sessions = PostgresSessionRepository(session_factory)
     messages = PostgresMessageRepository(session_factory)
@@ -267,8 +270,18 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         id_factory=ids,
     )
 
-    root_graph = LangGraphRootGraph(
-        dependencies=RootGraphDependencies(
+    worker_agent = ConfiguredWorkerAgent(llm_provider)
+    worker_executor = LangGraphWorkerExecutor(
+        workflow_factory=lambda: WorkerWorkflow(execute=worker_agent),
+        checkpointer=checkpointer,
+    )
+    scheduler = WorkerSchedulerService(
+        orchestration,
+        worker_executor,
+    )
+
+    root_workflow = RootWorkflow(
+        RootWorkflowDependencies(
             task_understanding=task_understanding,
             context=context_service,
             context_planner=context_planner,
@@ -279,10 +292,15 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             knowledge_loader=request_preparation.load_knowledge_bases,
             orchestration=OrchestrationService(orchestration),
             plan_repository=orchestration,
-            scheduler=WorkerSchedulerService(orchestration, LangGraphWorkerExecutor()),
+            scheduler=scheduler,
+            plan_loader=PostgresPlanLoader(orchestration),
             agent=ConfiguredRootAgent(llm_provider),
-            event_publisher=events,
         )
+    )
+    root_graph = LangGraphRootGraph(
+        workflow=root_workflow,
+        event_publisher=events,
+        checkpointer=checkpointer,
     )
 
     providers: dict[str, Provider] = {
@@ -319,6 +337,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "orchestration_service_factory": lambda: OrchestrationService(orchestration),
         "root_graph_factory": lambda: root_graph,
         "run_executor_factory": lambda: LangGraphRunExecutor(root_graph),
+        "worker_scheduler_factory": lambda: scheduler,
         "ingestion_service_factory": lambda: ingestion,
         "llm_provider": lambda: llm_provider,
         "embedding_provider": lambda: embedding,
@@ -326,7 +345,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "context_service_factory": lambda: context_service,
         "task_understanding_factory": lambda: task_understanding,
     }
-    resources: list[object] = [postgres, neo4j]
+    resources: list[object] = [postgres, checkpointer, root_graph, neo4j]
     resources.append(sandbox)
     if settings.workers_enabled:
         command_execution = RunExecutionService(

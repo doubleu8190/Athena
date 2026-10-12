@@ -20,6 +20,8 @@ from domain.runs import (
 )
 from domain.sessions import SessionRepository
 
+from application.common.responses import CommandEnqueueResponse, CommandStatusResponse
+
 
 class CommandRejectedError(ValueError):
     """基础设施拒绝命令时携带稳定业务错误码。"""
@@ -63,7 +65,7 @@ class RunCommandService:
         message: str,
         attachment_ids: Sequence[str] = (),
         message_id: str | None = None,
-    ) -> CommandEnqueueResult:
+    ) -> CommandEnqueueResponse:
         """提交一次消息运行；命令端口负责并发安全和幂等落库。"""
         if await self._sessions.get(session_id) is None:
             raise SessionNotFoundError(session_id)
@@ -93,9 +95,9 @@ class RunCommandService:
                 raise CommandRejectedError(code) from exc
             raise
 
-        return result
+        return _enqueue_response(result)
 
-    async def cancel_run(self, run_id: str) -> CommandEnqueueResult:
+    async def cancel_run(self, run_id: str) -> CommandEnqueueResponse:
         """按运行 ID 提交异步取消命令。"""
         run = await self._runs.get(run_id)
         if run is None:
@@ -109,11 +111,11 @@ class RunCommandService:
             issued_at=self._clock(),
         )
         result = await self._commands.enqueue_command(command)
-        return result
+        return _enqueue_response(result)
 
     async def cancel_session(
         self, session_id: str, *, run_id: str | None = None
-    ) -> CommandEnqueueResult:
+    ) -> CommandEnqueueResponse:
         """按会话取消当前运行；显式 run_id 优先。"""
         if await self._sessions.get(session_id) is None:
             raise SessionNotFoundError(session_id)
@@ -130,13 +132,33 @@ class RunCommandService:
             issued_at=self._clock(),
         )
         result = await self._commands.enqueue_command(command)
-        return result
+        return _enqueue_response(result)
 
-    async def get_command(self, command_id: str) -> CommandStatusRecord:
+    async def get_command(self, command_id: str) -> CommandStatusResponse:
         value = await self._commands.get_command(command_id)
         if value is None:
             raise CommandNotFoundError(command_id)
-        return value
+        return CommandStatusResponse(
+            command_id=value.command_id,
+            session_id=value.session_id,
+            run_id=value.run_id,
+            command_type=value.command_type.value if isinstance(value.command_type, CommandType) else str(value.command_type),
+            status=value.status.value if isinstance(value.status, CommandStatus) else str(value.status),
+            result=value.result,
+            error=value.error,
+        )
+
+
+def _enqueue_response(value: CommandEnqueueResult) -> CommandEnqueueResponse:
+    """将命令入队领域结果转换为只读应用响应。"""
+    return CommandEnqueueResponse(
+        command_id=value.command_id,
+        run_id=value.run_id,
+        message_id=value.message_id,
+        attachment_ids=tuple(value.attachment_ids),
+        status=value.status,
+        deduplicated=value.deduplicated,
+    )
 
 __all__ = [
     "CommandNotFoundError",

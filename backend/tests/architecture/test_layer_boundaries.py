@@ -65,6 +65,25 @@ def test_interfaces_do_not_depend_on_persistence_models() -> None:
     assert not any(module.startswith(forbidden) for module in imports for forbidden in forbidden_prefixes)
 
 
+def test_interfaces_do_not_import_domain_entities() -> None:
+    """HTTP/SSE 只能接收 application response，不得直接拿领域实体做 DTO。"""
+    imports = _all_imports("interfaces")
+    assert not any(module == "domain" or module.startswith("domain.") for module in imports)
+
+
+def test_application_response_models_are_frozen_dataclasses() -> None:
+    """跨边界返回模型必须是不可变 dataclass。"""
+    import dataclasses
+    import inspect
+    from application.common import responses
+
+    models = [value for _, value in inspect.getmembers(responses, inspect.isclass) if value.__module__ == responses.__name__]
+    assert models
+    for model in models:
+        assert dataclasses.is_dataclass(model)
+        assert model.__dataclass_params__.frozen is True
+
+
 def test_interfaces_do_not_depend_on_concrete_repositories_or_old_runtime() -> None:
     imports = _all_imports("interfaces")
     forbidden_prefixes = (

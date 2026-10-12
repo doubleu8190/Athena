@@ -9,7 +9,9 @@ from .options import EmbeddingOptions, coerce_embedding_options
 
 
 class EmbeddingProvider:
-    def __init__(self, embedder: Callable[[Sequence[str]], Any], *, dimension: int) -> None:
+    def __init__(
+        self, embedder: Callable[[Sequence[str]], Any], *, dimension: int
+    ) -> None:
         self._embedder = embedder
         self.dimension = dimension
 
@@ -37,19 +39,20 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
     def _load(self) -> Any:
         config = self._options
         provider = config.provider.strip().lower()
-        if provider in {"echo", "local", "test"}:
-            return lambda values: [[float(len(value))] * config.dimension for value in values]
         if provider in {"sentence_transformers", "sentence-transformers"}:
             from sentence_transformers import SentenceTransformer
+
             return SentenceTransformer(config.model, device=config.device)
         if provider == "openai":
             from langchain_openai import OpenAIEmbeddings
+
             kwargs: dict[str, Any] = {"model": config.model, "api_key": config.api_key}
             if config.base_url:
                 kwargs["base_url"] = config.base_url
             return OpenAIEmbeddings(**kwargs)
         if provider == "ollama":
             from langchain_ollama import OllamaEmbeddings
+
             return OllamaEmbeddings(
                 model=config.model,
                 base_url=config.base_url or "http://localhost:11434",
@@ -60,7 +63,11 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
         if not self._loaded:
             self._embedder = self._load()
             self._loaded = True
-        if callable(self._embedder) and not hasattr(self._embedder, "embed_documents") and not hasattr(self._embedder, "encode"):
+        if (
+            callable(self._embedder)
+            and not hasattr(self._embedder, "embed_documents")
+            and not hasattr(self._embedder, "encode")
+        ):
             return self._embedder(values)
         if hasattr(self._embedder, "encode"):
             encoded = self._embedder.encode(

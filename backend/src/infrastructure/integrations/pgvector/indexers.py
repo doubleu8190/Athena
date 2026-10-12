@@ -6,11 +6,12 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from domain.files import Attachment, FileChunk
+from domain.files import Attachment, FileChunk, FileVectorSearchPort, VectorIndexerPort
+from domain.memory import MemoryVectorSearchPort
 from infrastructure.persistence.postgres.models import FileChunkModel, MemoryModel
 
 
-class PostgresFileVectorIndex:
+class PostgresFileVectorIndex(VectorIndexerPort, FileVectorSearchPort):
     def __init__(self, session_factory, embedder) -> None:
         self._session_factory = session_factory
         self._embedder = embedder
@@ -58,7 +59,7 @@ class PostgresFileVectorIndex:
         ]
 
 
-class PostgresMemoryVectorIndex:
+class PostgresMemoryVectorIndex(MemoryVectorSearchPort):
     def __init__(self, session_factory, embedder) -> None:
         self._session_factory = session_factory
         self._embedder = embedder

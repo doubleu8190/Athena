@@ -9,9 +9,10 @@ from typing import Any
 from domain.retrieval import GraphContextQueryPort
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
+from application.runs.context.protocols import ContextProvider
 
 
-class GraphContextProvider:
+class GraphContextProvider(ContextProvider):
     """通过图查询端口获取与任务相关的节点内容。"""
 
     name = "graph"

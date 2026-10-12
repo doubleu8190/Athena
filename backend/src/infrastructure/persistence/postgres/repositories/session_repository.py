@@ -9,13 +9,13 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.sessions import Session
+from domain.sessions import Session, SessionRepository
 
 from ..models import SessionModel
 from ..mappers.converters import session_domain_to_model, session_model_to_domain
 
 
-class PostgresSessionRepository:
+class PostgresSessionRepository(SessionRepository):
     """通过注入的异步会话工厂实现 SessionRepository。"""
 
     def __init__(

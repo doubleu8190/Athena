@@ -94,6 +94,20 @@ def test_auth_login_requires_strong_secret_when_enabled() -> None:
     assert response.status_code == 503
 
 
+def test_auth_session_endpoint_reports_authenticated_state() -> None:
+    settings = Settings(
+        auth_enabled=True,
+        auth_username="alice",
+        auth_password="secret",
+        auth_session_secret="x" * 32,
+    )
+    app = create_app(auth_options=auth_routes._resolve_options(settings))
+    client = TestClient(app)
+    assert client.get("/api/auth/session").json() == {"authenticated": False, "username": None}
+    assert client.post("/api/auth/login", json={"username": "alice", "password": "secret"}).status_code == 200
+    assert client.get("/api/auth/session").json() == {"authenticated": True, "username": "alice"}
+
+
 def test_auth_middleware_blocks_unauthenticated_and_invalid_origins(monkeypatch) -> None:
     settings = Settings(
         auth_enabled=True,

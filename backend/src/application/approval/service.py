@@ -11,6 +11,7 @@ from domain.approval import (
     ApprovalRepository,
     ApprovalRequest,
 )
+from application.common.responses import ApprovalResponse, ApprovalStatsResponse
 
 
 class ApprovalService:
@@ -34,11 +35,11 @@ class ApprovalService:
         plan_id: str | None = None,
         approval_batch_id: str | None = None,
         approval_id: str | None = None,
-    ) -> ApprovalRequest:
+    ) -> ApprovalResponse:
         """幂等创建审批请求并发布待审批事件。"""
         existing = await self._repository.get(approval_id) if approval_id else None
         if existing is not None:
-            return existing
+            return _to_response(existing)
         request = ApprovalRequest(
             approval_id=approval_id or self._id_factory(),
             session_id=session_id,
@@ -56,25 +57,51 @@ class ApprovalService:
             recovered = await self._repository.get(request.approval_id)
             if recovered is None:
                 raise RuntimeError("approval was not created and cannot be recovered")
-            return recovered
+            return _to_response(recovered)
         await self._events.required(request)
-        return request
+        return _to_response(request)
 
-    async def resolve(self, approval_id: str, *, run_id: str, task_id: str, decision: ApprovalDecision) -> bool:
+    async def resolve(self, approval_id: str, *, run_id: str, task_id: str, decision: str | ApprovalDecision) -> bool:
         """解决单条审批并返回是否成功。"""
-        return await self._repository.resolve(approval_id, run_id=run_id, task_id=task_id, decision=decision)
+        return await self._repository.resolve(approval_id, run_id=run_id, task_id=task_id, decision=ApprovalDecision(decision))
 
-    async def resolve_batch(self, batch_id: str, decisions: dict[str, ApprovalDecision], *, run_id: str | None = None) -> bool:
+    async def resolve_batch(self, batch_id: str, decisions: dict[str, str | ApprovalDecision], *, run_id: str | None = None) -> bool:
         """按批次解决审批。"""
-        return await self._repository.resolve_batch(batch_id, decisions, run_id=run_id)
+        normalized = {key: ApprovalDecision(value) for key, value in decisions.items()}
+        return await self._repository.resolve_batch(batch_id, normalized, run_id=run_id)
 
-    async def pending(self, session_id: str | None = None) -> list[ApprovalRequest]:
+    async def pending(self, session_id: str | None = None) -> list[ApprovalResponse]:
         """查询待审批请求。"""
-        return await self._repository.list_pending(session_id)
+        return [_to_response(value) for value in await self._repository.list_pending(session_id)]
 
-    async def history(self, session_id: str | None = None, *, limit: int = 50, offset: int = 0) -> list[ApprovalRequest]:
+    async def history(self, session_id: str | None = None, *, limit: int = 50, offset: int = 0) -> list[ApprovalResponse]:
         """查询已处理审批历史。"""
-        return await self._repository.list_history(session_id, limit=limit, offset=offset)
+        return [_to_response(value) for value in await self._repository.list_history(session_id, limit=limit, offset=offset)]
+
+    async def stats(self, session_id: str | None = None) -> ApprovalStatsResponse:
+        """返回审批数量统计。"""
+        pending = await self.pending(session_id)
+        history = await self.history(session_id, limit=100000, offset=0)
+        approved = sum(item.resolution == "approved" for item in history)
+        denied = sum(item.resolution == "denied" for item in history)
+        return ApprovalStatsResponse(len(pending), approved, denied, len(pending) + len(history))
+
+
+def _to_response(value: ApprovalRequest) -> ApprovalResponse:
+    """将审批实体转换为只读应用响应。"""
+    return ApprovalResponse(
+        approval_id=value.approval_id,
+        tool_name=value.tool_name,
+        arguments=dict(value.arguments),
+        risk_level=value.risk_level,
+        created_at=value.created_at,
+        session_id=value.session_id,
+        run_id=value.run_id,
+        tool_call_id=value.tool_call_id,
+        approval_batch_id=value.approval_batch_id,
+        resolved=value.decision is not None,
+        resolution=value.decision.value if value.decision else value.status.value,
+    )
 
 
 __all__ = ["ApprovalService"]

@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.files import Attachment, FileChunk
+from domain.files import (
+    Attachment,
+    AttachmentRepository,
+    FileChunk,
+    FileChunkRepository,
+)
 from domain.files.entities import AttachmentStatus
 from ..models import FileChunkModel
 
@@ -22,7 +27,7 @@ from ..mappers.converters import (
 )
 
 
-class PostgresAttachmentRepository:
+class PostgresAttachmentRepository(AttachmentRepository):
     """通过注入会话工厂管理附件元数据。"""
 
     def __init__(
@@ -125,7 +130,7 @@ class PostgresAttachmentRepository:
         return [attachment_model_to_domain(row) for row in rows]
 
 
-class PostgresFileChunkRepository:
+class PostgresFileChunkRepository(FileChunkRepository):
     """通过注入会话工厂管理文件分块。"""
 
     def __init__(

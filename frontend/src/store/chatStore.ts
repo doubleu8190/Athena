@@ -11,6 +11,7 @@ import type {
   AppView,
   Attachment,
   OrchestrationTask,
+  OrchestrationPlan,
   ExecutionError,
   ExecutionTimelineEntry,
 } from "../types"
@@ -83,6 +84,9 @@ interface ChatStore {
   orchestrationTasks: OrchestrationTask[]
   upsertOrchestrationTask: (task: OrchestrationTask) => void
   clearOrchestrationTasks: () => void
+  orchestrationPlans: OrchestrationPlan[]
+  upsertOrchestrationPlan: (plan: OrchestrationPlan) => void
+  clearOrchestrationPlans: () => void
 
   // 错误
   error: string | null
@@ -242,11 +246,36 @@ export const useChatStore = create<ChatStore>((set) => ({
   orchestrationTasks: [],
   upsertOrchestrationTask: (task) =>
     set((state) => ({
-      orchestrationTasks: state.orchestrationTasks.some((entry) => entry.task_id === task.task_id)
-        ? state.orchestrationTasks.map((entry) => entry.task_id === task.task_id ? task : entry)
-        : [...state.orchestrationTasks, task],
+      orchestrationTasks: (() => {
+        const key = `${task.plan_id}:${task.task_id}`
+        const index = state.orchestrationTasks.findIndex((entry) => `${entry.plan_id}:${entry.task_id}` === key)
+        if (index < 0) return [...state.orchestrationTasks, task]
+        const existing = state.orchestrationTasks[index]
+        if (existing.session_seq != null && task.session_seq != null && task.session_seq < existing.session_seq) return state.orchestrationTasks
+        const next = [...state.orchestrationTasks]
+        const definedTask = Object.fromEntries(Object.entries(task).filter(([, value]) => value !== undefined)) as Partial<OrchestrationTask>
+        next[index] = {
+          ...existing,
+          ...definedTask,
+          title: task.title.trim() ? task.title : existing.title,
+          metadata: { ...existing.metadata, ...task.metadata },
+        }
+        return next
+      })(),
     })),
   clearOrchestrationTasks: () => set({ orchestrationTasks: [] }),
+  orchestrationPlans: [],
+  upsertOrchestrationPlan: (plan) =>
+    set((state) => {
+      const index = state.orchestrationPlans.findIndex((entry) => entry.plan_id === plan.plan_id)
+      if (index < 0) return { orchestrationPlans: [...state.orchestrationPlans, plan] }
+      const existing = state.orchestrationPlans[index]
+      if (existing.session_seq != null && plan.session_seq != null && plan.session_seq < existing.session_seq) return {}
+      const next = [...state.orchestrationPlans]
+      next[index] = { ...existing, ...Object.fromEntries(Object.entries(plan).filter(([, value]) => value !== undefined)), metadata: { ...existing.metadata, ...plan.metadata } }
+      return { orchestrationPlans: next }
+    }),
+  clearOrchestrationPlans: () => set({ orchestrationPlans: [] }),
 
   // 错误
   error: null,

@@ -1,18 +1,15 @@
-"""Single-user signed cookie authentication routes."""
+"""认证 HTTP 路由，只负责请求解析和 Cookie 传输。"""
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
-import time
 from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from configuration import get_settings
+from application.auth import AuthenticationConfig, AuthenticationService, InvalidCredentialsError
+from configuration import get_settings  # 兼容旧调用方；bootstrap 会显式注入 options。
 from .options import AuthOptions
 
 SESSION_COOKIE_NAME = "athena_session"
@@ -23,70 +20,90 @@ class LoginRequest(BaseModel):
     password: str
 
 
-def _signature(payload: str, secret: str) -> str:
-    return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-
-def _token(username: str, secret: str, ttl: int) -> str:
-    payload = base64.urlsafe_b64encode(
-        json.dumps({"u": username, "exp": int(time.time()) + ttl}, separators=(",", ":")).encode()
-    ).decode().rstrip("=")
-    return f"{payload}.{_signature(payload, secret)}"
+def _service_from_options(options: AuthOptions) -> AuthenticationService:
+    """将 HTTP 适配层配置转换为应用认证服务。"""
+    return AuthenticationService(AuthenticationConfig(
+        enabled=options.enabled,
+        username=options.username,
+        password=options.password,
+        session_secret=options.session_secret,
+        session_ttl_seconds=options.session_ttl_seconds,
+    ))
 
 
 def _resolve_options(value: AuthOptions | Any | None = None) -> AuthOptions:
+    """兼容迁移期 Settings 工厂，将其转换为 AuthOptions。"""
     if isinstance(value, AuthOptions):
         return value
     return AuthOptions.from_settings(value or get_settings())
 
 
 def is_authenticated(request: Request, settings: AuthOptions | Any | None = None) -> bool:
+    """验证请求 Cookie；认证关闭时保持开发环境免登录行为。"""
     options = _resolve_options(settings)
-    if not options.enabled:
-        return True
-    raw = request.cookies.get(SESSION_COOKIE_NAME, "")
-    if "." not in raw or not options.session_secret:
-        return False
-    body, signature = raw.rsplit(".", 1)
-    if not hmac.compare_digest(signature, _signature(body, options.session_secret)):
-        return False
-    try:
-        padded = body + "=" * (-len(body) % 4)
-        return json.loads(base64.urlsafe_b64decode(padded)).get("exp", 0) > time.time()
-    except Exception:
-        return False
+    return _service_from_options(options).session(request.cookies.get(SESSION_COOKIE_NAME)).authenticated
 
 
 def build_auth_router(
     settings_factory: Callable[[], AuthOptions | Any] | None = None,
     options: AuthOptions | None = None,
+    auth_service: AuthenticationService | Callable[[], AuthenticationService] | None = None,
 ) -> APIRouter:
+    """创建登录、登出和会话状态路由。"""
     router = APIRouter(prefix="/auth", tags=["auth"])
+    current_options = options or (
+        AuthOptions(
+            enabled=auth_service.config.enabled,
+            username=auth_service.config.username,
+            password=auth_service.config.password,
+            session_secret=auth_service.config.session_secret,
+            session_ttl_seconds=auth_service.config.session_ttl_seconds,
+        )
+        if isinstance(auth_service, AuthenticationService)
+        else _resolve_options((settings_factory or _default_settings)())
+    )
+
+    def service() -> AuthenticationService:
+        if auth_service is None:
+            return _service_from_options(current_options)
+        return auth_service() if callable(auth_service) and not isinstance(auth_service, AuthenticationService) else auth_service
 
     @router.post("/login")
-    async def login(body: LoginRequest, response: Response, request: Request) -> dict[str, str]:
-        current = options or _resolve_options((settings_factory or get_settings)())
-        if not hmac.compare_digest(body.username, current.username) or not hmac.compare_digest(body.password, current.password):
-            raise HTTPException(status_code=401, detail="invalid_credentials")
-        if current.enabled and len(current.session_secret) < 32:
-            raise HTTPException(status_code=503, detail="auth_secret_not_configured")
+    async def login(body: LoginRequest, response: Response, request: Request) -> dict[str, Any]:
+        try:
+            result = await service().login(body.username, body.password)
+        except InvalidCredentialsError as exc:
+            raise HTTPException(status_code=401, detail="invalid_credentials") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        current = service()
         response.set_cookie(
             SESSION_COOKIE_NAME,
-            _token(body.username, current.session_secret or "disabled", current.session_ttl_seconds),
+            current.issue_token(result.username),
             httponly=True,
             samesite="strict",
             secure=request.url.scheme == "https",
-            max_age=current.session_ttl_seconds,
+            max_age=current.config.session_ttl_seconds,
             path="/",
         )
-        return {"status": "ok"}
+        return {"status": "ok", "authenticated": result.authenticated, "username": result.username}
 
     @router.post("/logout")
     async def logout(response: Response) -> dict[str, str]:
         response.delete_cookie(SESSION_COOKIE_NAME, path="/")
         return {"status": "ok"}
 
+    @router.get("/session")
+    async def session(request: Request) -> dict[str, Any]:
+        result = service().session(request.cookies.get(SESSION_COOKIE_NAME))
+        return {"authenticated": result.authenticated, "username": result.username}
+
     return router
+
+
+def _default_settings() -> Any:
+    """延迟读取默认配置，避免模块导入时产生配置副作用。"""
+    return get_settings()
 
 
 __all__ = ["LoginRequest", "SESSION_COOKIE_NAME", "build_auth_router", "is_authenticated"]

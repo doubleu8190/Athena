@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from application.orchestration import RootExecutionService, WorkerSchedulerService
+from application.orchestration import WorkerSchedulerService
 from domain.orchestration import (
     Plan,
     Task,
@@ -160,15 +160,3 @@ async def test_scheduler_can_resume_by_task_id() -> None:
 
     assert result["accepted"] is True
     assert repository.running == [("task-1", 1)]
-
-
-@pytest.mark.asyncio
-async def test_root_execution_service_delegates_to_graph_port() -> None:
-    class Graph:
-        async def invoke(self, **kwargs):
-            return kwargs
-
-    service = RootExecutionService(Graph())
-    result = await service.execute(session_id="s", run_id="r", user_message="hello")
-    assert result["session_id"] == "s"
-    assert result["run_id"] == "r"

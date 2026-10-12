@@ -8,10 +8,7 @@ from contextlib import AbstractAsyncContextManager
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.sessions import (
-    AttachmentRef,
-    Message,
-)
+from domain.sessions import AttachmentRef, Message, MessageRepository
 
 from ..models import MessageModel
 from ..mappers.converters import message_domain_to_model, message_model_to_domain
@@ -19,7 +16,7 @@ from ..mappers.converters import message_domain_to_model, message_model_to_domai
 AttachmentReader = Callable[[list[str]], Awaitable[dict[str, list[AttachmentRef]]]]
 
 
-class PostgresMessageRepository:
+class PostgresMessageRepository(MessageRepository):
     """通过注入的异步会话工厂实现 MessageRepository。"""
 
     def __init__(

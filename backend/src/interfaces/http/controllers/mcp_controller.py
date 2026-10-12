@@ -8,8 +8,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from application.tools import MCPService
-from domain.tools import MCPServerConfig
+from application.tools import MCPService, McpServerConfigInput
 
 
 class MCPServerRequest(BaseModel):
@@ -34,7 +33,7 @@ def build_mcp_router(factory: Callable[[], MCPService]) -> APIRouter:
     async def register_servers(payload: dict[str, MCPServerRequest]) -> dict[str, Any]:
         results = []
         for name, item in payload.items():
-            config = MCPServerConfig(item.command if isinstance(item.command, str) else tuple(item.command), tuple(item.args), dict(item.env), item.image_id, item.network_policy, item.enabled)
+            config = McpServerConfigInput(item.command if isinstance(item.command, str) else tuple(item.command), tuple(item.args), dict(item.env), item.image_id, item.network_policy, item.enabled)
             results.append(await factory().register(name, config))
         registered = sum(value.get("status") == "connected" for value in results)
         return {"total": len(results), "registered": registered, "failed": len(results) - registered, "results": results}

@@ -10,7 +10,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.files import AdapterInfo, FileArtifact
+from domain.files import (
+    AdapterInfo,
+    AdapterRegistryRepository,
+    FileArtifact,
+    FileArtifactRepository,
+)
 
 from ..models import AdapterRegistryModel, FileArtifactModel
 from ..mappers.converters import (
@@ -21,7 +26,7 @@ from ..mappers.converters import (
 )
 
 
-class PostgresFileArtifactRepository:
+class PostgresFileArtifactRepository(FileArtifactRepository):
     """通过注入会话工厂管理文件解析产物。"""
 
     def __init__(
@@ -71,7 +76,7 @@ class PostgresFileArtifactRepository:
         return artifact
 
 
-class PostgresAdapterRegistryRepository:
+class PostgresAdapterRegistryRepository(AdapterRegistryRepository):
     """通过注入会话工厂同步文件适配器注册表。"""
 
     def __init__(

@@ -10,6 +10,8 @@ from uuid import uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from domain.files import DocumentJobPort, DocumentJobQueue
+
 from ..models import KnowledgeDocumentJobModel
 
 
@@ -17,7 +19,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class PostgresDocumentJobRepository:
+class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
     """Implements both the enqueue port and the worker queue protocol.
 
     Queue state is persisted with the attachment record, so a process restart

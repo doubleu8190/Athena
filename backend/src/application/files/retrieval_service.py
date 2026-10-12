@@ -15,6 +15,7 @@ from domain.files import (
 )
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
+from application.runs.context.protocols import ContextProvider
 
 
 def _keyword_score(content: str, query: str) -> float:
@@ -25,7 +26,7 @@ def _keyword_score(content: str, query: str) -> float:
     return sum(term in lowered for term in terms) / len(terms)
 
 
-class FileContextProvider:
+class FileContextProvider(ContextProvider):
     """在指定附件范围内执行文件关键词与向量召回。"""
 
     name = "file"

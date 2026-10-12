@@ -22,11 +22,11 @@
 | `core/llm/*` | port 在 domain/application，实现在 `infrastructure/integrations/llm/` | application 不依赖具体 SDK |
 | `core/sandbox/*` | port 在 domain，Docker 实现在 `infrastructure/integrations/sandbox/` | Workspace policy 和执行实现分开 |
 | `planning/*` | `domain/orchestration/` | Plan、DAG、校验规则 |
-| `agents/*` | `application/runs/` 或 `application/orchestration/` | Agent 用例编排；LangGraph 适配单独放 infrastructure |
+| `agents/*` | `application/runs/` 或 `application/orchestration/` | Agent 用例编排进入 Root/Worker workflow；LangGraph 适配单独放 infrastructure |
 | `runtime/command_consumer.py` | `workers/command_consumer.py` | 只保留消费循环和调用 service |
 | `runtime/task_executor.py` | `workers/orchestration_worker.py` | Worker 入口；调度规则由 application service 提供 |
-| `runtime/nodes/*` | `infrastructure/orchestration/langgraph/nodes/` | LangGraph 技术节点 |
-| `runtime/execution_loop/*` | `application/runs/` + `infrastructure/orchestration/langgraph/` | 业务执行用例与图适配拆开 |
+| `runtime/nodes/*` | `infrastructure/orchestration/langgraph/graphs/` | LangGraph 图拓扑和 checkpoint-safe state |
+| `runtime/execution_loop/*` | `application/runs/` + `application/orchestration/` + `infrastructure/orchestration/langgraph/` | 业务执行用例进入 application workflow，图适配单独保留 |
 | `runtime/langgraph_runtime.py` | application facade + LangGraph adapter | 不整体搬迁 |
 | `runtime/context/*` | `application/runs/context/` | 上下文规划和获取用例 |
 | `infrastructure/postgre/models.py` | `infrastructure/persistence/postgres/models/` | ORM 只留在基础设施 |

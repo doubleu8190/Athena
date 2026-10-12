@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from application.approval import ApprovalService
-from domain.approval import ApprovalDecision, ApprovalRequest
+from application.approval.responses import ApprovalResponse
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -41,14 +41,16 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
 
     @router.get("/stats")
     async def stats(session_id: str | None = None) -> dict[str, int]:
-        pending_items = await factory().pending(session_id)
-        history_items = await factory().history(session_id, limit=100000, offset=0)
-        return {
-            "pending": len(pending_items),
-            "approved": sum(item.decision is not None and item.decision.value == "approved" for item in history_items),
-            "denied": sum(item.decision is not None and item.decision.value == "denied" for item in history_items),
-            "total": len(pending_items) + len(history_items),
-        }
+        service = factory()
+        stats_method = getattr(service, "stats", None)
+        if stats_method is not None:
+            value = await stats_method(session_id)
+            return {"pending": value.pending, "approved": value.approved, "denied": value.denied, "total": value.total}
+        pending_items = await service.pending(session_id)
+        history_items = await service.history(session_id, limit=100000, offset=0)
+        approved = sum(_resolution(item) == "approved" for item in history_items)
+        denied = sum(_resolution(item) == "denied" for item in history_items)
+        return {"pending": len(pending_items), "approved": approved, "denied": denied, "total": len(pending_items) + len(history_items)}
 
     @router.post("/{approval_id}/resolve")
     async def resolve(approval_id: str, body: ApprovalDecisionRequest) -> dict[str, Any]:
@@ -56,7 +58,7 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
             approval_id,
             run_id=body.run_id,
             task_id=body.task_id,
-            decision=ApprovalDecision(body.decision),
+            decision=body.decision,
         )
         if not updated:
             raise HTTPException(status_code=409, detail="approval_not_pending")
@@ -64,15 +66,14 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
 
     @router.post("/batches/{batch_id}/resolve")
     async def resolve_batch(batch_id: str, body: ApprovalBatchRequest) -> dict[str, Any]:
-        decisions = {key: ApprovalDecision(value) for key, value in body.decisions.items()}
-        if not await factory().resolve_batch(batch_id, decisions, run_id=body.run_id):
+        if not await factory().resolve_batch(batch_id, body.decisions, run_id=body.run_id):
             raise HTTPException(status_code=409, detail="approval_batch_not_pending")
         return {"status": "resolved", "approval_batch_id": batch_id}
 
     return router
 
 
-def _response(value: ApprovalRequest) -> dict[str, Any]:
+def _response(value: ApprovalResponse) -> dict[str, Any]:
     """将审批实体转换为当前 HTTP 响应。"""
     return {
         "approval_id": value.approval_id,
@@ -87,6 +88,15 @@ def _response(value: ApprovalRequest) -> dict[str, Any]:
         "resolved": value.decision is not None,
         "resolution": value.decision.value if value.decision else value.status.value,
     }
+
+
+def _resolution(value: Any) -> str | None:
+    """兼容旧审批实体和新的应用响应。"""
+    resolution = getattr(value, "resolution", None)
+    if resolution is not None:
+        return str(getattr(resolution, "value", resolution))
+    decision = getattr(value, "decision", None)
+    return None if decision is None else str(getattr(decision, "value", decision))
 
 
 __all__ = ["build_approval_router"]

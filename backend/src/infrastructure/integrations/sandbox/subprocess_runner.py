@@ -12,8 +12,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from domain.integrations import SandboxPort
 
-class SubprocessSandbox:
+class SubprocessSandbox(SandboxPort):
     def __init__(self, *, max_output_bytes: int = 1_000_000) -> None:
         self._max_output_bytes = max_output_bytes
         self._processes: set[asyncio.subprocess.Process] = set()

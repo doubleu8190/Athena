@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from domain.configuration import ProviderQueryPort, SettingsQueryPort
 from .options import PublicConfiguration
 
 
-class ConfiguredSettingsQueries:
+class ConfiguredSettingsQueries(ProviderQueryPort, SettingsQueryPort):
     """Expose provider and runtime settings through query-port methods."""
 
     def __init__(self, settings: PublicConfiguration) -> None:

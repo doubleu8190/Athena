@@ -199,4 +199,26 @@ class PostgresOrchestrationRepository(PlanRepository):
         return {edge.from_task_id: TaskResult(edge.from_task_id, TaskStatus(by_id[edge.from_task_id].status), _load(by_id[edge.from_task_id].output_json, {}), error=_load(by_id[edge.from_task_id].error_json, None)) for edge in plan.edges if edge.to_task_id == task_id and edge.from_task_id in by_id}
 
 
-__all__ = ["PostgresOrchestrationRepository"]
+class PostgresPlanLoader:
+    """Expose persisted plan completion to the Root graph adapter."""
+
+    def __init__(self, repository: PostgresOrchestrationRepository) -> None:
+        self._repository = repository
+
+    async def __call__(self, *, plan_id: str | None, **_kwargs: object) -> dict[str, object]:
+        if not plan_id:
+            return {"completed": False, "results": {}}
+        value = await self._repository.get(plan_id)
+        if value is None:
+            return {"completed": False, "results": {}}
+        plan, _ = value
+        results = await self._repository.get_results(plan_id)
+        completed = plan.status in {
+            PlanStatus.COMPLETED,
+            PlanStatus.FAILED,
+            PlanStatus.CANCELLED,
+        }
+        return {"completed": completed, "results": results}
+
+
+__all__ = ["PostgresOrchestrationRepository", "PostgresPlanLoader"]

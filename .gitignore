@@ -48,5 +48,10 @@ desktop/out/
 *.log
 logs/
 
+# Generated analysis/build artifacts
+*.coverage
+coverage.json
+*.tsbuildinfo
+
 # ChromaDB
 chromadb/

@@ -17,6 +17,8 @@ from domain.files import (
 )
 from domain.sessions import SessionRepository
 
+from application.common.responses import AttachmentResponse
+
 
 class AttachmentNotFoundError(LookupError):
     """附件不存在或不属于目标会话。"""
@@ -48,16 +50,16 @@ class AttachmentService:
         self._id_factory = id_factory
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
-    async def list_for_session(self, session_id: str) -> list[Attachment]:
+    async def list_for_session(self, session_id: str) -> list[AttachmentResponse]:
         await self._require_session(session_id)
-        return await self._attachments.list_by_session(session_id)
+        return [_to_response(value) for value in await self._attachments.list_by_session(session_id)]
 
-    async def get(self, session_id: str, attachment_id: str) -> Attachment:
+    async def get(self, session_id: str, attachment_id: str) -> AttachmentResponse:
         await self._require_session(session_id)
         value = await self._attachments.get(attachment_id, session_id=session_id)
         if value is None:
             raise AttachmentNotFoundError(attachment_id)
-        return value
+        return _to_response(value)
 
     async def supported_extensions(self, session_id: str) -> list[str]:
         await self._require_session(session_id)
@@ -71,7 +73,7 @@ class AttachmentService:
         mime_type: str,
         chunks: AsyncIterator[bytes],
         message_id: str | None = None,
-    ) -> Attachment:
+    ) -> AttachmentResponse:
         await self._require_session(session_id)
         safe_name = self._normalize_filename(filename)
         adapter = self._adapters.select(safe_name, mime_type)
@@ -101,7 +103,7 @@ class AttachmentService:
         try:
             saved = await self._attachments.create(attachment)
             await self._jobs.enqueue(saved.id)
-            return saved
+            return _to_response(saved)
         except Exception:
             await self._compensate(attachment)
             raise
@@ -133,3 +135,26 @@ class AttachmentService:
                 )
             finally:
                 await self._storage.discard(attachment.storage_key)
+
+
+def _to_response(value: Attachment) -> AttachmentResponse:
+    """将附件领域实体转换为 HTTP/SSE 可消费的应用响应。"""
+    return AttachmentResponse(
+        id=value.id,
+        filename=value.filename,
+        mime_type=value.mime_type,
+        size_bytes=value.size_bytes,
+        sha256=value.sha256,
+        storage_key=value.storage_key,
+        status=value.status,
+        session_id=value.session_id,
+        knowledge_base_id=value.knowledge_base_id,
+        message_id=value.message_id,
+        adapter_name=value.adapter_name,
+        adapter_version=value.adapter_version,
+        capabilities=tuple(value.capabilities),
+        metadata=dict(value.metadata.values),
+        error_message=value.error_message,
+        created_at=value.created_at,
+        updated_at=value.updated_at,
+    )

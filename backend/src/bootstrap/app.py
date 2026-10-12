@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from application.sessions import SessionService
+from application.auth import AuthenticationConfig, AuthenticationService
 from application.runs import RunQueryService
 from application.runs import RunCommandService
 from application.sessions import SessionMessageQueryService
@@ -34,6 +35,7 @@ from interfaces.http.controllers.approval_controller import build_approval_route
 from interfaces.http.controllers.tools_controller import build_tools_router
 from interfaces.http.controllers.mcp_controller import build_mcp_router
 from interfaces.http.auth import AuthOptions, AuthenticationMiddleware, build_auth_router
+from interfaces.http.auth import middleware as auth_middleware
 from .dependencies import ApplicationDependencies, Provider, build_default_dependencies
 from .lifespan import lifespan
 
@@ -59,6 +61,7 @@ def create_app(
     attachment_service_factory: Callable[[], AttachmentService] | None = None,
     knowledge_service_factory: Callable[[], KnowledgeBaseService] | None = None,
     auth_options: AuthOptions | None = None,
+    auth_service: AuthenticationService | None = None,
 ) -> FastAPI:
     """创建无外部副作用的迁移期应用。
 
@@ -71,6 +74,14 @@ def create_app(
         本函数不主动抛出业务异常；依赖工厂异常会在请求处理时传播。
     """
     graph = dependencies or build_default_dependencies()
+    resolved_auth_options = auth_options or AuthOptions.from_settings(auth_middleware.get_settings())
+    resolved_auth_service = auth_service or AuthenticationService(AuthenticationConfig(
+        enabled=resolved_auth_options.enabled,
+        username=resolved_auth_options.username,
+        password=resolved_auth_options.password,
+        session_secret=resolved_auth_options.session_secret,
+        session_ttl_seconds=resolved_auth_options.session_ttl_seconds,
+    ))
     # Explicit test/deployment providers take precedence over the paired
     # mutation service for the same read endpoint.
     explicit_tool_query = tool_query_factory is not None
@@ -81,10 +92,7 @@ def create_app(
         version="0.1.0.dev0",
         lifespan=lambda application: lifespan(application, graph.resources),
     )
-    if auth_options is None:
-        app.add_middleware(AuthenticationMiddleware)
-    else:
-        app.add_middleware(AuthenticationMiddleware, options=auth_options)
+    app.add_middleware(AuthenticationMiddleware, options=resolved_auth_options, auth_service=resolved_auth_service)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -130,7 +138,7 @@ def create_app(
     async def api_health() -> dict[str, Any]:
         return {"status": "ok", "architecture": "restructured"}
 
-    app.include_router(build_auth_router(options=auth_options), prefix="/api")
+    app.include_router(build_auth_router(options=resolved_auth_options, auth_service=resolved_auth_service), prefix="/api")
 
     if session_service_factory is not None:
         app.include_router(

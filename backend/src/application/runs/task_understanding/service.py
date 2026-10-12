@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from domain.integrations.llm_ports import LLMPort
+
 from .specs import QueryHints, UserTaskSpec
 
 
@@ -18,7 +20,7 @@ class TaskUnderstandingService:
     """Use deterministic fast paths before an optional structured LLM."""
 
     def __init__(
-        self, structured_llm: Any = None, *, timeout_seconds: float = 15.0
+        self, structured_llm: LLMPort | None = None, *, timeout_seconds: float = 15.0
     ) -> None:
         self._structured_llm = structured_llm
         self._timeout_seconds = timeout_seconds
@@ -38,24 +40,25 @@ class TaskUnderstandingService:
             if item.get("id")
         )
         fast = self._fast_path(text, attachments)
+
         if fast is not None:
             return TaskUnderstandingResult(fast, "fast_path")
-        if self._structured_llm is not None:
-            try:
-                value = await asyncio.wait_for(
-                    self._call_structured(
-                        text,
-                        history or [],
-                        attachment_refs or [],
-                        knowledge_bases or [],
-                    ),
-                    timeout=self._timeout_seconds,
-                )
-                return TaskUnderstandingResult(
-                    self._normalize(value, text=text, attachment_ids=attachments), "llm"
-                )
-            except Exception:
-                pass
+
+        try:
+            value = await asyncio.wait_for(
+                self._call_structured(
+                    text,
+                    history or [],
+                    attachment_refs or [],
+                    knowledge_bases or [],
+                ),
+                timeout=self._timeout_seconds,
+            )
+            return TaskUnderstandingResult(
+                self._normalize(value, text=text, attachment_ids=attachments), "llm"
+            )
+        except Exception:
+            pass
         return TaskUnderstandingResult(
             self._normalize(
                 self._heuristic(text), text=text, attachment_ids=attachments
@@ -136,13 +139,27 @@ class TaskUnderstandingService:
                 context_requirements=("conversation", "knowledge"),
                 attachment_ids=attachments,
                 confidence=1.0,
-                query_hints={"knowledge": text},
+                query_hints=QueryHints(knowledge=text),
             )
         return None
 
     @staticmethod
     def _heuristic(text: str) -> dict[str, Any]:
         lowered = text.lower()
+        planning = any(
+            marker in lowered
+            for marker in (
+                "multi-worker",
+                "multi worker",
+                "worker",
+                "多个 worker",
+                "多个代理",
+                "并行执行",
+                "并行处理",
+                "拆分任务",
+                "分工协作",
+            )
+        )
         retrieving = any(
             marker in lowered
             for marker in (
@@ -158,7 +175,7 @@ class TaskUnderstandingService:
         )
         return {
             "goal": text,
-            "mode": "retrieve" if retrieving else "answer",
+            "mode": "plan" if planning else ("retrieve" if retrieving else "answer"),
             "confidence": 0.65 if retrieving else 0.45,
             "context_requirements": (
                 ("conversation", "knowledge") if retrieving else ("conversation",)

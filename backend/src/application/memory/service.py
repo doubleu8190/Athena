@@ -10,6 +10,7 @@ from domain.memory import (
     MemorySearchRequest,
     MemoryWriteCommand,
 )
+from application.common.responses import MemoryPageResponse, MemoryResponse
 
 
 class MemoryService:
@@ -31,21 +32,25 @@ class MemoryService:
         """初始化记忆索引等外部资源。"""
         await self._port.initialize()
 
-    async def search(self, request: MemorySearchRequest) -> list[MemoryRecord]:
+    async def search(self, request: MemorySearchRequest) -> list[MemoryResponse]:
         """执行记忆检索。"""
-        return await self._port.search(request)
+        return [_to_response(value) for value in await self._port.search(request)]
 
-    async def list_memories(self, request: MemoryListRequest) -> MemoryPage:
+    async def list_memories(self, request: MemoryListRequest) -> MemoryPageResponse:
         """分页列出记忆。"""
-        return await self._port.list_memories(request)
+        value = await self._port.list_memories(request)
+        if not hasattr(value, "items"):
+            return MemoryPageResponse((), 0, {})
+        return MemoryPageResponse(tuple(_to_response(item) for item in value.items), value.total, dict(value.stats))
 
-    async def get(self, memory_id: str) -> MemoryRecord | None:
+    async def get(self, memory_id: str) -> MemoryResponse | None:
         """按 ID 获取记忆。"""
-        return await self._port.get(memory_id)
+        value = await self._port.get(memory_id)
+        return None if value is None else _to_response(value)
 
-    async def revisions(self, memory_id: str) -> list[MemoryRecord]:
+    async def revisions(self, memory_id: str) -> list[MemoryResponse]:
         """获取记忆的不可变修订历史。"""
-        return await self._port.revisions(memory_id)
+        return [_to_response(value) for value in await self._port.revisions(memory_id)]
 
     async def create_memory(self, command: MemoryWriteCommand) -> str:
         """创建记忆并返回稳定 ID。"""
@@ -93,3 +98,15 @@ class MemoryService:
 
 
 __all__ = ["MemoryService"]
+
+
+def _to_response(value: MemoryRecord) -> MemoryResponse:
+    """将记忆实体转换为应用响应。"""
+    return MemoryResponse(
+        id=value.id,
+        content=value.content,
+        metadata=dict(value.metadata),
+        score=value.score,
+        source=value.source,
+        status=value.status.value,
+    )

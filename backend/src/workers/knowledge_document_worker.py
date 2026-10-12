@@ -3,15 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
 
 from application.files.ingestion_service import IngestionService
-
-
-class DocumentJobQueue(Protocol):
-    async def claim_next(self, *, max_attempts: int = 5) -> dict[str, object] | None: ...
-    async def mark_succeeded(self, job_id: str, result: dict[str, object]) -> None: ...
-    async def mark_failed(self, job_id: str, error: str, *, retry: bool) -> None: ...
+from domain.files import DocumentJobQueue
 
 
 class KnowledgeDocumentWorker:

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from domain.retrieval import GraphSearchPort
+
 from .adapter import Neo4jGraphIndex
 from .options import Neo4jOptions
 
 
-class Neo4jResource:
+class Neo4jResource(GraphSearchPort):
     def __init__(self, options: Neo4jOptions | object) -> None:
         self.options = options if isinstance(options, Neo4jOptions) else Neo4jOptions(
             uri=options.neo4j_uri,

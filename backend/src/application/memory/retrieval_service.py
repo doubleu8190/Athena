@@ -10,6 +10,7 @@ from application.retrieval import RetrievalFusionService
 from domain.memory import MemoryRepositoryPort, MemorySearchRequest, MemoryVectorSearchPort
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
+from application.runs.context.protocols import ContextProvider
 
 
 def _keyword_score(content: str, query: str) -> float:
@@ -20,7 +21,7 @@ def _keyword_score(content: str, query: str) -> float:
     return sum(term in lowered for term in terms) / len(terms)
 
 
-class MemoryContextProvider:
+class MemoryContextProvider(ContextProvider):
     """从记忆端口执行关键词与向量混合召回。"""
 
     name = "memory"

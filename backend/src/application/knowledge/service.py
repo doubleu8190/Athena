@@ -19,6 +19,7 @@ from domain.knowledge import KnowledgeBase, KnowledgeBaseRepository, KnowledgeDo
 
 from .document_service import KnowledgeDocumentService
 from .errors import KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError
+from application.common.responses import AttachmentResponse, KnowledgeBaseResponse
 
 
 class KnowledgeBaseService:
@@ -52,21 +53,21 @@ class KnowledgeBaseService:
             clock=self._clock,
         )
 
-    async def list_knowledge_bases(self) -> list[KnowledgeBase]:
-        return await self._repositories.list_knowledge_bases()
+    async def list_knowledge_bases(self) -> list[KnowledgeBaseResponse]:
+        return [_kb_response(value) for value in await self._repositories.list_knowledge_bases()]
 
-    async def get(self, knowledge_base_id: str) -> KnowledgeBase:
+    async def get(self, knowledge_base_id: str) -> KnowledgeBaseResponse:
         value = await self._repositories.get(knowledge_base_id)
         if value is None:
             raise KnowledgeBaseNotFoundError(knowledge_base_id)
-        return value
+        return _kb_response(value)
 
-    async def create_knowledge_base(self, name: str, description: str = "") -> KnowledgeBase:
+    async def create_knowledge_base(self, name: str, description: str = "") -> KnowledgeBaseResponse:
         normalized = name.strip()
         if not normalized:
             raise ValueError("knowledge base name must not be empty")
         now = self._clock()
-        return await self._repositories.create(
+        return _kb_response(await self._repositories.create(
             KnowledgeBase(
                 id=self._id_factory(),
                 name=normalized,
@@ -77,10 +78,12 @@ class KnowledgeBaseService:
                 created_at=now,
                 updated_at=now,
             )
-        )
+        ))
 
     async def update_knowledge_base(self, knowledge_base_id: str, name: str, description: str = "") -> KnowledgeBase:
-        current = await self.get(knowledge_base_id)
+        current = await self._repositories.get(knowledge_base_id)
+        if current is None:
+            raise KnowledgeBaseNotFoundError(knowledge_base_id)
         normalized = name.strip()
         if not normalized:
             raise ValueError("knowledge base name must not be empty")
@@ -94,7 +97,7 @@ class KnowledgeBaseService:
             created_at=current.created_at,
             updated_at=self._clock(),
         )
-        return await self._repositories.save(updated)
+        return _kb_response(await self._repositories.save(updated))
 
     async def delete_knowledge_base(self, knowledge_base_id: str) -> None:
         await self.get(knowledge_base_id)
@@ -111,19 +114,19 @@ class KnowledgeBaseService:
         filename: str,
         mime_type: str,
         chunks: AsyncIterator[bytes],
-    ) -> Attachment:
-        return await self._document_service.upload_document(
+    ) -> AttachmentResponse:
+        return _attachment_response(await self._document_service.upload_document(
             knowledge_base_id,
             filename=filename,
             mime_type=mime_type,
             chunks=chunks,
-        )
+        ))
 
-    async def list_documents(self, knowledge_base_id: str) -> list[Attachment]:
-        return await self._document_service.list_documents(knowledge_base_id)
+    async def list_documents(self, knowledge_base_id: str) -> list[AttachmentResponse]:
+        return [_attachment_response(value) for value in await self._document_service.list_documents(knowledge_base_id)]
 
-    async def list_versions(self, knowledge_base_id: str, attachment_id: str) -> list[Attachment]:
-        return await self._document_service.list_versions(knowledge_base_id, attachment_id)
+    async def list_versions(self, knowledge_base_id: str, attachment_id: str) -> list[AttachmentResponse]:
+        return [_attachment_response(value) for value in await self._document_service.list_versions(knowledge_base_id, attachment_id)]
 
     async def delete_document(self, knowledge_base_id: str, attachment_id: str) -> None:
         await self._document_service.delete_document(knowledge_base_id, attachment_id)
@@ -137,3 +140,40 @@ class KnowledgeBaseService:
         if not value or "\x00" in value or value in {".", ".."}:
             raise ValueError("invalid filename")
         return value
+
+
+def _kb_response(value: KnowledgeBase) -> KnowledgeBaseResponse:
+    """将知识库实体转换为只读应用响应。"""
+    return KnowledgeBaseResponse(
+        id=value.id,
+        name=value.name,
+        description=value.description,
+        document_count=value.document_count,
+        ready_document_count=value.ready_document_count,
+        total_size_bytes=value.total_size_bytes,
+        created_at=value.created_at,
+        updated_at=value.updated_at,
+    )
+
+
+def _attachment_response(value: Attachment) -> AttachmentResponse:
+    """将知识库附件实体转换为只读应用响应。"""
+    return AttachmentResponse(
+        id=value.id,
+        filename=value.filename,
+        mime_type=value.mime_type,
+        size_bytes=value.size_bytes,
+        sha256=value.sha256,
+        storage_key=value.storage_key,
+        status=value.status.value,
+        session_id=value.session_id,
+        knowledge_base_id=value.knowledge_base_id,
+        message_id=value.message_id,
+        adapter_name=value.adapter_name,
+        adapter_version=value.adapter_version,
+        capabilities=tuple(value.capabilities),
+        metadata=dict(value.metadata.values),
+        error_message=value.error_message,
+        created_at=value.created_at,
+        updated_at=value.updated_at,
+    )

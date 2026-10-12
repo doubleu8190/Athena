@@ -11,12 +11,12 @@ from .approval_repository import PostgresApprovalRepository
 from .event_repository import PostgresEventRepository
 from .memory_repository import PostgresMemoryRepository
 from .retrieval_repository import PostgresRetrievalRepository
-from .run_repository import PostgresRunRepository
+from ._runtime import PostgresRunRepository
 from .mcp_repository import PostgresMCPServerRepository
 from .message_repository import PostgresMessageRepository
 from .session_repository import PostgresSessionRepository
 from .tool_repository import PostgresToolConfigRepository
-from .orchestration_repository import PostgresOrchestrationRepository
+from .orchestration_repository import PostgresOrchestrationRepository, PostgresPlanLoader
 
 __all__ = [
     "PostgresAttachmentRepository",
@@ -36,4 +36,5 @@ __all__ = [
     "PostgresSessionRepository",
     "PostgresToolConfigRepository",
     "PostgresOrchestrationRepository",
+    "PostgresPlanLoader",
 ]

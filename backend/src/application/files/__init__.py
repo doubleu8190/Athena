@@ -6,9 +6,11 @@ from .attachment_service import (
     SessionNotFoundError,
 )
 from .ingestion_service import IngestionService
+from .responses import AttachmentResponse
 
 __all__ = [
     "AttachmentNotFoundError",
+    "AttachmentResponse",
     "AttachmentService",
     "IngestionService",
     "SessionNotFoundError",

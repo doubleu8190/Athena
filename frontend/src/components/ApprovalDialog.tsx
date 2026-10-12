@@ -63,7 +63,10 @@ export function ApprovalCard({ batchId, requests, onSubmit }: ApprovalCardProps)
             <div key={request.approval_id} className="px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <AlertTriangle className="h-4 w-4 text-yellow-400" />
-                <span className="text-sm font-medium text-athena-text">{approvalActionDescription(request.tool_name, request.arguments)}</span>
+                <div className="min-w-0">
+                  {request.task_title && <div className="text-xs text-athena-warning">任务「{request.task_title}」需要确认</div>}
+                  <span className="text-sm font-medium text-athena-text">{request.description || approvalActionDescription(request.tool_name, request.arguments)}</span>
+                </div>
                 <span className={`rounded border px-2 py-0.5 text-[11px] font-medium ${riskClass(request.risk_level)}`}>
                   {request.risk_level === "high" ? "高风险" : request.risk_level === "medium" ? "中风险" : "低风险"}
                 </span>

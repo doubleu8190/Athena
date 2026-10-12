@@ -26,13 +26,13 @@ def build_tools_router(factory: Callable[[], ToolService]) -> APIRouter:
         values = await factory().list_tools()
         items = [
             {
-                "name": value.tool_name,
+                "name": value.name,
                 "description": value.description,
-                "risk_level": value.risk_level.value,
-                "execution_mode": value.execution_mode.value,
+                "risk_level": value.risk_level.value if hasattr(value.risk_level, "value") else value.risk_level,
+                "execution_mode": value.execution_mode.value if hasattr(value.execution_mode, "value") else value.execution_mode,
                 "require_approval": value.require_approval,
                 "enabled": value.enabled,
-                "parameters": value.parameters.values,
+                "parameters": value.parameters,
             }
             for value in values
         ]
@@ -53,7 +53,7 @@ def build_tools_router(factory: Callable[[], ToolService]) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if value is None:
             raise HTTPException(status_code=404, detail="tool_not_found")
-        return {"status": "updated", "name": value.tool_name, "enabled": value.enabled, "risk_level": value.risk_level.value, "require_approval": value.require_approval}
+        return {"status": "updated", "name": value.name, "enabled": value.enabled, "risk_level": value.risk_level.value if hasattr(value.risk_level, "value") else value.risk_level, "require_approval": value.require_approval}
 
     return router
 

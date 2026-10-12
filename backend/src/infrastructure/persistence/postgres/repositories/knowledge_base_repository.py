@@ -9,13 +9,13 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.knowledge import KnowledgeBase
+from domain.knowledge import KnowledgeBase, KnowledgeBaseRepository
 
 from ..models import AttachmentModel, KnowledgeBaseModel
 from ..mappers.converters import knowledge_base_domain_to_model, knowledge_base_model_to_domain
 
 
-class PostgresKnowledgeBaseRepository:
+class PostgresKnowledgeBaseRepository(KnowledgeBaseRepository):
     """通过注入会话工厂管理知识库和文档统计。"""
 
     def __init__(

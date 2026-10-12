@@ -67,6 +67,7 @@ class ResultSynthesizer(Protocol):
 
 
 class RootGraphPort(Protocol):
+
     async def invoke(
         self,
         *,
@@ -76,6 +77,7 @@ class RootGraphPort(Protocol):
         message_id: str = "",
         attachment_ids: list[str] | None = None,
         resume_value: dict[str, object] | None = None,
+        stop_signal: object | None = None,
     ) -> object: ...
 
 

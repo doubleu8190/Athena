@@ -148,9 +148,40 @@ export interface OrchestrationTask {
   task_id: string
   title: string
   status: "queued" | "claimed" | "running" | "waiting_approval" | "retry_wait" | "cancel_requested" | "completed" | "failed" | "timed_out" | "invalid_output" | "cancelled"
+  run_id?: string
+  objective?: string
+  worker_type?: string
+  parent_run_id?: string | null
+  execution_generation?: number
   attempt?: number
   worker_run_id?: string
+  started_at?: string | null
+  completed_at?: string | null
+  duration_ms?: number
+  result_summary?: string | null
+  dependencies?: string[]
+  blocked_by?: string[]
+  approval_batch_id?: string | null
   error?: string
+  error_detail?: ExecutionError | null
+  session_seq?: number
+  transition_id?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export type OrchestrationPlanStatus = "created" | "running" | "completed" | "failed" | "cancelled"
+
+export interface OrchestrationPlan {
+  plan_id: string
+  run_id?: string
+  goal?: string
+  status: OrchestrationPlanStatus
+  max_parallelism?: number
+  task_ids?: string[]
+  synthesis_status?: "idle" | "running" | "completed" | "failed"
+  session_seq?: number
+  transition_id?: string | null
+  metadata?: Record<string, unknown>
 }
 
 // ─── 会话相关 ───────────────────────────────────────────────────
@@ -220,6 +251,10 @@ export interface ApprovalRequest {
   approval_batch_id?: string | null
   description?: string
   session_id?: string
+  plan_id?: string
+  task_id?: string
+  task_title?: string
+  worker_run_id?: string
 }
 
 export interface ApprovalResult {

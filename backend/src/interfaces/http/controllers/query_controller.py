@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -13,9 +14,9 @@ from application.memory import MemoryQueryService, MemoryService
 from application.retrieval import RetrievalQueryService
 from application.knowledge import KnowledgeBaseQueryService
 from application.tools import ToolQueryService
-from domain.knowledge import KnowledgeBase
-from domain.tools import ToolConfig
-from domain.memory import MemoryListRequest, MemorySearchRequest
+from application.knowledge.responses import KnowledgeBaseResponse as ApplicationKnowledgeBaseResponse
+from application.tools.responses import ToolResponse as ApplicationToolResponse
+from application.memory import MemoryListRequest, MemorySearchRequest
 
 
 class ToolResponse(BaseModel):
@@ -29,15 +30,15 @@ class ToolResponse(BaseModel):
     last_called_at: str | None = None
 
     @classmethod
-    def from_domain(cls, item: ToolConfig, *, last_called_at: str | None = None) -> "ToolResponse":
+    def from_application(cls, item: ApplicationToolResponse, *, last_called_at: str | None = None) -> "ToolResponse":
         return cls(
-            name=item.tool_name,
+            name=item.name,
             description=item.description,
-            risk_level=item.risk_level.value,
-            execution_mode=item.execution_mode.value,
+            risk_level=item.risk_level.value if hasattr(item.risk_level, "value") else item.risk_level,
+            execution_mode=item.execution_mode.value if hasattr(item.execution_mode, "value") else item.execution_mode,
             require_approval=item.require_approval,
             enabled=item.enabled,
-            parameters=item.parameters.values,
+            parameters=item.parameters,
             last_called_at=last_called_at,
         )
 
@@ -70,7 +71,7 @@ class KnowledgeBaseResponse(BaseModel):
     updated_at: Any
 
     @classmethod
-    def from_domain(cls, item: KnowledgeBase) -> "KnowledgeBaseResponse":
+    def from_application(cls, item: ApplicationKnowledgeBaseResponse) -> "KnowledgeBaseResponse":
         return cls(
             id=item.id,
             name=item.name,
@@ -105,7 +106,7 @@ def build_query_router(
                 raise HTTPException(status_code=503, detail="tool_query_not_configured")
             service = tool_factory()
             last_called, calls_today = await service.usage()
-            items = [ToolResponse.from_domain(item, last_called_at=last_called.get(item.tool_name)) for item in await service.list_tools()]
+            items = [ToolResponse.from_application(item, last_called_at=last_called.get(item.name)) for item in await service.list_tools()]
             return {
                 "items": [item.model_dump() for item in items],
                 "total": len(items),
@@ -118,7 +119,16 @@ def build_query_router(
     async def list_providers() -> list[ProviderResponse]:
         if provider_factory is None:
             raise HTTPException(status_code=503, detail="provider_query_not_configured")
-        return [ProviderResponse.model_validate(item) for item in await provider_factory().list_providers()]
+        return [ProviderResponse(
+            name=item.name,
+            provider=item.provider,
+            model=item.model,
+            base_url=item.base_url,
+            api_key_configured=item.api_key_configured,
+            api_key_masked=item.api_key_masked,
+            temperature=item.temperature,
+            max_tokens=item.max_tokens,
+        ) for item in await provider_factory().list_providers()]
 
     @router.post("/providers/test")
     async def test_provider(body: dict[str, Any]) -> dict[str, Any]:
@@ -133,14 +143,15 @@ def build_query_router(
     async def get_settings() -> SettingsResponse:
         if settings_factory is None:
             raise HTTPException(status_code=503, detail="settings_query_not_configured")
-        return SettingsResponse.model_validate(await settings_factory().get_settings())
+        value = await settings_factory().get_settings()
+        return SettingsResponse.model_validate(value.values if hasattr(value, "values") else value)
 
     @router.get("/knowledge-bases", response_model=list[KnowledgeBaseResponse])
     async def list_knowledge_bases() -> list[KnowledgeBaseResponse]:
         if knowledge_factory is None:
             raise HTTPException(status_code=503, detail="knowledge_query_not_configured")
         return [
-            KnowledgeBaseResponse.from_domain(item)
+            KnowledgeBaseResponse.from_application(item)
             for item in await knowledge_factory().list_knowledge_bases()
         ]
 
@@ -157,11 +168,12 @@ def build_query_router(
             return [_memory_response(value) for value in values]
         if memory_factory is None:
             raise HTTPException(status_code=503, detail="memory_query_not_configured")
-        return await memory_factory().search(
+        values = await memory_factory().search(
             query=str(body.get("query", "")),
             n_results=int(body.get("n_results", 5)),
             where=body.get("where"),
         )
+        return [_memory_response(value) for value in values]
 
     @router.get("/memory")
     async def list_memory(
@@ -179,12 +191,13 @@ def build_query_router(
                     session_id=session_id,
                 )
             )
-            return {"items": [_memory_response(value) for value in page.items], **page.stats}
+            return {"items": [_memory_response(value) for value in page.items], **page.stats, "total": page.total}
         if memory_factory is None:
             raise HTTPException(status_code=503, detail="memory_query_not_configured")
-        return await memory_factory().list_memories(
-            limit=limit, offset=offset, expired=expired, session_id=session_id
-        )
+        page = await memory_factory().list_memories(limit=limit, offset=offset, expired=expired, session_id=session_id)
+        if hasattr(page, "items"):
+            return {"items": [_memory_response(value) for value in page.items], **page.stats, "total": page.total}
+        return page
 
     @router.get("/memory/{memory_id}")
     async def get_memory(memory_id: str) -> dict[str, Any]:
@@ -198,7 +211,7 @@ def build_query_router(
         value = await memory_factory().get(memory_id)
         if value is None:
             raise HTTPException(status_code=404, detail="memory_not_found")
-        return value
+        return _memory_response(value)
 
     @router.get("/memory/{memory_id}/revisions")
     async def list_memory_revisions(memory_id: str) -> list[dict[str, Any]]:
@@ -212,7 +225,7 @@ def build_query_router(
         values = await memory_factory().revisions(memory_id)
         if not values:
             raise HTTPException(status_code=404, detail="memory_not_found")
-        return values
+        return [_memory_response(value) for value in values]
 
     @router.get("/retrieval/runs")
     async def list_retrieval_runs(
@@ -235,7 +248,7 @@ def build_query_router(
             agent_run_id=agent_run_id,
             query=q,
         )
-        return {"items": items, "total": total, "limit": limit, "offset": offset}
+        return {"items": [asdict(item) for item in items], "total": total, "limit": limit, "offset": offset}
 
     @router.get("/retrieval/runs/{run_id}")
     async def get_retrieval_run(run_id: str) -> dict[str, Any]:
@@ -244,13 +257,13 @@ def build_query_router(
         value = await retrieval_factory().get_run(run_id)
         if value is None:
             raise HTTPException(status_code=404, detail="retrieval_run_not_found")
-        return value
+        return asdict(value)
 
     return router
 
 
 def _memory_response(value: Any) -> dict[str, Any]:
-    """将目标 MemoryRecord 转换为 HTTP JSON 结构。"""
+    """将应用层记忆响应转换为 HTTP JSON 结构。"""
     result = {
         "id": value.id,
         "content": value.content,
@@ -260,4 +273,6 @@ def _memory_response(value: Any) -> dict[str, Any]:
         result["score"] = value.score
     if value.source is not None:
         result["source"] = value.source
+    if getattr(value, "status", None) is not None:
+        result["status"] = value.status
     return result

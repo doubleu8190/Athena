@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 from domain.sessions import Session, SessionRepository
 
+from application.common.responses import SessionResponse
+
 
 class SessionNotFoundError(LookupError):
     """请求的会话不存在。"""
@@ -26,7 +28,7 @@ class SessionService:
         self._id_factory = id_factory
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
-    async def create(self, title: str = "New Session") -> Session:
+    async def create(self, title: str = "New Session") -> SessionResponse:
         """创建会话并持久化。
 
         参数：
@@ -41,9 +43,9 @@ class SessionService:
             title=title,
             now=self._clock(),
         )
-        return await self._repository.create(session)
+        return _to_response(await self._repository.create(session))
 
-    async def list_sessions(self) -> list[Session]:
+    async def list_sessions(self) -> list[SessionResponse]:
         """返回所有未删除会话。
 
         参数：无。
@@ -52,9 +54,9 @@ class SessionService:
         异常：
             不主动抛出业务异常。
         """
-        return await self._repository.list_sessions()
+        return [_to_response(value) for value in await self._repository.list_sessions()]
 
-    async def get(self, session_id: str) -> Session:
+    async def get(self, session_id: str) -> SessionResponse:
         """按 ID 获取会话。
 
         参数：
@@ -67,9 +69,9 @@ class SessionService:
         session = await self._repository.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
-        return session
+        return _to_response(session)
 
-    async def rename(self, session_id: str, title: str) -> Session:
+    async def rename(self, session_id: str, title: str) -> SessionResponse:
         """修改会话标题并保存。
 
         参数：
@@ -81,9 +83,11 @@ class SessionService:
             SessionNotFoundError: 会话不存在时抛出。
             ValueError: 标题为空时抛出。
         """
-        current = await self.get(session_id)
+        current = await self._repository.get(session_id)
+        if current is None:
+            raise SessionNotFoundError(session_id)
         updated = current.rename(title, now=self._clock())
-        return await self._repository.save(updated)
+        return _to_response(await self._repository.save(updated))
 
     async def delete(self, session_id: str) -> None:
         """删除指定会话。
@@ -97,3 +101,15 @@ class SessionService:
         """
         if not await self._repository.delete(session_id):
             raise SessionNotFoundError(session_id)
+
+
+def _to_response(value: Session) -> SessionResponse:
+    """将领域会话转换为应用层只读返回值。"""
+    return SessionResponse(
+        id=value.id,
+        title=value.title,
+        status=value.status.value,
+        run_id=value.run_id,
+        created_at=value.created_at,
+        updated_at=value.updated_at,
+    )

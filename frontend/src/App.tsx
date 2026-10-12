@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react"
+import { LogOut } from "lucide-react"
 import Sidebar from "./components/Sidebar"
 import Chat from "./components/Chat"
 import StatusIndicator from "./components/StatusIndicator"
@@ -9,7 +10,8 @@ import { useChatStore } from "./store/chatStore"
 import { useSessionEventStream } from "./hooks/useSessionEventStream"
 import { ClientEventType } from "./types/events"
 import { apiClient } from "./api/client"
-import type { Session, AppView, Message, Step, ToolCall } from "./types"
+import LoginPage from "./components/LoginPage"
+import type { Session, AppView, Message, Step, ToolCall, OrchestrationTask, OrchestrationPlan } from "./types"
 
 /** 渲染主应用布局，并协调会话、视图和事件流状态。 */
 function AppContent() {
@@ -28,16 +30,32 @@ function AppContent() {
   const initializedSessions = useRef(false)
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false)
   const demoMode = useState(() => new URLSearchParams(window.location.search).get("demo") === "execution")[0]
+  const [authState, setAuthState] = useState<"loading" | "authenticated" | "unauthenticated">(demoMode ? "authenticated" : "loading")
 
   useEffect(() => {
-    const initApi = async () => {
-      apiClient.setBaseUrl("")
-    }
-    initApi()
+    apiClient.setBaseUrl("")
+    apiClient.setUnauthorizedHandler(() => {
+      initializedSessions.current = false
+      setAuthState("unauthenticated")
+    })
+    return () => apiClient.setUnauthorizedHandler(null)
   }, [])
 
   useEffect(() => {
     if (demoMode) return
+    let active = true
+    void apiClient.getAuthSession()
+      .then((session) => {
+        if (active) setAuthState(session.authenticated ? "authenticated" : "unauthenticated")
+      })
+      .catch(() => {
+        if (active) setAuthState("unauthenticated")
+      })
+    return () => { active = false }
+  }, [demoMode])
+
+  useEffect(() => {
+    if (demoMode || authState !== "authenticated") return
     if (initializedSessions.current) return
     initializedSessions.current = true
     const loadSessions = async () => {
@@ -65,9 +83,9 @@ function AppContent() {
       }
     }
     loadSessions()
-  }, [demoMode, setActiveSession, setSessions])
+  }, [authState, demoMode, setActiveSession, setSessions])
 
-  useSessionEventStream(demoMode ? null : activeSessionId, apiBase)
+  useSessionEventStream(demoMode || authState !== "authenticated" ? null : activeSessionId, apiBase)
 
   useEffect(() => {
     if (!demoMode) return
@@ -96,10 +114,10 @@ function AppContent() {
       setConnectionStatus,
       setAgentStatus: setDemoAgentStatus,
       addStep: addDemoStep,
-      updateStep: updateDemoStep,
       addToolCall: addDemoToolCall,
-      updateToolCall: updateDemoToolCall,
       addApproval: addDemoApproval,
+      upsertOrchestrationPlan: upsertDemoPlan,
+      upsertOrchestrationTask: upsertDemoTask,
       setThinking: setDemoThinking,
       upsertExecutionTimelineEntry: addDemoTimeline,
       clearError: clearDemoError,
@@ -111,6 +129,17 @@ function AppContent() {
     setConnectionStatus("connected")
     setDemoAgentStatus("thinking")
     clearDemoError()
+    const planId = "demo-plan"
+    const workerA = "demo-worker-feedback"
+    const workerB = "demo-worker-review"
+    const makeTask = (task_id: string, title: string, status: OrchestrationTask["status"]): OrchestrationTask => ({
+      plan_id: planId, task_id, run_id: runId, title, objective: status === "completed" ? "已整理并提炼用户反馈" : "正在处理用户反馈相关信息", status,
+      worker_run_id: task_id, attempt: 1, execution_generation: 1,
+    })
+    const plan: OrchestrationPlan = { plan_id: planId, run_id: runId, goal: "整理客户反馈并复核问题", status: "running", max_parallelism: 2, task_ids: [workerA, workerB], synthesis_status: "idle" }
+    upsertDemoPlan(plan)
+    upsertDemoTask(makeTask(workerA, "整理客户反馈", "queued"))
+    upsertDemoTask(makeTask(workerB, "独立复核问题", "queued"))
 
     const timers: number[] = []
     const later = (delay: number, task: () => void) => {
@@ -118,26 +147,26 @@ function AppContent() {
     }
     later(100, () => addDemoTimeline({ id: "demo-run-start", run_id: runId, event_type: "run.started", label: "开始处理你的请求", status: "running", timestamp: new Date().toISOString() }))
     later(700, () => {
-      setDemoThinking({ active: true, content: "我正在归纳反馈主题，并检查哪些事项需要写入项目看板。", messageId: "demo-thinking" })
-      addDemoTimeline({ id: "demo-plan", run_id: runId, event_type: "task.started", label: "正在归纳客户反馈", detail: "汇总反馈内容并提炼主要问题。", status: "running", timestamp: new Date().toISOString() })
-      const step: Step = { id: "demo-llm-step", session_id: sessionId, run_id: runId, step_number: 1, step_type: "llm_call", status: "running", started_at: new Date().toISOString(), duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 }
-      addDemoStep(step)
+      setDemoThinking({ active: true, content: "我正在拆分任务，让两个工作单元同时整理和复核反馈。", messageId: "demo-thinking" })
+      addDemoTimeline({ id: "demo-plan", run_id: runId, event_type: "plan.created", label: "已制定执行计划", detail: "将同时处理客户反馈整理和问题复核。", status: "running", timestamp: new Date().toISOString() })
+      upsertDemoTask({ ...makeTask(workerA, "整理客户反馈", "running"), started_at: new Date().toISOString() })
+      upsertDemoTask({ ...makeTask(workerB, "独立复核问题", "running"), started_at: new Date().toISOString() })
     })
     later(1800, () => {
-      setDemoThinking({ active: true, content: "已识别出 3 个主要问题，正在调用项目看板工具写入高优先级事项。", messageId: "demo-thinking" })
-      updateDemoStep("demo-llm-step", { status: "completed", completed_at: new Date().toISOString(), duration_ms: 1080, llm_output_tokens: 142 })
-      const toolStep: Step = { id: "demo-tool-step", session_id: sessionId, run_id: runId, step_number: 2, step_type: "tool_execution", status: "running", started_at: new Date().toISOString(), duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 }
-      addDemoStep(toolStep)
-      addDemoToolCall({ id: "demo-tool-call", tool_name: "project.create_issue", arguments: { title: "高优先级客户反馈汇总", priority: "high", labels: ["customer-feedback"] }, status: "running", started_at: new Date().toISOString(), risk_level: "high", step_id: toolStep.id, run_id: runId } as ToolCall)
-      addDemoTimeline({ id: "demo-tool-start", run_id: runId, event_type: "tool.started", label: "正在准备创建项目事项", detail: "这项操作会写入项目看板，需要你确认后才会继续。", status: "waiting", metadata: { tool_name: "project.create_issue", arguments: { title: "高优先级客户反馈汇总", priority: "high", labels: ["customer-feedback"] } }, timestamp: new Date().toISOString() })
-      setDemoAgentStatus("waiting_approval")
+      setDemoThinking({ active: true, content: "两个任务正在并行处理，其中问题复核遇到一次暂时性问题。", messageId: "demo-thinking" })
+      upsertDemoTask({ ...makeTask(workerB, "独立复核问题", "retry_wait"), attempt: 2, error: "暂时无法读取一份反馈记录，准备重试。" })
+      const reviewStep: Step = { id: "demo-review-step", session_id: sessionId, run_id: workerB, parent_run_id: runId, step_number: 1, step_type: "llm_call", status: "running", started_at: new Date().toISOString(), duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 }
+      addDemoStep(reviewStep)
     })
-    later(3400, () => {
+    later(2800, () => {
       setDemoThinking({ active: false, content: "", messageId: null })
-      updateDemoStep("demo-tool-step", { status: "paused", completed_at: null })
-      updateDemoToolCall("demo-tool-call", { status: "paused" })
-      addDemoApproval({ approval_id: "demo-approval", tool_name: "project.create_issue", arguments: { title: "高优先级客户反馈汇总", priority: "high", labels: ["customer-feedback"] }, risk_level: "high", approval_batch_id: "demo-approval-batch", session_id: sessionId })
-      addDemoTimeline({ id: "demo-approval", run_id: runId, event_type: "approval.required", label: "需要你确认这项操作", detail: "批准后将在项目看板创建高优先级的“高优先级客户反馈汇总”。", status: "waiting", timestamp: new Date().toISOString() })
+      upsertDemoTask({ ...makeTask(workerA, "整理客户反馈", "waiting_approval"), approval_batch_id: "demo-approval-batch", worker_run_id: workerA })
+      const toolStep: Step = { id: "demo-tool-step", session_id: sessionId, run_id: workerA, parent_run_id: runId, step_number: 1, step_type: "tool_execution", status: "paused", started_at: new Date().toISOString(), duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 }
+      addDemoStep(toolStep)
+      addDemoToolCall({ id: "demo-tool-call", tool_name: "project.create_issue", arguments: { title: "高优先级客户反馈汇总", priority: "high" }, status: "paused", started_at: new Date().toISOString(), risk_level: "high", step_id: toolStep.id, run_id: workerA } as ToolCall)
+      addDemoApproval({ approval_id: "demo-approval", tool_name: "project.create_issue", arguments: { title: "高优先级客户反馈汇总", priority: "high" }, risk_level: "high", approval_batch_id: "demo-approval-batch", session_id: sessionId, plan_id: planId, task_id: workerA, task_title: "整理客户反馈", worker_run_id: workerA })
+      addDemoTimeline({ id: "demo-approval", run_id: runId, event_type: "approval.required", label: "需要确认后才能继续", detail: "任务「整理客户反馈」需要确认；允许后会在项目看板创建高优先级事项。", status: "waiting", timestamp: new Date().toISOString() })
+      setDemoAgentStatus("waiting_approval")
     })
 
     return () => timers.forEach((timer) => window.clearTimeout(timer))
@@ -235,6 +264,22 @@ function AppContent() {
     }
   }, [])
 
+  const handleLogout = useCallback(async () => {
+    try {
+      await apiClient.logout()
+    } finally {
+      initializedSessions.current = false
+      setAuthState("unauthenticated")
+    }
+  }, [])
+
+  if (authState === "loading") {
+    return <main className="flex min-h-screen items-center justify-center bg-athena-bg text-athena-muted">加载中...</main>
+  }
+  if (authState === "unauthenticated" && !demoMode) {
+    return <LoginPage onAuthenticated={() => { initializedSessions.current = false; setAuthState("authenticated") }} />
+  }
+
   return (
     <div className="flex h-screen w-screen flex-col-reverse overflow-hidden md:flex-row">
       <NavRail activeView={activeView} onSelectView={handleSelectView} />
@@ -251,7 +296,12 @@ function AppContent() {
             onCloseMobile={() => setMobileSessionsOpen(false)}
           />
           <main className="flex-1 flex flex-col min-w-0 min-h-0">
-            <StatusIndicator />
+            <div className="flex items-center justify-between border-b border-athena-border">
+              <StatusIndicator />
+              {!demoMode && <button type="button" className="btn-ghost mr-3" onClick={() => void handleLogout()} aria-label="退出登录" title="退出登录">
+                <LogOut size={16} />
+              </button>}
+            </div>
             <Chat sendEvent={sendEvent} onOpenSessions={() => setMobileSessionsOpen(true)} demoMode={demoMode} />
           </main>
         </>

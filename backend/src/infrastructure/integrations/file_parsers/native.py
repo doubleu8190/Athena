@@ -17,14 +17,17 @@ from uuid import uuid4
 from domain.files import (
     AdapterInfo,
     Attachment,
+    DocumentParserPort,
+    FileAdapterRegistryPort,
     FileChunk,
     FileLocator,
     FileMetadata,
+    FileStoragePort,
     ParsedDocument,
 )
 
 
-class NativeFileAdapterRegistry:
+class NativeFileAdapterRegistry(FileAdapterRegistryPort):
     """Content-type registry used by the production target graph."""
 
     _adapters = (
@@ -48,10 +51,10 @@ class NativeFileAdapterRegistry:
         return [extension for adapter in self._adapters for extension in adapter.extensions]
 
 
-class NativeFileParser:
+class NativeFileParser(DocumentParserPort):
     """Parse common text, PDF, Word, Excel and image attachments."""
 
-    def __init__(self, storage) -> None:
+    def __init__(self, storage: FileStoragePort) -> None:
         self._storage = storage
 
     async def parse(self, attachment: Attachment) -> ParsedDocument:

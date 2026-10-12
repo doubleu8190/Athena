@@ -8,13 +8,13 @@ from contextlib import AbstractAsyncContextManager
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.tools import ToolConfig
+from domain.tools import ToolConfig, ToolConfigRepository
 
 from ..models import ToolModel
 from ..mappers.converters import tool_domain_to_model, tool_model_to_domain
 
 
-class PostgresToolConfigRepository:
+class PostgresToolConfigRepository(ToolConfigRepository):
     """通过注入会话工厂读写工具治理配置。"""
 
     def __init__(

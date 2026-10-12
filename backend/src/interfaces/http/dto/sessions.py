@@ -6,9 +6,11 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from domain.sessions import Session
-from domain.sessions import Message
-from domain.runs import RunSummary
+from application.sessions.responses import (
+    MessageResponse as ApplicationMessageResponse,
+    RunSummaryResponse as ApplicationRunSummaryResponse,
+    SessionResponse as ApplicationSessionResponse,
+)
 
 
 class CreateSessionRequest(BaseModel):
@@ -28,11 +30,11 @@ class SessionResponse(BaseModel):
     updated_at: datetime
 
     @classmethod
-    def from_domain(cls, session: Session) -> "SessionResponse":
+    def from_application(cls, session: ApplicationSessionResponse) -> "SessionResponse":
         return cls(
             id=session.id,
             title=session.title,
-            status=session.status.value,
+            status=session.status,
             run_id=session.run_id,
             created_at=session.created_at,
             updated_at=session.updated_at,
@@ -73,11 +75,11 @@ class MessageResponse(BaseModel):
     attachments: list[AttachmentRefResponse]
 
     @classmethod
-    def from_domain(cls, message: Message) -> "MessageResponse":
+    def from_application(cls, message: ApplicationMessageResponse) -> "MessageResponse":
         return cls(
             id=message.id,
             session_id=message.session_id,
-            role=message.role.value,
+            role=message.role,
             content=message.content,
             timestamp=message.timestamp,
             tool_calls=[ToolCallResponse(id=item.id, name=item.name, args=item.args) for item in message.tool_calls],
@@ -92,7 +94,7 @@ class MessageResponse(BaseModel):
                     filename=item.filename,
                     mime_type=item.mime_type,
                     size_bytes=item.size_bytes,
-                    status=item.status.value,
+                    status=item.status,
                 )
                 for item in message.attachments
             ],
@@ -109,11 +111,11 @@ class RunSummaryResponse(BaseModel):
     updated_at: datetime | str | None = None
 
     @classmethod
-    def from_domain(cls, run: RunSummary) -> "RunSummaryResponse":
+    def from_application(cls, run: ApplicationRunSummaryResponse) -> "RunSummaryResponse":
         return cls(
             run_id=run.run_id,
             session_id=run.session_id,
-            status=str(run.status),
+            status=run.status,
             root_thread_id=run.root_thread_id,
             error=run.error,
             created_at=run.created_at,

@@ -24,7 +24,9 @@ class RetryOptions:
 
 @dataclass(frozen=True, slots=True)
 class LLMOptions:
-    providers: tuple[LLMProviderOptions, ...] = field(default_factory=lambda: (LLMProviderOptions(),))
+    providers: tuple[LLMProviderOptions, ...] = field(
+        default_factory=lambda: (LLMProviderOptions(),)
+    )
     retry: RetryOptions = field(default_factory=RetryOptions)
 
     @property
@@ -44,7 +46,8 @@ class EmbeddingOptions:
     base_url: str = ""
 
 
-def coerce_llm_options(value: Any) -> LLMOptions:
+def coerce_llm_options(value: LLMOptions | Any) -> LLMOptions:
+    """将运行时 Settings 或已类型化选项转换为 LLMOptions。"""
     if isinstance(value, LLMOptions):
         return value
     retry = value.llm_retry
@@ -69,7 +72,8 @@ def coerce_llm_options(value: Any) -> LLMOptions:
     )
 
 
-def coerce_embedding_options(value: Any) -> EmbeddingOptions:
+def coerce_embedding_options(value: EmbeddingOptions | Any) -> EmbeddingOptions:
+    """将运行时 Settings 或已类型化选项转换为 EmbeddingOptions。"""
     if isinstance(value, EmbeddingOptions):
         return value
     return EmbeddingOptions(
@@ -87,6 +91,6 @@ __all__ = [
     "LLMOptions",
     "LLMProviderOptions",
     "RetryOptions",
-    "coerce_embedding_options",
     "coerce_llm_options",
+    "coerce_embedding_options",
 ]

@@ -13,8 +13,14 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.approval import ApprovalDecision, ApprovalRequest, ApprovalStatus
-from domain.retrieval.query_ports import RetrievalQueryPort
-from domain.events import ApplicationEvent
+from domain.approval.ports import ApprovalRepository
+from domain.events import (
+    ApplicationEvent,
+    EventHistoryPort,
+    EventPublisherPort,
+    EventSubscriptionPort,
+    RealtimeTransportPort,
+)
 from domain.memory import (
     MemoryListRequest,
     MemoryPage,
@@ -23,6 +29,8 @@ from domain.memory import (
     MemoryStatus,
     MemoryWriteCommand,
 )
+from domain.memory.repository_ports import MemoryRepositoryPort
+from domain.retrieval.query_ports import RetrievalQueryPort
 from domain.runs import (
     CommandEnqueueResult,
     CommandStatus,
@@ -33,6 +41,7 @@ from domain.runs import (
     RunStatus,
     RunSummary,
 )
+from domain.runs.ports import CommandQueuePort, CommandStorePort, RunLifecyclePort
 
 from ..models import (
     AgentCommandModel,
@@ -59,7 +68,12 @@ def _json(value: Any, default: Any) -> Any:
     return parsed
 
 
-class PostgresRunRepository(RunQueryPort):
+class PostgresRunRepository(
+    CommandQueuePort,
+    CommandStorePort,
+    RunLifecyclePort,
+    RunQueryPort,
+):
     """Command queue, run projection and lifecycle in the target schema."""
 
     def __init__(
@@ -284,7 +298,12 @@ class PostgresRunRepository(RunQueryPort):
         )
 
 
-class PostgresEventRepository:
+class PostgresEventRepository(
+    EventPublisherPort,
+    EventHistoryPort,
+    EventSubscriptionPort,
+    RealtimeTransportPort,
+):
     def __init__(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     ) -> None:
@@ -403,7 +422,7 @@ class PostgresEventRepository:
             self._subscribers[session_id].remove(queue)
 
 
-class PostgresApprovalRepository:
+class PostgresApprovalRepository(ApprovalRepository):
     def __init__(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     ) -> None:
@@ -537,7 +556,7 @@ class PostgresApprovalRepository:
         )
 
 
-class PostgresMemoryRepository:
+class PostgresMemoryRepository(MemoryRepositoryPort):
     def __init__(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     ) -> None:

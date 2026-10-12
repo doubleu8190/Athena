@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from domain.files import GraphIndexerPort
+from domain.retrieval import GraphSearchPort
 
-class Neo4jGraphIndex:
+class Neo4jGraphIndex(GraphIndexerPort, GraphSearchPort):
     """Keep Neo4j driver details outside domain and application layers."""
 
     def __init__(self, driver, *, database: str = "neo4j") -> None:

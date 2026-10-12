@@ -54,7 +54,7 @@ def build_runs_router(
             raise HTTPException(status_code=status, detail=exc.code) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return SubmitRunResponse.from_domain(value)
+        return SubmitRunResponse.from_application(value)
 
     @router.post("/sessions/{session_id}/cancel", status_code=202)
     async def cancel_session(
@@ -66,7 +66,7 @@ def build_runs_router(
             value = await commands.cancel_session(session_id, run_id=run_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
-        return CancelCommandResponse.from_domain(value)
+        return CancelCommandResponse.from_application(value)
 
     @router.post("/runs/{run_id}/cancel", status_code=202)
     async def cancel_run(
@@ -77,7 +77,7 @@ def build_runs_router(
             value = await commands.cancel_run(run_id)
         except RunNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run_not_found") from exc
-        return CancelCommandResponse.from_domain(value)
+        return CancelCommandResponse.from_application(value)
 
     @router.get("/commands/{command_id}")
     async def get_command(
@@ -88,7 +88,7 @@ def build_runs_router(
             value = await commands.get_command(command_id)
         except CommandNotFoundError as exc:
             raise HTTPException(status_code=404, detail="command_not_found") from exc
-        return CommandStatusResponse.from_domain(value)
+        return CommandStatusResponse.from_application(value)
 
     return router
 

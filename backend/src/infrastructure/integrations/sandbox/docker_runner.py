@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from domain.integrations import SandboxPort
 from .options import SandboxOptions
 
 
-class DockerSandbox:
+class DockerSandbox(SandboxPort):
     def __init__(self, options: SandboxOptions | object) -> None:
         self.options = options if isinstance(options, SandboxOptions) else SandboxOptions(
             docker_binary=options.sandbox_docker_binary,

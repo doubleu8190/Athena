@@ -14,10 +14,10 @@ from application.events import (
     EventSessionNotFoundError,
     EventStreamService,
 )
-from domain.events import ApplicationEvent
+from application.events.responses import EventResponse
 
 
-def _event_payload(event: ApplicationEvent) -> dict[str, Any]:
+def _event_payload(event: EventResponse) -> dict[str, Any]:
     return {
         "schema_version": 2,
         "session_seq": event.session_seq,
@@ -33,12 +33,12 @@ def _event_payload(event: ApplicationEvent) -> dict[str, Any]:
         "is_complete": event.is_complete,
         "parent_run_id": event.parent_run_id,
         "transition_id": event.transition_id,
-        "occurred_at": event.occurred_at.isoformat(),
+        "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
         "payload": event.payload,
     }
 
 
-def _format_event(event: ApplicationEvent) -> str:
+def _format_event(event: EventResponse) -> str:
     lines: list[str] = []
     if event.session_seq is not None:
         lines.append(f"id: {event.session_seq}")

@@ -1,9 +1,9 @@
 """Explicit no-op indexers for deployments without external indexes."""
 
-from domain.files import Attachment, FileChunk
+from domain.files import Attachment, FileChunk, GraphIndexerPort, VectorIndexerPort
 
 
-class DisabledVectorIndexer:
+class DisabledVectorIndexer(VectorIndexerPort):
     """Ignore vector indexing when embeddings are disabled."""
 
     async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk]) -> None:
@@ -19,7 +19,7 @@ class DisabledVectorIndexer:
         return await self.delete_attachment(attachment_id)
 
 
-class DisabledGraphIndexer:
+class DisabledGraphIndexer(GraphIndexerPort):
     """Ignore graph indexing when Neo4j is disabled."""
 
     async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk]) -> None:

@@ -1,10 +1,10 @@
 """Publish durable approval events through an injected event port."""
 
-from domain.approval import ApprovalRequest
+from domain.approval import ApprovalEventPort, ApprovalRequest
 from domain.events import ApplicationEvent, EventDurability, EventType, EventPublisherPort
 
 
-class ApprovalEventPublisher:
+class ApprovalEventPublisher(ApprovalEventPort):
     """Translate approval requests into durable application events."""
 
     def __init__(self, events: EventPublisherPort) -> None:

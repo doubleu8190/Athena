@@ -10,6 +10,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.files import Attachment, AttachmentStatus
+from domain.knowledge import KnowledgeDocumentRepository
 
 from ..models import (
     AttachmentModel,
@@ -19,7 +20,7 @@ from ..models import (
 from ..mappers.converters import attachment_domain_to_model, attachment_model_to_domain
 
 
-class PostgresKnowledgeDocumentRepository:
+class PostgresKnowledgeDocumentRepository(KnowledgeDocumentRepository):
     """知识库文档的版本、列表和软删除操作。"""
 
     def __init__(

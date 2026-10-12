@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from domain.files import Attachment, FileChunk
+from domain.files import Attachment, FileChunk, GraphIndexerPort
 
 from .resource import Neo4jResource
 
-class OptionalNeo4jFileIndexer:
+class OptionalNeo4jFileIndexer(GraphIndexerPort):
     """Delegate attachment indexing when the Neo4j resource is available."""
 
     def __init__(self, resource: Neo4jResource) -> None:

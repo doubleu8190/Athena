@@ -149,3 +149,43 @@ async def test_consumer_claims_and_stops_without_runtime_dependency() -> None:
     await consumer.stop()
 
     assert queue.completed[0][0] == "command-1"
+
+
+@pytest.mark.asyncio
+async def test_consumer_processes_cancel_while_run_is_active() -> None:
+    import asyncio
+
+    class ConcurrentQueue(Queue):
+        pass
+
+    class ConcurrentExecution:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def execute(self, value):
+            if value.command_type == CommandType.RUN_CANCEL:
+                await self.cancel(value.run_id)
+                return
+            self.started.set()
+            await self.cancelled.wait()
+
+        async def cancel(self, _run_id):
+            self.cancelled.set()
+
+        async def fail(self, _command, _error):
+            raise AssertionError("unexpected command failure")
+
+    queue = ConcurrentQueue()
+    start = command(CommandType.RUN_START)
+    cancel = command(CommandType.RUN_CANCEL)
+    queue.items.extend([start, cancel])
+    execution = ConcurrentExecution()
+    consumer = CommandConsumer(queue, execution, poll_interval=0.01)
+
+    await consumer.start()
+    await asyncio.wait_for(execution.started.wait(), timeout=1)
+    await asyncio.wait_for(execution.cancelled.wait(), timeout=1)
+    await consumer.stop()
+
+    assert execution.cancelled.is_set()

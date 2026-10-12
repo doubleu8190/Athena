@@ -22,6 +22,14 @@ class DocumentJobPort(Protocol):
     async def cancel(self, attachment_id: str) -> None: ...
 
 
+class DocumentJobQueue(Protocol):
+    """文档处理 worker 使用的任务领取和完成能力。"""
+
+    async def claim_next(self, *, max_attempts: int = 5) -> dict[str, object] | None: ...
+    async def mark_succeeded(self, job_id: str, result: dict[str, object]) -> None: ...
+    async def mark_failed(self, job_id: str, error: str, *, retry: bool) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedDocument:
     """解析器输出的规范化文档。"""
@@ -39,4 +47,10 @@ class DocumentParserPort(Protocol):
     async def parse(self, attachment: Attachment) -> ParsedDocument: ...
 
 
-__all__ = ["DocumentJobPort", "DocumentParserPort", "FileAdapterRegistryPort", "ParsedDocument"]
+__all__ = [
+    "DocumentJobPort",
+    "DocumentJobQueue",
+    "DocumentParserPort",
+    "FileAdapterRegistryPort",
+    "ParsedDocument",
+]

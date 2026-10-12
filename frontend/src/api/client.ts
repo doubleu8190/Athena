@@ -25,8 +25,28 @@ import type {
   RetrievalRunListResponse,
 } from "../types"
 
+export interface AuthSession {
+  authenticated: boolean
+  username?: string | null
+}
+
+export interface LoginResponse extends AuthSession {
+  status: string
+}
+
+export class ApiError extends Error {
+  readonly status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+  }
+}
+
 class ApiClient {
   private baseUrl = ""
+  private unauthorizedHandler: (() => void) | null = null
 
   /** 设置 API 根地址；会移除末尾斜杠以避免拼接出双斜杠。 */
   setBaseUrl(url: string): void {
@@ -36,6 +56,11 @@ class ApiClient {
   /** 返回当前 API 根地址。 */
   getBaseUrl(): string {
     return this.baseUrl
+  }
+
+  /** 注册 401 回调，让应用回到登录页。 */
+  setUnauthorizedHandler(handler: (() => void) | null): void {
+    this.unauthorizedHandler = handler
   }
 
   /**
@@ -57,8 +82,10 @@ class ApiClient {
     const res = await fetch(url, {
       headers,
       ...options,
+      credentials: "include",
     })
     if (!res.ok) {
+      if (res.status === 401) this.unauthorizedHandler?.()
       const errorText = await res.text().catch(() => res.statusText)
       let detail = errorText
       try {
@@ -67,7 +94,7 @@ class ApiClient {
       } catch {
         // Keep the original response body when it is not JSON.
       }
-      throw new Error(`API ${res.status}: ${detail || res.statusText}`)
+      throw new ApiError(res.status, `API ${res.status}: ${detail || res.statusText}`)
     }
     if (res.status === 204) return undefined as T
     return res.json()
@@ -78,6 +105,24 @@ class ApiClient {
   /** 获取后端健康状态和版本信息。 */
   async healthCheck(): Promise<{ status: string; timestamp: string }> {
     return this.request<{ status: string; timestamp: string }>("/api/health")
+  }
+
+  /** 查询当前 Cookie 会话状态。 */
+  async getAuthSession(): Promise<AuthSession> {
+    return this.request<AuthSession>("/api/auth/session")
+  }
+
+  /** 使用配置账号登录并写入 HttpOnly Cookie。 */
+  async login(username: string, password: string): Promise<LoginResponse> {
+    return this.request<LoginResponse>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    })
+  }
+
+  /** 注销当前 Cookie 会话。 */
+  async logout(): Promise<{ status: string }> {
+    return this.request<{ status: string }>("/api/auth/logout", { method: "POST" })
   }
 
   // ─── 会话管理 ─────────────────────────────────────────────────

@@ -13,7 +13,7 @@ from application.files import (
     AttachmentService,
     SessionNotFoundError,
 )
-from domain.files import Attachment
+from application.files.responses import AttachmentResponse as ApplicationAttachmentResponse
 
 
 class AttachmentResponse(BaseModel):
@@ -36,7 +36,7 @@ class AttachmentResponse(BaseModel):
     updated_at: Any
 
     @classmethod
-    def from_domain(cls, value: Attachment) -> "AttachmentResponse":
+    def from_application(cls, value: ApplicationAttachmentResponse) -> "AttachmentResponse":
         return cls(
             id=value.id,
             filename=value.filename,
@@ -44,14 +44,14 @@ class AttachmentResponse(BaseModel):
             size_bytes=value.size_bytes,
             sha256=value.sha256,
             storage_key=value.storage_key,
-            status=value.status.value,
+            status=value.status.value if hasattr(value.status, "value") else value.status,
             session_id=value.session_id,
             knowledge_base_id=value.knowledge_base_id,
             message_id=value.message_id,
             adapter_name=value.adapter_name,
             adapter_version=value.adapter_version,
             capabilities=list(value.capabilities),
-            metadata=value.metadata.values,
+            metadata=value.metadata,
             error_message=value.error_message,
             created_at=value.created_at,
             updated_at=value.updated_at,
@@ -72,7 +72,7 @@ def build_files_router(
             values = await service().list_for_session(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
-        return [AttachmentResponse.from_domain(value) for value in values]
+        return [AttachmentResponse.from_application(value) for value in values]
 
     @router.post("/attachments", status_code=202, response_model=list[AttachmentResponse])
     async def upload_attachments(
@@ -81,7 +81,7 @@ def build_files_router(
     ) -> list[AttachmentResponse]:
         if not files:
             raise HTTPException(status_code=400, detail="no_files")
-        created: list[Attachment] = []
+        created: list[ApplicationAttachmentResponse] = []
         try:
             for upload in files:
                 filename = upload.filename or "upload.bin"
@@ -108,7 +108,7 @@ def build_files_router(
         finally:
             for upload in files:
                 await upload.close()
-        return [AttachmentResponse.from_domain(value) for value in created]
+        return [AttachmentResponse.from_application(value) for value in created]
 
     @router.get("/attachment-types")
     async def supported_attachment_types(session_id: str) -> dict[str, list[str]]:
@@ -126,7 +126,7 @@ def build_files_router(
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except AttachmentNotFoundError as exc:
             raise HTTPException(status_code=404, detail="attachment_not_found") from exc
-        return AttachmentResponse.from_domain(value)
+        return AttachmentResponse.from_application(value)
 
     @router.delete("/attachments/{attachment_id}")
     async def delete_attachment(session_id: str, attachment_id: str) -> dict[str, str]:

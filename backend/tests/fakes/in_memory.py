@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from domain.approval import ApprovalDecision, ApprovalRequest
+from domain.approval import ApprovalDecision, ApprovalEventPort, ApprovalRepository, ApprovalRequest
 from domain.configuration import ProviderQueryPort, SettingsQueryPort
 from domain.memory.query_ports import MemoryQueryPort
 from domain.retrieval.query_ports import RetrievalQueryPort
@@ -27,13 +27,20 @@ from domain.files import (
     FileStoragePort,
     StoredBlob,
 )
-from domain.knowledge import KnowledgeBase, KnowledgeDocumentRepository
-from domain.events import ApplicationEvent
+from domain.knowledge import KnowledgeBase, KnowledgeBaseRepository, KnowledgeDocumentRepository
+from domain.events import (
+    ApplicationEvent,
+    EventHistoryPort,
+    EventPublisherPort,
+    EventSubscriptionPort,
+    RealtimeTransportPort,
+)
 import asyncio
 import hashlib
 from domain.memory import (
     MemoryListRequest,
     MemoryPage,
+    MemoryRepositoryPort,
     MemoryRecord,
     MemorySearchRequest,
     MemoryStatus,
@@ -44,16 +51,21 @@ from domain.runs import (
     CommandStatus,
     CommandStatusRecord,
     RunCommand,
+    CommandQueuePort,
+    CommandStorePort,
+    RunLifecyclePort,
     RunQueryPort,
     RunStatus,
     RunSummary,
 )
-from domain.sessions import Message, Session
+from domain.sessions import Message, MessageRepository, Session, SessionRepository
 from domain.tools import (
     JsonSchema,
     MCPServerConfig,
+    MCPPort,
     RiskLevel,
     ToolConfig,
+    ToolConfigRepository,
     ToolExecutionPort,
     ToolExecutionRequest,
     ToolExecutionResult,
@@ -61,7 +73,7 @@ from domain.tools import (
 )
 
 
-class InMemorySessionRepository:
+class InMemorySessionRepository(SessionRepository):
     def __init__(self) -> None:
         self.items: dict[str, Session] = {}
 
@@ -83,7 +95,7 @@ class InMemorySessionRepository:
         return self.items.pop(session_id, None) is not None
 
 
-class InMemoryMessageRepository:
+class InMemoryMessageRepository(MessageRepository):
     def __init__(self) -> None:
         self.items: dict[str, Message] = {}
 
@@ -104,7 +116,12 @@ class InMemoryMessageRepository:
         return [item for item in values if item.id > after_id]
 
 
-class InMemoryRunStore(RunQueryPort):
+class InMemoryRunStore(
+    CommandQueuePort,
+    CommandStorePort,
+    RunLifecyclePort,
+    RunQueryPort,
+):
     def __init__(self) -> None:
         self.commands: dict[str, RunCommand] = {}
         self.command_status: dict[str, CommandStatusRecord] = {}
@@ -163,7 +180,7 @@ class InMemoryRunStore(RunQueryPort):
         return await self.update_status(run_id, RunStatus.CANCELLED)
 
 
-class InMemoryToolRepository:
+class InMemoryToolRepository(ToolConfigRepository):
     def __init__(self) -> None:
         now = datetime.now(timezone.utc)
         self.items: dict[str, ToolConfig] = {
@@ -189,7 +206,7 @@ class InMemoryToolExecution(ToolExecutionPort):
         return ToolExecutionResult(status="success", output="", duration_ms=0)
 
 
-class InMemoryMCPPort:
+class InMemoryMCPPort(MCPPort):
     def __init__(self) -> None:
         self.items: dict[str, MCPServerConfig] = {}
 
@@ -207,7 +224,7 @@ class InMemoryMCPPort:
         self.items.clear()
 
 
-class InMemoryMemoryPort:
+class InMemoryMemoryPort(MemoryRepositoryPort):
     def __init__(self) -> None:
         self.items: dict[str, MemoryRecord] = {}
 
@@ -236,7 +253,7 @@ class InMemoryMemoryPort:
     async def flush_access_stats(self) -> int: return 0
 
 
-class InMemoryApprovalRepository:
+class InMemoryApprovalRepository(ApprovalRepository):
     def __init__(self) -> None: self.items: dict[str, ApprovalRequest] = {}
     async def create(self, request: ApprovalRequest) -> bool:
         if request.approval_id in self.items: return False
@@ -259,7 +276,7 @@ class InMemoryApprovalRepository:
         return changed
 
 
-class InMemoryApprovalEvents:
+class InMemoryApprovalEvents(ApprovalEventPort):
     async def required(self, request: ApprovalRequest) -> None: pass
 
 
@@ -285,7 +302,7 @@ class InMemoryProviderQueries(ProviderQueryPort, SettingsQueryPort, RetrievalQue
     async def get_run(self, run_id: str) -> dict[str, Any] | None: return None
 
 
-class InMemoryKnowledgeRepository:
+class InMemoryKnowledgeRepository(KnowledgeBaseRepository):
     def __init__(self) -> None: self.items: dict[str, KnowledgeBase] = {}
     async def create(self, item: KnowledgeBase) -> KnowledgeBase: self.items[item.id] = item; return item
     async def get(self, item_id: str) -> KnowledgeBase | None: return self.items.get(item_id)
@@ -302,6 +319,7 @@ class InMemoryFileStorage(FileStoragePort):
         digest = hashlib.sha256(data).hexdigest(); key = digest
         self.blobs[key] = bytes(data)
         return StoredBlob(digest, len(data), key)
+    async def read(self, storage_key: str) -> bytes: return self.blobs[storage_key]
     async def cleanup_unreferenced(self, live_storage_keys: set[str]) -> int:
         removed = len([key for key in self.blobs if key not in live_storage_keys])
         for key in list(self.blobs):
@@ -358,7 +376,12 @@ class InMemoryKnowledgeDocuments(InMemoryAttachmentRepository, KnowledgeDocument
         self.items[attachment_id] = replace(value, status=AttachmentStatus.DELETED, deleted_time=datetime.now(timezone.utc)); return True
 
 
-class InMemoryEventStore:
+class InMemoryEventStore(
+    EventPublisherPort,
+    EventHistoryPort,
+    EventSubscriptionPort,
+    RealtimeTransportPort,
+):
     def __init__(self) -> None: self.items: dict[str, list[ApplicationEvent]] = {}; self.subscribers: dict[str, list[asyncio.Queue[ApplicationEvent]]] = {}
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
         values = self.items.setdefault(event.session_id, []); event = replace(event, session_seq=len(values) + 1); values.append(event)
@@ -376,7 +399,7 @@ class InMemoryEventStore:
         if queue in self.subscribers.get(session_id, []): self.subscribers[session_id].remove(queue)
 
 
-class InMemoryEventPublisher:
+class InMemoryEventPublisher(ApprovalEventPort, EventPublisherPort):
     def __init__(self, store: InMemoryEventStore) -> None: self.store = store
     async def required(self, request: Any) -> None: return None
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish(event)

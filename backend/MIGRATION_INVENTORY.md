@@ -30,14 +30,14 @@
 | `core/tools/` | `domain/tools` + `application/tools` + `infrastructure/tools` | 已迁移 | 目标 NativeToolExecution 覆盖文件和 shell，治理 Service/MCP port 已接入生产图 |
 | `core/llm/` | `domain/integrations` + `infrastructure/integrations/llm` | 已迁移 | 目标 ConfiguredLLMProvider/EmbeddingProvider 提供 lazy SDK、超时、重试和本地 fallback |
 | `core/graph/` | `domain/integrations` + `infrastructure/integrations/neo4j` | 已迁移 | 目标 Neo4jGraphAdapter/Resource 提供健康检查、索引、删除和关闭生命周期 |
-| `core/harness/` | `application/runs` | 已迁移 | RunExecutionService、CommandConsumer、RootExecutionService 和 WorkerSchedulerService 提供目标执行边界 |
+| `core/harness/` | `application/runs` | 已迁移 | RunExecutionService、CommandConsumer 和 WorkerSchedulerService 提供目标执行边界 |
 | `core/retrieval/` | `application/retrieval` + infrastructure | 已迁移 | 目标 RetrievalCandidate/Run 和 HybridRetrievalService 提供候选融合与限额选择 |
 | `core/sandbox/`、`core/security/` | `domain/integrations` + `infrastructure/integrations/sandbox` | 已迁移 | 目标 DockerSandbox、SubprocessSandbox、workspace 路径和生命周期已实现 |
 | `agents/` | `application/orchestration`、`application/runs` | 已迁移 | Root facade、Worker executor/scheduler 和目标 Plan/Task/DAG port 已接入，具体 graph 由 infrastructure 注入 |
 | `planning/` | `domain/orchestration` + application materializer | 已迁移 | 目标 PlanValidator、PlanDAG、OrchestrationService、scheduler 和 result synthesizer 已实现 |
 | `runtime/context/` | `application/runs/context` | 已迁移 | 目标 ContextPlan、ContextBundle 和 ContextAcquisitionService 已实现 |
 | `runtime/execution_loop/` | `application/runs` + LangGraph infrastructure | 已迁移 | RunExecutionService/CommandConsumer 和 WorkerSchedulerService 覆盖执行、取消、失败、重试、审批等待和事件收敛 |
-| `runtime/nodes/` | `infrastructure/orchestration/langgraph/nodes` | 已迁移 | RootExecutionService/WorkerExecutor port 隔离 graph 技术适配，业务状态由 application 管理 |
+| `runtime/nodes/` | `infrastructure/orchestration/langgraph/nodes` | 已迁移 | WorkerExecutor port 隔离 graph 技术适配，业务状态由 application 管理 |
 | `runtime/orchestration/` | `application/orchestration` | 已迁移 | PlanValidator、DAG、OrchestrationService、scheduler、worker 和 synthesizer 已原生实现 |
 | `runtime/task_understanding/` | `application/runs/task_understanding` | 已迁移 | 目标 UserTaskSpec、fast path/fallback 和可注入 structured LLM service 已实现 |
 | `runtime/services/`、`processor_lifecycle.py` | `application/runs`、`bootstrap/lifespan` | 已迁移 | 目标 RunExecutionService、Root/Worker facade 和统一 lifespan 已接入 |

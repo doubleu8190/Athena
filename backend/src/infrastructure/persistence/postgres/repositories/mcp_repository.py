@@ -9,13 +9,13 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.tools import MCPServer
+from domain.tools import MCPServer, MCPServerRepository
 
 from ..models import MCPServerModel
 from ..mappers.converters import mcp_server_domain_to_model, mcp_server_model_to_domain
 
 
-class PostgresMCPServerRepository:
+class PostgresMCPServerRepository(MCPServerRepository):
     """通过注入会话工厂读写 MCP 服务端配置。"""
 
     def __init__(

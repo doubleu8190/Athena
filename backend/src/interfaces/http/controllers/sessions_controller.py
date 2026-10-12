@@ -52,14 +52,14 @@ def build_sessions_router(
         request: CreateSessionRequest,
         sessions: SessionService = Depends(service),
     ) -> SessionResponse:
-        return SessionResponse.from_domain(await sessions.create(request.title))
+        return SessionResponse.from_application(await sessions.create(request.title))
 
     @router.get("", response_model=list[SessionResponse])
     async def list_sessions(
         sessions: SessionService = Depends(service),
     ) -> list[SessionResponse]:
         return [
-            SessionResponse.from_domain(item) for item in await sessions.list_sessions()
+            SessionResponse.from_application(item) for item in await sessions.list_sessions()
         ]
 
     @router.get("/{session_id}", response_model=SessionResponse)
@@ -68,7 +68,7 @@ def build_sessions_router(
         sessions: SessionService = Depends(service),
     ) -> SessionResponse:
         try:
-            return SessionResponse.from_domain(await sessions.get(session_id))
+            return SessionResponse.from_application(await sessions.get(session_id))
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
 
@@ -84,7 +84,7 @@ def build_sessions_router(
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="title_empty") from exc
-        return SessionResponse.from_domain(updated)
+        return SessionResponse.from_application(updated)
 
     @router.delete("/{session_id}", response_model=SessionDeletionResponse)
     async def delete_session(
@@ -107,7 +107,7 @@ def build_sessions_router(
             values = await messages.list_messages(session_id, limit=limit)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
-        return [MessageResponse.from_domain(value) for value in values]
+        return [MessageResponse.from_application(value) for value in values]
 
     @router.get("/{session_id}/runs", response_model=list[RunSummaryResponse])
     async def list_session_runs(
@@ -118,6 +118,6 @@ def build_sessions_router(
             values = await runs.list_for_session(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
-        return [RunSummaryResponse.from_domain(value) for value in values]
+        return [RunSummaryResponse.from_application(value) for value in values]
 
     return router

@@ -4,10 +4,12 @@ import { MessageBubble } from "./MessageBubble"
 import { ApprovalCard } from "./ApprovalDialog"
 import { ActivityPanel } from "./ActivityPanel"
 import { ExecutionTimeline } from "./ExecutionTimeline"
+import { OrchestrationSummary } from "./OrchestrationSummary"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
 import type { Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
+import { deriveOrchestrationView } from "../utils/orchestrationProjection"
 
 interface ChatProps {
   sendEvent: (type: string, data?: Record<string, unknown>) => boolean
@@ -24,6 +26,9 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
   const {
     messages,
     steps,
+    toolCalls,
+    orchestrationTasks,
+    orchestrationPlans,
     activeSessionId,
     agentStatus,
     pendingApprovals,
@@ -35,6 +40,8 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
     clearMessages,
     clearSteps,
     clearToolCalls,
+    clearOrchestrationTasks,
+    clearOrchestrationPlans,
     clearApprovals,
     executionTimeline,
     setAgentStatus,
@@ -108,6 +115,8 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
       clearMessages()
       clearSteps()
       clearToolCalls()
+      clearOrchestrationTasks()
+      clearOrchestrationPlans()
       clearApprovals()
       clearThinking()
       setAgentStatus("idle")
@@ -129,6 +138,8 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
       clearMessages()
       clearSteps()
       clearToolCalls()
+      clearOrchestrationTasks()
+      clearOrchestrationPlans()
       clearApprovals()
       clearThinking()
       setAgentStatus("idle")
@@ -377,25 +388,30 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
       const store = useChatStore.getState()
       Object.entries(decisions).forEach(([id, decision]) => store.resolveApproval(id, decision))
       store.setThinking({ active: false, content: "", messageId: null })
-      store.setAgentStatus("completed")
       const approved = Object.values(decisions).every((decision) => decision === "approved")
+      const workerA = "demo-worker-feedback"
+      const workerB = "demo-worker-review"
+      const planId = "demo-plan"
       if (approved) {
-        store.updateToolCall("demo-tool-call", { status: "success", output: "已创建项目事项 ATH-204" })
+        store.updateToolCall("demo-tool-call", { status: "success", output: "已创建高优先级项目事项" })
         store.updateStep("demo-tool-step", { status: "completed", completed_at: new Date().toISOString(), duration_ms: 430 })
-        store.upsertExecutionTimelineEntry({ id: "demo-run-start", run_id: "demo-run", event_type: "run.started", label: "开始处理你的请求", status: "completed", timestamp: new Date().toISOString() })
-        store.upsertExecutionTimelineEntry({ id: "demo-plan", run_id: "demo-run", event_type: "task.started", label: "客户反馈已归纳", detail: "已汇总反馈内容并提炼主要问题。", status: "completed", timestamp: new Date().toISOString() })
-        store.upsertExecutionTimelineEntry({ id: "demo-tool-start", run_id: "demo-run", event_type: "tool.completed", label: "项目事项已创建", detail: "已在项目看板创建事项 ATH-204。", status: "completed", timestamp: new Date().toISOString() })
+        store.upsertOrchestrationTask({ plan_id: planId, task_id: workerA, title: "整理客户反馈", status: "completed", run_id: "demo-run", worker_run_id: workerA, attempt: 1, result_summary: "已提炼响应速度、数据导出和权限配置三个主要问题。", completed_at: new Date().toISOString() })
+        store.upsertOrchestrationTask({ plan_id: planId, task_id: workerB, title: "独立复核问题", status: "completed", run_id: "demo-run", worker_run_id: workerB, attempt: 2, result_summary: "复核结果与客户反馈整理一致。", completed_at: new Date().toISOString() })
+        store.upsertOrchestrationPlan({ plan_id: planId, run_id: "demo-run", status: "completed", synthesis_status: "completed" })
+        store.upsertExecutionTimelineEntry({ id: "demo-synthesis", run_id: "demo-run", event_type: "synthesis.completed", label: "处理结果已汇总", detail: "两个并行任务的结果已合并。", status: "completed", timestamp: new Date().toISOString() })
         store.upsertExecutionTimelineEntry({ id: "demo-approval", run_id: "demo-run", event_type: "approval.resolved", label: "确认已提交", detail: "你已允许此操作继续。", status: "completed", timestamp: new Date().toISOString() })
         store.addMessage({ id: "demo-assistant-message", role: "assistant", content: "已完成本周客户反馈整理：主要问题是响应速度、数据导出和权限配置。我已将高优先级汇总事项写入项目看板（ATH-204）。", timestamp: new Date().toISOString(), session_id: "demo-session", run_id: "demo-run" })
       } else {
         store.updateToolCall("demo-tool-call", { status: "denied", error: "操作已由用户拒绝" })
         store.updateStep("demo-tool-step", { status: "completed", completed_at: new Date().toISOString(), duration_ms: 0 })
-        store.upsertExecutionTimelineEntry({ id: "demo-run-start", run_id: "demo-run", event_type: "run.started", label: "开始处理你的请求", status: "completed", timestamp: new Date().toISOString() })
-        store.upsertExecutionTimelineEntry({ id: "demo-plan", run_id: "demo-run", event_type: "task.started", label: "客户反馈已归纳", detail: "已汇总反馈内容并提炼主要问题。", status: "completed", timestamp: new Date().toISOString() })
-        store.upsertExecutionTimelineEntry({ id: "demo-tool-start", run_id: "demo-run", event_type: "tool.completed", label: "项目事项未创建", detail: "操作已由用户拒绝，项目看板未发生变更。", status: "completed", timestamp: new Date().toISOString() })
+        store.upsertOrchestrationTask({ plan_id: planId, task_id: workerA, title: "整理客户反馈", status: "cancelled", run_id: "demo-run", worker_run_id: workerA, attempt: 1, error: "你拒绝了创建项目事项的操作。", completed_at: new Date().toISOString() })
+        store.upsertOrchestrationTask({ plan_id: planId, task_id: workerB, title: "独立复核问题", status: "completed", run_id: "demo-run", worker_run_id: workerB, attempt: 2, result_summary: "复核结果已保留。", completed_at: new Date().toISOString() })
+        store.upsertOrchestrationPlan({ plan_id: planId, run_id: "demo-run", status: "completed", synthesis_status: "completed" })
+        store.upsertExecutionTimelineEntry({ id: "demo-synthesis", run_id: "demo-run", event_type: "synthesis.completed", label: "处理结果已汇总", detail: "已保留复核结果，未执行需要确认的写入操作。", status: "completed", timestamp: new Date().toISOString() })
         store.upsertExecutionTimelineEntry({ id: "demo-approval", run_id: "demo-run", event_type: "approval.resolved", label: "确认已提交", detail: "你已拒绝此操作。", status: "completed", timestamp: new Date().toISOString() })
         store.addMessage({ id: "demo-assistant-message", role: "assistant", content: "反馈整理已完成。我没有创建项目看板事项；你可以继续查看整理结果或调整后再提交。", timestamp: new Date().toISOString(), session_id: "demo-session", run_id: "demo-run" })
       }
+      store.setAgentStatus("idle")
       store.upsertExecutionTimelineEntry({ id: `demo-run:${batchId}`, run_id: "demo-run", event_type: "run.completed", label: approved ? "任务已完成" : "操作已拒绝", detail: approved ? "已在项目看板创建事项 ATH-204。" : "项目看板未发生变更。", status: "completed", timestamp: new Date().toISOString() })
       return
     }
@@ -520,6 +536,10 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
       ? executionTimeline.filter((entry) => entry.run_id === currentRunId)
       : executionTimeline)
     : []
+  const activePlan = [...orchestrationPlans]
+    .reverse()
+    .find((plan) => !currentRunId || plan.run_id === currentRunId)
+  const orchestrationView = deriveOrchestrationView(activePlan, orchestrationTasks)
 
   return (
     <div ref={rootRef} className="flex-1 flex flex-row min-w-0 min-h-0">
@@ -610,6 +630,9 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
           {/* 分阶段消息组 */}
           {!isLoadingHistory && messages.length > 0 && (
             <>
+              {orchestrationView && (
+                <OrchestrationSummary view={orchestrationView} steps={steps} toolCalls={toolCalls} />
+              )}
               {phaseGroups.map((group, gi) => {
                 const isFirstGroup = gi === 0
                 const isLastGroup = gi === phaseGroups.length - 1

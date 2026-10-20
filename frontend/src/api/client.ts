@@ -23,6 +23,8 @@ import type {
   KnowledgeBase,
   RetrievalRunDetail,
   RetrievalRunListResponse,
+  EvaluationRunSummary,
+  EvaluationRunDetail,
 } from "../types"
 
 export interface AuthSession {
@@ -195,6 +197,31 @@ class ApiClient {
     )
   }
 
+  async listEvaluationRuns(opts?: { limit?: number; offset?: number; status?: string; dataset_version?: string }): Promise<{ items: EvaluationRunSummary[]; total: number; limit: number; offset: number }> {
+    const params = new URLSearchParams()
+    if (opts?.limit != null) params.set("limit", String(opts.limit))
+    if (opts?.offset != null) params.set("offset", String(opts.offset))
+    if (opts?.status) params.set("status", opts.status)
+    if (opts?.dataset_version) params.set("dataset_version", opts.dataset_version)
+    return this.request(`/api/evaluations/runs${params.size ? `?${params}` : ""}`)
+  }
+
+  async getEvaluationRun(runId: string): Promise<EvaluationRunDetail> {
+    return this.request(`/api/evaluations/runs/${encodeURIComponent(runId)}`)
+  }
+
+  async validateEvaluationDataset(path: string, name?: string): Promise<{ dataset_name: string; version_id: string; manifest_sha256: string; case_count: number; tag_counts: Record<string, number> }> {
+    return this.request("/api/evaluations/datasets/validate", { method: "POST", body: JSON.stringify({ path, name }) })
+  }
+
+  async startEvaluationRun(payload: { dataset_path: string; name?: string; mode?: string; target?: Record<string, unknown>; evaluators?: string[]; gates?: Array<Record<string, unknown>> }): Promise<{ run_id: string; status: string; case_count: number }> {
+    return this.request("/api/evaluations/runs", { method: "POST", body: JSON.stringify(payload) })
+  }
+
+  getEvaluationEventsUrl(runId: string): string {
+    return `${this.baseUrl}/api/evaluations/runs/${encodeURIComponent(runId)}/events`
+  }
+
   /** 提交异步 Agent 运行命令。
    * @param sessionId 目标会话 ID，必须非空。
    * @param payload 用户消息和可选附件/幂等命令 ID。
@@ -311,7 +338,7 @@ class ApiClient {
     approvalBatchId: string,
     decisions: Record<string, "approved" | "denied" | "cancelled">,
   ): Promise<{ status: string }> {
-    return this.request<{ status: string }>(`/api/approvals/batches/${encodeURIComponent(approvalBatchId)}/respond`, {
+    return this.request<{ status: string }>(`/api/approvals/batches/${encodeURIComponent(approvalBatchId)}/resolve`, {
       method: "POST",
       body: JSON.stringify({ decisions }),
     })

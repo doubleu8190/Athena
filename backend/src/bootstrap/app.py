@@ -34,6 +34,7 @@ from interfaces.http.sse.events import build_events_router
 from interfaces.http.controllers.approval_controller import build_approval_router
 from interfaces.http.controllers.tools_controller import build_tools_router
 from interfaces.http.controllers.mcp_controller import build_mcp_router
+from interfaces.http.controllers.evaluation_controller import build_evaluation_router
 from interfaces.http.auth import AuthOptions, AuthenticationMiddleware, build_auth_router
 from interfaces.http.auth import middleware as auth_middleware
 from .dependencies import ApplicationDependencies, Provider, build_default_dependencies
@@ -60,6 +61,11 @@ def create_app(
     knowledge_query_factory: Callable[[], KnowledgeBaseQueryService] | None = None,
     attachment_service_factory: Callable[[], AttachmentService] | None = None,
     knowledge_service_factory: Callable[[], KnowledgeBaseService] | None = None,
+    evaluation_repository_factory: Callable[[], Any] | None = None,
+    evaluation_target_factory: Callable[[Any], Any] | None = None,
+    evaluation_dataset_loader_factory: Callable[[str], Any] | None = None,
+    evaluation_event_sink_factory: Callable[[], Any] | None = None,
+    evaluation_progress_hub_factory: Callable[[], Any] | None = None,
     auth_options: AuthOptions | None = None,
     auth_service: AuthenticationService | None = None,
 ) -> FastAPI:
@@ -122,6 +128,11 @@ def create_app(
     knowledge_query_factory = registered("knowledge_query_factory", knowledge_query_factory)
     attachment_service_factory = registered("attachment_service_factory", attachment_service_factory)
     knowledge_service_factory = registered("knowledge_service_factory", knowledge_service_factory)
+    evaluation_repository_factory = registered("evaluation_repository_factory", evaluation_repository_factory)
+    evaluation_target_factory = registered("evaluation_target_factory", evaluation_target_factory)
+    evaluation_dataset_loader_factory = registered("evaluation_dataset_loader_factory", evaluation_dataset_loader_factory)
+    evaluation_event_sink_factory = registered("evaluation_event_sink_factory", evaluation_event_sink_factory)
+    evaluation_progress_hub_factory = registered("evaluation_progress_hub_factory", evaluation_progress_hub_factory)
     if explicit_tool_query:
         tool_service_factory = None
     if explicit_tool_service:
@@ -178,6 +189,14 @@ def create_app(
         app.include_router(build_files_router(attachment_service_factory), prefix="/api")
     if knowledge_service_factory is not None:
         app.include_router(build_knowledge_router(knowledge_service_factory), prefix="/api")
+    if evaluation_repository_factory is not None:
+        app.include_router(build_evaluation_router(
+            repository_factory=evaluation_repository_factory,
+            target_factory=evaluation_target_factory,
+            dataset_loader_factory=evaluation_dataset_loader_factory,
+            event_sink_factory=evaluation_event_sink_factory,
+            progress_hub_factory=evaluation_progress_hub_factory,
+        ), prefix="/api")
     if tool_service_factory is not None:
         app.include_router(build_tools_router(tool_service_factory), prefix="/api")
     if approval_service_factory is not None:

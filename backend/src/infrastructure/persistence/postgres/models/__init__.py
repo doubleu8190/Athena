@@ -27,6 +27,15 @@ from .runtime_models import (
     StepModel,
     ToolCallModel,
 )
+from .evaluation_models import (
+    EvalCaseAttemptModel,
+    EvalCaseModel,
+    EvalDatasetModel,
+    EvalDatasetVersionModel,
+    EvalGateModel,
+    EvalMetricValueModel,
+    EvalRunModel,
+)
 
 __all__ = [
     "AttachmentModel",
@@ -54,4 +63,11 @@ __all__ = [
     "RetrievalRunModel",
     "StepModel",
     "ToolCallModel",
+    "EvalCaseAttemptModel",
+    "EvalCaseModel",
+    "EvalDatasetModel",
+    "EvalDatasetVersionModel",
+    "EvalGateModel",
+    "EvalMetricValueModel",
+    "EvalRunModel",
 ]

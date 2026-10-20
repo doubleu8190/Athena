@@ -17,6 +17,7 @@ class DockerSandbox(SandboxPort):
             max_output_bytes=options.sandbox_max_output_bytes,
             memory_mb=options.sandbox_memory_mb,
             cpu_limit=options.sandbox_cpu_limit,
+            pids_limit=getattr(options, "sandbox_pids_limit", 128),
         )
         self._processes: set[asyncio.subprocess.Process] = set()
 
@@ -28,7 +29,11 @@ class DockerSandbox(SandboxPort):
 
     async def execute(self, request):
         argv = [self.options.docker_binary, "run", "--rm", "--network", self.options.default_network]
-        argv.extend(["--memory", f"{self.options.memory_mb}m", "--cpus", str(self.options.cpu_limit)])
+        argv.extend([
+            "--memory", f"{self.options.memory_mb}m",
+            "--cpus", str(self.options.cpu_limit),
+            "--pids-limit", str(self.options.pids_limit),
+        ])
         argv.extend(["-v", f"{request.workspace}:/workspace", "-w", "/workspace", request.image])
         argv.extend(request.argv)
         try:

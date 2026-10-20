@@ -17,6 +17,7 @@ from .message_repository import PostgresMessageRepository
 from .session_repository import PostgresSessionRepository
 from .tool_repository import PostgresToolConfigRepository
 from .orchestration_repository import PostgresOrchestrationRepository, PostgresPlanLoader
+from .evaluation_repository import PostgresEvaluationRepository
 
 __all__ = [
     "PostgresAttachmentRepository",
@@ -37,4 +38,5 @@ __all__ = [
     "PostgresToolConfigRepository",
     "PostgresOrchestrationRepository",
     "PostgresPlanLoader",
+    "PostgresEvaluationRepository",
 ]

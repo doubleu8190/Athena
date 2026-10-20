@@ -138,7 +138,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   activeView: ((): AppView => {
     try {
       const saved = localStorage.getItem("athena:activeView")
-      if (saved && ["chat", "memory", "tools", "approvals", "providers", "session-detail", "settings", "mcp", "retrieval"].includes(saved)) {
+      if (saved && ["chat", "memory", "tools", "approvals", "providers", "session-detail", "settings", "mcp", "retrieval", "evaluation"].includes(saved)) {
         return saved as AppView
       }
     } catch { /* 忽略不可用的本地存储内容，使用默认视图。 */ }

@@ -61,6 +61,10 @@ class Queue:
     async def complete_command(self, command_id, *, status, result=None, error=None):
         self.completed.append((command_id, status, result, error))
 
+    async def complete_active_command_for_run(self, run_id, *, status, result=None, error=None):
+        self.completed.append((f"active:{run_id}", status, result, error))
+        return True
+
 
 class Executor:
     def __init__(self, outcome=None, error=None):
@@ -104,6 +108,34 @@ async def test_execution_service_completes_run_and_command() -> None:
         "run.started",
         "run.completed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_execution_service_projects_completed_content_into_chat_stream() -> None:
+    lifecycle, queue, executor, events = Lifecycle(), Queue(), Executor(
+        outcome=CommandExecutionResult(result={"content": "ATHENA_EXEC_REAL"})
+    ), Events()
+    value = command()
+    value = RunCommand(
+        command_id=value.command_id,
+        command_type=value.command_type,
+        session_id=value.session_id,
+        run_id=value.run_id,
+        payload={"message": "执行命令 printf ATHENA_EXEC_REAL", "message_id": "message-1"},
+        issued_at=value.issued_at,
+    )
+    service = RunExecutionService(lifecycle, queue, executor, events)
+
+    await service.execute(value)
+
+    assert [event.event_type for event in events.values] == [
+        "run.started",
+        "message.delta",
+        "message.completed",
+        "run.completed",
+    ]
+    assert events.values[1].payload == {"delta": "ATHENA_EXEC_REAL"}
+    assert events.values[2].payload == {"content": "ATHENA_EXEC_REAL"}
 
 
 @pytest.mark.asyncio

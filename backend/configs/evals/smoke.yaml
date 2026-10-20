@@ -1,0 +1,10 @@
+name: retrieval-smoke
+mode: retrieval
+evaluators:
+  - retrieval_metrics
+target:
+  rankings: {}
+gates:
+  - metric: runtime.error
+    op: "=="
+    value: 0

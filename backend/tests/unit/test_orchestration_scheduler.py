@@ -94,6 +94,15 @@ class Synthesizer:
         return f"{plan.plan_id}:{sorted(results)}"
 
 
+class Events:
+    def __init__(self):
+        self.values = []
+
+    async def publish(self, event):
+        self.values.append(event)
+        return event
+
+
 @pytest.mark.asyncio
 async def test_scheduler_runs_worker_and_synthesizes_terminal_results() -> None:
     repository = Repository()
@@ -109,6 +118,29 @@ async def test_scheduler_runs_worker_and_synthesizes_terminal_results() -> None:
 
     assert repository.finished[0][2] == "done"
     assert service.synthesized_result("plan-1") == "plan-1:['task-1']"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_publishes_task_plan_and_synthesis_terminal_events() -> None:
+    repository = Repository()
+    worker = Worker([TaskResult("task-1", TaskStatus.DONE, output={"output": "A"})])
+    events = Events()
+    service = WorkerSchedulerService(repository, worker, events=events)
+
+    await service.start_ready_tasks("plan-1")
+    for _ in range(20):
+        if service.synthesized_result("plan-1"):
+            break
+        await asyncio.sleep(0.01)
+
+    assert [event.event_type for event in events.values] == [
+        "task.started",
+        "task.completed",
+        "plan.completed",
+        "synthesis.started",
+        "synthesis.completed",
+    ]
+    assert events.values[-1].payload["result"] == "A"
 
 
 @pytest.mark.asyncio

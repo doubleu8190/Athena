@@ -8,6 +8,7 @@ import SettingsView from "./SettingsView"
 import McpView from "./McpView"
 import KnowledgeBaseView from "./KnowledgeBaseView"
 import RetrievalView from "./RetrievalView"
+import EvaluationView from "./EvaluationView"
 
 interface PageViewProps {
   view: AppView
@@ -37,6 +38,8 @@ function PageView({ view }: PageViewProps) {
       return <SettingsView />
     case "retrieval":
       return <RetrievalView />
+    case "evaluation":
+      return <EvaluationView />
     default:
       return null
   }

@@ -179,6 +179,36 @@ class PostgresRunRepository(
                     )
                     row.completed_at = _now()
 
+    async def complete_active_command_for_run(
+        self,
+        run_id: str,
+        *,
+        status: CommandStatus,
+        result: object = None,
+        error: object = None,
+    ) -> bool:
+        """Converge the original command after an internal approval resume."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(AgentCommandModel)
+                        .where(
+                            AgentCommandModel.run_id == run_id,
+                            AgentCommandModel.status == CommandStatus.RUNNING.value,
+                        )
+                        .order_by(AgentCommandModel.started_at)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    return False
+                row.status = str(status)
+                row.result_json = json.dumps(result, default=str) if result is not None else None
+                row.error_json = json.dumps(error, default=str) if error is not None else None
+                row.completed_at = _now()
+                return True
+
     async def list_for_session(self, session_id: str) -> list[RunSummary]:
         async with self._session_factory() as session:
             rows = (
@@ -522,7 +552,7 @@ class PostgresApprovalRepository(ApprovalRepository):
             row = await self.get(approval_id)
             if (
                 row
-                and row.approval_batch_id == batch_id
+                and (row.approval_batch_id == batch_id or (row.approval_batch_id is None and row.approval_id == batch_id))
                 and (run_id is None or row.run_id == run_id)
             ):
                 changed = (

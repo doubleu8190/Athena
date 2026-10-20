@@ -85,8 +85,8 @@ def _response(value: ApprovalResponse) -> dict[str, Any]:
         "run_id": value.run_id,
         "tool_call_id": value.tool_call_id,
         "approval_batch_id": value.approval_batch_id,
-        "resolved": value.decision is not None,
-        "resolution": value.decision.value if value.decision else value.status.value,
+        "resolved": bool(getattr(value, "resolved", False)),
+        "resolution": getattr(value, "resolution", "pending"),
     }
 
 

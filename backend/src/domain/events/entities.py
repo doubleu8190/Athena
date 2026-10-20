@@ -15,6 +15,12 @@ class EventDurability(StrEnum):
 
 
 class EventType(StrEnum):
+    EVALUATION_STARTED = "evaluation.started"
+    EVALUATION_CASE_STARTED = "evaluation.case_started"
+    EVALUATION_CASE_COMPLETED = "evaluation.case_completed"
+    EVALUATION_CASE_FAILED = "evaluation.case_failed"
+    EVALUATION_COMPLETED = "evaluation.completed"
+    EVALUATION_FAILED = "evaluation.failed"
     APPROVAL_REQUIRED = "approval.required"
     APPROVAL_RESOLVED = "approval.resolved"
     PLAN_CREATED = "plan.created"

@@ -161,6 +161,9 @@
   color: #737373;
   margin: 0.5em 0;
 }
+.prose-custom table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+.prose-custom th, .prose-custom td { border: 1px solid #3a3a3a; padding: 0.45em 0.65em; text-align: left; vertical-align: top; }
+.prose-custom th { background: rgba(255,255,255,0.04); font-weight: 600; }
 
 /* Phase dividers */
 .phase-divider {

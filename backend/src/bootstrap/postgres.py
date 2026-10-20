@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import cast
+
 from application.approval import ApprovalService
+from application.evaluation import EvaluationService
 from application.configuration import ProviderQueryService, SettingsQueryService
 from application.events import EventStreamService
 from application.files import AttachmentService, IngestionService
@@ -98,8 +102,14 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresFileChunkRepository,
     PostgresOrchestrationRepository,
     PostgresPlanLoader,
+    PostgresEvaluationRepository,
 )
+from infrastructure.evaluation.retrieval_target import EmbeddingRetrievalTarget
+from infrastructure.evaluation import EvaluationEventPublisher, load_dataset
+from application.evaluation import EvaluationProgressHub
 from workers import CommandConsumer, KnowledgeDocumentWorker, WorkerSupervisor
+from domain.runs import CommandStatus, CommandType, RunCommand
+from datetime import datetime, timezone
 
 from .dependencies import ApplicationDependencies, Provider, build_dependencies
 
@@ -129,6 +139,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     approvals = PostgresApprovalRepository(session_factory)
     memory = PostgresMemoryRepository(session_factory)
     retrieval = PostgresRetrievalRepository(session_factory)
+    evaluation_repository = PostgresEvaluationRepository(session_factory)
+    evaluation_progress = EvaluationProgressHub()
     tools = PostgresToolConfigRepository(session_factory)
     mcp_repository = PostgresMCPServerRepository(session_factory)
     orchestration = PostgresOrchestrationRepository(session_factory)
@@ -278,8 +290,23 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     scheduler = WorkerSchedulerService(
         orchestration,
         worker_executor,
+        events=events,
     )
 
+    builtin_tool_service = ToolService(
+        tools,
+        BuiltinToolExecutor(
+            settings.files_path,
+            max_output_bytes=settings.sandbox_max_output_bytes,
+            sandbox=sandbox,
+            sandbox_enabled=(settings.sandbox_enabled or settings.sandbox_required) and settings.exec_shell_enabled,
+            sandbox_required=settings.sandbox_required,
+            sandbox_image=settings.sandbox_shell_image,
+            sandbox_max_timeout=settings.sandbox_max_timeout,
+            sandbox_workspace_root=Path(settings.sandbox_workspace_root),
+        ),
+    )
+    approval_service = ApprovalService(approvals, ApprovalEventPublisher(events), id_factory=ids)
     root_workflow = RootWorkflow(
         RootWorkflowDependencies(
             task_understanding=task_understanding,
@@ -295,6 +322,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             scheduler=scheduler,
             plan_loader=PostgresPlanLoader(orchestration),
             agent=ConfiguredRootAgent(llm_provider),
+            tool_service=builtin_tool_service,
+            approval_service=approval_service,
+            event_publisher=events,
         )
     )
     root_graph = LangGraphRootGraph(
@@ -312,20 +342,18 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         ),
         "event_stream_factory": lambda: EventStreamService(sessions, events, events, events),
         "tool_query_factory": lambda: ToolQueryService(tools),
-        "tool_service_factory": lambda: ToolService(
-            tools,
-            BuiltinToolExecutor(
-                settings.files_path, max_output_bytes=settings.sandbox_max_output_bytes
-            ),
-        ),
-        "approval_service_factory": lambda: ApprovalService(
-            approvals, ApprovalEventPublisher(events), id_factory=ids
-        ),
+        "tool_service_factory": lambda: builtin_tool_service,
+        "approval_service_factory": lambda: approval_service,
         "mcp_service_factory": lambda: MCPService(mcp),
         "provider_query_factory": lambda: ProviderQueryService(settings_queries),
         "settings_query_factory": lambda: SettingsQueryService(settings_queries),
         "memory_service_factory": lambda: MemoryService(memory),
         "retrieval_query_factory": lambda: RetrievalQueryService(retrieval),
+        "evaluation_repository_factory": lambda: evaluation_repository,
+        "evaluation_target_factory": lambda manifest: EmbeddingRetrievalTarget(manifest.corpus, embedding),
+        "evaluation_dataset_loader_factory": lambda path: load_dataset(path),
+        "evaluation_event_sink_factory": lambda: EvaluationEventPublisher(events, fanout=evaluation_progress),
+        "evaluation_progress_hub_factory": lambda: evaluation_progress,
         "knowledge_query_factory": lambda: KnowledgeBaseQueryService(knowledge),
         "attachment_service_factory": lambda: AttachmentService(
             sessions, attachments, storage, adapters, jobs, id_factory=ids
@@ -351,6 +379,28 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         command_execution = RunExecutionService(
             runs, runs, LangGraphRunExecutor(root_graph), events
         )
+        async def resume_approval(request, decision: str) -> None:
+            command = RunCommand(
+                command_id=f"approval-resume-{ids()}",
+                command_type=CommandType.RUN_RESUME,
+                session_id=request.session_id,
+                run_id=request.run_id,
+                payload={
+                    "message": f"执行命令 {request.arguments.get('command', '')}",
+                    "message_id": f"approval-result-{request.approval_id}",
+                    "resume_value": {"decision": decision, "tool_call_id": request.tool_call_id},
+                },
+                issued_at=datetime.now(timezone.utc),
+            )
+            result = await command_execution.execute(command)
+            # The approval resume is an internal command and can execute in a
+            # different worker task from the original waiting command. Ensure
+            # the persisted original command is converged by run id as a
+            # durable fallback even when the in-memory waiting map is absent.
+            converge = getattr(runs, "complete_active_command_for_run", None)
+            if converge is not None and result is not None:
+                await converge(request.run_id, status=CommandStatus.COMPLETED, result=result)
+        approval_service.set_resumer(resume_approval)
         command_worker = CommandConsumer(runs, command_execution)
         document_worker = KnowledgeDocumentWorker(jobs, ingestion)
         resources.append(WorkerSupervisor((command_worker, document_worker)))

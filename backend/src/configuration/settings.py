@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     database_backend: Literal["postgres"] = "postgres"
     postgres_create_schema: bool = True
     workers_enabled: bool = False
+    evaluation_enabled: bool = False
+    evaluation_dataset_root: str = "./data/evaluations/datasets"
+    evaluation_output_root: str = "./data/evaluations/runs"
+    evaluation_default_concurrency: int = Field(default=1, ge=1, le=64)
+    evaluation_case_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    evaluation_max_attempts: int = Field(default=1, ge=1, le=5)
+    evaluation_judge_enabled: bool = False
 
     llm_providers: list[LLMProviderConfig] = Field(
         default_factory=lambda: [LLMProviderConfig()]

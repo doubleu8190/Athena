@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -45,10 +46,13 @@ class RetryingLLMProvider(LLMPort):
         last_error: Exception | None = None
         for attempt in range(max(1, self._policy.attempts)):
             try:
-                return await asyncio.wait_for(
-                    self._model.invoke(messages, **kwargs),
-                    timeout=self._policy.timeout_seconds,
-                )
+                result = self._model.invoke(messages, **kwargs)
+                if inspect.isawaitable(result):
+                    return await asyncio.wait_for(
+                        result,
+                        timeout=self._policy.timeout_seconds,
+                    )
+                return result
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -137,7 +141,15 @@ class ConfiguredLLMProvider(RetryingLLMProvider):
                 encoding = tiktoken.encoding_for_model(config.model)
             except KeyError:
                 # 自定义 deployment 名称没有官方映射时使用 OpenAI 当前通用编码。
-                encoding = tiktoken.get_encoding("cl100k_base")
+                try:
+                    encoding = tiktoken.get_encoding("cl100k_base")
+                except Exception:
+                    return _offline_token_estimate(text)
+            except Exception:
+                # Offline CI and air-gapped deployments may not have the
+                # mergeable-ranks file cached. Token counts remain useful for
+                # budgets even when exact tokenizer data is unavailable.
+                return _offline_token_estimate(text)
             return len(encoding.encode(text))
         model = self._ensure_model()
         get_num_tokens = getattr(model, "get_num_tokens", None)
@@ -147,6 +159,23 @@ class ConfiguredLLMProvider(RetryingLLMProvider):
         if callable(get_token_ids):
             return len(get_token_ids(text))
         return super().count_text_tokens(text)
+
+
+def _offline_token_estimate(text: str) -> int:
+    """Estimate mixed Chinese/Latin tokens without downloading tokenizer data."""
+    chinese_count = 0
+    count = 0
+    latin_run = False
+    for char in text:
+        if "\u4e00" <= char <= "\u9fff":
+            chinese_count += 1
+            latin_run = False
+        elif char.isspace() or char in ",.!?;:，。！？；：、()[]{}\"'":
+            latin_run = False
+        elif not latin_run:
+            count += 1
+            latin_run = True
+    return count + (chinese_count + 1) // 2
 
 
 __all__ = ["ConfiguredLLMProvider", "RetryPolicy", "RetryingLLMProvider"]

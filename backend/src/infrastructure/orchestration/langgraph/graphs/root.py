@@ -96,6 +96,8 @@ def _route_after_agent(state: RootGraphState) -> str:
 
 
 def _route_after_prepare(state: RootGraphState) -> str:
+    if state.get("resume_value") and state.get("resume_value", {}).get("tool_call_id"):
+        return "understand_task"
     return "project_plan_result" if state.get("resume_value") else "understand_task"
 
 

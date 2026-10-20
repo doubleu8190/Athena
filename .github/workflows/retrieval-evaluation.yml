@@ -3,11 +3,16 @@ name: retrieval-evaluation
 on:
   pull_request:
     paths:
-      - "athena/evaluation/**"
-      - "athena/core/memory/**"
-      - "athena/core/retrieval/**"
-      - "doc/retrieval-evaluation/**"
-      - "tests/test_evaluation_*.py"
+      - "backend/src/domain/evaluation/**"
+      - "backend/src/application/evaluation/**"
+      - "backend/src/infrastructure/evaluation/**"
+      - "backend/src/interfaces/http/controllers/evaluation_controller.py"
+      - "backend/src/infrastructure/persistence/postgres/models/evaluation_models.py"
+      - "backend/src/infrastructure/persistence/postgres/repositories/evaluation_repository.py"
+      - "backend/scripts/evaluate*.py"
+      - "backend/configs/evals/**"
+      - "backend/tests/unit/test_evaluation_*.py"
+      - "frontend/src/components/pages/EvaluationView.tsx"
 
 jobs:
   protocol-smoke:
@@ -18,6 +23,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -e ".[dev]"
-      - run: python -m compileall -q athena/evaluation
-      - run: pytest tests/test_evaluation_*.py
+      - run: python -m pip install -e "backend[dev]"
+      - run: PYTHONPATH=backend/src python -m compileall -q backend/src/domain/evaluation backend/src/application/evaluation backend/src/infrastructure/evaluation
+      - run: cd backend && PYTHONPATH=src python -m pytest -q tests/unit/test_evaluation_system.py tests/architecture/test_layer_boundaries.py
+      - run: cd backend && PYTHONPATH=src python -m scripts.evaluate run --config configs/evals/smoke.yaml --output /tmp/athena-evaluation
+      - uses: actions/upload-artifact@v4
+        with:
+          name: athena-evaluation-smoke
+          path: /tmp/athena-evaluation/**

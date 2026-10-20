@@ -124,6 +124,20 @@ class TaskUnderstandingService:
                 attachment_ids=attachments,
                 confidence=1.0,
             )
+        if any(marker in text.lower() for marker in ("执行命令", "运行命令", "shell", "exec_shell")):
+            command = text
+            lowered = command.lower()
+            for marker in ("exec_shell", "shell", "执行命令", "运行命令"):
+                if marker in lowered:
+                    command = command[lowered.find(marker) + len(marker):].strip(" ：:`")
+                    break
+            return UserTaskSpec(
+                goal=text,
+                mode="act",
+                slots={"tool_name": "exec_shell", "command": command},
+                attachment_ids=attachments,
+                confidence=1.0,
+            )
         if len(text) <= 16 and any(
             marker in text
             for marker in ("你好", "您好", "谢谢", "感谢", "好的", "收到", "明白")

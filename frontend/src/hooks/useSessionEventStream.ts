@@ -339,7 +339,11 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           setErrorDetail(errorDetail || null)
           updateSession(sessionId, { status: "interrupted" })
           clearThinking()
-          setError(String(errorDetail?.message || data.error || data.message || (type === "run.budget_exceeded" ? "运行已达到限制" : "任务未能完成")))
+          const errorMessage = text(errorDetail?.message)
+            || text((data.error as Record<string, unknown> | undefined)?.message)
+            || text(data.message)
+            || (type === "run.budget_exceeded" ? "运行已达到限制" : "任务未能完成")
+          setError(errorMessage)
         }
         else if (type === "run.completed") {
           setAgentStatus("idle")
@@ -389,39 +393,18 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
     ...entry,
   })
 
-  if (type === "thinking.started" || type === "thinking.summary") {
-    return base({
-      id: `thinking:${envelope.session_seq ?? crypto.randomUUID()}`,
-      label: "正在分析并整理信息",
-      status: "info",
-    })
-  }
-  if (type === "thinking.completed") return null
+  // Internal model/node lifecycle events have no user-actionable detail.
+  // Showing each one as a timeline row produces repetitive, misleading steps.
+  if (type.startsWith("thinking.") || type.startsWith("node.")) return null
 
-  if (type === "run.started") return base({ id: `run:${runId}`, label: "开始处理你的请求", status: "running" })
-  if (type === "run.resumed") return base({ id: `run:${runId}`, label: "继续处理请求", status: "running" })
-  if (type === "run.completed") return base({ id: `run:${runId}`, label: "任务已完成", status: "completed" })
+  if (type === "run.started" || type === "run.resumed") return null
+  if (type === "run.completed") return null
   if (type === "run.paused") return base({ id: `run:${runId}`, label: "任务已暂停", status: "paused" })
   if (type === "run.cancelled") return base({ id: `run:${runId}`, label: "任务已取消", status: "info" })
   if (type === "run.root_suspended") return base({ id: `run:${runId}`, label: "主任务等待子任务继续", detail: "并行任务仍在处理，完成后将继续汇总结果。", status: "waiting" })
   if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "任务已达到运行限制" : "任务未能完成", detail, status: "failed" })
 
-  if (type === "node.started" || type === "node.completed" || type === "node.failed") {
-    const nodeName = text(data.node_name)
-    const executionId = text(data.execution_id) || String(envelope.session_seq ?? crypto.randomUUID())
-    const status = type === "node.started" ? "running" : type === "node.failed" ? "failed" : "completed"
-    const label = type === "node.started" ? "正在处理任务步骤" : type === "node.failed" ? "任务步骤未能完成" : "任务步骤已完成"
-    return base({
-      id: `node:${executionId}`,
-      label,
-      detail,
-      status,
-      metadata: { ...(data.duration_ms !== undefined ? { duration_ms: data.duration_ms } : {}), ...(nodeName ? { node_name: nodeName } : {}) },
-    })
-  }
-
-  if (type === "llm.started") return base({ id: `llm:${text(data.call_id)}`, label: "正在整理信息", status: "running" })
-  if (type === "llm.completed") return base({ id: `llm:${text(data.call_id)}`, label: error ? "信息整理未能完成" : "信息整理完成", detail, status: error ? "failed" : "completed" })
+  if (type.startsWith("llm.")) return null
 
   if (type === "tool.started") {
     const toolName = text(data.tool_name)

@@ -374,6 +374,49 @@ export type AppView =
   | "settings"
   | "mcp"
   | "retrieval"
+  | "evaluation"
+
+export interface EvaluationRunSummary {
+  run_id: string
+  dataset_version: string
+  mode: string
+  status: string
+  name: string
+  case_count: number
+  completed_count: number
+  failed_count: number
+  started_at: string | null
+  completed_at: string | null
+}
+
+export interface EvaluationMetric {
+  metric_id: string
+  metric_name: string
+  case_id: string | null
+  value: number | null
+  value_json: Record<string, unknown>
+  evidence: string[]
+}
+
+export interface EvaluationCaseResult {
+  case_id: string
+  status: string
+  attempt: number
+  error: string | null
+  output: string
+  ranking: string[]
+  retrieval_run_id: string | null
+  agent_run_id: string | null
+  duration_ms: number | null
+  metrics: EvaluationMetric[]
+}
+
+export interface EvaluationRunDetail extends EvaluationRunSummary {
+  config: Record<string, unknown>
+  metrics: EvaluationMetric[]
+  gates: Array<{ metric: string; status: string; actual: number | null; baseline: number | null; op: string; threshold: number; reason: string | null }>
+  cases: EvaluationCaseResult[]
+}
 
 // ─── 工具管理 ────────────────────────────────────────────────────
 

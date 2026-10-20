@@ -34,6 +34,7 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
     def __init__(self, options: EmbeddingOptions | Any) -> None:
         self._options = coerce_embedding_options(options)
         self._loaded = False
+        self._model: Any = None
         super().__init__(self._embed, dimension=self._options.dimension)
 
     def _load(self) -> Any:
@@ -61,20 +62,16 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
 
     def _embed(self, values: Sequence[str]) -> Any:
         if not self._loaded:
-            self._embedder = self._load()
+            self._model = self._load()
             self._loaded = True
-        if (
-            callable(self._embedder)
-            and not hasattr(self._embedder, "embed_documents")
-            and not hasattr(self._embedder, "encode")
-        ):
-            return self._embedder(values)
-        if hasattr(self._embedder, "encode"):
-            encoded = self._embedder.encode(
+        if hasattr(self._model, "encode"):
+            encoded = self._model.encode(
                 list(values), convert_to_numpy=True, normalize_embeddings=False
             )
             return [item.astype(float).tolist() for item in encoded]
-        return self._embedder.embed_documents(list(values))
+        if callable(self._model) and not hasattr(self._model, "embed_documents"):
+            return self._model(values)
+        return self._model.embed_documents(list(values))
 
 
 __all__ = ["ConfiguredEmbeddingProvider", "EmbeddingProvider"]

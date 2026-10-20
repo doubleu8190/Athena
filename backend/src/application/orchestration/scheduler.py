@@ -24,11 +24,13 @@ class WorkerSchedulerService(PlanScheduler):
         worker: WorkerExecutor,
         *,
         synthesizer: ResultSynthesizer | None = None,
+        events=None,
         max_retries: int = 1,
     ) -> None:
         self._repository = repository
         self._worker = worker
         self._synthesizer = synthesizer
+        self._events = events
         self._max_retries = max_retries
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_counts: dict[str, int] = {}
@@ -41,6 +43,16 @@ class WorkerSchedulerService(PlanScheduler):
         plan, _ = value
         claimed = await self._repository.claim_ready_tasks(plan_id, plan.max_parallelism)
         for execution in claimed:
+            if self._events is not None:
+                from domain.events import ApplicationEvent, EventDurability, EventType
+
+                await self._events.publish(ApplicationEvent(
+                    event_type=EventType.TASK_STARTED,
+                    durability=EventDurability.DURABLE,
+                    session_id=execution.session_id,
+                    run_id=execution.run_id,
+                    payload={"plan_id": execution.plan_id, "task_id": execution.task.task_id, "title": execution.task.title, "status": "running", "execution_generation": execution.execution_generation},
+                ))
             key = f"{execution.task.task_id}:{execution.execution_generation}"
             if key in self._tasks:
                 continue
@@ -71,6 +83,7 @@ class WorkerSchedulerService(PlanScheduler):
                 execution.execution_generation,
                 dict(result.approval_batch or {}),
             )
+            await self._publish_task(execution, "task.waiting_approval", {"status": "waiting_approval"})
             return
 
         outcome = await self._repository.finish_task(
@@ -82,6 +95,7 @@ class WorkerSchedulerService(PlanScheduler):
         )
         if not outcome.get("accepted"):
             return
+        await self._publish_task(execution, "task.completed" if result.status == TaskStatus.DONE else "task.failed", {"status": result.status.value, "output": dict(result.output), "error": dict(result.error or {})})
         if result.status in {TaskStatus.FAILED, TaskStatus.TIMED_OUT} and result.retryable:
             retries = self._retry_counts.get(execution.task.task_id, 0)
             if retries < self._max_retries:
@@ -90,6 +104,7 @@ class WorkerSchedulerService(PlanScheduler):
                     await self.start_ready_tasks(execution.plan_id)
                     return
         if outcome.get("plan_completed"):
+            await self._publish_plan_terminal(execution, result.status == TaskStatus.DONE)
             await self._synthesize(execution.plan_id)
         else:
             await self.start_ready_tasks(execution.plan_id)
@@ -134,14 +149,44 @@ class WorkerSchedulerService(PlanScheduler):
         return await self._worker.cancel(run_id)
 
     async def _synthesize(self, plan_id: str) -> None:
-        if self._synthesizer is None:
-            return
         value = await self._repository.get(plan_id)
         if value is None:
             return
         plan, _tasks = value
+        if self._events is not None:
+            from domain.events import ApplicationEvent, EventDurability, EventType
+
+            await self._events.publish(ApplicationEvent(event_type=EventType.SYNTHESIS_STARTED, durability=EventDurability.DURABLE, session_id=plan.session_id or "", run_id=plan.run_id, payload={"plan_id": plan_id}))
         results = await self._repository.get_results(plan_id)
-        self._results[plan_id] = await self._synthesizer.synthesize(plan, results)
+        self._results[plan_id] = (
+            await self._synthesizer.synthesize(plan, results)
+            if self._synthesizer is not None
+            else "\n".join(str(value.output.get("output", "")) for value in results.values())
+        )
+        if self._events is not None:
+            from domain.events import ApplicationEvent, EventDurability, EventType
+
+            await self._events.publish(ApplicationEvent(event_type=EventType.SYNTHESIS_COMPLETED, durability=EventDurability.DURABLE, session_id=plan.session_id or "", run_id=plan.run_id, payload={"plan_id": plan_id, "result": self._results[plan_id]}))
+
+    async def _publish_plan_terminal(self, execution, succeeded: bool) -> None:
+        if self._events is None:
+            return
+        from domain.events import ApplicationEvent, EventDurability, EventType
+
+        await self._events.publish(ApplicationEvent(
+            event_type=EventType.PLAN_COMPLETED if succeeded else EventType.PLAN_FAILED,
+            durability=EventDurability.DURABLE,
+            session_id=execution.session_id,
+            run_id=execution.run_id,
+            payload={"plan_id": execution.plan_id, "status": "completed" if succeeded else "failed"},
+        ))
+
+    async def _publish_task(self, execution, event_type: str, payload: dict[str, object]) -> None:
+        if self._events is None:
+            return
+        from domain.events import ApplicationEvent, EventDurability
+
+        await self._events.publish(ApplicationEvent(event_type=event_type, durability=EventDurability.DURABLE, session_id=execution.session_id, run_id=execution.run_id, payload={"plan_id": execution.plan_id, "task_id": execution.task.task_id, "title": execution.task.title, **payload}))
 
     def synthesized_result(self, plan_id: str) -> str | None:
         return self._results.get(plan_id)

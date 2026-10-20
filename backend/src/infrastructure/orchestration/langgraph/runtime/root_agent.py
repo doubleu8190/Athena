@@ -29,7 +29,9 @@ class ConfiguredRootAgent:
                         "Return only valid JSON for a parallel execution plan. "
                         "Use keys plan_id, goal, max_parallelism, edges, and tasks. "
                         "Each task must have task_id, title, objective, worker_type, "
-                        "allowed_tools, input, and expected_output. Keep the DAG acyclic."
+                        "allowed_tools, input, and expected_output. Use worker_type "
+                        "'general' for every task and an empty allowed_tools array; "
+                        "only registered tools may be used. Keep the DAG acyclic."
                     ),
                 },
             )

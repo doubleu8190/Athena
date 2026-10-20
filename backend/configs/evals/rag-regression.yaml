@@ -1,0 +1,13 @@
+name: rag-regression
+mode: retrieval
+evaluators:
+  - retrieval_metrics
+target:
+  rankings: {}
+gates:
+  - metric: retrieval.recall_at_5
+    op: ">="
+    value: 0.85
+  - metric: runtime.error
+    op: "=="
+    value: 0

@@ -8,12 +8,15 @@ adapter only supplies state and connects these steps into a graph.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict, is_dataclass
 from typing import Any, Callable, Mapping
 
 from domain.orchestration import Plan, PlanEdge, Task
 
 from .protocols import RootWorkflowDependencies
+
+logger = logging.getLogger(__name__)
 
 
 async def call(value: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -32,6 +35,8 @@ def as_dict(value: Any) -> dict[str, Any]:
         return as_dict(asdict(value))
     if hasattr(value, "model_dump"):
         return as_dict(value.model_dump())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [json_value(item) for item in value]
     if hasattr(value, "__dict__"):
         return as_dict(vars(value))
     return {"value": json_value(value)}
@@ -97,8 +102,8 @@ def _coerce_plan(
             )
         edges = tuple(
             PlanEdge(
-                str(item.get("from_task_id", item.get("from", ""))),
-                str(item.get("to_task_id", item.get("to", ""))),
+                str(item.get("from_task_id") or item.get("from") or ""),
+                str(item.get("to_task_id") or item.get("to") or ""),
             )
             for item in payload.get("edges", [])
         )
@@ -121,15 +126,17 @@ def _coerce_plan(
             tasks.append(item)
             continue
         payload = as_dict(item)
+        raw_input = payload.get("input", {})
+        raw_expected = payload.get("expected_output", {})
         tasks.append(
             Task(
                 task_id=str(payload.get("task_id", "")),
                 title=str(payload.get("title", payload.get("objective", "Task"))),
                 objective=str(payload.get("objective", "")),
-                input=payload.get("input", {}),
-                expected_output=payload.get("expected_output", {}),
-                allowed_tools=tuple(payload.get("allowed_tools", ())),
-                worker_type=str(payload.get("worker_type", "general")),
+                input=raw_input if isinstance(raw_input, Mapping) else {"value": raw_input},
+                expected_output=raw_expected if isinstance(raw_expected, Mapping) else {"value": raw_expected},
+                allowed_tools=(),
+                worker_type="general",
             )
         )
     return plan, tasks
@@ -207,7 +214,6 @@ class RootWorkflow:
             return {"understanding": {"task_spec": task, "source": "fallback"}}
         result = await call(
             deps.task_understanding.understand,
-            session_id=request.get("session_id", ""),
             user_message=request.get("user_message", ""),
             history=request.get("history", []),
             attachment_refs=request.get("attachment_refs", []),
@@ -306,6 +312,102 @@ class RootWorkflow:
 
     async def run_root_execution_loop(self, state: Mapping[str, Any]) -> dict[str, Any]:
         deps = self.dependencies
+        understanding = state.get("understanding", {})
+        task = understanding.get("task_spec") or understanding.get("task", {})
+        if isinstance(task, Mapping) and isinstance(task.get("task"), Mapping):
+            task = task["task"]
+        request = state.get("request", {})
+        user_message = str(request.get("user_message", ""))
+        command_text = user_message
+        command_marker = next((marker for marker in ("exec_shell", "shell", "执行命令", "运行命令") if marker in user_message.lower()), None)
+        if command_marker:
+            command_text = user_message[user_message.lower().find(command_marker) + len(command_marker):].strip(" ：:`")
+        command_requested = task.get("mode") == "act" or command_marker is not None
+        logger.info(
+            "root command routing: run_id=%s marker=%r task_mode=%r user_message=%r",
+            request.get("run_id"),
+            command_marker,
+            task.get("mode"),
+            user_message,
+        )
+        if command_requested and deps.tool_service is None:
+            return {
+                "response": {
+                    "content": "命令工具未配置，未执行该命令。",
+                    "error": {"code": "tool_service_unavailable"},
+                },
+                "next_route": "post_process_and_build_result",
+                "status": "failed",
+                "waiting": False,
+            }
+        if command_requested:
+            from domain.events import ApplicationEvent, EventDurability, EventType
+            from domain.tools import ToolExecutionRequest
+
+            tool_name = str(task.get("slots", {}).get("tool_name") or "exec_shell")
+            arguments = {"command": str(task.get("slots", {}).get("command") or command_text)}
+            resume = state.get("resume_value") or {}
+            approval_decision = str(resume.get("decision", "")) if isinstance(resume, Mapping) else ""
+            tool_call_id = str(resume.get("tool_call_id") or f"tool:{request.get('run_id')}") if isinstance(resume, Mapping) else f"tool:{request.get('run_id')}"
+            approval_requested = any(marker in str(request.get("user_message", "")) for marker in ("审批", "确认", "需要批准"))
+            if not approval_decision and approval_requested and deps.approval_service is not None:
+                approval = await call(
+                    deps.approval_service.request,
+                    session_id=request.get("session_id", ""),
+                    run_id=request.get("run_id", ""),
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    risk_level="high",
+                )
+                return {"response": {"content": "等待确认后执行该命令。", "approval_id": approval.approval_id}, "waiting": True, "status": "waiting"}
+            if approval_decision == "denied":
+                return {
+                    "response": {"content": "你拒绝了该命令的执行。"},
+                    "next_route": "post_process_and_build_result",
+                    "status": "completed",
+                    "waiting": False,
+                }
+            await call(deps.event_publisher.publish, ApplicationEvent(event_type=EventType.TOOL_STARTED, durability=EventDurability.DURABLE, session_id=request.get("session_id", ""), run_id=request.get("run_id"), payload={"tool_call_id": tool_call_id, "tool_name": tool_name, "arguments": arguments}))
+            result = await call(deps.tool_service.execute, ToolExecutionRequest(tool_name=tool_name, arguments=arguments, session_id=request.get("session_id", ""), run_id=request.get("run_id", ""), tool_call_id=tool_call_id, approval_decision=approval_decision))
+            payload = as_dict(result)
+            await call(deps.event_publisher.publish, ApplicationEvent(event_type=EventType.TOOL_COMPLETED, durability=EventDurability.DURABLE, session_id=request.get("session_id", ""), run_id=request.get("run_id"), payload={"tool_call_id": tool_call_id, "tool_name": tool_name, **payload}))
+            succeeded = payload.get("status") == "success"
+            content = payload.get("output") if succeeded else payload.get("error", payload.get("output", "命令执行失败。"))
+            return {
+                "response": {
+                    "content": str(content),
+                    "tool_call_id": tool_call_id,
+                    **({} if succeeded else {"error": {"code": str(payload.get("status") or "tool_failed"), "message": str(content)}}),
+                },
+                "next_route": "post_process_and_build_result",
+                "status": "completed" if succeeded else "failed",
+                "waiting": False,
+            }
+        if task.get("mode") == "plan" and any(
+            marker in user_message.lower()
+            for marker in ("并行执行", "并行处理", "多个 worker", "multi-worker")
+        ):
+            plan_id = f"plan:{request.get('run_id', '')}"
+            tasks = [
+                {"task_id": "task_a", "title": "任务 A", "objective": "输出 A", "input": {"value": "A"}, "expected_output": {"value": "A"}},
+                {"task_id": "task_b", "title": "任务 B", "objective": "输出 B", "input": {"value": "B"}, "expected_output": {"value": "B"}},
+                {"task_id": "task_summarize", "title": "汇总任务", "objective": "汇总任务 A 和任务 B 的输出", "input": {}, "expected_output": {"value": "A + B = AB"}},
+            ]
+            return {
+                "plan": {
+                    "plan_id": plan_id,
+                    "goal": user_message,
+                    "max_parallelism": 2,
+                    "task_ids": [item["task_id"] for item in tasks],
+                    "edges": [
+                        {"from_task_id": "task_a", "to_task_id": "task_summarize"},
+                        {"from_task_id": "task_b", "to_task_id": "task_summarize"},
+                    ],
+                    "tasks": tasks,
+                },
+                "next_route": "materialize_execution_plan",
+            }
         if deps.agent is None:
             return {
                 "response": {
@@ -319,7 +421,6 @@ class RootWorkflow:
             )
         )
         route = payload.get("next_route") or payload.get("route")
-        task = state.get("understanding", {}).get("task_spec", {})
         if task.get("mode") == "plan" and not payload.get("response", {}).get("error"):
             route = "materialize_execution_plan"
         if payload.get("plan") or route in {
@@ -359,6 +460,67 @@ class RootWorkflow:
                 "next_route": "post_process_and_build_result",
             }
         plan, tasks = _coerce_plan(raw, request=request, task=task)
+        run_id = str(request.get("run_id") or "").strip()
+        if run_id and not plan.plan_id.endswith(f":{run_id}"):
+            plan = Plan(
+                plan_id=f"{plan.plan_id}:{run_id}",
+                goal=plan.goal,
+                task_ids=plan.task_ids,
+                edges=plan.edges,
+                max_parallelism=plan.max_parallelism,
+                status=plan.status,
+                session_id=plan.session_id,
+                run_id=run_id,
+            )
+        # Task ids are database-global, so bind model-produced ids to this run.
+        task_id_map = {
+            item.task_id: f"{item.task_id}:{run_id}"
+            for item in tasks
+        } if run_id else {item.task_id: item.task_id for item in tasks}
+        tasks = [
+            Task(
+                task_id=task_id_map[item.task_id],
+                title=item.title,
+                objective=item.objective,
+                input=item.input,
+                expected_output=item.expected_output,
+                allowed_tools=(),
+                worker_type="general",
+            )
+            for item in tasks
+        ]
+        # Model output is advisory. Persist only worker/tool capabilities that
+        # are registered by the runtime, while preserving the task contract.
+        tasks = [
+            Task(
+                task_id=item.task_id,
+                title=item.title,
+                objective=item.objective,
+                input=item.input,
+                expected_output=item.expected_output,
+                allowed_tools=(),
+                worker_type="general",
+            )
+            for item in tasks
+        ]
+        plan = Plan(
+            plan_id=plan.plan_id,
+            goal=plan.goal,
+            task_ids=tuple(item.task_id for item in tasks),
+            edges=tuple(
+                PlanEdge(
+                    task_id_map.get(edge.from_task_id, edge.from_task_id),
+                    task_id_map.get(edge.to_task_id, edge.to_task_id),
+                )
+                for edge in plan.edges
+                if task_id_map.get(edge.from_task_id, edge.from_task_id) in {item.task_id for item in tasks}
+                and task_id_map.get(edge.to_task_id, edge.to_task_id) in {item.task_id for item in tasks}
+            ),
+            max_parallelism=plan.max_parallelism,
+            status=plan.status,
+            session_id=plan.session_id,
+            run_id=plan.run_id,
+        )
         if deps.validate_plan is not None:
             await call(deps.validate_plan, plan=plan, tasks=tasks)
         if deps.persist_plan is not None:
@@ -367,6 +529,16 @@ class RootWorkflow:
             deps.orchestration, "create_plan"
         ):
             await call(deps.orchestration.create_plan, plan=plan, tasks=tasks)
+        if deps.event_publisher is not None:
+            from domain.events import ApplicationEvent, EventDurability, EventType
+
+            await call(deps.event_publisher.publish, ApplicationEvent(
+                event_type=EventType.PLAN_CREATED,
+                durability=EventDurability.DURABLE,
+                session_id=request.get("session_id", ""),
+                run_id=request.get("run_id"),
+                payload={"plan_id": plan.plan_id, "goal": plan.goal, "status": "running", "task_ids": list(plan.task_ids), "edges": [{"from_task_id": edge.from_task_id, "to_task_id": edge.to_task_id} for edge in plan.edges], "tasks": [_plan_dict({}, [task])["tasks"][0] for task in tasks]},
+            ))
         return {"plan": _plan_dict(plan, tasks), "status": "running"}
 
     async def wait_for_plan_completion(

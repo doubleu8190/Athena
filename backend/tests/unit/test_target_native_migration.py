@@ -79,8 +79,84 @@ async def test_native_tools_enforce_workspace_and_execute(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_exec_shell_uses_configured_docker_sandbox(tmp_path: Path):
+    class Sandbox:
+        def __init__(self, result):
+            self.result = result
+            self.request = None
+
+        async def execute(self, request):
+            self.request = request
+            return self.result
+
+    sandbox = Sandbox(SimpleNamespace(status="success", exit_code=0, stdout="DOCKER_STDOUT", stderr=""))
+    execution = NativeToolExecution(
+        tmp_path,
+        sandbox=sandbox,
+        sandbox_enabled=True,
+        sandbox_image="python:test",
+        sandbox_max_timeout=12,
+    )
+    result = await execution.execute(
+        ToolExecutionRequest("exec_shell", {"command": "printf DOCKER_STDOUT", "timeout": 30}, "s", "r", "c")
+    )
+    assert result.status == "success" and result.output == "DOCKER_STDOUT"
+    assert sandbox.request.workspace.parent == (tmp_path / "sandboxes").resolve()
+    assert sandbox.request.workspace.name != ""
+    assert sandbox.request.workspace.is_dir()
+    first_workspace = sandbox.request.workspace
+    assert sandbox.request.image == "python:test"
+    assert sandbox.request.argv == ("/bin/sh", "-lc", "printf DOCKER_STDOUT")
+    assert sandbox.request.timeout_seconds == 12
+
+    second = await execution.execute(
+        ToolExecutionRequest("exec_shell", {"command": "printf OTHER_RUN"}, "s", "other-run", "c2")
+    )
+    assert second.status == "success"
+    assert sandbox.request.workspace != first_workspace
+
+
+@pytest.mark.asyncio
+async def test_exec_shell_does_not_fall_back_to_host_when_docker_is_unavailable(tmp_path: Path):
+    class Sandbox:
+        async def execute(self, _request):
+            return SimpleNamespace(status="runner_unavailable", exit_code=None, stdout="", stderr="docker socket unavailable")
+
+    result = await NativeToolExecution(tmp_path, sandbox=Sandbox(), sandbox_enabled=True).execute(
+        ToolExecutionRequest("exec_shell", {"command": "printf SHOULD_NOT_RUN_ON_HOST"}, "s", "r", "c")
+    )
+    assert result.status == "sandbox_unavailable"
+    assert result.error == "docker socket unavailable"
+
+
+@pytest.mark.asyncio
+async def test_exec_shell_uses_host_only_when_sandbox_is_explicitly_disabled(tmp_path: Path):
+    class Sandbox:
+        async def execute(self, _request):
+            raise AssertionError("disabled sandbox must not be called")
+
+    result = await NativeToolExecution(tmp_path, sandbox=Sandbox(), sandbox_enabled=False).execute(
+        ToolExecutionRequest("exec_shell", {"command": "printf LOCAL_ONLY"}, "s", "r", "c")
+    )
+    assert result.status == "success" and result.output == "LOCAL_ONLY"
+
+
+@pytest.mark.asyncio
+async def test_required_sandbox_cannot_be_disabled(tmp_path: Path):
+    class Sandbox:
+        async def execute(self, _request):
+            return SimpleNamespace(status="runner_unavailable", exit_code=None, stdout="", stderr="docker unavailable")
+
+    result = await NativeToolExecution(
+        tmp_path, sandbox=Sandbox(), sandbox_enabled=False, sandbox_required=True
+    ).execute(ToolExecutionRequest("exec_shell", {"command": "printf NO_HOST_FALLBACK"}, "s", "r", "c"))
+    assert result.status == "sandbox_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_docker_sandbox_has_target_lifecycle(monkeypatch, tmp_path: Path):
     settings = SimpleNamespace(sandbox_docker_binary="docker", sandbox_default_network="none", sandbox_memory_mb=64, sandbox_cpu_limit=1, sandbox_max_output_bytes=10)
+    settings.sandbox_pids_limit = 48
     sandbox = DockerSandbox(settings)
     await sandbox.start()
     await sandbox.stop()
@@ -101,6 +177,8 @@ async def test_docker_sandbox_has_target_lifecycle(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
     request = SimpleNamespace(workspace=tmp_path, image="python", argv=("-V",), timeout_seconds=1)
     assert (await sandbox.execute(request)).status == "success"
+    docker_args = calls[0]
+    assert "--pids-limit" in docker_args and "48" in docker_args
     assert await sandbox.health()
     hanging = Process(timeout=True)
     async def hanging_create(*args, **kwargs): return hanging

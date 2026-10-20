@@ -33,6 +33,10 @@ class RootWorkflowDependencies:
     persist_plan: Callable[..., Any] | None = None
     validate_plan: Callable[..., Any] | None = None
     event_publisher: Any | None = None
+    tool_service: Any | None = None
+    approval_service: Any | None = None
+    session_id: str = ""
+    run_id: str = ""
 
 
 class RootWorkflowPort(Protocol):

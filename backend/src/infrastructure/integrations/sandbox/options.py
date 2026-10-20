@@ -10,6 +10,7 @@ class SandboxOptions:
     max_output_bytes: int = 1_000_000
     memory_mb: int = 512
     cpu_limit: float = 1.0
+    pids_limit: int = 128
 
 
 __all__ = ["SandboxOptions"]

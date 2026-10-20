@@ -11,6 +11,8 @@
 | 5 | [文件智能与知识库实现](athena-files-knowledge.md) | 定义上传、适配器、解析、分块、索引、检索和分析 |
 | 6 | [记忆、上下文检索与检索轨迹](athena-memory-retrieval.md) | 定义长期记忆、revision、融合召回、图上下文和轨迹 |
 | 7 | [前端复刻说明](athena-frontend.md) | 定义页面、状态、SSE 投影和用户流程 |
+| 8 | [评测系统设计](evaluation-system-design.md) | 定义评测层次、数据模型、指标、实验和回归门禁 |
+| 9 | [评测系统实施](evaluation-system-implementation.md) | 定义实施阶段、代码落点、表结构、接口、测试和发布顺序 |
 
 `athena-target-implementation.md` 是之前留下的目标架构设计稿，描述范围大于当前已接入实现；它不是本套“当前系统功能”文档的依据。`optional-none-audit.md` 是代码审计记录，也不是产品功能定义。
 

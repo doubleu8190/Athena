@@ -52,8 +52,8 @@ BACKEND_DIR="${PROJECT_ROOT}/backend"                     # 后端 Python 项目
 FRONTEND_DIR="${PROJECT_ROOT}/frontend"                     # React Web 前端根目录
 RUN_DIR="${PROJECT_ROOT}/.run"                             # PID / 锁 / 临时文件
 LOG_DIR="${PROJECT_ROOT}/logs"                             # 运行日志
-ENV_FILE="${PROJECT_ROOT}/.env"                            # 用户环境变量
-ENV_EXAMPLE="${PROJECT_ROOT}/.env.example"                 # 环境变量参考
+ENV_FILE="${PROJECT_ROOT}/backend/.env"                            # 用户环境变量
+ENV_EXAMPLE="${PROJECT_ROOT}/backend/.env.example"                 # 环境变量参考
 
 PID_BACKEND="${RUN_DIR}/backend.pid"
 PID_FRONTEND="${RUN_DIR}/frontend.pid"
@@ -87,14 +87,6 @@ log_error()   { echo -e "${C_RED}[ERROR]${C_RESET}   $*" >&2; }
 # 带退出码的 fatal
 fatal() { log_error "$*"; exit 1; }
 
-# ---------------------------------------------------------------------------
-# 2. 加载环境变量与默认值
-# ---------------------------------------------------------------------------
-
-# 若存在 .env 则按顺序加载：系统环境变量 > 用户 .env > 脚本默认值
-# shellcheck disable=SC1090
-[[ -f "${ENV_FILE}" ]] && set -a && source "${ENV_FILE}" && set +a || true
-
 # --- Python 解释器选择（优先使用 .venv，否则系统 python3）---
 PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python3"
 if [[ -x "${PYTHON_BIN}" ]]; then
@@ -104,6 +96,21 @@ else
   log_warn "未检测到 .venv，使用系统 ${PYTHON_BIN}（若依赖缺失请先 ./start.sh install）"
 fi
 export PYTHON_BIN
+
+# ---------------------------------------------------------------------------
+# 2. 加载环境变量与默认值
+# ---------------------------------------------------------------------------
+
+# Parse dotenv syntax instead of sourcing the file as shell: secrets may contain
+# characters such as '$' that shell expansion would silently alter.
+if [[ -f "${ENV_FILE}" ]]; then
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    if ! printenv "${key}" >/dev/null 2>&1; then
+      export "${key}=${value}"
+    fi
+  done < <("${PYTHON_BIN}" -c 'from dotenv import dotenv_values; import sys; values = dotenv_values(sys.argv[1]); [sys.stdout.write(key + chr(0) + value + chr(0)) for key, value in values.items() if value is not None]' "${ENV_FILE}") \
+    || fatal "无法解析 ${ENV_FILE}，请安装后端依赖或检查 dotenv 配置。"
+fi
 
 # --- 默认值（在未设置时生效）---
 export HOST="${HOST:-127.0.0.1}"
@@ -121,6 +128,7 @@ export POSTGRES_USER="${POSTGRES_USER:-doubleu}"
 export POSTGRES_DB="${POSTGRES_DB:-athena}"
 export POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 export POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+export ATHENA_WORKERS_ENABLED="${ATHENA_WORKERS_ENABLED:-1}"
 mkdir -p "${PROJECT_ROOT}/data"
 
 # ---------------------------------------------------------------------------
@@ -411,13 +419,18 @@ start_backend() {
   # 以前台 + 日志文件双重方式运行（teeing），然后用 nohup 分离
   (
     cd "${PROJECT_ROOT}"
-    # 脚本子 shell 退出后父进程仍存活：使用 exec nohup 形式
-    nohup env PYTHONPATH="${PROJECT_ROOT}" \
+    # Start in a separate session so the service survives the launcher shell.
+    local launcher=""
+    command -v setsid >/dev/null 2>&1 && launcher="setsid"
+    ${launcher} nohup env PYTHONPATH="${PROJECT_ROOT}" \
       HOST="${HOST}" PORT="${PORT}" DEBUG="${DEBUG}" \
       LLM_PROVIDER="${LLM_PROVIDER}" LLM_MODEL="${LLM_MODEL}" \
       LLM_API_KEY="${LLM_API_KEY}" LLM_BASE_URL="${LLM_BASE_URL}" \
       POSTGRES_USER="${POSTGRES_USER}" POSTGRES_DB="${POSTGRES_DB}" \
+      POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}" \
       POSTGRES_HOST="${POSTGRES_HOST}" POSTGRES_PORT="${POSTGRES_PORT}" \
+      WORKERS_ENABLED="${ATHENA_WORKERS_ENABLED}" \
+      ATHENA_WORKERS_ENABLED="${ATHENA_WORKERS_ENABLED}" \
       "${PYTHON_BIN}" -u backend/src/main.py \
       >> "${LOG_BACKEND}" 2>&1 &
     echo $! > "${PID_BACKEND}"
@@ -447,6 +460,13 @@ cmd_backend() { start_backend; }
 start_frontend() {
   log_step "启动 Web 前端 (vite dev)"
 
+  local existing_frontend_pids
+  existing_frontend_pids="$(port_pid "${FRONTEND_PORT}")"
+  if [[ -n "${existing_frontend_pids}" ]]; then
+    log_error "前端端口 ${FRONTEND_PORT} 已被占用 (PID=${existing_frontend_pids})。请先停止占用该端口的 Vite 进程，或设置 FRONTEND_PORT 使用其他端口。"
+    return 1
+  fi
+
   # 如果后端没启动，给出警告但不阻塞（允许用户分开启动）
   if ! backend_healthy; then
     log_warn "后端尚未就绪（http://${HOST}:${PORT}${BACKEND_HEALTH_PATH} 无响应）。"
@@ -457,9 +477,12 @@ start_frontend() {
 
   (
     cd "${FRONTEND_DIR}"
-    nohup env \
-      HOST="${HOST}" PORT="${PORT}" \
-      npm run dev \
+    local launcher=""
+    command -v setsid >/dev/null 2>&1 && launcher="setsid"
+    # Invoke Vite directly so the PID file tracks the actual server process.
+    ${launcher} nohup env \
+      HOST="${HOST}" PORT="${PORT}" FRONTEND_PORT="${FRONTEND_PORT}" VITE_API_PROXY_TARGET="http://${HOST}:${PORT}" \
+      node_modules/.bin/vite --host "${HOST}" \
       >> "${LOG_FRONTEND}" 2>&1 &
     pid=$!
     echo "${pid}" > "${PID_FRONTEND}"
@@ -490,7 +513,11 @@ cmd_frontend() { start_frontend; }
 cmd_start() {
   # 先启动后端，再启动前端，保证依赖顺序
   start_backend || fatal "后端启动失败，已中止全栈启动。"
-  start_frontend || log_warn "前端启动失败，你仍可以单独用 ./start.sh frontend 排查。"
+  if ! start_frontend; then
+    log_warn "前端启动失败，正在停止本次启动的后端进程。"
+    stop_pid "${PID_BACKEND}" "FastAPI 后端" >/dev/null 2>&1 || true
+    fatal "前端启动失败，已中止全栈启动。"
+  fi
   echo ""
   log_success "🎉 Athena 全栈启动完成！"
   cmd_status

@@ -60,7 +60,16 @@ function AppContent() {
     initializedSessions.current = true
     const loadSessions = async () => {
       try {
-        const list = await apiClient.listSessions()
+        const listedSessions = await apiClient.listSessions()
+        const emptyDefaultSessions = await Promise.all(listedSessions.map(async (session) => {
+          if (session.title !== "New Session") return false
+          try {
+            return (await apiClient.getMessages(session.id)).length === 0
+          } catch {
+            return false
+          }
+        }))
+        const list = listedSessions.filter((_, index) => !emptyDefaultSessions[index])
         // 整体替换而非逐条前插：后端已按 updated_at desc（最近活跃在前）排序，
         // 逐条 addSession 会前插倒转顺序，导致侧栏最旧会话排在最上
         setSessions(list)
@@ -68,15 +77,7 @@ function AppContent() {
           const current = useChatStore.getState().activeSessionId
           setActiveSession(current && list.some((session) => session.id === current) ? current : list[0].id)
         } else {
-          const created = await apiClient.createSession("New Session")
-          setSessions([{
-            id: created.id,
-            title: created.title,
-            status: created.status as Session["status"],
-            created_at: created.created_at,
-            updated_at: created.created_at,
-          }])
-          setActiveSession(created.id)
+          setActiveSession(null)
         }
       } catch {
         useChatStore.getState().setError("Unable to connect to Athena. Check that the backend is running, then reload.")

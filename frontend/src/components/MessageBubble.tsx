@@ -125,7 +125,7 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 isStreaming ? "typing-cursor" : ""
               }`}
             >
-              <ReactMarkdown>{message.content}</ReactMarkdown>
+              <MarkdownContent content={message.content} />
             </div>
           </div>
         )}
@@ -142,6 +142,46 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       </div>
     </div>
   )
+}
+
+function MarkdownContent({ content }: { content: string }) {
+  const lines = content.split("\n")
+  const blocks: Array<{ type: "markdown"; content: string } | { type: "table"; rows: string[][] }> = []
+  let markdown: string[] = []
+  const flushMarkdown = () => {
+    if (markdown.length > 0) blocks.push({ type: "markdown", content: markdown.join("\n") })
+    markdown = []
+  }
+  const cells = (line: string) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim())
+  const isTableDivider = (line: string) => /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line)
+
+  for (let index = 0; index < lines.length;) {
+    if (index + 1 < lines.length && lines[index].includes("|") && isTableDivider(lines[index + 1])) {
+      flushMarkdown()
+      const rows = [cells(lines[index])]
+      index += 2
+      while (index < lines.length && lines[index].includes("|")) rows.push(cells(lines[index++]))
+      blocks.push({ type: "table", rows })
+    } else {
+      markdown.push(lines[index++])
+    }
+  }
+  flushMarkdown()
+
+  return <>
+    {blocks.map((block, index) => block.type === "markdown" ? (
+      <ReactMarkdown key={index}>{block.content}</ReactMarkdown>
+    ) : (
+      <div key={index} className="my-3 max-w-full overflow-x-auto">
+        <table>
+          <thead><tr>{block.rows[0].map((cell, cellIndex) => <th key={cellIndex}><ReactMarkdown>{cell}</ReactMarkdown></th>)}</tr></thead>
+          <tbody>{block.rows.slice(1).map((row, rowIndex) => (
+            <tr key={rowIndex}>{block.rows[0].map((_, cellIndex) => <td key={cellIndex}><ReactMarkdown>{row[cellIndex] || ""}</ReactMarkdown></td>)}</tr>
+          ))}</tbody>
+        </table>
+      </div>
+    ))}
+  </>
 }
 
 function formatTime(isoString: string): string {

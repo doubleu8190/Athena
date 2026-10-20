@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from domain.approval import (
     ApprovalDecision,
@@ -17,10 +17,14 @@ from application.common.responses import ApprovalResponse, ApprovalStatsResponse
 class ApprovalService:
     """创建、查询和解决工具审批请求。"""
 
-    def __init__(self, repository: ApprovalRepository, events: ApprovalEventPort, *, id_factory: Callable[[], str]) -> None:
+    def __init__(self, repository: ApprovalRepository, events: ApprovalEventPort, *, id_factory: Callable[[], str], resumer: Callable[..., Any] | None = None) -> None:
         self._repository = repository
         self._events = events
         self._id_factory = id_factory
+        self._resumer = resumer
+
+    def set_resumer(self, resumer: Callable[..., Any]) -> None:
+        self._resumer = resumer
 
     async def request(
         self,
@@ -63,12 +67,25 @@ class ApprovalService:
 
     async def resolve(self, approval_id: str, *, run_id: str, task_id: str, decision: str | ApprovalDecision) -> bool:
         """解决单条审批并返回是否成功。"""
-        return await self._repository.resolve(approval_id, run_id=run_id, task_id=task_id, decision=ApprovalDecision(decision))
+        existing = await self._repository.get(approval_id)
+        value = await self._repository.resolve(approval_id, run_id=run_id, task_id=task_id, decision=ApprovalDecision(decision))
+        if value and hasattr(self._events, "resolved"):
+            await self._events.resolved(approval_id, session_id=existing.session_id if existing else "", run_id=run_id, decision=ApprovalDecision(decision).value)
+        if value and self._resumer and existing:
+            await self._resumer(existing, ApprovalDecision(decision).value)
+        return value
 
     async def resolve_batch(self, batch_id: str, decisions: dict[str, str | ApprovalDecision], *, run_id: str | None = None) -> bool:
         """按批次解决审批。"""
         normalized = {key: ApprovalDecision(value) for key, value in decisions.items()}
-        return await self._repository.resolve_batch(batch_id, normalized, run_id=run_id)
+        value = await self._repository.resolve_batch(batch_id, normalized, run_id=run_id)
+        if value and hasattr(self._events, "resolved"):
+            for approval_id, decision in normalized.items():
+                existing = await self._repository.get(approval_id)
+                await self._events.resolved(approval_id, session_id=existing.session_id if existing else "", run_id=run_id or (existing.run_id if existing else ""), decision=decision.value)
+                if self._resumer and existing:
+                    await self._resumer(existing, decision.value)
+        return value
 
     async def pending(self, session_id: str | None = None) -> list[ApprovalResponse]:
         """查询待审批请求。"""

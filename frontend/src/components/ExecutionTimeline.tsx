@@ -41,7 +41,7 @@ export function ExecutionTimeline({ entries, defaultExpanded = false }: Executio
   }
 
   return (
-    <section className="my-5" aria-label="执行进度">
+    <section className="my-5" aria-label="操作记录">
       <button
         type="button"
         onClick={() => setIsOpen((value) => !value)}
@@ -50,10 +50,10 @@ export function ExecutionTimeline({ entries, defaultExpanded = false }: Executio
       >
         <span className="phase-label phase-processing">
           {isOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-          执行进度
+          操作记录
         </span>
         <span className="text-xs text-athena-muted">
-          {entries.length} 项进度
+          {entries.length} 条记录
         </span>
       </button>
       {isOpen && <div className="processing-group py-2">

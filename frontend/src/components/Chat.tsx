@@ -166,18 +166,27 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
         // 历史请求与 SSE replay 可能并发完成。以消息 ID 和 run_id 合并，
         // 保留已经由 SSE 构造出的实时 assistant 内容，禁止历史响应无条件清空。
         const current = useChatStore.getState().messages
-        const merged = [...history]
+        const mergedById = new Map(history.map((message) => [message.id, message]))
         for (const live of current) {
-          const same = merged.findIndex((item) =>
-            item.id === live.id ||
-            (item.role === "assistant" && live.role === "assistant" && item.run_id && item.run_id === live.run_id),
-          )
-          if (same >= 0) {
-            merged[same] = live.content.length >= merged[same].content.length ? live : merged[same]
+          const persisted = mergedById.get(live.id)
+          if (persisted) {
+            mergedById.set(live.id, persisted.content.length > live.content.length ? persisted : live)
+            continue
+          }
+          const sameRun = live.role === "assistant" && live.run_id
+            ? [...mergedById.values()].filter((item) => item.role === "assistant" && item.run_id === live.run_id)
+            : []
+          if (sameRun.length === 1) {
+            const stored = sameRun[0]
+            mergedById.set(stored.id, live.content.length > stored.content.length ? { ...stored, ...live, id: stored.id } : stored)
           } else {
-            merged.push(live)
+            mergedById.set(live.id, live)
           }
         }
+        const merged = [...mergedById.values()].sort((a, b) => {
+          const delta = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+          return Number.isNaN(delta) || delta === 0 ? a.id.localeCompare(b.id) : delta
+        })
         setMessages(merged)
       }
     } catch {
@@ -976,6 +985,6 @@ function timelineEntriesForGroup(
   messages: Message[],
 ): ExecutionTimelineEntry[] {
   const runIds = new Set(messages.map((message) => message.run_id).filter(Boolean))
-  if (runIds.size === 0) return entries
-  return entries.filter((entry) => !entry.run_id || runIds.has(entry.run_id))
+  if (runIds.size === 0) return []
+  return entries.filter((entry) => Boolean(entry.run_id) && runIds.has(entry.run_id))
 }

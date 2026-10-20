@@ -1,55 +1,49 @@
 #!/usr/bin/env python3
-"""在固定中文语料上评估当前 pgvector embedding 配置。"""
+"""Compatibility entrypoint for the original Chinese embedding benchmark."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
-from backend.bootstrap.config import get_settings
-from backend.domain.retrieval.evaluation import RetrievalEvaluationCase, evaluate_rankings
-from backend.infrastructure.integrations.llm.provider import ConfiguredEmbeddingProvider
+from application.evaluation import EvaluationService
+from domain.evaluation import EvaluationConfig, EvaluationMode
+from infrastructure.evaluation import load_dataset
+from infrastructure.evaluation.memory_repository import InMemoryEvaluationRepository
+from infrastructure.evaluation.retrieval_target import EmbeddingRetrievalTarget
 
 
 async def main() -> None:
-    fixture_path = Path(__file__).parents[1] / "tests" / "retrieval_eval" / "chinese_cases.json"
-    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    fixture_path = Path(__file__).parents[1] / "tests" / "retrieval_eval" / "chinese_cases.jsonl"
+    manifest = load_dataset(fixture_path)
+    from configuration import get_settings
+    from infrastructure.integrations.llm.embedding_provider import ConfiguredEmbeddingProvider
+
     settings = get_settings()
-    provider = ConfiguredEmbeddingProvider(settings)
-    corpus_ids = [item["id"] for item in fixture["corpus"]]
-    corpus_vectors = await provider.embed_documents([item["content"] for item in fixture["corpus"]])
-    rankings: dict[str, list[str]] = {}
-    for item in fixture["cases"]:
-        query_vector = await provider.embed_query(item["query"])
-        ranked = sorted(
-            zip(corpus_ids, corpus_vectors),
-            key=lambda candidate: _cosine_distance(query_vector, candidate[1]),
-        )
-        rankings[item["query"]] = [source_id for source_id, _ in ranked]
-    cases = [
-        RetrievalEvaluationCase.from_ids(item["query"], item["relevant_source_ids"])
-        for item in fixture["cases"]
-    ]
-    metrics = evaluate_rankings(cases, rankings, ks=(1, 3, 5))
-    print(json.dumps({
-        "embedding": {"provider": settings.embedding_provider, "model": settings.embedding_model},
-        "recall_at_k": metrics.recall_at_k,
-        "hit_rate_at_k": metrics.hit_rate_at_k,
-        "mrr": metrics.mrr,
-        "ndcg_at_k": metrics.ndcg_at_k,
-    }, ensure_ascii=False, indent=2))
-
-
-def _cosine_distance(left: list[float], right: list[float]) -> float:
-    dot = sum(a * b for a, b in zip(left, right))
-    left_norm = sum(value * value for value in left) ** 0.5
-    right_norm = sum(value * value for value in right) ** 0.5
-    if not left_norm or not right_norm:
-        return 1.0
-    return 1.0 - dot / (left_norm * right_norm)
+    repository = InMemoryEvaluationRepository()
+    await repository.create_manifest(manifest)
+    service = EvaluationService(
+        repository,
+        target=EmbeddingRetrievalTarget(manifest.corpus, ConfiguredEmbeddingProvider(settings)),
+    )
+    run = await service.run(
+        manifest,
+        EvaluationConfig(
+            "chinese-embedding",
+            manifest.version_id,
+            EvaluationMode.RETRIEVAL,
+            {"provider": settings.embedding_provider, "model": settings.embedding_model},
+            ("retrieval_metrics",),
+            concurrency=1,
+        ),
+    )
+    metrics = [item for item in await repository.list_metrics(run.run_id) if item.case_id is None]
+    failed_cases = [item for item in await repository.list_case_results(run.run_id) if item.error_message]
+    print(json.dumps({"run_id": run.run_id, "status": str(run.status), "embedding": {"provider": settings.embedding_provider, "model": settings.embedding_model}, "metrics": {item.metric_name: item.value for item in metrics}, "failed_cases": [{"case_id": item.case_id, "error": item.error_message} for item in failed_cases]}, ensure_ascii=False, indent=2))
+    if str(run.status) != "passed":
+        raise RuntimeError(f"evaluation {run.run_id} finished with status {run.status}")
 
 
 if __name__ == "__main__":
-    import asyncio
-
     asyncio.run(main())

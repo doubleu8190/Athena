@@ -11,7 +11,13 @@ from application.configuration import ProviderQueryService, SettingsQueryService
 from application.events import EventStreamService
 from application.files import AttachmentService, IngestionService
 from application.knowledge import KnowledgeBaseQueryService, KnowledgeBaseService
-from application.memory import MemoryService
+from application.memory import (
+    DefaultMemoryWriteTrigger,
+    LLMFactExtractor,
+    LLMMemoryResolver,
+    MemoryService,
+    MemoryWriteWorkflow,
+)
 from application.retrieval import RetrievalQueryService
 from application.runs import (
     RunCommandService,
@@ -93,6 +99,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresKnowledgeBaseRepository,
     PostgresKnowledgeDocumentRepository,
     PostgresMCPServerRepository,
+    PostgresMemoryJobRepository,
     PostgresMemoryRepository,
     PostgresMessageRepository,
     PostgresRetrievalRepository,
@@ -107,11 +114,38 @@ from infrastructure.persistence.postgres.repositories import (
 from infrastructure.evaluation.retrieval_target import EmbeddingRetrievalTarget
 from infrastructure.evaluation import EvaluationEventPublisher, load_dataset
 from application.evaluation import EvaluationProgressHub
-from workers import CommandConsumer, KnowledgeDocumentWorker, WorkerSupervisor
+from workers import (
+    CommandConsumer,
+    KnowledgeDocumentWorker,
+    MemoryWorker,
+    WorkerSupervisor,
+)
 from domain.runs import CommandStatus, CommandType, RunCommand
 from datetime import datetime, timezone
 
 from .dependencies import ApplicationDependencies, Provider, build_dependencies
+
+
+def _build_approval_resumer(command_execution, runs, ids):
+    """Build the resumed-approval command callback outside composition."""
+    async def resume_approval(request, decision: str) -> None:
+        command = RunCommand(
+            command_id=f"approval-resume-{ids()}",
+            command_type=CommandType.RUN_RESUME,
+            session_id=request.session_id,
+            run_id=request.run_id,
+            payload={
+                "message": f"执行命令 {request.arguments.get('command', '')}",
+                "message_id": f"approval-result-{request.approval_id}",
+                "resume_value": {"decision": decision, "tool_call_id": request.tool_call_id},
+            },
+            issued_at=datetime.now(timezone.utc),
+        )
+        result = await command_execution.execute(command)
+        converge = getattr(runs, "complete_active_command_for_run", None)
+        if converge is not None and result is not None:
+            await converge(request.run_id, status=CommandStatus.COMPLETED, result=result)
+    return resume_approval
 
 
 def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
@@ -138,6 +172,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     events = PostgresEventRepository(session_factory)
     approvals = PostgresApprovalRepository(session_factory)
     memory = PostgresMemoryRepository(session_factory)
+    memory_jobs = PostgresMemoryJobRepository(session_factory)
     retrieval = PostgresRetrievalRepository(session_factory)
     evaluation_repository = PostgresEvaluationRepository(session_factory)
     evaluation_progress = EvaluationProgressHub()
@@ -237,6 +272,15 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
     ids = monotonic_timestamp_id_factory()
     llm_provider = ConfiguredLLMProvider(llm_options)
+    memory_extractor = LLMFactExtractor(llm_provider, memory)
+    memory_resolver = LLMMemoryResolver(llm_provider, memory)
+    memory_workflow = MemoryWriteWorkflow(
+        memory,
+        DefaultMemoryWriteTrigger(),
+        memory_extractor,
+        memory_resolver,
+        memory_vectors,
+    )
     task_understanding = TaskUnderstandingService(
         llm_provider, timeout_seconds=settings.task_understanding_timeout_seconds
     )
@@ -377,33 +421,21 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     resources.append(sandbox)
     if settings.workers_enabled:
         command_execution = RunExecutionService(
-            runs, runs, LangGraphRunExecutor(root_graph), events
+            runs,
+            runs,
+            LangGraphRunExecutor(root_graph),
+            events,
+            memory_jobs,
         )
-        async def resume_approval(request, decision: str) -> None:
-            command = RunCommand(
-                command_id=f"approval-resume-{ids()}",
-                command_type=CommandType.RUN_RESUME,
-                session_id=request.session_id,
-                run_id=request.run_id,
-                payload={
-                    "message": f"执行命令 {request.arguments.get('command', '')}",
-                    "message_id": f"approval-result-{request.approval_id}",
-                    "resume_value": {"decision": decision, "tool_call_id": request.tool_call_id},
-                },
-                issued_at=datetime.now(timezone.utc),
-            )
-            result = await command_execution.execute(command)
-            # The approval resume is an internal command and can execute in a
-            # different worker task from the original waiting command. Ensure
-            # the persisted original command is converged by run id as a
-            # durable fallback even when the in-memory waiting map is absent.
-            converge = getattr(runs, "complete_active_command_for_run", None)
-            if converge is not None and result is not None:
-                await converge(request.run_id, status=CommandStatus.COMPLETED, result=result)
-        approval_service.set_resumer(resume_approval)
+        approval_service.set_resumer(_build_approval_resumer(command_execution, runs, ids))
         command_worker = CommandConsumer(runs, command_execution)
         document_worker = KnowledgeDocumentWorker(jobs, ingestion)
-        resources.append(WorkerSupervisor((command_worker, document_worker)))
+        memory_worker = MemoryWorker(memory_jobs, memory_workflow)
+        resources.append(
+            WorkerSupervisor(
+                (command_worker, document_worker, memory_worker)
+            )
+        )
     return build_dependencies(factories=providers, resources=resources)
 
 

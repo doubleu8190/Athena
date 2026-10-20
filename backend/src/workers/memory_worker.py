@@ -5,16 +5,24 @@ from __future__ import annotations
 import asyncio
 
 from application.memory.workflow import MemoryWriteWorkflow
-from domain.memory import CompletedTurn, MemoryJobPort
+from domain.memory import CompletedTurn, MemoryJobQueue
 
 
 class MemoryWorker:
     """可停止、可恢复的记忆后台任务消费者。"""
 
-    def __init__(self, jobs: MemoryJobPort, workflow: MemoryWriteWorkflow, *, poll_interval: float = 1.0) -> None:
+    def __init__(
+        self,
+        jobs: MemoryJobQueue,
+        workflow: MemoryWriteWorkflow,
+        *,
+        poll_interval: float = 1.0,
+        max_attempts: int = 3,
+    ) -> None:
         self._jobs = jobs
         self._workflow = workflow
         self._poll_interval = poll_interval
+        self._max_attempts = max_attempts
         self._stop = asyncio.Event()
 
     async def run(self) -> None:
@@ -37,12 +45,17 @@ class MemoryWorker:
             try:
                 await self._workflow.process_completed_turn(turn)
             except Exception as exc:
-                await self._jobs.mark_failed(turn.turn_id, str(exc), retry=True)
+                attempt = int(job.get("attempt", 1))
+                await self._jobs.mark_failed(
+                    turn.turn_id,
+                    str(exc),
+                    retry=attempt < self._max_attempts,
+                )
             else:
                 await self._jobs.mark_succeeded(turn.turn_id)
 
     def stop(self) -> None:
-        """请求 worker 在当前任务完成后停止。"""
+        """Request shutdown after the current job finishes."""
         self._stop.set()
 
 

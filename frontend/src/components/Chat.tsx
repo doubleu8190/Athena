@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react"
 import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, PanelLeft, Paperclip, Files, X, Trash2 } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ApprovalCard } from "./ApprovalDialog"
-import { ActivityPanel } from "./ActivityPanel"
+import { ExecutionContextPanel } from "./ExecutionContextPanel"
 import { ExecutionTimeline } from "./ExecutionTimeline"
 import { OrchestrationSummary } from "./OrchestrationSummary"
 import { useChatStore } from "../store/chatStore"
@@ -31,6 +31,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
     orchestrationPlans,
     activeSessionId,
     agentStatus,
+    connectionStatus,
     pendingApprovals,
     thinking,
     error,
@@ -99,6 +100,15 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
     const timer = window.setInterval(() => void refreshAttachments(), 1000)
     return () => window.clearInterval(timer)
   }, [activeSessionId, hasPendingAttachmentProcessing, setAttachments])
+
+  useEffect(() => {
+    if (!showActivity) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowActivity(false)
+    }
+    window.addEventListener("keydown", closeOnEscape)
+    return () => window.removeEventListener("keydown", closeOnEscape)
+  }, [showActivity])
 
   // 加载会话历史消息 — 切换 session 时完全重置状态
   useEffect(() => {
@@ -551,7 +561,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
   const orchestrationView = deriveOrchestrationView(activePlan, orchestrationTasks)
 
   return (
-    <div ref={rootRef} className="flex-1 flex flex-row min-w-0 min-h-0">
+    <div ref={rootRef} className="chat-workspace-chat flex-1 flex flex-row min-w-0 min-h-0">
       <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
       {/* 消息区域 */}
       <div
@@ -562,19 +572,21 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
         {/* Activity 面板开关，固定在消息区右上角 */}
           <div className="absolute top-3 right-4 z-10">
             <div className="flex items-center gap-2">
-            <button type="button" onClick={onOpenSessions} className="inline-flex items-center justify-center rounded-lg border border-athena-border bg-athena-surface p-1.5 text-athena-muted hover:text-athena-text md:hidden" title="打开会话列表" aria-label="打开会话列表"><PanelLeft className="w-4 h-4" /></button>
+            <button type="button" onClick={() => { setShowActivity(false); onOpenSessions?.() }} className="inline-flex items-center justify-center rounded-lg border border-athena-border bg-athena-surface p-1.5 text-athena-muted hover:text-athena-text md:hidden" title="打开会话列表" aria-label="打开会话列表"><PanelLeft className="w-4 h-4" /></button>
             <button
               type="button"
               onClick={() => setShowActivity((v) => !v)}
+              aria-expanded={showActivity}
+              aria-controls="execution-context-panel"
               className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors ${
                 showActivity
                   ? "bg-athena-accent/10 border-athena-accent/40 text-athena-accent"
                   : "bg-athena-surface border-athena-border text-athena-muted hover:text-athena-text hover:bg-athena-bg"
               }`}
-              title="切换请求记录"
+              title="切换执行上下文"
             >
               <PanelRight className="w-3.5 h-3.5" />
-              请求记录
+              执行上下文
             </button>
             </div>
             </div>
@@ -765,7 +777,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
 
       {/* 输入区域 */}
       <div
-        className="border-t border-athena-border bg-athena-surface p-4"
+        className="composer-shell border-t border-athena-border bg-athena-surface p-4"
         onDragOver={(event) => event.preventDefault()}
         onDrop={(event) => {
           event.preventDefault()
@@ -799,7 +811,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
               })}
             </div>
           )}
-          <div className="flex items-stretch gap-2">
+          <div className="composer-tools flex items-stretch gap-2">
             <input
               ref={fileInputRef}
               type="file"
@@ -820,6 +832,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
                     : "正在加载支持的文件类型"
               }
               className="inline-flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg border border-athena-border bg-athena-bg text-athena-muted hover:text-athena-text disabled:opacity-50"
+              aria-label="添加文件"
             >
               {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />}
             </button>
@@ -835,6 +848,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
                     : "请选择或创建会话开始聊天"
                 }
                 disabled={!activeSessionId}
+                aria-label="向 Athena 发送消息"
                 rows={1}
                 className="block w-full bg-athena-bg border border-athena-border rounded-lg px-4 py-3 pr-12 text-athena-text placeholder:text-athena-muted focus:outline-none focus:border-athena-accent transition-colors resize-none leading-5"
                 style={{ maxHeight: "200px", minHeight: "48px" }}
@@ -857,6 +871,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
                 disabled={!canSend || !activeSessionId}
                 className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
                 title="Send"
+                aria-label="发送消息"
               >
                 <Send className="w-4 h-4" />
               </button>
@@ -909,13 +924,23 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
       </div>
       </div>
 
-      {/* Activity / Workbench 面板，支持双视图 */}
+      {/* Execution context panel: the request index remains available for the existing flow;
+          the redesigned panel keeps plan/task/timeline context in one place. */}
       {showActivity && (
-        <ActivityPanel
-          messages={messages}
-          agentStatus={agentStatus}
-          onClose={() => setShowActivity(false)}
-        />
+        <>
+          <button type="button" className="execution-context-backdrop fixed inset-0 z-40 bg-black/30 xl:hidden" onClick={() => setShowActivity(false)} aria-label="关闭执行上下文" />
+          <ExecutionContextPanel
+            id="execution-context-panel"
+            messages={messages}
+            agentStatus={agentStatus}
+            connectionStatus={connectionStatus}
+            executionTimeline={executionTimeline}
+            orchestrationPlans={orchestrationPlans}
+            orchestrationTasks={orchestrationTasks}
+            attachments={attachments}
+            onClose={() => setShowActivity(false)}
+          />
+        </>
       )}
 
     </div>

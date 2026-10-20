@@ -416,24 +416,17 @@ start_backend() {
   check_dependencies_backend || return 1
   check_llm_key
 
-  # 以前台 + 日志文件双重方式运行（teeing），然后用 nohup 分离
+  # 子 shell 的 stdin/stdout/stderr 全部断开，确保调用终端的会话结束
+  # 不会向服务进程发送 SIGHUP。环境变量已由 dotenv 解析器安全注入。
   (
     cd "${PROJECT_ROOT}"
-    # Start in a separate session so the service survives the launcher shell.
     local launcher=""
     command -v setsid >/dev/null 2>&1 && launcher="setsid"
-    ${launcher} nohup env PYTHONPATH="${PROJECT_ROOT}" \
-      HOST="${HOST}" PORT="${PORT}" DEBUG="${DEBUG}" \
-      LLM_PROVIDER="${LLM_PROVIDER}" LLM_MODEL="${LLM_MODEL}" \
-      LLM_API_KEY="${LLM_API_KEY}" LLM_BASE_URL="${LLM_BASE_URL}" \
-      POSTGRES_USER="${POSTGRES_USER}" POSTGRES_DB="${POSTGRES_DB}" \
-      POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}" \
-      POSTGRES_HOST="${POSTGRES_HOST}" POSTGRES_PORT="${POSTGRES_PORT}" \
-      WORKERS_ENABLED="${ATHENA_WORKERS_ENABLED}" \
-      ATHENA_WORKERS_ENABLED="${ATHENA_WORKERS_ENABLED}" \
-      "${PYTHON_BIN}" -u backend/src/main.py \
-      >> "${LOG_BACKEND}" 2>&1 &
-    echo $! > "${PID_BACKEND}"
+    ${launcher} "${PYTHON_BIN}" -u backend/src/main.py \
+      </dev/null >>"${LOG_BACKEND}" 2>&1 &
+    local pid=$!
+    echo "${pid}" > "${PID_BACKEND}"
+    disown "${pid}" 2>/dev/null || true
   )
 
   # 等待健康

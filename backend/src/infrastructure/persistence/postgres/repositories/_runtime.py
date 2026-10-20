@@ -598,19 +598,18 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
     async def search(self, request: MemorySearchRequest):
         async with self._session_factory() as session:
             filters = request.filters or {}
-            rows = (
-                (
-                    await session.execute(
-                        select(MemoryModel).where(
-                            MemoryModel.content.ilike(f"%{request.query}%"),
-                            MemoryModel.status == MemoryStatus.ACTIVE.value,
-                            MemoryModel.validity_status != "invalid",
-                            MemoryModel.deleted_time.is_(None),
-                            *( [MemoryModel.session_id == filters["session_id"]] if filters.get("session_id") else [] ),
-                        )
-                        .limit(request.limit)
-                    )
+            statement = select(MemoryModel).where(
+                MemoryModel.content.ilike(f"%{request.query}%"),
+                MemoryModel.status == MemoryStatus.ACTIVE.value,
+                MemoryModel.validity_status != "invalid",
+                MemoryModel.deleted_time.is_(None),
+            )
+            if filters.get("session_id"):
+                statement = statement.where(
+                    MemoryModel.session_id == filters["session_id"]
                 )
+            rows = (
+                (await session.execute(statement.limit(request.limit)))
                 .scalars()
                 .all()
             )
@@ -618,21 +617,27 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
 
     async def list_memories(self, request: MemoryListRequest):
         async with self._session_factory() as session:
-            query = (
-                select(MemoryModel)
-                .where(MemoryModel.status != MemoryStatus.DELETED.value)
-                .order_by(MemoryModel.created_at)
-                .offset(request.offset)
-                .limit(request.limit)
-            )
+            conditions = [MemoryModel.status != MemoryStatus.DELETED.value]
             if request.session_id:
-                query = query.where(MemoryModel.session_id == request.session_id)
-            rows = (await session.execute(query)).scalars().all()
+                conditions.append(MemoryModel.session_id == request.session_id)
+            rows = (
+                (
+                    await session.execute(
+                        select(MemoryModel)
+                        .where(*conditions)
+                        .order_by(MemoryModel.created_at.desc())
+                        .offset(request.offset)
+                        .limit(request.limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
             total = (
                 await session.scalar(
                     select(func.count())
                     .select_from(MemoryModel)
-                    .where(MemoryModel.status != MemoryStatus.DELETED.value)
+                    .where(*conditions)
                 )
                 or 0
             )
@@ -649,24 +654,55 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         return None if row is None else self._domain(row)
 
     async def revisions(self, memory_id: str):
-        value = await self.get(memory_id)
-        return [] if value is None else [value]
+        async with self._session_factory() as session:
+            row = await session.get(MemoryModel, memory_id)
+            if row is None:
+                return []
+            logical_id = getattr(row, "logical_memory_id", None) or row.id
+            rows = (
+                (
+                    await session.execute(
+                        select(MemoryModel)
+                        .where(MemoryModel.logical_memory_id == logical_id)
+                        .order_by(MemoryModel.revision)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [self._domain(item) for item in rows] or [self._domain(row)]
 
     async def create_memory(self, command: MemoryWriteCommand) -> str:
+        """Create once per operation key; duplicate enqueues stay idempotent."""
         key = (
-            command.operation_key or f"memory-{datetime.now(timezone.utc).timestamp()}"
+            command.operation_key
+            or f"memory-{datetime.now(timezone.utc).timestamp()}"
         )
         async with self._session_factory() as session:
             async with session.begin():
+                existing = await session.get(MemoryModel, key)
+                if existing is not None:
+                    return key
                 session.add(
                     MemoryModel(
                         id=key,
                         logical_memory_id=key,
                         session_id=str(command.metadata.get("session_id", "")),
                         content=command.content,
-                        metadata_json=json.dumps(command.metadata),
+                        metadata_json=json.dumps(
+                            command.metadata, ensure_ascii=False
+                        ),
                         created_at=_now(),
+                        memory_type=str(command.metadata.get("type", "")) or None,
+                        category=str(command.metadata.get("category", "")) or None,
+                        confidence=float(command.metadata.get("confidence", 0.0)),
+                        source_kind="extraction",
                         status=MemoryStatus.ACTIVE.value,
+                        source_turn_id=str(
+                            command.metadata.get("source_turn_id", "")
+                        )
+                        or None,
+                        last_observed_at=_now(),
                         validity_status="valid",
                         revision=1,
                     )
@@ -676,18 +712,45 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
     async def revise(
         self, memory_id: str, content: str, *, metadata=None, operation_key=None
     ):
+        """Insert a new immutable revision and supersede the previous row."""
         async with self._session_factory() as session:
             async with session.begin():
-                result = await session.execute(
-                    update(MemoryModel)
-                    .where(MemoryModel.id == memory_id)
-                    .values(
+                old = await session.get(MemoryModel, memory_id)
+                if old is None or old.status != MemoryStatus.ACTIVE.value:
+                    return None
+                new_id = (
+                    operation_key
+                    or f"{old.logical_memory_id}:rev:{old.revision + 1}"
+                )
+                if await session.get(MemoryModel, new_id) is not None:
+                    return new_id
+                old.status = MemoryStatus.SUPERSEDED.value
+                session.add(
+                    MemoryModel(
+                        id=new_id,
+                        logical_memory_id=old.logical_memory_id,
+                        session_id=old.session_id,
                         content=content,
-                        metadata_json=json.dumps(metadata or {}),
-                        revision=MemoryModel.revision + 1,
+                        metadata_json=json.dumps(
+                            metadata or {}, ensure_ascii=False
+                        ),
+                        created_at=_now(),
+                        memory_type=old.memory_type,
+                        category=old.category,
+                        confidence=old.confidence,
+                        source_kind=old.source_kind,
+                        status=MemoryStatus.ACTIVE.value,
+                        source_turn_id=str(
+                            (metadata or {}).get("source_turn_id", "")
+                        )
+                        or None,
+                        last_observed_at=_now(),
+                        validity_status=old.validity_status,
+                        valid_until=old.valid_until,
+                        revision=old.revision + 1,
                     )
                 )
-        return memory_id if result.rowcount else None
+        return new_id
 
     async def update_validity(
         self, memory_id: str, validity_status: str, *, valid_until=None
@@ -723,7 +786,6 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
             row.source_kind,
             MemoryStatus(row.status),
         )
-
 
 class PostgresRetrievalRepository(RetrievalQueryPort):
     def __init__(

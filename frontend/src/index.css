@@ -358,6 +358,99 @@
   color: #737373;
 }
 
+/* Chat workspace visual layer. Scoped so management views retain the existing theme. */
+.chat-workspace-main {
+  --chat-bg: #f7f9fa;
+  --chat-surface: #ffffff;
+  --chat-border: #e2e8ea;
+  --chat-text: #24343b;
+  --chat-muted: #78878d;
+  --chat-accent: #23835e;
+  background: var(--chat-bg);
+  color: var(--chat-text);
+}
+.chat-workspace-header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; background: var(--chat-surface); border-color: var(--chat-border); }
+.chat-workspace-title-row { display: flex; min-width: 0; align-items: center; gap: 10px; padding-left: 18px; }
+.chat-workspace-title { color: var(--chat-text); font-size: 13px; font-weight: 600; }
+.chat-workspace-subtitle { margin-top: 2px; color: var(--chat-muted); font-size: 10px; }
+.chat-workspace-header-status { margin-left: auto; }
+.chat-workspace-header-status > div { min-height: 0; height: 52px; border: 0; background: transparent; padding-left: 14px; padding-right: 14px; }
+.chat-mobile-session-trigger { display: none; align-items: center; justify-content: center; border: 1px solid var(--chat-border); border-radius: 6px; width: 30px; height: 30px; color: var(--chat-muted); background: #fff; }
+.chat-workspace-main > .border-athena-border { border-color: var(--chat-border); background: var(--chat-surface); }
+.chat-workspace-main .bg-athena-bg { background-color: var(--chat-bg); }
+.chat-workspace-main .bg-athena-surface,
+.chat-workspace-main .bg-athena-surface\/40,
+.chat-workspace-main .bg-athena-surface\/45 { background-color: var(--chat-surface); }
+.chat-workspace-main .bg-athena-bg\/40,
+.chat-workspace-main .bg-athena-bg\/50 { background-color: #ffffff; }
+.chat-workspace-main .border-athena-border\/60,
+.chat-workspace-main .border-athena-border\/70 { border-color: #edf0f1; }
+.chat-workspace-main .border-athena-border { border-color: var(--chat-border); }
+.chat-workspace-main .text-athena-text { color: var(--chat-text); }
+.chat-workspace-main .text-athena-muted { color: var(--chat-muted); }
+.chat-workspace-main .text-athena-accent { color: var(--chat-accent); }
+.chat-workspace-main .bg-athena-accent { background-color: var(--chat-accent); }
+.chat-workspace-main .border-athena-accent { border-color: var(--chat-accent); }
+.chat-workspace-main textarea { background-color: #fff; border-color: #d8e1e4; color: var(--chat-text); }
+.chat-workspace-main textarea::placeholder { color: #96a3a8; }
+.chat-workspace-main .prose-custom code,
+.chat-workspace-main .prose-custom pre { background: #eef2f3; color: #34464e; }
+.chat-workspace-main .prose-custom th { background: #f1f5f6; }
+.chat-workspace-main .prose-custom th,
+.chat-workspace-main .prose-custom td { border-color: var(--chat-border); }
+.chat-workspace-main .chat-message-bubble.bg-athena-surface { background: #fff; border-color: #e3e9eb; }
+.chat-workspace-main .chat-message-bubble.bg-athena-accent { background: #27855e; color: #fff; }
+.chat-workspace-main .chat-message-bubble { border-radius: 8px; }
+.chat-workspace-main .chat-message .bg-athena-surface { background: #eaf4ee; border-color: #d4e8dc; color: #27855e; }
+.chat-workspace-main .chat-approval-card { background: #fff; border-color: #eadcc7; box-shadow: 0 8px 22px #24343b0a; }
+.chat-workspace-main .chat-approval-card pre { background: #f6f3ed; color: #4e4a41; }
+.chat-workspace-main .chat-approval-card .border-athena-border { border-color: #edf0f1; }
+.chat-workspace-main .text-red-400 { color: #b33f49; }
+.chat-workspace-main .text-yellow-400 { color: #94631c; }
+.chat-workspace-main .text-green-400 { color: #26764f; }
+.chat-workspace-main .bg-red-500\/20 { background-color: #fbebec; }
+.chat-workspace-main .bg-yellow-500\/20 { background-color: #fcf2df; }
+.chat-workspace-main .bg-green-500\/20 { background-color: #e9f5ed; }
+.chat-workspace-main .border-red-500\/50 { border-color: #efc7ca; }
+.chat-workspace-main .border-yellow-500\/50 { border-color: #ecd7ad; }
+.chat-workspace-main .border-green-500\/50 { border-color: #c5e3d0; }
+.chat-workspace-main .composer-shell { border: 1px solid var(--chat-border); border-radius: 9px; background: #fff; }
+.chat-workspace-main .composer-tools { color: var(--chat-muted); }
+.chat-workspace-main .composer-tools button { min-height: 30px; }
+.chat-workspace-main button:focus-visible,
+.chat-workspace-sidebar button:focus-visible,
+.execution-context-panel button:focus-visible,
+.execution-context-panel summary:focus-visible { outline: 2px solid #2b8a64; outline-offset: 2px; }
+.chat-workspace-sidebar { background: #182831; color: #eef3f4; border-color: #30434a; }
+.chat-workspace-sidebar .bg-athena-surface { background-color: #182831; }
+.chat-workspace-sidebar .border-athena-border { border-color: #30434a; }
+.chat-workspace-sidebar .text-athena-text { color: #eef3f4; }
+.chat-workspace-sidebar .text-athena-muted { color: #9aacb3; }
+.chat-workspace-sidebar .text-athena-accent { color: #91dfba; }
+.chat-workspace-sidebar .bg-athena-accent { background-color: #27855e; }
+.chat-workspace-sidebar .hover\:bg-athena-bg:hover { background-color: #22383f; }
+.execution-context-panel { color: var(--chat-text, #24343b); }
+@media (min-width: 1280px) {
+  .execution-context-panel { position: relative; z-index: auto; height: auto; }
+}
+@media (max-width: 1279px) {
+  .execution-context-panel { position: fixed; inset: 0 0 0 auto; z-index: 50; height: 100%; }
+}
+@media (max-width: 767px) {
+  .chat-workspace-sidebar { bottom: 0; width: min(88vw, 18rem); }
+  .chat-workspace-main > .border-athena-border { min-height: 44px; }
+  .chat-workspace-chat { min-height: 0; }
+  .chat-workspace-header { min-height: 48px; }
+  .chat-workspace-header-status > div { height: 48px; padding-right: 8px; }
+  .chat-workspace-header-status > div > div:first-child { display: none; }
+  .chat-mobile-session-trigger { display: inline-flex; }
+  .chat-workspace-title-row { padding-left: 10px; }
+  .chat-workspace-title { font-size: 12px; }
+  .chat-workspace-main .max-w-3xl { max-width: 100%; }
+  .chat-workspace-main textarea { font-size: 16px; }
+  .execution-context-panel { width: min(92vw, 360px); }
+}
+
 /* Responsive */
 @media (max-width: 1024px) {
   .max-w-3xl { max-width: 100%; }

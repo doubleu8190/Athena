@@ -1,6 +1,7 @@
 import { Plus, Trash2, MessageSquare, Sparkles, CheckCircle, X, Pencil, Check } from "lucide-react"
 import { useState } from "react"
-import type { Session } from "../types"
+import type { AppView, Session } from "../types"
+import { NAV_ITEMS } from "./NavRail"
 
 interface SidebarProps {
   sessions: Session[]
@@ -9,6 +10,8 @@ interface SidebarProps {
   onNewSession: () => void
   onDeleteSession: (sessionId: string) => void
   onRenameSession?: (sessionId: string, title: string) => Promise<void>
+  activeView?: AppView
+  onSelectView?: (view: AppView) => void
   mobileOpen?: boolean
   onCloseMobile?: () => void
 }
@@ -20,6 +23,8 @@ function Sidebar({
   onNewSession,
   onDeleteSession,
   onRenameSession,
+  activeView = "chat",
+  onSelectView,
   mobileOpen = true,
   onCloseMobile,
 }: SidebarProps) {
@@ -38,7 +43,7 @@ function Sidebar({
   const activeCount = sessions.filter((s) => s.status === "running").length
 
   return (
-    <aside className={`${mobileOpen ? "flex" : "hidden md:flex"} fixed top-0 bottom-12 left-0 z-30 w-[min(82vw,16rem)] md:static md:inset-auto md:w-64 flex-shrink-0 bg-athena-surface border-r border-athena-border flex-col h-full shadow-2xl md:shadow-none`}>
+    <aside className={`${mobileOpen ? "flex" : "hidden md:flex"} chat-workspace-sidebar fixed inset-y-0 left-0 z-30 w-[min(88vw,18rem)] md:static md:inset-auto md:w-[248px] flex-shrink-0 bg-athena-surface border-r border-athena-border flex-col h-full shadow-2xl md:shadow-none`}>
       {/* 侧栏标题 */}
       <div className="p-4 border-b border-athena-border">
         <div className="flex items-center gap-2 mb-4">
@@ -55,8 +60,27 @@ function Sidebar({
         </button>
       </div>
 
+      <nav className="border-b border-athena-border px-2 pb-3" aria-label="工作区导航">
+        <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-athena-muted">工作区</div>
+        <div className="grid grid-cols-2 gap-1">
+          {NAV_ITEMS.map(({ view, label, icon: Icon }) => (
+            <button
+              key={view}
+              type="button"
+              onClick={() => onSelectView?.(view)}
+              aria-current={activeView === view ? "page" : undefined}
+              className={`flex min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors ${activeView === view ? "bg-athena-accent/15 text-athena-accent" : "text-athena-muted hover:bg-athena-bg hover:text-athena-text"}`}
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              <span className="truncate">{label}</span>
+            </button>
+          ))}
+        </div>
+      </nav>
+
       {/* 会话列表 */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="px-4 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-athena-muted">最近会话</div>
         {sessions.length === 0 ? (
           <div className="p-4 text-center text-athena-muted text-sm">
             No sessions yet
@@ -69,35 +93,28 @@ function Sidebar({
               const isCompleted = session.status === "completed"
               return (
                 <li key={session.id}>
-                  <div
-                    className={`group flex items-center gap-2 px-3 py-2 mx-2 rounded-lg cursor-pointer transition-colors ${
+                  <div className={`group mx-2 my-1 flex items-center gap-1 rounded-lg px-1 transition-colors ${
                       isActive
                         ? "bg-athena-accent/20 text-athena-text border border-athena-accent/30"
                         : "hover:bg-athena-bg text-athena-muted hover:text-athena-text"
-                    }`}
-                    onClick={() => onSelectSession(session.id)}
-                  >
-                    <MessageSquare className={`w-4 h-4 flex-shrink-0 ${isActive ? "text-athena-accent" : isCompleted ? "text-athena-success" : ""}`} />
-                    {editingId === session.id ? <input autoFocus value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveTitle(); if (event.key === "Escape") setEditingId(null) }} onClick={(event) => event.stopPropagation()} className="min-w-0 flex-1 bg-transparent text-sm outline-none" /> : <span className="flex-1 truncate text-sm">{session.title || "Untitled"}</span>}
-                    {/* 会话状态指示器 */}
-                    {isRunning && (
-                      <span className="flex-shrink-0 w-2 h-2 rounded-full bg-athena-accent animate-pulse" />
+                    }`}>
+                    {editingId === session.id ? (
+                      <>
+                        <input autoFocus value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveTitle(); if (event.key === "Escape") setEditingId(null) }} className="min-w-0 flex-1 bg-transparent px-2 py-2 text-sm outline-none" aria-label="会话标题" />
+                        <button type="button" onClick={() => void saveTitle()} className="rounded p-2 text-athena-success hover:bg-athena-border/60" title="保存标题" aria-label="保存标题"><Check className="h-3.5 w-3.5" /></button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" onClick={() => onSelectSession(session.id)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left" aria-current={isActive ? "page" : undefined}>
+                          <MessageSquare className={`h-4 w-4 flex-shrink-0 ${isActive ? "text-athena-accent" : isCompleted ? "text-athena-success" : ""}`} />
+                          <span className="truncate text-sm">{session.title || "Untitled"}</span>
+                          {isRunning && <span className="flex-shrink-0 h-2 w-2 rounded-full bg-athena-accent animate-pulse" />}
+                          {isCompleted && !isActive && <CheckCircle className="h-3.5 w-3.5 flex-shrink-0 text-athena-success" />}
+                        </button>
+                        {onRenameSession && <button type="button" onClick={() => { setEditingId(session.id); setDraftTitle(session.title) }} className="rounded p-2 text-athena-muted opacity-0 transition-opacity hover:bg-athena-border/60 hover:text-athena-text group-hover:opacity-100 group-focus-within:opacity-100" title="重命名" aria-label={`重命名 ${session.title}`}><Pencil className="h-3.5 w-3.5" /></button>}
+                        <button type="button" onClick={() => onDeleteSession(session.id)} className="rounded p-2 text-athena-muted opacity-0 transition-opacity hover:bg-athena-danger/20 hover:text-athena-danger group-hover:opacity-100 group-focus-within:opacity-100" title="删除会话" aria-label={`删除 ${session.title}`}><Trash2 className="h-3.5 w-3.5" /></button>
+                      </>
                     )}
-                    {isCompleted && !isActive && (
-                      <CheckCircle className="w-3.5 h-3.5 text-athena-success flex-shrink-0" />
-                    )}
-                    {onRenameSession && editingId !== session.id ? <button type="button" onClick={(event) => { event.stopPropagation(); setEditingId(session.id); setDraftTitle(session.title) }} className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-athena-border/60" title="重命名" aria-label="重命名"><Pencil className="w-3 h-3" /></button> : null}
-                    {editingId === session.id ? <button type="button" onClick={(event) => { event.stopPropagation(); void saveTitle() }} className="p-1 rounded text-athena-success" title="保存标题" aria-label="保存标题"><Check className="w-3 h-3" /></button> : null}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onDeleteSession(session.id)
-                      }}
-                      className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-athena-danger/20 hover:text-athena-danger transition-opacity"
-                      title="Delete session"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
                   </div>
                 </li>
               )

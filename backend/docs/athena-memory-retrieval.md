@@ -26,7 +26,7 @@
 
 上下文检索按 memory requirement 调用 HybridMemoryRetriever：
 
-1. vector 召回 `RETRIEVAL_CANDIDATE_K`，过滤 inactive、invalid、过期、session 不匹配。
+1. vector 召回 `RETRIEVAL_CANDIDATE_K`，过滤 inactive、invalid、过期；长期记忆跨 session 共享，session_id 仅用于来源追踪。
 2. PostgreSQL FTS 关键词召回。
 3. RRF 融合，向量权重默认 0.75、关键词 0.25，RRF k=60。
 4. 计算生命周期/时间衰减/记忆性和 exact match 修正。

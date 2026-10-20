@@ -9,4 +9,8 @@ class MemoryVectorSearchPort(Protocol):
     async def query(self, text: str, limit: int = 10, *, session_id: str | None = None) -> list[dict[str, object]]: ...
 
 
-__all__ = ["MemoryVectorSearchPort"]
+class MemoryVectorIndexPort(Protocol):
+    async def index(self, memory_id: str, content: str) -> None: ...
+
+
+__all__ = ["MemoryVectorIndexPort", "MemoryVectorSearchPort"]

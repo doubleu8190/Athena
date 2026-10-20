@@ -21,7 +21,7 @@ interface NavItem {
   icon: LucideIcon
 }
 
-const NAV_ITEMS: NavItem[] = [
+export const NAV_ITEMS: NavItem[] = [
   { view: "chat", label: "对话", icon: MessageSquare },
   { view: "knowledge", label: "知识库", icon: LibraryBig },
   { view: "memory", label: "记忆管理", icon: Database },

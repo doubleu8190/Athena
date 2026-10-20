@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+import logging
 from typing import Any
 
 from .options import EmbeddingOptions, coerce_embedding_options
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class EmbeddingProvider:
@@ -38,12 +42,29 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
         super().__init__(self._embed, dimension=self._options.dimension)
 
     def _load(self) -> Any:
+        """根据实例配置加载 embedding 模型或远程客户端。
+
+        参数：无显式参数；从实例保存的配置中读取 Provider 与设备。
+        返回值：初始化后的模型或客户端。
+        异常：ValueError 表示 Provider 不受支持；其他加载异常原样抛出。
+        """
         config = self._options
         provider = config.provider.strip().lower()
         if provider in {"sentence_transformers", "sentence-transformers"}:
             from sentence_transformers import SentenceTransformer
 
-            return SentenceTransformer(config.model, device=config.device)
+            try:
+                return SentenceTransformer(config.model, device=config.device)
+            except RuntimeError as exc:
+                if (
+                    config.device.strip().lower() != "mps"
+                    or "MPS backend is supported on macOS" not in str(exc)
+                ):
+                    raise
+                _LOGGER.warning(
+                    "MPS is unavailable for this runtime; loading embedding model on CPU"
+                )
+                return SentenceTransformer(config.model, device="cpu")
         if provider == "openai":
             from langchain_openai import OpenAIEmbeddings
 

@@ -40,7 +40,7 @@ export function ApprovalCard({ batchId, requests, onSubmit }: ApprovalCardProps)
   }
 
   return (
-    <section className="card border-yellow-500/40 shadow-lg" aria-live="polite">
+    <section className="chat-approval-card card border-yellow-500/40 shadow-lg" aria-live="polite">
       <div className="flex items-center gap-3 border-b border-athena-border px-4 py-3">
         <div className="rounded-lg border border-yellow-500/50 bg-yellow-500/20 p-2 text-yellow-400">
           <Shield className="h-5 w-5" />

@@ -51,7 +51,7 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
   return (
     <div
-      className={`flex gap-3 ${
+      className={`chat-message flex gap-3 ${
         isUser ? "flex-row-reverse" : "flex-row"
       } animate-fade-in`}
     >
@@ -114,7 +114,7 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         {/* 消息气泡：助手纯工具回合无文本时不渲染空气泡 */}
         {(isUser || isSystem || (!isTool && hasText)) && (
           <div
-            className={`rounded-2xl px-4 py-3 ${
+          className={`chat-message-bubble rounded-2xl px-4 py-3 ${
               isUser
                 ? "bg-athena-accent text-white rounded-tr-sm"
                 : "bg-athena-surface border border-athena-border rounded-tl-sm"

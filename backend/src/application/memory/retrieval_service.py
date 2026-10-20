@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from application.retrieval import RetrievalFusionService
@@ -48,21 +49,24 @@ class MemoryContextProvider(ContextProvider):
         run_id: str | None = None,
     ) -> ProviderResult:
         started = time.perf_counter()
-        query = plan.memory_query or getattr(task, "goal", "")
+        query = plan.memory_query or (
+            str(task.get("goal", ""))
+            if isinstance(task, Mapping)
+            else str(getattr(task, "goal", ""))
+        )
         if not query:
             return ProviderResult(self.name, "succeeded")
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 limit = max(self._limit, plan.recall_limit)
+                # Long-term memory is intentionally independent from the
+                # current chat session. The session id is stored on each
+                # memory for provenance, not used to hide earlier memories.
                 keyword = await self._repository.search(
-                    MemorySearchRequest(
-                        query=query, limit=limit, filters={"session_id": session_id}
-                    )
+                    MemorySearchRequest(query=query, limit=limit)
                 )
                 vector = (
-                    await self._vector_indexer.query(
-                        query, limit, session_id=session_id
-                    )
+                    await self._vector_indexer.query(query, limit)
                     if self._vector_indexer
                     else []
                 )

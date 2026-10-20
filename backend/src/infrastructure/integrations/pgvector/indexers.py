@@ -81,6 +81,8 @@ class PostgresMemoryVectorIndex(MemoryVectorSearchPort):
             statement = select(MemoryModel, distance).where(
                 MemoryModel.embedding.is_not(None),
                 MemoryModel.deleted_time.is_(None),
+                MemoryModel.status == "active",
+                MemoryModel.validity_status != "invalid",
             )
             if session_id:
                 statement = statement.where(MemoryModel.session_id == session_id)

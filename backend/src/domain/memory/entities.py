@@ -113,6 +113,7 @@ class MemoryCandidate:
     memory_type: str = "fact"
     category: str = "fact"
     confidence: float = 0.8
+    session_id: str = ""
 
 
 class ResolutionAction(StrEnum):

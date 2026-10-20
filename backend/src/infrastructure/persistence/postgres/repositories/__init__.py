@@ -10,6 +10,7 @@ from .document_job_repository import PostgresDocumentJobRepository
 from .approval_repository import PostgresApprovalRepository
 from .event_repository import PostgresEventRepository
 from .memory_repository import PostgresMemoryRepository
+from .memory_job_repository import PostgresMemoryJobRepository
 from .retrieval_repository import PostgresRetrievalRepository
 from ._runtime import PostgresRunRepository
 from .mcp_repository import PostgresMCPServerRepository
@@ -30,6 +31,7 @@ __all__ = [
     "PostgresApprovalRepository",
     "PostgresEventRepository",
     "PostgresMemoryRepository",
+    "PostgresMemoryJobRepository",
     "PostgresRetrievalRepository",
     "PostgresRunRepository",
     "PostgresMCPServerRepository",

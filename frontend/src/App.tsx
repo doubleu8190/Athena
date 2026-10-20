@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react"
-import { LogOut } from "lucide-react"
+import { LogOut, MessageSquare } from "lucide-react"
 import Sidebar from "./components/Sidebar"
 import Chat from "./components/Chat"
 import StatusIndicator from "./components/StatusIndicator"
 import ErrorBoundary from "./components/ErrorBoundary"
-import NavRail from "./components/NavRail"
+import NavRail, { NAV_ITEMS } from "./components/NavRail"
 import PageView from "./components/pages/PageView"
 import { useChatStore } from "./store/chatStore"
 import { useSessionEventStream } from "./hooks/useSessionEventStream"
@@ -53,6 +53,15 @@ function AppContent() {
       })
     return () => { active = false }
   }, [demoMode])
+
+  useEffect(() => {
+    if (!mobileSessionsOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileSessionsOpen(false)
+    }
+    window.addEventListener("keydown", closeOnEscape)
+    return () => window.removeEventListener("keydown", closeOnEscape)
+  }, [mobileSessionsOpen])
 
   useEffect(() => {
     if (demoMode || authState !== "authenticated") return
@@ -283,32 +292,63 @@ function AppContent() {
 
   return (
     <div className="flex h-screen w-screen flex-col-reverse overflow-hidden md:flex-row">
-      <NavRail activeView={activeView} onSelectView={handleSelectView} />
-      {activeView === "chat" ? (
-        <>
-          <Sidebar
-            sessions={sessions}
-            activeSessionId={activeSessionId}
-            onSelectSession={handleSelectSession}
-            onNewSession={handleNewSession}
-            onDeleteSession={handleDeleteSession}
-            onRenameSession={handleRenameSession}
-            mobileOpen={mobileSessionsOpen}
-            onCloseMobile={() => setMobileSessionsOpen(false)}
-          />
-          <main className="flex-1 flex flex-col min-w-0 min-h-0">
-            <div className="flex items-center justify-between border-b border-athena-border">
-              <StatusIndicator />
-              {!demoMode && <button type="button" className="btn-ghost mr-3" onClick={() => void handleLogout()} aria-label="退出登录" title="退出登录">
-                <LogOut size={16} />
-              </button>}
-            </div>
-            <Chat sendEvent={sendEvent} onOpenSessions={() => setMobileSessionsOpen(true)} demoMode={demoMode} />
-          </main>
-        </>
-      ) : (
-        <PageView view={activeView} />
+      {mobileSessionsOpen && (
+        <button
+          type="button"
+          className="chat-drawer-backdrop fixed inset-0 z-20 bg-black/40 md:hidden"
+          onClick={() => setMobileSessionsOpen(false)}
+          aria-label="关闭工作区导航"
+        />
       )}
+      <Sidebar
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        onSelectSession={(sessionId) => {
+          handleSelectSession(sessionId)
+          setMobileSessionsOpen(false)
+          setActiveView("chat")
+        }}
+        onNewSession={async () => {
+          await handleNewSession()
+          setMobileSessionsOpen(false)
+          setActiveView("chat")
+        }}
+        onDeleteSession={handleDeleteSession}
+        onRenameSession={handleRenameSession}
+        activeView={activeView}
+        onSelectView={(view) => {
+          setMobileSessionsOpen(false)
+          handleSelectView(view)
+        }}
+        mobileOpen={mobileSessionsOpen}
+        onCloseMobile={() => setMobileSessionsOpen(false)}
+      />
+      <main className="chat-workspace-main flex-1 flex flex-col min-w-0 min-h-0">
+        <header className="chat-workspace-header border-b border-athena-border">
+          <div className="chat-workspace-title-row">
+            <button type="button" onClick={() => setMobileSessionsOpen(true)} className="chat-mobile-session-trigger" title="打开工作区导航" aria-label="打开工作区导航">
+              <MessageSquare className="h-4 w-4" />
+            </button>
+            <div className="min-w-0 flex-1">
+              <div className="chat-workspace-title truncate">
+                {activeView === "chat"
+                  ? sessions.find((session) => session.id === activeSessionId)?.title || "新对话"
+                  : NAV_ITEMS.find((item) => item.view === activeView)?.label || "Athena 工作区"}
+              </div>
+              <div className="chat-workspace-subtitle">Athena 工作区</div>
+            </div>
+          </div>
+          <div className="chat-workspace-header-status"><StatusIndicator /></div>
+          {!demoMode && <button type="button" className="btn-ghost mr-3" onClick={() => void handleLogout()} aria-label="退出登录" title="退出登录">
+            <LogOut size={16} />
+          </button>}
+        </header>
+        {activeView === "chat" ? (
+            <Chat sendEvent={sendEvent} onOpenSessions={() => setMobileSessionsOpen(true)} demoMode={demoMode} />
+        ) : (
+          <PageView view={activeView} />
+        )}
+      </main>
     </div>
   )
 }

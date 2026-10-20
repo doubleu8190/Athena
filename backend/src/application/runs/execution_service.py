@@ -8,6 +8,7 @@ from domain.events import (
     EventPublisherPort,
     EventType,
 )
+from domain.memory import MemoryJobPort
 from domain.runs import (
     CommandType,
     CommandStatus,
@@ -28,11 +29,13 @@ class RunExecutionService:
         commands: CommandQueuePort,
         executor: RunExecutorPort,
         events: EventPublisherPort,
+        memory_jobs: MemoryJobPort | None = None,
     ) -> None:
         self._lifecycle = lifecycle
         self._commands = commands
         self._executor = executor
         self._events = events
+        self._memory_jobs = memory_jobs
         # Approval resumes are internal commands. Keep the original queued
         # command so its status can converge when the resumed execution ends.
         self._waiting_commands: dict[str, str] = {}
@@ -92,6 +95,7 @@ class RunExecutionService:
         )
         await self._lifecycle.complete(command.run_id, result)
         await self._publish_result_message(command, result)
+        await self._enqueue_memory(command, result)
         await self._publish(command, EventType.RUN_COMPLETED)
         original_command_id = self._waiting_commands.pop(command.run_id, None)
         await self._commands.complete_command(
@@ -138,6 +142,31 @@ class RunExecutionService:
                 payload=payload or {"command_id": command.command_id},
             )
         )
+
+    async def _enqueue_memory(
+        self, command: RunCommand, result: dict[str, object]
+    ) -> None:
+        """Submit the completed user/assistant turn without breaking the run."""
+        if self._memory_jobs is None or not command.run_id:
+            return
+        user_text = str(command.payload.get("message", "")).strip()
+        if not user_text:
+            return
+        content = result.get("content")
+        if not isinstance(content, str):
+            nested = result.get("result")
+            content = nested.get("content") if isinstance(nested, dict) else None
+        try:
+            await self._memory_jobs.enqueue(
+                turn_id=command.run_id,
+                session_id=command.session_id,
+                user_text=user_text,
+                assistant_text=content if isinstance(content, str) else "",
+            )
+        except Exception:
+            # Memory extraction is asynchronous and must never turn a
+            # successful answer into a failed run.
+            return
 
     async def _publish_result_message(
         self, command: RunCommand, result: dict[str, object]

@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from domain.integrations.llm_ports import LLMPort
 
 from .specs import QueryHints, UserTaskSpec
+
+
+_PROMPT_ROOT = Path(__file__).resolve().parents[4] / "prompt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,10 +24,15 @@ class TaskUnderstandingService:
     """Use deterministic fast paths before an optional structured LLM."""
 
     def __init__(
-        self, structured_llm: LLMPort | None = None, *, timeout_seconds: float = 15.0
+        self,
+        structured_llm: LLMPort | None = None,
+        *,
+        timeout_seconds: float = 15.0,
+        prompt_root: Path | None = None,
     ) -> None:
         self._structured_llm = structured_llm
         self._timeout_seconds = timeout_seconds
+        self._prompt_root = prompt_root or _PROMPT_ROOT
 
     async def understand(
         self,
@@ -79,8 +88,21 @@ class TaskUnderstandingService:
             "attachments": attachments,
             "knowledge_bases": knowledge_bases,
         }
+        prompt = (self._prompt_root / "task_understanding.md").read_text(
+            encoding="utf-8"
+        )
         value = await self._structured_llm.invoke(
-            [{"role": "user", "content": text}], **context
+            [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"current_message": text, **context},
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            **context,
         )
         if isinstance(value, dict) and isinstance(value.get("content"), str):
             try:
@@ -143,6 +165,29 @@ class TaskUnderstandingService:
             for marker in ("你好", "您好", "谢谢", "感谢", "好的", "收到", "明白")
         ):
             return UserTaskSpec(goal=text, attachment_ids=attachments, confidence=1.0)
+        if any(
+            marker in text
+            for marker in (
+                "你知道我",
+                "你记得我",
+                "还记得我",
+                "我最喜欢",
+                "我最爱吃",
+                "我喜欢吃",
+                "我爱吃",
+                "我的偏好",
+                "之前说过",
+                "上次说过",
+            )
+        ):
+            return UserTaskSpec(
+                goal=text,
+                mode="retrieve",
+                context_requirements=("conversation", "memory"),
+                attachment_ids=attachments,
+                confidence=1.0,
+                query_hints=QueryHints(memory=text),
+            )
         if len(text) <= 16 and any(
             marker in text.lower()
             for marker in ("search", "find", "查找", "检索", "查询")
@@ -185,16 +230,29 @@ class TaskUnderstandingService:
                 "之前说过",
                 "知识库",
                 "附件",
+                "最喜欢",
+                "记得我",
+                "我的偏好",
             )
         )
+        needs_memory = any(
+            marker in lowered
+            for marker in ("最喜欢", "记得我", "我的偏好", "之前说过", "上次说过")
+        )
+        requirements = ["conversation"]
+        if needs_memory:
+            requirements.append("memory")
+        if retrieving and not needs_memory:
+            requirements.append("knowledge")
         return {
             "goal": text,
             "mode": "plan" if planning else ("retrieve" if retrieving else "answer"),
             "confidence": 0.65 if retrieving else 0.45,
-            "context_requirements": (
-                ("conversation", "knowledge") if retrieving else ("conversation",)
-            ),
-            "query_hints": {"knowledge": text if retrieving else ""},
+            "context_requirements": tuple(requirements),
+            "query_hints": {
+                "memory": text if needs_memory else "",
+                "knowledge": text if retrieving and not needs_memory else "",
+            },
         }
 
 

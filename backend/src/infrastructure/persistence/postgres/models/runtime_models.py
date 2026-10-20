@@ -300,3 +300,26 @@ class RetrievalCandidateModel(Base):
 
 
 __all__ = [name for name in globals() if name.endswith("Model")]
+
+class MemoryProcessingJobModel(Base):
+    """Durable queue entry for post-run long-term-memory extraction."""
+
+    __tablename__ = "memory_processing_jobs"
+    __table_args__ = (
+        Index(
+            "idx_memory_processing_jobs_status_available",
+            "status",
+            "available_at",
+        ),
+    )
+    job_id: Mapped[str] = mapped_column(String, primary_key=True)
+    turn_id: Mapped[str] = mapped_column(String, unique=True)
+    session_id: Mapped[str] = mapped_column(String)
+    user_text: Mapped[str] = mapped_column(Text)
+    assistant_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String, default="queued")
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[str] = mapped_column(String)
+    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)

@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
 
-from .entities import Task, TaskResult, TaskStatus
+from .entities import PlanStatus, Task, TaskResult, TaskStatus
 
 
 class RoundStatus(StrEnum):
@@ -91,6 +91,37 @@ class PlanRevision:
     cancel_task_ids: tuple[str, ...]
     new_tasks: tuple[Mapping[str, Any], ...] = ()
 
+    def __post_init__(self) -> None:
+        """校验修订中的任务身份集合，避免重复或互相冲突。"""
+        if self.base_version < 1:
+            raise ValueError("base_version must be positive")
+        for name, task_ids in (
+            ("keep_task_ids", self.keep_task_ids),
+            ("cancel_task_ids", self.cancel_task_ids),
+        ):
+            if any(
+                not isinstance(task_id, str) or not task_id.strip()
+                for task_id in task_ids
+            ):
+                raise ValueError(f"{name} must contain non-empty task IDs")
+            if len(task_ids) != len(set(task_ids)):
+                raise ValueError(f"{name} cannot contain duplicate task IDs")
+        if set(self.keep_task_ids) & set(self.cancel_task_ids):
+            raise ValueError("kept and cancelled task IDs must be disjoint")
+
+        new_task_ids: list[str] = []
+        for task in self.new_tasks:
+            if not isinstance(task, Mapping):
+                raise ValueError("new_tasks must contain task objects")
+            task_id = task.get("task_id")
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise ValueError("every new task requires a non-empty task_id")
+            new_task_ids.append(task_id)
+        if len(new_task_ids) != len(set(new_task_ids)):
+            raise ValueError("new task IDs cannot contain duplicates")
+        if set(new_task_ids) & (set(self.keep_task_ids) | set(self.cancel_task_ids)):
+            raise ValueError("new task IDs cannot reuse existing task IDs")
+
 
 @dataclass(frozen=True, slots=True)
 class ReviewDecision:
@@ -98,6 +129,32 @@ class ReviewDecision:
     reason: str
     revision: PlanRevision | None = None
     final_status: str | None = None
+
+    def __post_init__(self) -> None:
+        """保证 Review 决策只符合一种合法动作的字段组合。"""
+        if not isinstance(self.action, ReviewAction):
+            raise ValueError("action must be a ReviewAction")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("reason is required")
+        if self.action == ReviewAction.CONTINUE:
+            if self.revision is not None or self.final_status is not None:
+                raise ValueError("CONTINUE cannot include revision or final_status")
+        elif self.action == ReviewAction.REPLAN:
+            if (
+                not isinstance(self.revision, PlanRevision)
+                or self.final_status is not None
+            ):
+                raise ValueError(
+                    "REPLAN requires revision and cannot include final_status"
+                )
+        elif self.action == ReviewAction.FINISH:
+            if self.revision is not None:
+                raise ValueError("FINISH cannot include revision")
+            if not isinstance(self.final_status, str) or self.final_status not in {
+                PlanStatus.COMPLETED.value,
+                PlanStatus.FAILED.value,
+            }:
+                raise ValueError("FINISH final_status must be completed or failed")
 
 
 @dataclass(frozen=True, slots=True)

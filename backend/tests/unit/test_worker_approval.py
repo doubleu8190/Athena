@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -9,14 +10,18 @@ from application.orchestration.langgraph.graphs.worker import (
     build_worker_graph,
     invoke_worker_graph,
 )
+from application.orchestration.langgraph.runtime.worker_executor import (
+    LangGraphWorkerExecutor,
+)
 from application.orchestration.worker_tools import WorkerToolExecutor
 from application.orchestration.worker_workflow import WorkerWorkflow
 from application.orchestration.worker_approval import WorkerApprovalService
 from application.approval.service import ApprovalService
-from domain.orchestration import Task, WorkerJobLease
+from domain.orchestration import Task, TaskExecution, TaskStatus, WorkerJobLease
 from infrastructure.persistence.postgres.repositories.approval_repository import (
     PostgresApprovalRepository,
 )
+from workers.worker_job_dispatcher import WorkerJobDispatcher
 
 
 class ToolService:
@@ -310,3 +315,112 @@ async def test_worker_batch_approval_does_not_resume_root_run():
     assert root_resumes == []
     assert len(events.values) == 1
     assert events.values[0].event_type.value == "approval.resolved"
+
+
+@pytest.mark.asyncio
+async def test_worker_executor_recovers_checkpointed_interrupt_after_process_restart():
+    tools = ToolService()
+    executor = LangGraphWorkerExecutor(
+        workflow_factory=lambda: WorkerWorkflow(
+            execute=WorkerAgent(),
+            execute_tool=WorkerToolExecutor(tools),
+        ),
+        checkpointer=InMemorySaver(),
+    )
+    execution = TaskExecution(
+        plan_id="plan-1",
+        run_id="run-1",
+        session_id="session-1",
+        task=Task(
+            "task-1",
+            "write",
+            "write a report",
+            allowed_tools=("write_file",),
+        ),
+        execution_generation=1,
+        execution_id="execution-1",
+        worker_thread_id="task:task-1:exec:1",
+    )
+
+    result = await executor.execute(execution)
+    recovered = await executor.pending_interrupt(execution)
+
+    assert result.status == TaskStatus.WAITING_APPROVAL
+    assert recovered is not None
+    assert recovered["interrupt_id"]
+    assert recovered["execution_id"] == "execution-1"
+    assert recovered["operation_key"] == "athena:run-1:task-1:1:0:0"
+    assert tools.executed == []
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_worker_job_registers_checkpointed_approval_without_reinvoking_agent():
+    class Jobs:
+        async def renew_lease(self, lease):
+            return lease
+
+    class Worker:
+        async def pending_interrupt(self, _execution):
+            return {
+                "approval_id": "approval-1",
+                "interrupt_id": "interrupt-1",
+                "run_id": "run-1",
+                "plan_id": "plan-1",
+                "task_id": "task-1",
+                "execution_id": "execution-1",
+                "worker_thread_id": "task:task-1:exec:1",
+                "tool_call_id": "worker:task-1:1:0:0",
+                "tool_name": "write_file",
+                "arguments": {"path": "report.txt"},
+                "risk_level": "high",
+                "args_hash": "args-hash",
+                "operation_key": "operation-1",
+            }
+
+        async def execute(self, _execution):
+            raise AssertionError("reclaimed interrupt must not invoke the agent")
+
+    class ApprovalService:
+        def __init__(self):
+            self.request_value = None
+
+        async def request(self, lease, approval):
+            self.request_value = (lease, approval)
+            return True
+
+    class EventHandler:
+        async def apply_terminal_event(self, _event):
+            raise AssertionError("approval wait is not a terminal Task event")
+
+    approvals = ApprovalService()
+    dispatcher = WorkerJobDispatcher(
+        Jobs(),
+        Worker(),
+        EventHandler(),
+        worker_id="dispatcher-1",
+        lease_seconds=10,
+        max_concurrency=1,
+        approval_service=approvals,
+    )
+    lease = WorkerJobLease(
+        job_id="job-1",
+        worker_id="dispatcher-1",
+        run_id="run-1",
+        plan_id="plan-1",
+        round_id="round-1",
+        plan_version=1,
+        task_id="task-1",
+        execution_id="execution-1",
+        session_id="session-1",
+        attempt=1,
+        worker_thread_id="task:task-1:exec:1",
+        fencing_token=2,
+        cancellation_epoch=0,
+        lease_until=datetime.now(timezone.utc),
+        task=Task("task-1", "write", "write a report"),
+    )
+
+    await dispatcher._execute(lease)
+
+    assert approvals.request_value[1]["interrupt_id"] == "interrupt-1"
+    assert approvals.request_value[1]["execution_id"] == "execution-1"

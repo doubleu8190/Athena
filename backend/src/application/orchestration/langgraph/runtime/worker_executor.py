@@ -76,6 +76,34 @@ class LangGraphWorkerExecutor(WorkerExecutor):
         )
         return self._result(execution, value)
 
+    async def pending_interrupt(
+        self, execution: TaskExecution
+    ) -> dict[str, Any] | None:
+        """Recover an interrupt persisted before its Approval row was created."""
+        graph = self._graph_for(execution)
+        thread_id = execution.worker_thread_id or (
+            f"task:{execution.task.task_id}:exec:{execution.execution_generation}"
+        )
+        snapshot = await graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        interrupts = [
+            pending
+            for task in getattr(snapshot, "tasks", ())
+            for pending in getattr(task, "interrupts", ())
+        ]
+        if not interrupts:
+            return None
+        if len(interrupts) != 1:
+            raise RuntimeError("worker_graph_multiple_interrupts_not_supported")
+        pending = interrupts[0]
+        value = getattr(pending, "value", None)
+        if not isinstance(value, dict):
+            raise RuntimeError("worker_graph_interrupt_payload_invalid")
+        recovered = dict(value)
+        recovered["interrupt_id"] = str(getattr(pending, "id", ""))
+        return recovered
+
     async def cancel(self, run_id: str) -> int:
         """取消当前进程中属于指定运行的 Worker；返回取消数量。"""
         return 0

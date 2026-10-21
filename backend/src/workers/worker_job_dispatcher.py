@@ -120,12 +120,7 @@ class WorkerJobDispatcher:
             fencing_token=lease.fencing_token,
             cancellation_epoch=lease.cancellation_epoch,
         )
-        if lease.job_type == "resume_worker":
-            worker_call = self._worker.resume(
-                execution, dict(lease.resume_value)
-            )
-        else:
-            worker_call = self._worker.execute(execution)
+        worker_call = self._run_worker(lease, execution)
         worker_task = asyncio.create_task(
             worker_call,
             name=f"athena-worker-graph:{lease.worker_thread_id}",
@@ -211,6 +206,23 @@ class WorkerJobDispatcher:
                 lease.execution_id,
                 receipt.reason,
             )
+
+    async def _run_worker(
+        self, lease: WorkerJobLease, execution: TaskExecution
+    ) -> TaskResult:
+        """Recover a saved approval interrupt before starting a reclaimed Job."""
+        if lease.job_type == "resume_worker":
+            return await self._worker.resume(execution, dict(lease.resume_value))
+        recover = getattr(self._worker, "pending_interrupt", None)
+        if callable(recover):
+            pending = await recover(execution)
+            if pending:
+                return TaskResult(
+                    task_id=lease.task_id,
+                    status=TaskStatus.WAITING_APPROVAL,
+                    approval_batch=pending,
+                )
+        return await self._worker.execute(execution)
 
     async def _maintain_lease(
         self,

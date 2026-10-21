@@ -444,23 +444,40 @@ class RootWorkflow(RootWorkflowPort):
     ) -> dict[str, Any]:
         deps = self.dependencies
         plan = state.get("plan", {})
-        if deps.worker_scheduler is not None and plan.get("plan_id"):
-            await call(deps.worker_scheduler.start_ready_tasks, plan_id=plan["plan_id"])
         if deps.plan_loader is None:
-            return {"waiting": True, "status": "waiting_for_plan"}
-        deadline = asyncio.get_running_loop().time() + 120.0
-        while True:
-            loaded = await call(
-                deps.plan_loader, plan=plan, plan_id=plan.get("plan_id"), state=state
-            )
-            if isinstance(loaded, Mapping) and loaded.get("completed"):
-                return {
-                    "waiting": False,
-                    "plan_results": json_value(loaded.get("results", {})),
-                }
-            if asyncio.get_running_loop().time() >= deadline:
-                return {"waiting": True, "status": "waiting_for_plan"}
-            await asyncio.sleep(0.05)
+            return {
+                "waiting": True,
+                "status": "waiting_for_plan",
+                "root_wait": {
+                    "type": "round_wait",
+                    "run_id": str(state.get("request", {}).get("run_id", "")),
+                    "plan_id": str(plan.get("plan_id", "")),
+                },
+            }
+        loaded = await call(
+            deps.plan_loader, plan=plan, plan_id=plan.get("plan_id"), state=state
+        )
+        if isinstance(loaded, Mapping) and loaded.get("completed"):
+            return {
+                "waiting": False,
+                "plan_results": json_value(loaded.get("results", {})),
+            }
+        wait_context = (
+            dict(loaded.get("root_wait", {}))
+            if isinstance(loaded, Mapping)
+            and isinstance(loaded.get("root_wait"), Mapping)
+            else {}
+        )
+        wait_context.setdefault("type", "round_wait")
+        wait_context.setdefault(
+            "run_id", str(state.get("request", {}).get("run_id", ""))
+        )
+        wait_context.setdefault("plan_id", str(plan.get("plan_id", "")))
+        return {
+            "waiting": True,
+            "status": "waiting_for_plan",
+            "root_wait": wait_context,
+        }
 
     async def project_plan_result(self, state: Mapping[str, Any]) -> dict[str, Any]:
         deps = self.dependencies

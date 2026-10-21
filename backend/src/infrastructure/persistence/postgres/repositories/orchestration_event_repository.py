@@ -22,6 +22,7 @@ from ..models import (
     OrchestrationInboxModel,
     OrchestrationOutboxModel,
     PlanRoundModel,
+    RootResumeJobModel,
     RoundTaskModel,
     TaskExecutionModel,
     TaskExecutionResultModel,
@@ -290,6 +291,30 @@ class PostgresOrchestrationEventRepository:
                     plan.status = "waiting_review"
                     self._write_round_completed_outbox(
                         session, event, round_row, now
+                    )
+                    if (
+                        run.root_wait_round_id != round_row.round_id
+                        or run.root_wait_plan_version != round_row.plan_version
+                    ):
+                        run.root_wait_generation = int(run.root_wait_generation or 0) + 1
+                        run.root_wait_round_id = round_row.round_id
+                        run.root_wait_plan_version = round_row.plan_version
+                        run.root_wait_armed_at = None
+                        run.root_wait_interrupt_id = None
+                    session.add(
+                        RootResumeJobModel(
+                            job_id=self._id_factory(),
+                            dedupe_key=f"round:{round_row.round_id}:root-resume:{run.root_wait_generation}",
+                            run_id=run.run_id,
+                            plan_id=plan.plan_id,
+                            round_id=round_row.round_id,
+                            root_wait_generation=run.root_wait_generation,
+                            status="pending",
+                            attempt=0,
+                            available_at=now,
+                            created_at=now,
+                            updated_at=now,
+                        )
                     )
 
                 receipt = TaskEventReceipt(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from domain.events import EventPort
@@ -24,11 +25,22 @@ class LangGraphRootGraph(RootGraphPort):
     ) -> None:
         self._workflow = workflow
         self._dependencies = dependencies
-        self._graph = build_root_graph(
-            workflow=self._workflow,
-            dependencies=self._dependencies,
-            checkpointer=checkpointer,
-        )
+        self._checkpointer = checkpointer
+        self._graph: Any | None = None
+
+    def _compiled_graph(self) -> Any:
+        """Compile lazily so lifecycle-managed PostgreSQL savers can start first."""
+        if self._graph is None:
+            saver = self._checkpointer
+            getter = getattr(saver, "get_saver", None)
+            if callable(getter):
+                saver = getter()
+            self._graph = build_root_graph(
+                workflow=self._workflow,
+                dependencies=self._dependencies,
+                checkpointer=saver,
+            )
+        return self._graph
 
     async def invoke(
         self,
@@ -42,7 +54,7 @@ class LangGraphRootGraph(RootGraphPort):
         stop_signal: object | None = None,
     ) -> object:
         return await invoke_root_graph(
-            self._graph,
+            self._compiled_graph(),
             session_id=session_id,
             run_id=run_id,
             user_message=user_message,
@@ -51,6 +63,26 @@ class LangGraphRootGraph(RootGraphPort):
             resume_value=resume_value,
             stop_signal=stop_signal,
         )
+
+    async def has_pending_round_wait(
+        self, *, run_id: str, plan_id: str, round_id: str
+    ) -> bool:
+        """Confirm the checkpoint awaits the requested active Round."""
+        snapshot = await self._compiled_graph().aget_state(
+            {"configurable": {"thread_id": f"run:{run_id}"}}
+        )
+        for task in getattr(snapshot, "tasks", ()):
+            for pending in getattr(task, "interrupts", ()):
+                value = getattr(pending, "value", None)
+                if (
+                    isinstance(value, Mapping)
+                    and value.get("type") == "round_wait"
+                    and value.get("run_id") == run_id
+                    and value.get("plan_id") == plan_id
+                    and value.get("round_id") == round_id
+                ):
+                    return True
+        return False
 
 
 __all__ = ["LangGraphRootGraph"]

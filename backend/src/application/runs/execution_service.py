@@ -86,6 +86,7 @@ class RunExecutionService:
             return
         if outcome.waiting:
             self._waiting_commands[command.run_id] = command.command_id
+            await self._arm_root_wait(command.run_id, outcome.result)
             await self._publish(command, EventType.RUN_ROOT_SUSPENDED, payload=self._run_payload(command, "waiting"))
             return None
         if outcome.error is not None:
@@ -120,6 +121,26 @@ class RunExecutionService:
         if converge is not None:
             await converge(command.run_id, status=CommandStatus.COMPLETED, result=result)
         return result
+
+    async def _arm_root_wait(self, run_id: str, result: object) -> None:
+        """Persist the exact Round interrupt before a resume worker can claim it."""
+        arm = getattr(self._lifecycle, "arm_root_wait", None)
+        if not callable(arm) or not isinstance(result, dict):
+            return
+        interrupts = result.get("__interrupt__", ())
+        if not isinstance(interrupts, (list, tuple)) or len(interrupts) != 1:
+            return
+        interrupt = interrupts[0]
+        value = getattr(interrupt, "value", None)
+        if not isinstance(value, dict) or value.get("type") != "round_wait":
+            return
+        await arm(
+            run_id,
+            plan_id=str(value.get("plan_id", "")),
+            round_id=str(value.get("round_id", "")),
+            plan_version=int(value.get("plan_version", 0)),
+            interrupt_id=str(getattr(interrupt, "id", "")),
+        )
 
     async def fail(self, command: RunCommand, error: dict[str, object]) -> None:
         if command.run_id:

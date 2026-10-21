@@ -123,6 +123,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationCommandRepository,
     PostgresOrchestrationEventRepository,
     PostgresWorkerJobRepository,
+    PostgresRootResumeJobRepository,
     PostgresPlanLoader,
     PostgresEvaluationRepository,
 )
@@ -134,6 +135,7 @@ from workers import (
     KnowledgeDocumentWorker,
     MemoryWorker,
     WorkerJobDispatcher,
+    RootResumeDispatcher,
     WorkerSupervisor,
 )
 from domain.runs import CommandStatus, CommandType, RunCommand
@@ -210,6 +212,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         max_attempts=settings.worker_max_attempts,
     )
     worker_job_repository = PostgresWorkerJobRepository(session_factory)
+    root_resume_job_repository = PostgresRootResumeJobRepository(session_factory)
     orchestration_command_handler = OrchestrationCommandHandler(
         orchestration_command_repository
     )
@@ -445,6 +448,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         checkpointer=checkpointer,
     )
 
+    root_run_executor = LangGraphRunExecutor(root_graph)
     providers: dict[str, Provider] = {
         "session_service_factory": lambda: SessionService(sessions, id_factory=ids),
         "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
@@ -484,7 +488,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "worker_job_service_factory": lambda: worker_job_service,
         "worker_job_dispatcher_factory": lambda: worker_dispatcher,
         "root_graph_factory": lambda: root_graph,
-        "run_executor_factory": lambda: LangGraphRunExecutor(root_graph),
+        "run_executor_factory": lambda: root_run_executor,
         "worker_scheduler_factory": lambda: worker_scheduler,
         "ingestion_service_factory": lambda: ingestion,
         "llm_provider": lambda: llm_provider,
@@ -499,7 +503,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         command_execution = RunExecutionService(
             runs,
             runs,
-            LangGraphRunExecutor(root_graph),
+            root_run_executor,
             events,
             memory_jobs,
         )
@@ -507,11 +511,26 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             _build_approval_resumer(command_execution, runs, ids)
         )
         command_worker = CommandConsumer(runs, command_execution)
+        root_resume_dispatcher = RootResumeDispatcher(
+            root_resume_job_repository,
+            root_graph,
+            command_execution,
+            runs,
+            worker_id=f"root-resume-dispatcher:{ids()}",
+            lease_seconds=settings.worker_job_lease_seconds,
+            poll_interval=settings.worker_job_poll_interval_seconds,
+        )
         document_worker = KnowledgeDocumentWorker(jobs, ingestion)
         memory_worker = MemoryWorker(memory_jobs, memory_workflow)
         resources.append(
             WorkerSupervisor(
-                (command_worker, document_worker, memory_worker, worker_dispatcher)
+                (
+                    command_worker,
+                    document_worker,
+                    memory_worker,
+                    worker_dispatcher,
+                    root_resume_dispatcher,
+                )
             )
         )
     return build_dependencies(factories=providers, resources=resources)

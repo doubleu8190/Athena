@@ -156,6 +156,20 @@ class PostgresOrchestrationRepository(PlanRepository):
                             plan_row.updated_at = _now()
                 return {"task_id": task_id} if result.rowcount else None
 
+    async def get_wait_context(self, plan_id: str) -> dict[str, object] | None:
+        """Return the exact active Round identity used by Root interrupts."""
+        async with self._session_factory() as session:
+            row = await session.get(AgentPlanModel, plan_id)
+        if row is None or row.active_round_id is None:
+            return None
+        return {
+            "type": "round_wait",
+            "run_id": row.run_id,
+            "plan_id": row.plan_id,
+            "round_id": row.active_round_id,
+            "plan_version": row.current_version,
+        }
+
     async def get_results(self, plan_id: str) -> Mapping[str, TaskResult]:
         async with self._session_factory() as session:
             rows = (await session.execute(select(AgentTaskModel).where(AgentTaskModel.plan_id == plan_id))).scalars().all()
@@ -316,12 +330,18 @@ class PostgresPlanLoader:
             return {"completed": False, "results": {}}
         plan, _ = value
         results = await self._repository.get_results(plan_id)
+        wait_context = await self._repository.get_wait_context(plan_id)
         completed = plan.status in {
+            PlanStatus.WAITING_REVIEW,
             PlanStatus.COMPLETED,
             PlanStatus.FAILED,
             PlanStatus.CANCELLED,
         }
-        return {"completed": completed, "results": results}
+        return {
+            "completed": completed,
+            "results": results,
+            "root_wait": wait_context or {},
+        }
 
 
 __all__ = ["PostgresOrchestrationRepository", "PostgresPlanLoader"]

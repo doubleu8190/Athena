@@ -25,8 +25,10 @@ from domain.runs import (
 from domain.runs.ports import CommandQueuePort, CommandStorePort, RunLifecyclePort
 
 from ..models import (
+    AgentPlanModel,
     AgentCommandModel,
     AgentRunModel,
+    RootResumeJobModel,
 )
 
 def _now() -> str:
@@ -234,6 +236,46 @@ class PostgresRunRepository(
                 )
         return bool(result.rowcount)
 
+    async def arm_root_wait(
+        self,
+        run_id: str,
+        *,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+        interrupt_id: str,
+    ) -> bool:
+        """Record a checkpointed Root wait only for its current Round generation."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    AgentRunModel, run_id, with_for_update=True
+                )
+                plan = await session.get(
+                    AgentPlanModel, plan_id, with_for_update=True
+                )
+                if (
+                    row is None
+                    or plan is None
+                    or row.status != RunStatus.RUNNING.value
+                    or plan.run_id != run_id
+                    or plan.active_round_id != round_id
+                    or plan.current_version != plan_version
+                    or not interrupt_id
+                ):
+                    return False
+                if (
+                    row.root_wait_round_id != round_id
+                    or row.root_wait_plan_version != plan_version
+                ):
+                    row.root_wait_generation = int(row.root_wait_generation or 0) + 1
+                    row.root_wait_round_id = round_id
+                    row.root_wait_plan_version = plan_version
+                row.root_wait_armed_at = _now()
+                row.root_wait_interrupt_id = interrupt_id
+                row.updated_at = _now()
+                return True
+
     async def complete(self, run_id: str, result: dict[str, object]) -> bool:
         return await self._finish(run_id, RunStatus.COMPLETED, response=result)
 
@@ -263,6 +305,26 @@ class PostgresRunRepository(
                     .where(AgentRunModel.run_id == run_id)
                     .values(**values)
                 )
+                if result.rowcount:
+                    await session.execute(
+                        update(RootResumeJobModel)
+                        .where(
+                            RootResumeJobModel.run_id == run_id,
+                            RootResumeJobModel.status.in_(
+                                ("pending", "running")
+                            ),
+                        )
+                        .values(
+                            status=(
+                                "cancelled"
+                                if status == RunStatus.CANCELLED
+                                else "completed"
+                            ),
+                            lease_owner=None,
+                            lease_until=None,
+                            updated_at=_now(),
+                        )
+                    )
         return bool(result.rowcount)
 
     @staticmethod

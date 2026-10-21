@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from application.orchestration.protocols import (
     RootWorkflowDependencies,
@@ -124,6 +125,26 @@ def _route_after_wait(state: RootGraphState) -> str:
     return "project_plan_result" if state.get("waiting") is False else END
 
 
+def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
+    """Suspend Root until a durable Round completion resumes its checkpoint."""
+
+    async def wait_for_plan_completion(state: RootGraphState) -> dict[str, Any]:
+        while True:
+            value = await call(workflow.wait_for_plan_completion, state)
+            result = dict(value) if isinstance(value, Mapping) else {}
+            if not result.get("waiting"):
+                return result
+            wait_context = result.get("root_wait")
+            if not isinstance(wait_context, Mapping) or not wait_context.get(
+                "plan_id"
+            ):
+                raise RuntimeError("root_round_wait_identity_missing")
+            interrupt(dict(wait_context))
+
+    wait_for_plan_completion.__name__ = "wait_for_plan_completion"
+    return wait_for_plan_completion
+
+
 def build_root_graph(
     *,
     workflow: RootWorkflowPort,
@@ -148,7 +169,10 @@ def build_root_graph(
     }
     graph = StateGraph(RootGraphState)
     for name, handler in handlers.items():
-        graph.add_node(name, _node(name, handler, dependencies))
+        if name == "wait_for_plan_completion":
+            graph.add_node(name, _wait_for_plan_completion_node(workflow))
+        else:
+            graph.add_node(name, _node(name, handler, dependencies))
     graph.add_edge(START, "prepare_request")
     graph.add_conditional_edges(
         "prepare_request",
@@ -226,11 +250,17 @@ async def invoke_root_graph(
             "attachment_ids": list(attachment_ids or []),
         }
     }
-    if resume_value is not None:
-        state["resume_value"] = json_value(resume_value)
     config = {"configurable": {"thread_id": f"run:{run_id}"}}
     if stop_signal is not None:
         config["configurable"]["stop_signal"] = stop_signal
+    if resume_value is not None and resume_value.get("type") == "round_completed":
+        return await call(
+            graph.ainvoke,
+            Command(resume=dict(resume_value)),
+            config=config,
+        )
+    if resume_value is not None:
+        state["resume_value"] = json_value(resume_value)
     return await call(graph.ainvoke, state, config=config)
 
 

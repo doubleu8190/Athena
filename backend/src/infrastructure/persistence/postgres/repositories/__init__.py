@@ -18,6 +18,15 @@ from .message_repository import PostgresMessageRepository
 from .session_repository import PostgresSessionRepository
 from .tool_repository import PostgresToolConfigRepository
 from .orchestration_repository import PostgresOrchestrationRepository, PostgresPlanLoader
+from .orchestration_command_repository import (
+    OrchestrationCommandConflict,
+    PlanCommandRejected,
+    PostgresOrchestrationCommandRepository,
+)
+from .orchestration_event_repository import (
+    PostgresOrchestrationEventRepository,
+    TaskEventConflict,
+)
 from .evaluation_repository import PostgresEvaluationRepository
 
 __all__ = [
@@ -39,6 +48,11 @@ __all__ = [
     "PostgresSessionRepository",
     "PostgresToolConfigRepository",
     "PostgresOrchestrationRepository",
+    "PostgresOrchestrationCommandRepository",
+    "OrchestrationCommandConflict",
+    "PlanCommandRejected",
     "PostgresPlanLoader",
+    "PostgresOrchestrationEventRepository",
+    "TaskEventConflict",
     "PostgresEvaluationRepository",
 ]

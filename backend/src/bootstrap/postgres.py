@@ -27,7 +27,12 @@ from application.runs import (
 )
 from application.sessions import SessionMessageQueryService, SessionService
 from application.tools import MCPService, ToolQueryService, ToolService
-from application.orchestration import OrchestrationService, WorkerSchedulerService
+from application.orchestration import (
+    OrchestrationCommandHandler,
+    OrchestrationService,
+    WorkerSchedulerService,
+    WorkerTaskEventHandler,
+)
 from application.orchestration import (
     RootWorkflow,
     RootWorkflowDependencies,
@@ -114,6 +119,8 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresToolConfigRepository,
     PostgresFileChunkRepository,
     PostgresOrchestrationRepository,
+    PostgresOrchestrationCommandRepository,
+    PostgresOrchestrationEventRepository,
     PostgresPlanLoader,
     PostgresEvaluationRepository,
 )
@@ -192,6 +199,18 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     tools = PostgresToolConfigRepository(session_factory)
     mcp_repository = PostgresMCPServerRepository(session_factory)
     orchestration_repository = PostgresOrchestrationRepository(session_factory)
+    orchestration_command_repository = PostgresOrchestrationCommandRepository(
+        session_factory
+    )
+    orchestration_event_repository = PostgresOrchestrationEventRepository(
+        session_factory
+    )
+    orchestration_command_handler = OrchestrationCommandHandler(
+        orchestration_command_repository
+    )
+    worker_task_event_handler = WorkerTaskEventHandler(
+        orchestration_event_repository
+    )
     llm_options = LLMOptions(
         providers=tuple(
             LLMProviderOptions(
@@ -423,6 +442,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         ),
         "orchestration_repository_factory": lambda: orchestration_repository,
         "orchestration_service_factory": lambda: OrchestrationService(orchestration_repository),
+        "orchestration_command_handler_factory": lambda: orchestration_command_handler,
+        "worker_task_event_handler_factory": lambda: worker_task_event_handler,
         "root_graph_factory": lambda: root_graph,
         "run_executor_factory": lambda: LangGraphRunExecutor(root_graph),
         "worker_scheduler_factory": lambda: worker_scheduler,

@@ -115,12 +115,16 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     root_wait_generation INTEGER NOT NULL DEFAULT 0,
     root_wait_checkpoint_id VARCHAR,
     root_wait_armed_at VARCHAR,
+    root_wait_round_id VARCHAR,
+    root_wait_plan_version INTEGER,
+    root_wait_interrupt_id VARCHAR,
+    cancellation_epoch INTEGER NOT NULL DEFAULT 0,
     created_at VARCHAR NOT NULL,
     updated_at VARCHAR NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_session_status ON agent_runs(session_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_session
-ON agent_runs(session_id) WHERE status IN ('created', 'running');
+ON agent_runs(session_id) WHERE status IN ('created', 'running', 'cancelling');
 
 CREATE TABLE IF NOT EXISTS agent_plans (
     plan_id VARCHAR PRIMARY KEY,
@@ -130,6 +134,9 @@ CREATE TABLE IF NOT EXISTS agent_plans (
     user_goal TEXT NOT NULL,
     max_parallelism INTEGER NOT NULL DEFAULT 1,
     plan_json TEXT NOT NULL,
+    current_version INTEGER NOT NULL DEFAULT 1,
+    active_round_id VARCHAR,
+    cancellation_epoch INTEGER NOT NULL DEFAULT 0,
     created_at VARCHAR NOT NULL,
     updated_at VARCHAR NOT NULL
 );
@@ -150,12 +157,144 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     error_json TEXT,
     execution_generation INTEGER NOT NULL DEFAULT 0,
     worker_thread_id VARCHAR,
+    active_execution_id VARCHAR,
     llm_turn_count INTEGER NOT NULL DEFAULT 0,
     created_at VARCHAR NOT NULL,
     updated_at VARCHAR NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_plan_status ON agent_tasks(plan_id, status);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_run_status ON agent_tasks(run_id, status);
+
+CREATE TABLE IF NOT EXISTS plan_versions (
+    plan_id VARCHAR NOT NULL REFERENCES agent_plans(plan_id),
+    version INTEGER NOT NULL,
+    dag_json JSONB NOT NULL,
+    change_reason TEXT,
+    based_on_round_id VARCHAR,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    PRIMARY KEY(plan_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS plan_rounds (
+    round_id VARCHAR PRIMARY KEY,
+    plan_id VARCHAR NOT NULL,
+    plan_version INTEGER NOT NULL,
+    round_number INTEGER NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'running',
+    expected_task_count INTEGER NOT NULL DEFAULT 0,
+    terminal_task_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    FOREIGN KEY(plan_id, plan_version) REFERENCES plan_versions(plan_id, version),
+    UNIQUE(plan_id, round_number),
+    CHECK(expected_task_count >= 0 AND terminal_task_count >= 0 AND terminal_task_count <= expected_task_count)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_round_active ON plan_rounds(plan_id) WHERE status = 'running';
+
+CREATE TABLE IF NOT EXISTS round_tasks (
+    round_id VARCHAR NOT NULL REFERENCES plan_rounds(round_id),
+    task_id VARCHAR NOT NULL REFERENCES agent_tasks(task_id),
+    status VARCHAR NOT NULL DEFAULT 'pending',
+    active_execution_id VARCHAR,
+    terminal_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY(round_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_round_tasks_round_state ON round_tasks(round_id, status);
+
+CREATE TABLE IF NOT EXISTS task_executions (
+    execution_id VARCHAR PRIMARY KEY,
+    round_id VARCHAR NOT NULL,
+    task_id VARCHAR NOT NULL,
+    attempt INTEGER NOT NULL,
+    worker_thread_id VARCHAR NOT NULL UNIQUE,
+    status VARCHAR NOT NULL DEFAULT 'queued',
+    lease_owner VARCHAR,
+    lease_until TIMESTAMP WITH TIME ZONE,
+    fencing_token INTEGER NOT NULL,
+    cancellation_epoch INTEGER NOT NULL DEFAULT 0,
+    checkpoint_ref VARCHAR,
+    result_ref VARCHAR,
+    error_json JSONB,
+    result_json JSONB,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    FOREIGN KEY(round_id, task_id) REFERENCES round_tasks(round_id, task_id),
+    UNIQUE(task_id, attempt),
+    CHECK(attempt > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_task_executions_lease ON task_executions(status, lease_until);
+
+CREATE TABLE IF NOT EXISTS orchestration_commands (
+    message_id VARCHAR PRIMARY KEY,
+    scope_key VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    payload_hash VARCHAR NOT NULL,
+    command_type VARCHAR NOT NULL,
+    plan_id VARCHAR NOT NULL,
+    plan_version INTEGER,
+    round_id VARCHAR,
+    status VARCHAR NOT NULL DEFAULT 'accepted',
+    result_json JSONB,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    UNIQUE(scope_key, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_orchestration_commands_plan ON orchestration_commands(plan_id, created_at);
+
+CREATE TABLE IF NOT EXISTS orchestration_outbox (
+    message_id VARCHAR PRIMARY KEY,
+    dedupe_key VARCHAR NOT NULL UNIQUE,
+    event_type VARCHAR NOT NULL,
+    correlation_id VARCHAR NOT NULL,
+    plan_id VARCHAR NOT NULL,
+    plan_version INTEGER,
+    round_id VARCHAR,
+    task_id VARCHAR,
+    execution_id VARCHAR,
+    payload_json JSONB NOT NULL DEFAULT '{}',
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    status VARCHAR NOT NULL DEFAULT 'pending',
+    attempt INTEGER NOT NULL DEFAULT 0,
+    available_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    lease_owner VARCHAR,
+    lease_until TIMESTAMP WITH TIME ZONE,
+    published_at TIMESTAMP WITH TIME ZONE,
+    occurred_at TIMESTAMP WITH TIME ZONE NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orchestration_outbox_ready ON orchestration_outbox(status, available_at);
+
+CREATE TABLE IF NOT EXISTS orchestration_inbox (
+    consumer_name VARCHAR NOT NULL,
+    message_id VARCHAR NOT NULL,
+    event_type VARCHAR NOT NULL,
+    payload_json JSONB NOT NULL DEFAULT '{}',
+    payload_hash VARCHAR NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'received',
+    attempt INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    receipt_json JSONB,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    processed_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY(consumer_name, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_orchestration_inbox_state ON orchestration_inbox(consumer_name, status, created_at);
+
+CREATE TABLE IF NOT EXISTS root_resume_jobs (
+    job_id VARCHAR PRIMARY KEY,
+    dedupe_key VARCHAR NOT NULL UNIQUE,
+    run_id VARCHAR NOT NULL REFERENCES agent_runs(run_id),
+    plan_id VARCHAR NOT NULL REFERENCES agent_plans(plan_id),
+    round_id VARCHAR NOT NULL REFERENCES plan_rounds(round_id),
+    root_wait_generation INTEGER NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'pending',
+    attempt INTEGER NOT NULL DEFAULT 0,
+    available_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    lease_owner VARCHAR,
+    lease_until TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_root_resume_jobs_ready ON root_resume_jobs(status, available_at);
+
 CREATE TABLE IF NOT EXISTS agent_commands (
     command_id VARCHAR PRIMARY KEY,
     session_id VARCHAR NOT NULL REFERENCES sessions(id),
@@ -220,10 +359,36 @@ CREATE TABLE IF NOT EXISTS approvals (
     risk_level TEXT NOT NULL DEFAULT 'low',
     status TEXT NOT NULL DEFAULT 'pending',
     decision TEXT,
+    execution_id TEXT,
+    interrupt_id TEXT,
+    args_hash TEXT,
+    operation_key TEXT,
+    decided_by TEXT,
+    expires_at TIMESTAMP WITH TIME ZONE,
     created_at TEXT NOT NULL,
     decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_session_status ON approvals(session_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_approvals_worker_interrupt
+ON approvals(worker_thread_id, interrupt_id)
+WHERE worker_thread_id IS NOT NULL AND interrupt_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS worker_jobs (
+    job_id VARCHAR PRIMARY KEY,
+    dedupe_key VARCHAR NOT NULL UNIQUE,
+    job_type VARCHAR NOT NULL,
+    execution_id VARCHAR REFERENCES task_executions(execution_id),
+    approval_id VARCHAR REFERENCES approvals(approval_id),
+    payload_json JSONB NOT NULL DEFAULT '{}',
+    status VARCHAR NOT NULL DEFAULT 'pending',
+    attempt INTEGER NOT NULL DEFAULT 0,
+    available_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    lease_owner VARCHAR,
+    lease_until TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_worker_jobs_ready ON worker_jobs(status, available_at);
 
 -- 知识库文档的持久解析/索引队列。运行态任务在应用启动时恢复为 retry；
 -- 附件删除时会转为 cancelled，避免 worker 在删除后重新写入索引。

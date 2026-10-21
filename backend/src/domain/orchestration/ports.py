@@ -4,7 +4,28 @@ from __future__ import annotations
 
 from typing import Mapping, Protocol
 
+from .contracts import (
+    CommandReceipt,
+    OrchestrationCommand,
+    TaskEventReceipt,
+    WorkerTaskTerminalEvent,
+)
 from .entities import Plan, Task, TaskExecution, TaskResult
+
+
+class OrchestrationCommandRepository(Protocol):
+    async def submit_plan(
+        self,
+        command: OrchestrationCommand,
+        plan: Plan,
+        tasks: list[Task],
+    ) -> CommandReceipt: ...
+
+
+class TaskEventRepository(Protocol):
+    async def apply_worker_terminal_event(
+        self, event: WorkerTaskTerminalEvent
+    ) -> TaskEventReceipt: ...
 
 
 class PlanRepository(Protocol):
@@ -82,9 +103,11 @@ class RootGraphPort(Protocol):
 
 
 __all__ = [
+    "OrchestrationCommandRepository",
     "PlanRepository",
     "PlanScheduler",
     "ResultSynthesizer",
     "RootGraphPort",
+    "TaskEventRepository",
     "WorkerExecutor",
 ]

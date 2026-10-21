@@ -20,7 +20,6 @@ from bootstrap import ApplicationDependencies, build_dependencies
 from configuration import get_settings
 
 from .in_memory import (
-    InMemoryApprovalEvents,
     InMemoryApprovalRepository,
     InMemoryAttachmentRepository,
     InMemoryDocumentJobs,
@@ -115,7 +114,7 @@ def build_test_dependencies() -> ApplicationDependencies:
         "event_stream_factory": lambda: EventStreamService(sessions, events),
         "tool_query_factory": lambda: ToolQueryService(tools, queries),
         "tool_service_factory": lambda: ToolService(tools, InMemoryToolExecution()),
-        "approval_service_factory": lambda: ApprovalService(approvals, InMemoryApprovalEvents(), id_factory=now_id),
+        "approval_service_factory": lambda: ApprovalService(approvals, events, id_factory=now_id),
         "mcp_service_factory": lambda: MCPService(mcp),
         "provider_query_factory": lambda: ProviderQueryService(queries),
         "settings_query_factory": lambda: SettingsQueryService(type("SettingsPort", (), {"get_settings": staticmethod(settings_payload)})()),

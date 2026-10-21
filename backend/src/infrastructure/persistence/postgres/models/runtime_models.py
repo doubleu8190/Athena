@@ -7,7 +7,9 @@ application behavior.
 
 from __future__ import annotations
 
-from sqlalchemy import Computed, ForeignKey, Index, Integer, String, Text, Float, UniqueConstraint, text
+from datetime import datetime
+
+from sqlalchemy import Computed, DateTime, ForeignKey, Index, Integer, String, Text, Float, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
@@ -26,7 +28,7 @@ class AgentRunModel(Base):
     __tablename__ = "agent_runs"
     __table_args__ = (
         Index("idx_agent_runs_session_status", "session_id", "status"),
-        Index("one_active_run_per_session", "session_id", unique=True, postgresql_where=text("status IN ('created', 'running')")),
+        Index("one_active_run_per_session", "session_id", unique=True, postgresql_where=text("status IN ('created', 'running', 'cancelling')")),
     )
     run_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(String)
@@ -43,6 +45,10 @@ class AgentRunModel(Base):
     root_wait_generation: Mapped[int] = mapped_column(Integer, default=0)
     root_wait_checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     root_wait_armed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    root_wait_round_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    root_wait_plan_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    root_wait_interrupt_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
 
@@ -78,6 +84,9 @@ class AgentPlanModel(Base):
     user_goal: Mapped[str] = mapped_column(Text)
     max_parallelism: Mapped[int] = mapped_column(Integer, default=1)
     plan_json: Mapped[str] = mapped_column(Text)
+    current_version: Mapped[int] = mapped_column(Integer, default=1)
+    active_round_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
 
@@ -99,6 +108,7 @@ class AgentTaskModel(Base):
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_generation: Mapped[int] = mapped_column(Integer, default=0)
     worker_thread_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    active_execution_id: Mapped[str | None] = mapped_column(String, nullable=True)
     llm_turn_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
@@ -128,21 +138,30 @@ class AgentEventModel(Base):
 
 class ApprovalRecordModel(Base):
     __tablename__ = "approvals"
-    __table_args__ = (Index("idx_approvals_session_status", "session_id", "status"),)
+    __table_args__ = (
+        Index("idx_approvals_session_status", "session_id", "status"),
+        UniqueConstraint("worker_thread_id", "interrupt_id", name="uq_approvals_worker_interrupt"),
+    )
     approval_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(String)
     run_id: Mapped[str] = mapped_column(String)
     approval_batch_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     plan_id: Mapped[str | None] = mapped_column(String, nullable=True)
     task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    execution_id: Mapped[str | None] = mapped_column(String, nullable=True)
     worker_thread_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    interrupt_id: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_call_id: Mapped[str] = mapped_column(String)
     tool_name: Mapped[str] = mapped_column(String)
     arguments_json: Mapped[str] = mapped_column(Text, default="{}")
     risk_level: Mapped[str] = mapped_column(String, default="low")
+    args_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    operation_key: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
     decision: Mapped[str | None] = mapped_column(String, nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decided_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 

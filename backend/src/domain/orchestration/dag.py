@@ -28,7 +28,11 @@ class PlanDAG:
             task_id
             for task_id in self.task_ids
             if str(states.get(task_id)) == TaskStatus.PENDING.value
-            and all(str(states.get(parent)) == TaskStatus.DONE.value for parent in self.dependencies[task_id])
+            and all(
+                str(states.get(parent))
+                in {TaskStatus.DONE.value, TaskStatus.COMPLETED.value}
+                for parent in self.dependencies[task_id]
+            )
         ]
 
     def propagate_dependency_failures(self, states: dict[str, TaskStatus | str]) -> list[str]:

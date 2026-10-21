@@ -10,17 +10,41 @@ from .entities import (
     TaskStatus,
 )
 from .dag import PlanDAG
+from .contracts import (
+    CommandReceipt,
+    ExecutionStatus,
+    OrchestrationCommand,
+    OrchestrationCommandType,
+    OrchestrationEvent,
+    PlanRevision,
+    PlanRound,
+    PlanVersion,
+    ReviewAction,
+    ReviewDecision,
+    RoundStatus,
+    TaskEventReceipt,
+    TaskAttempt,
+    WorkerTaskTerminalEvent,
+)
 from .validation import PlanValidationError, PlanValidator
+from .rounds import NoReadyTasksError, freeze_ready_round
 from .ports import (
+    OrchestrationCommandRepository,
     PlanRepository,
     PlanScheduler,
     ResultSynthesizer,
     RootGraphPort,
+    TaskEventRepository,
     WorkerExecutor,
 )
 
 __all__ = [
     "Plan",
+    "CommandReceipt",
+    "PlanRevision",
+    "PlanRound",
+    "PlanVersion",
+    "NoReadyTasksError",
     "PlanDAG",
     "PlanEdge",
     "PlanStatus",
@@ -35,4 +59,17 @@ __all__ = [
     "TaskStatus",
     "TaskExecution",
     "WorkerExecutor",
+    "freeze_ready_round",
+    "ExecutionStatus",
+    "OrchestrationCommand",
+    "OrchestrationCommandType",
+    "OrchestrationCommandRepository",
+    "OrchestrationEvent",
+    "ReviewAction",
+    "ReviewDecision",
+    "RoundStatus",
+    "TaskAttempt",
+    "TaskEventReceipt",
+    "TaskEventRepository",
+    "WorkerTaskTerminalEvent",
 ]

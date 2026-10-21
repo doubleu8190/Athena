@@ -37,6 +37,17 @@ from .evaluation_models import (
     EvalMetricValueModel,
     EvalRunModel,
 )
+from .orchestration_models import (
+    OrchestrationCommandModel,
+    OrchestrationInboxModel,
+    OrchestrationOutboxModel,
+    PlanRoundModel,
+    PlanVersionModel,
+    RootResumeJobModel,
+    RoundTaskModel,
+    TaskExecutionModel,
+    WorkerJobModel,
+)
 
 __all__ = [
     "AttachmentModel",
@@ -65,6 +76,15 @@ __all__ = [
     "RetrievalRunModel",
     "StepModel",
     "ToolCallModel",
+    "OrchestrationCommandModel",
+    "OrchestrationInboxModel",
+    "OrchestrationOutboxModel",
+    "PlanRoundModel",
+    "PlanVersionModel",
+    "RootResumeJobModel",
+    "RoundTaskModel",
+    "TaskExecutionModel",
+    "WorkerJobModel",
     "EvalCaseAttemptModel",
     "EvalCaseModel",
     "EvalDatasetModel",

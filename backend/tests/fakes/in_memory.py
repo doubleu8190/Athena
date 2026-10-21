@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from domain.approval import ApprovalDecision, ApprovalEventPort, ApprovalRepository, ApprovalRequest
+from domain.approval import ApprovalDecision, ApprovalRepository, ApprovalRequest
 from domain.configuration import ProviderQueryPort, SettingsQueryPort
 from domain.memory.query_ports import MemoryQueryPort
 from domain.retrieval.query_ports import RetrievalPort
@@ -276,10 +276,6 @@ class InMemoryApprovalRepository(ApprovalRepository):
         return changed
 
 
-class InMemoryApprovalEvents(ApprovalEventPort):
-    async def required(self, request: ApprovalRequest) -> None: pass
-
-
 class InMemoryProviderQueries(ProviderQueryPort, SettingsQueryPort, RetrievalPort, ToolUsageQueryPort, MemoryQueryPort):
     def __init__(self, settings: dict[str, Any], memory: InMemoryMemoryPort) -> None:
         self.settings = settings
@@ -408,9 +404,8 @@ class InMemoryEventStore(EventPort):
         if queue in self.subscribers.get(session_id, []): self.subscribers[session_id].remove(queue)
 
 
-class InMemoryEventPublisher(ApprovalEventPort, EventPort):
+class InMemoryEventPublisher(EventPort):
     def __init__(self, store: InMemoryEventStore) -> None: self.store = store
-    async def required(self, request: Any) -> None: return None
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish(event)
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish_realtime(event)
     async def list_events_between(self, session_id: str, after: int = 0, upto: int | None = None) -> list[ApplicationEvent]:

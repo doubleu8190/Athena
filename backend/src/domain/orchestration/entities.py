@@ -10,6 +10,8 @@ from typing import Any, Mapping
 class PlanStatus(StrEnum):
     CREATED = "created"
     RUNNING = "running"
+    WAITING_REVIEW = "waiting_review"
+    CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -19,6 +21,9 @@ class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
+    CANCELLING = "cancelling"
+    COMPLETED = "completed"
+    # Legacy state remains readable while persisted pre-v1.1 runs are drained.
     DONE = "done"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
@@ -26,7 +31,13 @@ class TaskStatus(StrEnum):
 
 
 TERMINAL_TASK_STATUSES = frozenset(
-    {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.CANCELLED}
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.TIMED_OUT,
+        TaskStatus.CANCELLED,
+    }
 )
 FAILED_TASK_STATUSES = frozenset(
     {TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.CANCELLED}

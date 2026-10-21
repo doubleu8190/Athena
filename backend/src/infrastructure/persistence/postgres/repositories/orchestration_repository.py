@@ -179,10 +179,20 @@ class PostgresOrchestrationRepository(PlanRepository):
         rows = (await session.execute(select(AgentTaskModel.status).where(AgentTaskModel.plan_id == plan_id))).all()
         if not rows:
             return None
-        terminal = {item.value for item in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.CANCELLED)}
+        terminal = {
+            item.value
+            for item in (
+                TaskStatus.COMPLETED,
+                TaskStatus.DONE,
+                TaskStatus.FAILED,
+                TaskStatus.TIMED_OUT,
+                TaskStatus.CANCELLED,
+            )
+        }
         if not all(row[0] in terminal for row in rows):
             return None
-        return PlanStatus.COMPLETED if all(row[0] == TaskStatus.DONE.value for row in rows) else PlanStatus.FAILED
+        successful = {TaskStatus.DONE.value, TaskStatus.COMPLETED.value}
+        return PlanStatus.COMPLETED if all(row[0] in successful for row in rows) else PlanStatus.FAILED
 
     @staticmethod
     def _plan(row) -> Plan:

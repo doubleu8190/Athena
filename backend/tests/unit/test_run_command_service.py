@@ -158,6 +158,19 @@ async def test_cancel_run_and_command_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_run_reuses_command_identity_for_same_idempotency_key() -> None:
+    service, commands = make_service()
+
+    first = await service.cancel_run("run-1", idempotency_key="stop-request-1")
+    retry = await service.cancel_run("run-1", idempotency_key="stop-request-1")
+
+    assert first.command_id == retry.command_id
+    assert first.deduplicated is False
+    assert retry.deduplicated is True
+    assert len(commands.received) == 2
+
+
+@pytest.mark.asyncio
 async def test_missing_resources_are_rejected() -> None:
     service, _ = make_service(present=False)
     with pytest.raises(SessionNotFoundError):

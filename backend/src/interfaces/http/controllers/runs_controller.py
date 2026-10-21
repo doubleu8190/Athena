@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from application.runs import (
     CommandNotFoundError,
@@ -60,23 +60,38 @@ def build_runs_router(
     async def cancel_session(
         session_id: str,
         run_id: str | None = None,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         commands: RunCommandService = Depends(service),
     ) -> CancelCommandResponse:
         try:
-            value = await commands.cancel_session(session_id, run_id=run_id)
+            value = await commands.cancel_session(
+                session_id,
+                run_id=run_id,
+                idempotency_key=idempotency_key,
+            )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
+        except RunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return CancelCommandResponse.from_application(value)
 
     @router.post("/runs/{run_id}/cancel", status_code=202)
     async def cancel_run(
         run_id: str,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         commands: RunCommandService = Depends(service),
     ) -> CancelCommandResponse:
         try:
-            value = await commands.cancel_run(run_id)
+            value = await commands.cancel_run(
+                run_id,
+                idempotency_key=idempotency_key,
+            )
         except RunNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return CancelCommandResponse.from_application(value)
 
     @router.get("/commands/{command_id}")

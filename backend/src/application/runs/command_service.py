@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
+import hashlib
 from typing import Any
 
 from application.sessions import SessionNotFoundError
@@ -97,13 +98,16 @@ class RunCommandService:
 
         return _enqueue_response(result)
 
-    async def cancel_run(self, run_id: str) -> CommandEnqueueResponse:
-        """按运行 ID 提交异步取消命令。"""
+    async def cancel_run(
+        self, run_id: str, *, idempotency_key: str | None = None
+    ) -> CommandEnqueueResponse:
+        """按运行 ID 提交可安全重试的异步取消命令。"""
         run = await self._runs.get(run_id)
         if run is None:
             raise RunNotFoundError(run_id)
+        key = _cancel_idempotency_key(idempotency_key, f"run:{run_id}")
         command = RunCommand(
-            command_id=f"cmd_{self._id_factory()}",
+            command_id=_cancel_command_id(run_id, key),
             command_type=CommandType.RUN_CANCEL,
             session_id=run.session_id,
             run_id=run_id,
@@ -114,17 +118,27 @@ class RunCommandService:
         return _enqueue_response(result)
 
     async def cancel_session(
-        self, session_id: str, *, run_id: str | None = None
+        self,
+        session_id: str,
+        *,
+        run_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> CommandEnqueueResponse:
         """按会话取消当前运行；显式 run_id 优先。"""
         if await self._sessions.get(session_id) is None:
             raise SessionNotFoundError(session_id)
         target_run_id = run_id
-        if target_run_id is None:
+        if target_run_id is not None:
+            target_run = await self._runs.get(target_run_id)
+            if target_run is None or target_run.session_id != session_id:
+                raise RunNotFoundError(target_run_id)
+        else:
             active = await self._runs.get_active_for_session(session_id)
             target_run_id = active.run_id if active is not None else None
+        scope = f"run:{target_run_id}" if target_run_id else f"session:{session_id}"
+        key = _cancel_idempotency_key(idempotency_key, scope)
         command = RunCommand(
-            command_id=f"cmd_{self._id_factory()}",
+            command_id=_cancel_command_id(scope, key),
             command_type=CommandType.RUN_CANCEL,
             session_id=session_id,
             run_id=target_run_id,
@@ -159,6 +173,20 @@ def _enqueue_response(value: CommandEnqueueResult) -> CommandEnqueueResponse:
         status=value.status,
         deduplicated=value.deduplicated,
     )
+
+
+def _cancel_idempotency_key(value: str | None, default_scope: str) -> str:
+    """规范取消幂等键；未提供时使用作用域固定键支持网络重试。"""
+    key = value.strip() if value is not None else ""
+    if value is not None and not key:
+        raise ValueError("Idempotency-Key must not be empty")
+    return key or f"cancel:{default_scope}"
+
+
+def _cancel_command_id(scope: str, idempotency_key: str) -> str:
+    """生成不暴露调用方幂等键的稳定命令 ID。"""
+    digest = hashlib.sha256(f"{scope}:{idempotency_key}".encode("utf-8")).hexdigest()
+    return f"cmd_cancel_{digest[:32]}"
 
 __all__ = [
     "CommandNotFoundError",

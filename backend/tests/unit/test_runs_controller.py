@@ -96,9 +96,18 @@ def test_run_command_routes_preserve_contract() -> None:
     assert status.status_code == 200
     assert status.json()["command_type"] == "run.start"
 
-    cancelled = client.post("/api/runs/run-1/cancel")
+    cancelled = client.post(
+        "/api/runs/run-1/cancel",
+        headers={"Idempotency-Key": "stop-request-1"},
+    )
     assert cancelled.status_code == 202
     assert cancelled.json()["run_id"] == "run-1"
+    retried_cancel = client.post(
+        "/api/runs/run-1/cancel",
+        headers={"Idempotency-Key": "stop-request-1"},
+    )
+    assert retried_cancel.status_code == 202
+    assert retried_cancel.json()["command_id"] == cancelled.json()["command_id"]
 
 
 def test_run_command_routes_map_missing_resources() -> None:

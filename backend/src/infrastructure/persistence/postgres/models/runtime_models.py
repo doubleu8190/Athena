@@ -122,6 +122,13 @@ class AgentEventModel(Base):
     __table_args__ = (
         Index("idx_agent_events_run", "run_id"),
         Index("idx_agent_events_session_run_seq", "session_id", "run_id", "session_seq"),
+        Index(
+            "uq_agent_events_session_transition_id",
+            "session_id",
+            "transition_id",
+            unique=True,
+            postgresql_where=text("transition_id IS NOT NULL"),
+        ),
     )
     session_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_seq: Mapped[int] = mapped_column(Integer, primary_key=True)

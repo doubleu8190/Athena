@@ -7,6 +7,7 @@ from typing import Mapping, Protocol
 from .contracts import (
     CommandReceipt,
     OrchestrationCommand,
+    RunCancellationOutboxLease,
     RunCancellationReceipt,
     TaskEventReceipt,
     WorkerJobLease,
@@ -48,6 +49,22 @@ class WorkerJobRepository(Protocol):
     async def acknowledge_cancelled(self, lease: WorkerJobLease) -> bool: ...
 
     async def reconcile_cancellations(self) -> list[RunCancellationReceipt]: ...
+
+
+class RunCancellationOutboxRepository(Protocol):
+    """取消 SSE 事件的可靠领取和至少一次投递状态。"""
+
+    async def claim_next_cancellation_event(
+        self, worker_id: str, *, lease_seconds: float
+    ) -> RunCancellationOutboxLease | None: ...
+
+    async def mark_cancellation_event_published(
+        self, lease: RunCancellationOutboxLease
+    ) -> bool: ...
+
+    async def retry_cancellation_event(
+        self, lease: RunCancellationOutboxLease, *, delay_seconds: float
+    ) -> bool: ...
 
 
 class PlanRepository(Protocol):

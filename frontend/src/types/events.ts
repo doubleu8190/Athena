@@ -27,6 +27,7 @@ export const ApplicationEventType = {
   THINKING_COMPLETED: "thinking.completed",
   STREAM_SNAPSHOT: "stream.snapshot",
   PLAN_CREATED: "plan.created",
+  PLAN_CANCELLING: "plan.cancelling",
   PLAN_COMPLETED: "plan.completed",
   PLAN_FAILED: "plan.failed",
   PLAN_CANCELLED: "plan.cancelled",

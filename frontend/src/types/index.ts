@@ -169,7 +169,7 @@ export interface OrchestrationTask {
   metadata?: Record<string, unknown>
 }
 
-export type OrchestrationPlanStatus = "created" | "running" | "completed" | "failed" | "cancelled"
+export type OrchestrationPlanStatus = "created" | "running" | "cancelling" | "completed" | "failed" | "cancelled"
 
 export interface OrchestrationPlan {
   plan_id: string

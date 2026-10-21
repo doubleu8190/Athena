@@ -235,6 +235,24 @@ class RunCancellationReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class RunCancellationOutboxLease:
+    """已被 Dispatcher 独占领取的取消通知 Outbox 事件。"""
+
+    message_id: str
+    worker_id: str
+    event_type: str
+    run_id: str
+    plan_id: str
+    session_id: str
+    plan_version: int | None
+    round_id: str | None
+    occurred_at: datetime
+    payload: Mapping[str, Any]
+    attempt: int
+    lease_until: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerJobLease:
     """Worker Job 的持久租约和执行输入快照。"""
 
@@ -271,6 +289,7 @@ __all__ = [
     "ReviewAction",
     "ReviewDecision",
     "RunCancellationReceipt",
+    "RunCancellationOutboxLease",
     "RoundStatus",
     "TaskAttempt",
     "TaskEventReceipt",

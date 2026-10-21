@@ -24,6 +24,8 @@ class EventType(StrEnum):
     APPROVAL_REQUIRED = "approval.required"
     APPROVAL_RESOLVED = "approval.resolved"
     PLAN_CREATED = "plan.created"
+    PLAN_CANCELLING = "plan.cancelling"
+    PLAN_CANCELLED = "plan.cancelled"
     PLAN_COMPLETED = "plan.completed"
     PLAN_FAILED = "plan.failed"
     TASK_STARTED = "task.started"

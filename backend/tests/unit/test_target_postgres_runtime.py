@@ -26,6 +26,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresMemoryRepository,
     PostgresRetrievalRepository,
     PostgresRunRepository,
+    PostgresRunCancellationOutboxRepository,
 )
 from infrastructure.persistence.postgres.engine import PostgresEngine
 from infrastructure.persistence.postgres.options import PostgresOptions
@@ -51,6 +52,9 @@ class Result:
 
     def all(self):
         return self.rows
+
+    def first(self):
+        return self.rows.pop(0) if self.rows else self.scalar
 
 
 class DB:
@@ -170,6 +174,92 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     assert (await retrieval.list_runs(scope="session"))[0][0]["run_id"] == "rr"
     db.get_values = [retrieval_row]
     assert (await retrieval.get_run("rr"))["query"] == "q"
+
+
+@pytest.mark.asyncio
+async def test_postgres_event_repository_reuses_transition_identity():
+    db = DB()
+    events = PostgresEventRepository(factory(db))
+    existing = SimpleNamespace(
+        event_type="run.cancelled",
+        durability="durable",
+        session_id="s-1",
+        session_seq=7,
+        run_id="r-1",
+        message_id=None,
+        attachment_id=None,
+        stream_id=None,
+        stream_type=None,
+        is_complete=0,
+        parent_run_id=None,
+        transition_id="orchestration-outbox:message-1",
+        payload_json='{"status":"cancelled"}',
+        occurred_at=NOW.isoformat(),
+    )
+    db.results = [Result(scalar=existing)]
+
+    value = await events.publish(
+        ApplicationEvent(
+            "run.cancelled",
+            EventDurability.DURABLE,
+            "s-1",
+            run_id="r-1",
+            transition_id="orchestration-outbox:message-1",
+            occurred_at=NOW,
+            payload={"status": "cancelled"},
+        )
+    )
+
+    assert value.session_seq == 7
+    assert db.added == []
+
+    db.results = [Result(scalar=existing)]
+    with pytest.raises(ValueError, match="transition_id_reused_with_different_event"):
+        await events.publish(
+            ApplicationEvent(
+                "run.cancelled",
+                EventDurability.DURABLE,
+                "s-1",
+                run_id="r-1",
+                transition_id="orchestration-outbox:message-1",
+                occurred_at=NOW,
+                payload={"status": "completed"},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_postgres_run_cancellation_outbox_claims_and_acknowledges_lease():
+    db = DB()
+    outbox = SimpleNamespace(
+        message_id="message-1",
+        event_type="RunCancelled",
+        plan_id="plan-1",
+        plan_version=1,
+        round_id="round-1",
+        occurred_at=NOW,
+        payload_json={"cancellation_epoch": 3},
+        status="pending",
+        attempt=0,
+        lease_owner=None,
+        lease_until=None,
+    )
+    db.results = [Result(rows=[(outbox, "s-1", "r-1")])]
+    repository = PostgresRunCancellationOutboxRepository(
+        factory(db), clock=lambda: NOW
+    )
+
+    lease = await repository.claim_next_cancellation_event(
+        "dispatcher-1", lease_seconds=30
+    )
+
+    assert lease is not None
+    assert lease.run_id == "r-1"
+    assert lease.session_id == "s-1"
+    assert lease.attempt == 1
+    assert outbox.status == "processing"
+    assert outbox.lease_owner == "dispatcher-1"
+    assert await repository.mark_cancellation_event_published(lease)
 
 
 @pytest.mark.asyncio

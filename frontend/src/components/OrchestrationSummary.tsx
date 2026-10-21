@@ -14,11 +14,20 @@ interface OrchestrationSummaryProps {
 export function OrchestrationSummary({ view, steps, toolCalls, defaultExpanded = true }: OrchestrationSummaryProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
   const { counts } = view
-  const active = counts.running + counts.queued + counts.waitingApproval + counts.retrying > 0
+  const active = view.status === "cancelling" || counts.running + counts.queued + counts.waitingApproval + counts.retrying > 0
+  const title = view.status === "cancelling"
+    ? "正在停止并行任务"
+    : active
+      ? `正在并行处理 ${counts.total} 项任务`
+      : view.status === "failed"
+        ? "并行任务未全部完成"
+        : view.status === "cancelled"
+          ? "并行任务已取消"
+          : "并行任务已完成"
   return <section className="my-4 rounded-lg border border-athena-border bg-athena-surface/45 p-3" aria-label="并行任务">
     <button type="button" onClick={() => setExpanded((value) => !value)} className="flex w-full items-center gap-2 text-left">
-      {active ? <Loader2 className="h-4 w-4 animate-spin text-athena-accent" /> : view.status === "failed" ? <XCircle className="h-4 w-4 text-athena-danger" /> : <CheckCircle className="h-4 w-4 text-athena-success" />}
-      <span className="min-w-0 flex-1 text-sm font-semibold text-athena-text">{active ? `正在并行处理 ${counts.total} 项任务` : view.status === "failed" ? "并行任务未全部完成" : "并行任务已完成"}</span>
+      {active ? <Loader2 className="h-4 w-4 animate-spin text-athena-accent" /> : view.status === "failed" ? <XCircle className="h-4 w-4 text-athena-danger" /> : view.status === "cancelled" ? <XCircle className="h-4 w-4 text-athena-muted" /> : <CheckCircle className="h-4 w-4 text-athena-success" />}
+      <span className="min-w-0 flex-1 text-sm font-semibold text-athena-text">{title}</span>
       <span className="inline-flex items-center gap-1 text-xs text-athena-muted"><Network className="h-3.5 w-3.5" />{counts.completed}/{counts.total} 已完成</span>
       <ChevronDown className={`h-4 w-4 text-athena-muted transition-transform ${expanded ? "rotate-180" : ""}`} />
     </button>

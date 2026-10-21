@@ -124,6 +124,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationEventRepository,
     PostgresWorkerJobRepository,
     PostgresRootResumeJobRepository,
+    PostgresRunCancellationOutboxRepository,
     PostgresPlanLoader,
     PostgresEvaluationRepository,
 )
@@ -136,6 +137,7 @@ from workers import (
     MemoryWorker,
     WorkerJobDispatcher,
     RootResumeDispatcher,
+    RunCancellationOutboxDispatcher,
     WorkerSupervisor,
 )
 from domain.runs import CommandStatus, CommandType, RunCommand
@@ -213,6 +215,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
     worker_job_repository = PostgresWorkerJobRepository(session_factory)
     root_resume_job_repository = PostgresRootResumeJobRepository(session_factory)
+    cancellation_outbox_repository = PostgresRunCancellationOutboxRepository(
+        session_factory
+    )
     orchestration_command_handler = OrchestrationCommandHandler(
         orchestration_command_repository
     )
@@ -418,7 +423,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         lease_seconds=settings.worker_job_lease_seconds,
         max_concurrency=settings.worker_dispatch_max_concurrency,
         approval_service=worker_approval_service,
-        events=events,
         poll_interval=settings.worker_job_poll_interval_seconds,
         id_factory=ids,
     )
@@ -521,6 +525,13 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             lease_seconds=settings.worker_job_lease_seconds,
             poll_interval=settings.worker_job_poll_interval_seconds,
         )
+        cancellation_outbox_dispatcher = RunCancellationOutboxDispatcher(
+            cancellation_outbox_repository,
+            events,
+            worker_id=f"cancellation-outbox:{ids()}",
+            lease_seconds=settings.worker_job_lease_seconds,
+            poll_interval=settings.worker_job_poll_interval_seconds,
+        )
         document_worker = KnowledgeDocumentWorker(jobs, ingestion)
         memory_worker = MemoryWorker(memory_jobs, memory_workflow)
         resources.append(
@@ -531,6 +542,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
                     memory_worker,
                     worker_dispatcher,
                     root_resume_dispatcher,
+                    cancellation_outbox_dispatcher,
                 )
             )
         )

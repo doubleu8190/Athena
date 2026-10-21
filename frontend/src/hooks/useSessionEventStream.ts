@@ -224,18 +224,44 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (useChatStore.getState().pendingApprovals.length <= Object.keys(decisions).length && useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
         }
         if (type.startsWith("plan.")) {
+          const planStatus: OrchestrationPlan["status"] | null =
+            type === "plan.created" ? "running"
+            : type === "plan.cancelling" ? "cancelling"
+            : type === "plan.completed" ? "completed"
+            : type === "plan.failed" ? "failed"
+            : type === "plan.cancelled" ? "cancelled"
+            : null
           const plan: OrchestrationPlan = {
             plan_id: text(data.plan_id) || `plan:${runId}`,
             run_id: runId || undefined,
             goal: text(data.goal) || text(data.user_goal) || undefined,
-            status: type === "plan.created" ? "running" : type === "plan.completed" ? "completed" : type === "plan.failed" ? "failed" : "cancelled",
+            status: planStatus || "running",
             max_parallelism: number(data.max_parallelism),
             task_ids: stringArray(data.task_ids),
             session_seq: sequence,
             transition_id: envelope.transition_id,
             metadata: { ...data },
           }
-          upsertOrchestrationPlan(plan)
+          if (planStatus) upsertOrchestrationPlan(plan)
+          if (type === "plan.cancelling") {
+            if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("cancelling")
+          } else if (type === "plan.cancelled") {
+            const planId = text(data.plan_id)
+            for (const task of useChatStore.getState().orchestrationTasks) {
+              if (
+                task.plan_id === planId
+                && ["queued", "claimed", "running", "waiting_approval", "retry_wait", "cancel_requested"].includes(task.status)
+              ) {
+                upsertOrchestrationTask({
+                  ...task,
+                  status: "cancelled",
+                  completed_at: occurredAt,
+                  session_seq: sequence,
+                  transition_id: envelope.transition_id,
+                })
+              }
+            }
+          }
         }
         if (type.startsWith("synthesis.")) {
           const planId = text(data.plan_id) || findPlanId(runId)
@@ -380,7 +406,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "approval.required", "approval.resolved",
       "message.started", "message.persisted", "message.completed", "message.delta", "stream.snapshot",
       "thinking.started", "thinking.summary", "thinking.completed",
-      "plan.created", "plan.completed", "plan.failed", "plan.cancelled",
+      "plan.created", "plan.cancelling", "plan.completed", "plan.failed", "plan.cancelled",
       "task.queued", "task.started", "task.retrying", "task.waiting_approval", "task.completed", "task.failed", "task.cancelled",
       "synthesis.started", "synthesis.completed",
       "agent.waiting_for_files", "attachment_updated",
@@ -461,8 +487,9 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
 
   if (type.startsWith("plan.")) {
     const planId = text(data.plan_id)
-    const labels: Record<string, string> = { "plan.created": "已制定执行计划", "plan.completed": "执行计划已完成", "plan.failed": "执行计划未能完成", "plan.cancelled": "执行计划已取消" }
-    return base({ id: `plan:${planId}`, label: labels[type] || "执行计划已更新", detail: error || undefined, status: type === "plan.failed" ? "failed" : type === "plan.created" ? "running" : "completed" })
+    const labels: Record<string, string> = { "plan.created": "已制定执行计划", "plan.cancelling": "正在停止执行计划", "plan.completed": "执行计划已完成", "plan.failed": "执行计划未能完成", "plan.cancelled": "执行计划已取消" }
+    const status = type === "plan.failed" ? "failed" : type === "plan.created" ? "running" : type === "plan.cancelling" ? "waiting" : type === "plan.cancelled" ? "info" : "completed"
+    return base({ id: `plan:${planId}`, label: labels[type] || "执行计划已更新", detail: error || undefined, status })
   }
   if (type.startsWith("task.")) return null
   if (type.startsWith("synthesis.")) return base({ id: `synthesis:${text(data.plan_id)}`, label: type === "synthesis.started" ? "正在汇总处理结果" : "处理结果已汇总", status: type === "synthesis.started" ? "running" : "completed" })

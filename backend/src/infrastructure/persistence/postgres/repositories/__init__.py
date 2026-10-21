@@ -29,6 +29,9 @@ from .orchestration_event_repository import (
 )
 from .worker_job_repository import PostgresWorkerJobRepository
 from .root_resume_job_repository import PostgresRootResumeJobRepository
+from .run_cancellation_outbox_repository import (
+    PostgresRunCancellationOutboxRepository,
+)
 from .evaluation_repository import PostgresEvaluationRepository
 
 __all__ = [
@@ -58,5 +61,6 @@ __all__ = [
     "TaskEventConflict",
     "PostgresWorkerJobRepository",
     "PostgresRootResumeJobRepository",
+    "PostgresRunCancellationOutboxRepository",
     "PostgresEvaluationRepository",
 ]

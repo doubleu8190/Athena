@@ -106,7 +106,10 @@ class AgentTaskModel(Base):
 
 class AgentEventModel(Base):
     __tablename__ = "agent_events"
-    __table_args__ = (Index("idx_agent_events_run", "run_id"),)
+    __table_args__ = (
+        Index("idx_agent_events_run", "run_id"),
+        Index("idx_agent_events_session_run_seq", "session_id", "run_id", "session_seq"),
+    )
     session_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_seq: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[str | None] = mapped_column(String, nullable=True)

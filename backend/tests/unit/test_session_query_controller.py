@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from application.runs import RunQueryService
 from application.sessions import SessionMessageQueryService, SessionService
 from bootstrap import create_app
+from domain.events import ApplicationEvent, EventDurability
 from domain.runs import RunStatus, RunSummary
 from domain.sessions import (
     Message,
@@ -24,7 +25,12 @@ class SessionRepository:
                 session_id="session-1",
                 title="Session",
                 now=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            )
+            ),
+            "session-2": Session.create(
+                session_id="session-2",
+                title="Other Session",
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
         }
 
     async def create(self, value):
@@ -70,6 +76,8 @@ class MessageRepository:
 
 class RunRepository:
     async def list_for_session(self, session_id):
+        if session_id != "session-1":
+            return []
         return [
             RunSummary(
                 run_id="run-1",
@@ -82,7 +90,34 @@ class RunRepository:
         ]
 
 
-def make_client() -> TestClient:
+class EventHistory:
+    def __init__(self):
+        self.events = [
+            ApplicationEvent(
+                event_type="node.completed",
+                durability=EventDurability.DURABLE,
+                session_id="session-1",
+                session_seq=4,
+                run_id="run-1",
+                payload={
+                    "activity_id": "node:run-1:prepare_request",
+                    "name": "prepare_request",
+                    "status": "completed",
+                    "duration_ms": 12,
+                    "message": "must not be exposed",
+                    "arguments": {"command": "private command"},
+                    "output": "private output",
+                    "error": {"code": "node_failed", "message": "safe diagnostic", "stack": "private stack"},
+                },
+            )
+        ]
+
+    async def list_events_for_run(self, session_id, run_id, *, after=0, limit=200):
+        values = [event for event in self.events if event.session_id == session_id and event.run_id == run_id and event.session_seq > after]
+        return values[:limit], len(values) > limit
+
+
+def make_client(events=None) -> TestClient:
     sessions = SessionRepository()
     session_service = SessionService(sessions, id_factory=lambda: "unused")
     messages = MessageRepository()
@@ -91,7 +126,7 @@ def make_client() -> TestClient:
         create_app(
             session_service_factory=lambda: session_service,
             message_query_factory=lambda: SessionMessageQueryService(sessions, messages),
-            run_query_factory=lambda: RunQueryService(sessions, runs),
+            run_query_factory=lambda: RunQueryService(sessions, runs, events),
         )
     )
 
@@ -114,3 +149,19 @@ def test_session_messages_and_runs_return_404_for_unknown_session() -> None:
     client = make_client()
     assert client.get("/api/sessions/missing/messages").status_code == 404
     assert client.get("/api/sessions/missing/runs").status_code == 404
+
+
+def test_run_timeline_is_scoped_and_filters_sensitive_payload_fields() -> None:
+    client = make_client(EventHistory())
+
+    timeline = client.get("/api/sessions/session-1/runs/run-1/timeline")
+    assert timeline.status_code == 200
+    body = timeline.json()
+    assert body["next_after_seq"] == 4
+    assert body["events"][0]["payload"]["name"] == "prepare_request"
+    assert body["events"][0]["payload"]["error"] == {"code": "node_failed", "message": "safe diagnostic"}
+    assert "message" not in body["events"][0]["payload"]
+    assert "arguments" not in body["events"][0]["payload"]
+    assert "output" not in body["events"][0]["payload"]
+
+    assert client.get("/api/sessions/session-2/runs/run-1/timeline").status_code == 404

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,6 +45,44 @@ async def test_target_llm_timeout_and_failure_are_bounded():
             await asyncio.sleep(0.02)
     with pytest.raises(RuntimeError):
         await RetryingLLMProvider(Model(), policy=RetryPolicy(attempts=1, timeout_seconds=0.001)).invoke([])
+
+
+@pytest.mark.asyncio
+async def test_sync_llm_and_embedding_calls_do_not_block_the_event_loop():
+    class SyncModel:
+        def invoke(self, messages, **kwargs):
+            time.sleep(0.08)
+            return {"messages": messages}
+
+    model = SyncModel()
+    provider = RetryingLLMProvider(
+        model, policy=RetryPolicy(attempts=1, timeout_seconds=1)
+    )
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        deadline = asyncio.get_running_loop().time() + 0.06
+        while asyncio.get_running_loop().time() < deadline:
+            ticks += 1
+            await asyncio.sleep(0.005)
+
+    result, _ = await asyncio.gather(provider.invoke(["hello"]), heartbeat())
+    assert result["messages"] == ["hello"]
+    assert ticks >= 5
+
+    thread_id = threading.get_ident()
+
+    def sync_embed(texts):
+        assert threading.get_ident() != thread_id
+        time.sleep(0.04)
+        return [[float(len(texts[0]))]]
+
+    embeddings = EmbeddingProvider(sync_embed, dimension=1)
+    ticks = 0
+    vector, _ = await asyncio.gather(embeddings.embed_query("abcd"), heartbeat())
+    assert vector == [4.0]
+    assert ticks >= 5
 
 
 @pytest.mark.asyncio

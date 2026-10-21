@@ -623,7 +623,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
           {/* 会话摘要标题 */}
           {!isLoadingHistory && messages.length > 0 && conversationTime && (
             <div className="flex justify-center py-1 mb-4">
-              <div className="conversation-header-pill bg-athena-surface/80 border border-athena-border">
+              <div className="conversation-header-pill bg-white text-black border border-athena-border">
                 {isConversationCompleted ? (
                   <CheckCircle className="w-3 h-3 text-athena-success" />
                 ) : (
@@ -632,7 +632,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
                 <span>
                   {isConversationCompleted ? "对话已完成" : "对话进行中"}
                 </span>
-                <span className="text-athena-border">·</span>
+                <span>·</span>
                 <span>
                   {conversationTime.end
                     ? `${conversationTime.start} — ${conversationTime.end}`
@@ -640,7 +640,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
                 </span>
                 {conversationTime.duration && (
                   <>
-                    <span className="text-athena-border">·</span>
+                    <span>·</span>
                     <span>{conversationTime.duration}</span>
                   </>
                 )}
@@ -677,7 +677,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
                     {/* 跨天日期分隔条（今天/昨天/具体日期） */}
                     {showDateDivider && (
                       <div className="flex justify-center py-1">
-                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-athena-surface/80 border border-athena-border text-xs text-athena-muted">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full bg-white border border-athena-border text-xs text-black">
                           {formatDateLabel(group.messages[0].timestamp)}
                         </span>
                       </div>

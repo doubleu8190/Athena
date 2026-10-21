@@ -316,6 +316,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             ),
         },
         trace_repository=retrieval,
+        event_publisher=events,
     )
 
     request_preparation = RunRequestPreparationService(
@@ -326,7 +327,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         id_factory=ids,
     )
 
-    worker_agent = ConfiguredWorkerAgent(llm_provider)
+    worker_agent = ConfiguredWorkerAgent(llm_provider, events)
     worker_executor = LangGraphWorkerExecutor(
         workflow_factory=lambda: WorkerWorkflow(execute=worker_agent),
         checkpointer=checkpointer,
@@ -365,7 +366,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             plan_repository=orchestration,
             scheduler=scheduler,
             plan_loader=PostgresPlanLoader(orchestration),
-            agent=ConfiguredRootAgent(llm_provider),
+            agent=ConfiguredRootAgent(llm_provider, events),
             tool_service=builtin_tool_service,
             approval_service=approval_service,
             event_publisher=events,
@@ -380,7 +381,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     providers: dict[str, Provider] = {
         "session_service_factory": lambda: SessionService(sessions, id_factory=ids),
         "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
-        "run_query_factory": lambda: RunQueryService(sessions, runs),
+        "run_query_factory": lambda: RunQueryService(sessions, runs, events),
         "run_command_factory": lambda: RunCommandService(
             sessions, runs, runs, id_factory=ids
         ),

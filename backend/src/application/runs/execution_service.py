@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from time import perf_counter
+
 from domain.events import (
     ApplicationEvent,
     EventDurability,
@@ -39,13 +42,14 @@ class RunExecutionService:
         # Approval resumes are internal commands. Keep the original queued
         # command so its status can converge when the resumed execution ends.
         self._waiting_commands: dict[str, str] = {}
+        self._run_started: dict[str, tuple[datetime, float]] = {}
 
     async def execute(self, command: RunCommand) -> dict[str, object] | None:
         if command.command_type.value == CommandType.RUN_CANCEL.value:
             await self._executor.cancel(command.run_id)
             if command.run_id:
                 await self._lifecycle.cancel(command.run_id)
-                await self._publish(command, EventType.RUN_CANCELLED)
+                await self._publish(command, EventType.RUN_CANCELLED, payload=self._run_payload(command, "cancelled"))
             await self._commands.complete_command(
                 command.command_id,
                 status=CommandStatus.COMPLETED,
@@ -60,12 +64,18 @@ class RunExecutionService:
             )
             return None
         await self._lifecycle.update_status(command.run_id, RunStatus.RUNNING)
+        if command.run_id not in self._run_started:
+            self._run_started[command.run_id] = (datetime.now(timezone.utc), perf_counter())
         start_event = (
             EventType.RUN_RESUMED
             if command.command_type.value == CommandType.RUN_RESUME.value
             else EventType.RUN_STARTED
         )
-        await self._publish(command, start_event)
+        await self._publish(
+            command,
+            start_event,
+            payload=self._run_payload(command, "running", started_at=self._run_started[command.run_id][0]),
+        )
         try:
             outcome = await self._executor.execute(command)
         except Exception as exc:
@@ -76,7 +86,7 @@ class RunExecutionService:
             return
         if outcome.waiting:
             self._waiting_commands[command.run_id] = command.command_id
-            await self._publish(command, EventType.RUN_ROOT_SUSPENDED)
+            await self._publish(command, EventType.RUN_ROOT_SUSPENDED, payload=self._run_payload(command, "waiting"))
             return None
         if outcome.error is not None:
             await self.fail(
@@ -96,7 +106,8 @@ class RunExecutionService:
         await self._lifecycle.complete(command.run_id, result)
         await self._publish_result_message(command, result)
         await self._enqueue_memory(command, result)
-        await self._publish(command, EventType.RUN_COMPLETED)
+        await self._publish(command, EventType.RUN_COMPLETED, payload=self._run_payload(command, "completed", summary="运行已完成"))
+        self._run_started.pop(command.run_id, None)
         original_command_id = self._waiting_commands.pop(command.run_id, None)
         await self._commands.complete_command(
             command.command_id, status=CommandStatus.COMPLETED, result=result
@@ -113,7 +124,8 @@ class RunExecutionService:
     async def fail(self, command: RunCommand, error: dict[str, object]) -> None:
         if command.run_id:
             await self._lifecycle.fail(command.run_id, error)
-            await self._publish(command, EventType.RUN_FAILED, payload={"error": error})
+            await self._publish(command, EventType.RUN_FAILED, payload=self._run_payload(command, "failed", error=error))
+            self._run_started.pop(command.run_id, None)
         await self._commands.complete_command(
             command.command_id, status=CommandStatus.FAILED, error=error
         )
@@ -142,6 +154,41 @@ class RunExecutionService:
                 payload=payload or {"command_id": command.command_id},
             )
         )
+
+    def _run_payload(
+        self,
+        command: RunCommand,
+        status: str,
+        *,
+        started_at: datetime | None = None,
+        summary: str | None = None,
+        error: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        run_id = command.run_id or ""
+        payload: dict[str, object] = {
+            "command_id": command.command_id,
+            "activity_id": f"run:{run_id}",
+            "activity_type": "run",
+            "name": "run",
+            "status": status,
+        }
+        state = self._run_started.get(run_id)
+        start_time = started_at or (state[0] if state else None)
+        if start_time is not None:
+            payload["started_at"] = start_time.isoformat()
+        if status in {"completed", "failed", "cancelled"} and state:
+            payload["duration_ms"] = int((perf_counter() - state[1]) * 1000)
+            payload["completed_at"] = datetime.now(timezone.utc).isoformat()
+        if summary:
+            payload["summary"] = summary
+        if error:
+            safe_error: dict[str, object] = {
+                key: value for key, value in error.items()
+                if key in {"code", "stage", "retryable"}
+            }
+            safe_error["message"] = str(error.get("code", "run_failed"))
+            payload["error"] = safe_error
+        return payload
 
     async def _enqueue_memory(
         self, command: RunCommand, result: dict[str, object]

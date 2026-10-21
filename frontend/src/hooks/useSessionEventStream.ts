@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import type { ApplicationEventEnvelope, ExecutionError } from "../types/events"
-import type { ExecutionTimelineEntry, Message, ToolCall, OrchestrationPlan, OrchestrationTask } from "../types"
+import type { ExecutionTimelineEntry, Message, ToolCall, OrchestrationPlan, OrchestrationTask, RunTimelineEvent } from "../types"
 import { approvalActionDescription, toolActionLabel } from "../utils/executionCopy"
 import { summarizeResult } from "../utils/orchestrationProjection"
 
@@ -38,6 +38,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
     upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans,
     upsertExecutionTimelineEntry, clearExecutionTimeline,
+    appendRunTimelineEvent, clearRunTimelineEvents,
   } = useChatStore()
 
   useEffect(() => {
@@ -53,6 +54,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     clearOrchestrationTasks()
     clearOrchestrationPlans()
     clearExecutionTimeline()
+    clearRunTimelineEvents()
     if (!sessionId) {
       setConnectionStatus("disconnected")
       return
@@ -111,6 +113,15 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           lastSeqRef.current = sequence
         }
         const runId = envelope.run_id || String(data.run_id || "")
+        if (runId && typeof sequence === "number") {
+          appendRunTimelineEvent({
+            session_seq: sequence,
+            event_type: type,
+            occurred_at: envelope.occurred_at || new Date().toISOString(),
+            run_id: runId,
+            payload: data as RunTimelineEvent["payload"],
+          })
+        }
         const streamId = envelope.stream_id || String(data.stream_id || (runId ? `answer-${runId}` : ""))
         const now = new Date().toISOString()
         const timelineEntry = projectTimelineEvent({
@@ -367,7 +378,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "file_processing_started", "file_processing_completed", "file_processing_failed",
     ].forEach((name) => source.addEventListener(name, parse))
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, upsertExecutionTimelineEntry, clearExecutionTimeline])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
 
   return sourceRef
 }

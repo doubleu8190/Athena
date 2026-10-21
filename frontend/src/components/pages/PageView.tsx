@@ -9,6 +9,7 @@ import McpView from "./McpView"
 import KnowledgeBaseView from "./KnowledgeBaseView"
 import RetrievalView from "./RetrievalView"
 import EvaluationView from "./EvaluationView"
+import RunChainView from "./RunChainView"
 
 interface PageViewProps {
   view: AppView
@@ -34,6 +35,8 @@ function PageView({ view }: PageViewProps) {
       return <McpView />
     case "session-detail":
       return <SessionDetailView />
+    case "run-chain":
+      return <RunChainView />
     case "settings":
       return <SettingsView />
     case "retrieval":

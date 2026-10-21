@@ -11,6 +11,7 @@ import type {
   MemoryEntry,
   MemoryListResponse,
   SessionRunSummary,
+  RunTimelineResponse,
   ProviderInfo,
   SettingsView,
   TestProviderResult,
@@ -164,6 +165,13 @@ class ApiClient {
 
   async listSessionRuns(sessionId: string): Promise<SessionRunSummary[]> {
     return this.request<SessionRunSummary[]>(`/api/sessions/${encodeURIComponent(sessionId)}/runs`)
+  }
+
+  async getRunTimeline(sessionId: string, runId: string, after = 0, limit = 200): Promise<RunTimelineResponse> {
+    const params = new URLSearchParams({ after: String(after), limit: String(limit) })
+    return this.request<RunTimelineResponse>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/timeline?${params.toString()}`,
+    )
   }
 
   /** 分页读取召回运行摘要，可按范围、状态、会话或查询文本过滤。 */

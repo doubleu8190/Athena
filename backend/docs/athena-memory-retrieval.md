@@ -18,9 +18,13 @@
 
 `revise_memory(old_id, content)` 不更新原文，而创建 revision+1 的新记录，保留 logical_memory_id，事务性将旧记录标记 superseded，并建立 Neo4j `supersedes` 边。任何 projection 失败都回滚 active 状态和新记录。
 
-`set_memory_validity()` 只修改事实有效性和 last_observed_at；invalid 记忆保留历史但不参与检索。`valid_until` 必须为 ISO-8601。`add_memory_relation()` 写 supports/contradicts 等关系。过期清理由后台定时任务执行：软删 expired，删除 vector 和 graph，失败恢复 PostgreSQL 状态。
+`update_validity()` 修改事实有效性和 valid_until；invalid 记忆保留历史但不参与检索。`valid_until` 必须为 ISO-8601。`add_memory_relation()` 写 supports/contradicts 等关系。过期清理由后台定时任务执行：软删 expired，删除 vector 和 graph，失败恢复 PostgreSQL 状态。
 
-访问统计在内存按 memory id 聚合，`MEMORY_SYNC_INTERVAL` 默认 900 秒 flush 到 PostgreSQL；管理页 get/list 不增加访问热度，真正被上下文选中的结果才记录访问。
+访问统计在关键词与向量融合选中结果后直接提交 PostgreSQL，按 ID 去重，以原子加一更新 access_count 和 last_accessed_at；管理页 search/get/list 不增加访问热度。flush_access_stats 没有待刷新数据，返回 0。
+
+last_observed_at 是创建或修订时观察事实的时间，last_accessed_at 是召回使用时间，两者独立。expires_at 是记忆 TTL，valid_until 是事实有效截止时间；任一期限到达均不再参与关键词或向量召回。空值表示该期限不受限，访问不会延长这两个期限。修订保留旧记录的期限。
+
+列表、详情、修订和搜索 API 均返回 created_at、expires_at、last_accessed_at、access_count、last_observed_at、valid_until 和 validity_status。列表统计返回 total、expired、recent_week；expired 筛选同时检查两种期限。
 
 ## 4. HybridMemoryRetriever
 

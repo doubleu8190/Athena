@@ -18,6 +18,11 @@ class ApprovalEventPublisher(ApprovalEventPort):
                 session_id=request.session_id,
                 run_id=request.run_id,
                 payload={
+                    "activity_id": f"approval:{request.approval_id}",
+                    "activity_type": "approval",
+                    "name": "tool_approval",
+                    "parent_activity_id": f"tool:{request.tool_call_id}",
+                    "status": "waiting",
                     "approval_id": request.approval_id,
                     "tool_name": request.tool_name,
                     "arguments": request.arguments,
@@ -33,7 +38,14 @@ class ApprovalEventPublisher(ApprovalEventPort):
                 durability=EventDurability.DURABLE,
                 session_id=session_id,
                 run_id=run_id,
-                payload={"approval_id": approval_id, "decision": decision},
+                payload={
+                    "activity_id": f"approval:{approval_id}",
+                    "activity_type": "approval",
+                    "name": "tool_approval",
+                    "status": "approved" if decision == "approved" else "failed",
+                    "approval_id": approval_id,
+                    "decision": decision,
+                },
             )
         )
 

@@ -104,6 +104,7 @@ class MemoryContextProvider(ContextProvider):
                 )
                 for item in fused
             )
+            await self._repository.record_access([item.source_id for item in items])
             return ProviderResult(
                 self.name,
                 "succeeded",

@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   Server,
   History,
+  GitCommitVertical,
   Settings,
   Sparkles,
   Network,
@@ -32,6 +33,7 @@ export const NAV_ITEMS: NavItem[] = [
   { view: "retrieval", label: "召回分析", icon: GitBranch },
   { view: "evaluation", label: "评测实验", icon: FlaskConical },
   { view: "session-detail", label: "会话详情", icon: History },
+  { view: "run-chain", label: "运行链路", icon: GitCommitVertical },
   { view: "settings", label: "系统设置", icon: Settings },
 ]
 

@@ -14,6 +14,7 @@ import type {
   OrchestrationPlan,
   ExecutionError,
   ExecutionTimelineEntry,
+  RunTimelineEvent,
 } from "../types"
 
 interface ChatStore {
@@ -79,6 +80,9 @@ interface ChatStore {
   executionTimeline: ExecutionTimelineEntry[]
   upsertExecutionTimelineEntry: (entry: ExecutionTimelineEntry) => void
   clearExecutionTimeline: () => void
+  runTimelineEvents: RunTimelineEvent[]
+  appendRunTimelineEvent: (event: RunTimelineEvent) => void
+  clearRunTimelineEvents: () => void
 
   // 中心编排
   orchestrationTasks: OrchestrationTask[]
@@ -138,7 +142,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   activeView: ((): AppView => {
     try {
       const saved = localStorage.getItem("athena:activeView")
-      if (saved && ["chat", "memory", "tools", "approvals", "providers", "session-detail", "settings", "mcp", "retrieval", "evaluation"].includes(saved)) {
+      if (saved && ["chat", "memory", "tools", "approvals", "providers", "session-detail", "run-chain", "settings", "mcp", "retrieval", "evaluation"].includes(saved)) {
         return saved as AppView
       }
     } catch { /* 忽略不可用的本地存储内容，使用默认视图。 */ }
@@ -223,6 +227,12 @@ export const useChatStore = create<ChatStore>((set) => ({
   clearThinking: () => set({ thinking: null }),
 
   executionTimeline: [],
+  runTimelineEvents: [],
+  appendRunTimelineEvent: (event) => set((state) => {
+    if (state.runTimelineEvents.some((item) => item.session_seq === event.session_seq && item.run_id === event.run_id)) return {}
+    return { runTimelineEvents: [...state.runTimelineEvents, event].slice(-5000) }
+  }),
+  clearRunTimelineEvents: () => set({ runTimelineEvents: [] }),
   upsertExecutionTimelineEntry: (entry) =>
     set((state) => {
       const existingIndex = state.executionTimeline.findIndex((item) => item.id === entry.id)

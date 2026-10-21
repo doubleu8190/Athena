@@ -8,8 +8,11 @@ adapter only supplies state and connects these steps into a graph.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any, Callable, Mapping
 
 from domain.orchestration import Plan, PlanEdge, Task
@@ -20,7 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 async def call(value: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    result = value(*args, **kwargs)
+    # Synchronous adapters are allowed by the application port, but must not
+    # run on the ASGI event-loop thread.
+    if inspect.iscoroutinefunction(value) or inspect.iscoroutinefunction(getattr(value, "__call__", None)):
+        result = value(*args, **kwargs)
+    else:
+        result = await asyncio.to_thread(value, *args, **kwargs)
     if hasattr(result, "__await__"):
         return await result
     return result
@@ -303,6 +311,10 @@ class RootWorkflow:
         request = state.get("request", {})
         return {
             "harness_input": {
+                "request": {
+                    "session_id": request.get("session_id", ""),
+                    "run_id": request.get("run_id", ""),
+                },
                 "messages": list(request.get("history", []))
                 + [{"role": "user", "content": request.get("user_message", "")}],
                 "task": state.get("understanding", {}).get("task_spec", {}),
@@ -368,11 +380,73 @@ class RootWorkflow:
                     "status": "completed",
                     "waiting": False,
                 }
-            await call(deps.event_publisher.publish, ApplicationEvent(event_type=EventType.TOOL_STARTED, durability=EventDurability.DURABLE, session_id=request.get("session_id", ""), run_id=request.get("run_id"), payload={"tool_call_id": tool_call_id, "tool_name": tool_name, "arguments": arguments}))
-            result = await call(deps.tool_service.execute, ToolExecutionRequest(tool_name=tool_name, arguments=arguments, session_id=request.get("session_id", ""), run_id=request.get("run_id", ""), tool_call_id=tool_call_id, approval_decision=approval_decision))
+            tool_started_at = datetime.now(timezone.utc)
+            tool_started_clock = perf_counter()
+            tool_activity_id = f"tool:{tool_call_id}"
+            await call(deps.event_publisher.publish, ApplicationEvent(
+                event_type=EventType.TOOL_STARTED,
+                durability=EventDurability.DURABLE,
+                session_id=request.get("session_id", ""),
+                run_id=request.get("run_id"),
+                payload={
+                    "activity_id": tool_activity_id,
+                    "activity_type": "tool",
+                    "call_id": tool_call_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "name": tool_name,
+                    "parent_activity_id": f"run:{request.get('run_id', '')}",
+                    "status": "running",
+                    "started_at": tool_started_at.isoformat(),
+                    "arguments": arguments,
+                },
+            ))
+            try:
+                result = await call(deps.tool_service.execute, ToolExecutionRequest(tool_name=tool_name, arguments=arguments, session_id=request.get("session_id", ""), run_id=request.get("run_id", ""), tool_call_id=tool_call_id, approval_decision=approval_decision))
+            except Exception as exc:
+                await call(deps.event_publisher.publish, ApplicationEvent(
+                    event_type=EventType.TOOL_COMPLETED,
+                    durability=EventDurability.DURABLE,
+                    session_id=request.get("session_id", ""),
+                    run_id=request.get("run_id"),
+                    payload={
+                        "activity_id": tool_activity_id,
+                        "activity_type": "tool",
+                        "call_id": tool_call_id,
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "name": tool_name,
+                        "parent_activity_id": f"run:{request.get('run_id', '')}",
+                        "status": "failed",
+                        "started_at": tool_started_at.isoformat(),
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "duration_ms": int((perf_counter() - tool_started_clock) * 1000),
+                        "error": {"code": "tool_execution_failed", "message": type(exc).__name__},
+                    },
+                ))
+                raise
             payload = as_dict(result)
-            await call(deps.event_publisher.publish, ApplicationEvent(event_type=EventType.TOOL_COMPLETED, durability=EventDurability.DURABLE, session_id=request.get("session_id", ""), run_id=request.get("run_id"), payload={"tool_call_id": tool_call_id, "tool_name": tool_name, **payload}))
             succeeded = payload.get("status") == "success"
+            await call(deps.event_publisher.publish, ApplicationEvent(
+                event_type=EventType.TOOL_COMPLETED,
+                durability=EventDurability.DURABLE,
+                session_id=request.get("session_id", ""),
+                run_id=request.get("run_id"),
+                payload={
+                    "activity_id": tool_activity_id,
+                    "activity_type": "tool",
+                    "call_id": tool_call_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "name": tool_name,
+                    "parent_activity_id": f"run:{request.get('run_id', '')}",
+                    "status": "completed" if succeeded else "failed",
+                    "started_at": tool_started_at.isoformat(),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "duration_ms": int((perf_counter() - tool_started_clock) * 1000),
+                    **payload,
+                },
+            ))
             content = payload.get("output") if succeeded else payload.get("error", payload.get("output", "命令执行失败。"))
             return {
                 "response": {
@@ -537,7 +611,7 @@ class RootWorkflow:
                 durability=EventDurability.DURABLE,
                 session_id=request.get("session_id", ""),
                 run_id=request.get("run_id"),
-                payload={"plan_id": plan.plan_id, "goal": plan.goal, "status": "running", "task_ids": list(plan.task_ids), "edges": [{"from_task_id": edge.from_task_id, "to_task_id": edge.to_task_id} for edge in plan.edges], "tasks": [_plan_dict({}, [task])["tasks"][0] for task in tasks]},
+                payload={"activity_id": f"plan:{plan.plan_id}", "activity_type": "plan", "name": "execution_plan", "parent_activity_id": f"run:{request.get('run_id', '')}", "plan_id": plan.plan_id, "goal": plan.goal, "status": "running", "task_ids": list(plan.task_ids), "edges": [{"from_task_id": edge.from_task_id, "to_task_id": edge.to_task_id} for edge in plan.edges], "tasks": [_plan_dict({}, [task])["tasks"][0] for task in tasks]},
             ))
         return {"plan": _plan_dict(plan, tasks), "status": "running"}
 

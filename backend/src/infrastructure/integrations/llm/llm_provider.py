@@ -46,13 +46,7 @@ class RetryingLLMProvider(LLMPort):
         last_error: Exception | None = None
         for attempt in range(max(1, self._policy.attempts)):
             try:
-                result = self._model.invoke(messages, **kwargs)
-                if inspect.isawaitable(result):
-                    return await asyncio.wait_for(
-                        result,
-                        timeout=self._policy.timeout_seconds,
-                    )
-                return result
+                return await self._invoke_once(messages, **kwargs)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -60,6 +54,23 @@ class RetryingLLMProvider(LLMPort):
                 if attempt + 1 < max(1, self._policy.attempts) and self._policy.delay_seconds:
                     await asyncio.sleep(self._policy.delay_seconds)
         raise RuntimeError("LLM invocation failed") from last_error
+
+    async def _invoke_once(self, messages: list[Any], **kwargs: Any) -> Any:
+        """调用异步模型；同步 SDK 调用放到线程，避免阻塞事件循环。"""
+        model = self._model
+        if model is None:
+            raise RuntimeError("LLM model is not configured")
+        ainvoke = getattr(model, "ainvoke", None)
+        if callable(ainvoke):
+            result = ainvoke(messages, **kwargs)
+        else:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(model.invoke, messages, **kwargs),
+                timeout=self._policy.timeout_seconds,
+            )
+        if inspect.isawaitable(result):
+            return await asyncio.wait_for(result, timeout=self._policy.timeout_seconds)
+        return result
 
     async def complete(self, messages: list[Any], **kwargs: Any) -> Any:
         """使用 ``invoke`` 提供端口要求的 completion 别名。"""
@@ -124,7 +135,7 @@ class ConfiguredLLMProvider(RetryingLLMProvider):
 
     async def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
         """确保模型已加载后执行一次带重试的调用。"""
-        self._ensure_model()
+        await asyncio.to_thread(self._ensure_model)
         return await super().invoke(messages, **kwargs)
 
     def count_text_tokens(self, text: str) -> int:

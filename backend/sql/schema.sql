@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS agent_events (
     PRIMARY KEY(session_id, session_seq)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_agent_events_session_run_seq ON agent_events(session_id, run_id, session_seq);
 
 CREATE TABLE IF NOT EXISTS stream_snapshots (
     stream_id VARCHAR PRIMARY KEY,

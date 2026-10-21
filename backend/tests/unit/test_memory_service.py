@@ -69,3 +69,26 @@ def test_memory_commands_reject_invalid_values() -> None:
         MemoryListRequest(offset=-1)
     with pytest.raises(ValueError):
         MemoryWriteCommand("")
+
+@pytest.mark.asyncio
+async def test_memory_metadata_survives_repository_to_http_boundary() -> None:
+    """验证数据库时间和统计经过服务、HTTP 转换后保持不变，无业务异常。"""
+    from infrastructure.persistence.postgres.models import MemoryModel
+    from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository
+    from application.memory.service import _to_response
+    from interfaces.http.controllers.query_controller import _memory_response
+
+    row = MemoryModel(
+        id="m-1", content="fact", metadata_json="{}", source_kind="extraction",
+        status="active", created_at="2026-10-01T00:00:00+00:00",
+        access_count=3, last_accessed_at="2026-10-20T00:00:00+00:00",
+        last_observed_at="2026-10-01T00:00:00+00:00", expires_at=None,
+        valid_until="2026-11-01T00:00:00+00:00", validity_status="valid",
+    )
+    result = _memory_response(_to_response(PostgresMemoryRepository._domain(row)))
+    assert result["created_at"] == row.created_at
+    assert result["access_count"] == 3
+    assert result["last_accessed_at"] == row.last_accessed_at
+    assert result["last_observed_at"] == row.last_observed_at
+    assert result["expires_at"] is None
+    assert result["valid_until"] == row.valid_until

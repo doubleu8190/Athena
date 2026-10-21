@@ -206,6 +206,35 @@ export interface SessionRunSummary {
   updated_at?: string | null
 }
 
+export type RunTimelinePayload = Record<string, unknown> & {
+  activity_id?: string
+  activity_type?: string
+  name?: string
+  node?: string
+  status?: string
+  summary?: string
+  duration_ms?: number
+  parent_activity_id?: string | null
+  parent_run_id?: string | null
+  error?: { code?: string; message?: string; retryable?: boolean; stage?: string } | null
+}
+
+export interface RunTimelineEvent {
+  session_seq: number
+  event_type: string
+  occurred_at: string
+  run_id: string | null
+  payload: RunTimelinePayload
+}
+
+export interface RunTimelineResponse {
+  run: SessionRunSummary
+  events: RunTimelineEvent[]
+  next_after_seq: number
+  has_more: boolean
+  links: { retrieval_run_ids: string[]; plan_ids: string[]; task_ids: string[] }
+}
+
 // ─── 工具调用相关 ────────────────────────────────────────────────
 
 export type ToolCallStatus = "pending" | "running" | "paused" | "success" | "failed" | "denied" | "timeout"
@@ -371,6 +400,7 @@ export type AppView =
   | "approvals"
   | "providers"
   | "session-detail"
+  | "run-chain"
   | "settings"
   | "mcp"
   | "retrieval"
@@ -447,7 +477,10 @@ export interface MemoryEntry {
   metadata: Record<string, unknown>
   expires_at: string | null
   created_at: string
-  last_accessed: string | null
+  last_accessed_at: string | null
+  last_observed_at: string | null
+  valid_until: string | null
+  validity_status: string
   access_count: number
 }
 

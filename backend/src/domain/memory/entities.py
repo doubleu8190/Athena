@@ -34,6 +34,13 @@ class MemoryRecord:
     score: float | None = None
     source: str | None = None
     status: MemoryStatus = MemoryStatus.ACTIVE
+    created_at: str = ""
+    expires_at: str | None = None
+    last_accessed_at: str | None = None
+    access_count: int = 0
+    last_observed_at: str | None = None
+    valid_until: str | None = None
+    validity_status: str = "valid"
 
 
 @dataclass(frozen=True, slots=True)

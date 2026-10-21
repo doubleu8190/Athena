@@ -110,7 +110,7 @@ def build_test_dependencies() -> ApplicationDependencies:
     providers = {
         "session_service_factory": lambda: SessionService(sessions, id_factory=now_id),
         "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
-        "run_query_factory": lambda: RunQueryService(sessions, runs),
+        "run_query_factory": lambda: RunQueryService(sessions, runs, events),
         "run_command_factory": lambda: RunCommandService(sessions, runs, runs, id_factory=now_id),
         "event_stream_factory": lambda: EventStreamService(sessions, events, events, events),
         "tool_query_factory": lambda: ToolQueryService(tools, queries),

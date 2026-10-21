@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from time import perf_counter
 
 from domain.orchestration import (
     PlanRepository,
@@ -35,6 +37,7 @@ class WorkerSchedulerService(PlanScheduler):
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_counts: dict[str, int] = {}
         self._results: dict[str, str] = {}
+        self._task_started: dict[str, tuple[datetime, float]] = {}
 
     async def start_ready_tasks(self, plan_id: str) -> dict[str, object]:
         value = await self._repository.get(plan_id)
@@ -43,17 +46,9 @@ class WorkerSchedulerService(PlanScheduler):
         plan, _ = value
         claimed = await self._repository.claim_ready_tasks(plan_id, plan.max_parallelism)
         for execution in claimed:
-            if self._events is not None:
-                from domain.events import ApplicationEvent, EventDurability, EventType
-
-                await self._events.publish(ApplicationEvent(
-                    event_type=EventType.TASK_STARTED,
-                    durability=EventDurability.DURABLE,
-                    session_id=execution.session_id,
-                    run_id=execution.run_id,
-                    payload={"plan_id": execution.plan_id, "task_id": execution.task.task_id, "title": execution.task.title, "status": "running", "execution_generation": execution.execution_generation},
-                ))
             key = f"{execution.task.task_id}:{execution.execution_generation}"
+            self._task_started[key] = (datetime.now(timezone.utc), perf_counter())
+            await self._publish_task(execution, "task.started", {"status": "running"})
             if key in self._tasks:
                 continue
             task = asyncio.create_task(
@@ -156,7 +151,7 @@ class WorkerSchedulerService(PlanScheduler):
         if self._events is not None:
             from domain.events import ApplicationEvent, EventDurability, EventType
 
-            await self._events.publish(ApplicationEvent(event_type=EventType.SYNTHESIS_STARTED, durability=EventDurability.DURABLE, session_id=plan.session_id or "", run_id=plan.run_id, payload={"plan_id": plan_id}))
+            await self._events.publish(ApplicationEvent(event_type=EventType.SYNTHESIS_STARTED, durability=EventDurability.DURABLE, session_id=plan.session_id or "", run_id=plan.run_id, payload={"activity_id": f"synthesis:{plan_id}", "activity_type": "synthesis", "name": "synthesis", "parent_activity_id": f"plan:{plan_id}", "plan_id": plan_id, "status": "running"}))
         results = await self._repository.get_results(plan_id)
         self._results[plan_id] = (
             await self._synthesizer.synthesize(plan, results)
@@ -166,7 +161,7 @@ class WorkerSchedulerService(PlanScheduler):
         if self._events is not None:
             from domain.events import ApplicationEvent, EventDurability, EventType
 
-            await self._events.publish(ApplicationEvent(event_type=EventType.SYNTHESIS_COMPLETED, durability=EventDurability.DURABLE, session_id=plan.session_id or "", run_id=plan.run_id, payload={"plan_id": plan_id, "result": self._results[plan_id]}))
+            await self._events.publish(ApplicationEvent(event_type=EventType.SYNTHESIS_COMPLETED, durability=EventDurability.DURABLE, session_id=plan.session_id or "", run_id=plan.run_id, payload={"activity_id": f"synthesis:{plan_id}", "activity_type": "synthesis", "name": "synthesis", "parent_activity_id": f"plan:{plan_id}", "plan_id": plan_id, "status": "completed"}))
 
     async def _publish_plan_terminal(self, execution, succeeded: bool) -> None:
         if self._events is None:
@@ -178,15 +173,33 @@ class WorkerSchedulerService(PlanScheduler):
             durability=EventDurability.DURABLE,
             session_id=execution.session_id,
             run_id=execution.run_id,
-            payload={"plan_id": execution.plan_id, "status": "completed" if succeeded else "failed"},
+            payload={"activity_id": f"plan:{execution.plan_id}", "activity_type": "plan", "name": "execution_plan", "parent_activity_id": f"run:{execution.run_id}", "plan_id": execution.plan_id, "status": "completed" if succeeded else "failed"},
         ))
 
     async def _publish_task(self, execution, event_type: str, payload: dict[str, object]) -> None:
         if self._events is None:
             return
         from domain.events import ApplicationEvent, EventDurability
-
-        await self._events.publish(ApplicationEvent(event_type=event_type, durability=EventDurability.DURABLE, session_id=execution.session_id, run_id=execution.run_id, payload={"plan_id": execution.plan_id, "task_id": execution.task.task_id, "title": execution.task.title, **payload}))
+        key = f"{execution.task.task_id}:{execution.execution_generation}"
+        started = self._task_started.get(key)
+        activity_id = f"task:{execution.task.task_id}:{execution.execution_generation}"
+        details: dict[str, object] = {
+            "activity_id": activity_id,
+            "activity_type": "task",
+            "name": execution.task.title,
+            "parent_activity_id": f"plan:{execution.plan_id}",
+            "plan_id": execution.plan_id,
+            "task_id": execution.task.task_id,
+            "title": execution.task.title,
+            "execution_generation": execution.execution_generation,
+            **payload,
+        }
+        if started:
+            details["started_at"] = started[0].isoformat()
+            if event_type in {"task.completed", "task.failed", "task.cancelled"}:
+                details["duration_ms"] = int((perf_counter() - started[1]) * 1000)
+                details["completed_at"] = datetime.now(timezone.utc).isoformat()
+        await self._events.publish(ApplicationEvent(event_type=event_type, durability=EventDurability.DURABLE, session_id=execution.session_id, run_id=execution.run_id, payload=details))
 
     def synthesized_result(self, plan_id: str) -> str | None:
         return self._results.get(plan_id)

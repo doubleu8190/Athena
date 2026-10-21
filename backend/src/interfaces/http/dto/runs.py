@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from application.runs.responses import CommandEnqueueResponse, CommandStatusResponse as ApplicationCommandStatusResponse
+from application.common.responses import RunTimelineResponse as ApplicationRunTimelineResponse
+from interfaces.http.dto.sessions import RunSummaryResponse
 
 
 class SubmitRunRequest(BaseModel):
@@ -69,4 +72,44 @@ class CommandStatusResponse(BaseModel):
             status=value.status.value if hasattr(value.status, "value") else value.status,
             result=value.result,
             error=value.error,
+        )
+
+
+class RunTimelineEventResponse(BaseModel):
+    session_seq: int
+    event_type: str
+    occurred_at: datetime | str
+    run_id: str | None
+    payload: dict[str, object]
+
+
+class RunTimelineResponse(BaseModel):
+    run: RunSummaryResponse
+    events: list[RunTimelineEventResponse]
+    next_after_seq: int
+    has_more: bool
+    links: dict[str, list[str]]
+
+    @classmethod
+    def from_application(cls, value: ApplicationRunTimelineResponse) -> "RunTimelineResponse":
+        return cls(
+            run=RunSummaryResponse(
+                run_id=value.run.run_id,
+                session_id=value.run.session_id,
+                status=value.run.status,
+                root_thread_id=value.run.root_thread_id,
+                error=value.run.error,
+                created_at=value.run.created_at,
+                updated_at=value.run.updated_at,
+            ),
+            events=[RunTimelineEventResponse(
+                session_seq=event.session_seq,
+                event_type=event.event_type,
+                occurred_at=event.occurred_at,
+                run_id=event.run_id,
+                payload=event.payload,
+            ) for event in value.events],
+            next_after_seq=value.next_after_seq,
+            has_more=value.has_more,
+            links={key: list(items) for key, items in value.links.items()},
         )

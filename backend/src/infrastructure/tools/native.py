@@ -52,14 +52,26 @@ class BuiltinToolExecutor(ToolExecutionPort):
         try:
             args = request.arguments
             if request.tool_name in {"read_local_file", "read_file"}:
-                output = self._path(str(args["path"])).read_text(encoding=str(args.get("encoding", "utf-8")))
+                path = self._path(str(args["path"]))
+                output = await asyncio.to_thread(
+                    path.read_text, encoding=str(args.get("encoding", "utf-8"))
+                )
             elif request.tool_name in {"write_file", "write_file_content"}:
-                path = self._path(str(args["path"])); path.parent.mkdir(parents=True, exist_ok=True)
+                path = self._path(str(args["path"]))
+                await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
                 mode = "a" if args.get("append") else "w"
-                path.open(mode, encoding=str(args.get("encoding", "utf-8"))).write(str(args.get("content", "")))
+                content = str(args.get("content", ""))
+                encoding = str(args.get("encoding", "utf-8"))
+                await asyncio.to_thread(_write_text, path, mode, encoding, content)
                 output = f"wrote {path.relative_to(self._root)}"
             elif request.tool_name in {"list_directory", "list_files"}:
-                output = "\n".join(sorted(item.name for item in self._path(str(args.get("path", "."))).iterdir() if args.get("include_hidden") or not item.name.startswith(".")))
+                path = self._path(str(args.get("path", ".")))
+                include_hidden = bool(args.get("include_hidden"))
+                entries = await asyncio.to_thread(lambda: tuple(path.iterdir()))
+                output = "\n".join(
+                    sorted(item.name for item in entries
+                           if include_hidden or not item.name.startswith("."))
+                )
             elif request.tool_name in {"exec_shell", "shell"}:
                 timeout = min(float(args.get("timeout", 60)), float(self._sandbox_max_timeout))
                 command = str(args["command"])
@@ -104,5 +116,10 @@ class BuiltinToolExecutor(ToolExecutionPort):
 
 
 NativeToolExecution = BuiltinToolExecutor
+
+
+def _write_text(path: Path, mode: str, encoding: str, content: str) -> None:
+    with path.open(mode, encoding=encoding) as stream:
+        stream.write(content)
 
 __all__ = ["BuiltinToolExecutor", "NativeToolExecution"]

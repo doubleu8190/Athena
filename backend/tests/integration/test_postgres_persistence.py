@@ -129,3 +129,42 @@ async def test_tool_and_mcp_repositories_against_postgresql() -> None:
         assert await servers.get(server_name) is None
     finally:
         await engine.dispose()
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_memory_access_and_expiration_against_postgresql() -> None:
+    """验证真实 PostgreSQL 并发访问累加及两种期限过滤；未配置数据库时跳过。"""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import delete, update
+    from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
+    from infrastructure.persistence.postgres.models import MemoryModel
+    from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository
+
+    engine = create_async_engine(DATABASE_URL)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    repository = PostgresMemoryRepository(factory)
+    prefix = f"memory-test-{uuid4().hex}"
+    ids = [f"{prefix}-{suffix}" for suffix in ("active", "ttl", "validity")]
+    try:
+        for memory_id in ids:
+            await repository.create_memory(MemoryWriteCommand(prefix, operation_key=memory_id))
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        async with factory() as session, session.begin():
+            await session.execute(update(MemoryModel).where(MemoryModel.id == ids[1]).values(expires_at=past))
+            await session.execute(update(MemoryModel).where(MemoryModel.id == ids[2]).values(valid_until=past))
+        assert [item.id for item in await repository.search(MemorySearchRequest(prefix))] == ids[:1]
+        before = await repository.get(ids[0])
+        await asyncio.gather(*(repository.record_access([ids[0], ids[0]]) for _ in range(5)))
+        after = await repository.get(ids[0])
+        assert before.access_count == 0 and after.access_count == 5
+        assert after.last_accessed_at is not None
+        assert after.last_observed_at == before.last_observed_at
+        page = await repository.list_memories(MemoryListRequest(expired_only=True, limit=10000))
+        assert set(ids[1:]) <= {item.id for item in page.items}
+    finally:
+        async with factory() as session, session.begin():
+            await session.execute(delete(MemoryModel).where(MemoryModel.id.in_(ids)))
+        await engine.dispose()

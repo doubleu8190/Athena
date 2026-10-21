@@ -147,7 +147,7 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     await approvals.resolve_batch("b-1", {"a-1": ApprovalDecision.DENIED}, run_id="r-1")
 
     memory = PostgresMemoryRepository(factory(db))
-    mem_row = SimpleNamespace(id="m-1", content="hello memory", metadata_json='{"x":1}', source_kind="chat", status="active")
+    mem_row = SimpleNamespace(id="m-1", content="hello memory", metadata_json='{"x":1}', source_kind="chat", status="active", created_at=NOW.isoformat(), expires_at=None, last_accessed_at=None, access_count=0, last_observed_at=NOW.isoformat(), valid_until=None, validity_status="valid")
     db.results = [Result(rows=[mem_row])]
     assert (await memory.search(MemorySearchRequest("hello")))[0].id == "m-1"
     db.results = [Result(rows=[mem_row])]
@@ -397,3 +397,32 @@ async def test_postgres_resource_schema_and_session_context(monkeypatch):
     async with resource.session() as value:
         assert isinstance(value, Session)
     await resource.stop()
+
+@pytest.mark.asyncio
+async def test_memory_access_is_atomic_and_management_reads_do_not_write():
+    """验证访问原子累加、ID 去重以及管理查询无写入，无业务异常。"""
+    from sqlalchemy.dialects import postgresql
+
+    class CapturingDB(DB):
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return await super().execute(statement)
+
+    db = CapturingDB()
+    db.statements = []
+    repository = PostgresMemoryRepository(factory(db))
+    assert await repository.record_access([]) == 0
+    assert not db.statements
+    assert await repository.record_access(["m-1", "m-1", "m-2"]) == 1
+    compiled = db.statements[0].compile(dialect=postgresql.dialect())
+    assert "coalesce(memories.access_count" in str(compiled)
+    assert "last_accessed_at=" in str(compiled)
+    assert any(isinstance(value, list) and set(value) == {"m-1", "m-2"} for value in compiled.params.values())
+    db.statements.clear()
+    await repository.search(MemorySearchRequest("fact"))
+    await repository.list_memories(MemoryListRequest(expired_only=True))
+    assert all(statement.is_select for statement in db.statements)
+    search_sql = str(db.statements[0].compile(dialect=postgresql.dialect()))
+    assert "memories.expires_at" in search_sql and "memories.valid_until" in search_sql
+    list_sql = str(db.statements[1].compile(dialect=postgresql.dialect()))
+    assert "<= now()" in list_sql

@@ -250,6 +250,9 @@ class InMemoryMemoryPort(MemoryRepositoryPort):
     async def update_validity(self, memory_id: str, validity_status: str, *, valid_until: str | None = None) -> bool: return memory_id in self.items
     async def delete(self, memory_id: str) -> None:
         if memory_id in self.items: self.items[memory_id] = replace(self.items[memory_id], status=MemoryStatus.DELETED)
+    async def record_access(self, memory_ids: list[str]) -> int:
+        """测试端口无需统计，返回 0，无业务异常。"""
+        return 0
     async def flush_access_stats(self) -> int: return 0
 
 
@@ -395,6 +398,9 @@ class InMemoryEventStore(
         return queue, len(self.items.get(session_id, []))
     async def list_events_between(self, session_id: str, after: int = 0, upto: int | None = None):
         values = self.items.get(session_id, []); return values[after:upto]
+    async def list_events_for_run(self, session_id: str, run_id: str, *, after: int = 0, limit: int = 200):
+        values = [event for event in self.items.get(session_id, []) if event.run_id == run_id and (event.session_seq or 0) > after]
+        return values[:limit], len(values) > limit
     async def close_subscription(self, session_id: str, queue: asyncio.Queue[ApplicationEvent]) -> None:
         if queue in self.subscribers.get(session_id, []): self.subscribers[session_id].remove(queue)
 

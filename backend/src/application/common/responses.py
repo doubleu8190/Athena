@@ -65,6 +65,24 @@ class RunSummaryResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class RunTimelineEventResponse:
+    session_seq: int
+    event_type: str
+    occurred_at: datetime | str
+    run_id: str | None
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RunTimelineResponse:
+    run: RunSummaryResponse
+    events: tuple[RunTimelineEventResponse, ...]
+    next_after_seq: int
+    has_more: bool
+    links: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class CommandEnqueueResponse:
     command_id: str
     run_id: str | None
@@ -210,6 +228,13 @@ class MemoryResponse:
     score: float | None = None
     source: str | None = None
     status: str = "active"
+    created_at: str = ""
+    expires_at: str | None = None
+    last_accessed_at: str | None = None
+    access_count: int = 0
+    last_observed_at: str | None = None
+    valid_until: str | None = None
+    validity_status: str = "valid"
 
 
 @dataclass(frozen=True, slots=True)

@@ -109,4 +109,12 @@ def _to_response(value: MemoryRecord) -> MemoryResponse:
         score=value.score,
         source=value.source,
         status=value.status.value,
+        created_at=value.created_at,
+        expires_at=value.expires_at,
+        last_accessed_at=value.last_accessed_at,
+        access_count=value.access_count,
+        last_observed_at=value.last_observed_at,
+        valid_until=value.valid_until,
+        validity_status=value.validity_status,
+
     )

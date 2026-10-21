@@ -268,6 +268,14 @@ def _memory_response(value: Any) -> dict[str, Any]:
         "id": value.id,
         "content": value.content,
         "metadata": dict(value.metadata),
+        "created_at": value.created_at,
+        "expires_at": value.expires_at,
+        "last_accessed_at": value.last_accessed_at,
+        "access_count": value.access_count,
+        "last_observed_at": value.last_observed_at,
+        "valid_until": value.valid_until,
+        "validity_status": value.validity_status,
+
     }
     if value.score is not None:
         result["score"] = value.score

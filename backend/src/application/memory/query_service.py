@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from domain.memory.query_ports import MemoryQueryPort
+from application.memory.service import _to_response as record_to_response
 from application.common.responses import MemoryPageResponse, MemoryResponse
 from domain.memory import MemoryRecord, MemoryPage
 
@@ -38,8 +39,16 @@ def _to_response(value: Any) -> MemoryResponse:
     if isinstance(value, MemoryResponse):
         return value
     if isinstance(value, MemoryRecord):
-        return MemoryResponse(value.id, value.content, dict(value.metadata), value.score, value.source, value.status.value)
-    return MemoryResponse(str(value.get("id", "")), str(value.get("content", "")), dict(value.get("metadata") or {}), value.get("score"), value.get("source"), str(value.get("status", "active")))
+        return record_to_response(value)
+    return MemoryResponse(str(value.get("id", "")), str(value.get("content", "")), dict(value.get("metadata") or {}), value.get("score"), value.get("source"), str(value.get("status", "active")),
+        created_at=value.get("created_at", ""),
+        expires_at=value.get("expires_at", None),
+        last_accessed_at=value.get("last_accessed_at", None),
+        access_count=value.get("access_count", 0),
+        last_observed_at=value.get("last_observed_at", None),
+        valid_until=value.get("valid_until", None),
+        validity_status=value.get("validity_status", "valid"),
+    )
 
 
 __all__ = ["MemoryQueryService"]

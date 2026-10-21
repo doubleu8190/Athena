@@ -87,7 +87,9 @@ function MemoryView() {
       className: "whitespace-nowrap",
       render: (m) => (
         <span className="text-xs text-athena-muted">
-          {m.access_count} 次 · {formatDateTime(m.expires_at)} 到期
+          {m.access_count} 次 · 最近访问 {formatDateTime(m.last_accessed_at)}
+          {m.expires_at ? ` · ${formatDateTime(m.expires_at)} 到期` : ""}
+          {m.valid_until ? ` · 事实有效至 ${formatDateTime(m.valid_until)}` : ""}
         </span>
       ),
     },

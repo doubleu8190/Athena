@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import DateTime, cast, func, or_, select, update
 
 from domain.files import Attachment, FileChunk, FileVectorSearchPort, VectorIndexerPort
 from domain.memory import MemoryVectorSearchPort
@@ -83,6 +83,8 @@ class PostgresMemoryVectorIndex(MemoryVectorSearchPort):
                 MemoryModel.deleted_time.is_(None),
                 MemoryModel.status == "active",
                 MemoryModel.validity_status != "invalid",
+                *[or_(column.is_(None), cast(column, DateTime(timezone=True)) > func.now())
+                  for column in (MemoryModel.expires_at, MemoryModel.valid_until)],
             )
             if session_id:
                 statement = statement.where(MemoryModel.session_id == session_id)

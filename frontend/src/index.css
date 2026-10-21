@@ -355,7 +355,7 @@
   padding: 6px 16px;
   border-radius: 9999px;
   font-size: 12px;
-  color: #737373;
+  color: #000;
 }
 
 /* Chat workspace visual layer. Scoped so management views retain the existing theme. */
@@ -466,3 +466,8 @@
   .processing-group { margin-left: 8px; padding-left: 12px; }
   .timeline-node::before { left: -18px; width: 8px; height: 8px; }
 }
+
+/* Run chain panels use opaque surfaces for readable text in the light workspace. */
+.chat-workspace-main .run-chain-toolbar { background-color: var(--chat-bg); }
+.chat-workspace-main .run-chain-details { background-color: var(--chat-surface); }
+.chat-workspace-main .run-chain-view-selected { background-color: #e7eef0; }

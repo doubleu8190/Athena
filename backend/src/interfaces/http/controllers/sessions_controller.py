@@ -24,6 +24,7 @@ from interfaces.http.dto.sessions import (
     MessageResponse,
     RunSummaryResponse,
 )
+from interfaces.http.dto.runs import RunTimelineResponse
 
 
 def build_sessions_router(
@@ -119,5 +120,21 @@ def build_sessions_router(
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return [RunSummaryResponse.from_application(value) for value in values]
+
+    @router.get("/{session_id}/runs/{run_id}/timeline", response_model=RunTimelineResponse)
+    async def get_run_timeline(
+        session_id: str,
+        run_id: str,
+        after: int = 0,
+        limit: int = 200,
+        runs: RunQueryService = Depends(run_query),
+    ) -> RunTimelineResponse:
+        try:
+            value = await runs.timeline(session_id, run_id, after=after, limit=limit)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="session_not_found") from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="run_not_found") from exc
+        return RunTimelineResponse.from_application(value)
 
     return router

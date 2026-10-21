@@ -52,6 +52,38 @@ FastAPI 根路径为 `/api`，默认监听 `http://127.0.0.1:8000`。JSON 请求
 
 返回运行摘要数组：`run_id/session_id/status/root_thread_id/error/created_at/updated_at`。
 
+### `GET /api/sessions/{session_id}/runs/{run_id}/timeline?after=0&limit=200`
+
+读取指定会话内单次运行的历史链路。服务端先校验 `run_id` 属于
+`session_id`，不匹配返回 404 `run_not_found`。`after` 使用会话事件序号游标，
+`limit` 默认 200、最大 500；返回超过当前页的数据时 `has_more=true`。
+
+```json
+{
+  "run": {"run_id":"run-1","session_id":"session-1","status":"completed"},
+  "events": [{
+    "session_seq": 42,
+    "event_type": "node.completed",
+    "occurred_at": "2026-10-20T04:30:00Z",
+    "run_id": "run-1",
+    "payload": {
+      "activity_id": "node:run-1:prepare_request",
+      "activity_type": "node",
+      "name": "prepare_request",
+      "status": "completed",
+      "duration_ms": 42,
+      "parent_activity_id": "run:run-1"
+    }
+  }],
+  "next_after_seq": 42,
+  "has_more": false,
+  "links": {"retrieval_run_ids": [], "plan_ids": [], "task_ids": []}
+}
+```
+
+链路 payload 只返回活动标识、状态、关联 ID、耗时、计数和安全错误摘要；
+完整 prompt、工具参数、工具输出和 traceback 不通过该接口返回。
+
 ### `POST /api/sessions/{session_id}/runs`（202）
 
 JSON 请求：

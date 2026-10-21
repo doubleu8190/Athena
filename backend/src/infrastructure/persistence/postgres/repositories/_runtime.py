@@ -6,11 +6,12 @@ import asyncio
 import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import DateTime, cast, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from domain.approval import ApprovalDecision, ApprovalRequest, ApprovalStatus
 from domain.approval.ports import ApprovalRepository
@@ -445,6 +446,51 @@ class PostgresEventRepository(
             for row in rows
         ]
 
+    async def list_events_for_run(
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        after: int = 0,
+        limit: int = 200,
+    ) -> tuple[list[ApplicationEvent], bool]:
+        """按会话和运行游标读取链路事件，避免跨会话 run ID 越权。"""
+        bounded_limit = min(max(limit, 1), 500)
+        async with self._session_factory() as session:
+            query = (
+                select(AgentEventModel)
+                .where(
+                    AgentEventModel.session_id == session_id,
+                    AgentEventModel.run_id == run_id,
+                    AgentEventModel.session_seq > after,
+                )
+                .order_by(AgentEventModel.session_seq)
+                .limit(bounded_limit + 1)
+            )
+            rows = (await session.execute(query)).scalars().all()
+        has_more = len(rows) > bounded_limit
+        rows = rows[:bounded_limit]
+        return [
+            ApplicationEvent(
+                row.event_type,
+                row.durability,
+                row.session_id,
+                row.session_seq,
+                row.run_id,
+                row.message_id,
+                row.attachment_id,
+                row.stream_id,
+                row.stream_type,
+                None,
+                bool(row.is_complete),
+                row.parent_run_id,
+                row.transition_id,
+                datetime.fromisoformat(row.occurred_at),
+                _json(row.payload_json, {}),
+            )
+            for row in rows
+        ], has_more
+
     async def close_subscription(
         self, session_id: str, queue: asyncio.Queue[ApplicationEvent]
     ) -> None:
@@ -603,6 +649,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 MemoryModel.status == MemoryStatus.ACTIVE.value,
                 MemoryModel.validity_status != "invalid",
                 MemoryModel.deleted_time.is_(None),
+                *self._unexpired_conditions(),
             )
             if filters.get("session_id"):
                 statement = statement.where(
@@ -613,13 +660,23 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 .scalars()
                 .all()
             )
-        return [self._domain(row, score=1.0) for row in rows]
+        values = [self._domain(row, score=1.0) for row in rows]
+        if request.record_access:
+            await self.record_access([value.id for value in values])
+        return values
 
     async def list_memories(self, request: MemoryListRequest):
         async with self._session_factory() as session:
             conditions = [MemoryModel.status != MemoryStatus.DELETED.value]
             if request.session_id:
                 conditions.append(MemoryModel.session_id == request.session_id)
+            base_conditions = list(conditions)
+            expired_condition = or_(
+                cast(MemoryModel.expires_at, DateTime(timezone=True)) <= func.now(),
+                cast(MemoryModel.valid_until, DateTime(timezone=True)) <= func.now(),
+            )
+            if request.expired_only:
+                conditions.append(expired_condition)
             rows = (
                 (
                     await session.execute(
@@ -641,11 +698,15 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 )
                 or 0
             )
+            expired = await session.scalar(select(func.count()).select_from(MemoryModel).where(*base_conditions, expired_condition)) or 0
+            recent_week = await session.scalar(select(func.count()).select_from(MemoryModel).where(
+                *base_conditions, cast(MemoryModel.created_at, DateTime(timezone=True)) >= datetime.now(timezone.utc) - timedelta(days=7)
+            )) or 0
         values = tuple(self._domain(row) for row in rows)
         return MemoryPage(
             values,
             int(total),
-            {"total": int(total), "expired": 0, "recent": len(values)},
+            {"total": int(total), "expired": int(expired), "recent_week": int(recent_week)},
         )
 
     async def get(self, memory_id: str):
@@ -747,6 +808,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                         last_observed_at=_now(),
                         validity_status=old.validity_status,
                         valid_until=old.valid_until,
+                        expires_at=old.expires_at,
                         revision=old.revision + 1,
                     )
                 )
@@ -773,7 +835,32 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                     .values(status=MemoryStatus.DELETED.value, deleted_time=_now())
                 )
 
+    async def record_access(self, memory_ids: list[str]) -> int:
+        """原子记录召回访问；参数 memory_ids 为本次选中的 ID 列表，重复 ID 只计一次。
+
+        返回更新的记录数；数据库异常向上传播，不主动抛出业务异常。
+        """
+        if not memory_ids:
+            return 0
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(MemoryModel)
+                    .where(MemoryModel.id.in_(set(memory_ids)), MemoryModel.status == "active", MemoryModel.validity_status != "invalid", MemoryModel.deleted_time.is_(None), *self._unexpired_conditions())
+                    .values(access_count=func.coalesce(MemoryModel.access_count, 0) + 1, last_accessed_at=_now())
+                )
+        return int(result.rowcount)
+
+    @staticmethod
+    def _unexpired_conditions() -> list[ColumnElement[bool]]:
+        """生成有效期限条件；无参数，返回 SQL 条件列表，不主动抛出业务异常。"""
+        return [
+            or_(column.is_(None), cast(column, DateTime(timezone=True)) > func.now())
+            for column in (MemoryModel.expires_at, MemoryModel.valid_until)
+        ]
+
     async def flush_access_stats(self) -> int:
+        """统计已随访问提交；无参数，返回待刷新的数量 0，无业务异常。"""
         return 0
 
     @staticmethod
@@ -785,6 +872,13 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
             score,
             row.source_kind,
             MemoryStatus(row.status),
+            created_at=row.created_at,
+            expires_at=row.expires_at,
+            last_accessed_at=row.last_accessed_at,
+            access_count=row.access_count,
+            last_observed_at=row.last_observed_at,
+            valid_until=row.valid_until,
+            validity_status=row.validity_status,
         )
 
 class PostgresRetrievalRepository(RetrievalQueryPort):

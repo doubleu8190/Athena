@@ -13,6 +13,7 @@
 | 7 | [前端复刻说明](athena-frontend.md) | 定义页面、状态、SSE 投影和用户流程 |
 | 8 | [评测系统设计](evaluation-system-design.md) | 定义评测层次、数据模型、指标、实验和回归门禁 |
 | 9 | [评测系统实施](evaluation-system-implementation.md) | 定义实施阶段、代码落点、表结构、接口、测试和发布顺序 |
+| 10 | [任务运行链路查看方案](tracing-implementation.md) | 定义基于现有运行事件和 SSE 的历史链路 API、前端时间线/执行树、事件协议和落地阶段 |
 
 `athena-target-implementation.md` 是之前留下的目标架构设计稿，描述范围大于当前已接入实现；它不是本套“当前系统功能”文档的依据。`optional-none-audit.md` 是代码审计记录，也不是产品功能定义。
 
@@ -29,6 +30,9 @@ flowchart TD
   T --> U
   F --> U
   M --> U
+  R --> X[任务运行链路查看方案]
+  X --> A
+  X --> U
 ```
 
 ## 启动和验证

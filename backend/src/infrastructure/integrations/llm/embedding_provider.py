@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -22,8 +24,13 @@ class EmbeddingProvider:
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
-        result = self._embedder(texts)
-        if hasattr(result, "__await__"):
+        if inspect.iscoroutinefunction(self._embedder) or inspect.iscoroutinefunction(
+            getattr(self._embedder, "__call__", None)
+        ):
+            result = self._embedder(texts)
+        else:
+            result = await asyncio.to_thread(self._embedder, texts)
+        if inspect.isawaitable(result):
             result = await result
         return [list(map(float, value)) for value in result]
 

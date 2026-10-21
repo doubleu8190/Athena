@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -20,7 +22,14 @@ RootGraphDependencies = RootWorkflowDependencies
 
 
 async def _publish(
-    dependencies: RootGraphDependencies, event_type: str, state: Mapping[str, Any]
+    dependencies: RootGraphDependencies,
+    event_type: str,
+    state: Mapping[str, Any],
+    *,
+    node_name: str,
+    started_at: datetime | None = None,
+    duration_ms: int | None = None,
+    error: str | None = None,
 ) -> None:
     publisher = getattr(dependencies, "event_publisher", None)
     if publisher is None or not hasattr(publisher, "publish"):
@@ -37,7 +46,17 @@ async def _publish(
                 session_id=str(request.get("session_id", "")),
                 run_id=request.get("run_id"),
                 message_id=request.get("message_id"),
-                payload={"node": event_type},
+                payload={
+                    "activity_id": f"node:{request.get('run_id', '')}:{node_name}",
+                    "activity_type": "node",
+                    "parent_activity_id": f"run:{request.get('run_id', '')}",
+                    "node": node_name,
+                    "name": node_name,
+                    "status": "running" if event_type == "node.started" else "failed" if event_type == "node.failed" else "completed",
+                    **({"started_at": started_at.isoformat()} if started_at else {}),
+                    **({"completed_at": datetime.now(timezone.utc).isoformat(), "duration_ms": duration_ms} if duration_ms is not None else {}),
+                    **({"error": {"code": "node_failed", "message": error, "stage": node_name}} if error else {}),
+                },
             ),
         )
     except Exception:
@@ -50,11 +69,13 @@ def _node(
     dependencies: RootGraphDependencies,
 ):
     async def wrapped(state: RootGraphState) -> dict[str, Any]:
-        await _publish(dependencies, "node.started", state)
+        started_at = datetime.now(timezone.utc)
+        started_clock = perf_counter()
+        await _publish(dependencies, "node.started", state, node_name=name, started_at=started_at)
         try:
             value = await call(handler, state)
         except Exception as exc:
-            await _publish(dependencies, "node.failed", state)
+            await _publish(dependencies, "node.failed", state, node_name=name, started_at=started_at, duration_ms=int((perf_counter() - started_clock) * 1000), error=type(exc).__name__)
             return {
                 "status": "failed",
                 "error": {
@@ -64,7 +85,7 @@ def _node(
                 },
                 "next_route": "assemble_final_response",
             }
-        await _publish(dependencies, "node.completed", state)
+        await _publish(dependencies, "node.completed", state, node_name=name, started_at=started_at, duration_ms=int((perf_counter() - started_clock) * 1000))
         return value or {}
 
     wrapped.__name__ = name

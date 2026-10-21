@@ -16,6 +16,7 @@ from infrastructure.orchestration.langgraph.runtime.root_agent import Configured
 class MemoryRepository:
     def __init__(self) -> None:
         self.request: MemorySearchRequest | None = None
+        self.accessed: list[str] = []
 
     async def search(self, request: MemorySearchRequest) -> list[MemoryRecord]:
         self.request = request
@@ -27,6 +28,11 @@ class MemoryRepository:
                 score=1.0,
             )
         ]
+
+    async def record_access(self, memory_ids: list[str]) -> int:
+        """保存本次选中的 ID；返回记录数，无业务异常。"""
+        self.accessed.extend(memory_ids)
+        return len(memory_ids)
 
 
 class VectorIndex:
@@ -64,6 +70,7 @@ async def test_memory_context_recalls_a_memory_from_an_earlier_session() -> None
 
     assert result.status == "succeeded"
     assert [item.content for item in result.items] == ["fruit_preference: 苹果"]
+    assert repository.accessed == ["turn:old:0"]
     assert repository.request is not None
     assert not repository.request.filters
     assert "session_id" not in vectors.kwargs

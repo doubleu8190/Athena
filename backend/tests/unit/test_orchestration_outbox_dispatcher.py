@@ -130,6 +130,13 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
             {"approval_id": "approval-1", "decision": "approved"},
         ),
         (
+            "ApprovalCancelled",
+            "approval.resolved",
+            "approval:approval-1",
+            "cancelled",
+            {"approval_id": "approval-1", "decision": "cancelled"},
+        ),
+        (
             "PlanCancelled",
             "plan.cancelled",
             "plan:plan-1",

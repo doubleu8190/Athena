@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import DateTime, cast, func, or_, select, update
+from sqlalchemy import DateTime, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -364,13 +364,8 @@ class PostgresRunRepository(
                     run.cancellation_external_effect_status = external_effect_status
                     run.updated_at = now_iso
                     await self._cancel_root_resume_jobs(session, run_id, now)
-                    await session.execute(
-                        update(ApprovalRecordModel)
-                        .where(
-                            ApprovalRecordModel.run_id == run_id,
-                            ApprovalRecordModel.status == "pending",
-                        )
-                        .values(status="cancelled")
+                    await self._cancel_pending_approvals(
+                        session, run_id=run_id, plan=None, now=now
                     )
                     await session.execute(
                         update(AgentCommandModel)
@@ -441,21 +436,6 @@ class PostgresRunRepository(
                 execution_ids = select(TaskExecutionModel.execution_id).where(
                     TaskExecutionModel.task_id.in_(task_ids)
                 )
-                pending_resume_approval_ids = list(
-                    (
-                        await session.execute(
-                            select(WorkerJobModel.approval_id).where(
-                                WorkerJobModel.execution_id.in_(execution_ids),
-                                WorkerJobModel.job_type == "resume_worker",
-                                WorkerJobModel.status == "pending",
-                                WorkerJobModel.approval_id.is_not(None),
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-
                 await session.execute(
                     update(RoundTaskModel)
                     .where(
@@ -537,23 +517,8 @@ class PostgresRunRepository(
                     )
                     .values(status="cancel_requested", updated_at=now)
                 )
-                approval_filter = [
-                    ApprovalRecordModel.run_id == run_id,
-                    ApprovalRecordModel.status == "pending",
-                ]
-                if pending_resume_approval_ids:
-                    approval_filter.append(
-                        ApprovalRecordModel.approval_id.in_(
-                            pending_resume_approval_ids
-                        )
-                    )
-                    approval_predicate = or_(*approval_filter)
-                else:
-                    approval_predicate = approval_filter[0] & approval_filter[1]
-                await session.execute(
-                    update(ApprovalRecordModel)
-                    .where(approval_predicate)
-                    .values(status="cancelled")
+                await self._cancel_pending_approvals(
+                    session, run_id=run_id, plan=plan, now=now
                 )
                 await self._cancel_root_resume_jobs(session, run_id, now)
                 session.add(
@@ -582,6 +547,58 @@ class PostgresRunRepository(
                     True,
                     external_effect_status,
                 )
+
+    async def _cancel_pending_approvals(
+        self,
+        session: AsyncSession,
+        *,
+        run_id: str,
+        plan: AgentPlanModel | None,
+        now: datetime,
+    ) -> None:
+        """Cancel pending approvals and persist their user events atomically."""
+        approvals = (
+            await session.execute(
+                select(ApprovalRecordModel)
+                .where(
+                    ApprovalRecordModel.run_id == run_id,
+                    ApprovalRecordModel.status == "pending",
+                )
+                .with_for_update()
+            )
+        ).scalars().all()
+        for approval in approvals:
+            approval.status = "cancelled"
+            approval_plan_id = approval.plan_id or (plan.plan_id if plan else None)
+            session.add(
+                OrchestrationOutboxModel(
+                    message_id=uuid4().hex,
+                    dedupe_key=f"approval:{approval.approval_id}:cancelled",
+                    event_type="ApprovalCancelled",
+                    correlation_id=run_id,
+                    plan_id=approval_plan_id,
+                    plan_version=plan.current_version if plan else None,
+                    round_id=plan.active_round_id if plan else None,
+                    payload_json={
+                        "approval_id": approval.approval_id,
+                        "task_id": approval.task_id,
+                        "execution_id": approval.execution_id,
+                        "worker_thread_id": approval.worker_thread_id,
+                        "interrupt_id": approval.interrupt_id,
+                        "tool_call_id": approval.tool_call_id,
+                        "tool_name": approval.tool_name,
+                        "decision": "cancelled",
+                        "parent_activity_id": (
+                            f"task:{approval.task_id}" if approval.task_id else None
+                        ),
+                    },
+                    schema_version=1,
+                    status="pending",
+                    attempt=0,
+                    available_at=now,
+                    occurred_at=now,
+                )
+            )
 
     async def _cancel_root_resume_jobs(
         self, session: AsyncSession, run_id: str, now: datetime

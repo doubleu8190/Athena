@@ -7,6 +7,7 @@ import pytest
 
 from domain.approval import ApprovalDecision
 from domain.runs import RunCancellationResult, RunStatus
+from infrastructure.persistence.postgres.models import ApprovalRecordModel
 from infrastructure.persistence.postgres.repositories.approval_repository import (
     PostgresApprovalRepository,
 )
@@ -35,9 +36,10 @@ class Result:
 
 
 class CancellationSession:
-    def __init__(self, run, plan=None):
+    def __init__(self, run, plan=None, approval_rows=()):
         self.run = run
         self.plan = plan
+        self.approval_rows = list(approval_rows)
         self.executed = []
         self.added = []
 
@@ -55,6 +57,9 @@ class CancellationSession:
 
     async def execute(self, statement):
         self.executed.append(statement)
+        descriptions = getattr(statement, "column_descriptions", ())
+        if descriptions and descriptions[0].get("entity") is ApprovalRecordModel:
+            return Result(rows=self.approval_rows)
         if len(self.executed) == 1:
             return Result(scalar=self.plan)
         if len(self.executed) == 2 and self.plan is not None:
@@ -87,7 +92,18 @@ async def test_cancel_plan_advances_epoch_and_persists_cancelling_outbox():
         active_round_id="round-2",
         updated_at=None,
     )
-    session = CancellationSession(run, plan)
+    approval = SimpleNamespace(
+        approval_id="approval-1",
+        plan_id="plan-1",
+        task_id="task-1",
+        execution_id="execution-1",
+        worker_thread_id="task:task-1:exec:1",
+        interrupt_id="interrupt-1",
+        tool_call_id="call-1",
+        tool_name="write_file",
+        status="pending",
+    )
+    session = CancellationSession(run, plan, approval_rows=[approval])
     repository = PostgresRunRepository(factory(session))
 
     status = await repository.cancel("run-1")
@@ -99,19 +115,42 @@ async def test_cancel_plan_advances_epoch_and_persists_cancelling_outbox():
         row.event_type == "PlanCancelling" and row.round_id == "round-2"
         for row in session.added
     )
+    approval_event = next(
+        row for row in session.added if row.event_type == "ApprovalCancelled"
+    )
+    assert approval.status == "cancelled"
+    assert approval_event.dedupe_key == "approval:approval-1:cancelled"
+    assert approval_event.payload_json["decision"] == "cancelled"
+    assert approval_event.round_id == "round-2"
     assert len(session.executed) >= 10
 
 
 @pytest.mark.asyncio
 async def test_cancel_without_a_plan_finishes_run_and_repeat_cancel_is_noop():
     run = SimpleNamespace(status="created", cancellation_epoch=0, updated_at=None)
-    session = CancellationSession(run)
+    root_approval = SimpleNamespace(
+        approval_id="approval-root",
+        plan_id=None,
+        task_id=None,
+        execution_id=None,
+        worker_thread_id=None,
+        interrupt_id=None,
+        tool_call_id="call-root",
+        tool_name="send_message",
+        status="pending",
+    )
+    session = CancellationSession(run, approval_rows=[root_approval])
     repository = PostgresRunRepository(factory(session))
 
     status = await repository.cancel("run-1")
     assert status == RunCancellationResult(RunStatus.CANCELLED, True, "none")
     assert run.status == "cancelled"
     assert run.cancellation_epoch == 1
+    assert root_approval.status == "cancelled"
+    assert any(
+        row.event_type == "ApprovalCancelled" and row.plan_id is None
+        for row in session.added
+    )
 
     already_cancelling = SimpleNamespace(
         status="cancelling",

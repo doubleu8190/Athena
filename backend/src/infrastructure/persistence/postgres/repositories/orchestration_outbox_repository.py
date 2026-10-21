@@ -24,6 +24,7 @@ _USER_EVENT_TYPES = (
     "PlanFailed",
     "ApprovalRequested",
     "ApprovalResolved",
+    "ApprovalCancelled",
     "RoundStarted",
     "RoundCompleted",
     "PlanCancelling",

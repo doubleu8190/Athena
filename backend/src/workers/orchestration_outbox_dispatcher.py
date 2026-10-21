@@ -21,6 +21,7 @@ _EVENT_TYPES = {
     "PlanFailed": (EventType.PLAN_FAILED, "failed", "plan"),
     "ApprovalRequested": (EventType.APPROVAL_REQUIRED, "waiting", "approval"),
     "ApprovalResolved": (EventType.APPROVAL_RESOLVED, "resolved", "approval"),
+    "ApprovalCancelled": (EventType.APPROVAL_RESOLVED, "cancelled", "approval"),
     "RoundStarted": (EventType.ROUND_STARTED, "running", "round"),
     "RoundCompleted": (EventType.ROUND_COMPLETED, "completed", "round"),
     "PlanCancelling": (EventType.PLAN_CANCELLING, "cancelling", "plan"),

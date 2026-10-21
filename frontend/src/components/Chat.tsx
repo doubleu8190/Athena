@@ -388,9 +388,21 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return
-    // 单一全局连接下后端从 data.session_id 取会话，不再依赖 URL 路径
-    sendEvent(ClientEventType.SESSION_STOP, { session_id: activeSessionId })
-  }, [activeSessionId, sendEvent])
+    const previousStatus = useChatStore.getState().agentStatus
+    clearError()
+    setAgentStatus("cancelling")
+    void apiClient.cancelSession(activeSessionId)
+      .then((response) => {
+        if (response.status === "cancelling") setAgentStatus("cancelling")
+        else if (response.status === "completed") setAgentStatus("completed")
+        else if (response.status === "failed") setAgentStatus("error")
+        else setAgentStatus("idle")
+      })
+      .catch((err) => {
+        if (useChatStore.getState().agentStatus === "cancelling") setAgentStatus(previousStatus)
+        setError(err instanceof Error ? err.message : "Failed to stop run")
+      })
+  }, [activeSessionId, clearError, setAgentStatus, setError])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -447,6 +459,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
   const isAgentActive =
     agentStatus === "thinking" ||
     agentStatus === "running" ||
+    agentStatus === "cancelling" ||
     agentStatus === "waiting_approval"
 
   // 只有存在助手答复且 Agent 已回到空闲状态时，才认为本次会话已完成。
@@ -858,11 +871,12 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
               <>
                 <button
                   onClick={handleStop}
+                  disabled={agentStatus === "cancelling"}
                   className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-danger text-white hover:opacity-90 flex-shrink-0 min-h-[48px] w-[48px]"
-                  title="取消运行"
-                  aria-label="取消运行"
+                  title={agentStatus === "cancelling" ? "正在停止运行" : "取消运行"}
+                  aria-label={agentStatus === "cancelling" ? "正在停止运行" : "取消运行"}
                 >
-                  <Square className="w-4 h-4" />
+                  {agentStatus === "cancelling" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
                 </button>
               </>
             ) : (

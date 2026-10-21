@@ -299,7 +299,7 @@ export type { ApplicationEventType }
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error"
 
-export type AgentStatus = "idle" | "thinking" | "running" | "paused" | "waiting_approval" | "completed" | "error"
+export type AgentStatus = "idle" | "thinking" | "running" | "cancelling" | "paused" | "waiting_approval" | "completed" | "error"
 
 export interface AppState {
   connectionStatus: ConnectionStatus

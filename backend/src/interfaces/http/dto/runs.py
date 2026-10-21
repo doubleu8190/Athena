@@ -7,7 +7,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from application.runs.responses import CommandEnqueueResponse, CommandStatusResponse as ApplicationCommandStatusResponse
+from application.runs.responses import (
+    CommandEnqueueResponse,
+    CommandStatusResponse as ApplicationCommandStatusResponse,
+    RunCancellationResponse,
+)
 from application.common.responses import RunTimelineResponse as ApplicationRunTimelineResponse
 from interfaces.http.dto.sessions import RunSummaryResponse
 
@@ -39,16 +43,18 @@ class SubmitRunResponse(BaseModel):
 
 
 class CancelCommandResponse(BaseModel):
-    command_id: str
+    command_id: str | None = None
     run_id: str | None = None
     status: str
+    already_terminal: bool
 
     @classmethod
-    def from_application(cls, value: CommandEnqueueResponse) -> "CancelCommandResponse":
+    def from_application(cls, value: RunCancellationResponse) -> "CancelCommandResponse":
         return cls(
             command_id=value.command_id,
             run_id=value.run_id,
-            status=value.status.value if hasattr(value.status, "value") else value.status,
+            status=value.status,
+            already_terminal=value.already_terminal,
         )
 
 

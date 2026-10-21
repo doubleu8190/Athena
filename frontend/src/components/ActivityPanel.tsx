@@ -21,7 +21,7 @@ export function ActivityPanel({ messages, agentStatus = "idle", onClose }: Activ
     return deriveOrchestrationView(plan, orchestrationTasks)
   }, [orchestrationPlans, orchestrationTasks])
   const latestGroupKey = groups[groups.length - 1]?.key
-  const isAgentActive = agentStatus === "thinking" || agentStatus === "running" || agentStatus === "waiting_approval"
+  const isAgentActive = agentStatus === "thinking" || agentStatus === "running" || agentStatus === "cancelling" || agentStatus === "waiting_approval"
   const isAgentPaused = agentStatus === "paused"
 
   useEffect(() => {

@@ -102,6 +102,8 @@ def test_run_command_routes_preserve_contract() -> None:
     )
     assert cancelled.status_code == 202
     assert cancelled.json()["run_id"] == "run-1"
+    assert cancelled.json()["status"] == "cancelling"
+    assert cancelled.json()["already_terminal"] is False
     retried_cancel = client.post(
         "/api/runs/run-1/cancel",
         headers={"Idempotency-Key": "stop-request-1"},

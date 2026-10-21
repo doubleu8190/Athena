@@ -22,6 +22,7 @@ from domain.runs import (
 from domain.sessions import SessionRepository
 
 from application.common.responses import CommandEnqueueResponse, CommandStatusResponse
+from application.runs.responses import RunCancellationResponse
 
 
 class CommandRejectedError(ValueError):
@@ -100,22 +101,33 @@ class RunCommandService:
 
     async def cancel_run(
         self, run_id: str, *, idempotency_key: str | None = None
-    ) -> CommandEnqueueResponse:
-        """按运行 ID 提交可安全重试的异步取消命令。"""
+    ) -> RunCancellationResponse:
+        """按运行 ID 受理可安全重试的异步取消命令。"""
         run = await self._runs.get(run_id)
         if run is None:
             raise RunNotFoundError(run_id)
         key = _cancel_idempotency_key(idempotency_key, f"run:{run_id}")
-        command = RunCommand(
-            command_id=_cancel_command_id(run_id, key),
-            command_type=CommandType.RUN_CANCEL,
+        command_id = _cancel_command_id(run_id, key)
+        status = _run_status(run.status)
+        if status in _TERMINAL_RUN_STATUSES:
+            return RunCancellationResponse(
+                command_id=await self._existing_cancel_command_id(command_id),
+                run_id=run_id,
+                status=status,
+                already_terminal=True,
+            )
+        if status == RunStatus.CANCELLING.value:
+            return RunCancellationResponse(
+                command_id=await self._existing_cancel_command_id(command_id),
+                run_id=run_id,
+                status=status,
+                already_terminal=False,
+            )
+        return await self._enqueue_cancellation(
+            command_id=command_id,
             session_id=run.session_id,
             run_id=run_id,
-            payload={"reason": "USER_REQUEST"},
-            issued_at=self._clock(),
         )
-        result = await self._commands.enqueue_command(command)
-        return _enqueue_response(result)
 
     async def cancel_session(
         self,
@@ -123,30 +135,72 @@ class RunCommandService:
         *,
         run_id: str | None = None,
         idempotency_key: str | None = None,
-    ) -> CommandEnqueueResponse:
+    ) -> RunCancellationResponse:
         """按会话取消当前运行；显式 run_id 优先。"""
         if await self._sessions.get(session_id) is None:
             raise SessionNotFoundError(session_id)
-        target_run_id = run_id
-        if target_run_id is not None:
-            target_run = await self._runs.get(target_run_id)
+        if run_id is not None:
+            target_run = await self._runs.get(run_id)
             if target_run is None or target_run.session_id != session_id:
-                raise RunNotFoundError(target_run_id)
+                raise RunNotFoundError(run_id)
         else:
-            active = await self._runs.get_active_for_session(session_id)
-            target_run_id = active.run_id if active is not None else None
-        scope = f"run:{target_run_id}" if target_run_id else f"session:{session_id}"
+            target_run = await self._runs.get_active_for_session(session_id)
+        if target_run is None:
+            _cancel_idempotency_key(idempotency_key, f"session:{session_id}")
+            return RunCancellationResponse(
+                command_id=None,
+                run_id=None,
+                status=RunStatus.CANCELLED.value,
+                already_terminal=True,
+            )
+        target_run_id = target_run.run_id
+        scope = f"run:{target_run_id}"
         key = _cancel_idempotency_key(idempotency_key, scope)
-        command = RunCommand(
-            command_id=_cancel_command_id(scope, key),
-            command_type=CommandType.RUN_CANCEL,
+        command_id = _cancel_command_id(scope, key)
+        status = _run_status(target_run.status)
+        if status in _TERMINAL_RUN_STATUSES:
+            return RunCancellationResponse(
+                command_id=await self._existing_cancel_command_id(command_id),
+                run_id=target_run_id,
+                status=status,
+                already_terminal=True,
+            )
+        if status == RunStatus.CANCELLING.value:
+            return RunCancellationResponse(
+                command_id=await self._existing_cancel_command_id(command_id),
+                run_id=target_run_id,
+                status=status,
+                already_terminal=False,
+            )
+        return await self._enqueue_cancellation(
+            command_id=command_id,
             session_id=session_id,
             run_id=target_run_id,
+        )
+
+    async def _enqueue_cancellation(
+        self, *, command_id: str, session_id: str, run_id: str
+    ) -> RunCancellationResponse:
+        """提交停止命令，并返回 API 对运行状态的受理视图。"""
+        command = RunCommand(
+            command_id=command_id,
+            command_type=CommandType.RUN_CANCEL,
+            session_id=session_id,
+            run_id=run_id,
             payload={"reason": "USER_REQUEST"},
             issued_at=self._clock(),
         )
-        result = await self._commands.enqueue_command(command)
-        return _enqueue_response(result)
+        await self._commands.enqueue_command(command)
+        return RunCancellationResponse(
+            command_id=command_id,
+            run_id=run_id,
+            status=RunStatus.CANCELLING.value,
+            already_terminal=False,
+        )
+
+    async def _existing_cancel_command_id(self, command_id: str) -> str | None:
+        """重复请求已完成终态转换时保留原命令身份。"""
+        return command_id if await self._commands.get_command(command_id) is not None else None
 
     async def get_command(self, command_id: str) -> CommandStatusResponse:
         value = await self._commands.get_command(command_id)
@@ -187,6 +241,18 @@ def _cancel_command_id(scope: str, idempotency_key: str) -> str:
     """生成不暴露调用方幂等键的稳定命令 ID。"""
     digest = hashlib.sha256(f"{scope}:{idempotency_key}".encode("utf-8")).hexdigest()
     return f"cmd_cancel_{digest[:32]}"
+
+
+_TERMINAL_RUN_STATUSES = {
+    RunStatus.COMPLETED.value,
+    RunStatus.FAILED.value,
+    RunStatus.CANCELLED.value,
+}
+
+
+def _run_status(value: RunStatus | str) -> str:
+    """统一处理领域枚举和持久化字符串状态。"""
+    return value.value if isinstance(value, RunStatus) else str(value)
 
 __all__ = [
     "CommandNotFoundError",

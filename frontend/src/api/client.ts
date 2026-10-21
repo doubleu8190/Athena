@@ -251,12 +251,12 @@ class ApiClient {
   /** 提交取消运行命令。
    * @param runId 可选目标运行 ID；为空时由后端选择当前运行。
    */
-  async cancelSession(sessionId: string, runId?: string): Promise<{ command_id: string; status: string }> {
+  async cancelSession(sessionId: string, runId?: string): Promise<{ command_id: string | null; run_id: string | null; status: string; already_terminal: boolean }> {
     const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : ""
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/cancel${suffix}`, { method: "POST" })
   }
 
-  async cancelRun(runId: string): Promise<{ command_id: string; status: string }> {
+  async cancelRun(runId: string): Promise<{ command_id: string | null; run_id: string | null; status: string; already_terminal: boolean }> {
     return this.request(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" })
   }
 

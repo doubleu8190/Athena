@@ -10,6 +10,7 @@ export const ApplicationEventType = {
   RUN_STARTED: "run.started",
   RUN_RESUMED: "run.resumed",
   RUN_PAUSED: "run.paused",
+  RUN_CANCELLING: "run.cancelling",
   RUN_FAILED: "run.failed",
   NODE_STARTED: "node.started",
   NODE_COMPLETED: "node.completed",

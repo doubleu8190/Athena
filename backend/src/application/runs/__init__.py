@@ -9,7 +9,12 @@ from .command_service import (
 )
 from .execution_service import RunExecutionService
 from .request_preparation import RunRequestPreparationService
-from .responses import CommandEnqueueResponse, CommandStatusResponse, RunSummaryResponse
+from .responses import (
+    CommandEnqueueResponse,
+    CommandStatusResponse,
+    RunCancellationResponse,
+    RunSummaryResponse,
+)
 
 __all__ = [
     "CommandNotFoundError",
@@ -21,5 +26,6 @@ __all__ = [
     "RunRequestPreparationService",
     "CommandEnqueueResponse",
     "CommandStatusResponse",
+    "RunCancellationResponse",
     "RunSummaryResponse",
 ]

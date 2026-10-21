@@ -113,8 +113,8 @@ export function ExecutionContextPanel({
       return timeDelta || (a.session_seq ?? 0) - (b.session_seq ?? 0)
     })
   }, [executionTimeline, runId])
-  const active = agentStatus === "thinking" || agentStatus === "running" || agentStatus === "waiting_approval"
-  const stateLabel = agentStatus === "waiting_approval" ? "等待确认" : agentStatus === "running" || agentStatus === "thinking" ? "执行中" : agentStatus === "error" ? "执行失败" : agentStatus === "paused" ? "已暂停" : "空闲"
+  const active = agentStatus === "thinking" || agentStatus === "running" || agentStatus === "cancelling" || agentStatus === "waiting_approval"
+  const stateLabel = agentStatus === "cancelling" ? "正在停止" : agentStatus === "waiting_approval" ? "等待确认" : agentStatus === "running" || agentStatus === "thinking" ? "执行中" : agentStatus === "error" ? "执行失败" : agentStatus === "paused" ? "已暂停" : "空闲"
   const connectionLabel = connectionStatus === "connected" ? "事件流已连接" : connectionStatus === "connecting" ? "事件流连接中" : connectionStatus === "error" ? "事件流异常" : "事件流已断开"
 
   return (

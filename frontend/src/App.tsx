@@ -192,8 +192,6 @@ function AppContent() {
               ? data.attachment_ids.map(String)
               : [],
           })
-        } else if (type === ClientEventType.SESSION_STOP) {
-          await apiClient.cancelSession(activeSessionId)
         }
       } catch (error) { useChatStore.getState().setError(error instanceof Error ? error.message : "Command failed") }
     }

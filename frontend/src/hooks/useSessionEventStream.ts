@@ -73,7 +73,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             session_id: approval.session_id || sessionId,
           }))
           mergeApprovals(pending)
-          if (pending.length > 0) setAgentStatus("waiting_approval")
+          if (pending.length > 0 && useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("waiting_approval")
         })
         .catch(() => {
           // API 暂时不可用时保留已有事件状态，等待下一次重连同步。
@@ -208,20 +208,20 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           }
         } else if (type === "thinking.started" || type === "thinking.summary") {
           setThinking({ active: true, content: String(data.content || ""), messageId: streamId || null })
-          setAgentStatus("thinking")
+          if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("thinking")
         } else if (type === "thinking.completed") {
           clearThinking()
         }
 
         if (type === "approval.required") {
           addApproval({ approval_id: String(data.approval_id || ""), tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, risk_level: (String(data.risk_level || "low") as "low" | "medium" | "high"), approval_batch_id: data.approval_batch_id ? String(data.approval_batch_id) : null, session_id: sessionId, plan_id: text(data.plan_id) || undefined, task_id: text(data.task_id) || undefined, task_title: text(data.task_title) || undefined, worker_run_id: text(data.worker_run_id) || undefined })
-          setAgentStatus("waiting_approval")
+          if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("waiting_approval")
         } else if (type === "approval.resolved") {
           const decisions = (data.decisions as Record<string, string> | undefined) || {}
           const approvalId = String(data.approval_id || "")
           if (approvalId) decisions[approvalId] = String(data.decision || "denied")
           Object.entries(decisions).forEach(([id, decision]) => resolveApproval(id, decision))
-          if (useChatStore.getState().pendingApprovals.length <= Object.keys(decisions).length) setAgentStatus("running")
+          if (useChatStore.getState().pendingApprovals.length <= Object.keys(decisions).length && useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
         }
         if (type.startsWith("plan.")) {
           const plan: OrchestrationPlan = {
@@ -289,7 +289,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         if (type === "llm.started") {
           const stepId = String(data.call_id || crypto.randomUUID())
           addStep({ id: stepId, session_id: sessionId, run_id: runId, parent_run_id: envelope.parent_run_id || text(data.parent_run_id) || null, step_number: useChatStore.getState().steps.length + 1, step_type: "llm_call", status: "running", started_at: occurredAt, duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 })
-          setAgentStatus("thinking")
+          if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("thinking")
         } else if (type === "llm.completed") {
           const stepId = String(data.call_id || "")
           if (stepId) updateStep(stepId, { status: data.status === "failed" ? "failed" : "completed", completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
@@ -306,7 +306,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (stepId) updateStep(stepId, { status: status === "success" ? "completed" : "failed", completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
         }
         if (type === "run.started" || type === "run.resumed") {
-          setAgentStatus("running")
+          if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
           updateSession(sessionId, { status: "running" })
         } else if (type === "run.paused") {
           // A run-level terminal/control event must also close any child
@@ -326,6 +326,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           }
           setAgentStatus("paused")
           updateSession(sessionId, { status: "interrupted" })
+          clearThinking()
+        } else if (type === "run.cancelling") {
+          setAgentStatus("cancelling")
           clearThinking()
         } else if (type === "run.cancelled") {
           const completedAt = occurredAt
@@ -348,7 +351,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           // The root run can wait while workers continue. Clear transient
           // thinking state without presenting the whole plan as failed.
           clearThinking()
-          setAgentStatus("running")
+          if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
           updateSession(sessionId, { status: "running" })
         }
         else if (type === "run.failed" || type === "run.budget_exceeded") {
@@ -371,7 +374,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     }
 
     ;[
-      "run.started", "run.resumed", "run.paused", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded", "run.root_suspended",
+      "run.started", "run.resumed", "run.paused", "run.cancelling", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded", "run.root_suspended",
       "node.started", "node.completed", "node.failed",
       "llm.started", "llm.completed", "tool.started", "tool.completed",
       "approval.required", "approval.resolved",
@@ -417,6 +420,7 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
   if (type === "run.started" || type === "run.resumed") return null
   if (type === "run.completed") return null
   if (type === "run.paused") return base({ id: `run:${runId}`, label: "任务已暂停", status: "paused" })
+  if (type === "run.cancelling") return base({ id: `run:${runId}`, label: "正在停止任务", detail: "正在等待运行中的工作安全结束。", status: "waiting" })
   if (type === "run.cancelled") return base({ id: `run:${runId}`, label: "任务已取消", status: "info" })
   if (type === "run.root_suspended") return base({ id: `run:${runId}`, label: "主任务等待子任务继续", detail: "并行任务仍在处理，完成后将继续汇总结果。", status: "waiting" })
   if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "任务已达到运行限制" : "任务未能完成", detail, status: "failed" })

@@ -41,6 +41,7 @@ class Sessions:
 
 class Runs:
     def __init__(self) -> None:
+        self.active = True
         self.value = RunSummary(
             run_id="run-1",
             session_id="session-1",
@@ -52,7 +53,7 @@ class Runs:
         return self.value if run_id == "run-1" else None
 
     async def get_active_for_session(self, session_id: str):
-        return self.value if session_id == "session-1" else None
+        return self.value if self.active and session_id == "session-1" else None
 
     async def list_for_session(self, session_id: str):
         return [self.value]
@@ -153,7 +154,9 @@ async def test_cancel_run_and_command_status() -> None:
     status = await service.get_command(accepted.command_id)
 
     assert accepted.run_id == "run-1"
-    assert accepted.status == CommandStatus.QUEUED
+    assert accepted.status == "cancelling"
+    assert accepted.already_terminal is False
+    assert status.status == CommandStatus.QUEUED
     assert status.command_type == CommandType.RUN_CANCEL
 
 
@@ -165,9 +168,58 @@ async def test_cancel_run_reuses_command_identity_for_same_idempotency_key() -> 
     retry = await service.cancel_run("run-1", idempotency_key="stop-request-1")
 
     assert first.command_id == retry.command_id
-    assert first.deduplicated is False
-    assert retry.deduplicated is True
+    assert first.status == retry.status == "cancelling"
     assert len(commands.received) == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_reports_terminal_without_enqueuing_another_command() -> None:
+    service, commands = make_service()
+    # 模拟停止请求到达前，运行已由其他路径完成。
+    service._runs.value = RunSummary(
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        root_thread_id="thread-1",
+    )
+
+    response = await service.cancel_run("run-1")
+
+    assert response.status == "completed"
+    assert response.already_terminal is True
+    assert response.command_id is None
+    assert commands.received == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_reuses_existing_cancellation_without_requeueing() -> None:
+    service, commands = make_service()
+    service._runs.value = RunSummary(
+        run_id="run-1",
+        session_id="session-1",
+        status="cancelling",
+        root_thread_id="thread-1",
+    )
+
+    response = await service.cancel_run("run-1")
+
+    assert response.status == "cancelling"
+    assert response.already_terminal is False
+    assert response.command_id is None
+    assert commands.received == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_with_no_active_run_is_a_no_op() -> None:
+    service, commands = make_service()
+    service._runs.active = False
+
+    response = await service.cancel_session("session-1")
+
+    assert response.run_id is None
+    assert response.status == "cancelled"
+    assert response.already_terminal is True
+    assert commands.received == []
 
 
 @pytest.mark.asyncio

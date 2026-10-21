@@ -51,6 +51,13 @@ export default function StatusIndicator() {
             正在执行
           </span>
         )
+      case "cancelling":
+        return (
+          <span className="flex items-center gap-1.5 text-sm text-yellow-400">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            正在停止
+          </span>
+        )
       case "paused":
         return (
           <span className="flex items-center gap-1.5 text-sm text-athena-muted">

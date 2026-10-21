@@ -86,17 +86,23 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     source.onerror = () => setConnectionStatus("error")
     syncPendingApprovals()
 
-    const upsertAssistant = (runId: string, content: string, streamId?: string) => {
+    const upsertAssistant = (runId: string, content: string, occurredAt: string, streamId?: string) => {
       if (!runId) return
       const state = useChatStore.getState()
       const existing = state.messages.find((m) => m.run_id === runId && m.role === "assistant")
       if (existing) {
-        if (existing.content !== content) updateMessage(existing.id, { content })
+        // Replayed events can repair a timestamp previously set to receipt time.
+        // Later chunks must not move the message's original event time forward.
+        const timestamp = Date.parse(occurredAt) < Date.parse(existing.timestamp)
+          ? occurredAt : existing.timestamp
+        if (existing.content !== content || existing.timestamp !== timestamp) {
+          updateMessage(existing.id, { content, timestamp })
+        }
         return
       }
       addMessage({
         id: crypto.randomUUID(), role: "assistant", content,
-        timestamp: new Date().toISOString(), session_id: sessionId, run_id: runId,
+        timestamp: occurredAt, session_id: sessionId, run_id: runId,
         ...(streamId ? { type: `stream:${streamId}` } : {}),
       } as Message)
     }
@@ -112,24 +118,24 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (sequence <= lastSeqRef.current) return
           lastSeqRef.current = sequence
         }
+        const occurredAt = envelope.occurred_at || new Date().toISOString()
         const runId = envelope.run_id || String(data.run_id || "")
         if (runId && typeof sequence === "number") {
           appendRunTimelineEvent({
             session_seq: sequence,
             event_type: type,
-            occurred_at: envelope.occurred_at || new Date().toISOString(),
+            occurred_at: occurredAt,
             run_id: runId,
             payload: data as RunTimelineEvent["payload"],
           })
         }
         const streamId = envelope.stream_id || String(data.stream_id || (runId ? `answer-${runId}` : ""))
-        const now = new Date().toISOString()
         const timelineEntry = projectTimelineEvent({
           type,
           data,
           envelope,
           runId,
-          timestamp: envelope.occurred_at || now,
+          timestamp: occurredAt,
         })
         if (timelineEntry) upsertExecutionTimelineEntry(timelineEntry)
         if (type === "message.persisted" && Array.isArray(data.attachment_ids) && data.attachment_ids.length > 0) {
@@ -155,7 +161,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             stream.pending.clear()
             stream.nextChunkId = Number(data.last_chunk_id || 0) + 1
             streamsRef.current.set(streamId, stream)
-            upsertAssistant(runId, stream.content, streamId)
+            upsertAssistant(runId, stream.content, occurredAt, streamId)
           }
           return
         }
@@ -166,7 +172,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             pending: new Map<number, string>(), snapshotVersion: 0,
           }
           streamsRef.current.set(streamId, stream)
-          upsertAssistant(runId, stream.content, streamId)
+          upsertAssistant(runId, stream.content, occurredAt, streamId)
         } else if (type === "message.delta") {
           const stream = streamsRef.current.get(streamId) || {
             nextChunkId: 1, finalChunkId: null, content: "", status: "created",
@@ -188,7 +194,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             stream.status = "completed"
           }
           streamsRef.current.set(streamId, stream)
-          upsertAssistant(runId, stream.content, streamId)
+          upsertAssistant(runId, stream.content, occurredAt, streamId)
         } else if (type === "message.completed") {
           const stream = streamsRef.current.get(streamId)
           const legacyContent = String(data.content || "")
@@ -196,9 +202,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             stream.status = "completed"
             // v2 completion is a lifecycle marker; content comes from chunks/snapshot.
             if (!stream.content && legacyContent) stream.content = legacyContent
-            upsertAssistant(runId, stream.content, streamId)
+            upsertAssistant(runId, stream.content, occurredAt, streamId)
           } else if (legacyContent) {
-            upsertAssistant(runId, legacyContent, streamId)
+            upsertAssistant(runId, legacyContent, occurredAt, streamId)
           }
         } else if (type === "thinking.started" || type === "thinking.summary") {
           setThinking({ active: true, content: String(data.content || ""), messageId: streamId || null })
@@ -266,8 +272,8 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             execution_generation: number(data.execution_generation),
             attempt: number(data.attempt),
             worker_run_id: text(data.worker_run_id) || undefined,
-            started_at: text(data.started_at) || (type === "task.started" ? now : undefined),
-            completed_at: text(data.completed_at) || (["completed", "failed", "cancelled"].includes(status) ? now : undefined),
+            started_at: text(data.started_at) || (type === "task.started" ? occurredAt : undefined),
+            completed_at: text(data.completed_at) || (["completed", "failed", "cancelled"].includes(status) ? occurredAt : undefined),
             duration_ms: number(data.duration_ms),
             result_summary: summarizeResult(data.result ?? data.output),
             dependencies: stringArray(data.dependencies),
@@ -282,22 +288,22 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
         if (type === "llm.started") {
           const stepId = String(data.call_id || crypto.randomUUID())
-          addStep({ id: stepId, session_id: sessionId, run_id: runId, parent_run_id: envelope.parent_run_id || text(data.parent_run_id) || null, step_number: useChatStore.getState().steps.length + 1, step_type: "llm_call", status: "running", started_at: now, duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 })
+          addStep({ id: stepId, session_id: sessionId, run_id: runId, parent_run_id: envelope.parent_run_id || text(data.parent_run_id) || null, step_number: useChatStore.getState().steps.length + 1, step_type: "llm_call", status: "running", started_at: occurredAt, duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 })
           setAgentStatus("thinking")
         } else if (type === "llm.completed") {
           const stepId = String(data.call_id || "")
-          if (stepId) updateStep(stepId, { status: data.status === "failed" ? "failed" : "completed", completed_at: now, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
+          if (stepId) updateStep(stepId, { status: data.status === "failed" ? "failed" : "completed", completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
         } else if (type === "tool.started") {
           const toolId = String(data.tool_call_id || crypto.randomUUID())
           const stepId = String(data.call_id || crypto.randomUUID())
-          addStep({ id: stepId, session_id: sessionId, run_id: runId, parent_run_id: envelope.parent_run_id || text(data.parent_run_id) || null, step_number: useChatStore.getState().steps.length + 1, step_type: "tool_execution", status: "running", started_at: now, duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 })
-          addToolCall({ id: toolId, tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, status: "running", started_at: now, risk_level: (String(data.risk_level || "low") as ToolCall["risk_level"]), step_id: stepId, run_id: runId })
+          addStep({ id: stepId, session_id: sessionId, run_id: runId, parent_run_id: envelope.parent_run_id || text(data.parent_run_id) || null, step_number: useChatStore.getState().steps.length + 1, step_type: "tool_execution", status: "running", started_at: occurredAt, duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 })
+          addToolCall({ id: toolId, tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, status: "running", started_at: occurredAt, risk_level: (String(data.risk_level || "low") as ToolCall["risk_level"]), step_id: stepId, run_id: runId })
         } else if (type === "tool.completed") {
           const toolId = String(data.tool_call_id || "")
           const stepId = String(data.call_id || "")
           const status = data.status === "success" ? "success" : "failed"
-          if (toolId) updateToolCall(toolId, { status, completed_at: now, duration_ms: Number(data.duration_ms || 0), output: data.output ? String(data.output) : undefined, error: data.error ? String(data.error) : undefined, error_detail: errorDetail || null })
-          if (stepId) updateStep(stepId, { status: status === "success" ? "completed" : "failed", completed_at: now, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
+          if (toolId) updateToolCall(toolId, { status, completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), output: data.output ? String(data.output) : undefined, error: data.error ? String(data.error) : undefined, error_detail: errorDetail || null })
+          if (stepId) updateStep(stepId, { status: status === "success" ? "completed" : "failed", completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
         }
         if (type === "run.started" || type === "run.resumed") {
           setAgentStatus("running")
@@ -307,7 +313,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           // activity that did not get its own completion event. Otherwise the
           // progress panel keeps spinning after pause.
           const terminalStatus = "paused"
-          const completedAt = now
+          const completedAt = occurredAt
           for (const step of useChatStore.getState().steps) {
             if (step.run_id === runId && step.status === "running") {
               updateStep(step.id, { status: terminalStatus, completed_at: completedAt })
@@ -322,7 +328,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           updateSession(sessionId, { status: "interrupted" })
           clearThinking()
         } else if (type === "run.cancelled") {
-          const completedAt = now
+          const completedAt = occurredAt
           for (const step of useChatStore.getState().steps) {
             if (step.run_id === runId && step.status === "running") {
               updateStep(step.id, { status: "failed", completed_at: completedAt, error_message: "Stopped by user" })

@@ -224,6 +224,17 @@ class TaskEventReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class RunCancellationReceipt:
+    """一次 Run 取消已收敛且可发布终止事件的持久回执。"""
+
+    run_id: str
+    session_id: str
+    plan_id: str
+    cancellation_epoch: int
+    external_effect_status: str = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerJobLease:
     """Worker Job 的持久租约和执行输入快照。"""
 
@@ -259,6 +270,7 @@ __all__ = [
     "PlanVersion",
     "ReviewAction",
     "ReviewDecision",
+    "RunCancellationReceipt",
     "RoundStatus",
     "TaskAttempt",
     "TaskEventReceipt",

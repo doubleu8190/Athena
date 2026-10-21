@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from domain.orchestration import WorkerJobLease, WorkerJobRepository
+from domain.orchestration import (
+    RunCancellationReceipt,
+    WorkerJobLease,
+    WorkerJobRepository,
+)
 
 
 class WorkerJobService:
@@ -30,6 +34,14 @@ class WorkerJobService:
         return await self._repository.renew_lease(
             lease, lease_seconds=self._lease_seconds
         )
+
+    async def acknowledge_cancelled(self, lease: WorkerJobLease) -> bool:
+        """确认 Worker 已响应取消栅栏并释放执行租约。"""
+        return await self._repository.acknowledge_cancelled(lease)
+
+    async def reconcile_cancellations(self) -> list[RunCancellationReceipt]:
+        """收敛已确认退出或租约过期隔离的 Run 取消。"""
+        return await self._repository.reconcile_cancellations()
 
 
 __all__ = ["WorkerJobService"]

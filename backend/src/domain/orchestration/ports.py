@@ -7,6 +7,7 @@ from typing import Mapping, Protocol
 from .contracts import (
     CommandReceipt,
     OrchestrationCommand,
+    RunCancellationReceipt,
     TaskEventReceipt,
     WorkerJobLease,
     WorkerTaskTerminalEvent,
@@ -43,6 +44,10 @@ class WorkerJobRepository(Protocol):
         lease: WorkerJobLease,
         approval: Mapping[str, object],
     ) -> bool: ...
+
+    async def acknowledge_cancelled(self, lease: WorkerJobLease) -> bool: ...
+
+    async def reconcile_cancellations(self) -> list[RunCancellationReceipt]: ...
 
 
 class PlanRepository(Protocol):

@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from domain.orchestration import (
+    RunCancellationReceipt,
+    Task,
+    TaskResult,
+    TaskStatus,
+    WorkerJobLease,
+)
+from infrastructure.persistence.postgres.repositories.worker_job_repository import (
+    PostgresWorkerJobRepository,
+)
+from workers.worker_job_dispatcher import WorkerJobDispatcher
+
+NOW = datetime(2026, 10, 22, tzinfo=timezone.utc)
+
+
+class Result:
+    def __init__(self, *, scalar=None, rows=()):
+        self._scalar = scalar
+        self._rows = list(rows)
+
+    def scalar_one_or_none(self):
+        return self._scalar
+
+    def scalar_one(self):
+        return self._scalar
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class ChainSession:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.executed = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def begin(self):
+        return self
+
+    async def execute(self, statement):
+        self.executed.append(statement)
+        return Result(scalar=self.rows.pop(0))
+
+
+class ReconcileSession:
+    def __init__(self, run, plan):
+        self.run = run
+        self.plan = plan
+        self.execute_count = 0
+        self.added = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def begin(self):
+        return self
+
+    async def get(self, model, _key, **_kwargs):
+        return self.run if model.__name__ == "AgentRunModel" else None
+
+    async def execute(self, _statement):
+        self.execute_count += 1
+        if self.execute_count == 1:
+            return Result(rows=[self.run.run_id])
+        if self.execute_count == 2:
+            return Result(scalar=self.plan)
+        if self.execute_count == 3:
+            return Result(rows=[])
+        if self.execute_count == 4:
+            return Result(scalar=0)
+        return Result()
+
+    def add_all(self, values):
+        self.added.extend(values)
+
+
+def factory(session):
+    @asynccontextmanager
+    async def provide():
+        yield session
+
+    return provide
+
+
+def cancellation_lease() -> WorkerJobLease:
+    return WorkerJobLease(
+        job_id="job-1",
+        worker_id="worker-1",
+        run_id="run-1",
+        plan_id="plan-1",
+        round_id="round-1",
+        plan_version=1,
+        task_id="task-1",
+        execution_id="execution-1",
+        session_id="session-1",
+        attempt=1,
+        worker_thread_id="task:task-1:exec:1",
+        fencing_token=7,
+        cancellation_epoch=3,
+        lease_until=NOW + timedelta(seconds=10),
+        task=Task("task-1", "Task", "Do task"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_acknowledges_only_its_fenced_cancellation():
+    run = SimpleNamespace(status="cancelling", cancellation_epoch=4)
+    plan = SimpleNamespace(status="cancelling", cancellation_epoch=4)
+    round_row = SimpleNamespace(terminal_task_count=0, expected_task_count=1)
+    task = SimpleNamespace(status="cancelling", updated_at=None)
+    round_task = SimpleNamespace(status="cancelling", terminal_at=None)
+    execution = SimpleNamespace(
+        status="cancel_requested",
+        cancellation_epoch=4,
+        lease_owner="worker-1",
+        lease_until=NOW,
+        updated_at=NOW,
+        fencing_token=7,
+    )
+    job = SimpleNamespace(
+        status="cancel_requested",
+        lease_owner="worker-1",
+        lease_until=NOW,
+        updated_at=NOW,
+    )
+    session = ChainSession([run, plan, round_row, task, round_task, execution, job])
+    repository = PostgresWorkerJobRepository(
+        factory(session), clock=lambda: NOW
+    )
+
+    accepted = await repository.acknowledge_cancelled(cancellation_lease())
+
+    assert accepted is True
+    assert job.status == execution.status == task.status == round_task.status == "cancelled"
+    assert job.lease_owner is execution.lease_owner is None
+    assert round_row.terminal_task_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciler_finishes_cancel_when_no_workers_remain():
+    run = SimpleNamespace(
+        run_id="run-1",
+        session_id="session-1",
+        status="cancelling",
+        cancellation_epoch=5,
+        cancellation_external_effect_status="none",
+        updated_at=None,
+    )
+    plan = SimpleNamespace(
+        plan_id="plan-1",
+        status="cancelling",
+        cancellation_epoch=5,
+        current_version=2,
+        active_round_id="round-2",
+        updated_at=None,
+    )
+    session = ReconcileSession(run, plan)
+    repository = PostgresWorkerJobRepository(factory(session), clock=lambda: NOW)
+
+    receipts = await repository.reconcile_cancellations()
+
+    assert receipts == [
+        RunCancellationReceipt("run-1", "session-1", "plan-1", 5, "none")
+    ]
+    assert run.status == plan.status == "cancelled"
+    assert [row.event_type for row in session.added] == [
+        "PlanCancelled",
+        "RunCancelled",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_acknowledges_cancellation_after_lease_fence_fails():
+    class Jobs:
+        def __init__(self):
+            self.acknowledged = []
+
+        async def renew_lease(self, _lease):
+            return None
+
+        async def acknowledge_cancelled(self, lease):
+            self.acknowledged.append(lease.execution_id)
+            return True
+
+    class Worker:
+        async def execute(self, execution):
+            await asyncio.Event().wait()
+            return TaskResult(execution.task.task_id, TaskStatus.COMPLETED)
+
+    class EventHandler:
+        pass
+
+    jobs = Jobs()
+    dispatcher = WorkerJobDispatcher(
+        jobs,
+        Worker(),
+        EventHandler(),
+        worker_id="dispatcher-1",
+        lease_seconds=0.1,
+        max_concurrency=1,
+    )
+
+    await asyncio.wait_for(dispatcher._execute(cancellation_lease()), timeout=1)
+
+    assert jobs.acknowledged == ["execution-1"]

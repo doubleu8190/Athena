@@ -8,11 +8,13 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.orchestration import (
+    RunCancellationReceipt,
     Task,
     TaskResult,
     TaskStatus,
@@ -24,9 +26,11 @@ from ..models import (
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
+    OrchestrationOutboxModel,
     PlanRoundModel,
     PlanVersionModel,
     RoundTaskModel,
+    RootResumeJobModel,
     TaskExecutionModel,
     WorkerJobModel,
 )
@@ -258,6 +262,300 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 round_task.status = "waiting_approval"
                 round_task.terminal_at = None
                 return True
+
+    async def acknowledge_cancelled(self, lease: WorkerJobLease) -> bool:
+        """只接受当前取消代际的 Worker 退出确认并释放其租约。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                now = await self._now(session)
+                run, plan, round_row, task, round_task, execution, job = (
+                    await self._lock_execution_chain(session, lease)
+                )
+                if any(
+                    item is None
+                    for item in (
+                        run,
+                        plan,
+                        round_row,
+                        task,
+                        round_task,
+                        execution,
+                        job,
+                    )
+                ):
+                    return False
+                assert run is not None and plan is not None
+                assert round_row is not None and task is not None
+                assert round_task is not None and execution is not None
+                assert job is not None
+                if (
+                    run.status != "cancelling"
+                    or plan.status != "cancelling"
+                    or run.cancellation_epoch != plan.cancellation_epoch
+                    or execution.cancellation_epoch != run.cancellation_epoch
+                    or lease.cancellation_epoch == run.cancellation_epoch
+                    or task.status != "cancelling"
+                    or round_task.status != "cancelling"
+                    or execution.status != "cancel_requested"
+                    or job.status != "cancel_requested"
+                    or job.lease_owner != lease.worker_id
+                    or execution.lease_owner != lease.worker_id
+                    or execution.fencing_token != lease.fencing_token
+                ):
+                    return False
+
+                job.status = "cancelled"
+                job.lease_owner = None
+                job.lease_until = None
+                job.updated_at = now
+                execution.status = "cancelled"
+                execution.lease_owner = None
+                execution.lease_until = None
+                execution.updated_at = now
+                task.status = "cancelled"
+                task.updated_at = now.isoformat()
+                round_task.status = "cancelled"
+                round_task.terminal_at = now
+                round_row.terminal_task_count = min(
+                    round_row.expected_task_count,
+                    round_row.terminal_task_count + 1,
+                )
+                return True
+
+    async def reconcile_cancellations(self) -> list[RunCancellationReceipt]:
+        """回收租约过期的取消执行，并在整组 Worker 收敛后终结 Run。"""
+        receipts: list[RunCancellationReceipt] = []
+        async with self._session_factory() as session:
+            async with session.begin():
+                now = await self._now(session)
+                run_ids = (
+                    await session.execute(
+                        select(AgentRunModel.run_id)
+                        .where(AgentRunModel.status == "cancelling")
+                        .order_by(AgentRunModel.updated_at)
+                        .limit(self._candidate_limit)
+                    )
+                ).scalars().all()
+                for run_id in run_ids:
+                    run = await session.get(
+                        AgentRunModel, run_id, with_for_update=True
+                    )
+                    if run is None or run.status != "cancelling":
+                        continue
+                    plan = (
+                        await session.execute(
+                            select(AgentPlanModel)
+                            .where(AgentPlanModel.run_id == run_id)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if plan is None or plan.status != "cancelling":
+                        continue
+
+                    # 只把取消租约已过期的执行标记为可靠隔离；仍在租期内的
+                    # Worker 会通过续租失败收到协作取消并主动确认退出。
+                    expired_rows = (
+                        await session.execute(
+                            select(
+                                WorkerJobModel.job_id,
+                                TaskExecutionModel.execution_id,
+                                AgentTaskModel.task_id,
+                                RoundTaskModel.round_id,
+                            )
+                            .join(
+                                TaskExecutionModel,
+                                WorkerJobModel.execution_id
+                                == TaskExecutionModel.execution_id,
+                            )
+                            .join(
+                                AgentTaskModel,
+                                TaskExecutionModel.task_id == AgentTaskModel.task_id,
+                            )
+                            .join(
+                                RoundTaskModel,
+                                (RoundTaskModel.round_id == TaskExecutionModel.round_id)
+                                & (RoundTaskModel.task_id == TaskExecutionModel.task_id),
+                            )
+                            .where(
+                                AgentTaskModel.plan_id == plan.plan_id,
+                                WorkerJobModel.status == "cancel_requested",
+                                or_(
+                                    WorkerJobModel.lease_until.is_(None),
+                                    WorkerJobModel.lease_until <= now,
+                                ),
+                            )
+                        )
+                    ).all()
+                    for job_id, execution_id, task_id, round_id in expired_rows:
+                        await session.execute(
+                            update(WorkerJobModel)
+                            .where(
+                                WorkerJobModel.job_id == job_id,
+                                WorkerJobModel.status == "cancel_requested",
+                            )
+                            .values(
+                                status="cancelled",
+                                lease_owner=None,
+                                lease_until=None,
+                                updated_at=now,
+                            )
+                        )
+                        await session.execute(
+                            update(TaskExecutionModel)
+                            .where(
+                                TaskExecutionModel.execution_id == execution_id,
+                                TaskExecutionModel.status == "cancel_requested",
+                            )
+                            .values(
+                                status="cancelled",
+                                lease_owner=None,
+                                lease_until=None,
+                                updated_at=now,
+                            )
+                        )
+                        await session.execute(
+                            update(AgentTaskModel)
+                            .where(
+                                AgentTaskModel.task_id == task_id,
+                                AgentTaskModel.status == "cancelling",
+                            )
+                            .values(status="cancelled", updated_at=now.isoformat())
+                        )
+                        await session.execute(
+                            update(RoundTaskModel)
+                            .where(
+                                RoundTaskModel.round_id == round_id,
+                                RoundTaskModel.task_id == task_id,
+                                RoundTaskModel.status == "cancelling",
+                            )
+                            .values(status="cancelled", terminal_at=now)
+                        )
+
+                    active_count = (
+                        await session.execute(
+                            select(func.count())
+                            .select_from(TaskExecutionModel)
+                            .join(
+                                AgentTaskModel,
+                                TaskExecutionModel.task_id == AgentTaskModel.task_id,
+                            )
+                            .where(
+                                AgentTaskModel.plan_id == plan.plan_id,
+                                TaskExecutionModel.status == "cancel_requested",
+                            )
+                        )
+                    ).scalar_one()
+                    if active_count:
+                        continue
+
+                    await session.execute(
+                        update(AgentTaskModel)
+                        .where(
+                            AgentTaskModel.plan_id == plan.plan_id,
+                            AgentTaskModel.status == "cancelling",
+                        )
+                        .values(status="cancelled", updated_at=now.isoformat())
+                    )
+                    await session.execute(
+                        update(RoundTaskModel)
+                        .where(
+                            RoundTaskModel.task_id.in_(
+                                select(AgentTaskModel.task_id).where(
+                                    AgentTaskModel.plan_id == plan.plan_id
+                                )
+                            ),
+                            RoundTaskModel.status == "cancelling",
+                        )
+                        .values(status="cancelled", terminal_at=now)
+                    )
+                    await session.execute(
+                        update(PlanRoundModel)
+                        .where(
+                            PlanRoundModel.plan_id == plan.plan_id,
+                            PlanRoundModel.status == "running",
+                        )
+                        .values(
+                            status="cancelled",
+                            terminal_task_count=PlanRoundModel.expected_task_count,
+                            completed_at=now,
+                        )
+                    )
+                    plan.status = "cancelled"
+                    plan.updated_at = now.isoformat()
+                    run.status = "cancelled"
+                    run.updated_at = now.isoformat()
+                    await session.execute(
+                        update(RootResumeJobModel)
+                        .where(
+                            RootResumeJobModel.run_id == run.run_id,
+                            RootResumeJobModel.status.in_(("pending", "running")),
+                        )
+                        .values(
+                            status="cancelled",
+                            lease_owner=None,
+                            lease_until=None,
+                            updated_at=now,
+                        )
+                    )
+                    session.add_all(
+                        [
+                            self._cancellation_outbox(
+                                run=run,
+                                plan=plan,
+                                event_type="PlanCancelled",
+                                dedupe_key=f"plan:{plan.plan_id}:cancelled:{plan.cancellation_epoch}",
+                                now=now,
+                            ),
+                            self._cancellation_outbox(
+                                run=run,
+                                plan=plan,
+                                event_type="RunCancelled",
+                                dedupe_key=f"run:{run.run_id}:cancelled:{run.cancellation_epoch}",
+                                now=now,
+                            ),
+                        ]
+                    )
+                    receipts.append(
+                        RunCancellationReceipt(
+                            run_id=run.run_id,
+                            session_id=run.session_id,
+                            plan_id=plan.plan_id,
+                            cancellation_epoch=run.cancellation_epoch,
+                            external_effect_status=(
+                                run.cancellation_external_effect_status
+                            ),
+                        )
+                    )
+        return receipts
+
+    def _cancellation_outbox(
+        self,
+        *,
+        run: AgentRunModel,
+        plan: AgentPlanModel,
+        event_type: str,
+        dedupe_key: str,
+        now: datetime,
+    ) -> OrchestrationOutboxModel:
+        """构造 Plan/Run 取消终态的事务性 Outbox 记录。"""
+        return OrchestrationOutboxModel(
+            message_id=uuid4().hex,
+            dedupe_key=dedupe_key,
+            event_type=event_type,
+            correlation_id=run.run_id,
+            plan_id=plan.plan_id,
+            plan_version=plan.current_version,
+            round_id=plan.active_round_id,
+            payload_json={
+                "cancellation_epoch": run.cancellation_epoch,
+                "external_effect_status": run.cancellation_external_effect_status,
+            },
+            schema_version=1,
+            status="pending",
+            attempt=0,
+            available_at=now,
+            occurred_at=now,
+        )
 
     async def _now(self, session: AsyncSession) -> datetime:
         """优先使用 PostgreSQL 时钟，避免多 Worker 主机时钟偏差。"""

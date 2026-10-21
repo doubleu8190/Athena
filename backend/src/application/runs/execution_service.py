@@ -53,20 +53,29 @@ class RunExecutionService:
                     command.run_id,
                     reason=str(command.payload.get("reason", "USER_REQUEST")),
                 )
-                if cancellation is not None and cancellation.changed:
-                    status = str(cancellation.status)
-                    event_type = (
-                        EventType.RUN_CANCELLING
-                        if status == RunStatus.CANCELLING.value
-                        else EventType.RUN_CANCELLED
-                    )
-                    await self._publish(
-                        command,
-                        event_type,
-                        payload=self._run_payload(command, status),
-                    )
             # 先持久化取消栅栏，再中断 Root，避免并发的 SubmitPlan 或 Worker 领取穿过取消边界。
-            await self._executor.cancel(command.run_id)
+            cancel_error: Exception | None = None
+            try:
+                await self._executor.cancel(command.run_id)
+            except Exception as exc:
+                cancel_error = exc
+            if command.run_id and cancellation is not None and cancellation.changed:
+                status = str(cancellation.status)
+                event_type = (
+                    EventType.RUN_CANCELLING
+                    if status == RunStatus.CANCELLING.value
+                    else EventType.RUN_CANCELLED
+                )
+                await self._publish(
+                    command,
+                    event_type,
+                    payload={
+                        **self._run_payload(command, status),
+                        "external_effect_status": cancellation.external_effect_status,
+                    },
+                )
+            if cancel_error is not None:
+                raise cancel_error
             await self._commands.complete_command(
                 command.command_id,
                 status=CommandStatus.COMPLETED,
@@ -75,7 +84,12 @@ class RunExecutionService:
                         str(cancellation.status)
                         if cancellation is not None
                         else "unchanged"
-                    )
+                    ),
+                    "external_effect_status": (
+                        cancellation.external_effect_status
+                        if cancellation is not None
+                        else "unknown"
+                    ),
                 },
             )
             return {
@@ -83,7 +97,12 @@ class RunExecutionService:
                     str(cancellation.status)
                     if cancellation is not None
                     else "unchanged"
-                )
+                ),
+                "external_effect_status": (
+                    cancellation.external_effect_status
+                    if cancellation is not None
+                    else "unknown"
+                ),
             }
         if not command.run_id:
             await self._commands.complete_command(

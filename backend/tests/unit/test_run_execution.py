@@ -134,10 +134,16 @@ async def test_cancel_marks_run_cancelling_before_interrupting_root() -> None:
 
     result = await service.execute(command(CommandType.RUN_CANCEL))
 
-    assert result == {"status": "cancelling"}
+    assert result == {
+        "status": "cancelling",
+        "external_effect_status": "unknown",
+    }
     assert calls == ["persist", "interrupt"]
     assert [event.event_type for event in events.values] == ["run.cancelling"]
-    assert queue.completed[0][2] == {"status": "cancelling"}
+    assert queue.completed[0][2] == {
+        "status": "cancelling",
+        "external_effect_status": "unknown",
+    }
 
 
 @pytest.mark.asyncio
@@ -156,7 +162,10 @@ async def test_repeated_cancel_keeps_progress_without_republishing_event() -> No
 
     result = await service.execute(command(CommandType.RUN_CANCEL))
 
-    assert result == {"status": "cancelling"}
+    assert result == {
+        "status": "cancelling",
+        "external_effect_status": "unknown",
+    }
     assert events.values == []
 
 

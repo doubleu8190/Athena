@@ -24,6 +24,9 @@ class Result:
     def scalar_one_or_none(self):
         return self._scalar
 
+    def scalar_one(self):
+        return self._scalar
+
     def scalars(self):
         return self
 
@@ -55,6 +58,8 @@ class CancellationSession:
         if len(self.executed) == 1:
             return Result(scalar=self.plan)
         if len(self.executed) == 2 and self.plan is not None:
+            return Result(scalar=1)
+        if len(self.executed) == 3 and self.plan is not None:
             return Result(rows=[])
         return Result()
 
@@ -104,18 +109,33 @@ async def test_cancel_without_a_plan_finishes_run_and_repeat_cancel_is_noop():
     repository = PostgresRunRepository(factory(session))
 
     status = await repository.cancel("run-1")
-    assert status == RunCancellationResult(RunStatus.CANCELLED, True)
+    assert status == RunCancellationResult(RunStatus.CANCELLED, True, "none")
     assert run.status == "cancelled"
     assert run.cancellation_epoch == 1
 
     already_cancelling = SimpleNamespace(
-        status="cancelling", cancellation_epoch=1, updated_at=None
+        status="cancelling",
+        cancellation_epoch=1,
+        cancellation_external_effect_status="unknown",
+        updated_at=None,
     )
     repeated = CancellationSession(already_cancelling)
     assert await PostgresRunRepository(factory(repeated)).cancel("run-1") == (
         RunCancellationResult(RunStatus.CANCELLING, False)
     )
     assert repeated.executed == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_root_work_before_plan_marks_effects_unknown():
+    run = SimpleNamespace(status="running", cancellation_epoch=2, updated_at=None)
+    session = CancellationSession(run)
+    repository = PostgresRunRepository(factory(session))
+
+    status = await repository.cancel("run-1")
+
+    assert status == RunCancellationResult(RunStatus.CANCELLED, True, "unknown")
+    assert run.cancellation_external_effect_status == "unknown"
 
 
 class ApprovalSession:

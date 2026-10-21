@@ -333,7 +333,13 @@ class PostgresRunRepository(
                     RunStatus.FAILED.value,
                 }:
                     if run is not None:
-                        return RunCancellationResult(RunStatus(run.status), False)
+                        return RunCancellationResult(
+                            RunStatus(run.status),
+                            False,
+                            str(
+                                run.cancellation_external_effect_status or "none"
+                            ),
+                        )
                     return None
 
                 plan = (
@@ -348,8 +354,14 @@ class PostgresRunRepository(
                     "failed",
                     "cancelled",
                 }:
+                    external_effect_status = (
+                        "unknown"
+                        if run.status == RunStatus.RUNNING.value
+                        else "none"
+                    )
                     run.status = RunStatus.CANCELLED.value
                     run.cancellation_epoch = int(run.cancellation_epoch or 0) + 1
+                    run.cancellation_external_effect_status = external_effect_status
                     run.updated_at = now_iso
                     await self._cancel_root_resume_jobs(session, run_id, now)
                     await session.execute(
@@ -380,16 +392,40 @@ class PostgresRunRepository(
                             ),
                         )
                     )
-                    return RunCancellationResult(RunStatus.CANCELLED, True)
+                    return RunCancellationResult(
+                        RunStatus.CANCELLED,
+                        True,
+                        external_effect_status,
+                    )
 
                 # Worker Job 领取与终态写入同样先锁 Run；该 epoch 变更使旧租约、
                 # Worker 结果和已批准但尚未恢复的工具调用同时失效。
+                active_execution_count = (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(TaskExecutionModel)
+                        .join(
+                            AgentTaskModel,
+                            TaskExecutionModel.task_id == AgentTaskModel.task_id,
+                        )
+                        .where(
+                            AgentTaskModel.plan_id == plan.plan_id,
+                            TaskExecutionModel.status == "running",
+                        )
+                    )
+                ).scalar_one()
+                external_effect_status = (
+                    "unknown"
+                    if run.status == RunStatus.RUNNING.value or active_execution_count
+                    else "none"
+                )
                 cancellation_epoch = max(
                     int(run.cancellation_epoch or 0),
                     int(plan.cancellation_epoch or 0),
                 ) + 1
                 run.status = RunStatus.CANCELLING.value
                 run.cancellation_epoch = cancellation_epoch
+                run.cancellation_external_effect_status = external_effect_status
                 run.updated_at = now_iso
                 plan.status = "cancelling"
                 plan.cancellation_epoch = cancellation_epoch
@@ -493,6 +529,14 @@ class PostgresRunRepository(
                         updated_at=now,
                     )
                 )
+                await session.execute(
+                    update(WorkerJobModel)
+                    .where(
+                        WorkerJobModel.execution_id.in_(execution_ids),
+                        WorkerJobModel.status == "running",
+                    )
+                    .values(status="cancel_requested", updated_at=now)
+                )
                 approval_filter = [
                     ApprovalRecordModel.run_id == run_id,
                     ApprovalRecordModel.status == "pending",
@@ -524,6 +568,7 @@ class PostgresRunRepository(
                         payload_json={
                             "cancellation_epoch": cancellation_epoch,
                             "reason": reason,
+                            "external_effect_status": external_effect_status,
                         },
                         schema_version=1,
                         status="pending",
@@ -532,7 +577,11 @@ class PostgresRunRepository(
                         occurred_at=now,
                     )
                 )
-                return RunCancellationResult(RunStatus.CANCELLING, True)
+                return RunCancellationResult(
+                    RunStatus.CANCELLING,
+                    True,
+                    external_effect_status,
+                )
 
     async def _cancel_root_resume_jobs(
         self, session: AsyncSession, run_id: str, now: datetime

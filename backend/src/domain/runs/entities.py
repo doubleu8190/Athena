@@ -47,6 +47,7 @@ class RunCancellationResult:
 
     status: RunStatus
     changed: bool
+    external_effect_status: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)

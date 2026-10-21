@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from application.orchestration.worker_job_service import WorkerJobService
 from domain.orchestration import (
+    RunCancellationReceipt,
     TaskExecution,
     TaskResult,
     TaskStatus,
@@ -18,6 +19,7 @@ from domain.orchestration import (
     WorkerTaskTerminalEvent,
     WorkerExecutor,
 )
+from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,7 @@ class WorkerJobDispatcher:
         lease_seconds: float,
         max_concurrency: int,
         approval_service: Any | None = None,
+        events: EventPort | None = None,
         poll_interval: float = 0.25,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -48,6 +51,7 @@ class WorkerJobDispatcher:
         self._worker = worker
         self._event_handler = event_handler
         self._approval_service = approval_service
+        self._events = events
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._max_concurrency = max_concurrency
@@ -81,6 +85,9 @@ class WorkerJobDispatcher:
         while not self._stop.is_set():
             claimed = False
             try:
+                completed_cancellations = await self._jobs.reconcile_cancellations()
+                for cancellation in completed_cancellations:
+                    await self._publish_cancelled(cancellation)
                 while (
                     not self._stop.is_set()
                     and len(self._inflight) < self._max_concurrency
@@ -134,9 +141,8 @@ class WorkerJobDispatcher:
             try:
                 result = await worker_task
             except asyncio.CancelledError:
-                if lease_lost.is_set():
-                    return
-                raise
+                if not lease_lost.is_set():
+                    raise
             except Exception as exc:
                 logger.exception("Worker execution failed: %s", lease.execution_id)
                 result = TaskResult(
@@ -153,6 +159,13 @@ class WorkerJobDispatcher:
             await asyncio.gather(heartbeat, return_exceptions=True)
 
         if lease_lost.is_set():
+            try:
+                await self._jobs.acknowledge_cancelled(lease)
+            except Exception:
+                logger.exception(
+                    "Worker cancellation acknowledgement failed: %s",
+                    lease.execution_id,
+                )
             return
         if result.status == TaskStatus.WAITING_APPROVAL:
             if self._approval_service is None:
@@ -300,6 +313,30 @@ class WorkerJobDispatcher:
         error = task.exception()
         if error is not None:
             logger.error("Worker Job failed before event persistence", exc_info=error)
+
+    async def _publish_cancelled(
+        self, cancellation: RunCancellationReceipt
+    ) -> None:
+        """把取消收敛结果发布到可重放的 Run 事件流。"""
+        if self._events is None:
+            return
+        await self._events.publish(
+            ApplicationEvent(
+                event_type=EventType.RUN_CANCELLED,
+                durability=EventDurability.DURABLE,
+                session_id=cancellation.session_id,
+                run_id=cancellation.run_id,
+                payload={
+                    "activity_id": f"run:{cancellation.run_id}",
+                    "activity_type": "run",
+                    "name": "run",
+                    "status": "cancelled",
+                    "plan_id": cancellation.plan_id,
+                    "cancellation_epoch": cancellation.cancellation_epoch,
+                    "external_effect_status": cancellation.external_effect_status,
+                },
+            )
+        )
 
 
 def _mapping(value: Any) -> dict[str, Any]:

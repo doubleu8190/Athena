@@ -418,6 +418,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         lease_seconds=settings.worker_job_lease_seconds,
         max_concurrency=settings.worker_dispatch_max_concurrency,
         approval_service=worker_approval_service,
+        events=events,
         poll_interval=settings.worker_job_poll_interval_seconds,
         id_factory=ids,
     )

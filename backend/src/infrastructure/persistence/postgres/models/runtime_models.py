@@ -49,6 +49,9 @@ class AgentRunModel(Base):
     root_wait_plan_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     root_wait_interrupt_id: Mapped[str | None] = mapped_column(String, nullable=True)
     cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)
+    cancellation_external_effect_status: Mapped[str] = mapped_column(
+        String, default="none"
+    )
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
 

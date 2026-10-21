@@ -12,7 +12,7 @@ from .event_repository import PostgresEventRepository
 from .memory_repository import PostgresMemoryRepository
 from .memory_job_repository import PostgresMemoryJobRepository
 from .retrieval_repository import PostgresRetrievalRepository
-from ._runtime import PostgresRunRepository
+from .run_repository import PostgresRunRepository
 from .mcp_repository import PostgresMCPServerRepository
 from .message_repository import PostgresMessageRepository
 from .session_repository import PostgresSessionRepository

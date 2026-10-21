@@ -15,7 +15,7 @@ from typing import Any
 from domain.approval import ApprovalDecision, ApprovalEventPort, ApprovalRepository, ApprovalRequest
 from domain.configuration import ProviderQueryPort, SettingsQueryPort
 from domain.memory.query_ports import MemoryQueryPort
-from domain.retrieval.query_ports import RetrievalQueryPort
+from domain.retrieval.query_ports import RetrievalPort
 from domain.tools.query_ports import ToolUsageQueryPort
 from domain.files import (
     AdapterInfo,
@@ -30,10 +30,7 @@ from domain.files import (
 from domain.knowledge import KnowledgeBase, KnowledgeBaseRepository, KnowledgeDocumentRepository
 from domain.events import (
     ApplicationEvent,
-    EventHistoryPort,
-    EventPublisherPort,
-    EventSubscriptionPort,
-    RealtimeTransportPort,
+    EventPort,
 )
 import asyncio
 import hashlib
@@ -283,7 +280,7 @@ class InMemoryApprovalEvents(ApprovalEventPort):
     async def required(self, request: ApprovalRequest) -> None: pass
 
 
-class InMemoryProviderQueries(ProviderQueryPort, SettingsQueryPort, RetrievalQueryPort, ToolUsageQueryPort, MemoryQueryPort):
+class InMemoryProviderQueries(ProviderQueryPort, SettingsQueryPort, RetrievalPort, ToolUsageQueryPort, MemoryQueryPort):
     def __init__(self, settings: dict[str, Any], memory: InMemoryMemoryPort) -> None:
         self.settings = settings
         self.memory = memory
@@ -379,12 +376,7 @@ class InMemoryKnowledgeDocuments(InMemoryAttachmentRepository, KnowledgeDocument
         self.items[attachment_id] = replace(value, status=AttachmentStatus.DELETED, deleted_time=datetime.now(timezone.utc)); return True
 
 
-class InMemoryEventStore(
-    EventPublisherPort,
-    EventHistoryPort,
-    EventSubscriptionPort,
-    RealtimeTransportPort,
-):
+class InMemoryEventStore(EventPort):
     def __init__(self) -> None: self.items: dict[str, list[ApplicationEvent]] = {}; self.subscribers: dict[str, list[asyncio.Queue[ApplicationEvent]]] = {}
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
         values = self.items.setdefault(event.session_id, []); event = replace(event, session_seq=len(values) + 1); values.append(event)
@@ -393,20 +385,59 @@ class InMemoryEventStore(
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
         for queue in self.subscribers.get(event.session_id, []): queue.put_nowait(event)
         return event
-    async def open_subscription(self, session_id: str):
+    async def open_subscription(
+        self, session_id: str
+    ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
         queue: asyncio.Queue[ApplicationEvent] = asyncio.Queue(); self.subscribers.setdefault(session_id, []).append(queue)
         return queue, len(self.items.get(session_id, []))
-    async def list_events_between(self, session_id: str, after: int = 0, upto: int | None = None):
+    async def list_events_between(
+        self, session_id: str, after: int = 0, upto: int | None = None
+    ) -> list[ApplicationEvent]:
         values = self.items.get(session_id, []); return values[after:upto]
-    async def list_events_for_run(self, session_id: str, run_id: str, *, after: int = 0, limit: int = 200):
+    async def list_events_for_run(
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        after: int = 0,
+        limit: int = 200,
+    ) -> tuple[list[ApplicationEvent], bool]:
         values = [event for event in self.items.get(session_id, []) if event.run_id == run_id and (event.session_seq or 0) > after]
         return values[:limit], len(values) > limit
     async def close_subscription(self, session_id: str, queue: asyncio.Queue[ApplicationEvent]) -> None:
         if queue in self.subscribers.get(session_id, []): self.subscribers[session_id].remove(queue)
 
 
-class InMemoryEventPublisher(ApprovalEventPort, EventPublisherPort):
+class InMemoryEventPublisher(ApprovalEventPort, EventPort):
     def __init__(self, store: InMemoryEventStore) -> None: self.store = store
     async def required(self, request: Any) -> None: return None
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish(event)
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish_realtime(event)
+    async def list_events_between(self, session_id: str, after: int = 0, upto: int | None = None) -> list[ApplicationEvent]:
+        """把历史查询转交给共享的内存事件库。"""
+        return await self.store.list_events_between(session_id, after, upto)
+
+    async def list_events_for_run(
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        after: int = 0,
+        limit: int = 200,
+    ) -> tuple[list[ApplicationEvent], bool]:
+        """把运行事件查询转交给共享的内存事件库。"""
+        return await self.store.list_events_for_run(
+            session_id, run_id, after=after, limit=limit
+        )
+
+    async def open_subscription(
+        self, session_id: str
+    ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
+        """把实时订阅转交给共享的内存事件库。"""
+        return await self.store.open_subscription(session_id)
+
+    async def close_subscription(
+        self, session_id: str, queue: asyncio.Queue[ApplicationEvent]
+    ) -> None:
+        """关闭共享内存事件库中的订阅。"""
+        await self.store.close_subscription(session_id, queue)

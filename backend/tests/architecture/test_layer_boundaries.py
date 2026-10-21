@@ -44,11 +44,11 @@ def test_domain_does_not_depend_on_outer_layers() -> None:
     assert not any(module.startswith(forbidden) for module in imports for forbidden in forbidden_prefixes)
 
 
-def test_application_does_not_depend_on_web_or_concrete_storage() -> None:
+def test_application_does_not_depend_on_infrastructure_or_web_frameworks() -> None:
     imports = _all_imports("application")
     forbidden_prefixes = (
         "interfaces",
-        "infrastructure.persistence",
+        "infrastructure",
         "fastapi",
         "starlette",
         "sqlalchemy",

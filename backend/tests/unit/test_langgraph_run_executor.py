@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from domain.runs import CommandType, RunCommand
-from infrastructure.orchestration.langgraph import LangGraphRunExecutor
+from application.orchestration.langgraph import LangGraphRunExecutor
 
 
 def _command(run_id: str = "run-1") -> RunCommand:

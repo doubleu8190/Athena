@@ -28,7 +28,11 @@ from application.runs import (
 from application.sessions import SessionMessageQueryService, SessionService
 from application.tools import MCPService, ToolQueryService, ToolService
 from application.orchestration import OrchestrationService, WorkerSchedulerService
-from application.orchestration import RootWorkflow, RootWorkflowDependencies, WorkerWorkflow
+from application.orchestration import (
+    RootWorkflow,
+    RootWorkflowDependencies,
+    WorkerWorkflow,
+)
 from application.runs.context import (
     ContextAcquisitionService,
     ContextPlan,
@@ -73,7 +77,7 @@ from infrastructure.integrations.sandbox.docker import DockerSandbox
 from infrastructure.integrations.sandbox.options import SandboxOptions
 from infrastructure.tools.executor import BuiltinToolExecutor
 from infrastructure.integrations.storage.storage import LocalFileStorage
-from infrastructure.orchestration.langgraph import (
+from application.orchestration.langgraph import (
     ConfiguredRootAgent,
     ConfiguredWorkerAgent,
     LangGraphRootGraph,
@@ -85,9 +89,11 @@ from infrastructure.configuration import (
     PublicConfiguration,
     PublicRuntimeOptions,
 )
-from infrastructure.persistence.postgres.resource import PostgresCheckpointer, PostgresEngine
+from infrastructure.persistence.postgres.resource import (
+    PostgresCheckpointer,
+    PostgresEngine,
+)
 from infrastructure.persistence.postgres.options import PostgresOptions
-from infrastructure.approval import ApprovalEventPublisher
 from infrastructure.persistence.postgres.adapters import (
     PostgresMCPAdapter,
 )
@@ -128,6 +134,7 @@ from .dependencies import ApplicationDependencies, Provider, build_dependencies
 
 def _build_approval_resumer(command_execution, runs, ids):
     """Build the resumed-approval command callback outside composition."""
+
     async def resume_approval(request, decision: str) -> None:
         command = RunCommand(
             command_id=f"approval-resume-{ids()}",
@@ -137,14 +144,20 @@ def _build_approval_resumer(command_execution, runs, ids):
             payload={
                 "message": f"执行命令 {request.arguments.get('command', '')}",
                 "message_id": f"approval-result-{request.approval_id}",
-                "resume_value": {"decision": decision, "tool_call_id": request.tool_call_id},
+                "resume_value": {
+                    "decision": decision,
+                    "tool_call_id": request.tool_call_id,
+                },
             },
             issued_at=datetime.now(timezone.utc),
         )
         result = await command_execution.execute(command)
         converge = getattr(runs, "complete_active_command_for_run", None)
         if converge is not None and result is not None:
-            await converge(request.run_id, status=CommandStatus.COMPLETED, result=result)
+            await converge(
+                request.run_id, status=CommandStatus.COMPLETED, result=result
+            )
+
     return resume_approval
 
 
@@ -178,7 +191,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     evaluation_progress = EvaluationProgressHub()
     tools = PostgresToolConfigRepository(session_factory)
     mcp_repository = PostgresMCPServerRepository(session_factory)
-    orchestration = PostgresOrchestrationRepository(session_factory)
+    orchestration_repository = PostgresOrchestrationRepository(session_factory)
     llm_options = LLMOptions(
         providers=tuple(
             LLMProviderOptions(
@@ -332,8 +345,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         workflow_factory=lambda: WorkerWorkflow(execute=worker_agent),
         checkpointer=checkpointer,
     )
-    scheduler = WorkerSchedulerService(
-        orchestration,
+    worker_scheduler = WorkerSchedulerService(
+        orchestration_repository,
         worker_executor,
         events=events,
     )
@@ -344,37 +357,35 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             settings.files_path,
             max_output_bytes=settings.sandbox_max_output_bytes,
             sandbox=sandbox,
-            sandbox_enabled=(settings.sandbox_enabled or settings.sandbox_required) and settings.exec_shell_enabled,
+            sandbox_enabled=(settings.sandbox_enabled or settings.sandbox_required)
+            and settings.exec_shell_enabled,
             sandbox_required=settings.sandbox_required,
             sandbox_image=settings.sandbox_shell_image,
             sandbox_max_timeout=settings.sandbox_max_timeout,
             sandbox_workspace_root=Path(settings.sandbox_workspace_root),
         ),
     )
-    approval_service = ApprovalService(approvals, ApprovalEventPublisher(events), id_factory=ids)
-    root_workflow = RootWorkflow(
-        RootWorkflowDependencies(
-            task_understanding=task_understanding,
-            context=context_service,
-            context_planner=context_planner,
-            context_plan_factory=lambda value: ContextPlan(**value),
-            request_handler=request_preparation.prepare,
-            history_loader=request_preparation.load_history,
-            attachment_loader=request_preparation.load_attachments,
-            knowledge_loader=request_preparation.load_knowledge_bases,
-            orchestration=OrchestrationService(orchestration),
-            plan_repository=orchestration,
-            scheduler=scheduler,
-            plan_loader=PostgresPlanLoader(orchestration),
-            agent=ConfiguredRootAgent(llm_provider, events),
-            tool_service=builtin_tool_service,
-            approval_service=approval_service,
-            event_publisher=events,
-        )
+    approval_service = ApprovalService(
+        approvals, events, id_factory=ids
     )
+    dependencies = RootWorkflowDependencies(
+        task_understanding=task_understanding,
+        context_acquisition=context_service,
+        context_planner=context_planner,
+        request_preparation=request_preparation,
+        orchestration=OrchestrationService(orchestration_repository),
+        plan_repository=orchestration_repository,
+        worker_scheduler=worker_scheduler,
+        plan_loader=PostgresPlanLoader(orchestration_repository),
+        agent=ConfiguredRootAgent(llm_provider, events),
+        tool_service=builtin_tool_service,
+        approval_service=approval_service,
+        event_publisher=events,
+    )
+    root_workflow = RootWorkflow(dependencies)
     root_graph = LangGraphRootGraph(
         workflow=root_workflow,
-        event_publisher=events,
+        dependencies=dependencies,
         checkpointer=checkpointer,
     )
 
@@ -385,7 +396,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "run_command_factory": lambda: RunCommandService(
             sessions, runs, runs, id_factory=ids
         ),
-        "event_stream_factory": lambda: EventStreamService(sessions, events, events, events),
+        "event_stream_factory": lambda: EventStreamService(sessions, events),
         "tool_query_factory": lambda: ToolQueryService(tools),
         "tool_service_factory": lambda: builtin_tool_service,
         "approval_service_factory": lambda: approval_service,
@@ -395,9 +406,13 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "memory_service_factory": lambda: MemoryService(memory),
         "retrieval_query_factory": lambda: RetrievalQueryService(retrieval),
         "evaluation_repository_factory": lambda: evaluation_repository,
-        "evaluation_target_factory": lambda manifest: EmbeddingRetrievalTarget(manifest.corpus, embedding),
+        "evaluation_target_factory": lambda manifest: EmbeddingRetrievalTarget(
+            manifest.corpus, embedding
+        ),
         "evaluation_dataset_loader_factory": lambda path: load_dataset(path),
-        "evaluation_event_sink_factory": lambda: EvaluationEventPublisher(events, fanout=evaluation_progress),
+        "evaluation_event_sink_factory": lambda: EvaluationEventPublisher(
+            events, fanout=evaluation_progress
+        ),
         "evaluation_progress_hub_factory": lambda: evaluation_progress,
         "knowledge_query_factory": lambda: KnowledgeBaseQueryService(knowledge),
         "attachment_service_factory": lambda: AttachmentService(
@@ -406,11 +421,11 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "knowledge_service_factory": lambda: KnowledgeBaseService(
             knowledge, documents, storage, adapters, jobs, id_factory=ids
         ),
-        "orchestration_repository_factory": lambda: orchestration,
-        "orchestration_service_factory": lambda: OrchestrationService(orchestration),
+        "orchestration_repository_factory": lambda: orchestration_repository,
+        "orchestration_service_factory": lambda: OrchestrationService(orchestration_repository),
         "root_graph_factory": lambda: root_graph,
         "run_executor_factory": lambda: LangGraphRunExecutor(root_graph),
-        "worker_scheduler_factory": lambda: scheduler,
+        "worker_scheduler_factory": lambda: worker_scheduler,
         "ingestion_service_factory": lambda: ingestion,
         "llm_provider": lambda: llm_provider,
         "embedding_provider": lambda: embedding,
@@ -428,14 +443,14 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             events,
             memory_jobs,
         )
-        approval_service.set_resumer(_build_approval_resumer(command_execution, runs, ids))
+        approval_service.set_resumer(
+            _build_approval_resumer(command_execution, runs, ids)
+        )
         command_worker = CommandConsumer(runs, command_execution)
         document_worker = KnowledgeDocumentWorker(jobs, ingestion)
         memory_worker = MemoryWorker(memory_jobs, memory_workflow)
         resources.append(
-            WorkerSupervisor(
-                (command_worker, document_worker, memory_worker)
-            )
+            WorkerSupervisor((command_worker, document_worker, memory_worker))
         )
     return build_dependencies(factories=providers, resources=resources)
 

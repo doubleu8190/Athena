@@ -1,13 +1,13 @@
-"""LangGraph infrastructure adapters for Root and Worker execution.
+"""Application orchestration graphs built with LangGraph.
 
 The package is organized by responsibility:
 
 * ``graphs`` defines checkpointable graph topology and invocation contracts.
-* ``runtime`` adapts graphs to domain ports and configured model execution.
-* ``shared`` contains small framework-neutral helpers used by both graphs.
+* ``runtime`` connects graphs to domain ports and configured model execution.
+* ``shared`` contains small helpers used by both graphs.
 """
 
-from .graphs.root import RootGraphDependencies, build_root_graph, invoke_root_graph
+from .graphs.root import build_root_graph, invoke_root_graph
 from .graphs.state import RootGraphState, WorkerGraphState
 from .graphs.worker import build_worker_graph, invoke_worker_graph
 from .runtime.root_adapter import LangGraphRootGraph
@@ -17,7 +17,6 @@ from .runtime.worker_executor import LangGraphWorkerExecutor
 
 __all__ = [
     "build_root_graph",
-    "RootGraphDependencies",
     "build_worker_graph",
     "invoke_root_graph",
     "invoke_worker_graph",

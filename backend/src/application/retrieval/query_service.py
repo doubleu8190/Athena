@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from domain.retrieval.query_ports import RetrievalQueryPort
+from domain.retrieval.query_ports import RetrievalPort
 from application.common.responses import RetrievalCandidateResponse, RetrievalRunResponse
 
 
 class RetrievalQueryService:
-    def __init__(self, port: RetrievalQueryPort) -> None:
+    def __init__(self, port: RetrievalPort) -> None:
         self._port = port
 
     async def list_runs(self, **filters: Any) -> tuple[list[RetrievalRunResponse], int]:

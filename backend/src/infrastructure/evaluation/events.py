@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from domain.events import ApplicationEvent, EventDurability, EventPublisherPort
+from domain.events import ApplicationEvent, EventDurability, EventPort
 
 
 class EvaluationEventPublisher:
-    def __init__(self, publisher: EventPublisherPort | None = None, *, session_id: str = "evaluation", fanout=None) -> None:
+    def __init__(self, publisher: EventPort | None = None, *, session_id: str = "evaluation", fanout=None) -> None:
         self.publisher = publisher
         self.session_id = session_id
         self.fanout = fanout

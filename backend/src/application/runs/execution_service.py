@@ -8,7 +8,7 @@ from time import perf_counter
 from domain.events import (
     ApplicationEvent,
     EventDurability,
-    EventPublisherPort,
+    EventPort,
     EventType,
 )
 from domain.memory import MemoryJobPort
@@ -31,7 +31,7 @@ class RunExecutionService:
         lifecycle: RunLifecyclePort,
         commands: CommandQueuePort,
         executor: RunExecutorPort,
-        events: EventPublisherPort,
+        events: EventPort,
         memory_jobs: MemoryJobPort | None = None,
     ) -> None:
         self._lifecycle = lifecycle

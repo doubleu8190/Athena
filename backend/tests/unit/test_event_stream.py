@@ -10,7 +10,7 @@ from starlette.requests import Request
 
 from application.events import EventStreamService
 from bootstrap import create_app
-from domain.events import ApplicationEvent, EventDurability, EventType
+from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
 from domain.sessions import Session
 
 
@@ -27,7 +27,7 @@ class Sessions:
         )
 
 
-class Events:
+class Events(EventPort):
     def __init__(self) -> None:
         self.queue: asyncio.Queue[ApplicationEvent] = asyncio.Queue()
         self.replayed = [
@@ -39,38 +39,60 @@ class Events:
                 payload={"status": "running"},
             )
         ]
+        self.closed: list[tuple[str, asyncio.Queue[ApplicationEvent]]] = []
 
-    async def open_subscription(self, session_id):
+    async def open_subscription(
+        self, session_id: str
+    ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
         return self.queue, 5
 
-    async def list_events_between(self, session_id, after=0, upto=None):
+    async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
+        return event
+
+    async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
+        return event
+
+    async def list_events_between(
+        self, session_id: str, after: int = 0, upto: int | None = None
+    ) -> list[ApplicationEvent]:
         return [event for event in self.replayed if event.session_seq > after]
 
+    async def list_events_for_run(
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        after: int = 0,
+        limit: int = 200,
+    ) -> tuple[list[ApplicationEvent], bool]:
+        return [], False
 
-class Transport:
-    def __init__(self) -> None:
-        self.closed = []
-
-    async def close_subscription(self, session_id, queue):
+    async def close_subscription(
+        self, session_id: str, queue: asyncio.Queue[ApplicationEvent]
+    ) -> None:
         self.closed.append((session_id, queue))
 
 
 def make_client():
     events = Events()
-    transport = Transport()
-    service = EventStreamService(Sessions(), events, events, transport)
+    service = EventStreamService(Sessions(), events)
     client = TestClient(create_app(event_stream_factory=lambda: service))
-    return client, events, transport
+    return client, events, events
 
 
 def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
     from  interfaces.http.sse.events import build_events_router
 
     events = Events()
-    transport = Transport()
-    service = EventStreamService(Sessions(), events, events, transport)
+    service = EventStreamService(Sessions(), events)
     app = __import__("fastapi").FastAPI()
-    app.include_router(build_events_router(lambda: service))
+    router = build_events_router(lambda: service)
+    endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if getattr(route, "path", None) == "/sessions/{session_id}/events"
+    )
+    app.include_router(router)
     request = Request(
         {
             "type": "http",
@@ -83,14 +105,14 @@ def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
     request.is_disconnected = lambda: _disconnected_once()  # type: ignore[method-assign]
 
     async def run():
-        response = await app.routes[-1].endpoint("session-1", request, 0, service)
+        response = await endpoint("session-1", request, 0, service)
         chunks = [chunk async for chunk in response.body_iterator]
         assert "id: 5" in chunks[0]
         assert "run.started" in chunks[0]
 
     asyncio.run(run())
-    assert transport.closed
-    assert transport.closed[0][0] == "session-1"
+    assert events.closed
+    assert events.closed[0][0] == "session-1"
 
 
 async def _disconnected_once() -> bool:

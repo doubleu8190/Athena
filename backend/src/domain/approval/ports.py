@@ -16,8 +16,4 @@ class ApprovalRepository(Protocol):
     async def resolve_batch(self, batch_id: str, decisions: dict[str, ApprovalDecision], *, run_id: str | None = None) -> bool: ...
 
 
-class ApprovalEventPort(Protocol):
-    async def required(self, request: ApprovalRequest) -> None: ...
-
-
-__all__ = ["ApprovalEventPort", "ApprovalRepository"]
+__all__ = ["ApprovalRepository"]

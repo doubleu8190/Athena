@@ -6,7 +6,7 @@ import pytest
 
 from application.orchestration import OrchestrationService, WorkerSchedulerService
 from domain.orchestration import Plan, PlanEdge, PlanStatus, Task, TaskExecution, TaskResult, TaskStatus
-from infrastructure.orchestration.langgraph import RootGraphDependencies, build_root_graph, invoke_root_graph
+from application.orchestration.langgraph import RootGraphDependencies, build_root_graph, invoke_root_graph
 
 
 class Repository:
@@ -117,11 +117,11 @@ async def test_root_runs_and_aggregates_two_workers() -> None:
             agent=Agent(),
             plan_builder=plan_builder,
             orchestration=OrchestrationService(repository),
-            scheduler=scheduler,
+            worker_scheduler=scheduler,
             plan_loader=load_plan,
         )
     )
     result = await invoke_root_graph(graph, session_id="s", run_id="r", user_message="parallel")
     assert result["status"] == "completed", result
-    assert set(result["plan_results"]) == {"worker-a", "worker-b"}
+    assert set(result["plan_results"]) == {"worker-a:r", "worker-b:r"}
     assert all(value.status is TaskStatus.DONE for value in (await repository.get_results("plan:e2e")).values())

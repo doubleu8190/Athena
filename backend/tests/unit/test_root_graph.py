@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from application.orchestration import RootWorkflowDependencies
 from application.runs.context import ContextAcquisitionService, ProviderResult
 from application.runs.task_understanding import TaskUnderstandingResult, UserTaskSpec
-from infrastructure.orchestration.langgraph import (
-    RootGraphDependencies,
+from application.orchestration.langgraph import (
     build_root_graph,
     invoke_root_graph,
 )
@@ -33,9 +33,9 @@ async def test_root_graph_builds_context_plan_from_dependency_graph() -> None:
         return ProviderResult("conversation", "succeeded")
 
     graph = build_root_graph(
-        dependencies=RootGraphDependencies(
+        dependencies=RootWorkflowDependencies(
             task_understanding=_TaskUnderstanding(UserTaskSpec(goal="hello")),
-            context=ContextAcquisitionService({"conversation": provider}),
+            context_acquisition=ContextAcquisitionService({"conversation": provider}),
             agent=_Agent(),
         )
     )
@@ -51,7 +51,7 @@ async def test_root_graph_builds_context_plan_from_dependency_graph() -> None:
 @pytest.mark.asyncio
 async def test_root_graph_routes_nested_task_clarification() -> None:
     graph = build_root_graph(
-        dependencies=RootGraphDependencies(
+        dependencies=RootWorkflowDependencies(
             task_understanding=_TaskUnderstanding(
                 UserTaskSpec(
                     goal="choose a file",

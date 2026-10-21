@@ -4,12 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from domain.events import (
-    ApplicationEvent,
-    EventHistoryPort,
-    EventSubscriptionPort,
-    RealtimeTransportPort,
-)
+from domain.events import ApplicationEvent, EventPort
 from domain.sessions import SessionRepository
 from application.common.responses import EventResponse
 
@@ -24,14 +19,10 @@ class EventStreamService:
     def __init__(
         self,
         sessions: SessionRepository,
-        subscriptions: EventSubscriptionPort,
-        history: EventHistoryPort,
-        transport: RealtimeTransportPort,
+        events: EventPort,
     ) -> None:
         self._sessions = sessions
-        self._subscriptions = subscriptions
-        self._history = history
-        self._transport = transport
+        self._events = events
         self._event_pumps: dict[asyncio.Queue[EventResponse], tuple[asyncio.Queue[ApplicationEvent], asyncio.Task[None]]] = {}
 
     async def ensure_session(self, session_id: str) -> None:
@@ -42,7 +33,7 @@ class EventStreamService:
         self, session_id: str
     ) -> tuple[asyncio.Queue[EventResponse], int]:
         await self.ensure_session(session_id)
-        queue, watermark = await self._subscriptions.open_subscription(session_id)
+        queue, watermark = await self._events.open_subscription(session_id)
         output: asyncio.Queue[EventResponse] = asyncio.Queue()
         async def pump() -> None:
             while True:
@@ -55,7 +46,10 @@ class EventStreamService:
     async def replay(
         self, session_id: str, after: int, upto: int
     ) -> list[EventResponse]:
-        return [_event_response(value) for value in await self._history.list_events_between(session_id, after, upto)]
+        return [
+            _event_response(value)
+            for value in await self._events.list_events_between(session_id, after, upto)
+        ]
 
     async def close(
         self, session_id: str, queue: asyncio.Queue[EventResponse]
@@ -64,7 +58,7 @@ class EventStreamService:
         if pump is not None:
             pump.cancel()
         if original is not None:
-            await self._transport.close_subscription(session_id, original)
+            await self._events.close_subscription(session_id, original)
 
 def _event_response(value: ApplicationEvent) -> EventResponse:
     """将事件信封转换为 SSE 使用的应用响应。"""

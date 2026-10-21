@@ -1,9 +1,10 @@
-"""Ports implemented by the LangGraph infrastructure adapter."""
+"""LangGraph-backed implementation of the Root graph port."""
 
 from __future__ import annotations
 
 from typing import Any
 
+from domain.events import EventPort
 from domain.orchestration.ports import RootGraphPort
 
 from application.orchestration.protocols import RootWorkflowDependencies, RootWorkflowPort
@@ -17,39 +18,17 @@ class LangGraphRootGraph(RootGraphPort):
     def __init__(
         self,
         *,
-        workflow: RootWorkflowPort | None = None,
-        dependencies: RootWorkflowDependencies | None = None,
-        event_publisher: Any | None = None,
+        workflow: RootWorkflowPort,
+        dependencies: RootWorkflowDependencies,
         checkpointer: Any = None,
-        graph: Any = None,
     ) -> None:
         self._workflow = workflow
         self._dependencies = dependencies
-        self._event_publisher = event_publisher
-        self._checkpointer = checkpointer
-        self._graph = graph
-
-    def _saver(self) -> Any:
-        if self._checkpointer is None:
-            return None
-        getter = getattr(self._checkpointer, "get_saver", None)
-        return getter() if getter is not None else self._checkpointer
-
-    async def start(self) -> None:
-        if self._graph is None:
-            self._graph = build_root_graph(
-                workflow=self._workflow,
-                dependencies=self._dependencies,
-                event_publisher=self._event_publisher,
-                checkpointer=self._saver(),
-            )
-
-    async def stop(self) -> None:
-        return None
-
-    @property
-    def graph(self) -> Any:
-        return self._graph
+        self._graph = build_root_graph(
+            workflow=self._workflow,
+            dependencies=self._dependencies,
+            checkpointer=checkpointer,
+        )
 
     async def invoke(
         self,
@@ -62,8 +41,6 @@ class LangGraphRootGraph(RootGraphPort):
         resume_value: dict[str, object] | None = None,
         stop_signal: object | None = None,
     ) -> object:
-        if self._graph is None:
-            await self.start()
         return await invoke_root_graph(
             self._graph,
             session_id=session_id,

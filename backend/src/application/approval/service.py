@@ -5,9 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from backend.src.domain.events.entities import (
+    ApplicationEvent,
+    EventDurability,
+    EventType,
+)
+from backend.src.domain.events.ports import EventPort
 from domain.approval import (
     ApprovalDecision,
-    ApprovalEventPort,
     ApprovalRepository,
     ApprovalRequest,
 )
@@ -17,7 +22,14 @@ from application.common.responses import ApprovalResponse, ApprovalStatsResponse
 class ApprovalService:
     """创建、查询和解决工具审批请求。"""
 
-    def __init__(self, repository: ApprovalRepository, events: ApprovalEventPort, *, id_factory: Callable[[], str], resumer: Callable[..., Any] | None = None) -> None:
+    def __init__(
+        self,
+        repository: ApprovalRepository,
+        events: EventPort,
+        *,
+        id_factory: Callable[[], str],
+        resumer: Callable[..., Any] | None = None,
+    ) -> None:
         self._repository = repository
         self._events = events
         self._id_factory = id_factory
@@ -62,38 +74,124 @@ class ApprovalService:
             if recovered is None:
                 raise RuntimeError("approval was not created and cannot be recovered")
             return _to_response(recovered)
-        await self._events.required(request)
+        await self._events.publish(
+            ApplicationEvent(
+                event_type=EventType.APPROVAL_REQUIRED,
+                durability=EventDurability.DURABLE,
+                session_id=request.session_id,
+                run_id=request.run_id,
+                payload={
+                    "activity_id": f"approval:{request.approval_id}",
+                    "activity_type": "approval",
+                    "name": "tool_approval",
+                    "parent_activity_id": f"tool:{request.tool_call_id}",
+                    "status": "waiting",
+                    "approval_id": request.approval_id,
+                    "tool_name": request.tool_name,
+                    "arguments": request.arguments,
+                    "risk_level": request.risk_level,
+                },
+            )
+        )
         return _to_response(request)
 
-    async def resolve(self, approval_id: str, *, run_id: str, task_id: str, decision: str | ApprovalDecision) -> bool:
+    async def resolve(
+        self,
+        approval_id: str,
+        *,
+        run_id: str,
+        task_id: str,
+        decision: str,
+    ) -> bool:
         """解决单条审批并返回是否成功。"""
         existing = await self._repository.get(approval_id)
-        value = await self._repository.resolve(approval_id, run_id=run_id, task_id=task_id, decision=ApprovalDecision(decision))
-        if value and hasattr(self._events, "resolved"):
-            await self._events.resolved(approval_id, session_id=existing.session_id if existing else "", run_id=run_id, decision=ApprovalDecision(decision).value)
+        decision = ApprovalDecision(decision)
+        value = await self._repository.resolve(
+            approval_id,
+            run_id=run_id,
+            task_id=task_id,
+            decision=decision,
+        )
+        await self._events.publish(
+            ApplicationEvent(
+                event_type=EventType.APPROVAL_RESOLVED,
+                durability=EventDurability.DURABLE,
+                session_id=existing.session_id if existing else "",
+                run_id=run_id,
+                payload={
+                    "activity_id": f"approval:{approval_id}",
+                    "activity_type": "approval",
+                    "name": "tool_approval",
+                    "status": (
+                        "approved"
+                        if decision == ApprovalDecision.APPROVED
+                        else "failed"
+                    ),
+                    "approval_id": approval_id,
+                    "decision": decision.value,
+                },
+            )
+        )
         if value and self._resumer and existing:
-            await self._resumer(existing, ApprovalDecision(decision).value)
+            await self._resumer(existing, decision.value)
         return value
 
-    async def resolve_batch(self, batch_id: str, decisions: dict[str, str | ApprovalDecision], *, run_id: str | None = None) -> bool:
+    async def resolve_batch(
+        self,
+        batch_id: str,
+        decisions: dict[str, str | ApprovalDecision],
+        *,
+        run_id: str | None = None,
+    ) -> bool:
         """按批次解决审批。"""
         normalized = {key: ApprovalDecision(value) for key, value in decisions.items()}
-        value = await self._repository.resolve_batch(batch_id, normalized, run_id=run_id)
+        value = await self._repository.resolve_batch(
+            batch_id, normalized, run_id=run_id
+        )
         if value and hasattr(self._events, "resolved"):
             for approval_id, decision in normalized.items():
                 existing = await self._repository.get(approval_id)
-                await self._events.resolved(approval_id, session_id=existing.session_id if existing else "", run_id=run_id or (existing.run_id if existing else ""), decision=decision.value)
+                await self._events.publish(
+                    ApplicationEvent(
+                        event_type=EventType.APPROVAL_RESOLVED,
+                        durability=EventDurability.DURABLE,
+                        session_id=existing.session_id if existing else "",
+                        run_id=run_id or (existing.run_id if existing else ""),
+                        payload={
+                            "activity_id": f"approval:{approval_id}",
+                            "activity_type": "approval",
+                            "name": "tool_approval",
+                            "status": (
+                                "approved"
+                                if decision == ApprovalDecision.APPROVED
+                                else "failed"
+                            ),
+                            "approval_id": approval_id,
+                            "decision": decision.value,
+                        },
+                    )
+                )
                 if self._resumer and existing:
                     await self._resumer(existing, decision.value)
         return value
 
     async def pending(self, session_id: str | None = None) -> list[ApprovalResponse]:
         """查询待审批请求。"""
-        return [_to_response(value) for value in await self._repository.list_pending(session_id)]
+        return [
+            _to_response(value)
+            for value in await self._repository.list_pending(session_id)
+        ]
 
-    async def history(self, session_id: str | None = None, *, limit: int = 50, offset: int = 0) -> list[ApprovalResponse]:
+    async def history(
+        self, session_id: str | None = None, *, limit: int = 50, offset: int = 0
+    ) -> list[ApprovalResponse]:
         """查询已处理审批历史。"""
-        return [_to_response(value) for value in await self._repository.list_history(session_id, limit=limit, offset=offset)]
+        return [
+            _to_response(value)
+            for value in await self._repository.list_history(
+                session_id, limit=limit, offset=offset
+            )
+        ]
 
     async def stats(self, session_id: str | None = None) -> ApprovalStatsResponse:
         """返回审批数量统计。"""
@@ -101,7 +199,9 @@ class ApprovalService:
         history = await self.history(session_id, limit=100000, offset=0)
         approved = sum(item.resolution == "approved" for item in history)
         denied = sum(item.resolution == "denied" for item in history)
-        return ApprovalStatsResponse(len(pending), approved, denied, len(pending) + len(history))
+        return ApprovalStatsResponse(
+            len(pending), approved, denied, len(pending) + len(history)
+        )
 
 
 def _to_response(value: ApprovalRequest) -> ApprovalResponse:

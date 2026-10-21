@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from domain.events import EventHistoryPort
+from domain.events import EventPort
 from domain.runs import RunQueryPort, RunStatus, RunSummary
 from domain.sessions import SessionRepository
 
@@ -15,7 +15,12 @@ from .command_service import RunNotFoundError
 class RunQueryService:
     """把会话存在性校验和运行查询组合起来。"""
 
-    def __init__(self, sessions: SessionRepository, runs: RunQueryPort, events: EventHistoryPort | None = None) -> None:
+    def __init__(
+        self,
+        sessions: SessionRepository,
+        runs: RunQueryPort,
+        events: EventPort | None = None,
+    ) -> None:
         self._sessions = sessions
         self._runs = runs
         self._events = events

@@ -245,7 +245,7 @@ async def list_run_events(
 ) -> tuple[list[ApplicationEvent], bool]: ...
 ```
 
-暂不新增独立 trace repository；历史查询复用 `EventHistoryPort` 或扩展 `RunQueryPort`。这样可以保持 PostgreSQL 为唯一业务事实来源。
+暂不新增独立 trace repository；历史查询复用 `EventPort` 或扩展 `RunQueryPort`。这样可以保持 PostgreSQL 为唯一业务事实来源。
 
 ### 6.3 数据库改造
 
@@ -446,7 +446,7 @@ interface RunTimelineEvent {
 - `backend/src/infrastructure/integrations/llm/llm_provider.py`
 - `backend/src/application/runs/context/service.py`
 - `backend/src/application/orchestration/scheduler.py`
-- `backend/src/infrastructure/persistence/postgres/repositories/_runtime.py`
+- `../src/infrastructure/persistence/postgres/repositories/run_repository.py`
 - `backend/src/interfaces/http/controllers/sessions_controller.py` 或独立 timeline controller
 - `backend/src/application/common/responses.py`
 - `backend/docs/athena-api.md`

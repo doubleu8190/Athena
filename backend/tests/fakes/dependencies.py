@@ -112,7 +112,7 @@ def build_test_dependencies() -> ApplicationDependencies:
         "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
         "run_query_factory": lambda: RunQueryService(sessions, runs, events),
         "run_command_factory": lambda: RunCommandService(sessions, runs, runs, id_factory=now_id),
-        "event_stream_factory": lambda: EventStreamService(sessions, events, events, events),
+        "event_stream_factory": lambda: EventStreamService(sessions, events),
         "tool_query_factory": lambda: ToolQueryService(tools, queries),
         "tool_service_factory": lambda: ToolService(tools, InMemoryToolExecution()),
         "approval_service_factory": lambda: ApprovalService(approvals, InMemoryApprovalEvents(), id_factory=now_id),

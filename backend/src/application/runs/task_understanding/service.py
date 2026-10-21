@@ -25,7 +25,7 @@ class TaskUnderstandingService:
 
     def __init__(
         self,
-        structured_llm: LLMPort | None = None,
+        structured_llm: LLMPort,
         *,
         timeout_seconds: float = 15.0,
         prompt_root: Path | None = None,

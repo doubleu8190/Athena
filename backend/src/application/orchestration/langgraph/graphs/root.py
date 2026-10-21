@@ -12,17 +12,15 @@ from langgraph.graph import END, START, StateGraph
 from application.orchestration.protocols import (
     RootWorkflowDependencies,
     RootWorkflowPort,
-    make_root_workflow,
 )
 
 from ..shared.utils import call
 from .state import RootGraphState, json_value
 
-RootGraphDependencies = RootWorkflowDependencies
 
 
 async def _publish(
-    dependencies: RootGraphDependencies,
+    dependencies: RootWorkflowDependencies,
     event_type: str,
     state: Mapping[str, Any],
     *,
@@ -66,7 +64,7 @@ async def _publish(
 def _node(
     name: str,
     handler: Callable[[RootGraphState], Any],
-    dependencies: RootGraphDependencies,
+    dependencies: RootWorkflowDependencies,
 ):
     async def wrapped(state: RootGraphState) -> dict[str, Any]:
         started_at = datetime.now(timezone.utc)
@@ -128,17 +126,11 @@ def _route_after_wait(state: RootGraphState) -> str:
 
 def build_root_graph(
     *,
-    workflow: RootWorkflowPort | None = None,
-    dependencies: RootGraphDependencies | None = None,
-    event_publisher: Any | None = None,
+    workflow: RootWorkflowPort,
+    dependencies: RootWorkflowDependencies ,
     checkpointer: Any = None,
 ) -> Any:
     """Compile a graph whose nodes delegate business work to an application port."""
-    deps = dependencies or RootGraphDependencies()
-    workflow = workflow or make_root_workflow(deps)
-    publisher_dependencies = deps
-    if event_publisher is not None:
-        publisher_dependencies = RootGraphDependencies(event_publisher=event_publisher)
     handlers = {
         "prepare_request": workflow.prepare_request,
         "understand_task": workflow.understand_task,
@@ -156,7 +148,7 @@ def build_root_graph(
     }
     graph = StateGraph(RootGraphState)
     for name, handler in handlers.items():
-        graph.add_node(name, _node(name, handler, publisher_dependencies))
+        graph.add_node(name, _node(name, handler, dependencies))
     graph.add_edge(START, "prepare_request")
     graph.add_conditional_edges(
         "prepare_request",
@@ -242,4 +234,4 @@ async def invoke_root_graph(
     return await call(graph.ainvoke, state, config=config)
 
 
-__all__ = ["RootGraphDependencies", "build_root_graph", "invoke_root_graph"]
+__all__ = ["build_root_graph", "invoke_root_graph"]

@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import DateTime, cast, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,7 @@ from domain.approval.ports import ApprovalRepository
 
 from ..models import (
     ApprovalRecordModel,
+    WorkerJobModel,
 )
 
 
@@ -52,11 +54,18 @@ class PostgresApprovalRepository(ApprovalRepository):
                         tool_name=request.tool_name,
                         arguments_json=json.dumps(request.arguments),
                         risk_level=request.risk_level,
+                        execution_id=request.execution_id,
+                        worker_thread_id=request.worker_thread_id,
+                        interrupt_id=request.interrupt_id,
+                        args_hash=request.args_hash,
+                        operation_key=request.operation_key,
                         status=request.status.value,
                         decision=request.decision.value if request.decision else None,
                         created_at=(
                             request.created_at or datetime.now(timezone.utc)
                         ).isoformat(),
+                        expires_at=request.expires_at,
+                        decided_by=request.decided_by,
                     )
                 )
         return True
@@ -102,6 +111,21 @@ class PostgresApprovalRepository(ApprovalRepository):
     ) -> bool:
         async with self._session_factory() as session:
             async with session.begin():
+                approval = await session.get(
+                    ApprovalRecordModel,
+                    approval_id,
+                    with_for_update=True,
+                )
+                if (
+                    approval is None
+                    or approval.run_id != run_id
+                    or approval.status != ApprovalStatus.PENDING.value
+                    or (
+                        approval.task_id is not None
+                        and approval.task_id != task_id
+                    )
+                ):
+                    return False
                 result = await session.execute(
                     update(ApprovalRecordModel)
                     .where(
@@ -115,6 +139,37 @@ class PostgresApprovalRepository(ApprovalRepository):
                         decided_at=_now(),
                     )
                 )
+                if (
+                    result.rowcount
+                    and approval.execution_id
+                    and approval.worker_thread_id
+                    and approval.interrupt_id
+                    and approval.args_hash
+                    and approval.operation_key
+                ):
+                    now = datetime.now(timezone.utc)
+                    session.add(
+                        WorkerJobModel(
+                            job_id=uuid4().hex,
+                            dedupe_key=f"resume-worker:{approval_id}",
+                            job_type="resume_worker",
+                            execution_id=approval.execution_id,
+                            approval_id=approval_id,
+                            payload_json={
+                                "approval_id": approval_id,
+                                "decision": decision.value,
+                                "interrupt_id": approval.interrupt_id,
+                                "execution_id": approval.execution_id,
+                                "args_hash": approval.args_hash,
+                                "operation_key": approval.operation_key,
+                            },
+                            status="pending",
+                            attempt=0,
+                            available_at=now,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
         return bool(result.rowcount)
 
     async def resolve_batch(
@@ -160,6 +215,13 @@ class PostgresApprovalRepository(ApprovalRepository):
             ApprovalDecision(row.decision) if row.decision else None,
             datetime.fromisoformat(row.created_at),
             datetime.fromisoformat(row.decided_at) if row.decided_at else None,
+            getattr(row, "execution_id", None),
+            getattr(row, "worker_thread_id", None),
+            getattr(row, "interrupt_id", None),
+            getattr(row, "args_hash", None),
+            getattr(row, "operation_key", None),
+            getattr(row, "expires_at", None),
+            getattr(row, "decided_by", None),
         )
 
 __all__ = ["PostgresApprovalRepository"]

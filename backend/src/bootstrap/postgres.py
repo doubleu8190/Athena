@@ -34,6 +34,7 @@ from application.orchestration import (
     RootWorkflowDependencies,
     WorkerJobService,
     WorkerSchedulerService,
+    WorkerApprovalService,
     WorkerToolExecutor,
     WorkerTaskEventHandler,
     WorkerWorkflow,
@@ -402,6 +403,10 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         ),
         checkpointer=checkpointer,
     )
+    approval_service = ApprovalService(
+        approvals, events, id_factory=ids
+    )
+    worker_approval_service = WorkerApprovalService(worker_job_repository, events)
     worker_dispatcher = WorkerJobDispatcher(
         worker_job_service,
         worker_executor,
@@ -409,6 +414,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         worker_id=f"worker-dispatcher:{ids()}",
         lease_seconds=settings.worker_job_lease_seconds,
         max_concurrency=settings.worker_dispatch_max_concurrency,
+        approval_service=worker_approval_service,
         poll_interval=settings.worker_job_poll_interval_seconds,
         id_factory=ids,
     )
@@ -418,9 +424,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         events=events,
     )
 
-    approval_service = ApprovalService(
-        approvals, events, id_factory=ids
-    )
     dependencies = RootWorkflowDependencies(
         task_understanding=task_understanding,
         context_acquisition=context_service,

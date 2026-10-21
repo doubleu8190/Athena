@@ -72,7 +72,7 @@ class LangGraphWorkerExecutor(WorkerExecutor):
             task_id=execution.task.task_id,
             execution_generation=execution.execution_generation,
             execution=execution,
-            decisions=decisions,
+            resume_value=decisions,
         )
         return self._result(execution, value)
 
@@ -96,6 +96,21 @@ class LangGraphWorkerExecutor(WorkerExecutor):
     @staticmethod
     def _result(execution: TaskExecution, value: dict[str, Any]) -> TaskResult:
         """将 Worker graph 的最终状态转换为领域结果。"""
+        interrupts = value.get("__interrupt__", ())
+        if isinstance(interrupts, (list, tuple)) and interrupts:
+            if len(interrupts) != 1:
+                raise RuntimeError("worker_graph_multiple_interrupts_not_supported")
+            interrupt_value = getattr(interrupts[0], "value", {})
+            if not isinstance(interrupt_value, dict):
+                raise RuntimeError("worker_graph_interrupt_payload_invalid")
+            interrupt_id = getattr(interrupts[0], "id", None)
+            approval = dict(interrupt_value)
+            approval["interrupt_id"] = str(interrupt_id or "")
+            return TaskResult(
+                execution.task.task_id,
+                TaskStatus.WAITING_APPROVAL,
+                approval_batch=approval,
+            )
         payload = dict(value.get("result", {}))
         status = str(value.get("status", payload.get("status", "failed")))
         try:

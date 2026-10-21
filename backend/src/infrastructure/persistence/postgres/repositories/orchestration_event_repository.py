@@ -156,7 +156,11 @@ class PostgresOrchestrationEventRepository:
                     session,
                     WorkerJobModel,
                     (WorkerJobModel.execution_id == event.execution_id)
-                    & (WorkerJobModel.job_type == "execute"),
+                    & WorkerJobModel.job_type.in_(
+                        ("execute", "resume_worker")
+                    )
+                    & (WorkerJobModel.status == "running")
+                    & (WorkerJobModel.lease_owner == event.worker_id),
                 )
 
                 rejection = _rejection_reason(

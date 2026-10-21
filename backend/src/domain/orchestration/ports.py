@@ -38,6 +38,12 @@ class WorkerJobRepository(Protocol):
         self, lease: WorkerJobLease, *, lease_seconds: float
     ) -> WorkerJobLease | None: ...
 
+    async def wait_for_approval(
+        self,
+        lease: WorkerJobLease,
+        approval: Mapping[str, object],
+    ) -> bool: ...
+
 
 class PlanRepository(Protocol):
     async def create(self, plan: Plan, tasks: list[Task]) -> Plan: ...

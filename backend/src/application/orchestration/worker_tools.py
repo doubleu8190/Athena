@@ -1,9 +1,10 @@
-"""Restricted read-only tools available to independent Worker executions."""
+"""Governed tools available to independent Worker executions."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 import hashlib
+import json
 from typing import Any
 
 from application.tools.service import ToolService
@@ -11,20 +12,15 @@ from domain.files import FileStoragePort
 from domain.tools import ToolExecutionRequest
 
 
-WORKER_READ_ONLY_TOOL_NAMES = frozenset(
-    {"read_local_file", "read_file", "list_directory", "list_files"}
-)
-
-
-async def list_worker_read_tools(tool_service: Any) -> tuple[str, ...]:
-    """Return registered, enabled, low-risk read-only tools for planning."""
+async def list_worker_tools(tool_service: Any) -> tuple[str, ...]:
+    """Return registered native tools available to Worker planning."""
     return tuple(
-        str(item["name"]) for item in await worker_read_tool_manifest(tool_service)
+        str(item["name"]) for item in await worker_tool_manifest(tool_service)
     )
 
 
-async def worker_read_tool_manifest(tool_service: Any) -> tuple[dict[str, Any], ...]:
-    """Return safe tool schemas without exposing mutating capabilities."""
+async def worker_tool_manifest(tool_service: Any) -> tuple[dict[str, Any], ...]:
+    """Return enabled native tools with their deterministic approval policy."""
     list_tools = getattr(tool_service, "list_tools", None)
     if not callable(list_tools):
         return ()
@@ -34,12 +30,14 @@ async def worker_read_tool_manifest(tool_service: Any) -> tuple[dict[str, Any], 
             "name": name,
             "description": str(getattr(tool, "description", "")),
             "parameters": dict(getattr(tool, "parameters", {}) or {}),
+            "risk_level": _risk_level(tool),
+            "requires_approval": _requires_approval(tool),
         }
         for name, tool in sorted(
             (
                 (str(getattr(tool, "name", "")), tool)
                 for tool in configured
-                if _is_worker_read_tool(tool, str(getattr(tool, "name", "")))
+                if _is_worker_tool(tool)
             ),
             key=lambda item: item[0],
         )
@@ -47,7 +45,7 @@ async def worker_read_tool_manifest(tool_service: Any) -> tuple[dict[str, Any], 
 
 
 class WorkerToolExecutor:
-    """Execute only task-authorized, currently enabled read-only tools."""
+    """Execute task-authorized native tools through deterministic governance."""
 
     def __init__(
         self,
@@ -88,7 +86,7 @@ class WorkerToolExecutor:
             return _denied("tool_not_allowed_for_task", name=name)
 
         config = await self._tool_service.get(name)
-        if config is None or not _is_worker_read_tool(config, name):
+        if config is None or not _is_worker_tool(config):
             return _denied("tool_not_available_to_worker", name=name)
 
         arguments = tool_call.get("arguments", tool_call.get("args", {}))
@@ -104,16 +102,74 @@ class WorkerToolExecutor:
         tool_call_id = (
             f"worker:{task_id}:{generation}:{tool_round}:{call_index}"
         )
+        approval_decision = str(tool_call.get("approval_decision", "")).lower()
+        if approval_decision == "approved":
+            expected_args_hash = hashlib.sha256(
+                _strict_json(dict(arguments)).encode("utf-8")
+            ).hexdigest()
+            expected_operation_key = _operation_key(
+                run_id, task_id, generation, tool_round, call_index
+            )
+            if (
+                tool_call.get("args_hash") != expected_args_hash
+                or tool_call.get("operation_key") != expected_operation_key
+                or tool_call.get("tool_call_id")
+                != f"worker:{task_id}:{generation}:{tool_round}:{call_index}"
+            ):
+                return _denied("worker_approval_operation_mismatch", name=name)
+        if _requires_approval(config) and approval_decision != "approved":
+            execution_id = str(execution.get("execution_id", ""))
+            worker_thread_id = str(
+                execution.get("worker_thread_id")
+                or f"task:{task_id}:exec:{generation}"
+            )
+            if not execution_id:
+                return _denied("worker_execution_identity_missing", name=name)
+            arguments_json = _strict_json(dict(arguments))
+            args_hash = hashlib.sha256(arguments_json.encode("utf-8")).hexdigest()
+            operation_key = _operation_key(
+                run_id, task_id, generation, tool_round, call_index
+            )
+            approval_id = "approval:" + hashlib.sha256(
+                f"{worker_thread_id}:{operation_key}".encode("utf-8")
+            ).hexdigest()[:32]
+            return {
+                "status": "approval_required",
+                "approval_request": {
+                    "approval_id": approval_id,
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "plan_id": str(execution.get("plan_id", "")),
+                    "task_id": task_id,
+                    "execution_id": execution_id,
+                    "worker_thread_id": worker_thread_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": name,
+                    "arguments": dict(arguments),
+                    "risk_level": _risk_level(config),
+                    "args_hash": args_hash,
+                    "operation_key": operation_key,
+                    "tool_round": tool_round,
+                    "call_index": call_index,
+                },
+            }
+
         result = await self._tool_service.execute(
             ToolExecutionRequest(
                 tool_name=name,
                 arguments=dict(arguments),
                 session_id=session_id,
                 run_id=run_id,
+                approval_decision=approval_decision or None,
                 plan_id=str(execution.get("plan_id", "")) or None,
                 task_id=task_id,
                 tool_call_id=tool_call_id,
                 agent_role="worker",
+                operation_key=(
+                    str(tool_call.get("operation_key"))
+                    if tool_call.get("operation_key")
+                    else None
+                ),
             )
         )
         payload = {
@@ -184,14 +240,51 @@ class WorkerToolExecutor:
         }
 
 
-def _is_worker_read_tool(config: Any, name: str) -> bool:
-    """Workers may use only explicitly configured low-risk read operations."""
+def _is_worker_tool(config: Any) -> bool:
+    """Workers may use enabled native tools with a known risk classification."""
+    risk_level = _risk_level(config)
     return (
-        name in WORKER_READ_ONLY_TOOL_NAMES
-        and bool(getattr(config, "enabled", False))
-        and not bool(getattr(config, "require_approval", True))
-        and str(getattr(config, "risk_level", "")).lower() == "low"
+        bool(getattr(config, "enabled", False))
+        and risk_level in {"low", "medium", "high"}
         and str(getattr(config, "execution_mode", "")).lower() == "native"
+    )
+
+
+def _risk_level(config: Any) -> str:
+    """Normalize an enum or plain string risk value."""
+    value = getattr(config, "risk_level", "")
+    return str(getattr(value, "value", value)).lower()
+
+
+def _requires_approval(config: Any) -> bool:
+    """Require approval when configured or when risk is medium/high."""
+    return bool(getattr(config, "require_approval", True)) or _risk_level(
+        config
+    ) in {"medium", "high"}
+
+
+def _operation_key(
+    run_id: str,
+    task_id: str,
+    generation: int,
+    tool_round: int,
+    call_index: int,
+) -> str:
+    """Build a stable side-effect key within the database column limit."""
+    value = f"athena:{run_id}:{task_id}:{generation}:{tool_round}:{call_index}"
+    if len(value) <= 128:
+        return value
+    return "athena:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _strict_json(value: Any) -> str:
+    """Serialize an operation deterministically for approval binding."""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
 
 
@@ -208,8 +301,7 @@ async def _byte_chunks(value: bytes) -> AsyncIterator[bytes]:
 
 
 __all__ = [
-    "WORKER_READ_ONLY_TOOL_NAMES",
     "WorkerToolExecutor",
-    "list_worker_read_tools",
-    "worker_read_tool_manifest",
+    "list_worker_tools",
+    "worker_tool_manifest",
 ]

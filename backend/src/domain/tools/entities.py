@@ -82,6 +82,7 @@ class ToolExecutionRequest:
     agent_role: str = "root"
     plan_id: str | None = None
     task_id: str | None = None
+    operation_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

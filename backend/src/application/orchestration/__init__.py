@@ -8,6 +8,7 @@ from .scheduler import WorkerSchedulerService
 from .root_workflow import RootWorkflow, RootWorkflowDependencies
 from .worker_workflow import WorkerWorkflow
 from .worker_tools import WorkerToolExecutor
+from .worker_approval import WorkerApprovalService
 from .protocols import RootWorkflowPort, WorkerWorkflowPort
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "RootWorkflowDependencies",
     "WorkerWorkflow",
     "WorkerToolExecutor",
+    "WorkerApprovalService",
     "RootWorkflowPort",
     "WorkerWorkflowPort",
 ]

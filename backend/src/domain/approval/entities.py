@@ -34,6 +34,13 @@ class ApprovalRequest:
     decision: ApprovalDecision | None = None
     created_at: datetime | None = None
     decided_at: datetime | None = None
+    execution_id: str | None = None
+    worker_thread_id: str | None = None
+    interrupt_id: str | None = None
+    args_hash: str | None = None
+    operation_key: str | None = None
+    expires_at: datetime | None = None
+    decided_by: str | None = None
 
 
 __all__ = ["ApprovalDecision", "ApprovalRequest", "ApprovalStatus"]

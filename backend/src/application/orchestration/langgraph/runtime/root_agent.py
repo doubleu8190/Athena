@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from application.orchestration.worker_tools import worker_read_tool_manifest
+from application.orchestration.worker_tools import worker_tool_manifest
 
 
 class ConfiguredRootAgent:
@@ -38,8 +38,8 @@ class ConfiguredRootAgent:
                         "Each task must have task_id, title, objective, worker_type, "
                         "allowed_tools, input, and expected_output. Use worker_type "
                         "'general' for every task. allowed_tools may contain only "
-                        "the registered read-only tools listed here, and only when "
-                        "needed: "
+                        "the tools listed here, and only when needed. Tools marked "
+                        "requires_approval require user approval before execution: "
                         f"{json.dumps(available_tools, ensure_ascii=False)}. "
                         "Keep the DAG acyclic."
                     ),
@@ -190,7 +190,7 @@ class ConfiguredWorkerAgent:
         allowed_tools = tuple(
             str(name) for name in task.get("allowed_tools", ()) if str(name)
         )
-        manifest = await worker_read_tool_manifest(self._tool_service)
+        manifest = await worker_tool_manifest(self._tool_service)
         tool_specs = [
             item for item in manifest if item["name"] in set(allowed_tools)
         ]

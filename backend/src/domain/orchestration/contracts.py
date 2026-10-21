@@ -243,6 +243,9 @@ class WorkerJobLease:
     lease_until: datetime
     task: Task
     upstream_results: Mapping[str, TaskResult] = field(default_factory=dict)
+    job_type: str = "execute"
+    approval_id: str | None = None
+    resume_value: Mapping[str, Any] = field(default_factory=dict)
 
 
 __all__ = [

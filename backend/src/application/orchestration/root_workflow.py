@@ -18,7 +18,7 @@ from typing import Any, Callable, Mapping
 from domain.orchestration import Plan, PlanEdge, Task
 
 from .protocols import RootWorkflowDependencies, RootWorkflowPort
-from .worker_tools import list_worker_read_tools, worker_read_tool_manifest
+from .worker_tools import list_worker_tools, worker_tool_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +282,7 @@ class RootWorkflow(RootWorkflowPort):
         request = state.get("request", {})
         task = state.get("understanding", {}).get("task_spec", {})
         worker_tools = (
-            await worker_read_tool_manifest(self.dependencies.tool_service)
+            await worker_tool_manifest(self.dependencies.tool_service)
             if isinstance(task, Mapping) and task.get("mode") == "plan"
             else ()
         )
@@ -358,9 +358,7 @@ class RootWorkflow(RootWorkflowPort):
                 session_id=plan.session_id,
                 run_id=run_id,
             )
-        worker_read_tools = set(
-            await list_worker_read_tools(deps.tool_service)
-        )
+        worker_tools = set(await list_worker_tools(deps.tool_service))
         # Task ids are database-global, so bind model-produced ids to this run.
         task_id_map = (
             {item.task_id: f"{item.task_id}:{run_id}" for item in tasks}
@@ -375,7 +373,7 @@ class RootWorkflow(RootWorkflowPort):
                 input=item.input,
                 expected_output=item.expected_output,
                 allowed_tools=tuple(
-                    name for name in item.allowed_tools if name in worker_read_tools
+                    name for name in item.allowed_tools if name in worker_tools
                 ),
                 worker_type="general",
             )

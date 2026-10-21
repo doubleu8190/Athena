@@ -23,6 +23,7 @@ from ..models import (
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
+    ApprovalRecordModel,
     PlanRoundModel,
     PlanVersionModel,
     RoundTaskModel,
@@ -40,6 +41,9 @@ class _Candidate:
     round_id: str
     task_id: str
     execution_id: str
+    job_type: str
+    approval_id: str | None
+    resume_value: dict[str, Any]
 
 
 class PostgresWorkerJobRepository(WorkerJobRepository):
@@ -135,6 +139,126 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 execution.updated_at = now
                 return replace(lease, lease_until=expires_at)
 
+    async def wait_for_approval(
+        self,
+        lease: WorkerJobLease,
+        approval: Mapping[str, object],
+    ) -> bool:
+        """原子登记 Worker 审批，并释放该执行的活跃租约。
+
+        Args:
+            lease: 当前 Worker Job 的有效租约。
+            approval: 已校验的审批身份、工具和冻结参数。
+
+        Returns:
+            审批记录与执行状态同时持久化时返回 True。
+
+        Raises:
+            无：身份不匹配或租约失效会返回 False。
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                prior = (
+                    await session.execute(
+                        select(ApprovalRecordModel).where(
+                            ApprovalRecordModel.worker_thread_id
+                            == approval.get("worker_thread_id"),
+                            ApprovalRecordModel.interrupt_id
+                            == approval.get("interrupt_id"),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if prior is not None:
+                    return prior.approval_id == approval.get("approval_id")
+
+                run, plan, round_row, task, round_task, execution, job = (
+                    await self._lock_execution_chain(session, lease)
+                )
+                if any(
+                    item is None
+                    for item in (
+                        run,
+                        plan,
+                        round_row,
+                        task,
+                        round_task,
+                        execution,
+                        job,
+                    )
+                ):
+                    return False
+                assert run is not None
+                assert plan is not None
+                assert round_row is not None
+                assert task is not None
+                assert round_task is not None
+                assert execution is not None
+                assert job is not None
+                if (
+                    lease.job_type != "execute"
+                    or not _owns_lease(
+                        lease, run, plan, round_row, task, round_task, execution, job
+                    )
+                    or approval.get("run_id") != run.run_id
+                    or approval.get("plan_id") != plan.plan_id
+                    or approval.get("task_id") != task.task_id
+                    or approval.get("execution_id") != execution.execution_id
+                    or approval.get("worker_thread_id")
+                    != execution.worker_thread_id
+                    or not approval.get("approval_id")
+                    or not approval.get("interrupt_id")
+                    or not approval.get("tool_call_id")
+                    or not approval.get("tool_name")
+                    or not approval.get("args_hash")
+                    or not approval.get("operation_key")
+                ):
+                    return False
+
+                now = await self._now(session)
+                session.add(
+                    ApprovalRecordModel(
+                        approval_id=str(approval["approval_id"]),
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        plan_id=plan.plan_id,
+                        task_id=task.task_id,
+                        execution_id=execution.execution_id,
+                        worker_thread_id=execution.worker_thread_id,
+                        interrupt_id=str(approval["interrupt_id"]),
+                        tool_call_id=str(approval["tool_call_id"]),
+                        tool_name=str(approval["tool_name"]),
+                        arguments_json=json.dumps(
+                            dict(approval.get("arguments", {})),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        risk_level=str(approval.get("risk_level", "high")),
+                        args_hash=str(approval["args_hash"]),
+                        operation_key=str(approval["operation_key"]),
+                        status="pending",
+                        created_at=now.isoformat(),
+                    )
+                )
+                execution.status = "waiting_approval"
+                execution.lease_owner = None
+                execution.lease_until = None
+                execution.fencing_token += 1
+                execution.updated_at = now
+                job.status = "completed"
+                job.lease_owner = None
+                job.lease_until = None
+                job.updated_at = now
+                task.status = "waiting_approval"
+                task.error_json = json.dumps(
+                    {"approval_id": str(approval["approval_id"])},
+                    ensure_ascii=False,
+                )
+                task.updated_at = now.isoformat()
+                round_task.status = "waiting_approval"
+                round_task.terminal_at = None
+                return True
+
     async def _now(self, session: AsyncSession) -> datetime:
         """优先使用 PostgreSQL 时钟，避免多 Worker 主机时钟偏差。"""
         value = (
@@ -163,6 +287,9 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 PlanRoundModel.round_id,
                 AgentTaskModel.task_id,
                 TaskExecutionModel.execution_id,
+                WorkerJobModel.job_type,
+                WorkerJobModel.approval_id,
+                WorkerJobModel.payload_json,
             )
             .join(
                 TaskExecutionModel,
@@ -173,7 +300,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             .join(AgentRunModel, AgentPlanModel.run_id == AgentRunModel.run_id)
             .join(PlanRoundModel, TaskExecutionModel.round_id == PlanRoundModel.round_id)
             .where(
-                WorkerJobModel.job_type == "execute",
+                WorkerJobModel.job_type.in_(("execute", "resume_worker")),
                 or_(ready_job, expired_job),
             )
             .order_by(WorkerJobModel.available_at, WorkerJobModel.created_at)
@@ -223,6 +350,29 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         ):
             return None
 
+        is_resume = candidate.job_type == "resume_worker"
+        if candidate.job_type not in {"execute", "resume_worker"}:
+            return None
+        resume_value = _load_json(candidate.resume_value, {})
+        if is_resume:
+            approval = (
+                await session.get(ApprovalRecordModel, candidate.approval_id)
+                if candidate.approval_id
+                else None
+            )
+            if (
+                approval is None
+                or approval.status != "resolved"
+                or approval.decision not in {"approved", "denied"}
+                or approval.execution_id != execution.execution_id
+                or approval.worker_thread_id != execution.worker_thread_id
+                or approval.interrupt_id != resume_value.get("interrupt_id")
+                or approval.args_hash != resume_value.get("args_hash")
+                or approval.operation_key != resume_value.get("operation_key")
+                or approval.decision != resume_value.get("decision")
+            ):
+                return None
+
         is_reclaim = job.status == "running"
         if is_reclaim:
             if (
@@ -231,6 +381,15 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 or round_task.status != "running"
                 or not _is_expired(job.lease_until, now)
                 or not _is_expired(execution.lease_until, now)
+            ):
+                return None
+        elif is_resume:
+            if (
+                job.status != "pending"
+                or execution.status != "waiting_approval"
+                or task_row.status != "waiting_approval"
+                or round_task.status != "waiting_approval"
+                or job.available_at > now
             ):
                 return None
         elif (
@@ -261,7 +420,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             return None
 
         previous_owner = execution.lease_owner
-        if is_reclaim or previous_owner is not None:
+        if is_resume or is_reclaim or previous_owner is not None:
             execution.fencing_token += 1
         expires_at = now + timedelta(seconds=lease_seconds)
         job.status = "running"
@@ -303,6 +462,9 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             lease_until=expires_at,
             task=task,
             upstream_results=upstream,
+            job_type=candidate.job_type,
+            approval_id=candidate.approval_id,
+            resume_value=resume_value if is_resume else {},
         )
 
     async def _lock_execution_chain(
@@ -456,7 +618,7 @@ def _owns_lease(lease, run, plan, round_row, task, round_task, execution, job) -
         and execution.task_id == lease.task_id
         and execution.round_id == lease.round_id
         and job.execution_id == lease.execution_id
-        and job.job_type == "execute"
+        and job.job_type == lease.job_type
         and execution.cancellation_epoch == lease.cancellation_epoch
         and run.cancellation_epoch == lease.cancellation_epoch
         and plan.cancellation_epoch == lease.cancellation_epoch

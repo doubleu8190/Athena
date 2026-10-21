@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from application.orchestration.protocols import WorkerWorkflowPort
 
@@ -54,11 +55,43 @@ def build_worker_graph(
     graph.add_conditional_edges(
         "execute_tool_batch",
         workflow.route_after_tools,
-        {"worker_agent_loop": "worker_agent_loop", "finish_worker": "finish_worker"},
+        {
+            "worker_agent_loop": "worker_agent_loop",
+            "request_worker_approval": "request_worker_approval",
+            "finish_worker": "finish_worker",
+        },
     )
+    async def request_worker_approval(state: WorkerGraphState) -> dict[str, Any]:
+        return await _request_worker_approval(workflow, state)
+
+    graph.add_node("request_worker_approval", request_worker_approval)
+    graph.add_edge("request_worker_approval", "worker_agent_loop")
     graph.add_edge("finish_worker", END)
     graph.add_edge("finalize_worker", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+async def _request_worker_approval(
+    workflow: WorkerWorkflowPort,
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """中断当前 Worker，并在 ResumeWorker 后执行原样冻结的操作。
+
+    Args:
+        workflow: 提供审批后工具执行用例的应用工作流。
+        state: 包含待审批操作的可恢复 Worker 状态。
+
+    Returns:
+        恢复后写入图状态的工具结果。
+
+    Raises:
+        RuntimeError: 中断状态中没有有效待审批操作时抛出。
+    """
+    approval = state.get("pending_approval")
+    if not isinstance(approval, Mapping) or not approval:
+        raise RuntimeError("worker_approval_request_missing")
+    decision = interrupt(dict(approval))
+    return await workflow.complete_tool_approval(state, decision)
 
 
 async def invoke_worker_graph(
@@ -68,6 +101,7 @@ async def invoke_worker_graph(
     execution_generation: int,
     execution: Mapping[str, Any],
     decisions: dict[str, str] | None = None,
+    resume_value: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not task_id:
         raise ValueError("task_id is required")
@@ -77,11 +111,19 @@ async def invoke_worker_graph(
     }
     if decisions is not None:
         state["response"] = {"resume": True, "decisions": json_value(decisions)}
-    return await call(
-        graph.ainvoke,
-        state,
-        config={"configurable": {"thread_id": f"task:{task_id}:exec:{execution_generation}"}},
-    )
+    thread_id = (
+        encoded.get("worker_thread_id")
+        if isinstance(encoded, Mapping)
+        else None
+    ) or f"task:{task_id}:exec:{execution_generation}"
+    config = {"configurable": {"thread_id": str(thread_id)}}
+    if resume_value is not None:
+        return await call(
+            graph.ainvoke,
+            Command(resume=dict(resume_value)),
+            config=config,
+        )
+    return await call(graph.ainvoke, state, config=config)
 
 
 __all__ = ["build_worker_graph", "invoke_worker_graph"]

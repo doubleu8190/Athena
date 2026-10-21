@@ -79,8 +79,9 @@ class WorkerWorkflow:
                 },
                 "waiting": False,
             }
-        tool_results = [
-            as_dict(
+        tool_results: list[dict[str, Any]] = []
+        for index, item in enumerate(calls):
+            result = as_dict(
                 await call(
                     self.execute_tool,
                     tool_call=item,
@@ -90,8 +91,128 @@ class WorkerWorkflow:
                     call_index=index,
                 )
             )
-            for index, item in enumerate(calls)
-        ]
+            if result.get("status") == "approval_required":
+                approval = result.get("approval_request", {})
+                pending = (
+                    self._append_tool_results(
+                        state,
+                        tool_results,
+                        tool_round=tool_round,
+                    )
+                    if tool_results
+                    else {}
+                )
+                return {
+                    **pending,
+                    "pending_approval": dict(approval)
+                    if isinstance(approval, Mapping)
+                    else {},
+                    "result": {"status": "waiting_approval"},
+                    "waiting": True,
+                }
+            tool_results.append(result)
+        return self._append_tool_results(
+            state,
+            tool_results,
+            tool_round=tool_round,
+        )
+
+    async def complete_tool_approval(
+        self,
+        state: Mapping[str, Any],
+        decision: Any,
+    ) -> dict[str, Any]:
+        """核对审批回执，再执行原样冻结的工具操作或回传拒绝结果。
+
+        Args:
+            state: LangGraph 中断前保存的 Worker 状态。
+            decision: ResumeWorker Job 携带的审批身份和决定。
+
+        Returns:
+            更新后的执行状态；拒绝时将明确的拒绝结果交回 Worker。
+
+        Raises:
+            RuntimeError: 审批身份与中断中的工具操作不一致时抛出。
+        """
+        approval = state.get("pending_approval", {})
+        approval = approval if isinstance(approval, Mapping) else {}
+        if not isinstance(decision, Mapping):
+            raise RuntimeError("worker_approval_resume_payload_invalid")
+        execution = state.get("execution", {})
+        execution = execution if isinstance(execution, Mapping) else {}
+        expected = {
+            "approval_id": approval.get("approval_id"),
+            "execution_id": approval.get("execution_id"),
+            "args_hash": approval.get("args_hash"),
+            "operation_key": approval.get("operation_key"),
+        }
+        if any(decision.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("worker_approval_operation_mismatch")
+        if not decision.get("interrupt_id"):
+            raise RuntimeError("worker_approval_interrupt_identity_missing")
+        if execution.get("execution_id") != approval.get("execution_id"):
+            raise RuntimeError("worker_approval_execution_identity_mismatch")
+
+        resolution = str(decision.get("decision", "")).lower()
+        tool_call = {
+            "name": approval.get("tool_name"),
+            "arguments": approval.get("arguments", {}),
+            "operation_key": approval.get("operation_key"),
+            "args_hash": approval.get("args_hash"),
+            "tool_call_id": approval.get("tool_call_id"),
+        }
+        if resolution == "approved":
+            tool_call["approval_decision"] = "approved"
+            if self.execute_tool is None:
+                raise RuntimeError("worker_tool_executor_not_configured")
+            result = as_dict(
+                await call(
+                    self.execute_tool,
+                    tool_call=tool_call,
+                    execution=execution,
+                    state=state,
+                    tool_round=int(approval.get("tool_round", 0)),
+                    call_index=int(approval.get("call_index", 0)),
+                )
+            )
+        elif resolution == "denied":
+            result = {
+                "id": str(approval.get("tool_call_id", "")),
+                "name": str(approval.get("tool_name", "")),
+                "status": "denied",
+                "error": {"code": "approval_denied"},
+            }
+        else:
+            raise RuntimeError("worker_approval_decision_invalid")
+
+        if result.get("status") == "approval_required":
+            raise RuntimeError("worker_tool_reapproval_required")
+        return self._append_tool_results(
+            state,
+            [result],
+            tool_round=int(approval.get("tool_round", 0)),
+        )
+
+    @staticmethod
+    def _append_tool_results(
+        state: Mapping[str, Any],
+        tool_results: list[dict[str, Any]],
+        *,
+        tool_round: int,
+    ) -> dict[str, Any]:
+        """追加工具回执，并把大结果的存储键留在 Worker 私有状态中。
+
+        Args:
+            state: 当前 Worker 图状态。
+            tool_results: 本轮已完成工具的回执。
+            tool_round: 这些工具所属的 LLM 工具轮次。
+
+        Returns:
+            包含安全投影、内部结果引用和下一轮计数的状态补丁。
+
+        Raises:
+            无：该方法只整理已产生的 JSON 风格结果。
+        """
         execution = dict(state.get("execution", {}))
         previous_results = execution.get("tool_results", [])
         previous_refs = execution.get("_worker_result_refs", {})
@@ -113,6 +234,7 @@ class WorkerWorkflow:
             "result": {},
             "waiting": False,
             "tool_round": tool_round + 1,
+            "pending_approval": None,
         }
 
     async def resume_node(self, state: Mapping[str, Any]) -> dict[str, Any]:
@@ -145,6 +267,8 @@ class WorkerWorkflow:
 
     @staticmethod
     def route_after_tools(state: Mapping[str, Any]) -> str:
+        if state.get("pending_approval"):
+            return "request_worker_approval"
         return "finish_worker" if state.get("result", {}).get("error") else "worker_agent_loop"
 
 

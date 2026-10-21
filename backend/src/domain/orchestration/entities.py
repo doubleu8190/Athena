@@ -71,6 +71,10 @@ class TaskExecution:
     task: Task
     execution_generation: int
     upstream_results: Mapping[str, "TaskResult"] = field(default_factory=dict)
+    execution_id: str | None = None
+    worker_thread_id: str | None = None
+    fencing_token: int | None = None
+    cancellation_epoch: int = 0
 
 
 @dataclass(frozen=True, slots=True)

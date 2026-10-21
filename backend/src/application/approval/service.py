@@ -51,6 +51,12 @@ class ApprovalService:
         plan_id: str | None = None,
         approval_batch_id: str | None = None,
         approval_id: str | None = None,
+        execution_id: str | None = None,
+        worker_thread_id: str | None = None,
+        interrupt_id: str | None = None,
+        args_hash: str | None = None,
+        operation_key: str | None = None,
+        expires_at: datetime | None = None,
     ) -> ApprovalResponse:
         """幂等创建审批请求并发布待审批事件。"""
         existing = await self._repository.get(approval_id) if approval_id else None
@@ -68,6 +74,12 @@ class ApprovalService:
             plan_id=plan_id,
             approval_batch_id=approval_batch_id,
             created_at=datetime.now(timezone.utc),
+            execution_id=execution_id,
+            worker_thread_id=worker_thread_id,
+            interrupt_id=interrupt_id,
+            args_hash=args_hash,
+            operation_key=operation_key,
+            expires_at=expires_at,
         )
         if not await self._repository.create(request):
             recovered = await self._repository.get(request.approval_id)
@@ -112,6 +124,8 @@ class ApprovalService:
             task_id=task_id,
             decision=decision,
         )
+        if not value:
+            return False
         await self._events.publish(
             ApplicationEvent(
                 event_type=EventType.APPROVAL_RESOLVED,
@@ -132,7 +146,7 @@ class ApprovalService:
                 },
             )
         )
-        if value and self._resumer and existing:
+        if self._resumer and existing and existing.execution_id is None:
             await self._resumer(existing, decision.value)
         return value
 
@@ -148,7 +162,7 @@ class ApprovalService:
         value = await self._repository.resolve_batch(
             batch_id, normalized, run_id=run_id
         )
-        if value and hasattr(self._events, "resolved"):
+        if value:
             for approval_id, decision in normalized.items():
                 existing = await self._repository.get(approval_id)
                 await self._events.publish(
@@ -171,7 +185,7 @@ class ApprovalService:
                         },
                     )
                 )
-                if self._resumer and existing:
+                if self._resumer and existing and existing.execution_id is None:
                     await self._resumer(existing, decision.value)
         return value
 

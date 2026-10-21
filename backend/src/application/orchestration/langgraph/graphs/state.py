@@ -39,9 +39,11 @@ class WorkerGraphState(TypedDict, total=False):
     messages: list[dict[str, Any]]
     response: dict[str, Any]
     result: dict[str, Any]
+    status: str
     waiting: bool
     error: dict[str, Any]
     tool_round: int
+    pending_approval: dict[str, Any] | None
 
 
 def json_value(value: Any) -> Any:

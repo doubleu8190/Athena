@@ -34,6 +34,7 @@ class WorkerJobDispatcher:
         worker_id: str,
         lease_seconds: float,
         max_concurrency: int,
+        approval_service: Any | None = None,
         poll_interval: float = 0.25,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -46,6 +47,7 @@ class WorkerJobDispatcher:
         self._jobs = jobs
         self._worker = worker
         self._event_handler = event_handler
+        self._approval_service = approval_service
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._max_concurrency = max_concurrency
@@ -113,9 +115,19 @@ class WorkerJobDispatcher:
             task=lease.task,
             execution_generation=lease.attempt,
             upstream_results=lease.upstream_results,
+            execution_id=lease.execution_id,
+            worker_thread_id=lease.worker_thread_id,
+            fencing_token=lease.fencing_token,
+            cancellation_epoch=lease.cancellation_epoch,
         )
+        if lease.job_type == "resume_worker":
+            worker_call = self._worker.resume(
+                execution, dict(lease.resume_value)
+            )
+        else:
+            worker_call = self._worker.execute(execution)
         worker_task = asyncio.create_task(
-            self._worker.execute(execution),
+            worker_call,
             name=f"athena-worker-graph:{lease.worker_thread_id}",
         )
         lease_lost = asyncio.Event()
@@ -147,6 +159,23 @@ class WorkerJobDispatcher:
 
         if lease_lost.is_set():
             return
+        if result.status == TaskStatus.WAITING_APPROVAL:
+            if self._approval_service is None:
+                result = TaskResult(
+                    task_id=lease.task_id,
+                    status=TaskStatus.FAILED,
+                    error={"code": "worker_approval_service_not_configured"},
+                )
+            else:
+                accepted = await self._approval_service.request(
+                    lease, result.approval_batch or {}
+                )
+                if not accepted:
+                    logger.warning(
+                        "Worker approval request rejected: execution=%s",
+                        lease.execution_id,
+                    )
+                return
         result = self._terminal_result(result, lease.task_id)
         event = WorkerTaskTerminalEvent(
             message_id=self._id_factory(),

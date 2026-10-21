@@ -29,6 +29,7 @@ from ..models import (
     TaskExecutionModel,
     WorkerJobModel,
 )
+from .task_execution_results import load_task_execution_outputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,8 +389,30 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             )
         ).scalars().all()
         by_id = {row.task_id: row for row in rows}
+        execution_ids = [
+            by_id[parent].active_execution_id
+            for parent in parents
+            if parent in by_id and by_id[parent].active_execution_id
+        ]
+        executions = (
+            (
+                await session.execute(
+                    select(TaskExecutionModel).where(
+                        TaskExecutionModel.execution_id.in_(execution_ids)
+                    )
+                )
+            ).scalars().all()
+            if execution_ids
+            else []
+        )
+        outputs_by_execution = await load_task_execution_outputs(
+            session, executions
+        )
         return {
-            parent: _result_from_row(by_id[parent])
+            parent: _result_from_row(
+                by_id[parent],
+                outputs_by_execution.get(by_id[parent].active_execution_id),
+            )
             for parent in parents
             if parent in by_id
         }
@@ -453,9 +476,22 @@ def _task_from_row(row: AgentTaskModel) -> Task:
     )
 
 
-def _result_from_row(row: AgentTaskModel) -> TaskResult:
+def _result_from_row(
+    row: AgentTaskModel,
+    resolved_output: dict[str, Any] | None = None,
+) -> TaskResult:
     """恢复已完成上游的结果、证据和不确定性。"""
-    raw = _load_json(row.output_json, {})
+    raw = (
+        resolved_output
+        if resolved_output is not None
+        else _load_json(row.output_json, {})
+    )
+    if (
+        resolved_output is None
+        and raw.get("result_ref")
+        and {"result_bytes", "result_sha256"}.issubset(raw)
+    ):
+        raise RuntimeError("task_execution_result_reference_unavailable")
     output = raw.get("output", raw)
     if not isinstance(output, dict):
         output = {"value": output}

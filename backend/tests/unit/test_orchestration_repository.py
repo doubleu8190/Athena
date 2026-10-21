@@ -96,6 +96,7 @@ def task(task_id, *, status=TaskStatus.PENDING, generation=0, output=None, error
         status=status.value,
         execution_generation=generation,
         worker_thread_id=None,
+        active_execution_id=None,
         output_json=output,
         error_json=error,
     )

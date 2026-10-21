@@ -46,6 +46,7 @@ from .orchestration_models import (
     RootResumeJobModel,
     RoundTaskModel,
     TaskExecutionModel,
+    TaskExecutionResultModel,
     WorkerJobModel,
 )
 
@@ -84,6 +85,7 @@ __all__ = [
     "RootResumeJobModel",
     "RoundTaskModel",
     "TaskExecutionModel",
+    "TaskExecutionResultModel",
     "WorkerJobModel",
     "EvalCaseAttemptModel",
     "EvalCaseModel",

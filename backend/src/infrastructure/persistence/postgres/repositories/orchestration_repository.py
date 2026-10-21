@@ -22,7 +22,8 @@ from domain.orchestration import (
     TaskStatus,
 )
 
-from ..models import AgentPlanModel, AgentTaskModel
+from ..models import AgentPlanModel, AgentTaskModel, TaskExecutionModel
+from .task_execution_results import load_task_execution_outputs
 
 
 def _now() -> str:
@@ -92,7 +93,10 @@ class PostgresOrchestrationRepository(PlanRepository):
                     row.execution_generation += 1
                     row.worker_thread_id = f"task:{task_id}:exec:{row.execution_generation}"
                     row.updated_at = _now()
-                    claimed.append(TaskExecution(plan.plan_id, plan.run_id or row.run_id, plan.session_id or "", task_by_id[task_id], row.execution_generation, self._upstream(plan, rows, task_id)))
+                    upstream = await self._upstream(
+                        session, plan, rows, task_id
+                    )
+                    claimed.append(TaskExecution(plan.plan_id, plan.run_id or row.run_id, plan.session_id or "", task_by_id[task_id], row.execution_generation, upstream))
                 if claimed and plan_row.status == PlanStatus.CREATED.value:
                     plan_row.status = PlanStatus.RUNNING.value
                     plan_row.updated_at = _now()
@@ -155,7 +159,8 @@ class PostgresOrchestrationRepository(PlanRepository):
     async def get_results(self, plan_id: str) -> Mapping[str, TaskResult]:
         async with self._session_factory() as session:
             rows = (await session.execute(select(AgentTaskModel).where(AgentTaskModel.plan_id == plan_id))).scalars().all()
-        return {row.task_id: TaskResult(row.task_id, TaskStatus(row.status), _load(row.output_json, {}), error=_load(row.error_json, None)) for row in rows}
+            results = await self._task_results(session, rows)
+        return results
 
     async def get_task_execution(self, task_id: str) -> TaskExecution | None:
         async with self._session_factory() as session:
@@ -166,8 +171,9 @@ class PostgresOrchestrationRepository(PlanRepository):
             if plan_row is None:
                 return None
             rows = (await session.execute(select(AgentTaskModel).where(AgentTaskModel.plan_id == row.plan_id))).scalars().all()
+            upstream = await self._upstream(session, self._plan(plan_row), rows, task_id)
         plan = self._plan(plan_row)
-        return TaskExecution(plan.plan_id, plan.run_id or row.run_id, plan.session_id or "", self._task(row), row.execution_generation, self._upstream(plan, rows, task_id))
+        return TaskExecution(plan.plan_id, plan.run_id or row.run_id, plan.session_id or "", self._task(row), row.execution_generation, upstream)
 
     async def _set_status(self, task_id: str, generation: int, status: str, *, expected: str = TaskStatus.RUNNING.value) -> bool:
         async with self._session_factory() as session:
@@ -203,10 +209,97 @@ class PostgresOrchestrationRepository(PlanRepository):
     def _task(row) -> Task:
         return Task(row.task_id, row.title, row.objective, _load(row.input_json, {}), _load(row.expected_output_json, {}), tuple(_load(row.allowed_tools_json, [])), row.worker_type)
 
-    @classmethod
-    def _upstream(cls, plan: Plan, rows: list, task_id: str) -> dict[str, TaskResult]:
+    async def _upstream(
+        self,
+        session: AsyncSession,
+        plan: Plan,
+        rows: list,
+        task_id: str,
+    ) -> dict[str, TaskResult]:
+        """读取 DAG 中指定 Task 的直接上游结果，并解析持久化引用。
+
+        Args:
+            session: 当前事务使用的 PostgreSQL 会话。
+            plan: 用于确定直接依赖边的 Plan。
+            rows: Plan 中已加载的 Task 投影。
+            task_id: 需要读取上游结果的 Task ID。
+
+        Returns:
+            以直接上游 Task ID 为键的完整结果映射。
+
+        Raises:
+            RuntimeError: 上游大结果的持久化引用无法解析时抛出。
+        """
         by_id = {row.task_id: row for row in rows}
-        return {edge.from_task_id: TaskResult(edge.from_task_id, TaskStatus(by_id[edge.from_task_id].status), _load(by_id[edge.from_task_id].output_json, {}), error=_load(by_id[edge.from_task_id].error_json, None)) for edge in plan.edges if edge.to_task_id == task_id and edge.from_task_id in by_id}
+        parent_rows = [
+            by_id[edge.from_task_id]
+            for edge in plan.edges
+            if edge.to_task_id == task_id and edge.from_task_id in by_id
+        ]
+        return await self._task_results(session, parent_rows)
+
+    async def _task_results(
+        self,
+        session: AsyncSession,
+        rows: list,
+    ) -> dict[str, TaskResult]:
+        """将 Task 投影与对应执行结果组合为完整领域结果。
+
+        Args:
+            session: 当前事务使用的 PostgreSQL 会话。
+            rows: 需要恢复结果的 Task 投影。
+
+        Returns:
+            以 Task ID 为键的结果映射。
+
+        Raises:
+            RuntimeError: 投影包含无法解析的大结果引用时抛出。
+        """
+        execution_ids = [
+            row.active_execution_id for row in rows if row.active_execution_id
+        ]
+        executions = (
+            (
+                await session.execute(
+                    select(TaskExecutionModel).where(
+                        TaskExecutionModel.execution_id.in_(execution_ids)
+                    )
+                )
+            ).scalars().all()
+            if execution_ids
+            else []
+        )
+        outputs_by_execution = await load_task_execution_outputs(
+            session, executions
+        )
+        results: dict[str, TaskResult] = {}
+        for row in rows:
+            resolved_output = outputs_by_execution.get(row.active_execution_id)
+            raw_output = (
+                resolved_output
+                if resolved_output is not None
+                else _load(row.output_json, {})
+            )
+            if (
+                resolved_output is None
+                and isinstance(raw_output, Mapping)
+                and raw_output.get("result_ref")
+                and {"result_bytes", "result_sha256"}.issubset(raw_output)
+            ):
+                raise RuntimeError("task_execution_result_reference_unavailable")
+            if not isinstance(raw_output, Mapping):
+                raw_output = {}
+            try:
+                status = TaskStatus(row.status)
+            except ValueError:
+                status = TaskStatus.FAILED
+            results[row.task_id] = TaskResult(
+                row.task_id,
+                status,
+                dict(raw_output),
+                error=_load(row.error_json, None),
+            )
+        return results
 
 
 class PostgresPlanLoader:

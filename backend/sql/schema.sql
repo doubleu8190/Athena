@@ -224,6 +224,16 @@ CREATE TABLE IF NOT EXISTS task_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_task_executions_lease ON task_executions(status, lease_until);
 
+CREATE TABLE IF NOT EXISTS task_execution_results (
+    result_ref VARCHAR PRIMARY KEY,
+    execution_id VARCHAR NOT NULL UNIQUE
+        REFERENCES task_executions(execution_id) ON DELETE CASCADE,
+    result_json JSONB NOT NULL,
+    content_sha256 VARCHAR NOT NULL,
+    content_bytes INTEGER NOT NULL CHECK(content_bytes > 0),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS orchestration_commands (
     message_id VARCHAR PRIMARY KEY,
     scope_key VARCHAR NOT NULL,

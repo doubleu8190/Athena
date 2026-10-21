@@ -24,11 +24,14 @@ from ..models import (
     PlanRoundModel,
     RoundTaskModel,
     TaskExecutionModel,
+    TaskExecutionResultModel,
     WorkerJobModel,
 )
+from .task_execution_results import strict_result_json
 
 
 _CONSUMER_NAME = "round-task-terminal-v1"
+_INLINE_RESULT_LIMIT_BYTES = 64 * 1024
 
 
 class TaskEventConflict(ValueError):
@@ -62,6 +65,9 @@ class PostgresOrchestrationEventRepository:
         """应用一次 Worker 完成/失败事件，重复事件只返回原回执。"""
         payload = _event_document(event)
         payload_hash = _hash(payload)
+        result_json = strict_result_json(event.result)
+        result_bytes = result_json.encode("utf-8")
+        result_sha256 = hashlib.sha256(result_bytes).hexdigest()
         async with self._session_factory() as session:
             async with session.begin():
                 now = (
@@ -79,7 +85,15 @@ class PostgresOrchestrationEventRepository:
                         consumer_name=_CONSUMER_NAME,
                         message_id=event.message_id,
                         event_type="WorkerTaskTerminal",
-                        payload_json=payload,
+                        payload_json={
+                            key: value
+                            for key, value in payload.items()
+                            if key not in {"result", "error"}
+                        }
+                        | {
+                            "result_sha256": result_sha256,
+                            "result_bytes": len(result_bytes),
+                        },
                         payload_hash=payload_hash,
                         status="received",
                         attempt=1,
@@ -185,7 +199,34 @@ class PostgresOrchestrationEventRepository:
                     "metrics": dict(event.result.get("metrics", {})),
                 }
                 execution.status = status
-                execution.result_json = result_document
+                if len(result_bytes) > _INLINE_RESULT_LIMIT_BYTES:
+                    result_ref = f"task-result:{execution.execution_id}"
+                    session.add(
+                        TaskExecutionResultModel(
+                            result_ref=result_ref,
+                            execution_id=execution.execution_id,
+                            result_json=dict(event.result),
+                            content_sha256=result_sha256,
+                            content_bytes=len(result_bytes),
+                            created_at=now,
+                        )
+                    )
+                    execution.result_ref = result_ref
+                    execution.result_json = {
+                        "status": status,
+                        "result_ref": result_ref,
+                        "result_bytes": len(result_bytes),
+                        "result_sha256": result_sha256,
+                        "error": (
+                            dict(event.error)
+                            if event.error is not None
+                            else None
+                        ),
+                        "retryable": event.retryable,
+                    }
+                else:
+                    execution.result_ref = None
+                    execution.result_json = result_document
                 execution.error_json = (
                     dict(event.error) if event.error is not None else None
                 )
@@ -214,7 +255,17 @@ class PostgresOrchestrationEventRepository:
                     )
                 else:
                     task.status = status
-                    task.output_json = _strict_json(dict(event.result))
+                    task.output_json = (
+                        _strict_json(
+                            {
+                                "result_ref": execution.result_ref,
+                                "result_bytes": len(result_bytes),
+                                "result_sha256": result_sha256,
+                            }
+                        )
+                        if execution.result_ref is not None
+                        else _strict_json(dict(event.result))
+                    )
                     task.error_json = (
                         _strict_json(dict(event.error))
                         if event.error is not None
@@ -426,7 +477,13 @@ def _event_document(event: WorkerTaskTerminalEvent) -> dict[str, Any]:
 
 def _strict_json(value: Any) -> str:
     """只编码标准 JSON，拒绝隐式字符串化的未知对象。"""
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _hash(value: Any) -> str:

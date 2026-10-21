@@ -7,7 +7,7 @@ The package is organized by responsibility:
 * ``shared`` contains small helpers used by both graphs.
 """
 
-from .graphs.root import build_root_graph, invoke_root_graph
+from .graphs import RootGraphDependencies, build_root_graph, invoke_root_graph
 from .graphs.state import RootGraphState, WorkerGraphState
 from .graphs.worker import build_worker_graph, invoke_worker_graph
 from .runtime.root_adapter import LangGraphRootGraph
@@ -18,6 +18,7 @@ from .runtime.worker_executor import LangGraphWorkerExecutor
 __all__ = [
     "build_root_graph",
     "build_worker_graph",
+    "RootGraphDependencies",
     "invoke_root_graph",
     "invoke_worker_graph",
     "LangGraphRootGraph",

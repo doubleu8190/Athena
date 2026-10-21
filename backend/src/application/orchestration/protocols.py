@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from application.orchestration.scheduler import WorkerSchedulerService
 from application.orchestration.service import OrchestrationService
@@ -19,10 +19,14 @@ from application.runs.request_preparation import (
 )
 from application.runs.task_understanding.service import TaskUnderstandingService
 from application.approval.service import ApprovalService
-from application.orchestration.langgraph.runtime.root_agent import ConfiguredRootAgent
 from application.tools.service import ToolService
 from domain.events.ports import EventPort
 from domain.orchestration.ports import PlanRepository
+
+if TYPE_CHECKING:
+    from application.orchestration.langgraph.runtime.root_agent import (
+        ConfiguredRootAgent,
+    )
 
 
 @dataclass(slots=True)

@@ -108,6 +108,23 @@ class TaskExecutionModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class TaskExecutionResultModel(Base):
+    """保存大体积 Task 结果，并通过引用避免复制到多个投影。"""
+
+    __tablename__ = "task_execution_results"
+
+    result_ref: Mapped[str] = mapped_column(String, primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_executions.execution_id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    result_json: Mapped[dict[str, Any]] = mapped_column(_JSON_DOCUMENT)
+    content_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    content_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class OrchestrationCommandModel(Base):
     """保存命令幂等键、请求摘要和稳定回执。"""
     __tablename__ = "orchestration_commands"

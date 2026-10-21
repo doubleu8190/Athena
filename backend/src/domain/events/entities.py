@@ -35,6 +35,7 @@ class EventType(StrEnum):
     RUN_STARTED = "run.started"
     RUN_ROOT_SUSPENDED = "run.root_suspended"
     RUN_RESUMED = "run.resumed"
+    RUN_CANCELLING = "run.cancelling"
     RUN_CANCELLED = "run.cancelled"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"

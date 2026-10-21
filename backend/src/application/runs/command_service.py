@@ -107,7 +107,7 @@ class RunCommandService:
             command_type=CommandType.RUN_CANCEL,
             session_id=run.session_id,
             run_id=run_id,
-            payload={},
+            payload={"reason": "USER_REQUEST"},
             issued_at=self._clock(),
         )
         result = await self._commands.enqueue_command(command)
@@ -128,7 +128,7 @@ class RunCommandService:
             command_type=CommandType.RUN_CANCEL,
             session_id=session_id,
             run_id=target_run_id,
-            payload={},
+            payload={"reason": "USER_REQUEST"},
             issued_at=self._clock(),
         )
         result = await self._commands.enqueue_command(command)

@@ -17,6 +17,7 @@ from domain.runs import (
     CommandStatus,
     CommandQueuePort,
     RunCommand,
+    RunCancellationResult,
     RunExecutorPort,
     RunLifecyclePort,
     RunStatus,
@@ -46,16 +47,44 @@ class RunExecutionService:
 
     async def execute(self, command: RunCommand) -> dict[str, object] | None:
         if command.command_type.value == CommandType.RUN_CANCEL.value:
-            await self._executor.cancel(command.run_id)
+            cancellation: RunCancellationResult | None = None
             if command.run_id:
-                await self._lifecycle.cancel(command.run_id)
-                await self._publish(command, EventType.RUN_CANCELLED, payload=self._run_payload(command, "cancelled"))
+                cancellation = await self._lifecycle.cancel(
+                    command.run_id,
+                    reason=str(command.payload.get("reason", "USER_REQUEST")),
+                )
+                if cancellation is not None and cancellation.changed:
+                    status = str(cancellation.status)
+                    event_type = (
+                        EventType.RUN_CANCELLING
+                        if status == RunStatus.CANCELLING.value
+                        else EventType.RUN_CANCELLED
+                    )
+                    await self._publish(
+                        command,
+                        event_type,
+                        payload=self._run_payload(command, status),
+                    )
+            # 先持久化取消栅栏，再中断 Root，避免并发的 SubmitPlan 或 Worker 领取穿过取消边界。
+            await self._executor.cancel(command.run_id)
             await self._commands.complete_command(
                 command.command_id,
                 status=CommandStatus.COMPLETED,
-                result={"status": RunStatus.CANCELLED.value},
+                result={
+                    "status": (
+                        str(cancellation.status)
+                        if cancellation is not None
+                        else "unchanged"
+                    )
+                },
             )
-            return {"status": RunStatus.CANCELLED.value}
+            return {
+                "status": (
+                    str(cancellation.status)
+                    if cancellation is not None
+                    else "unchanged"
+                )
+            }
         if not command.run_id:
             await self._commands.complete_command(
                 command.command_id,
@@ -63,7 +92,17 @@ class RunExecutionService:
                 error={"code": "run_id_required"},
             )
             return None
-        await self._lifecycle.update_status(command.run_id, RunStatus.RUNNING)
+        started = await self._lifecycle.update_status(
+            command.run_id, RunStatus.RUNNING
+        )
+        if not started:
+            result = {"status": RunStatus.CANCELLED.value}
+            await self._commands.complete_command(
+                command.command_id,
+                status=CommandStatus.CANCELLED,
+                result=result,
+            )
+            return result
         if command.run_id not in self._run_started:
             self._run_started[command.run_id] = (datetime.now(timezone.utc), perf_counter())
         start_event = (

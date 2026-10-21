@@ -9,6 +9,7 @@ from .entities import (
     CommandExecutionResult,
     CommandStatus,
     CommandStatusRecord,
+    RunCancellationResult,
     RunCommand,
     RunStatus,
     RunSummary,
@@ -39,7 +40,9 @@ class RunLifecyclePort(Protocol):
 
     async def fail(self, run_id: str, error: dict[str, object]) -> bool: ...
 
-    async def cancel(self, run_id: str) -> bool: ...
+    async def cancel(
+        self, run_id: str, *, reason: str = "USER_REQUEST"
+    ) -> RunCancellationResult | None: ...
 
 
 class RunExecutorPort(Protocol):

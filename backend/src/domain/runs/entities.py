@@ -34,10 +34,19 @@ class RunStatus(StrEnum):
 
     CREATED = "created"
     RUNNING = "running"
+    CANCELLING = "cancelling"
     PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class RunCancellationResult:
+    """停止请求的当前状态，以及本次调用是否首次推进了取消。"""
+
+    status: RunStatus
+    changed: bool
 
 
 @dataclass(frozen=True, slots=True)

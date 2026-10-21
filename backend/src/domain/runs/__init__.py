@@ -7,6 +7,7 @@ from .entities import (
     CommandStatusRecord,
     CommandType,
     RunCommand,
+    RunCancellationResult,
     RunStatus,
     RunSummary,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "CommandStorePort",
     "CommandType",
     "RunCommand",
+    "RunCancellationResult",
     "RunExecutorPort",
     "RunLifecyclePort",
     "RunQueryPort",

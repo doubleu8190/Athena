@@ -5,6 +5,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 from uuid import uuid4
+from typing import Any
 
 from sqlalchemy import DateTime, cast, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,8 @@ from domain.approval import ApprovalDecision, ApprovalRequest, ApprovalStatus
 from domain.approval.ports import ApprovalRepository
 
 from ..models import (
+    AgentPlanModel,
+    AgentRunModel,
     ApprovalRecordModel,
     WorkerJobModel,
 )
@@ -109,17 +112,42 @@ class PostgresApprovalRepository(ApprovalRepository):
     async def resolve(
         self, approval_id: str, *, run_id: str, task_id: str, decision: ApprovalDecision
     ) -> bool:
+        """仅在关联 Run 与 Plan 仍活跃时记录决策并创建 Worker Resume Job。"""
         async with self._session_factory() as session:
             async with session.begin():
+                # 先读取不可变归属，再按 Run、Plan、Approval 加锁，与取消事务保持同序以消除竞态。
+                hint = await session.get(ApprovalRecordModel, approval_id)
+                if hint is None or hint.run_id != run_id:
+                    return False
+                run = await session.get(
+                    AgentRunModel, run_id, with_for_update=True
+                )
+                plan = (
+                    await session.get(
+                        AgentPlanModel,
+                        hint.plan_id,
+                        with_for_update=True,
+                    )
+                    if hint.plan_id
+                    else None
+                )
                 approval = await session.get(
                     ApprovalRecordModel,
                     approval_id,
                     with_for_update=True,
                 )
                 if (
-                    approval is None
+                    run is None
+                    or run.status not in {"created", "running"}
+                    or (hint.plan_id is not None and plan is None)
+                    or (
+                        plan is not None
+                        and (plan.run_id != run_id or plan.status != "running")
+                    )
+                    or approval is None
                     or approval.run_id != run_id
                     or approval.status != ApprovalStatus.PENDING.value
+                    or approval.plan_id != hint.plan_id
                     or (
                         approval.task_id is not None
                         and approval.task_id != task_id

@@ -75,7 +75,7 @@ class DB:
     async def execute(self, _statement):
         return self.results.pop(0) if self.results else Result()
 
-    async def get(self, _model, _key):
+    async def get(self, _model, _key, **_kwargs):
         return self.get_values.pop(0) if self.get_values else None
 
     async def scalar(self, _statement):

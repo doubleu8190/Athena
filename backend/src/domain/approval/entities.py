@@ -11,6 +11,7 @@ from typing import Any
 class ApprovalStatus(StrEnum):
     PENDING = "pending"
     RESOLVED = "resolved"
+    CANCELLED = "cancelled"
 
 
 class ApprovalDecision(StrEnum):

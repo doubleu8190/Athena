@@ -80,7 +80,11 @@ class RepositorySession:
     def begin(self):
         return self
 
-    async def get(self, _model, _key, **_kwargs):
+    async def get(self, model, _key, **_kwargs):
+        if model.__name__ == "AgentRunModel":
+            return SimpleNamespace(status="running")
+        if model.__name__ == "AgentPlanModel":
+            return SimpleNamespace(run_id=self.approval.run_id, status="running")
         return self.approval
 
     async def execute(self, _statement):
@@ -217,6 +221,7 @@ async def test_resolving_worker_approval_enqueues_resume_job_in_same_repository_
     approval = SimpleNamespace(
         approval_id="approval-1",
         run_id="run-1",
+        plan_id="plan-1",
         task_id="task-1",
         status="pending",
         execution_id="execution-1",

@@ -14,6 +14,7 @@ from domain.runs import (
     CommandStatus,
     CommandType,
     RunCommand,
+    RunCancellationResult,
     RunStatus,
 )
 
@@ -45,9 +46,9 @@ class Lifecycle:
         self.calls.append(("fail", run_id, error))
         return True
 
-    async def cancel(self, run_id):
+    async def cancel(self, run_id, **_kwargs):
         self.calls.append(("cancel", run_id))
-        return True
+        return RunCancellationResult(RunStatus.CANCELLING, True)
 
 
 class Queue:
@@ -108,6 +109,72 @@ async def test_execution_service_completes_run_and_command() -> None:
         "run.started",
         "run.completed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_marks_run_cancelling_before_interrupting_root() -> None:
+    calls = []
+
+    class CancellationLifecycle(Lifecycle):
+        async def cancel(self, run_id, **_kwargs):
+            calls.append("persist")
+            return RunCancellationResult(RunStatus.CANCELLING, True)
+
+    class CancellationExecutor(Executor):
+        async def cancel(self, run_id):
+            calls.append("interrupt")
+
+    lifecycle, queue, executor, events = (
+        CancellationLifecycle(),
+        Queue(),
+        CancellationExecutor(),
+        Events(),
+    )
+    service = RunExecutionService(lifecycle, queue, executor, events)
+
+    result = await service.execute(command(CommandType.RUN_CANCEL))
+
+    assert result == {"status": "cancelling"}
+    assert calls == ["persist", "interrupt"]
+    assert [event.event_type for event in events.values] == ["run.cancelling"]
+    assert queue.completed[0][2] == {"status": "cancelling"}
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancel_keeps_progress_without_republishing_event() -> None:
+    class RepeatedCancellationLifecycle(Lifecycle):
+        async def cancel(self, run_id, **_kwargs):
+            return RunCancellationResult(RunStatus.CANCELLING, False)
+
+    lifecycle, queue, executor, events = (
+        RepeatedCancellationLifecycle(),
+        Queue(),
+        Executor(),
+        Events(),
+    )
+    service = RunExecutionService(lifecycle, queue, executor, events)
+
+    result = await service.execute(command(CommandType.RUN_CANCEL))
+
+    assert result == {"status": "cancelling"}
+    assert events.values == []
+
+
+@pytest.mark.asyncio
+async def test_stale_run_start_is_not_executed_after_cancellation() -> None:
+    class StoppedLifecycle(Lifecycle):
+        async def update_status(self, run_id, status):
+            return False
+
+    lifecycle, queue, executor, events = Lifecycle(), Queue(), Executor(), Events()
+    service = RunExecutionService(StoppedLifecycle(), queue, executor, events)
+
+    result = await service.execute(command())
+
+    assert result == {"status": "cancelled"}
+    assert executor.error is None
+    assert events.values == []
+    assert queue.completed[0][1] == CommandStatus.CANCELLED
 
 
 @pytest.mark.asyncio

@@ -144,6 +144,13 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
             {"cancellation_epoch": 4},
         ),
         (
+            "RunCancelling",
+            "run.cancelling",
+            "run:run-1",
+            "cancelling",
+            {"cancellation_epoch": 4},
+        ),
+        (
             "RoundStarted",
             "round.started",
             "round:round-2",

@@ -59,7 +59,14 @@ class RunExecutionService:
                 await self._executor.cancel(command.run_id)
             except Exception as exc:
                 cancel_error = exc
-            if command.run_id and cancellation is not None and cancellation.changed:
+            if (
+                command.run_id
+                and cancellation is not None
+                and cancellation.changed
+                and not getattr(
+                    self._lifecycle, "writes_cancellation_events_to_outbox", False
+                )
+            ):
                 status = str(cancellation.status)
                 event_type = (
                     EventType.RUN_CANCELLING

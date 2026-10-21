@@ -147,6 +147,22 @@ async def test_cancel_marks_run_cancelling_before_interrupting_root() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_does_not_duplicate_events_from_transactional_lifecycle():
+    class TransactionalCancellationLifecycle(Lifecycle):
+        writes_cancellation_events_to_outbox = True
+
+    events = Events()
+    service = RunExecutionService(
+        TransactionalCancellationLifecycle(), Queue(), Executor(), events
+    )
+
+    result = await service.execute(command(CommandType.RUN_CANCEL))
+
+    assert result["status"] == RunStatus.CANCELLING
+    assert events.values == []
+
+
+@pytest.mark.asyncio
 async def test_repeated_cancel_keeps_progress_without_republishing_event() -> None:
     class RepeatedCancellationLifecycle(Lifecycle):
         async def cancel(self, run_id, **_kwargs):

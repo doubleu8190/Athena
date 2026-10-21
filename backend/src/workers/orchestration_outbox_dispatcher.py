@@ -31,6 +31,7 @@ _EVENT_TYPES = {
     "RoundCompleted": (EventType.ROUND_COMPLETED, "completed", "round"),
     "PlanCancelling": (EventType.PLAN_CANCELLING, "cancelling", "plan"),
     "PlanCancelled": (EventType.PLAN_CANCELLED, "cancelled", "plan"),
+    "RunCancelling": (EventType.RUN_CANCELLING, "cancelling", "run"),
     "RunCancelled": (EventType.RUN_CANCELLED, "cancelled", "run"),
 }
 

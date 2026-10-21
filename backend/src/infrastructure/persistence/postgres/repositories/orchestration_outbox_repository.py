@@ -34,6 +34,7 @@ _USER_EVENT_TYPES = (
     "RoundCompleted",
     "PlanCancelling",
     "PlanCancelled",
+    "RunCancelling",
     "RunCancelled",
 )
 

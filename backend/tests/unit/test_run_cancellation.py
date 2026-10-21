@@ -134,6 +134,10 @@ async def test_cancel_plan_advances_epoch_and_persists_cancelling_outbox():
         row.event_type == "PlanCancelling" and row.round_id == "round-2"
         for row in session.added
     )
+    assert any(
+        row.event_type == "RunCancelling" and row.plan_id == "plan-1"
+        for row in session.added
+    )
     approval_event = next(
         row for row in session.added if row.event_type == "ApprovalCancelled"
     )
@@ -171,6 +175,10 @@ async def test_cancel_without_a_plan_finishes_run_and_repeat_cancel_is_noop():
     assert status == RunCancellationResult(RunStatus.CANCELLED, True, "none")
     assert run.status == "cancelled"
     assert run.cancellation_epoch == 1
+    assert any(
+        row.event_type == "RunCancelled" and row.plan_id is None
+        for row in session.added
+    )
     assert root_approval.status == "cancelled"
     assert any(
         row.event_type == "ApprovalCancelled" and row.plan_id is None

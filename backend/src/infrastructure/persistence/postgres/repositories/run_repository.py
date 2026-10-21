@@ -60,6 +60,8 @@ class PostgresRunRepository(
 ):
     """Command queue, run projection and lifecycle in the target schema."""
 
+    writes_cancellation_events_to_outbox = True
+
     def __init__(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     ) -> None:
@@ -387,6 +389,30 @@ class PostgresRunRepository(
                             ),
                         )
                     )
+                    session.add(
+                        OrchestrationOutboxModel(
+                            message_id=uuid4().hex,
+                            dedupe_key=(
+                                f"run:{run_id}:cancelled:{run.cancellation_epoch}"
+                            ),
+                            event_type="RunCancelled",
+                            correlation_id=run_id,
+                            plan_id=plan.plan_id if plan else None,
+                            plan_version=(
+                                plan.current_version if plan is not None else None
+                            ),
+                            round_id=plan.active_round_id if plan is not None else None,
+                            payload_json={
+                                "cancellation_epoch": run.cancellation_epoch,
+                                "external_effect_status": external_effect_status,
+                            },
+                            schema_version=1,
+                            status="pending",
+                            attempt=0,
+                            available_at=now,
+                            occurred_at=now,
+                        )
+                    )
                     return RunCancellationResult(
                         RunStatus.CANCELLED,
                         True,
@@ -574,6 +600,27 @@ class PostgresRunRepository(
                         message_id=uuid4().hex,
                         dedupe_key=f"plan:{plan.plan_id}:cancelling:{cancellation_epoch}",
                         event_type="PlanCancelling",
+                        correlation_id=run_id,
+                        plan_id=plan.plan_id,
+                        plan_version=plan.current_version,
+                        round_id=plan.active_round_id,
+                        payload_json={
+                            "cancellation_epoch": cancellation_epoch,
+                            "reason": reason,
+                            "external_effect_status": external_effect_status,
+                        },
+                        schema_version=1,
+                        status="pending",
+                        attempt=0,
+                        available_at=now,
+                        occurred_at=now,
+                    )
+                )
+                session.add(
+                    OrchestrationOutboxModel(
+                        message_id=uuid4().hex,
+                        dedupe_key=f"run:{run_id}:cancelling:{cancellation_epoch}",
+                        event_type="RunCancelling",
                         correlation_id=run_id,
                         plan_id=plan.plan_id,
                         plan_version=plan.current_version,

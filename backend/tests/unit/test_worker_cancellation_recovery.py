@@ -17,6 +17,7 @@ from domain.orchestration import (
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
 )
+from infrastructure.persistence.postgres.models import OrchestrationOutboxModel
 from workers.worker_job_dispatcher import WorkerJobDispatcher
 
 NOW = datetime(2026, 10, 22, tzinfo=timezone.utc)
@@ -94,6 +95,17 @@ class ReconcileSession:
         self.added.extend(values)
 
 
+class ClaimSession:
+    def __init__(self):
+        self.added = []
+
+    async def execute(self, _statement):
+        return Result(scalar=0)
+
+    def add(self, value):
+        self.added.append(value)
+
+
 def factory(session):
     @asynccontextmanager
     async def provide():
@@ -120,6 +132,109 @@ def cancellation_lease() -> WorkerJobLease:
         lease_until=NOW + timedelta(seconds=10),
         task=Task("task-1", "Task", "Do task"),
     )
+
+
+@pytest.mark.asyncio
+async def test_worker_claim_commits_task_started_outbox_with_execution_lease(
+    monkeypatch,
+):
+    session = ClaimSession()
+    run = SimpleNamespace(
+        run_id="run-1", session_id="session-1", status="running", cancellation_epoch=0
+    )
+    plan = SimpleNamespace(
+        plan_id="plan-1",
+        run_id="run-1",
+        status="running",
+        active_round_id="round-1",
+        current_version=1,
+        cancellation_epoch=0,
+        max_parallelism=2,
+    )
+    round_row = SimpleNamespace(
+        round_id="round-1", plan_version=1, status="running"
+    )
+    task_row = SimpleNamespace(
+        task_id="task-1",
+        plan_id="plan-1",
+        run_id="run-1",
+        status="pending",
+        active_execution_id="execution-1",
+        execution_generation=1,
+        worker_thread_id="task:task-1:exec:1",
+        title="Write report",
+        objective="Write the requested report",
+        input_json="{}",
+        expected_output_json="{}",
+        allowed_tools_json="[]",
+        worker_type="general",
+        updated_at=None,
+    )
+    round_task = SimpleNamespace(
+        status="pending", active_execution_id="execution-1", terminal_at=None
+    )
+    execution = SimpleNamespace(
+        execution_id="execution-1",
+        worker_thread_id="task:task-1:exec:1",
+        status="queued",
+        cancellation_epoch=0,
+        fencing_token=1,
+        lease_owner=None,
+        lease_until=None,
+        attempt=1,
+        task_id="task-1",
+        round_id="round-1",
+        updated_at=None,
+    )
+    job = SimpleNamespace(
+        job_type="execute",
+        status="pending",
+        lease_owner=None,
+        lease_until=None,
+        attempt=0,
+        available_at=NOW - timedelta(seconds=1),
+        updated_at=None,
+        job_id="job-1",
+        execution_id="execution-1",
+    )
+    repository = PostgresWorkerJobRepository(
+        factory(session), clock=lambda: NOW
+    )
+
+    async def lock_chain(*_args, **_kwargs):
+        return run, plan, round_row, task_row, round_task, execution, job
+
+    async def upstream(*_args, **_kwargs):
+        return ()
+
+    monkeypatch.setattr(repository, "_lock_execution_chain", lock_chain)
+    monkeypatch.setattr(repository, "_load_upstream_results", upstream)
+    lease = await repository._claim_candidate(
+        session,
+        SimpleNamespace(
+            job_id="job-1",
+            run_id="run-1",
+            plan_id="plan-1",
+            round_id="round-1",
+            task_id="task-1",
+            execution_id="execution-1",
+            job_type="execute",
+            approval_id=None,
+            resume_value={},
+        ),
+        worker_id="worker-1",
+        now=NOW,
+        lease_seconds=30,
+    )
+
+    assert lease is not None
+    event = next(
+        item for item in session.added if isinstance(item, OrchestrationOutboxModel)
+    )
+    assert event.event_type == "TaskStarted"
+    assert event.dedupe_key == "execution:execution-1:started"
+    assert event.payload_json["attempt"] == 1
+    assert event.payload_json["parent_activity_id"] == "round:round-1"
 
 
 @pytest.mark.asyncio

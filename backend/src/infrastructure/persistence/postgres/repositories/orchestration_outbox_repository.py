@@ -15,7 +15,7 @@ from domain.orchestration import (
     OrchestrationOutboxRepository,
 )
 
-from ..models import AgentPlanModel, OrchestrationOutboxModel
+from ..models import AgentRunModel, OrchestrationOutboxModel
 
 
 _USER_EVENT_TYPES = (
@@ -25,6 +25,10 @@ _USER_EVENT_TYPES = (
     "ApprovalRequested",
     "ApprovalResolved",
     "ApprovalCancelled",
+    "TaskStarted",
+    "TaskRetrying",
+    "TaskCompleted",
+    "TaskFailed",
     "RoundStarted",
     "RoundCompleted",
     "PlanCancelling",
@@ -76,13 +80,13 @@ class PostgresOrchestrationOutboxRepository(OrchestrationOutboxRepository):
                     await session.execute(
                         select(
                             OrchestrationOutboxModel,
-                            AgentPlanModel.session_id,
-                            AgentPlanModel.run_id,
+                            AgentRunModel.session_id,
+                            AgentRunModel.run_id,
                         )
                         .join(
-                            AgentPlanModel,
-                            AgentPlanModel.plan_id
-                            == OrchestrationOutboxModel.plan_id,
+                            AgentRunModel,
+                            AgentRunModel.run_id
+                            == OrchestrationOutboxModel.correlation_id,
                         )
                         .where(
                             OrchestrationOutboxModel.event_type.in_(_USER_EVENT_TYPES),

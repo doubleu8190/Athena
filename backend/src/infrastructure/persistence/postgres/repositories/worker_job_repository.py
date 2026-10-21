@@ -775,7 +775,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             plan_version=round_row.plan_version,
             task_id=task_row.task_id,
         )
-        return WorkerJobLease(
+        lease = WorkerJobLease(
             job_id=job.job_id,
             worker_id=worker_id,
             run_id=run.run_id,
@@ -796,6 +796,45 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             approval_id=candidate.approval_id,
             resume_value=resume_value if is_resume else {},
         )
+        if not is_reclaim and previous_owner is None:
+            if candidate.job_type == "execute":
+                dedupe_key = f"execution:{execution.execution_id}:started"
+            else:
+                dedupe_key = (
+                    f"execution:{execution.execution_id}:resumed:"
+                    f"{candidate.approval_id}"
+                )
+            session.add(
+                OrchestrationOutboxModel(
+                    message_id=uuid4().hex,
+                    dedupe_key=dedupe_key,
+                    event_type="TaskStarted",
+                    correlation_id=run.run_id,
+                    plan_id=plan.plan_id,
+                    plan_version=round_row.plan_version,
+                    round_id=round_row.round_id,
+                    task_id=task_row.task_id,
+                    execution_id=execution.execution_id,
+                    payload_json={
+                        "task_id": task_row.task_id,
+                        "execution_id": execution.execution_id,
+                        "execution_generation": execution.attempt,
+                        "attempt": execution.attempt,
+                        "title": task.title,
+                        "objective": task.objective,
+                        "worker_type": task.worker_type,
+                        "resumed": is_resume,
+                        "started_at": now.isoformat(),
+                        "parent_activity_id": f"round:{round_row.round_id}",
+                    },
+                    schema_version=1,
+                    status="pending",
+                    attempt=0,
+                    available_at=now,
+                    occurred_at=now,
+                )
+            )
+        return lease
 
     async def _lock_execution_chain(
         self,

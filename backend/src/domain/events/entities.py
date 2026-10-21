@@ -32,6 +32,7 @@ class EventType(StrEnum):
     ROUND_STARTED = "round.started"
     ROUND_COMPLETED = "round.completed"
     TASK_STARTED = "task.started"
+    TASK_RETRYING = "task.retrying"
     TASK_COMPLETED = "task.completed"
     TASK_FAILED = "task.failed"
     MESSAGE_DELTA = "message.delta"

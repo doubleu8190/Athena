@@ -22,6 +22,10 @@ _EVENT_TYPES = {
     "ApprovalRequested": (EventType.APPROVAL_REQUIRED, "waiting", "approval"),
     "ApprovalResolved": (EventType.APPROVAL_RESOLVED, "resolved", "approval"),
     "ApprovalCancelled": (EventType.APPROVAL_RESOLVED, "cancelled", "approval"),
+    "TaskStarted": (EventType.TASK_STARTED, "running", "task"),
+    "TaskRetrying": (EventType.TASK_RETRYING, "retry_wait", "task"),
+    "TaskCompleted": (EventType.TASK_COMPLETED, "completed", "task"),
+    "TaskFailed": (EventType.TASK_FAILED, "failed", "task"),
     "RoundStarted": (EventType.ROUND_STARTED, "running", "round"),
     "RoundCompleted": (EventType.ROUND_COMPLETED, "completed", "round"),
     "PlanCancelling": (EventType.PLAN_CANCELLING, "cancelling", "plan"),
@@ -129,6 +133,8 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
         activity_identity = lease.round_id or lease.plan_id
     elif activity_type == "approval":
         activity_identity = str(lease.payload.get("approval_id") or lease.message_id)
+    elif activity_type == "task":
+        activity_identity = str(lease.payload.get("task_id") or lease.message_id)
     else:
         activity_identity = lease.run_id
     if lease.event_type == "ApprovalResolved":
@@ -146,6 +152,7 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
             "execution_plan" if activity_type == "plan"
             else "round" if activity_type == "round"
             else "tool_approval" if activity_type == "approval"
+            else "task" if activity_type == "task"
             else "run"
         ),
         "plan_id": lease.plan_id,

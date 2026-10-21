@@ -158,7 +158,7 @@ class OrchestrationOutboxModel(Base):
     dedupe_key: Mapped[str] = mapped_column(String, nullable=False)
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     correlation_id: Mapped[str] = mapped_column(String, nullable=False)
-    plan_id: Mapped[str] = mapped_column(String, nullable=False)
+    plan_id: Mapped[str | None] = mapped_column(String, nullable=True)
     plan_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     round_id: Mapped[str | None] = mapped_column(String, nullable=True)
     task_id: Mapped[str | None] = mapped_column(String, nullable=True)

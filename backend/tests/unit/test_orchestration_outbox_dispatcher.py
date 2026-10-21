@@ -157,6 +157,34 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
             "completed",
             {"terminal_task_count": 2, "expected_task_count": 2},
         ),
+        (
+            "TaskStarted",
+            "task.started",
+            "task:task-1",
+            "running",
+            {"task_id": "task-1", "execution_id": "execution-1", "attempt": 1},
+        ),
+        (
+            "TaskRetrying",
+            "task.retrying",
+            "task:task-1",
+            "retry_wait",
+            {"task_id": "task-1", "next_execution_id": "execution-2"},
+        ),
+        (
+            "TaskCompleted",
+            "task.completed",
+            "task:task-1",
+            "completed",
+            {"task_id": "task-1", "execution_id": "execution-1", "status": "completed"},
+        ),
+        (
+            "TaskFailed",
+            "task.failed",
+            "task:task-1",
+            "failed",
+            {"task_id": "task-1", "execution_id": "execution-1", "execution_status": "timed_out"},
+        ),
     ],
 )
 async def test_dispatcher_maps_durable_plan_and_round_events(

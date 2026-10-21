@@ -245,13 +245,22 @@ async def test_postgres_event_repository_reuses_transition_identity():
 
 @pytest.mark.asyncio
 async def test_postgres_orchestration_outbox_claims_and_acknowledges_lease():
-    db = DB()
+    class CapturingDB(DB):
+        def __init__(self):
+            super().__init__()
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return await super().execute(statement)
+
+    db = CapturingDB()
     outbox = SimpleNamespace(
         message_id="message-1",
         event_type="RunCancelled",
-        plan_id="plan-1",
-        plan_version=1,
-        round_id="round-1",
+        plan_id=None,
+        plan_version=None,
+        round_id=None,
         occurred_at=NOW,
         payload_json={"cancellation_epoch": 3},
         status="pending",
@@ -271,7 +280,12 @@ async def test_postgres_orchestration_outbox_claims_and_acknowledges_lease():
     assert lease is not None
     assert lease.run_id == "r-1"
     assert lease.session_id == "s-1"
+    assert lease.plan_id is None
     assert lease.attempt == 1
+    from sqlalchemy.dialects import postgresql
+
+    claim_sql = str(db.statements[0].compile(dialect=postgresql.dialect()))
+    assert "JOIN agent_runs ON agent_runs.run_id = orchestration_outbox.correlation_id" in claim_sql
     assert outbox.status == "processing"
     assert outbox.lease_owner == "dispatcher-1"
     assert await repository.mark_event_published(lease)

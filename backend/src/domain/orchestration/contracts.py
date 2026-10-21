@@ -242,7 +242,7 @@ class OrchestrationOutboxLease:
     worker_id: str
     event_type: str
     run_id: str
-    plan_id: str
+    plan_id: str | None
     session_id: str
     plan_version: int | None
     round_id: str | None

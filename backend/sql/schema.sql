@@ -255,7 +255,7 @@ CREATE TABLE IF NOT EXISTS orchestration_outbox (
     dedupe_key VARCHAR NOT NULL UNIQUE,
     event_type VARCHAR NOT NULL,
     correlation_id VARCHAR NOT NULL,
-    plan_id VARCHAR NOT NULL,
+    plan_id VARCHAR,
     plan_version INTEGER,
     round_id VARCHAR,
     task_id VARCHAR,

@@ -258,6 +258,13 @@ class PostgresOrchestrationEventRepository:
                         round_task=round_task,
                         now=now,
                     )
+                    self._write_task_retrying_outbox(
+                        session,
+                        event=event,
+                        attempt=execution.attempt,
+                        next_execution_id=next_execution_id,
+                        now=now,
+                    )
                 else:
                     task.status = status
                     task.output_json = (
@@ -279,6 +286,15 @@ class PostgresOrchestrationEventRepository:
                     task.updated_at = now.isoformat()
                     round_task.status = status
                     round_task.terminal_at = now
+                    self._write_task_terminal_outbox(
+                        session,
+                        event=event,
+                        task=task,
+                        execution=execution,
+                        result_bytes=len(result_bytes),
+                        result_sha256=result_sha256,
+                        now=now,
+                    )
 
                 if not retry_scheduled:
                     round_row.terminal_task_count += 1
@@ -328,6 +344,99 @@ class PostgresOrchestrationEventRepository:
                 )
                 _mark_processed(inbox, receipt, now)
                 return receipt
+
+    def _write_task_retrying_outbox(
+        self,
+        session: AsyncSession,
+        *,
+        event: WorkerTaskTerminalEvent,
+        attempt: int,
+        next_execution_id: str,
+        now: datetime,
+    ) -> None:
+        """Persist the retry transition with its next execution job."""
+        session.add(
+            OrchestrationOutboxModel(
+                message_id=self._id_factory(),
+                dedupe_key=f"execution:{event.execution_id}:retrying",
+                event_type="TaskRetrying",
+                correlation_id=event.run_id,
+                plan_id=event.plan_id,
+                plan_version=event.plan_version,
+                round_id=event.round_id,
+                task_id=event.task_id,
+                execution_id=event.execution_id,
+                payload_json={
+                    "task_id": event.task_id,
+                    "execution_id": event.execution_id,
+                    "next_execution_id": next_execution_id,
+                    "attempt": attempt,
+                    "execution_status": event.status.value,
+                    "error": dict(event.error) if event.error is not None else None,
+                    "parent_activity_id": f"round:{event.round_id}",
+                },
+                schema_version=1,
+                status="pending",
+                attempt=0,
+                available_at=now,
+                occurred_at=now,
+            )
+        )
+
+    def _write_task_terminal_outbox(
+        self,
+        session: AsyncSession,
+        *,
+        event: WorkerTaskTerminalEvent,
+        task: AgentTaskModel,
+        execution: TaskExecutionModel,
+        result_bytes: int,
+        result_sha256: str,
+        now: datetime,
+    ) -> None:
+        """Commit the final Task event with its accepted terminal result."""
+        status = event.status.value
+        event_type = "TaskCompleted" if status == "completed" else "TaskFailed"
+        result = (
+            dict(event.result)
+            if execution.result_ref is None
+            else {
+                "result_ref": execution.result_ref,
+                "result_bytes": result_bytes,
+                "result_sha256": result_sha256,
+            }
+        )
+        session.add(
+            OrchestrationOutboxModel(
+                message_id=self._id_factory(),
+                dedupe_key=f"execution:{event.execution_id}:terminal",
+                event_type=event_type,
+                correlation_id=event.run_id,
+                plan_id=event.plan_id,
+                plan_version=event.plan_version,
+                round_id=event.round_id,
+                task_id=event.task_id,
+                execution_id=event.execution_id,
+                payload_json={
+                    "task_id": event.task_id,
+                    "execution_id": event.execution_id,
+                    "execution_generation": execution.attempt,
+                    "attempt": execution.attempt,
+                    "execution_status": status,
+                    "title": task.title,
+                    "objective": task.objective,
+                    "worker_type": task.worker_type,
+                    "result": result,
+                    "error": dict(event.error) if event.error is not None else None,
+                    "parent_activity_id": f"round:{event.round_id}",
+                },
+                schema_version=1,
+                status="pending",
+                attempt=0,
+                available_at=now,
+                occurred_at=now,
+            )
+        )
 
     def _schedule_retry(
         self,

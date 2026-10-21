@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -12,7 +14,10 @@ from domain.orchestration import (
     Task,
     TaskStatus,
 )
-from infrastructure.persistence.postgres.models import OrchestrationOutboxModel
+from infrastructure.persistence.postgres.models import (
+    OrchestrationOutboxModel,
+    TaskExecutionResultModel,
+)
 from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationRepository,
 )
@@ -135,6 +140,155 @@ async def test_target_orchestration_repository_claims_and_completes_dag():
     assert await repository._terminal_plan_status(session, "p-1") is PlanStatus.COMPLETED
     session.execute_values = [Result(rows=[("done",), ("cancelled",)])]
     assert await repository._terminal_plan_status(session, "p-1") is PlanStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_load_review_context_uses_requested_round_and_its_plan_version():
+    session = Session()
+    repository = PostgresOrchestrationRepository(factory(session))
+    round_row = SimpleNamespace(
+        round_id="round-2",
+        plan_id="p-1",
+        plan_version=1,
+        round_number=2,
+        status="completed",
+        expected_task_count=1,
+        terminal_task_count=1,
+    )
+    plan_row = SimpleNamespace(
+        plan_id="p-1",
+        status=PlanStatus.WAITING_REVIEW.value,
+        active_round_id="round-2",
+        current_version=1,
+        user_goal="Build the report",
+    )
+    dag = {
+        "nodes": [
+            {"task_id": "a", "title": "Research", "objective": "Find facts"},
+            {"task_id": "b", "title": "Analyze", "objective": "Analyze facts"},
+            {"task_id": "c", "title": "Draft", "objective": "Write draft"},
+            {"task_id": "d", "title": "Publish", "objective": "Publish report"},
+        ],
+        "edges": [
+            {"from": "a", "to": "d"},
+            {"from": "b", "to": "c"},
+        ],
+        "user_constraints": ["Cite sources"],
+        "remaining_budget": {"tokens": 1200},
+    }
+    version_row = SimpleNamespace(dag_json=dag)
+    tasks = [
+        task("a", status=TaskStatus.FAILED, error='{"reason":"source_missing"}'),
+        task("b", status=TaskStatus.DONE),
+        task("c", status=TaskStatus.PENDING),
+        task(
+            "d",
+            status=TaskStatus.CANCELLED,
+            error='{"reason":"dependency_failed"}',
+        ),
+    ]
+    previous_execution = SimpleNamespace(
+        execution_id="exec-a",
+        round_id="round-1",
+        task_id="a",
+        result_ref=None,
+        error_json={"reason": "source_missing"},
+        result_json={
+            "output": {
+                "output": {"cause": "source unavailable"},
+                "evidence": ["source-1"],
+            }
+        },
+    )
+    current_output = {
+        "output": {"answer": "draft ready"},
+        "evidence": ["report-1"],
+        "uncertainties": ["one figure needs confirmation"],
+    }
+    serialized_output = json.dumps(
+        current_output,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    current_execution = SimpleNamespace(
+        execution_id="exec-b",
+        round_id="round-2",
+        task_id="b",
+        result_ref="result-b",
+        error_json=None,
+        result_json=None,
+    )
+    result_artifact = SimpleNamespace(
+        result_ref="result-b",
+        execution_id="exec-b",
+        result_json=current_output,
+        content_bytes=len(serialized_output),
+        content_sha256=hashlib.sha256(serialized_output).hexdigest(),
+    )
+    previous_round_task = SimpleNamespace(
+        round_id="round-1", task_id="a", status="failed"
+    )
+    current_round_task = SimpleNamespace(
+        round_id="round-2", task_id="b", status="done"
+    )
+    session.get_values = [round_row, plan_row, version_row]
+    session.execute_values = [
+        Result(rows=tasks),
+        Result(
+            rows=[
+                (1, previous_round_task, previous_execution),
+                (2, current_round_task, current_execution),
+            ]
+        ),
+        Result(rows=[result_artifact]),
+    ]
+
+    context = await repository.load_review_context("round-2")
+
+    assert context.plan_id == "p-1"
+    assert context.plan_version == 1
+    assert context.round_id == "round-2"
+    assert context.full_dag_summary == dag
+    assert [item["task_id"] for item in context.previous_results_summary] == ["a"]
+    assert context.previous_results_summary[0]["summary"] == '{"cause":"source unavailable"}'
+    assert [item["task_id"] for item in context.round_results] == ["b"]
+    assert context.round_results[0]["summary"] == '{"answer":"draft ready"}'
+    assert context.round_results[0]["result_ref"] == "result-b"
+    assert context.round_results[0]["evidence"] == ["report-1"]
+    assert context.round_results[0]["uncertainties"] == [
+        "one figure needs confirmation"
+    ]
+    assert [item["task_id"] for item in context.remaining_tasks] == ["c", "d"]
+    assert context.remaining_tasks[1]["blocked_by"] == ["a"]
+    assert context.user_constraints == ("Cite sources",)
+    assert context.remaining_budget == {"tokens": 1200}
+
+
+@pytest.mark.asyncio
+async def test_load_review_context_rejects_a_round_that_is_no_longer_active():
+    session = Session()
+    repository = PostgresOrchestrationRepository(factory(session))
+    session.get_values = [
+        SimpleNamespace(
+            round_id="round-1",
+            plan_id="p-1",
+            status="completed",
+            plan_version=1,
+            terminal_task_count=1,
+            expected_task_count=1,
+        ),
+        SimpleNamespace(
+            status=PlanStatus.WAITING_REVIEW.value,
+            active_round_id="round-2",
+            current_version=2,
+        ),
+    ]
+
+    with pytest.raises(RuntimeError, match="review_round_identity_stale"):
+        await repository.load_review_context("round-1")
+
+    assert session.execute_values == []
 
 
 @pytest.mark.asyncio

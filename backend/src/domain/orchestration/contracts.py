@@ -69,6 +69,56 @@ class PlanRound:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewContext:
+    """Root 基于固定 Plan 版本和 Round 事实进行审查的只读上下文。"""
+
+    original_goal: str
+    plan_id: str
+    plan_version: int
+    round_id: str
+    full_dag_summary: Mapping[str, Any]
+    previous_results_summary: tuple[Mapping[str, Any], ...] = ()
+    round_results: tuple[Mapping[str, Any], ...] = ()
+    remaining_tasks: tuple[Mapping[str, Any], ...] = ()
+    user_constraints: tuple[str, ...] = ()
+    remaining_budget: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """拒绝缺失身份或未结构化的 Review 输入。"""
+        if not isinstance(self.original_goal, str) or not self.original_goal.strip():
+            raise ValueError("original_goal is required")
+        if (
+            not isinstance(self.plan_id, str)
+            or not self.plan_id.strip()
+            or not isinstance(self.round_id, str)
+            or not self.round_id.strip()
+        ):
+            raise ValueError("plan_id and round_id are required")
+        if (
+            not isinstance(self.plan_version, int)
+            or isinstance(self.plan_version, bool)
+            or self.plan_version < 1
+        ):
+            raise ValueError("plan_version must be positive")
+        if not isinstance(self.full_dag_summary, Mapping):
+            raise ValueError("full_dag_summary must be a mapping")
+        for name, items in (
+            ("previous_results_summary", self.previous_results_summary),
+            ("round_results", self.round_results),
+            ("remaining_tasks", self.remaining_tasks),
+        ):
+            if any(not isinstance(item, Mapping) for item in items):
+                raise ValueError(f"{name} must contain mappings")
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.user_constraints
+        ):
+            raise ValueError("user_constraints must contain non-empty strings")
+        if not isinstance(self.remaining_budget, Mapping):
+            raise ValueError("remaining_budget must be a mapping")
+
+
+@dataclass(frozen=True, slots=True)
 class TaskAttempt:
     """带独立栅栏身份的一次 Task 执行尝试。"""
 
@@ -343,6 +393,7 @@ __all__ = [
     "PlanRevision",
     "PlanRound",
     "PlanVersion",
+    "ReviewContext",
     "ReviewAction",
     "ReviewDecision",
     "RunCancellationReceipt",

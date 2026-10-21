@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select, update
@@ -17,6 +18,8 @@ from domain.orchestration import (
     PlanEdge,
     PlanRepository,
     PlanStatus,
+    ReviewContext,
+    ReviewContextRepository,
     Task,
     TaskExecution,
     TaskResult,
@@ -27,6 +30,9 @@ from ..models import (
     AgentPlanModel,
     AgentTaskModel,
     OrchestrationOutboxModel,
+    PlanRoundModel,
+    PlanVersionModel,
+    RoundTaskModel,
     TaskExecutionModel,
 )
 from .task_execution_results import load_task_execution_outputs
@@ -49,7 +55,46 @@ def _load(value: str | None, default):
         return default
 
 
-class PostgresOrchestrationRepository(PlanRepository):
+def _review_task_result(
+    round_task: RoundTaskModel,
+    task_row: AgentTaskModel,
+    execution: TaskExecutionModel | None,
+    output: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    """把执行记录转换成有界、带引用的 Root Review 结果摘要。"""
+    result = dict(output) if isinstance(output, Mapping) else {}
+    summary_value = result.get("output", result)
+    summary_json = json.dumps(
+        summary_value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    if len(summary_json) > 6000:
+        summary_json = summary_json[:6000] + "…[truncated]"
+    uncertainties = result.get("uncertainties", ())
+    if isinstance(uncertainties, str):
+        uncertainties = (uncertainties,) if uncertainties else ()
+    elif not isinstance(uncertainties, (list, tuple)):
+        uncertainties = ()
+    error = (
+        execution.error_json
+        if execution is not None and isinstance(execution.error_json, Mapping)
+        else _load(task_row.error_json, None)
+    )
+    return {
+        "task_id": round_task.task_id,
+        "status": round_task.status,
+        "summary": summary_json,
+        "result_ref": execution.result_ref if execution is not None else None,
+        "evidence": result.get("evidence", []),
+        "uncertainties": [str(item) for item in uncertainties if str(item)],
+        "error": dict(error) if isinstance(error, Mapping) else None,
+    }
+
+
+class PostgresOrchestrationRepository(PlanRepository, ReviewContextRepository):
     """Persist target Plan/Task entities and claim work atomically."""
 
     def __init__(self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]) -> None:
@@ -71,6 +116,221 @@ class PostgresOrchestrationRepository(PlanRepository):
                 return None
             rows = (await session.execute(select(AgentTaskModel).where(AgentTaskModel.plan_id == plan_id).order_by(AgentTaskModel.task_id))).scalars().all()
         return self._plan(plan_row), [self._task(row) for row in rows]
+
+    async def load_review_context(self, round_id: str) -> ReviewContext:
+        """按指定 Round 和不可变版本读取 Root Review 所需业务事实。
+
+        Args:
+            round_id: 必须是当前等待审查的已完成 Round。
+
+        Returns:
+            使用该 Round 对应 Plan Version、历史结果和未完成任务构成的上下文。
+
+        Raises:
+            LookupError: Round、Plan 或其版本不存在。
+            RuntimeError: Round 尚未完成、已过期或持久化身份不一致。
+        """
+        async with self._session_factory() as session:
+            round_row = await session.get(PlanRoundModel, round_id)
+            if round_row is None:
+                raise LookupError("review_round_not_found")
+            if round_row.status != "completed":
+                raise RuntimeError("review_round_not_completed")
+
+            plan_row = await session.get(AgentPlanModel, round_row.plan_id)
+            if plan_row is None:
+                raise LookupError("review_plan_not_found")
+            if (
+                plan_row.status != PlanStatus.WAITING_REVIEW.value
+                or plan_row.active_round_id != round_id
+                or plan_row.current_version != round_row.plan_version
+                or round_row.terminal_task_count != round_row.expected_task_count
+            ):
+                raise RuntimeError("review_round_identity_stale")
+
+            version_row = await session.get(
+                PlanVersionModel, (round_row.plan_id, round_row.plan_version)
+            )
+            if version_row is None:
+                raise LookupError("review_plan_version_not_found")
+            dag_document = version_row.dag_json
+            if not isinstance(dag_document, Mapping):
+                raise RuntimeError("review_plan_version_document_invalid")
+
+            task_rows = (
+                await session.execute(
+                    select(AgentTaskModel).where(
+                        AgentTaskModel.plan_id == plan_row.plan_id
+                    )
+                )
+            ).scalars().all()
+            task_by_id = {row.task_id: row for row in task_rows}
+            round_execution_rows = (
+                await session.execute(
+                    select(
+                        PlanRoundModel.round_number,
+                        RoundTaskModel,
+                        TaskExecutionModel,
+                    )
+                    .join(
+                        RoundTaskModel,
+                        RoundTaskModel.round_id == PlanRoundModel.round_id,
+                    )
+                    .outerjoin(
+                        TaskExecutionModel,
+                        TaskExecutionModel.execution_id
+                        == RoundTaskModel.active_execution_id,
+                    )
+                    .where(
+                        PlanRoundModel.plan_id == plan_row.plan_id,
+                        PlanRoundModel.round_number <= round_row.round_number,
+                        PlanRoundModel.status == "completed",
+                    )
+                    .order_by(
+                        PlanRoundModel.round_number,
+                        RoundTaskModel.task_id,
+                    )
+                )
+            ).all()
+            executions = [
+                execution
+                for _, _, execution in round_execution_rows
+                if execution is not None
+            ]
+            outputs_by_execution = await load_task_execution_outputs(
+                session, executions
+            )
+
+        current_task_ids: set[str] = set()
+        previous_results: list[Mapping[str, Any]] = []
+        round_results: list[Mapping[str, Any]] = []
+        for result_round_number, round_task, execution in round_execution_rows:
+            task_id = round_task.task_id
+            if execution is not None and (
+                execution.round_id != round_task.round_id
+                or execution.task_id != task_id
+            ):
+                raise RuntimeError("review_round_execution_identity_mismatch")
+            round_is_incomplete = (
+                result_round_number == round_row.round_number
+                and round_task.status
+                not in {
+                    TaskStatus.COMPLETED.value,
+                    TaskStatus.DONE.value,
+                    TaskStatus.FAILED.value,
+                    TaskStatus.TIMED_OUT.value,
+                    TaskStatus.CANCELLED.value,
+                }
+            )
+            if round_is_incomplete:
+                raise RuntimeError("review_round_task_not_terminal")
+            task_row = task_by_id.get(task_id)
+            if task_row is None:
+                raise RuntimeError("review_round_task_definition_missing")
+            result = _review_task_result(
+                round_task,
+                task_row,
+                execution,
+                outputs_by_execution.get(execution.execution_id)
+                if execution is not None
+                else None,
+            )
+            if result_round_number == round_row.round_number:
+                current_task_ids.add(task_id)
+                round_results.append(result)
+            else:
+                previous_results.append(result)
+
+        nodes = dag_document.get("nodes", [])
+        edges = dag_document.get("edges", [])
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            raise RuntimeError("review_plan_dag_invalid")
+        definitions_by_id: dict[str, Mapping[str, Any]] = {}
+        for definition in nodes:
+            if not isinstance(definition, Mapping):
+                raise RuntimeError("review_plan_dag_invalid")
+            task_id = definition.get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                raise RuntimeError("review_plan_dag_invalid")
+            if task_id in definitions_by_id:
+                raise RuntimeError("review_plan_task_id_duplicate")
+            if task_id not in task_by_id:
+                raise RuntimeError("review_plan_task_definition_missing")
+            definitions_by_id[task_id] = definition
+        previous_results = [
+            item for item in previous_results if item["task_id"] in definitions_by_id
+        ]
+
+        dependencies_by_task: dict[str, list[str]] = {}
+        for edge in edges:
+            if not isinstance(edge, Mapping):
+                raise RuntimeError("review_plan_dag_invalid")
+            source = edge.get("from")
+            target = edge.get("to")
+            if (
+                not isinstance(source, str)
+                or not isinstance(target, str)
+                or source not in definitions_by_id
+                or target not in definitions_by_id
+            ):
+                raise RuntimeError("review_plan_dag_invalid")
+            dependencies_by_task.setdefault(target, []).append(source)
+
+        remaining_tasks: list[Mapping[str, Any]] = []
+        for task_id, definition in definitions_by_id.items():
+            if task_id in current_task_ids:
+                continue
+            task_row = task_by_id[task_id]
+            blocked_by = sorted(
+                parent_id
+                for parent_id in dependencies_by_task.get(task_id, [])
+                if task_by_id[parent_id].status
+                in {
+                    TaskStatus.FAILED.value,
+                    TaskStatus.TIMED_OUT.value,
+                    TaskStatus.CANCELLED.value,
+                }
+            )
+            task_status = task_row.status
+            if task_status == TaskStatus.PENDING.value or (
+                task_status == TaskStatus.CANCELLED.value and blocked_by
+            ):
+                remaining_tasks.append(
+                    {
+                        "task_id": task_id,
+                        "title": str(definition.get("title", "")),
+                        "instruction": str(
+                            definition.get("objective", definition.get("title", ""))
+                        ),
+                        "depends_on": dependencies_by_task.get(task_id, []),
+                        "status": task_status,
+                        "blocked_by": blocked_by,
+                    }
+                )
+
+        if len(current_task_ids) != round_row.expected_task_count:
+            raise RuntimeError("review_round_membership_incomplete")
+
+        raw_constraints = dag_document.get("user_constraints", ())
+        user_constraints = (
+            tuple(item for item in raw_constraints if isinstance(item, str))
+            if isinstance(raw_constraints, (list, tuple))
+            else ()
+        )
+        raw_budget = dag_document.get("remaining_budget", {})
+        remaining_budget = dict(raw_budget) if isinstance(raw_budget, Mapping) else {}
+        return ReviewContext(
+            original_goal=plan_row.user_goal,
+            plan_id=plan_row.plan_id,
+            plan_version=round_row.plan_version,
+            round_id=round_row.round_id,
+            full_dag_summary=dict(dag_document),
+            previous_results_summary=tuple(previous_results),
+            round_results=tuple(round_results),
+            remaining_tasks=tuple(remaining_tasks),
+            user_constraints=user_constraints,
+            remaining_budget=remaining_budget,
+        )
 
     async def claim_ready_tasks(self, plan_id: str, max_parallelism: int) -> list[TaskExecution]:
         async with self._session_factory() as session:

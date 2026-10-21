@@ -8,6 +8,7 @@ from .contracts import (
     CommandReceipt,
     OrchestrationCommand,
     OrchestrationOutboxLease,
+    ReviewContext,
     RunCancellationReceipt,
     TaskEventReceipt,
     WorkerJobLease,
@@ -105,6 +106,10 @@ class PlanRepository(Protocol):
     async def get_task_execution(self, task_id: str) -> TaskExecution | None: ...
 
 
+class ReviewContextRepository(Protocol):
+    async def load_review_context(self, round_id: str) -> ReviewContext: ...
+
+
 class PlanScheduler(Protocol):
     async def start_ready_tasks(self, plan_id: str) -> dict[str, object]: ...
 
@@ -161,6 +166,7 @@ __all__ = [
     "PlanRepository",
     "PlanScheduler",
     "ResultSynthesizer",
+    "ReviewContextRepository",
     "RootGraphPort",
     "TaskEventRepository",
     "WorkerJobRepository",

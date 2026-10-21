@@ -1,4 +1,4 @@
-"""Run 取消通知 Outbox 的 PostgreSQL 租约与投递回执。"""
+"""Orchestration Outbox 的 PostgreSQL 租约与投递回执。"""
 
 from __future__ import annotations
 
@@ -11,18 +11,25 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.orchestration import (
-    RunCancellationOutboxLease,
-    RunCancellationOutboxRepository,
+    OrchestrationOutboxLease,
+    OrchestrationOutboxRepository,
 )
 
 from ..models import AgentPlanModel, OrchestrationOutboxModel
 
 
-_CANCELLATION_EVENT_TYPES = ("PlanCancelling", "PlanCancelled", "RunCancelled")
+_USER_EVENT_TYPES = (
+    "PlanAccepted",
+    "RoundStarted",
+    "RoundCompleted",
+    "PlanCancelling",
+    "PlanCancelled",
+    "RunCancelled",
+)
 
 
-class PostgresRunCancellationOutboxRepository(RunCancellationOutboxRepository):
-    """通过短事务领取取消事件，并用 lease owner 防止旧 Dispatcher 确认。"""
+class PostgresOrchestrationOutboxRepository(OrchestrationOutboxRepository):
+    """通过短事务领取事件，并用 lease owner 防止旧 Dispatcher 确认。"""
 
     def __init__(
         self,
@@ -35,9 +42,9 @@ class PostgresRunCancellationOutboxRepository(RunCancellationOutboxRepository):
         self._session_factory = session_factory
         self._clock = clock
 
-    async def claim_next_cancellation_event(
+    async def claim_next_event(
         self, worker_id: str, *, lease_seconds: float
-    ) -> RunCancellationOutboxLease | None:
+    ) -> OrchestrationOutboxLease | None:
         """独占领取一个待投递事件或租约已过期的事件。"""
         if not worker_id.strip():
             raise ValueError("worker_id is required")
@@ -73,9 +80,7 @@ class PostgresRunCancellationOutboxRepository(RunCancellationOutboxRepository):
                             == OrchestrationOutboxModel.plan_id,
                         )
                         .where(
-                            OrchestrationOutboxModel.event_type.in_(
-                                _CANCELLATION_EVENT_TYPES
-                            ),
+                            OrchestrationOutboxModel.event_type.in_(_USER_EVENT_TYPES),
                             eligible,
                         )
                         .order_by(
@@ -97,7 +102,7 @@ class PostgresRunCancellationOutboxRepository(RunCancellationOutboxRepository):
                 outbox.attempt = int(outbox.attempt or 0) + 1
                 outbox.lease_owner = worker_id
                 outbox.lease_until = lease_until
-                return RunCancellationOutboxLease(
+                return OrchestrationOutboxLease(
                     message_id=outbox.message_id,
                     worker_id=worker_id,
                     event_type=outbox.event_type,
@@ -112,8 +117,8 @@ class PostgresRunCancellationOutboxRepository(RunCancellationOutboxRepository):
                     lease_until=lease_until,
                 )
 
-    async def mark_cancellation_event_published(
-        self, lease: RunCancellationOutboxLease
+    async def mark_event_published(
+        self, lease: OrchestrationOutboxLease
     ) -> bool:
         """仅允许未过期的当前所有者确认投递。"""
         async with self._session_factory() as session:
@@ -136,10 +141,10 @@ class PostgresRunCancellationOutboxRepository(RunCancellationOutboxRepository):
                 )
         return bool(result.rowcount)
 
-    async def retry_cancellation_event(
-        self, lease: RunCancellationOutboxLease, *, delay_seconds: float
+    async def retry_event(
+        self, lease: OrchestrationOutboxLease, *, delay_seconds: float
     ) -> bool:
-        """失败后释放租约并延迟重试，不丢弃取消事实。"""
+        """失败后释放租约并延迟重试，不丢弃编排事实。"""
         if delay_seconds < 0:
             raise ValueError("delay_seconds cannot be negative")
         async with self._session_factory() as session:
@@ -172,4 +177,4 @@ class PostgresRunCancellationOutboxRepository(RunCancellationOutboxRepository):
         return value.astimezone(timezone.utc)
 
 
-__all__ = ["PostgresRunCancellationOutboxRepository"]
+__all__ = ["PostgresOrchestrationOutboxRepository"]

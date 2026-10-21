@@ -5,7 +5,7 @@ from .knowledge_document_worker import KnowledgeDocumentWorker
 from .lifecycle import WorkerSupervisor
 from .worker_job_dispatcher import WorkerJobDispatcher
 from .root_resume_dispatcher import RootResumeDispatcher
-from .run_cancellation_outbox_dispatcher import RunCancellationOutboxDispatcher
+from .orchestration_outbox_dispatcher import OrchestrationOutboxDispatcher
 from .memory_worker import MemoryWorker
 
 __all__ = [
@@ -15,5 +15,5 @@ __all__ = [
     "WorkerSupervisor",
     "WorkerJobDispatcher",
     "RootResumeDispatcher",
-    "RunCancellationOutboxDispatcher",
+    "OrchestrationOutboxDispatcher",
 ]

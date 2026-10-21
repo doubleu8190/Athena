@@ -26,7 +26,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresMemoryRepository,
     PostgresRetrievalRepository,
     PostgresRunRepository,
-    PostgresRunCancellationOutboxRepository,
+    PostgresOrchestrationOutboxRepository,
 )
 from infrastructure.persistence.postgres.engine import PostgresEngine
 from infrastructure.persistence.postgres.options import PostgresOptions
@@ -229,7 +229,7 @@ async def test_postgres_event_repository_reuses_transition_identity():
 
 
 @pytest.mark.asyncio
-async def test_postgres_run_cancellation_outbox_claims_and_acknowledges_lease():
+async def test_postgres_orchestration_outbox_claims_and_acknowledges_lease():
     db = DB()
     outbox = SimpleNamespace(
         message_id="message-1",
@@ -245,11 +245,11 @@ async def test_postgres_run_cancellation_outbox_claims_and_acknowledges_lease():
         lease_until=None,
     )
     db.results = [Result(rows=[(outbox, "s-1", "r-1")])]
-    repository = PostgresRunCancellationOutboxRepository(
+    repository = PostgresOrchestrationOutboxRepository(
         factory(db), clock=lambda: NOW
     )
 
-    lease = await repository.claim_next_cancellation_event(
+    lease = await repository.claim_next_event(
         "dispatcher-1", lease_seconds=30
     )
 
@@ -259,7 +259,7 @@ async def test_postgres_run_cancellation_outbox_claims_and_acknowledges_lease():
     assert lease.attempt == 1
     assert outbox.status == "processing"
     assert outbox.lease_owner == "dispatcher-1"
-    assert await repository.mark_cancellation_event_published(lease)
+    assert await repository.mark_event_published(lease)
 
 
 @pytest.mark.asyncio

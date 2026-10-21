@@ -124,7 +124,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationEventRepository,
     PostgresWorkerJobRepository,
     PostgresRootResumeJobRepository,
-    PostgresRunCancellationOutboxRepository,
+    PostgresOrchestrationOutboxRepository,
     PostgresPlanLoader,
     PostgresEvaluationRepository,
 )
@@ -137,7 +137,7 @@ from workers import (
     MemoryWorker,
     WorkerJobDispatcher,
     RootResumeDispatcher,
-    RunCancellationOutboxDispatcher,
+    OrchestrationOutboxDispatcher,
     WorkerSupervisor,
 )
 from domain.runs import CommandStatus, CommandType, RunCommand
@@ -215,7 +215,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
     worker_job_repository = PostgresWorkerJobRepository(session_factory)
     root_resume_job_repository = PostgresRootResumeJobRepository(session_factory)
-    cancellation_outbox_repository = PostgresRunCancellationOutboxRepository(
+    orchestration_outbox_repository = PostgresOrchestrationOutboxRepository(
         session_factory
     )
     orchestration_command_handler = OrchestrationCommandHandler(
@@ -525,10 +525,10 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             lease_seconds=settings.worker_job_lease_seconds,
             poll_interval=settings.worker_job_poll_interval_seconds,
         )
-        cancellation_outbox_dispatcher = RunCancellationOutboxDispatcher(
-            cancellation_outbox_repository,
+        orchestration_outbox_dispatcher = OrchestrationOutboxDispatcher(
+            orchestration_outbox_repository,
             events,
-            worker_id=f"cancellation-outbox:{ids()}",
+            worker_id=f"orchestration-outbox:{ids()}",
             lease_seconds=settings.worker_job_lease_seconds,
             poll_interval=settings.worker_job_poll_interval_seconds,
         )
@@ -542,7 +542,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
                     memory_worker,
                     worker_dispatcher,
                     root_resume_dispatcher,
-                    cancellation_outbox_dispatcher,
+                    orchestration_outbox_dispatcher,
                 )
             )
         )

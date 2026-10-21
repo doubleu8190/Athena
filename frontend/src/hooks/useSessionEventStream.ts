@@ -406,7 +406,8 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "approval.required", "approval.resolved",
       "message.started", "message.persisted", "message.completed", "message.delta", "stream.snapshot",
       "thinking.started", "thinking.summary", "thinking.completed",
-      "plan.created", "plan.cancelling", "plan.completed", "plan.failed", "plan.cancelled",
+      "plan.accepted", "plan.created", "plan.cancelling", "plan.completed", "plan.failed", "plan.cancelled",
+      "round.started", "round.completed",
       "task.queued", "task.started", "task.retrying", "task.waiting_approval", "task.completed", "task.failed", "task.cancelled",
       "synthesis.started", "synthesis.completed",
       "agent.waiting_for_files", "attachment_updated",
@@ -487,9 +488,34 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
 
   if (type.startsWith("plan.")) {
     const planId = text(data.plan_id)
-    const labels: Record<string, string> = { "plan.created": "已制定执行计划", "plan.cancelling": "正在停止执行计划", "plan.completed": "执行计划已完成", "plan.failed": "执行计划未能完成", "plan.cancelled": "执行计划已取消" }
-    const status = type === "plan.failed" ? "failed" : type === "plan.created" ? "running" : type === "plan.cancelling" ? "waiting" : type === "plan.cancelled" ? "info" : "completed"
-    return base({ id: `plan:${planId}`, label: labels[type] || "执行计划已更新", detail: error || undefined, status })
+    const labels: Record<string, string> = { "plan.accepted": "执行计划已受理", "plan.created": "已制定执行计划", "plan.cancelling": "正在停止执行计划", "plan.completed": "执行计划已完成", "plan.failed": "执行计划未能完成", "plan.cancelled": "执行计划已取消" }
+    const status = type === "plan.failed" ? "failed" : type === "plan.created" ? "running" : type === "plan.accepted" || type === "plan.cancelled" ? "info" : type === "plan.cancelling" ? "waiting" : "completed"
+    const id = type === "plan.accepted" ? `plan-accepted:${planId}` : `plan:${planId}`
+    return base({ id, label: labels[type] || "执行计划已更新", detail: error || undefined, status })
+  }
+  if (type === "round.started" || type === "round.completed") {
+    const roundId = text(data.round_id)
+    const taskIds = stringArray(data.task_ids) || []
+    const version = number(data.plan_version)
+    const terminalCount = number(data.terminal_task_count)
+    const expectedCount = number(data.expected_task_count)
+    const detail = type === "round.started"
+      ? [taskIds.length ? `${taskIds.length} 个任务进入本轮执行` : "本轮任务开始执行", version ? `计划版本 v${version}` : ""].filter(Boolean).join(" · ")
+      : terminalCount !== undefined && expectedCount !== undefined
+        ? `${terminalCount} / ${expectedCount} 个任务已结束`
+        : undefined
+    return base({
+      id: `round:${roundId}:${type.endsWith("started") ? "started" : "completed"}`,
+      label: type === "round.started" ? "开始执行一轮任务" : "本轮任务已处理完毕",
+      detail,
+      status: type === "round.started" ? "running" : "completed",
+      metadata: {
+        ...(text(data.plan_id) ? { plan_id: text(data.plan_id) } : {}),
+        ...(roundId ? { round_id: roundId } : {}),
+        ...(version ? { plan_version: version } : {}),
+        ...(taskIds.length ? { task_ids: taskIds } : {}),
+      },
+    })
   }
   if (type.startsWith("task.")) return null
   if (type.startsWith("synthesis.")) return base({ id: `synthesis:${text(data.plan_id)}`, label: type === "synthesis.started" ? "正在汇总处理结果" : "处理结果已汇总", status: type === "synthesis.started" ? "running" : "completed" })

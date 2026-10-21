@@ -235,8 +235,8 @@ class RunCancellationReceipt:
 
 
 @dataclass(frozen=True, slots=True)
-class RunCancellationOutboxLease:
-    """已被 Dispatcher 独占领取的取消通知 Outbox 事件。"""
+class OrchestrationOutboxLease:
+    """已被 Dispatcher 独占领取的用户可见 Orchestration Outbox 事件。"""
 
     message_id: str
     worker_id: str
@@ -289,7 +289,7 @@ __all__ = [
     "ReviewAction",
     "ReviewDecision",
     "RunCancellationReceipt",
-    "RunCancellationOutboxLease",
+    "OrchestrationOutboxLease",
     "RoundStatus",
     "TaskAttempt",
     "TaskEventReceipt",

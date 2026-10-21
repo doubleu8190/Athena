@@ -1,4 +1,4 @@
-"""可靠投递 Run/Plan 取消事实到持久 SSE 事件流。"""
+"""可靠投递 Orchestration 业务事实到持久 SSE 事件流。"""
 
 from __future__ import annotations
 
@@ -8,26 +8,29 @@ from typing import Any
 
 from domain.events import ApplicationEvent, EventDurability, EventType, EventPort
 from domain.orchestration import (
-    RunCancellationOutboxLease,
-    RunCancellationOutboxRepository,
+    OrchestrationOutboxLease,
+    OrchestrationOutboxRepository,
 )
 
 logger = logging.getLogger(__name__)
 
 
 _EVENT_TYPES = {
+    "PlanAccepted": (EventType.PLAN_ACCEPTED, "running", "plan"),
+    "RoundStarted": (EventType.ROUND_STARTED, "running", "round"),
+    "RoundCompleted": (EventType.ROUND_COMPLETED, "completed", "round"),
     "PlanCancelling": (EventType.PLAN_CANCELLING, "cancelling", "plan"),
     "PlanCancelled": (EventType.PLAN_CANCELLED, "cancelled", "plan"),
     "RunCancelled": (EventType.RUN_CANCELLED, "cancelled", "run"),
 }
 
 
-class RunCancellationOutboxDispatcher:
-    """通过可恢复租约投递取消通知；Outbox 状态与 SSE 历史分开保存。"""
+class OrchestrationOutboxDispatcher:
+    """通过可恢复租约投递业务事件；Outbox 与 SSE 历史分开保存。"""
 
     def __init__(
         self,
-        outbox: RunCancellationOutboxRepository,
+        outbox: OrchestrationOutboxRepository,
         events: EventPort,
         *,
         worker_id: str,
@@ -50,7 +53,7 @@ class RunCancellationOutboxDispatcher:
             return
         self._stop.clear()
         self._task = asyncio.create_task(
-            self.run(), name=f"athena-cancellation-outbox:{self._worker_id}"
+            self.run(), name=f"athena-orchestration-outbox:{self._worker_id}"
         )
 
     async def stop(self) -> None:
@@ -68,7 +71,7 @@ class RunCancellationOutboxDispatcher:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Run cancellation Outbox claim failed")
+                logger.exception("Orchestration Outbox claim failed")
                 claimed = False
             if not claimed:
                 try:
@@ -80,7 +83,7 @@ class RunCancellationOutboxDispatcher:
 
     async def dispatch_once(self) -> bool:
         """投递一个事件；无到期消息时返回 False。"""
-        lease = await self._outbox.claim_next_cancellation_event(
+        lease = await self._outbox.claim_next_event(
             self._worker_id, lease_seconds=self._lease_seconds
         )
         if lease is None:
@@ -92,47 +95,54 @@ class RunCancellationOutboxDispatcher:
             raise
         except Exception:
             delay = min(30.0, 0.5 * (2 ** min(lease.attempt - 1, 6)))
-            await self._outbox.retry_cancellation_event(
-                lease, delay_seconds=delay
-            )
+            await self._outbox.retry_event(lease, delay_seconds=delay)
             logger.exception(
-                "Run cancellation Outbox delivery failed: message=%s attempt=%s",
+                "Orchestration Outbox delivery failed: message=%s attempt=%s",
                 lease.message_id,
                 lease.attempt,
             )
             return True
 
-        if not await self._outbox.mark_cancellation_event_published(lease):
+        if not await self._outbox.mark_event_published(lease):
             logger.warning(
-                "Run cancellation Outbox lease expired before acknowledgement: %s",
+                "Orchestration Outbox lease expired before acknowledgement: %s",
                 lease.message_id,
             )
         return True
 
 
-def _application_event(lease: RunCancellationOutboxLease) -> ApplicationEvent:
+def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
     """把持久 Outbox 信封转换为稳定、可幂等重放的 SSE 事件。"""
     try:
         event_type, status, activity_type = _EVENT_TYPES[lease.event_type]
     except KeyError as exc:
-        raise ValueError(f"unsupported cancellation event: {lease.event_type}") from exc
+        raise ValueError(f"unsupported orchestration event: {lease.event_type}") from exc
 
     activity_identity = (
-        lease.plan_id if activity_type == "plan" else lease.run_id
+        lease.plan_id
+        if activity_type == "plan"
+        else lease.round_id or lease.plan_id
+        if activity_type == "round"
+        else lease.run_id
     )
     activity_id = f"{activity_type}:{activity_identity}"
-    payload: dict[str, Any] = {
+    payload: dict[str, Any] = dict(lease.payload)
+    payload.update({
         "activity_id": activity_id,
         "activity_type": activity_type,
-        "name": "execution_plan" if activity_type == "plan" else "run",
+        "name": (
+            "execution_plan" if activity_type == "plan"
+            else "round" if activity_type == "round"
+            else "run"
+        ),
         "plan_id": lease.plan_id,
         "status": status,
-        "cancellation_epoch": lease.payload.get("cancellation_epoch"),
-        "external_effect_status": lease.payload.get(
-            "external_effect_status", "unknown"
-        ),
+        "round_id": lease.round_id,
+        "plan_version": lease.plan_version,
         "outbox_message_id": lease.message_id,
-    }
+    })
+    if activity_type == "run":
+        payload.setdefault("external_effect_status", "unknown")
     return ApplicationEvent(
         event_type=event_type,
         durability=EventDurability.DURABLE,
@@ -144,4 +154,4 @@ def _application_event(lease: RunCancellationOutboxLease) -> ApplicationEvent:
     )
 
 
-__all__ = ["RunCancellationOutboxDispatcher"]
+__all__ = ["OrchestrationOutboxDispatcher"]

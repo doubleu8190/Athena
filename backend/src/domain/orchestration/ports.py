@@ -7,7 +7,7 @@ from typing import Mapping, Protocol
 from .contracts import (
     CommandReceipt,
     OrchestrationCommand,
-    RunCancellationOutboxLease,
+    OrchestrationOutboxLease,
     RunCancellationReceipt,
     TaskEventReceipt,
     WorkerJobLease,
@@ -51,19 +51,19 @@ class WorkerJobRepository(Protocol):
     async def reconcile_cancellations(self) -> list[RunCancellationReceipt]: ...
 
 
-class RunCancellationOutboxRepository(Protocol):
-    """取消 SSE 事件的可靠领取和至少一次投递状态。"""
+class OrchestrationOutboxRepository(Protocol):
+    """用户可见编排事件的可靠领取和至少一次投递状态。"""
 
-    async def claim_next_cancellation_event(
+    async def claim_next_event(
         self, worker_id: str, *, lease_seconds: float
-    ) -> RunCancellationOutboxLease | None: ...
+    ) -> OrchestrationOutboxLease | None: ...
 
-    async def mark_cancellation_event_published(
-        self, lease: RunCancellationOutboxLease
+    async def mark_event_published(
+        self, lease: OrchestrationOutboxLease
     ) -> bool: ...
 
-    async def retry_cancellation_event(
-        self, lease: RunCancellationOutboxLease, *, delay_seconds: float
+    async def retry_event(
+        self, lease: OrchestrationOutboxLease, *, delay_seconds: float
     ) -> bool: ...
 
 
@@ -143,6 +143,7 @@ class RootGraphPort(Protocol):
 
 __all__ = [
     "OrchestrationCommandRepository",
+    "OrchestrationOutboxRepository",
     "PlanRepository",
     "PlanScheduler",
     "ResultSynthesizer",

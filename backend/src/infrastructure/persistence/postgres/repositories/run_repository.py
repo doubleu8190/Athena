@@ -433,6 +433,19 @@ class PostgresRunRepository(
                     AgentTaskModel.plan_id == plan.plan_id,
                     AgentTaskModel.status.in_(("pending", "waiting_approval")),
                 )
+                pending_tasks = (
+                    await session.execute(
+                        select(AgentTaskModel)
+                        .where(
+                            AgentTaskModel.plan_id == plan.plan_id,
+                            AgentTaskModel.status.in_(
+                                ("pending", "waiting_approval")
+                            ),
+                        )
+                        .order_by(AgentTaskModel.task_id)
+                        .with_for_update()
+                    )
+                ).scalars().all()
                 execution_ids = select(TaskExecutionModel.execution_id).where(
                     TaskExecutionModel.task_id.in_(task_ids)
                 )
@@ -460,6 +473,41 @@ class PostgresRunRepository(
                     )
                     .values(status="cancelled", updated_at=now_iso)
                 )
+                for task in pending_tasks:
+                    session.add(
+                        OrchestrationOutboxModel(
+                            message_id=uuid4().hex,
+                            dedupe_key=(
+                                f"task:{task.task_id}:cancelled:{cancellation_epoch}"
+                            ),
+                            event_type="TaskCancelled",
+                            correlation_id=run_id,
+                            plan_id=plan.plan_id,
+                            plan_version=plan.current_version,
+                            round_id=plan.active_round_id,
+                            task_id=task.task_id,
+                            execution_id=task.active_execution_id,
+                            payload_json={
+                                "task_id": task.task_id,
+                                "execution_id": task.active_execution_id,
+                                "execution_generation": task.execution_generation,
+                                "title": task.title,
+                                "objective": task.objective,
+                                "status": "cancelled",
+                                "reason": reason,
+                                "parent_activity_id": (
+                                    f"round:{plan.active_round_id}"
+                                    if plan.active_round_id
+                                    else f"plan:{plan.plan_id}"
+                                ),
+                            },
+                            schema_version=1,
+                            status="pending",
+                            attempt=0,
+                            available_at=now,
+                            occurred_at=now,
+                        )
+                    )
                 await session.execute(
                     update(AgentTaskModel)
                     .where(

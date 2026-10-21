@@ -45,6 +45,7 @@ class ChainSession:
     def __init__(self, rows):
         self.rows = list(rows)
         self.executed = []
+        self.added = []
 
     async def __aenter__(self):
         return self
@@ -59,11 +60,15 @@ class ChainSession:
         self.executed.append(statement)
         return Result(scalar=self.rows.pop(0))
 
+    def add(self, value):
+        self.added.append(value)
+
 
 class ReconcileSession:
-    def __init__(self, run, plan):
+    def __init__(self, run, plan, expired_rows=()):
         self.run = run
         self.plan = plan
+        self.expired_rows = list(expired_rows)
         self.execute_count = 0
         self.added = []
 
@@ -86,10 +91,13 @@ class ReconcileSession:
         if self.execute_count == 2:
             return Result(scalar=self.plan)
         if self.execute_count == 3:
-            return Result(rows=[])
-        if self.execute_count == 4:
+            return Result(rows=self.expired_rows)
+        if self.execute_count == 4 + 4 * len(self.expired_rows):
             return Result(scalar=0)
         return Result()
+
+    def add(self, value):
+        self.added.append(value)
 
     def add_all(self, values):
         self.added.extend(values)
@@ -239,18 +247,38 @@ async def test_worker_claim_commits_task_started_outbox_with_execution_lease(
 
 @pytest.mark.asyncio
 async def test_worker_acknowledges_only_its_fenced_cancellation():
-    run = SimpleNamespace(status="cancelling", cancellation_epoch=4)
-    plan = SimpleNamespace(status="cancelling", cancellation_epoch=4)
-    round_row = SimpleNamespace(terminal_task_count=0, expected_task_count=1)
-    task = SimpleNamespace(status="cancelling", updated_at=None)
+    run = SimpleNamespace(
+        run_id="run-1", status="cancelling", cancellation_epoch=4
+    )
+    plan = SimpleNamespace(
+        plan_id="plan-1",
+        status="cancelling",
+        cancellation_epoch=4,
+        current_version=1,
+    )
+    round_row = SimpleNamespace(
+        round_id="round-1",
+        plan_version=1,
+        terminal_task_count=0,
+        expected_task_count=1,
+    )
+    task = SimpleNamespace(
+        task_id="task-1",
+        title="Task",
+        objective="Do task",
+        status="cancelling",
+        updated_at=None,
+    )
     round_task = SimpleNamespace(status="cancelling", terminal_at=None)
     execution = SimpleNamespace(
         status="cancel_requested",
+        execution_id="execution-1",
         cancellation_epoch=4,
         lease_owner="worker-1",
         lease_until=NOW,
         updated_at=NOW,
         fencing_token=7,
+        attempt=1,
     )
     job = SimpleNamespace(
         status="cancel_requested",
@@ -269,6 +297,11 @@ async def test_worker_acknowledges_only_its_fenced_cancellation():
     assert job.status == execution.status == task.status == round_task.status == "cancelled"
     assert job.lease_owner is execution.lease_owner is None
     assert round_row.terminal_task_count == 1
+    event = next(
+        item for item in session.added if isinstance(item, OrchestrationOutboxModel)
+    )
+    assert event.event_type == "TaskCancelled"
+    assert event.dedupe_key == "task:task-1:cancelled:4"
 
 
 @pytest.mark.asyncio
@@ -302,6 +335,53 @@ async def test_reconciler_finishes_cancel_when_no_workers_remain():
         "PlanCancelled",
         "RunCancelled",
     ]
+
+
+@pytest.mark.asyncio
+async def test_reconciler_persists_task_cancelled_when_worker_lease_expires():
+    run = SimpleNamespace(
+        run_id="run-1",
+        session_id="session-1",
+        status="cancelling",
+        cancellation_epoch=5,
+        cancellation_external_effect_status="unknown",
+        updated_at=None,
+    )
+    plan = SimpleNamespace(
+        plan_id="plan-1",
+        status="cancelling",
+        cancellation_epoch=5,
+        current_version=2,
+        active_round_id="round-2",
+        updated_at=None,
+    )
+    session = ReconcileSession(
+        run,
+        plan,
+        expired_rows=[
+            (
+                "job-1",
+                "execution-1",
+                "task-1",
+                "round-2",
+                "Task",
+                "Do task",
+                1,
+            )
+        ],
+    )
+    repository = PostgresWorkerJobRepository(factory(session), clock=lambda: NOW)
+
+    receipts = await repository.reconcile_cancellations()
+
+    task_event = next(
+        item for item in session.added if isinstance(item, OrchestrationOutboxModel)
+        and item.event_type == "TaskCancelled"
+    )
+    assert receipts[0].external_effect_status == "unknown"
+    assert task_event.task_id == "task-1"
+    assert task_event.execution_id == "execution-1"
+    assert task_event.dedupe_key == "task:task-1:cancelled:5"
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,7 @@ _USER_EVENT_TYPES = (
     "TaskRetrying",
     "TaskCompleted",
     "TaskFailed",
+    "TaskCancelled",
     "RoundStarted",
     "RoundCompleted",
     "PlanCancelling",

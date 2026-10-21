@@ -26,6 +26,7 @@ _EVENT_TYPES = {
     "TaskRetrying": (EventType.TASK_RETRYING, "retry_wait", "task"),
     "TaskCompleted": (EventType.TASK_COMPLETED, "completed", "task"),
     "TaskFailed": (EventType.TASK_FAILED, "failed", "task"),
+    "TaskCancelled": (EventType.TASK_CANCELLED, "cancelled", "task"),
     "RoundStarted": (EventType.ROUND_STARTED, "running", "round"),
     "RoundCompleted": (EventType.ROUND_COMPLETED, "completed", "round"),
     "PlanCancelling": (EventType.PLAN_CANCELLING, "cancelling", "plan"),

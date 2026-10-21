@@ -7,7 +7,10 @@ import pytest
 
 from domain.approval import ApprovalDecision
 from domain.runs import RunCancellationResult, RunStatus
-from infrastructure.persistence.postgres.models import ApprovalRecordModel
+from infrastructure.persistence.postgres.models import (
+    AgentTaskModel,
+    ApprovalRecordModel,
+)
 from infrastructure.persistence.postgres.repositories.approval_repository import (
     PostgresApprovalRepository,
 )
@@ -36,10 +39,11 @@ class Result:
 
 
 class CancellationSession:
-    def __init__(self, run, plan=None, approval_rows=()):
+    def __init__(self, run, plan=None, approval_rows=(), pending_task_rows=()):
         self.run = run
         self.plan = plan
         self.approval_rows = list(approval_rows)
+        self.pending_task_rows = list(pending_task_rows)
         self.executed = []
         self.added = []
 
@@ -60,6 +64,8 @@ class CancellationSession:
         descriptions = getattr(statement, "column_descriptions", ())
         if descriptions and descriptions[0].get("entity") is ApprovalRecordModel:
             return Result(rows=self.approval_rows)
+        if descriptions and descriptions[0].get("entity") is AgentTaskModel:
+            return Result(rows=self.pending_task_rows)
         if len(self.executed) == 1:
             return Result(scalar=self.plan)
         if len(self.executed) == 2 and self.plan is not None:
@@ -103,7 +109,20 @@ async def test_cancel_plan_advances_epoch_and_persists_cancelling_outbox():
         tool_name="write_file",
         status="pending",
     )
-    session = CancellationSession(run, plan, approval_rows=[approval])
+    pending_task = SimpleNamespace(
+        task_id="queued-task",
+        title="Queued task",
+        objective="Run after its dependency",
+        active_execution_id="queued-execution",
+        execution_generation=1,
+        status="pending",
+    )
+    session = CancellationSession(
+        run,
+        plan,
+        approval_rows=[approval],
+        pending_task_rows=[pending_task],
+    )
     repository = PostgresRunRepository(factory(session))
 
     status = await repository.cancel("run-1")
@@ -122,6 +141,12 @@ async def test_cancel_plan_advances_epoch_and_persists_cancelling_outbox():
     assert approval_event.dedupe_key == "approval:approval-1:cancelled"
     assert approval_event.payload_json["decision"] == "cancelled"
     assert approval_event.round_id == "round-2"
+    task_event = next(
+        row for row in session.added if row.event_type == "TaskCancelled"
+    )
+    assert task_event.task_id == "queued-task"
+    assert task_event.execution_id == "queued-execution"
+    assert task_event.dedupe_key == "task:queued-task:cancelled:5"
     assert len(session.executed) >= 10
 
 

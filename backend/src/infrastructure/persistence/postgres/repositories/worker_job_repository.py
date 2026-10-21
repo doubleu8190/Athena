@@ -352,6 +352,19 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                     round_row.expected_task_count,
                     round_row.terminal_task_count + 1,
                 )
+                session.add(
+                    self._task_cancelled_outbox(
+                        run=run,
+                        plan=plan,
+                        round_id=round_row.round_id,
+                        task_id=task.task_id,
+                        execution_id=execution.execution_id,
+                        execution_generation=execution.attempt,
+                        title=task.title,
+                        objective=task.objective,
+                        now=now,
+                    )
+                )
                 return True
 
     async def reconcile_cancellations(self) -> list[RunCancellationReceipt]:
@@ -393,6 +406,9 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                                 TaskExecutionModel.execution_id,
                                 AgentTaskModel.task_id,
                                 RoundTaskModel.round_id,
+                                AgentTaskModel.title,
+                                AgentTaskModel.objective,
+                                TaskExecutionModel.attempt,
                             )
                             .join(
                                 TaskExecutionModel,
@@ -418,7 +434,15 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                             )
                         )
                     ).all()
-                    for job_id, execution_id, task_id, round_id in expired_rows:
+                    for (
+                        job_id,
+                        execution_id,
+                        task_id,
+                        round_id,
+                        title,
+                        objective,
+                        attempt,
+                    ) in expired_rows:
                         await session.execute(
                             update(WorkerJobModel)
                             .where(
@@ -462,6 +486,19 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                             )
                             .values(status="cancelled", terminal_at=now)
                         )
+                        session.add(
+                            self._task_cancelled_outbox(
+                                run=run,
+                                plan=plan,
+                                round_id=round_id,
+                                task_id=task_id,
+                                execution_id=execution_id,
+                                execution_generation=attempt,
+                                title=title,
+                                objective=objective,
+                                now=now,
+                            )
+                        )
 
                     active_count = (
                         await session.execute(
@@ -480,6 +517,31 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                     if active_count:
                         continue
 
+                    cancelling_tasks = (
+                        await session.execute(
+                            select(AgentTaskModel)
+                            .where(
+                                AgentTaskModel.plan_id == plan.plan_id,
+                                AgentTaskModel.status == "cancelling",
+                            )
+                            .order_by(AgentTaskModel.task_id)
+                            .with_for_update()
+                        )
+                    ).scalars().all()
+                    for task in cancelling_tasks:
+                        session.add(
+                            self._task_cancelled_outbox(
+                                run=run,
+                                plan=plan,
+                                round_id=plan.active_round_id,
+                                task_id=task.task_id,
+                                execution_id=task.active_execution_id,
+                                execution_generation=task.execution_generation,
+                                title=task.title,
+                                objective=task.objective,
+                                now=now,
+                            )
+                        )
                     await session.execute(
                         update(AgentTaskModel)
                         .where(
@@ -581,6 +643,50 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             payload_json={
                 "cancellation_epoch": run.cancellation_epoch,
                 "external_effect_status": run.cancellation_external_effect_status,
+            },
+            schema_version=1,
+            status="pending",
+            attempt=0,
+            available_at=now,
+            occurred_at=now,
+        )
+
+    def _task_cancelled_outbox(
+        self,
+        *,
+        run: AgentRunModel,
+        plan: AgentPlanModel,
+        round_id: str | None,
+        task_id: str,
+        execution_id: str | None,
+        execution_generation: int,
+        title: str,
+        objective: str,
+        now: datetime,
+    ) -> OrchestrationOutboxModel:
+        """Construct a deduplicated Task cancellation event for this epoch."""
+        return OrchestrationOutboxModel(
+            message_id=uuid4().hex,
+            dedupe_key=(
+                f"task:{task_id}:cancelled:{run.cancellation_epoch}"
+            ),
+            event_type="TaskCancelled",
+            correlation_id=run.run_id,
+            plan_id=plan.plan_id,
+            plan_version=plan.current_version,
+            round_id=round_id,
+            task_id=task_id,
+            execution_id=execution_id,
+            payload_json={
+                "task_id": task_id,
+                "execution_id": execution_id,
+                "execution_generation": execution_generation,
+                "title": title,
+                "objective": objective,
+                "status": "cancelled",
+                "parent_activity_id": (
+                    f"round:{round_id}" if round_id else f"plan:{plan.plan_id}"
+                ),
             },
             schema_version=1,
             status="pending",

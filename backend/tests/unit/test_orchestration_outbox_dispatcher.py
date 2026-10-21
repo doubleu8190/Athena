@@ -185,6 +185,13 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
             "failed",
             {"task_id": "task-1", "execution_id": "execution-1", "execution_status": "timed_out"},
         ),
+        (
+            "TaskCancelled",
+            "task.cancelled",
+            "task:task-1",
+            "cancelled",
+            {"task_id": "task-1", "execution_id": "execution-1", "status": "cancelled"},
+        ),
     ],
 )
 async def test_dispatcher_maps_durable_plan_and_round_events(

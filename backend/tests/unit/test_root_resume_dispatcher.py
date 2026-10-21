@@ -10,8 +10,10 @@ from langgraph.types import Command
 
 from application.orchestration.langgraph.graphs.root import (
     _wait_for_plan_completion_node,
+    invoke_root_graph,
 )
 from application.orchestration.langgraph.graphs.state import RootGraphState
+from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
 from domain.orchestration import PlanStatus
 from infrastructure.persistence.postgres.repositories.orchestration_repository import (
     PostgresPlanLoader,
@@ -48,10 +50,30 @@ async def test_root_wait_node_interrupts_and_rechecks_after_resume():
     graph = builder.compile(checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "run:run-1"}}
 
-    paused = await graph.ainvoke({}, config=config)
+    paused = await invoke_root_graph(
+        graph, session_id="session-1", run_id="run-1"
+    )
 
     assert len(paused["__interrupt__"]) == 1
     assert paused["__interrupt__"][0].value["round_id"] == "round-1"
+    assert paused["__root_checkpoint_id__"]
+    adapter = LangGraphRootGraph(workflow=None, dependencies=None)
+    adapter._graph = graph
+    identity = {
+        "run_id": "run-1",
+        "plan_id": "plan-1",
+        "round_id": "round-1",
+        "plan_version": 1,
+        "interrupt_id": paused["__interrupt__"][0].id,
+        "checkpoint_id": paused["__root_checkpoint_id__"],
+    }
+    assert await adapter.has_pending_round_wait(**identity) is True
+    assert await adapter.has_pending_round_wait(
+        **{**identity, "interrupt_id": "stale-interrupt"}
+    ) is False
+    assert await adapter.has_pending_round_wait(
+        **{**identity, "checkpoint_id": "stale-checkpoint"}
+    ) is False
     resumed = await graph.ainvoke(
         Command(
             resume={
@@ -112,7 +134,10 @@ async def test_root_resume_dispatcher_retries_until_matching_interrupt_exists():
         session_id="session-1",
         plan_id="plan-1",
         round_id="round-1",
+        plan_version=1,
         root_wait_generation=3,
+        interrupt_id="interrupt-1",
+        checkpoint_id="checkpoint-1",
         worker_id="root-resumer-1",
         lease_until=datetime.now(timezone.utc),
     )
@@ -145,6 +170,9 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
                 "run_id": "run-1",
                 "plan_id": "plan-1",
                 "round_id": "round-1",
+                "plan_version": 1,
+                "interrupt_id": "interrupt-1",
+                "checkpoint_id": "checkpoint-1",
             }
 
     class Execution:
@@ -173,7 +201,10 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
         session_id="session-1",
         plan_id="plan-1",
         round_id="round-1",
+        plan_version=1,
         root_wait_generation=3,
+        interrupt_id="interrupt-1",
+        checkpoint_id="checkpoint-1",
         worker_id="root-resumer-1",
         lease_until=datetime.now(timezone.utc),
     )
@@ -182,6 +213,7 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
 
     assert execution.command.run_id == "run-1"
     assert execution.command.payload["resume_value"]["round_id"] == "round-1"
+    assert execution.command.payload["resume_value"]["interrupt_id"] == "interrupt-1"
     assert len(jobs.completed) == 1
 
 

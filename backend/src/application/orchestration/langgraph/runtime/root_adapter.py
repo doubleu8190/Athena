@@ -65,21 +65,41 @@ class LangGraphRootGraph(RootGraphPort):
         )
 
     async def has_pending_round_wait(
-        self, *, run_id: str, plan_id: str, round_id: str
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+        interrupt_id: str,
+        checkpoint_id: str,
     ) -> bool:
-        """Confirm the checkpoint awaits the requested active Round."""
+        """检查当前 checkpoint 是否正等待指定版本和轮次的中断。"""
         snapshot = await self._compiled_graph().aget_state(
             {"configurable": {"thread_id": f"run:{run_id}"}}
         )
+        snapshot_config = getattr(snapshot, "config", {})
+        configurable = (
+            snapshot_config.get("configurable", {})
+            if isinstance(snapshot_config, Mapping)
+            else {}
+        )
+        if (
+            not isinstance(configurable, Mapping)
+            or configurable.get("checkpoint_id") != checkpoint_id
+        ):
+            return False
         for task in getattr(snapshot, "tasks", ()):
             for pending in getattr(task, "interrupts", ()):
                 value = getattr(pending, "value", None)
                 if (
-                    isinstance(value, Mapping)
+                    getattr(pending, "id", None) == interrupt_id
+                    and isinstance(value, Mapping)
                     and value.get("type") == "round_wait"
                     and value.get("run_id") == run_id
                     and value.get("plan_id") == plan_id
                     and value.get("round_id") == round_id
+                    and value.get("plan_version") == plan_version
                 ):
                     return True
         return False

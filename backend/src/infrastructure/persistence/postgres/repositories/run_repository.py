@@ -268,6 +268,7 @@ class PostgresRunRepository(
         round_id: str,
         plan_version: int,
         interrupt_id: str,
+        checkpoint_id: str,
     ) -> bool:
         """Record a checkpointed Root wait only for its current Round generation."""
         async with self._session_factory() as session:
@@ -286,6 +287,7 @@ class PostgresRunRepository(
                     or plan.active_round_id != round_id
                     or plan.current_version != plan_version
                     or not interrupt_id
+                    or not checkpoint_id
                 ):
                     return False
                 if (
@@ -297,6 +299,7 @@ class PostgresRunRepository(
                     row.root_wait_plan_version = plan_version
                 row.root_wait_armed_at = _now()
                 row.root_wait_interrupt_id = interrupt_id
+                row.root_wait_checkpoint_id = checkpoint_id
                 row.updated_at = _now()
                 return True
 

@@ -143,6 +143,17 @@ class RootGraphPort(Protocol):
         stop_signal: object | None = None,
     ) -> object: ...
 
+    async def has_pending_round_wait(
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+        interrupt_id: str,
+        checkpoint_id: str,
+    ) -> bool: ...
+
 
 __all__ = [
     "OrchestrationCommandRepository",

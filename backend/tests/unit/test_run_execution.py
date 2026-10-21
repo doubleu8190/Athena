@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -256,6 +257,53 @@ async def test_execution_service_preserves_resume_and_waiting_events() -> None:
         "run.root_suspended",
     ]
     assert queue.completed == []
+
+
+@pytest.mark.asyncio
+async def test_execution_service_arms_exact_root_interrupt_checkpoint() -> None:
+    class WaitingLifecycle(Lifecycle):
+        def __init__(self):
+            super().__init__()
+            self.root_wait = None
+
+        async def arm_root_wait(self, run_id, **identity):
+            self.root_wait = (run_id, identity)
+            return True
+
+    interrupt = SimpleNamespace(
+        id="interrupt-1",
+        value={
+            "type": "round_wait",
+            "run_id": "run-1",
+            "plan_id": "plan-1",
+            "round_id": "round-1",
+            "plan_version": 2,
+        },
+    )
+    lifecycle = WaitingLifecycle()
+    executor = Executor(
+        outcome=CommandExecutionResult(
+            result={
+                "__interrupt__": [interrupt],
+                "__root_checkpoint_id__": "checkpoint-1",
+            },
+            waiting=True,
+        )
+    )
+    service = RunExecutionService(lifecycle, Queue(), executor, Events())
+
+    await service.execute(command())
+
+    assert lifecycle.root_wait == (
+        "run-1",
+        {
+            "plan_id": "plan-1",
+            "round_id": "round-1",
+            "plan_version": 2,
+            "interrupt_id": "interrupt-1",
+            "checkpoint_id": "checkpoint-1",
+        },
+    )
 
 
 @pytest.mark.asyncio

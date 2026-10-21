@@ -197,7 +197,12 @@ class RunExecutionService:
             return
         interrupt = interrupts[0]
         value = getattr(interrupt, "value", None)
-        if not isinstance(value, dict) or value.get("type") != "round_wait":
+        checkpoint_id = result.get("__root_checkpoint_id__")
+        if (
+            not isinstance(value, dict)
+            or value.get("type") != "round_wait"
+            or not checkpoint_id
+        ):
             return
         await arm(
             run_id,
@@ -205,6 +210,7 @@ class RunExecutionService:
             round_id=str(value.get("round_id", "")),
             plan_version=int(value.get("plan_version", 0)),
             interrupt_id=str(getattr(interrupt, "id", "")),
+            checkpoint_id=str(checkpoint_id),
         )
 
     async def fail(self, command: RunCommand, error: dict[str, object]) -> None:

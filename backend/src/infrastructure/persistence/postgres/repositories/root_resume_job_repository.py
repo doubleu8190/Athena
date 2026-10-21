@@ -28,7 +28,10 @@ class RootResumeLease:
     session_id: str
     plan_id: str
     round_id: str
+    plan_version: int
     root_wait_generation: int
+    interrupt_id: str | None
+    checkpoint_id: str | None
     worker_id: str
     lease_until: datetime
 
@@ -130,7 +133,10 @@ class PostgresRootResumeJobRepository:
                     session_id=run.session_id,
                     plan_id=plan.plan_id,
                     round_id=round_row.round_id,
+                    plan_version=round_row.plan_version,
                     root_wait_generation=job.root_wait_generation,
+                    interrupt_id=run.root_wait_interrupt_id,
+                    checkpoint_id=run.root_wait_checkpoint_id,
                     worker_id=worker_id,
                     lease_until=expires_at,
                 )

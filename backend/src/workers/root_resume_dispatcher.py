@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from domain.runs import CommandType, RunCommand
+from domain.orchestration.ports import RootGraphPort
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ class RootResumeDispatcher:
     def __init__(
         self,
         jobs: Any,
-        graph: Any,
+        graph: RootGraphPort,
         execution: Any,
         runs: Any,
         *,
@@ -88,11 +89,17 @@ class RootResumeDispatcher:
                     pass
 
     async def _resume(self, lease: Any) -> None:
+        if not lease.interrupt_id or not lease.checkpoint_id:
+            await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+            return
         try:
             has_pending = await self._graph.has_pending_round_wait(
                 run_id=lease.run_id,
                 plan_id=lease.plan_id,
                 round_id=lease.round_id,
+                plan_version=lease.plan_version,
+                interrupt_id=lease.interrupt_id,
+                checkpoint_id=lease.checkpoint_id,
             )
         except Exception:
             logger.exception("Root checkpoint inspection failed: %s", lease.job_id)
@@ -115,7 +122,9 @@ class RootResumeDispatcher:
                     "run_id": lease.run_id,
                     "plan_id": lease.plan_id,
                     "round_id": lease.round_id,
+                    "plan_version": lease.plan_version,
                     "root_wait_generation": lease.root_wait_generation,
+                    "interrupt_id": lease.interrupt_id,
                 },
             },
             issued_at=datetime.now(timezone.utc),

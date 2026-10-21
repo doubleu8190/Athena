@@ -317,6 +317,7 @@ class PostgresOrchestrationEventRepository:
                         run.root_wait_plan_version = round_row.plan_version
                         run.root_wait_armed_at = None
                         run.root_wait_interrupt_id = None
+                        run.root_wait_checkpoint_id = None
                     session.add(
                         RootResumeJobModel(
                             job_id=self._id_factory(),

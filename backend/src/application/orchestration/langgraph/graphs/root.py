@@ -135,10 +135,17 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
             if not result.get("waiting"):
                 return result
             wait_context = result.get("root_wait")
-            if not isinstance(wait_context, Mapping) or not wait_context.get(
-                "plan_id"
+            request = state.get("request", {})
+            if (
+                not isinstance(wait_context, Mapping)
+                or any(
+                    not wait_context.get(name)
+                    for name in ("run_id", "plan_id", "round_id", "plan_version")
+                )
             ):
                 raise RuntimeError("root_round_wait_identity_missing")
+            if wait_context.get("run_id") != request.get("run_id"):
+                raise RuntimeError("root_round_wait_run_mismatch")
             interrupt(dict(wait_context))
 
     wait_for_plan_completion.__name__ = "wait_for_plan_completion"
@@ -254,14 +261,32 @@ async def invoke_root_graph(
     if stop_signal is not None:
         config["configurable"]["stop_signal"] = stop_signal
     if resume_value is not None and resume_value.get("type") == "round_completed":
-        return await call(
+        result = await call(
             graph.ainvoke,
             Command(resume=dict(resume_value)),
             config=config,
         )
-    if resume_value is not None:
-        state["resume_value"] = json_value(resume_value)
-    return await call(graph.ainvoke, state, config=config)
+    else:
+        if resume_value is not None:
+            state["resume_value"] = json_value(resume_value)
+        result = await call(graph.ainvoke, state, config=config)
+    if isinstance(result, Mapping) and result.get("__interrupt__"):
+        snapshot = await call(graph.aget_state, config)
+        snapshot_config = getattr(snapshot, "config", {})
+        configurable = (
+            snapshot_config.get("configurable", {})
+            if isinstance(snapshot_config, Mapping)
+            else {}
+        )
+        checkpoint_id = (
+            configurable.get("checkpoint_id")
+            if isinstance(configurable, Mapping)
+            else None
+        )
+        if not checkpoint_id:
+            raise RuntimeError("root_wait_checkpoint_identity_missing")
+        result = {**result, "__root_checkpoint_id__": str(checkpoint_id)}
+    return result
 
 
 __all__ = ["build_root_graph", "invoke_root_graph"]

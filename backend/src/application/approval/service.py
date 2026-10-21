@@ -15,6 +15,7 @@ from domain.approval import (
     ApprovalDecision,
     ApprovalRepository,
     ApprovalRequest,
+    ApprovalStatus,
 )
 from application.common.responses import ApprovalResponse, ApprovalStatsResponse
 
@@ -86,7 +87,7 @@ class ApprovalService:
             if recovered is None:
                 raise RuntimeError("approval was not created and cannot be recovered")
             return _to_response(recovered)
-        if not (request.plan_id and request.task_id):
+        if not self._uses_transactional_event_outbox(request):
             await self._events.publish(
                 ApplicationEvent(
                     event_type=EventType.APPROVAL_REQUIRED,
@@ -128,11 +129,7 @@ class ApprovalService:
         )
         if not value:
             return False
-        if not (
-            existing
-            and getattr(existing, "plan_id", None)
-            and getattr(existing, "task_id", None)
-        ):
+        if not self._uses_transactional_event_outbox(existing):
             await self._events.publish(
                 ApplicationEvent(
                     event_type=EventType.APPROVAL_RESOLVED,
@@ -173,11 +170,7 @@ class ApprovalService:
         if value:
             for approval_id, decision in normalized.items():
                 existing = await self._repository.get(approval_id)
-                if not (
-                    existing
-                    and getattr(existing, "plan_id", None)
-                    and getattr(existing, "task_id", None)
-                ):
+                if not self._uses_transactional_event_outbox(existing):
                     await self._events.publish(
                         ApplicationEvent(
                             event_type=EventType.APPROVAL_RESOLVED,
@@ -202,6 +195,16 @@ class ApprovalService:
                 if self._resumer and existing and existing.execution_id is None:
                     await self._resumer(existing, decision.value)
         return value
+
+    def _uses_transactional_event_outbox(self, approval: Any) -> bool:
+        """Avoid duplicate SSE writes when the repository commits the event."""
+        if getattr(self._repository, "writes_approval_events_to_outbox", False):
+            return True
+        return bool(
+            approval
+            and getattr(approval, "plan_id", None)
+            and getattr(approval, "task_id", None)
+        )
 
     async def pending(self, session_id: str | None = None) -> list[ApprovalResponse]:
         """查询待审批请求。"""
@@ -244,7 +247,7 @@ def _to_response(value: ApprovalRequest) -> ApprovalResponse:
         run_id=value.run_id,
         tool_call_id=value.tool_call_id,
         approval_batch_id=value.approval_batch_id,
-        resolved=value.decision is not None,
+        resolved=value.status != ApprovalStatus.PENDING,
         resolution=value.decision.value if value.decision else value.status.value,
     )
 

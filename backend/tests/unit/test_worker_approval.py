@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
+from domain.approval import ApprovalDecision
 from application.orchestration.langgraph.graphs.worker import (
     build_worker_graph,
     invoke_worker_graph,
@@ -254,8 +255,6 @@ async def test_resolving_worker_approval_enqueues_resume_job_in_same_repository_
             return Context()
 
     repository = PostgresApprovalRepository(Factory())
-    from domain.approval import ApprovalDecision
-
     assert await repository.resolve(
         "approval-1",
         run_id="run-1",
@@ -455,6 +454,100 @@ async def test_task_approval_resolution_uses_transactional_outbox():
         "approval-1",
         run_id="run-1",
         task_id="task-1",
+        decision="approved",
+    )
+    assert events.values == []
+
+
+@pytest.mark.asyncio
+async def test_root_approval_resolution_writes_transactional_outbox():
+    approval = SimpleNamespace(
+        approval_id="approval-root",
+        run_id="run-1",
+        plan_id=None,
+        task_id=None,
+        tool_call_id="call-1",
+        tool_name="send_message",
+        status="pending",
+        execution_id=None,
+        worker_thread_id=None,
+        interrupt_id=None,
+    )
+    session = RepositorySession(approval)
+
+    class Factory:
+        def __call__(self):
+            class Context:
+                async def __aenter__(self):
+                    return session
+
+                async def __aexit__(self, *_args):
+                    return False
+
+            return Context()
+
+    repository = PostgresApprovalRepository(Factory())
+
+    assert await repository.resolve(
+        "approval-root",
+        run_id="run-1",
+        task_id="",
+        decision=ApprovalDecision.APPROVED,
+    )
+    outbox = next(
+        item for item in session.added if isinstance(item, OrchestrationOutboxModel)
+    )
+    assert outbox.event_type == "ApprovalResolved"
+    assert outbox.plan_id is None
+    assert outbox.payload_json["parent_activity_id"] == "tool:call-1"
+
+
+@pytest.mark.asyncio
+async def test_approval_service_avoids_duplicate_events_for_outbox_repository():
+    approval = SimpleNamespace(
+        approval_id="approval-root",
+        session_id="session-1",
+        run_id="run-1",
+        plan_id=None,
+        task_id=None,
+        tool_call_id="call-1",
+        tool_name="send_message",
+        arguments={"recipient": "team"},
+        risk_level="medium",
+        status=SimpleNamespace(value="pending"),
+        decision=None,
+        execution_id=None,
+    )
+
+    class ApprovalRepo:
+        writes_approval_events_to_outbox = True
+
+        async def create(self, _request):
+            return True
+
+        async def get(self, _approval_id):
+            return approval
+
+        async def resolve(self, *_args, **_kwargs):
+            return True
+
+    events = Events()
+    service = ApprovalService(
+        ApprovalRepo(), events, id_factory=lambda: "approval-root"
+    )
+
+    await service.request(
+        session_id="session-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        tool_name="send_message",
+        arguments={"recipient": "team"},
+        risk_level="medium",
+    )
+    assert await service.resolve(
+        "approval-root",
+        run_id="run-1",
+        task_id="",
         decision="approved",
     )
     assert events.values == []

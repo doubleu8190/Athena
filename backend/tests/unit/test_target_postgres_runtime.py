@@ -150,6 +150,17 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     row_resolved = SimpleNamespace(**{**row.__dict__, "status": "resolved", "decision": "approved", "decided_at": NOW.isoformat()})
     db.results = [Result(rows=[row_resolved])]
     assert await approvals.list_history("s-1")
+    cancelled_row = SimpleNamespace(
+        **{
+            **row.__dict__,
+            "status": "cancelled",
+            "decision": None,
+            "decided_at": None,
+        }
+    )
+    db.results = [Result(rows=[cancelled_row])]
+    cancelled_history = await approvals.list_history("s-1")
+    assert cancelled_history[0].status.value == "cancelled"
     await approvals.resolve("a-1", run_id="r-1", task_id="t-1", decision=ApprovalDecision.APPROVED)
     db.get_values = [row]
     await approvals.resolve_batch("b-1", {"a-1": ApprovalDecision.DENIED}, run_id="r-1")
@@ -566,3 +577,69 @@ async def test_postgres_task_approval_creation_writes_requested_outbox():
     assert outbox.dedupe_key == "approval:approval-1:requested"
     assert outbox.plan_version == 3
     assert outbox.round_id == "round-3"
+
+
+@pytest.mark.asyncio
+async def test_postgres_root_approval_creation_writes_requested_outbox():
+    db = DB()
+    repository = PostgresApprovalRepository(factory(db))
+    db.get_values = [None]
+    request = ApprovalRequest(
+        approval_id="root-approval-1",
+        session_id="s-1",
+        run_id="r-1",
+        tool_call_id="call-1",
+        tool_name="send_message",
+        arguments={"recipient": "team"},
+        risk_level="medium",
+        created_at=NOW,
+    )
+
+    assert await repository.create(request)
+    outbox = next(
+        item for item in db.added if isinstance(item, OrchestrationOutboxModel)
+    )
+    assert outbox.event_type == "ApprovalRequested"
+    assert outbox.dedupe_key == "approval:root-approval-1:requested"
+    assert outbox.plan_id is None
+    assert outbox.payload_json["parent_activity_id"] == "tool:call-1"
+
+
+@pytest.mark.asyncio
+async def test_postgres_root_approval_resolution_writes_resolved_outbox():
+    approval = SimpleNamespace(
+        approval_id="root-approval-1",
+        run_id="r-1",
+        plan_id=None,
+        task_id=None,
+        tool_call_id="call-1",
+        tool_name="send_message",
+        status="pending",
+        execution_id=None,
+        worker_thread_id=None,
+        interrupt_id=None,
+        args_hash=None,
+        operation_key=None,
+    )
+
+    class ApprovalDB(DB):
+        def __init__(self):
+            super().__init__()
+            self.get_values = [approval, SimpleNamespace(status="running"), approval]
+
+    db = ApprovalDB()
+    repository = PostgresApprovalRepository(factory(db))
+
+    assert await repository.resolve(
+        "root-approval-1",
+        run_id="r-1",
+        task_id="",
+        decision=ApprovalDecision.APPROVED,
+    )
+    outbox = next(
+        item for item in db.added if isinstance(item, OrchestrationOutboxModel)
+    )
+    assert outbox.event_type == "ApprovalResolved"
+    assert outbox.dedupe_key == "approval:root-approval-1:resolved"
+    assert outbox.plan_id is None
+    assert outbox.payload_json["decision"] == "approved"

@@ -36,6 +36,8 @@ def _json(value: Any, default: Any) -> Any:
     return parsed
 
 class PostgresApprovalRepository(ApprovalRepository):
+    writes_approval_events_to_outbox = True
+
     def __init__(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     ) -> None:
@@ -47,7 +49,7 @@ class PostgresApprovalRepository(ApprovalRepository):
                 if await session.get(ApprovalRecordModel, request.approval_id):
                     return False
                 plan = None
-                if request.plan_id and request.task_id:
+                if request.plan_id:
                     plan = await session.get(
                         AgentPlanModel, request.plan_id, with_for_update=True
                     )
@@ -82,39 +84,40 @@ class PostgresApprovalRepository(ApprovalRepository):
                         decided_by=request.decided_by,
                     )
                 )
-                if plan is not None:
-                    session.add(
-                        OrchestrationOutboxModel(
-                            message_id=uuid4().hex,
-                            dedupe_key=(
-                                f"approval:{request.approval_id}:requested"
+                session.add(
+                    OrchestrationOutboxModel(
+                        message_id=uuid4().hex,
+                        dedupe_key=f"approval:{request.approval_id}:requested",
+                        event_type="ApprovalRequested",
+                        correlation_id=request.run_id,
+                        plan_id=plan.plan_id if plan else request.plan_id,
+                        plan_version=plan.current_version if plan else None,
+                        round_id=plan.active_round_id if plan else None,
+                        payload_json={
+                            "approval_id": request.approval_id,
+                            "task_id": request.task_id,
+                            "execution_id": request.execution_id,
+                            "worker_thread_id": request.worker_thread_id,
+                            "interrupt_id": request.interrupt_id,
+                            "tool_call_id": request.tool_call_id,
+                            "tool_name": request.tool_name,
+                            "arguments": dict(request.arguments),
+                            "risk_level": request.risk_level,
+                            "args_hash": request.args_hash,
+                            "operation_key": request.operation_key,
+                            "parent_activity_id": (
+                                f"task:{request.task_id}"
+                                if request.task_id
+                                else f"tool:{request.tool_call_id}"
                             ),
-                            event_type="ApprovalRequested",
-                            correlation_id=request.run_id,
-                            plan_id=plan.plan_id,
-                            plan_version=plan.current_version,
-                            round_id=plan.active_round_id,
-                            payload_json={
-                                "approval_id": request.approval_id,
-                                "task_id": request.task_id,
-                                "execution_id": request.execution_id,
-                                "worker_thread_id": request.worker_thread_id,
-                                "interrupt_id": request.interrupt_id,
-                                "tool_call_id": request.tool_call_id,
-                                "tool_name": request.tool_name,
-                                "arguments": dict(request.arguments),
-                                "risk_level": request.risk_level,
-                                "args_hash": request.args_hash,
-                                "operation_key": request.operation_key,
-                                "parent_activity_id": f"task:{request.task_id}",
-                            },
-                            schema_version=1,
-                            status="pending",
-                            attempt=0,
-                            available_at=created_at,
-                            occurred_at=created_at,
-                        )
+                        },
+                        schema_version=1,
+                        status="pending",
+                        attempt=0,
+                        available_at=created_at,
+                        occurred_at=created_at,
                     )
+                )
         return True
 
     async def get(self, approval_id: str):
@@ -135,11 +138,13 @@ class PostgresApprovalRepository(ApprovalRepository):
             query = (
                 select(ApprovalRecordModel)
                 .where(
-                    ApprovalRecordModel.status
-                    == (
-                        ApprovalStatus.PENDING.value
-                        if pending
-                        else ApprovalStatus.RESOLVED.value
+                    ApprovalRecordModel.status == ApprovalStatus.PENDING.value
+                    if pending
+                    else ApprovalRecordModel.status.in_(
+                        (
+                            ApprovalStatus.RESOLVED.value,
+                            ApprovalStatus.CANCELLED.value,
+                        )
                     )
                 )
                 .order_by(ApprovalRecordModel.created_at)
@@ -211,8 +216,7 @@ class PostgresApprovalRepository(ApprovalRepository):
                         decided_at=_now(),
                     )
                 )
-                if result.rowcount and approval.plan_id and approval.task_id:
-                    assert plan is not None
+                if result.rowcount:
                     now = datetime.now(timezone.utc)
                     session.add(
                         OrchestrationOutboxModel(
@@ -220,9 +224,9 @@ class PostgresApprovalRepository(ApprovalRepository):
                             dedupe_key=f"approval:{approval_id}:resolved",
                             event_type="ApprovalResolved",
                             correlation_id=run_id,
-                            plan_id=plan.plan_id,
-                            plan_version=plan.current_version,
-                            round_id=plan.active_round_id,
+                            plan_id=plan.plan_id if plan else approval.plan_id,
+                            plan_version=plan.current_version if plan else None,
+                            round_id=plan.active_round_id if plan else None,
                             payload_json={
                                 "approval_id": approval_id,
                                 "task_id": approval.task_id,
@@ -232,7 +236,11 @@ class PostgresApprovalRepository(ApprovalRepository):
                                 "tool_call_id": approval.tool_call_id,
                                 "tool_name": approval.tool_name,
                                 "decision": decision.value,
-                                "parent_activity_id": f"task:{approval.task_id}",
+                                "parent_activity_id": (
+                                    f"task:{approval.task_id}"
+                                    if approval.task_id
+                                    else f"tool:{approval.tool_call_id}"
+                                ),
                             },
                             schema_version=1,
                             status="pending",

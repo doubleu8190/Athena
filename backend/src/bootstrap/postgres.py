@@ -414,7 +414,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     approval_service = ApprovalService(
         approvals, events, id_factory=ids
     )
-    worker_approval_service = WorkerApprovalService(worker_job_repository, events)
+    worker_approval_service = WorkerApprovalService(worker_job_repository)
     worker_dispatcher = WorkerJobDispatcher(
         worker_job_service,
         worker_executor,

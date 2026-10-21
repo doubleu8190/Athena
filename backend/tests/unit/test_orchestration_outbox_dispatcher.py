@@ -112,6 +112,24 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
             {"goal": "goal"},
         ),
         (
+            "ApprovalRequested",
+            "approval.required",
+            "approval:approval-1",
+            "waiting",
+            {
+                "approval_id": "approval-1",
+                "tool_name": "write_file",
+                "arguments": {"path": "report.txt"},
+            },
+        ),
+        (
+            "ApprovalResolved",
+            "approval.resolved",
+            "approval:approval-1",
+            "approved",
+            {"approval_id": "approval-1", "decision": "approved"},
+        ),
+        (
             "PlanCancelled",
             "plan.cancelled",
             "plan:plan-1",

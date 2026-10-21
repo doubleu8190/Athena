@@ -155,7 +155,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             approval: 已校验的审批身份、工具和冻结参数。
 
         Returns:
-            审批记录与执行状态同时持久化时返回 True。
+            审批记录、执行状态和可重放通知同时持久化时返回 True。
 
         Raises:
             无：身份不匹配或租约失效会返回 False。
@@ -242,6 +242,38 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                         operation_key=str(approval["operation_key"]),
                         status="pending",
                         created_at=now.isoformat(),
+                    )
+                )
+                session.add(
+                    OrchestrationOutboxModel(
+                        message_id=uuid4().hex,
+                        dedupe_key=(
+                            f"approval:{approval['approval_id']}:requested"
+                        ),
+                        event_type="ApprovalRequested",
+                        correlation_id=run.run_id,
+                        plan_id=plan.plan_id,
+                        plan_version=plan.current_version,
+                        round_id=round_row.round_id,
+                        payload_json={
+                            "approval_id": str(approval["approval_id"]),
+                            "task_id": task.task_id,
+                            "execution_id": execution.execution_id,
+                            "worker_thread_id": execution.worker_thread_id,
+                            "interrupt_id": str(approval["interrupt_id"]),
+                            "tool_call_id": str(approval["tool_call_id"]),
+                            "tool_name": str(approval["tool_name"]),
+                            "arguments": dict(approval.get("arguments", {})),
+                            "risk_level": str(approval.get("risk_level", "high")),
+                            "args_hash": str(approval["args_hash"]),
+                            "operation_key": str(approval["operation_key"]),
+                            "parent_activity_id": f"task:{task.task_id}",
+                        },
+                        schema_version=1,
+                        status="pending",
+                        attempt=0,
+                        available_at=now,
+                        occurred_at=now,
                     )
                 )
                 execution.status = "waiting_approval"

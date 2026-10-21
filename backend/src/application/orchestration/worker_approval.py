@@ -5,32 +5,29 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from domain.events import ApplicationEvent, EventDurability, EventType
-from domain.events.ports import EventPort
 from domain.orchestration import WorkerJobLease, WorkerJobRepository
 
 
 class WorkerApprovalService:
-    """持久化 Worker interrupt 对应的审批，并发布用户通知。"""
+    """持久化 Worker interrupt 审批；通知由事务性 Outbox 投递。"""
 
-    def __init__(self, repository: WorkerJobRepository, events: EventPort) -> None:
-        """保存 Worker Job 仓储和应用事件端口。"""
+    def __init__(self, repository: WorkerJobRepository) -> None:
+        """保存 Worker Job 仓储；请求通知与业务状态原子写入 Outbox。"""
         self._repository = repository
-        self._events = events
 
     async def request(
         self,
         lease: WorkerJobLease,
         interrupt: Mapping[str, Any],
     ) -> bool:
-        """核对中断身份后原子暂停执行、创建审批，并发布可重放事件。
+        """核对中断身份后原子暂停执行并创建审批和可重放通知。
 
         Args:
             lease: 触发当前 interrupt 的执行租约。
             interrupt: Worker 图持久化的操作描述和 LangGraph interrupt ID。
 
         Returns:
-            仓储接受该审批请求时返回 True。
+            仓储接受审批请求并写入通知 Outbox 时返回 True。
 
         Raises:
             ValueError: 中断缺少必需身份，或与当前执行租约不匹配时抛出。
@@ -71,27 +68,7 @@ class WorkerApprovalService:
             "args_hash": str(approval["args_hash"]),
             "operation_key": str(approval["operation_key"]),
         }
-        accepted = await self._repository.wait_for_approval(lease, request)
-        if not accepted:
-            return False
-
-        await self._events.publish(
-            ApplicationEvent(
-                event_type=EventType.APPROVAL_REQUIRED,
-                durability=EventDurability.DURABLE,
-                session_id=lease.session_id,
-                run_id=lease.run_id,
-                payload={
-                    "activity_id": f"approval:{request['approval_id']}",
-                    "activity_type": "approval",
-                    "parent_activity_id": f"task:{lease.task_id}",
-                    "name": "tool_approval",
-                    "status": "waiting",
-                    **request,
-                },
-            )
-        )
-        return True
+        return await self._repository.wait_for_approval(lease, request)
 
 
 __all__ = ["WorkerApprovalService"]

@@ -30,6 +30,10 @@ from infrastructure.persistence.postgres.repositories import (
 )
 from infrastructure.persistence.postgres.engine import PostgresEngine
 from infrastructure.persistence.postgres.options import PostgresOptions
+from infrastructure.persistence.postgres.models import (
+    ApprovalRecordModel,
+    OrchestrationOutboxModel,
+)
 from workers import WorkerSupervisor
 from workers import KnowledgeDocumentWorker
 from bootstrap.check import check_app
@@ -516,3 +520,49 @@ async def test_memory_access_is_atomic_and_management_reads_do_not_write():
     assert "memories.expires_at" in search_sql and "memories.valid_until" in search_sql
     list_sql = str(db.statements[1].compile(dialect=postgresql.dialect()))
     assert "<= now()" in list_sql
+
+
+@pytest.mark.asyncio
+async def test_postgres_task_approval_creation_writes_requested_outbox():
+    db = DB()
+    repository = PostgresApprovalRepository(factory(db))
+    db.get_values = [
+        None,
+        SimpleNamespace(
+            plan_id="p-1",
+            run_id="r-1",
+            status="running",
+            current_version=3,
+            active_round_id="round-3",
+        ),
+    ]
+    request = ApprovalRequest(
+        approval_id="approval-1",
+        session_id="s-1",
+        run_id="r-1",
+        tool_call_id="call-1",
+        tool_name="write_file",
+        arguments={"path": "report.txt"},
+        risk_level="high",
+        task_id="task-1",
+        plan_id="p-1",
+        execution_id="execution-1",
+        worker_thread_id="task:task-1:exec:1",
+        interrupt_id="interrupt-1",
+        args_hash="args-hash",
+        operation_key="operation-1",
+        created_at=NOW,
+    )
+
+    assert await repository.create(request)
+    approval_row = next(
+        item for item in db.added if isinstance(item, ApprovalRecordModel)
+    )
+    outbox = next(
+        item for item in db.added if isinstance(item, OrchestrationOutboxModel)
+    )
+    assert approval_row.approval_id == "approval-1"
+    assert outbox.event_type == "ApprovalRequested"
+    assert outbox.dedupe_key == "approval:approval-1:requested"
+    assert outbox.plan_version == 3
+    assert outbox.round_id == "round-3"

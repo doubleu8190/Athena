@@ -19,6 +19,8 @@ _EVENT_TYPES = {
     "PlanAccepted": (EventType.PLAN_ACCEPTED, "running", "plan"),
     "PlanCompleted": (EventType.PLAN_COMPLETED, "completed", "plan"),
     "PlanFailed": (EventType.PLAN_FAILED, "failed", "plan"),
+    "ApprovalRequested": (EventType.APPROVAL_REQUIRED, "waiting", "approval"),
+    "ApprovalResolved": (EventType.APPROVAL_RESOLVED, "resolved", "approval"),
     "RoundStarted": (EventType.ROUND_STARTED, "running", "round"),
     "RoundCompleted": (EventType.ROUND_COMPLETED, "completed", "round"),
     "PlanCancelling": (EventType.PLAN_CANCELLING, "cancelling", "plan"),
@@ -120,13 +122,20 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
     except KeyError as exc:
         raise ValueError(f"unsupported orchestration event: {lease.event_type}") from exc
 
-    activity_identity = (
-        lease.plan_id
-        if activity_type == "plan"
-        else lease.round_id or lease.plan_id
-        if activity_type == "round"
-        else lease.run_id
-    )
+    if activity_type == "plan":
+        activity_identity = lease.plan_id
+    elif activity_type == "round":
+        activity_identity = lease.round_id or lease.plan_id
+    elif activity_type == "approval":
+        activity_identity = str(lease.payload.get("approval_id") or lease.message_id)
+    else:
+        activity_identity = lease.run_id
+    if lease.event_type == "ApprovalResolved":
+        status = (
+            "approved"
+            if lease.payload.get("decision") == "approved"
+            else "failed"
+        )
     activity_id = f"{activity_type}:{activity_identity}"
     payload: dict[str, Any] = dict(lease.payload)
     payload.update({
@@ -135,6 +144,7 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
         "name": (
             "execution_plan" if activity_type == "plan"
             else "round" if activity_type == "round"
+            else "tool_approval" if activity_type == "approval"
             else "run"
         ),
         "plan_id": lease.plan_id,

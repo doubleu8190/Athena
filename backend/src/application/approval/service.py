@@ -86,25 +86,27 @@ class ApprovalService:
             if recovered is None:
                 raise RuntimeError("approval was not created and cannot be recovered")
             return _to_response(recovered)
-        await self._events.publish(
-            ApplicationEvent(
-                event_type=EventType.APPROVAL_REQUIRED,
-                durability=EventDurability.DURABLE,
-                session_id=request.session_id,
-                run_id=request.run_id,
-                payload={
-                    "activity_id": f"approval:{request.approval_id}",
-                    "activity_type": "approval",
-                    "name": "tool_approval",
-                    "parent_activity_id": f"tool:{request.tool_call_id}",
-                    "status": "waiting",
-                    "approval_id": request.approval_id,
-                    "tool_name": request.tool_name,
-                    "arguments": request.arguments,
-                    "risk_level": request.risk_level,
-                },
+        if not (request.plan_id and request.task_id):
+            await self._events.publish(
+                ApplicationEvent(
+                    event_type=EventType.APPROVAL_REQUIRED,
+                    durability=EventDurability.DURABLE,
+                    session_id=request.session_id,
+                    run_id=request.run_id,
+                    transition_id=f"approval:{request.approval_id}:requested",
+                    payload={
+                        "activity_id": f"approval:{request.approval_id}",
+                        "activity_type": "approval",
+                        "name": "tool_approval",
+                        "parent_activity_id": f"tool:{request.tool_call_id}",
+                        "status": "waiting",
+                        "approval_id": request.approval_id,
+                        "tool_name": request.tool_name,
+                        "arguments": request.arguments,
+                        "risk_level": request.risk_level,
+                    },
+                )
             )
-        )
         return _to_response(request)
 
     async def resolve(
@@ -126,26 +128,32 @@ class ApprovalService:
         )
         if not value:
             return False
-        await self._events.publish(
-            ApplicationEvent(
-                event_type=EventType.APPROVAL_RESOLVED,
-                durability=EventDurability.DURABLE,
-                session_id=existing.session_id if existing else "",
-                run_id=run_id,
-                payload={
-                    "activity_id": f"approval:{approval_id}",
-                    "activity_type": "approval",
-                    "name": "tool_approval",
-                    "status": (
-                        "approved"
-                        if decision == ApprovalDecision.APPROVED
-                        else "failed"
-                    ),
-                    "approval_id": approval_id,
-                    "decision": decision.value,
-                },
+        if not (
+            existing
+            and getattr(existing, "plan_id", None)
+            and getattr(existing, "task_id", None)
+        ):
+            await self._events.publish(
+                ApplicationEvent(
+                    event_type=EventType.APPROVAL_RESOLVED,
+                    durability=EventDurability.DURABLE,
+                    session_id=existing.session_id if existing else "",
+                    run_id=run_id,
+                    transition_id=f"approval:{approval_id}:resolved",
+                    payload={
+                        "activity_id": f"approval:{approval_id}",
+                        "activity_type": "approval",
+                        "name": "tool_approval",
+                        "status": (
+                            "approved"
+                            if decision == ApprovalDecision.APPROVED
+                            else "failed"
+                        ),
+                        "approval_id": approval_id,
+                        "decision": decision.value,
+                    },
+                )
             )
-        )
         if self._resumer and existing and existing.execution_id is None:
             await self._resumer(existing, decision.value)
         return value
@@ -165,26 +173,32 @@ class ApprovalService:
         if value:
             for approval_id, decision in normalized.items():
                 existing = await self._repository.get(approval_id)
-                await self._events.publish(
-                    ApplicationEvent(
-                        event_type=EventType.APPROVAL_RESOLVED,
-                        durability=EventDurability.DURABLE,
-                        session_id=existing.session_id if existing else "",
-                        run_id=run_id or (existing.run_id if existing else ""),
-                        payload={
-                            "activity_id": f"approval:{approval_id}",
-                            "activity_type": "approval",
-                            "name": "tool_approval",
-                            "status": (
-                                "approved"
-                                if decision == ApprovalDecision.APPROVED
-                                else "failed"
-                            ),
-                            "approval_id": approval_id,
-                            "decision": decision.value,
-                        },
+                if not (
+                    existing
+                    and getattr(existing, "plan_id", None)
+                    and getattr(existing, "task_id", None)
+                ):
+                    await self._events.publish(
+                        ApplicationEvent(
+                            event_type=EventType.APPROVAL_RESOLVED,
+                            durability=EventDurability.DURABLE,
+                            session_id=existing.session_id if existing else "",
+                            run_id=run_id or (existing.run_id if existing else ""),
+                            transition_id=f"approval:{approval_id}:resolved",
+                            payload={
+                                "activity_id": f"approval:{approval_id}",
+                                "activity_type": "approval",
+                                "name": "tool_approval",
+                                "status": (
+                                    "approved"
+                                    if decision == ApprovalDecision.APPROVED
+                                    else "failed"
+                                ),
+                                "approval_id": approval_id,
+                                "decision": decision.value,
+                            },
+                        )
                     )
-                )
                 if self._resumer and existing and existing.execution_id is None:
                     await self._resumer(existing, decision.value)
         return value

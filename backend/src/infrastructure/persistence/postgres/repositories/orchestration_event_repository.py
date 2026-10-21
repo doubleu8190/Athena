@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ from ..models import (
     PlanRoundModel,
     RoundTaskModel,
     TaskExecutionModel,
+    WorkerJobModel,
 )
 
 
@@ -49,7 +50,7 @@ class PostgresOrchestrationEventRepository:
         """保存数据库会话工厂和可替换的时间、ID 来源。"""
         self._session_factory = session_factory
         self._id_factory = id_factory or (lambda: uuid4().hex)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock
 
     async def apply_worker_terminal_event(
         self, event: WorkerTaskTerminalEvent
@@ -57,10 +58,17 @@ class PostgresOrchestrationEventRepository:
         """应用一次 Worker 完成/失败事件，重复事件只返回原回执。"""
         payload = _event_document(event)
         payload_hash = _hash(payload)
-        now = self._clock()
-
         async with self._session_factory() as session:
             async with session.begin():
+                now = (
+                    self._clock()
+                    if self._clock is not None
+                    else await session.scalar(select(func.clock_timestamp()))
+                )
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=timezone.utc)
+                else:
+                    now = now.astimezone(timezone.utc)
                 await session.execute(
                     insert(OrchestrationInboxModel)
                     .values(
@@ -115,7 +123,7 @@ class PostgresOrchestrationEventRepository:
                     AgentTaskModel,
                     AgentTaskModel.task_id == event.task_id,
                 )
-                execution = await _locked_one(
+                round_task = await _locked_one(
                     session,
                     RoundTaskModel,
                     (RoundTaskModel.round_id == event.round_id)
@@ -126,9 +134,15 @@ class PostgresOrchestrationEventRepository:
                     TaskExecutionModel,
                     TaskExecutionModel.execution_id == event.execution_id,
                 )
+                job = await _locked_one(
+                    session,
+                    WorkerJobModel,
+                    (WorkerJobModel.execution_id == event.execution_id)
+                    & (WorkerJobModel.job_type == "execute"),
+                )
 
                 rejection = _rejection_reason(
-                    event, run, plan, round_row, task, execution, round_task
+                    event, run, plan, round_row, task, execution, round_task, job, now
                 )
                 if rejection is not None:
                     receipt = TaskEventReceipt(
@@ -154,6 +168,7 @@ class PostgresOrchestrationEventRepository:
                 assert round_task is not None
                 assert round_row is not None
                 assert plan is not None
+                assert job is not None
 
                 status = event.status.value
                 result_document = {
@@ -173,6 +188,10 @@ class PostgresOrchestrationEventRepository:
                 execution.lease_owner = None
                 execution.lease_until = None
                 execution.updated_at = now
+                job.status = "completed"
+                job.lease_owner = None
+                job.lease_until = None
+                job.updated_at = now
 
                 task.status = status
                 task.output_json = _strict_json(dict(event.result))
@@ -246,9 +265,14 @@ async def _locked_one(session: AsyncSession, model: type, predicate: Any):
     ).scalar_one_or_none()
 
 
-def _rejection_reason(event, run, plan, round_row, task, execution, round_task):
+def _rejection_reason(
+    event, run, plan, round_row, task, execution, round_task, job, now
+):
     """验证身份、状态和执行栅栏，返回可持久化的拒绝原因。"""
-    if any(item is None for item in (run, plan, round_row, task, execution, round_task)):
+    if any(
+        item is None
+        for item in (run, plan, round_row, task, execution, round_task, job)
+    ):
         return "orchestration_record_not_found"
     if (
         plan.run_id != event.run_id
@@ -264,6 +288,20 @@ def _rejection_reason(event, run, plan, round_row, task, execution, round_task):
         return "stale_execution"
     if execution.status != "running" or task.status != "running":
         return "execution_not_running"
+    if job.status != "running":
+        return "worker_job_not_running"
+    if (
+        job.lease_owner != event.worker_id
+        or execution.lease_owner != event.worker_id
+    ):
+        return "worker_lease_owner_mismatch"
+    if (
+        job.lease_until is None
+        or execution.lease_until is None
+        or job.lease_until <= now
+        or execution.lease_until <= now
+    ):
+        return "worker_lease_expired"
     if execution.fencing_token != event.fencing_token:
         return "stale_fencing_token"
     if any(
@@ -289,6 +327,7 @@ def _event_document(event: WorkerTaskTerminalEvent) -> dict[str, Any]:
     return {
         "message_id": event.message_id,
         "occurred_at": event.occurred_at.isoformat(),
+        "worker_id": event.worker_id,
         "run_id": event.run_id,
         "plan_id": event.plan_id,
         "plan_version": event.plan_version,

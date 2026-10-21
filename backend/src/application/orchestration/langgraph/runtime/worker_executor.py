@@ -106,6 +106,8 @@ class LangGraphWorkerExecutor(WorkerExecutor):
             execution.task.task_id,
             task_status,
             output=payload.get("output", {}),
+            evidence=tuple(payload.get("evidence", ())),
+            uncertainties=tuple(str(item) for item in payload.get("uncertainties", ())),
             error=payload.get("error"),
             approval_batch=payload.get("approval_batch"),
             retryable=bool(payload.get("retryable", False)),

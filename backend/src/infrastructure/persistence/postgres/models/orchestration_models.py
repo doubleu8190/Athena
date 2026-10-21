@@ -181,6 +181,7 @@ class WorkerJobModel(Base):
     __table_args__ = (
         UniqueConstraint("dedupe_key", name="uq_worker_jobs_dedupe"),
         Index("idx_worker_jobs_ready", "status", "available_at"),
+        Index("idx_worker_jobs_lease", "status", "lease_until"),
     )
 
     job_id: Mapped[str] = mapped_column(String, primary_key=True)

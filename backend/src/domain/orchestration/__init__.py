@@ -24,6 +24,7 @@ from .contracts import (
     RoundStatus,
     TaskEventReceipt,
     TaskAttempt,
+    WorkerJobLease,
     WorkerTaskTerminalEvent,
 )
 from .validation import PlanValidationError, PlanValidator
@@ -35,6 +36,7 @@ from .ports import (
     ResultSynthesizer,
     RootGraphPort,
     TaskEventRepository,
+    WorkerJobRepository,
     WorkerExecutor,
 )
 
@@ -71,5 +73,7 @@ __all__ = [
     "TaskAttempt",
     "TaskEventReceipt",
     "TaskEventRepository",
+    "WorkerJobLease",
+    "WorkerJobRepository",
     "WorkerTaskTerminalEvent",
 ]

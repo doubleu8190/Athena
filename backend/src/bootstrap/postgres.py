@@ -32,6 +32,7 @@ from application.orchestration import (
     OrchestrationService,
     WorkerSchedulerService,
     WorkerTaskEventHandler,
+    WorkerJobService,
 )
 from application.orchestration import (
     RootWorkflow,
@@ -121,6 +122,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationRepository,
     PostgresOrchestrationCommandRepository,
     PostgresOrchestrationEventRepository,
+    PostgresWorkerJobRepository,
     PostgresPlanLoader,
     PostgresEvaluationRepository,
 )
@@ -131,6 +133,7 @@ from workers import (
     CommandConsumer,
     KnowledgeDocumentWorker,
     MemoryWorker,
+    WorkerJobDispatcher,
     WorkerSupervisor,
 )
 from domain.runs import CommandStatus, CommandType, RunCommand
@@ -205,11 +208,16 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     orchestration_event_repository = PostgresOrchestrationEventRepository(
         session_factory
     )
+    worker_job_repository = PostgresWorkerJobRepository(session_factory)
     orchestration_command_handler = OrchestrationCommandHandler(
         orchestration_command_repository
     )
     worker_task_event_handler = WorkerTaskEventHandler(
         orchestration_event_repository
+    )
+    worker_job_service = WorkerJobService(
+        worker_job_repository,
+        lease_seconds=settings.worker_job_lease_seconds,
     )
     llm_options = LLMOptions(
         providers=tuple(
@@ -364,6 +372,16 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         workflow_factory=lambda: WorkerWorkflow(execute=worker_agent),
         checkpointer=checkpointer,
     )
+    worker_dispatcher = WorkerJobDispatcher(
+        worker_job_service,
+        worker_executor,
+        worker_task_event_handler,
+        worker_id=f"worker-dispatcher:{ids()}",
+        lease_seconds=settings.worker_job_lease_seconds,
+        max_concurrency=settings.worker_dispatch_max_concurrency,
+        poll_interval=settings.worker_job_poll_interval_seconds,
+        id_factory=ids,
+    )
     worker_scheduler = WorkerSchedulerService(
         orchestration_repository,
         worker_executor,
@@ -444,6 +462,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "orchestration_service_factory": lambda: OrchestrationService(orchestration_repository),
         "orchestration_command_handler_factory": lambda: orchestration_command_handler,
         "worker_task_event_handler_factory": lambda: worker_task_event_handler,
+        "worker_job_service_factory": lambda: worker_job_service,
+        "worker_job_dispatcher_factory": lambda: worker_dispatcher,
         "root_graph_factory": lambda: root_graph,
         "run_executor_factory": lambda: LangGraphRunExecutor(root_graph),
         "worker_scheduler_factory": lambda: worker_scheduler,
@@ -471,7 +491,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         document_worker = KnowledgeDocumentWorker(jobs, ingestion)
         memory_worker = MemoryWorker(memory_jobs, memory_workflow)
         resources.append(
-            WorkerSupervisor((command_worker, document_worker, memory_worker))
+            WorkerSupervisor(
+                (command_worker, document_worker, memory_worker, worker_dispatcher)
+            )
         )
     return build_dependencies(factories=providers, resources=resources)
 

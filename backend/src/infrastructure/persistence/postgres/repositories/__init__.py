@@ -27,6 +27,7 @@ from .orchestration_event_repository import (
     PostgresOrchestrationEventRepository,
     TaskEventConflict,
 )
+from .worker_job_repository import PostgresWorkerJobRepository
 from .evaluation_repository import PostgresEvaluationRepository
 
 __all__ = [
@@ -54,5 +55,6 @@ __all__ = [
     "PostgresPlanLoader",
     "PostgresOrchestrationEventRepository",
     "TaskEventConflict",
+    "PostgresWorkerJobRepository",
     "PostgresEvaluationRepository",
 ]

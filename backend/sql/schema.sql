@@ -389,6 +389,7 @@ CREATE TABLE IF NOT EXISTS worker_jobs (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_ready ON worker_jobs(status, available_at);
+CREATE INDEX IF NOT EXISTS idx_worker_jobs_lease ON worker_jobs(status, lease_until);
 
 -- 知识库文档的持久解析/索引队列。运行态任务在应用启动时恢复为 retry；
 -- 附件删除时会转为 cancelled，避免 worker 在删除后重新写入索引。

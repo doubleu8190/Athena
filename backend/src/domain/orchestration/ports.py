@@ -8,6 +8,7 @@ from .contracts import (
     CommandReceipt,
     OrchestrationCommand,
     TaskEventReceipt,
+    WorkerJobLease,
     WorkerTaskTerminalEvent,
 )
 from .entities import Plan, Task, TaskExecution, TaskResult
@@ -26,6 +27,16 @@ class TaskEventRepository(Protocol):
     async def apply_worker_terminal_event(
         self, event: WorkerTaskTerminalEvent
     ) -> TaskEventReceipt: ...
+
+
+class WorkerJobRepository(Protocol):
+    async def claim_next(
+        self, worker_id: str, *, lease_seconds: float
+    ) -> WorkerJobLease | None: ...
+
+    async def renew_lease(
+        self, lease: WorkerJobLease, *, lease_seconds: float
+    ) -> WorkerJobLease | None: ...
 
 
 class PlanRepository(Protocol):
@@ -109,5 +120,6 @@ __all__ = [
     "ResultSynthesizer",
     "RootGraphPort",
     "TaskEventRepository",
+    "WorkerJobRepository",
     "WorkerExecutor",
 ]

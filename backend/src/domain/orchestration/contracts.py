@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
 
-from .entities import TaskStatus
+from .entities import Task, TaskResult, TaskStatus
 
 
 class RoundStatus(StrEnum):
@@ -171,6 +171,7 @@ class WorkerTaskTerminalEvent:
 
     message_id: str
     occurred_at: datetime
+    worker_id: str
     run_id: str
     plan_id: str
     plan_version: int
@@ -188,6 +189,7 @@ class WorkerTaskTerminalEvent:
         """拒绝不完整身份、非终态结果和无效栅栏值。"""
         for name in (
             "message_id",
+            "worker_id",
             "run_id",
             "plan_id",
             "round_id",
@@ -219,6 +221,28 @@ class TaskEventReceipt:
     expected_task_count: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerJobLease:
+    """Worker Job 的持久租约和执行输入快照。"""
+
+    job_id: str
+    worker_id: str
+    run_id: str
+    plan_id: str
+    round_id: str
+    plan_version: int
+    task_id: str
+    execution_id: str
+    session_id: str
+    attempt: int
+    worker_thread_id: str
+    fencing_token: int
+    cancellation_epoch: int
+    lease_until: datetime
+    task: Task
+    upstream_results: Mapping[str, TaskResult] = field(default_factory=dict)
+
+
 __all__ = [
     "ExecutionStatus",
     "CommandReceipt",
@@ -234,4 +258,5 @@ __all__ = [
     "TaskAttempt",
     "TaskEventReceipt",
     "WorkerTaskTerminalEvent",
+    "WorkerJobLease",
 ]

@@ -17,15 +17,25 @@ class WorkerWorkflow:
         execute: Callable[..., Any] | None = None,
         worker: Any | None = None,
         resume: Callable[..., Any] | None = None,
+        max_tool_rounds: int = 4,
+        max_tool_calls_per_round: int = 8,
     ) -> None:
+        if max_tool_rounds < 1 or max_tool_calls_per_round < 1:
+            raise ValueError("worker tool budgets are invalid")
         self.execute_tool = execute_tool
         self.execute = execute
         self.worker = worker
         self.resume = resume
+        self.max_tool_rounds = max_tool_rounds
+        self.max_tool_calls_per_round = max_tool_calls_per_round
 
     async def prepare(self, state: Mapping[str, Any]) -> dict[str, Any]:
         execution = dict(state.get("execution", {}))
-        return {"execution": json_value(execution), "input": json_value(state.get("input", execution.get("task", {})))}
+        return {
+            "execution": json_value(execution),
+            "input": json_value(state.get("input", execution.get("task", {}))),
+            "tool_round": int(state.get("tool_round", 0)),
+        }
 
     async def run(self, state: Mapping[str, Any]) -> dict[str, Any]:
         execution_fn = self.execute
@@ -44,11 +54,66 @@ class WorkerWorkflow:
         if self.execute_tool is None:
             return {"result": {"status": "failed", "error": {"code": "tool_executor_not_configured"}}, "waiting": False}
         result = state.get("result", {})
-        calls = result.get("tool_calls", []) if isinstance(result, Mapping) else []
-        tool_results = [as_dict(await call(self.execute_tool, tool_call=item, execution=state.get("execution", {}), state=state)) for item in calls]
+        raw_calls = result.get("tool_calls", []) if isinstance(result, Mapping) else []
+        calls = raw_calls if isinstance(raw_calls, (list, tuple)) else []
+        if len(calls) > self.max_tool_calls_per_round:
+            return {
+                "result": {
+                    "status": "failed",
+                    "error": {
+                        "code": "worker_tool_call_limit_exceeded",
+                        "max_tool_calls_per_round": self.max_tool_calls_per_round,
+                    },
+                },
+                "waiting": False,
+            }
+        tool_round = int(state.get("tool_round", 0))
+        if tool_round >= self.max_tool_rounds:
+            return {
+                "result": {
+                    "status": "failed",
+                    "error": {
+                        "code": "worker_tool_round_limit_exceeded",
+                        "max_tool_rounds": self.max_tool_rounds,
+                    },
+                },
+                "waiting": False,
+            }
+        tool_results = [
+            as_dict(
+                await call(
+                    self.execute_tool,
+                    tool_call=item,
+                    execution=state.get("execution", {}),
+                    state=state,
+                    tool_round=tool_round,
+                    call_index=index,
+                )
+            )
+            for index, item in enumerate(calls)
+        ]
         execution = dict(state.get("execution", {}))
-        execution["tool_results"] = tool_results
-        return {"execution": execution, "result": {}, "waiting": False}
+        previous_results = execution.get("tool_results", [])
+        previous_refs = execution.get("_worker_result_refs", {})
+        result_refs = dict(previous_refs) if isinstance(previous_refs, Mapping) else {}
+        public_results = []
+        for result in tool_results:
+            storage_key = result.pop("_storage_key", None)
+            result_ref = result.get("result_ref")
+            if isinstance(storage_key, str) and isinstance(result_ref, str):
+                result_refs[result_ref] = storage_key
+            public_results.append(result)
+        execution["tool_results"] = [
+            *(previous_results if isinstance(previous_results, list) else []),
+            *public_results,
+        ]
+        execution["_worker_result_refs"] = result_refs
+        return {
+            "execution": execution,
+            "result": {},
+            "waiting": False,
+            "tool_round": tool_round + 1,
+        }
 
     async def resume_node(self, state: Mapping[str, Any]) -> dict[str, Any]:
         resume_fn = self.resume
@@ -71,6 +136,10 @@ class WorkerWorkflow:
     @staticmethod
     def route_after_gate(state: Mapping[str, Any]) -> str:
         if state.get("waiting"):
+            return "finish_worker"
+        result = state.get("result", {})
+        status = str(result.get("status", "done"))
+        if status not in {"done", "completed"} and result.get("error"):
             return "finish_worker"
         return "execute_tool_batch" if state.get("result", {}).get("tool_calls") else "finish_worker"
 

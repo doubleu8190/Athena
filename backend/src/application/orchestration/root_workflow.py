@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping
 from domain.orchestration import Plan, PlanEdge, Task
 
 from .protocols import RootWorkflowDependencies, RootWorkflowPort
+from .worker_tools import list_worker_read_tools, worker_read_tool_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,15 @@ def _coerce_plan(
                     if isinstance(raw_expected, Mapping)
                     else {"value": raw_expected}
                 ),
-                allowed_tools=(),
+                allowed_tools=tuple(
+                    dict.fromkeys(
+                        str(name).strip()
+                        for name in payload.get("allowed_tools", [])
+                        if str(name).strip()
+                    )
+                )
+                if isinstance(payload.get("allowed_tools", []), (list, tuple, set))
+                else (),
                 worker_type="general",
             )
         )
@@ -271,6 +280,12 @@ class RootWorkflow(RootWorkflowPort):
 
     async def prepare_harness_input(self, state: Mapping[str, Any]) -> dict[str, Any]:
         request = state.get("request", {})
+        task = state.get("understanding", {}).get("task_spec", {})
+        worker_tools = (
+            await worker_read_tool_manifest(self.dependencies.tool_service)
+            if isinstance(task, Mapping) and task.get("mode") == "plan"
+            else ()
+        )
         return {
             "harness_input": {
                 "request": {
@@ -279,8 +294,9 @@ class RootWorkflow(RootWorkflowPort):
                 },
                 "messages": list(request.get("history", []))
                 + [{"role": "user", "content": request.get("user_message", "")}],
-                "task": state.get("understanding", {}).get("task_spec", {}),
+                "task": task,
                 "context": state.get("context_bundle", {}),
+                "available_worker_tools": list(worker_tools),
             }
         }
 
@@ -342,6 +358,9 @@ class RootWorkflow(RootWorkflowPort):
                 session_id=plan.session_id,
                 run_id=run_id,
             )
+        worker_read_tools = set(
+            await list_worker_read_tools(deps.tool_service)
+        )
         # Task ids are database-global, so bind model-produced ids to this run.
         task_id_map = (
             {item.task_id: f"{item.task_id}:{run_id}" for item in tasks}
@@ -355,21 +374,9 @@ class RootWorkflow(RootWorkflowPort):
                 objective=item.objective,
                 input=item.input,
                 expected_output=item.expected_output,
-                allowed_tools=(),
-                worker_type="general",
-            )
-            for item in tasks
-        ]
-        # Model output is advisory. Persist only worker/tool capabilities that
-        # are registered by the runtime, while preserving the task contract.
-        tasks = [
-            Task(
-                task_id=item.task_id,
-                title=item.title,
-                objective=item.objective,
-                input=item.input,
-                expected_output=item.expected_output,
-                allowed_tools=(),
+                allowed_tools=tuple(
+                    name for name in item.allowed_tools if name in worker_read_tools
+                ),
                 worker_type="general",
             )
             for item in tasks

@@ -30,13 +30,12 @@ from application.tools import MCPService, ToolQueryService, ToolService
 from application.orchestration import (
     OrchestrationCommandHandler,
     OrchestrationService,
-    WorkerSchedulerService,
-    WorkerTaskEventHandler,
-    WorkerJobService,
-)
-from application.orchestration import (
     RootWorkflow,
     RootWorkflowDependencies,
+    WorkerJobService,
+    WorkerSchedulerService,
+    WorkerToolExecutor,
+    WorkerTaskEventHandler,
     WorkerWorkflow,
 )
 from application.runs.context import (
@@ -368,9 +367,39 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         id_factory=ids,
     )
 
-    worker_agent = ConfiguredWorkerAgent(llm_provider, events)
+    builtin_tool_service = ToolService(
+        tools,
+        BuiltinToolExecutor(
+            settings.files_path,
+            max_output_bytes=settings.sandbox_max_output_bytes,
+            sandbox=sandbox,
+            sandbox_enabled=(settings.sandbox_enabled or settings.sandbox_required)
+            and settings.exec_shell_enabled,
+            sandbox_required=settings.sandbox_required,
+            sandbox_image=settings.sandbox_shell_image,
+            sandbox_max_timeout=settings.sandbox_max_timeout,
+            sandbox_workspace_root=Path(settings.sandbox_workspace_root),
+        ),
+    )
+    worker_result_storage = LocalFileStorage(
+        settings.files_path.parent
+        / f"{settings.files_path.name}-worker-results",
+        settings.file_max_upload_bytes,
+    )
+    worker_tool_executor = WorkerToolExecutor(
+        builtin_tool_service,
+        storage=worker_result_storage,
+    )
+    worker_agent = ConfiguredWorkerAgent(
+        llm_provider, events, tool_service=builtin_tool_service
+    )
     worker_executor = LangGraphWorkerExecutor(
-        workflow_factory=lambda: WorkerWorkflow(execute=worker_agent),
+        workflow_factory=lambda: WorkerWorkflow(
+            execute=worker_agent,
+            execute_tool=worker_tool_executor,
+            max_tool_rounds=settings.worker_max_tool_rounds,
+            max_tool_calls_per_round=settings.worker_max_tool_calls_per_round,
+        ),
         checkpointer=checkpointer,
     )
     worker_dispatcher = WorkerJobDispatcher(
@@ -389,20 +418,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         events=events,
     )
 
-    builtin_tool_service = ToolService(
-        tools,
-        BuiltinToolExecutor(
-            settings.files_path,
-            max_output_bytes=settings.sandbox_max_output_bytes,
-            sandbox=sandbox,
-            sandbox_enabled=(settings.sandbox_enabled or settings.sandbox_required)
-            and settings.exec_shell_enabled,
-            sandbox_required=settings.sandbox_required,
-            sandbox_image=settings.sandbox_shell_image,
-            sandbox_max_timeout=settings.sandbox_max_timeout,
-            sandbox_workspace_root=Path(settings.sandbox_workspace_root),
-        ),
-    )
     approval_service = ApprovalService(
         approvals, events, id_factory=ids
     )

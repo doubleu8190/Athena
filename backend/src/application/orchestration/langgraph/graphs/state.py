@@ -41,6 +41,7 @@ class WorkerGraphState(TypedDict, total=False):
     result: dict[str, Any]
     waiting: bool
     error: dict[str, Any]
+    tool_round: int
 
 
 def json_value(value: Any) -> Any:

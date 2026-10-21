@@ -9,6 +9,8 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
+from application.orchestration.worker_tools import worker_read_tool_manifest
+
 
 class ConfiguredRootAgent:
     """Translate Root harness input into one configured LLM invocation."""
@@ -25,6 +27,7 @@ class ConfiguredRootAgent:
         task = harness_input.get("task", {})
         planning = isinstance(task, Mapping) and task.get("mode") == "plan"
         if planning:
+            available_tools = harness_input.get("available_worker_tools", [])
             messages.insert(
                 0,
                 {
@@ -34,8 +37,11 @@ class ConfiguredRootAgent:
                         "Use keys plan_id, goal, max_parallelism, edges, and tasks. "
                         "Each task must have task_id, title, objective, worker_type, "
                         "allowed_tools, input, and expected_output. Use worker_type "
-                        "'general' for every task and an empty allowed_tools array; "
-                        "only registered tools may be used. Keep the DAG acyclic."
+                        "'general' for every task. allowed_tools may contain only "
+                        "the registered read-only tools listed here, and only when "
+                        "needed: "
+                        f"{json.dumps(available_tools, ensure_ascii=False)}. "
+                        "Keep the DAG acyclic."
                     ),
                 },
             )
@@ -167,38 +173,119 @@ class ConfiguredRootAgent:
 class ConfiguredWorkerAgent:
     """Run one persisted task with the configured model."""
 
-    def __init__(self, llm: Any, event_publisher: Any | None = None) -> None:
+    def __init__(
+        self,
+        llm: Any,
+        event_publisher: Any | None = None,
+        tool_service: Any | None = None,
+    ) -> None:
         self._llm = llm
         self._events = event_publisher
+        self._tool_service = tool_service
 
     async def __call__(self, *, execution: Mapping[str, Any], **_kwargs: Any) -> dict[str, Any]:
         task = execution.get("task", {})
+        task = task if isinstance(task, Mapping) else {}
         upstream = execution.get("upstream_results", {})
+        allowed_tools = tuple(
+            str(name) for name in task.get("allowed_tools", ()) if str(name)
+        )
+        manifest = await worker_read_tool_manifest(self._tool_service)
+        tool_specs = [
+            item for item in manifest if item["name"] in set(allowed_tools)
+        ]
+        if execution.get("_worker_result_refs"):
+            tool_specs.append(
+                {
+                    "name": "read_worker_result",
+                    "description": "Read a bounded slice from a large result produced earlier in this Worker execution.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "result_ref": {"type": "string"},
+                            "offset": {"type": "integer", "minimum": 0},
+                            "max_chars": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["result_ref"],
+                    },
+                }
+            )
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You are an independent worker. Complete the assigned objective. "
-                    "Return concise JSON with keys output and evidence."
+                    "You may request only the tools in the supplied tool manifest. "
+                    "Return one JSON object with output, evidence, uncertainties, "
+                    "and optionally tool_calls. Each tool call has name and arguments. "
+                    "When tool results are supplied, use them before requesting more. "
+                    f"Tool manifest: {json.dumps(tool_specs, ensure_ascii=False)}"
                 ),
             },
             {
                 "role": "user",
                 "content": json.dumps(
-                    {"objective": task.get("objective", ""), "input": task.get("input", {}), "upstream": upstream},
+                    {
+                        "objective": task.get("objective", ""),
+                        "input": task.get("input", {}),
+                        "expected_output": task.get("expected_output", {}),
+                        "upstream": upstream,
+                        "allowed_tools": list(allowed_tools),
+                        "tool_results": execution.get("tool_results", []),
+                    },
                     ensure_ascii=False,
                 ),
             },
         ]
         value = await self._invoke(messages, execution)
-        content = value.get("content", value) if isinstance(value, Mapping) else getattr(value, "content", value)
-        try:
-            parsed = json.loads(str(content).strip().strip("`"))
-        except (TypeError, ValueError):
-            parsed = {"output": str(content)}
-        if not isinstance(parsed, Mapping):
-            parsed = {"output": parsed}
-        return {"status": "done", "output": dict(parsed), "evidence": parsed.get("evidence", [])}
+        content = (
+            value.get("content", value)
+            if isinstance(value, Mapping)
+            else getattr(value, "content", value)
+        )
+        parsed = _decode_worker_reply(content)
+        raw_calls = (
+            value.get("tool_calls", [])
+            if isinstance(value, Mapping)
+            else getattr(value, "tool_calls", [])
+        )
+        tool_calls = _normalize_tool_calls(
+            parsed.get("tool_calls", raw_calls)
+        )
+        output = parsed.get("output")
+        if output is None:
+            output = {} if tool_calls else {
+                key: item
+                for key, item in parsed.items()
+                if key not in {"evidence", "uncertainties", "tool_calls", "status", "error", "retryable"}
+            }
+        if not isinstance(output, Mapping):
+            output = {"value": output}
+        evidence = parsed.get("evidence", [])
+        if not isinstance(evidence, (list, tuple)):
+            evidence = [evidence] if evidence else []
+        uncertainties = parsed.get("uncertainties", [])
+        if isinstance(uncertainties, str):
+            uncertainties = [uncertainties] if uncertainties else []
+        elif not isinstance(uncertainties, (list, tuple)):
+            uncertainties = []
+        result = {
+            "status": str(parsed.get("status", "done")),
+            "output": output,
+            "evidence": evidence,
+            "uncertainties": uncertainties,
+            "tool_calls": tool_calls,
+        }
+        if parsed.get("error") is not None:
+            error = parsed["error"]
+            result["error"] = (
+                dict(error)
+                if isinstance(error, Mapping)
+                else {"message": str(error)}
+            )
+        if parsed.get("retryable") is not None:
+            result["retryable"] = bool(parsed["retryable"])
+        return result
 
     async def _invoke(self, messages: list[Any], execution: Mapping[str, Any]) -> Any:
         run_id = str(execution.get("run_id", ""))
@@ -206,7 +293,7 @@ class ConfiguredWorkerAgent:
         task = execution.get("task", {})
         task_id = str(task.get("task_id", "")) if isinstance(task, Mapping) else ""
         generation = execution.get("execution_generation", 0)
-        parent_id = f"task:{task_id}:{generation}"
+        parent_id = f"task:{task_id}:exec:{generation}"
         call_id = f"llm:{uuid4().hex}"
         started_at = datetime.now(timezone.utc)
         started_clock = perf_counter()
@@ -244,6 +331,45 @@ class ConfiguredWorkerAgent:
             ))
         except Exception:
             return
+
+
+def _decode_worker_reply(content: Any) -> dict[str, Any]:
+    """Decode the Worker's JSON envelope while preserving plain-text answers."""
+    if isinstance(content, Mapping):
+        return dict(content)
+    text = str(content or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.startswith("json"):
+            text = text[4:].lstrip()
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return {"output": text}
+    return dict(value) if isinstance(value, Mapping) else {"output": value}
+
+
+def _normalize_tool_calls(value: Any) -> list[dict[str, Any]]:
+    """Normalize JSON or LangChain tool-call records for the Worker graph."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    calls: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name", "")).strip()
+        arguments = item.get("arguments", item.get("args", {}))
+        if name:
+            calls.append(
+                {
+                    "id": str(item.get("id", "")),
+                    "name": name,
+                    "arguments": dict(arguments)
+                    if isinstance(arguments, Mapping)
+                    else arguments,
+                }
+            )
+    return calls
 
 
 __all__ = ["ConfiguredRootAgent", "ConfiguredWorkerAgent"]

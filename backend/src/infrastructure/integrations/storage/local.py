@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 import hashlib
 from pathlib import Path
@@ -26,8 +27,8 @@ class LocalFileStorage(FileStoragePort):
         digest = hashlib.sha256(content).hexdigest()
         relative = Path(digest[:2]) / digest[2:]
         path = self._root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(path.write_bytes, content)
         return StoredBlob(digest, len(content), str(relative))
 
     async def cleanup_unreferenced(self, live_storage_keys: set[str]) -> int:
@@ -49,6 +50,7 @@ class LocalFileStorage(FileStoragePort):
     async def read(self, storage_key: str) -> bytes:
         """Read a stored blob for a parser running in the same process."""
         path = self._root / storage_key
-        if not path.is_file():
+        exists = await asyncio.to_thread(path.is_file)
+        if not exists:
             raise FileNotFoundError(storage_key)
-        return path.read_bytes()
+        return await asyncio.to_thread(path.read_bytes)

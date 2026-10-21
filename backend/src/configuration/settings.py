@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     workers_enabled: bool = False
     worker_job_lease_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
+    worker_max_tool_rounds: int = Field(default=4, ge=1, le=20)
+    worker_max_tool_calls_per_round: int = Field(default=8, ge=1, le=32)
     worker_job_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10.0)
     worker_dispatch_max_concurrency: int = Field(default=4, ge=1, le=64)
     evaluation_enabled: bool = False

@@ -206,7 +206,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         session_factory
     )
     orchestration_event_repository = PostgresOrchestrationEventRepository(
-        session_factory
+        session_factory,
+        max_attempts=settings.worker_max_attempts,
     )
     worker_job_repository = PostgresWorkerJobRepository(session_factory)
     orchestration_command_handler = OrchestrationCommandHandler(

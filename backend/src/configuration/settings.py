@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     postgres_create_schema: bool = True
     workers_enabled: bool = False
     worker_job_lease_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
+    worker_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_job_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10.0)
     worker_dispatch_max_concurrency: int = Field(default=4, ge=1, le=64)
     evaluation_enabled: bool = False

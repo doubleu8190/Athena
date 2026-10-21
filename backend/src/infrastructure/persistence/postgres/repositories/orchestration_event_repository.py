@@ -44,11 +44,15 @@ class PostgresOrchestrationEventRepository:
             [], AbstractAsyncContextManager[AsyncSession]
         ],
         *,
+        max_attempts: int = 3,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         """保存数据库会话工厂和可替换的时间、ID 来源。"""
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
         self._session_factory = session_factory
+        self._max_attempts = max_attempts
         self._id_factory = id_factory or (lambda: uuid4().hex)
         self._clock = clock
 
@@ -193,19 +197,36 @@ class PostgresOrchestrationEventRepository:
                 job.lease_until = None
                 job.updated_at = now
 
-                task.status = status
-                task.output_json = _strict_json(dict(event.result))
-                task.error_json = (
-                    _strict_json(dict(event.error))
-                    if event.error is not None
-                    else None
+                retry_scheduled = (
+                    event.retryable
+                    and status in {"failed", "timed_out"}
+                    and execution.attempt < self._max_attempts
                 )
-                task.updated_at = now.isoformat()
-                round_task.status = status
-                round_task.terminal_at = now
+                next_execution_id: str | None = None
+                if retry_scheduled:
+                    next_execution_id = self._schedule_retry(
+                        session,
+                        event=event,
+                        task=task,
+                        execution=execution,
+                        round_task=round_task,
+                        now=now,
+                    )
+                else:
+                    task.status = status
+                    task.output_json = _strict_json(dict(event.result))
+                    task.error_json = (
+                        _strict_json(dict(event.error))
+                        if event.error is not None
+                        else None
+                    )
+                    task.updated_at = now.isoformat()
+                    round_task.status = status
+                    round_task.terminal_at = now
 
-                round_row.terminal_task_count += 1
-                completed = (
+                if not retry_scheduled:
+                    round_row.terminal_task_count += 1
+                completed = not retry_scheduled and (
                     round_row.terminal_task_count == round_row.expected_task_count
                 )
                 if completed:
@@ -220,11 +241,71 @@ class PostgresOrchestrationEventRepository:
                     message_id=event.message_id,
                     accepted=True,
                     round_completed=completed,
+                    retry_scheduled=retry_scheduled,
+                    next_execution_id=next_execution_id,
                     terminal_task_count=round_row.terminal_task_count,
                     expected_task_count=round_row.expected_task_count,
                 )
                 _mark_processed(inbox, receipt, now)
                 return receipt
+
+    def _schedule_retry(
+        self,
+        session: AsyncSession,
+        *,
+        event: WorkerTaskTerminalEvent,
+        task: AgentTaskModel,
+        execution: TaskExecutionModel,
+        round_task: RoundTaskModel,
+        now: datetime,
+    ) -> str:
+        """保存失败 attempt，并原子插入同一 Round 的下一次执行。"""
+        attempt = execution.attempt + 1
+        execution_id = self._id_factory()
+        worker_thread_id = f"task:{task.task_id}:exec:{attempt}"
+        session.add(
+            TaskExecutionModel(
+                execution_id=execution_id,
+                round_id=event.round_id,
+                task_id=event.task_id,
+                attempt=attempt,
+                worker_thread_id=worker_thread_id,
+                status="queued",
+                fencing_token=1,
+                cancellation_epoch=event.cancellation_epoch,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            WorkerJobModel(
+                job_id=self._id_factory(),
+                dedupe_key=f"execute:{execution_id}",
+                job_type="execute",
+                execution_id=execution_id,
+                payload_json={
+                    "plan_id": event.plan_id,
+                    "round_id": event.round_id,
+                    "task_id": event.task_id,
+                },
+                status="pending",
+                attempt=0,
+                available_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        task.status = "pending"
+        task.output_json = None
+        task.error_json = None
+        task.execution_generation = attempt
+        task.worker_thread_id = worker_thread_id
+        task.active_execution_id = execution_id
+        task.updated_at = now.isoformat()
+        round_task.status = "pending"
+        round_task.active_execution_id = execution_id
+        round_task.terminal_at = None
+        return execution_id
 
     def _write_round_completed_outbox(
         self,
@@ -362,6 +443,8 @@ def _mark_processed(inbox, receipt: TaskEventReceipt, now: datetime) -> None:
         "accepted": receipt.accepted,
         "reason": receipt.reason,
         "round_completed": receipt.round_completed,
+        "retry_scheduled": receipt.retry_scheduled,
+        "next_execution_id": receipt.next_execution_id,
         "terminal_task_count": receipt.terminal_task_count,
         "expected_task_count": receipt.expected_task_count,
     }
@@ -377,6 +460,12 @@ def _receipt(value: dict[str, Any] | None, *, deduplicated: bool) -> TaskEventRe
         reason=value.get("reason"),
         deduplicated=deduplicated,
         round_completed=bool(value.get("round_completed", False)),
+        retry_scheduled=bool(value.get("retry_scheduled", False)),
+        next_execution_id=(
+            str(value["next_execution_id"])
+            if value.get("next_execution_id") is not None
+            else None
+        ),
         terminal_task_count=(
             int(value["terminal_task_count"])
             if value.get("terminal_task_count") is not None

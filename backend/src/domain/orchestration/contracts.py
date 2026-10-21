@@ -217,6 +217,8 @@ class TaskEventReceipt:
     reason: str | None = None
     deduplicated: bool = False
     round_completed: bool = False
+    retry_scheduled: bool = False
+    next_execution_id: str | None = None
     terminal_task_count: int | None = None
     expected_task_count: int | None = None
 

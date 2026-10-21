@@ -44,7 +44,16 @@ class Repository:
             return []
         return [self.claimed.pop(0)]
 
-    async def finish_task(self, task_id, generation, *, status, output=None, error=None):
+    async def finish_task(
+        self,
+        task_id,
+        generation,
+        *,
+        status,
+        output=None,
+        error=None,
+        finalize_plan=True,
+    ):
         self.finished.append((task_id, generation, status, output, error))
         self.results[task_id] = TaskResult(task_id, TaskStatus(status), output or {}, error=error)
         return {"accepted": True, "plan_completed": status in {"done", "failed"}}
@@ -121,7 +130,7 @@ async def test_scheduler_runs_worker_and_synthesizes_terminal_results() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_publishes_task_plan_and_synthesis_terminal_events() -> None:
+async def test_scheduler_publishes_task_and_synthesis_events() -> None:
     repository = Repository()
     worker = Worker([TaskResult("task-1", TaskStatus.DONE, output={"output": "A"})])
     events = Events()
@@ -136,7 +145,6 @@ async def test_scheduler_publishes_task_plan_and_synthesis_terminal_events() -> 
     assert [event.event_type for event in events.values] == [
         "task.started",
         "task.completed",
-        "plan.completed",
         "synthesis.started",
         "synthesis.completed",
     ]

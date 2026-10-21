@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 _EVENT_TYPES = {
     "PlanAccepted": (EventType.PLAN_ACCEPTED, "running", "plan"),
+    "PlanCompleted": (EventType.PLAN_COMPLETED, "completed", "plan"),
+    "PlanFailed": (EventType.PLAN_FAILED, "failed", "plan"),
     "RoundStarted": (EventType.ROUND_STARTED, "running", "round"),
     "RoundCompleted": (EventType.ROUND_COMPLETED, "completed", "round"),
     "PlanCancelling": (EventType.PLAN_CANCELLING, "cancelling", "plan"),

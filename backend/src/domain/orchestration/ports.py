@@ -13,7 +13,7 @@ from .contracts import (
     WorkerJobLease,
     WorkerTaskTerminalEvent,
 )
-from .entities import Plan, Task, TaskExecution, TaskResult
+from .entities import Plan, PlanStatus, Task, TaskExecution, TaskResult
 
 
 class OrchestrationCommandRepository(Protocol):
@@ -84,7 +84,10 @@ class PlanRepository(Protocol):
         status: str,
         output: dict[str, object] | None = None,
         error: dict[str, object] | None = None,
+        finalize_plan: bool = True,
     ) -> dict[str, object]: ...
+
+    async def finalize_plan(self, plan_id: str) -> PlanStatus | None: ...
 
     async def set_task_waiting_approval(
         self,

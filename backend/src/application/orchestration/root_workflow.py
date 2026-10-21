@@ -401,12 +401,14 @@ class RootWorkflow(RootWorkflowPort):
         )
         if deps.validate_plan is not None:
             await call(deps.validate_plan, plan=plan, tasks=tasks)
+        created_locally = False
         if deps.persist_plan is not None:
             await call(deps.persist_plan, plan=plan, tasks=tasks, state=state)
         elif deps.orchestration is not None and hasattr(
             deps.orchestration, "create_plan"
         ):
             await call(deps.orchestration.create_plan, plan=plan, tasks=tasks)
+            created_locally = True
         if deps.event_publisher is not None:
             from domain.events import ApplicationEvent, EventDurability, EventType
 
@@ -437,6 +439,8 @@ class RootWorkflow(RootWorkflowPort):
                     },
                 ),
             )
+        if created_locally and deps.worker_scheduler is not None:
+            await call(deps.worker_scheduler.start_ready_tasks, plan.plan_id)
         return {"plan": _plan_dict(plan, tasks), "status": "running"}
 
     async def wait_for_plan_completion(

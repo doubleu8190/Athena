@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,7 +23,12 @@ from domain.orchestration import (
     TaskStatus,
 )
 
-from ..models import AgentPlanModel, AgentTaskModel, TaskExecutionModel
+from ..models import (
+    AgentPlanModel,
+    AgentTaskModel,
+    OrchestrationOutboxModel,
+    TaskExecutionModel,
+)
 from .task_execution_results import load_task_execution_outputs
 
 
@@ -102,23 +108,112 @@ class PostgresOrchestrationRepository(PlanRepository):
                     plan_row.updated_at = _now()
                 return claimed
 
-    async def finish_task(self, task_id: str, execution_generation: int, *, status: str, output: dict[str, object] | None = None, error: dict[str, object] | None = None) -> dict[str, object]:
+    async def finish_task(
+        self,
+        task_id: str,
+        execution_generation: int,
+        *,
+        status: str,
+        output: dict[str, object] | None = None,
+        error: dict[str, object] | None = None,
+        finalize_plan: bool = True,
+    ) -> dict[str, object]:
         async with self._session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(AgentTaskModel).where(AgentTaskModel.task_id == task_id, AgentTaskModel.execution_generation == execution_generation).with_for_update())).scalar_one_or_none()
+                row = (
+                    await session.execute(
+                        select(AgentTaskModel)
+                        .where(
+                            AgentTaskModel.task_id == task_id,
+                            AgentTaskModel.execution_generation
+                            == execution_generation,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
                 if row is None or row.status != TaskStatus.RUNNING.value:
                     return {"accepted": False, "reason": "stale_execution"}
+                now = datetime.now(timezone.utc)
                 row.status = status
                 row.output_json = _dump(output) if output is not None else None
                 row.error_json = _dump(error) if error is not None else None
-                row.updated_at = _now()
+                row.updated_at = now.isoformat()
                 plan_row = await session.get(AgentPlanModel, row.plan_id, with_for_update=True)
                 plan_status = await self._terminal_plan_status(session, row.plan_id)
-                plan_completed = plan_status is not None
-                if plan_row is not None:
-                    plan_row.status = plan_status.value if plan_status else PlanStatus.RUNNING.value
-                    plan_row.updated_at = _now()
+                plan_completed = (
+                    plan_status is not None
+                    and plan_row is not None
+                    and plan_row.status
+                    in {PlanStatus.CREATED.value, PlanStatus.RUNNING.value}
+                )
+                if finalize_plan and plan_completed:
+                    self._record_plan_terminal(
+                        session,
+                        plan_row,
+                        plan_status,
+                        now,
+                    )
                 return {"accepted": True, "plan_completed": plan_completed}
+
+    async def finalize_plan(self, plan_id: str) -> PlanStatus | None:
+        """将已全部终结的活跃 Plan 与终态事件原子提交。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                plan_row = await session.get(
+                    AgentPlanModel, plan_id, with_for_update=True
+                )
+                if (
+                    plan_row is None
+                    or plan_row.status
+                    not in {PlanStatus.CREATED.value, PlanStatus.RUNNING.value}
+                ):
+                    return None
+                plan_status = await self._terminal_plan_status(session, plan_id)
+                if plan_status is None:
+                    return None
+                self._record_plan_terminal(
+                    session,
+                    plan_row,
+                    plan_status,
+                    datetime.now(timezone.utc),
+                )
+                return plan_status
+
+    @staticmethod
+    def _record_plan_terminal(
+        session: AsyncSession,
+        plan_row: AgentPlanModel,
+        plan_status: PlanStatus,
+        now: datetime,
+    ) -> None:
+        """原子记录 Plan 终态和 SSE Outbox 事实。"""
+        plan_row.status = plan_status.value
+        plan_row.updated_at = now.isoformat()
+        event_type = (
+            "PlanCompleted"
+            if plan_status == PlanStatus.COMPLETED
+            else "PlanFailed"
+        )
+        session.add(
+            OrchestrationOutboxModel(
+                message_id=uuid4().hex,
+                dedupe_key=f"plan:{plan_row.plan_id}:{plan_status.value}",
+                event_type=event_type,
+                correlation_id=plan_row.run_id,
+                plan_id=plan_row.plan_id,
+                plan_version=plan_row.current_version,
+                round_id=plan_row.active_round_id,
+                payload_json={
+                    "goal": plan_row.user_goal,
+                    "parent_activity_id": f"run:{plan_row.run_id}",
+                },
+                schema_version=1,
+                status="pending",
+                attempt=0,
+                available_at=now,
+                occurred_at=now,
+            )
+        )
 
     async def set_task_waiting_approval(self, task_id: str, execution_generation: int, approval_batch: dict[str, object] | None = None) -> bool:
         async with self._session_factory() as session:

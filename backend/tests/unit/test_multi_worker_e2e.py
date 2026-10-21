@@ -5,6 +5,8 @@ import asyncio
 import pytest
 
 from application.orchestration import OrchestrationService, WorkerSchedulerService
+from application.orchestration.root_workflow import RootWorkflow
+from application.runs.context.planner import ContextPlanner
 from domain.orchestration import Plan, PlanEdge, PlanStatus, Task, TaskExecution, TaskResult, TaskStatus
 from application.orchestration.langgraph import RootGraphDependencies, build_root_graph, invoke_root_graph
 
@@ -42,13 +44,13 @@ class Repository:
             self.plan = Plan(self.plan.plan_id, self.plan.goal, self.plan.task_ids, self.plan.edges, self.plan.max_parallelism, PlanStatus.RUNNING, self.plan.session_id, self.plan.run_id)
         return ready
 
-    async def finish_task(self, task_id: str, execution_generation: int, *, status: str, output=None, error=None):
+    async def finish_task(self, task_id: str, execution_generation: int, *, status: str, output=None, error=None, finalize_plan=True):
         task, current, generation, _ = self.tasks[task_id]
         if current is not TaskStatus.RUNNING or generation != execution_generation:
             return {"accepted": False}
         self.tasks[task_id] = (task, TaskStatus(status), generation, output or {})
         terminal = all(value[1] in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.TIMED_OUT} for value in self.tasks.values())
-        if terminal and self.plan is not None:
+        if terminal and finalize_plan and self.plan is not None:
             status_value = "completed" if all(value[1] is TaskStatus.DONE for value in self.tasks.values()) else "failed"
             self.plan = Plan(self.plan.plan_id, self.plan.goal, self.plan.task_ids, self.plan.edges, self.plan.max_parallelism, PlanStatus(status_value), self.plan.session_id, self.plan.run_id)
         return {"accepted": True, "plan_completed": terminal}
@@ -83,6 +85,35 @@ class Worker:
         return 0
 
 
+class RequestPreparation:
+    async def prepare(self, *, request, **kwargs):
+        return {"request": dict(request)}
+
+    async def load_history(self, **kwargs):
+        return []
+
+    async def load_attachments(self, **kwargs):
+        return []
+
+    async def load_knowledge_bases(self, request):
+        return []
+
+
+class ContextAcquisition:
+    async def retrieve_context(self, **kwargs):
+        return {}
+
+
+class ToolService:
+    async def list_tools(self):
+        return []
+
+
+class EventPublisher:
+    async def publish(self, event):
+        return event
+
+
 @pytest.mark.asyncio
 async def test_root_runs_and_aggregates_two_workers() -> None:
     repository = Repository()
@@ -105,21 +136,35 @@ async def test_root_runs_and_aggregates_two_workers() -> None:
 
     class Understanding:
         async def understand(self, **kwargs):
-            return {"task_spec": {"goal": "parallel", "mode": "plan", "context_requirements": ["conversation"]}}
+            return {
+                "task": {
+                    "goal": "parallel",
+                    "mode": "plan",
+                    "context_requirements": ["conversation"],
+                }
+            }
 
     class Agent:
         async def __call__(self, **kwargs):
             return {"next_route": "materialize_execution_plan"}
 
+    dependencies = RootGraphDependencies(
+        task_understanding=Understanding(),
+        context_acquisition=ContextAcquisition(),
+        context_planner=ContextPlanner(),
+        agent=Agent(),
+        orchestration=OrchestrationService(repository),
+        plan_repository=repository,
+        worker_scheduler=scheduler,
+        request_preparation=RequestPreparation(),
+        event_publisher=EventPublisher(),
+        tool_service=ToolService(),
+        approval_service=None,
+        plan_builder=plan_builder,
+        plan_loader=load_plan,
+    )
     graph = build_root_graph(
-        dependencies=RootGraphDependencies(
-            task_understanding=Understanding(),
-            agent=Agent(),
-            plan_builder=plan_builder,
-            orchestration=OrchestrationService(repository),
-            worker_scheduler=scheduler,
-            plan_loader=load_plan,
-        )
+        workflow=RootWorkflow(dependencies), dependencies=dependencies
     )
     result = await invoke_root_graph(graph, session_id="s", run_id="r", user_message="parallel")
     assert result["status"] == "completed", result

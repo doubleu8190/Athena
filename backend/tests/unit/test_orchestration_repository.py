@@ -12,6 +12,7 @@ from domain.orchestration import (
     Task,
     TaskStatus,
 )
+from infrastructure.persistence.postgres.models import OrchestrationOutboxModel
 from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationRepository,
 )
@@ -134,6 +135,122 @@ async def test_target_orchestration_repository_claims_and_completes_dag():
     assert await repository._terminal_plan_status(session, "p-1") is PlanStatus.COMPLETED
     session.execute_values = [Result(rows=[("done",), ("cancelled",)])]
     assert await repository._terminal_plan_status(session, "p-1") is PlanStatus.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_statuses", "expected_plan_status", "expected_event"),
+    [
+        (["done", "completed"], PlanStatus.COMPLETED, "PlanCompleted"),
+        (["done", "failed"], PlanStatus.FAILED, "PlanFailed"),
+    ],
+)
+async def test_finish_task_writes_plan_terminal_outbox_with_state(
+    terminal_statuses, expected_plan_status, expected_event
+):
+    session = Session()
+    repository = PostgresOrchestrationRepository(factory(session))
+    task_row = task("b", status=TaskStatus.RUNNING, generation=3)
+    plan_row = SimpleNamespace(
+        plan_id="p-1",
+        run_id="r-1",
+        session_id="s-1",
+        user_goal="goal",
+        status=PlanStatus.RUNNING.value,
+        current_version=2,
+        active_round_id="round-2",
+        updated_at=None,
+    )
+    session.execute_values = [
+        Result(scalar=task_row),
+        Result(rows=[(value,) for value in terminal_statuses]),
+    ]
+    session.get_values = [plan_row]
+
+    outcome = await repository.finish_task(
+        "b", 3, status=terminal_statuses[-1]
+    )
+
+    assert outcome == {"accepted": True, "plan_completed": True}
+    assert plan_row.status == expected_plan_status.value
+    outbox = next(
+        value
+        for value in session.added
+        if isinstance(value, OrchestrationOutboxModel)
+    )
+    assert outbox.event_type == expected_event
+    assert outbox.dedupe_key == f"plan:p-1:{expected_plan_status.value}"
+    assert outbox.plan_version == 2
+    assert outbox.round_id == "round-2"
+    assert outbox.payload_json["goal"] == "goal"
+
+
+@pytest.mark.asyncio
+async def test_finish_task_does_not_reopen_cancelled_plan_or_emit_terminal_outbox():
+    session = Session()
+    repository = PostgresOrchestrationRepository(factory(session))
+    task_row = task("b", status=TaskStatus.RUNNING, generation=3)
+    plan_row = SimpleNamespace(
+        plan_id="p-1",
+        run_id="r-1",
+        session_id="s-1",
+        user_goal="goal",
+        status=PlanStatus.CANCELLED.value,
+        current_version=2,
+        active_round_id="round-2",
+        updated_at=None,
+    )
+    session.execute_values = [
+        Result(scalar=task_row),
+        Result(rows=[("done",), ("cancelled",)]),
+    ]
+    session.get_values = [plan_row]
+
+    outcome = await repository.finish_task("b", 3, status="done")
+
+    assert outcome == {"accepted": True, "plan_completed": False}
+    assert plan_row.status == PlanStatus.CANCELLED.value
+    assert not any(
+        isinstance(value, OrchestrationOutboxModel) for value in session.added
+    )
+
+
+@pytest.mark.asyncio
+async def test_finalize_plan_records_deferred_terminal_after_retry_is_not_scheduled():
+    session = Session()
+    repository = PostgresOrchestrationRepository(factory(session))
+    task_row = task("b", status=TaskStatus.RUNNING, generation=3)
+    plan_row = SimpleNamespace(
+        plan_id="p-1",
+        run_id="r-1",
+        session_id="s-1",
+        user_goal="goal",
+        status=PlanStatus.RUNNING.value,
+        current_version=2,
+        active_round_id="round-2",
+        updated_at=None,
+    )
+    session.execute_values = [
+        Result(scalar=task_row),
+        Result(rows=[("done",), ("failed",)]),
+    ]
+    session.get_values = [plan_row]
+
+    outcome = await repository.finish_task(
+        "b", 3, status="failed", finalize_plan=False
+    )
+
+    assert outcome == {"accepted": True, "plan_completed": True}
+    assert plan_row.status == PlanStatus.RUNNING.value
+    assert not session.added
+
+    session.get_values = [plan_row]
+    session.execute_values = [Result(rows=[("done",), ("failed",)])]
+    status = await repository.finalize_plan("p-1")
+
+    assert status is PlanStatus.FAILED
+    assert plan_row.status == PlanStatus.FAILED.value
+    assert session.added[0].event_type == "PlanFailed"
 
 
 @pytest.mark.asyncio

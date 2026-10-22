@@ -68,13 +68,16 @@ class WorkerJobDispatcher:
         )
 
     async def stop(self) -> None:
-        """停止领取新 Job，并等待已领取工作完成或主动交还租约。"""
+        """停止领取并取消本进程中的 Graph 调用，让过期租约可被接管。"""
         self._stop.set()
         if self._loop_task is not None:
             await self._loop_task
             self._loop_task = None
-        if self._inflight:
-            await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
+        pending = tuple(self._inflight)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def run(self) -> None:
         """持续领取作业；无工作时用短间隔轮询数据库。"""

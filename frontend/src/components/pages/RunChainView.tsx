@@ -497,6 +497,12 @@ function projectSnapshot(snapshot: RunOrchestrationSnapshot | null): RunEvent[] 
   if (!snapshot) return []
   const runId = snapshot.run.run_id
   const runNodeId = `snapshot:run:${runId}`
+  const externalEffectStatus = snapshot.run.cancellation_external_effect_status
+  const externalEffectDetail = externalEffectStatus === "unknown"
+    ? "外部副作用结果未知；停止不能保证撤回已发送的操作"
+    : externalEffectStatus === "none"
+      ? "未观察到在途外部副作用"
+      : `外部副作用状态：${externalEffectStatus}`
   const events: RunEvent[] = [{
     id: runNodeId,
     kind: "run",
@@ -505,7 +511,7 @@ function projectSnapshot(snapshot: RunOrchestrationSnapshot | null): RunEvent[] 
     status: snapshotStatus(snapshot.run.status),
     duration: "—",
     time: formatTimestamp(snapshot.run.updated_at || snapshot.run.created_at),
-    detail: `取消 epoch ${snapshot.run.cancellation_epoch} · 外部副作用 ${snapshot.run.cancellation_external_effect_status}`,
+    detail: `取消 epoch ${snapshot.run.cancellation_epoch} · ${externalEffectDetail}`,
   }]
   const taskNodes = new Map<string, string>()
   const executionNodes = new Map<string, string>()

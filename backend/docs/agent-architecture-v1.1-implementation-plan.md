@@ -416,7 +416,7 @@ P6 本轮新增真实 Provider、浏览器、PostgreSQL、正常审批与 Docker
 
 在用户授权的本地单用户测试会话中，另以真实浏览器和 PostgreSQL 完成一次高风险工具审批闭环，Run ID 为 `2026.10.22.04.47.54.126`：只建立一个 Worker task，明确 allowlist 仅为 `exec_shell`；Athena 先生成待审批卡片，用户在界面批准后由 Worker 在 Docker `--network none`、无工作区挂载、只读根文件系统的容器中执行唯一命令 `python -c 'import sys; print(sys.version.split()[0])'`，退出码 0、输出 `3.12.14`，ToolOperation 只成功一次。用于本次验收的临时工具行已删除，测试会话已通过 Athena 界面软删除；失败的前置尝试未执行命令。该记录验证工具审批和隔离执行路径，不替代其余 A01–A20 矩阵覆盖。
 
-本轮将 pytest 默认导入模式设为 `importlib`，避免 unit/integration 中同名测试模块冲突。以项目本地 PostgreSQL URL 在当前测试进程中设置 `ATHENA_TEST_DATABASE_URL` 后，全量后端与 PostgreSQL 测试为 `347 passed, 2 warnings`；`compileall` 与 `git diff --check` 通过。警告为既有的 FastAPI duplicate operation ID。PostgreSQL 验收覆盖 A01 Round 屏障与重投去重、A02 双 engine 下的并行上限与固定 DAG 成员、A04 每个 Worker 独立审批恢复，以及 A06 终态 Inbox/Resume Job 原子写入和 checkpoint 就绪前延迟。新增 A07 并发 Continue 幂等与冲突检查；A13 覆盖 Stop 与 Worker 审批决议及最后一个 Worker 终态事件的并发裁决，终态先提交时 Stop 会撤销 Root Resume，Stop 先提交时事件被拒绝并留存 Inbox 回执；Continue/Revise 与 Stop 的并发裁决仍待覆盖。A19 在 Run 完成事务中原子写入最终回答 Outbox、RunCompleted Outbox、唯一 memory job 和命令终态，并通过丢失完成回执、Outbox 重放及 Memory Worker 崩溃恢复验证可收敛。Ruff 未安装在项目虚拟环境中，未执行 lint。Athena 按用户确认以单用户产品为目标，不要求多用户身份映射。
+本轮将 pytest 默认导入模式设为 `importlib`，避免 unit/integration 中同名测试模块冲突。以项目本地 PostgreSQL URL 在当前测试进程中设置 `ATHENA_TEST_DATABASE_URL` 后，全量后端与 PostgreSQL 测试为 `348 passed, 2 warnings`；`compileall` 与 `git diff --check` 通过。警告为既有的 FastAPI duplicate operation ID。PostgreSQL 验收覆盖 A01 Round 屏障与重投去重、A02 双 engine 下的并行上限与固定 DAG 成员、A04 每个 Worker 独立审批恢复，以及 A06 终态 Inbox/Resume Job 原子写入和 checkpoint 就绪前延迟。新增 A07 并发 Continue 幂等与冲突检查；A09 通过 app engine 重建、lease 接管、迟到结果拒绝及失败后重试验证 attempt 计数与 Round 状态持久化；A13 覆盖 Stop 与 Worker 审批决议及最后一个 Worker 终态事件的并发裁决，终态先提交时 Stop 会撤销 Root Resume，Stop 先提交时事件被拒绝并留存 Inbox 回执；Continue/Revise 与 Stop 的并发裁决仍待覆盖。A19 在 Run 完成事务中原子写入最终回答 Outbox、RunCompleted Outbox、唯一 memory job 和命令终态，并通过丢失完成回执、Outbox 重放及 Memory Worker 崩溃恢复验证可收敛。Ruff 未安装在项目虚拟环境中，未执行 lint。Athena 按用户确认以单用户产品为目标，不要求多用户身份映射。
 
 ### A01–A20 覆盖盘点（2026-10-22）
 
@@ -432,14 +432,14 @@ P6 本轮新增真实 Provider、浏览器、PostgreSQL、正常审批与 Docker
 | A06 | 已覆盖 | `test_round_barrier_holds_dependent_task_and_resumes_root_once` 验证终态 Inbox 与 RoundCompleted/Root Resume Job 在 PostgreSQL 事务内一并持久化，任务先于 interrupt 就绪时保留并延迟，checkpoint arm 后 dispatcher 仅 resume 一次；`test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt` 另验证两个 app engine 竞争只有一个 Root Resume Job 获租。 |
 | A07 | 已覆盖 | `test_round_barrier_holds_dependent_task_and_resumes_root_once` 在 PG 中并发提交 10 次同内容 Continue，仅一个回执非 deduplicated 且只创建一个下一 Round/Job；复用相同 key 改变 Review 内容会明确冲突。 |
 | A08 | 已覆盖 | `test_submit_and_replan_preserve_completed_results_in_postgres` 验证保留完成结果、取消旧任务、写入新版本与 Round/Job。 |
-| A09 | 部分覆盖 | 租约回收、fencing 和 Worker 重启后审批恢复已有 PG 验收；尚需失败 attempt 跨完整应用重启、确认 Task/Round 不提前终态并按持久 retry policy 重投的专门测试。 |
+| A09 | 已覆盖 | `test_worker_restart_reclaims_failed_attempt_without_closing_round` 重建 app engine 后从 PostgreSQL 接管过期 attempt，拒绝旧 Worker 迟到结果；新 Worker 的可重试失败原子创建 attempt 2，Task/Round 继续 pending/running，终态计数不增加且重启后可领取新 Job。 |
 | A10 | 部分覆盖 | DAG validator 覆盖非法图与循环拒绝；尚无“依赖失败后无 ready task”进入有界 Root Review 决策、不会永久运行的 PG/Graph 联合测试。 |
 | A11 | 部分覆盖 | PostgreSQL checkpointer 重建后可恢复原 Worker 审批 interrupt，审批恢复 Job 具备持久化路径；尚无决定提交后立即模拟进程崩溃、再由新 app instance 自动恢复且工具只执行一次的单一故障注入用例。 |
 | A12 | 部分覆盖 | ToolOperation 的 completed 结果跨 attempt 重放、executing 未知结果拒绝重发，以及终态提交后丢回执已有 PG 验收；Root checkpoint 写入和外部效果对账的崩溃窗口还缺独立故障注入。 |
 | A13 | 部分覆盖 | `test_resolving_one_worker_approval_only_unblocks_its_execution` 在 PG 中并发竞争 Worker 审批与 Stop；`test_stop_racing_last_worker_terminal_event_leaves_no_root_resume` 验证最后一个终态事件与 Stop 争用 Run 锁，事件先提交时 Root Resume 会被 Stop 撤销，Stop 先提交时终态事件被拒绝并留存 Inbox 回执。Continue/Revise 与 Stop 的并发裁决仍未覆盖。 |
 | A14 | 部分覆盖 | 已有规划前停止和活跃 Worker 停止的真实浏览器验收及活跃租约 PG 收敛；规划中、审批中、Review 中、Finalize 中的阶段矩阵尚未覆盖。 |
 | A15 | 部分覆盖 | 运行中重复 Stop 和已 cancelling 再次 Stop 有单测/PG 证据；终态 Run 保持原状态且事件与取消进度不重复，尚缺完整 PG 断言。 |
-| A16 | 部分覆盖 | 双数据库会话竞争过期 Worker lease，只提升一个 fencing token，旧租约不能续租；尚无迟到终态事件被拒绝及同一 LangGraph thread 不出现双 checkpoint writer 的联合验收。 |
+| A16 | 部分覆盖 | 双数据库会话竞争过期 Worker lease，只提升一个 fencing token，旧租约不能续租；`test_worker_restart_reclaims_failed_attempt_without_closing_round` 另验证旧 fencing token 的迟到终态被拒绝。尚无同一 LangGraph thread 不出现双 checkpoint writer 的联合验收。 |
 | A17 | 部分覆盖 | 活跃 Worker 取消后 `external_effect_status=unknown` 有 PG 证据；真实外部 API 已发出且不可取消时的操作账本审计与 UI 状态仍未联合验收。 |
 | A18 | 部分覆盖 | SSE Last-Event-ID 重放有单测，Run Chain 刷新恢复有浏览器证据；尚无浏览器断线期间后台继续、重复事件重投后时间线/审批/版本快照一致的完整闭环。 |
 | A19 | 已覆盖 | `test_final_answer_and_memory_job_survive_completion_receipt_loss` 在同一 PostgreSQL Run 完成事务中写入最终回答的两条 Outbox、RunCompleted Outbox、唯一 memory job 和活动命令终态；模拟事务提交后回执丢失，再由新 Outbox dispatcher 投递，并模拟 Memory Worker claim 后崩溃/恢复，最终每类记录仅一份且 Run/命令/记忆 Job 收敛。 |

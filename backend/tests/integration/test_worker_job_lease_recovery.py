@@ -6,11 +6,11 @@ import asyncio
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from itertools import count
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -24,6 +24,7 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    OrchestrationCommandModel,
     OrchestrationOutboxModel,
     OrchestrationInboxModel,
     PlanRoundModel,
@@ -36,10 +37,21 @@ from infrastructure.persistence.postgres.models import (
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
 )
+from infrastructure.persistence.postgres.repositories.orchestration_command_repository import (
+    PostgresOrchestrationCommandRepository,
+)
 from infrastructure.persistence.postgres.repositories.orchestration_event_repository import (
     PostgresOrchestrationEventRepository,
 )
-from domain.orchestration import TaskStatus, WorkerTaskTerminalEvent
+from domain.orchestration import (
+    OrchestrationCommand,
+    OrchestrationCommandType,
+    Plan,
+    Task,
+    TaskStatus,
+    WorkerJobLease,
+    WorkerTaskTerminalEvent,
+)
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -514,6 +526,238 @@ async def test_worker_terminal_commit_with_lost_receipt_is_deduplicated() -> Non
         assert len(outbox_rows) == 2
     finally:
         await test_engine.dispose()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_worker_restart_reclaims_failed_attempt_without_closing_round() -> None:
+    """重启后的 app 接管租约、拒绝迟到结果，并持久化下一次 attempt。"""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"worker_restart_retry_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    first_app_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    restarted_app_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    schema_created = False
+    now = datetime.now(timezone.utc)
+    run_id = f"run-{uuid4().hex}"
+    session_id = f"session-{run_id}"
+    plan_id = f"plan-{run_id}"
+
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+
+        required_tables = [
+            AgentRunModel.__table__,
+            AgentPlanModel.__table__,
+            AgentTaskModel.__table__,
+            ApprovalRecordModel.__table__,
+            OrchestrationCommandModel.__table__,
+            OrchestrationOutboxModel.__table__,
+            OrchestrationInboxModel.__table__,
+            PlanVersionModel.__table__,
+            PlanRoundModel.__table__,
+            RoundTaskModel.__table__,
+            TaskExecutionModel.__table__,
+            WorkerJobModel.__table__,
+            RootResumeJobModel.__table__,
+        ]
+        async with first_app_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, tables=required_tables
+                )
+            )
+
+        first_sessions = async_sessionmaker(first_app_engine, expire_on_commit=False)
+        restarted_sessions = async_sessionmaker(
+            restarted_app_engine, expire_on_commit=False
+        )
+        async with first_sessions() as session, session.begin():
+            session.add(
+                AgentRunModel(
+                    run_id=run_id,
+                    session_id=session_id,
+                    status="created",
+                    root_thread_id=f"run:{run_id}",
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+
+        plan = Plan(
+            plan_id=plan_id,
+            goal="Recover one durable Worker attempt after app restart",
+            task_ids=("task-retry",),
+            max_parallelism=1,
+            session_id=session_id,
+            run_id=run_id,
+        )
+        command = OrchestrationCommand(
+            message_id=f"submit:{run_id}",
+            command_type=OrchestrationCommandType.SUBMIT_PLAN,
+            idempotency_key=f"submit:{run_id}",
+            correlation_id=run_id,
+            occurred_at=now,
+            plan_id=plan_id,
+            scope_key=run_id,
+            plan_version=1,
+        )
+        ids = count()
+        submitted = await PostgresOrchestrationCommandRepository(
+            first_sessions,
+            id_factory=lambda: f"generated-{next(ids)}",
+            clock=lambda: now,
+        ).submit_plan(
+            command,
+            plan,
+            [Task(task_id="task-retry", title="Retry task", objective="Complete")],
+        )
+
+        old_jobs = PostgresWorkerJobRepository(first_sessions, clock=lambda: now)
+        old_lease = await old_jobs.claim_next(
+            "worker-before-restart", lease_seconds=5
+        )
+        assert old_lease is not None
+        assert old_lease.attempt == 1
+
+        # 重启后的 app 只读取 PostgreSQL 状态，并接管已经过期的租约。
+        await first_app_engine.dispose()
+        restarted_at = now + timedelta(seconds=6)
+        restarted_jobs = PostgresWorkerJobRepository(
+            restarted_sessions, clock=lambda: restarted_at
+        )
+        reclaimed = await restarted_jobs.claim_next(
+            "worker-after-restart", lease_seconds=60
+        )
+        assert reclaimed is not None
+        assert reclaimed.execution_id == old_lease.execution_id
+        assert reclaimed.attempt == old_lease.attempt
+        assert reclaimed.fencing_token == old_lease.fencing_token + 1
+
+        events = PostgresOrchestrationEventRepository(
+            restarted_sessions,
+            clock=lambda: restarted_at,
+            id_factory=lambda: f"event-{uuid4().hex}",
+        )
+
+        def terminal_event(
+            lease: WorkerJobLease,
+            *,
+            message_id: str,
+            status: TaskStatus,
+            retryable: bool,
+        ) -> WorkerTaskTerminalEvent:
+            """根据租约构造终态事件，便于比较旧 Worker 与接管者。"""
+            return WorkerTaskTerminalEvent(
+                message_id=message_id,
+                occurred_at=restarted_at,
+                worker_id=lease.worker_id,
+                run_id=run_id,
+                plan_id=plan_id,
+                plan_version=lease.plan_version,
+                round_id=submitted.round_id,
+                task_id="task-retry",
+                execution_id=lease.execution_id,
+                fencing_token=lease.fencing_token,
+                cancellation_epoch=lease.cancellation_epoch,
+                status=status,
+                result={"attempt": lease.attempt},
+                error=(
+                    {"code": "provider_timeout"}
+                    if status == TaskStatus.FAILED
+                    else None
+                ),
+                retryable=retryable,
+            )
+
+        late_result = await events.apply_worker_terminal_event(
+            terminal_event(
+                old_lease,
+                message_id=f"late:{run_id}",
+                status=TaskStatus.COMPLETED,
+                retryable=False,
+            )
+        )
+        assert not late_result.accepted
+        retry_result = await events.apply_worker_terminal_event(
+            terminal_event(
+                reclaimed,
+                message_id=f"failed:{run_id}",
+                status=TaskStatus.FAILED,
+                retryable=True,
+            )
+        )
+        assert retry_result.accepted
+        assert retry_result.retry_scheduled
+        assert retry_result.terminal_task_count == 0
+        assert retry_result.expected_task_count == 1
+
+        async with restarted_sessions() as session:
+            run = await session.get(AgentRunModel, run_id)
+            plan_row = await session.get(AgentPlanModel, plan_id)
+            task_row = await session.get(AgentTaskModel, "task-retry")
+            round_row = await session.get(PlanRoundModel, submitted.round_id)
+            round_task = await session.get(
+                RoundTaskModel, (submitted.round_id, "task-retry")
+            )
+            executions = (
+                await session.execute(
+                    select(TaskExecutionModel)
+                    .where(TaskExecutionModel.task_id == "task-retry")
+                    .order_by(TaskExecutionModel.attempt)
+                )
+            ).scalars().all()
+            jobs = (await session.execute(select(WorkerJobModel))).scalars().all()
+            round_completed_count = await session.scalar(
+                select(func.count()).select_from(OrchestrationOutboxModel).where(
+                    OrchestrationOutboxModel.event_type == "RoundCompleted"
+                )
+            )
+            resume_count = await session.scalar(
+                select(func.count()).select_from(RootResumeJobModel)
+            )
+
+        assert run is not None and run.status == "running"
+        assert plan_row is not None and plan_row.status == "running"
+        assert task_row is not None and task_row.status == "pending"
+        assert task_row.execution_generation == 2
+        assert round_row is not None and round_row.status == "running"
+        assert round_row.terminal_task_count == 0
+        assert round_task is not None and round_task.status == "pending"
+        assert len(executions) == 2
+        assert executions[0].status == "failed"
+        assert executions[1].status == "queued"
+        assert executions[1].attempt == 2
+        assert len(jobs) == 2
+        assert sum(job.status == "completed" for job in jobs) == 1
+        assert sum(job.status == "pending" for job in jobs) == 1
+        assert round_completed_count == 0
+        assert resume_count == 0
+
+        next_attempt = await restarted_jobs.claim_next(
+            "worker-retry", lease_seconds=60
+        )
+        assert next_attempt is not None
+        assert next_attempt.execution_id == executions[1].execution_id
+        assert next_attempt.attempt == 2
+    finally:
+        await first_app_engine.dispose()
+        await restarted_app_engine.dispose()
         if schema_created:
             async with base_engine.begin() as connection:
                 await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))

@@ -8,6 +8,7 @@ from .contracts import (
     CommandReceipt,
     OrchestrationCommand,
     OrchestrationOutboxLease,
+    ReviewDecision,
     ReviewContext,
     RunCancellationReceipt,
     TaskEventReceipt,
@@ -23,6 +24,12 @@ class OrchestrationCommandRepository(Protocol):
         command: OrchestrationCommand,
         plan: Plan,
         tasks: list[Task],
+    ) -> CommandReceipt: ...
+
+    async def apply_review_decision(
+        self,
+        command: OrchestrationCommand,
+        decision: ReviewDecision,
     ) -> CommandReceipt: ...
 
 

@@ -9,6 +9,8 @@ from domain.orchestration import (
     OrchestrationCommandType,
     Plan,
     PlanValidator,
+    ReviewAction,
+    ReviewDecision,
     Task,
 )
 
@@ -59,6 +61,31 @@ class OrchestrationCommandHandler:
             raise ValueError("command correlation_id must equal plan.run_id")
         self._validator.validate(plan, tasks)
         return await self._repository.submit_plan(command, plan, tasks)
+
+    async def apply_review_decision(
+        self,
+        command: OrchestrationCommand,
+        decision: ReviewDecision,
+    ) -> CommandReceipt:
+        """Bind a Root decision to the command type and reviewed identities."""
+        expected_type = {
+            ReviewAction.CONTINUE: OrchestrationCommandType.CONTINUE_PLAN,
+            ReviewAction.REPLAN: OrchestrationCommandType.REVISE_PLAN,
+            ReviewAction.FINISH: OrchestrationCommandType.FINISH_PLAN,
+        }[decision.action]
+        if command.command_type != expected_type:
+            raise ValueError("review_action_command_type_mismatch")
+        if command.plan_version is None or command.plan_version < 1:
+            raise ValueError("review_command_plan_version_required")
+        if not command.round_id:
+            raise ValueError("review_command_round_id_required")
+        if (
+            decision.action == ReviewAction.REPLAN
+            and decision.revision is not None
+            and decision.revision.base_version != command.plan_version
+        ):
+            raise ValueError("review_command_revision_version_mismatch")
+        return await self._repository.apply_review_decision(command, decision)
 
 
 __all__ = ["OrchestrationCommandHandler"]

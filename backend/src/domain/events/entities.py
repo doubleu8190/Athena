@@ -27,6 +27,7 @@ class EventType(StrEnum):
     PLAN_CREATED = "plan.created"
     PLAN_CANCELLING = "plan.cancelling"
     PLAN_CANCELLED = "plan.cancelled"
+    PLAN_REVISED = "plan.revised"
     PLAN_COMPLETED = "plan.completed"
     PLAN_FAILED = "plan.failed"
     ROUND_STARTED = "round.started"

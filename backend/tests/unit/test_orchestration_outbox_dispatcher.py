@@ -98,6 +98,13 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
             {"task_ids": ["task-1"]},
         ),
         (
+            "PlanRevised",
+            "plan.revised",
+            "plan:plan-1",
+            "running",
+            {"task_ids": ["task-1", "task-2"]},
+        ),
+        (
             "PlanCompleted",
             "plan.completed",
             "plan:plan-1",

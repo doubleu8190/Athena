@@ -20,6 +20,7 @@ from ..models import AgentRunModel, OrchestrationOutboxModel
 
 _USER_EVENT_TYPES = (
     "PlanAccepted",
+    "PlanRevised",
     "PlanCompleted",
     "PlanFailed",
     "ApprovalRequested",

@@ -29,6 +29,7 @@ export const ApplicationEventType = {
   PLAN_ACCEPTED: "plan.accepted",
   PLAN_CREATED: "plan.created",
   PLAN_CANCELLING: "plan.cancelling",
+  PLAN_REVISED: "plan.revised",
   PLAN_COMPLETED: "plan.completed",
   PLAN_FAILED: "plan.failed",
   PLAN_CANCELLED: "plan.cancelled",

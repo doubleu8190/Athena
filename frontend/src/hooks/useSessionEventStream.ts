@@ -225,7 +225,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
         if (type.startsWith("plan.")) {
           const planStatus: OrchestrationPlan["status"] | null =
-            type === "plan.created" ? "running"
+            type === "plan.created" || type === "plan.revised" ? "running"
             : type === "plan.cancelling" ? "cancelling"
             : type === "plan.completed" ? "completed"
             : type === "plan.failed" ? "failed"
@@ -406,7 +406,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "approval.required", "approval.resolved",
       "message.started", "message.persisted", "message.completed", "message.delta", "stream.snapshot",
       "thinking.started", "thinking.summary", "thinking.completed",
-      "plan.accepted", "plan.created", "plan.cancelling", "plan.completed", "plan.failed", "plan.cancelled",
+      "plan.accepted", "plan.created", "plan.cancelling", "plan.revised", "plan.completed", "plan.failed", "plan.cancelled",
       "round.started", "round.completed",
       "task.queued", "task.started", "task.retrying", "task.waiting_approval", "task.completed", "task.failed", "task.cancelled",
       "synthesis.started", "synthesis.completed",
@@ -488,8 +488,8 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
 
   if (type.startsWith("plan.")) {
     const planId = text(data.plan_id)
-    const labels: Record<string, string> = { "plan.accepted": "执行计划已受理", "plan.created": "已制定执行计划", "plan.cancelling": "正在停止执行计划", "plan.completed": "执行计划已完成", "plan.failed": "执行计划未能完成", "plan.cancelled": "执行计划已取消" }
-    const status = type === "plan.failed" ? "failed" : type === "plan.created" ? "running" : type === "plan.accepted" || type === "plan.cancelled" ? "info" : type === "plan.cancelling" ? "waiting" : "completed"
+    const labels: Record<string, string> = { "plan.accepted": "执行计划已受理", "plan.created": "已制定执行计划", "plan.cancelling": "正在停止执行计划", "plan.revised": "执行计划已调整", "plan.completed": "执行计划已完成", "plan.failed": "执行计划未能完成", "plan.cancelled": "执行计划已取消" }
+    const status = type === "plan.failed" ? "failed" : type === "plan.created" || type === "plan.revised" ? "running" : type === "plan.accepted" || type === "plan.cancelled" ? "info" : type === "plan.cancelling" ? "waiting" : "completed"
     const id = type === "plan.accepted" ? `plan-accepted:${planId}` : `plan:${planId}`
     return base({ id, label: labels[type] || "执行计划已更新", detail: error || undefined, status })
   }

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _EVENT_TYPES = {
     "PlanAccepted": (EventType.PLAN_ACCEPTED, "running", "plan"),
+    "PlanRevised": (EventType.PLAN_REVISED, "running", "plan"),
     "PlanCompleted": (EventType.PLAN_COMPLETED, "completed", "plan"),
     "PlanFailed": (EventType.PLAN_FAILED, "failed", "plan"),
     "ApprovalRequested": (EventType.APPROVAL_REQUIRED, "waiting", "approval"),

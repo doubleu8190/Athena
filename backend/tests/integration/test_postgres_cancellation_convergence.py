@@ -469,3 +469,176 @@ async def test_stop_preserves_completed_and_failed_run_without_duplicate_events(
             async with base_engine.begin() as connection:
                 await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await base_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_stop_converges_during_planning_review_and_finalization() -> None:
+    """Planning, Review, and final-answer phases cannot resume after Stop."""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"run_stop_stage_matrix_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    test_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    schema_created = False
+    now = datetime.now(timezone.utc)
+    run_ids = {phase: f"{phase}-{uuid4().hex}" for phase in ("planning", "review", "finalize")}
+
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+        tables = [
+            AgentCommandModel.__table__,
+            AgentRunModel.__table__,
+            AgentPlanModel.__table__,
+            AgentTaskModel.__table__,
+            ApprovalRecordModel.__table__,
+            PlanVersionModel.__table__,
+            PlanRoundModel.__table__,
+            RoundTaskModel.__table__,
+            TaskExecutionModel.__table__,
+            WorkerJobModel.__table__,
+            RootResumeJobModel.__table__,
+            OrchestrationOutboxModel.__table__,
+        ]
+        async with test_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, tables=tables
+                )
+            )
+
+        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+        async with session_factory() as session, session.begin():
+            for phase, run_id in run_ids.items():
+                session.add(
+                    AgentRunModel(
+                        run_id=run_id,
+                        session_id=f"session-{run_id}",
+                        status="running",
+                        root_thread_id=f"thread-{run_id}",
+                        cancellation_epoch=0,
+                        cancellation_external_effect_status="none",
+                        created_at=now.isoformat(),
+                        updated_at=now.isoformat(),
+                    )
+                )
+                if phase == "planning":
+                    continue
+
+                plan_id = f"plan-{run_id}"
+                round_id = f"round-{run_id}"
+                plan_status = "waiting_review" if phase == "review" else "completed"
+                session.add(
+                    AgentPlanModel(
+                        plan_id=plan_id,
+                        run_id=run_id,
+                        session_id=f"session-{run_id}",
+                        status=plan_status,
+                        user_goal=f"Stop during {phase}",
+                        max_parallelism=1,
+                        plan_json='{"nodes":[],"edges":[]}',
+                        current_version=1,
+                        active_round_id=round_id,
+                        cancellation_epoch=0,
+                        created_at=now.isoformat(),
+                        updated_at=now.isoformat(),
+                    )
+                )
+                await session.flush()
+                session.add(
+                    PlanVersionModel(
+                        plan_id=plan_id,
+                        version=1,
+                        dag_json={"nodes": [], "edges": []},
+                        created_at=now,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    PlanRoundModel(
+                        round_id=round_id,
+                        plan_id=plan_id,
+                        plan_version=1,
+                        round_number=1,
+                        status="completed",
+                        expected_task_count=0,
+                        terminal_task_count=0,
+                        created_at=now,
+                        completed_at=now,
+                    )
+                )
+                session.add(
+                    RootResumeJobModel(
+                        job_id=f"root-resume-{run_id}",
+                        dedupe_key=f"root-resume:{run_id}",
+                        run_id=run_id,
+                        plan_id=plan_id,
+                        round_id=round_id,
+                        root_wait_generation=1,
+                        status="pending",
+                        attempt=0,
+                        available_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+        run_repository = PostgresRunRepository(session_factory)
+        planning = await run_repository.cancel(run_ids["planning"])
+        review = await run_repository.cancel(run_ids["review"])
+        finalization = await run_repository.cancel(run_ids["finalize"])
+        assert planning is not None and planning.status is RunStatus.CANCELLED
+        assert review is not None and review.status is RunStatus.CANCELLING
+        assert finalization is not None and finalization.status is RunStatus.CANCELLED
+
+        reconciled = await PostgresWorkerJobRepository(
+            session_factory, clock=lambda: now + timedelta(seconds=1)
+        ).reconcile_cancellations()
+        assert [item.run_id for item in reconciled] == [run_ids["review"]]
+
+        async with session_factory() as session:
+            runs = {
+                row.run_id: row
+                for row in (await session.execute(select(AgentRunModel))).scalars()
+            }
+            plans = {
+                row.run_id: row
+                for row in (await session.execute(select(AgentPlanModel))).scalars()
+            }
+            root_jobs = (
+                await session.execute(select(RootResumeJobModel))
+            ).scalars().all()
+            events = (
+                await session.execute(select(OrchestrationOutboxModel))
+            ).scalars().all()
+        assert all(runs[run_id].status == "cancelled" for run_id in run_ids.values())
+        assert plans[run_ids["review"]].status == "cancelled"
+        assert plans[run_ids["finalize"]].status == "completed"
+        assert len(root_jobs) == 2
+        assert all(job.status == "cancelled" for job in root_jobs)
+        event_types_by_run = {
+            run_id: [event.event_type for event in events if event.correlation_id == run_id]
+            for run_id in run_ids.values()
+        }
+        assert event_types_by_run[run_ids["planning"]] == ["RunCancelled"]
+        assert set(event_types_by_run[run_ids["review"]]) == {
+            "PlanCancelling",
+            "RunCancelling",
+            "PlanCancelled",
+            "RunCancelled",
+        }
+        assert event_types_by_run[run_ids["finalize"]] == ["RunCancelled"]
+    finally:
+        await test_engine.dispose()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()

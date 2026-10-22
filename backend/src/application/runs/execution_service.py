@@ -18,10 +18,11 @@ from domain.runs import (
     CommandQueuePort,
     RunCommand,
     RunCancellationResult,
-    RunExecutorPort,
     RunLifecyclePort,
+    RootWaitCheckpoint,
     RunStatus,
 )
+from application.runs.ports import RunExecutorPort
 
 
 class RunExecutionService:
@@ -46,71 +47,19 @@ class RunExecutionService:
         self._run_started: dict[str, tuple[datetime, float]] = {}
 
     async def execute(self, command: RunCommand) -> dict[str, object] | None:
-        if command.command_type.value == CommandType.RUN_CANCEL.value:
-            cancellation: RunCancellationResult | None = None
-            if command.run_id:
-                cancellation = await self._lifecycle.cancel(
-                    command.run_id,
-                    reason=str(command.payload.get("reason", "USER_REQUEST")),
-                )
-            # 先持久化取消栅栏，再中断 Root，避免并发的 SubmitPlan 或 Worker 领取穿过取消边界。
-            cancel_error: Exception | None = None
-            try:
-                await self._executor.cancel(command.run_id)
-            except Exception as exc:
-                cancel_error = exc
-            if (
-                command.run_id
-                and cancellation is not None
-                and cancellation.changed
-                and not getattr(
-                    self._lifecycle, "writes_cancellation_events_to_outbox", False
-                )
-            ):
-                status = str(cancellation.status)
-                event_type = (
-                    EventType.RUN_CANCELLING
-                    if status == RunStatus.CANCELLING.value
-                    else EventType.RUN_CANCELLED
-                )
-                await self._publish(
-                    command,
-                    event_type,
-                    payload={
-                        **self._run_payload(command, status),
-                        "external_effect_status": cancellation.external_effect_status,
-                    },
-                )
-            if cancel_error is not None:
-                raise cancel_error
-            await self._commands.complete_command(
-                command.command_id,
-                status=CommandStatus.COMPLETED,
-                result={
-                    "status": (
-                        str(cancellation.status)
-                        if cancellation is not None
-                        else "unchanged"
-                    ),
-                    "external_effect_status": (
-                        cancellation.external_effect_status
-                        if cancellation is not None
-                        else "unknown"
-                    ),
-                },
-            )
-            return {
-                "status": (
-                    str(cancellation.status)
-                    if cancellation is not None
-                    else "unchanged"
-                ),
-                "external_effect_status": (
-                    cancellation.external_effect_status
-                    if cancellation is not None
-                    else "unknown"
-                ),
-            }
+        """执行取消或 Root 命令，并委托对应分支完成状态收敛。
+
+        Args:
+            command: 已从命令队列领取的运行命令。
+
+        Returns:
+            已完成命令的结果；等待 Root Resume 时返回 None。
+
+        Raises:
+            Exception: 生命周期、事件或命令仓储操作失败时透传。
+        """
+        if command.command_type == CommandType.RUN_CANCEL:
+            return await self._execute_cancellation(command)
         if not command.run_id:
             await self._commands.complete_command(
                 command.command_id,
@@ -118,8 +67,68 @@ class RunExecutionService:
                 error={"code": "run_id_required"},
             )
             return None
+
+        return await self._execute_run(command, command.run_id)
+
+    async def _execute_cancellation(
+        self, command: RunCommand
+    ) -> dict[str, object]:
+        """先持久化取消栅栏，再停止 Root 并完成取消命令。"""
+        cancellation: RunCancellationResult | None = None
+        if command.run_id:
+            cancellation = await self._lifecycle.cancel(
+                command.run_id,
+                reason=str(command.payload.get("reason", "USER_REQUEST")),
+            )
+
+        # 数据库事务先设置取消栅栏，之后才中断 Root，避免新 Worker 越过取消边界。
+        cancel_error: Exception | None = None
+        try:
+            await self._executor.cancel(command.run_id)
+        except Exception as error:
+            cancel_error = error
+
+        if (
+            command.run_id
+            and cancellation is not None
+            and cancellation.changed
+            and not self._lifecycle.writes_cancellation_events_to_outbox
+        ):
+            event_type = (
+                EventType.RUN_CANCELLING
+                if cancellation.status == RunStatus.CANCELLING
+                else EventType.RUN_CANCELLED
+            )
+            await self._publish(
+                command,
+                event_type,
+                payload={
+                    **self._run_payload(command, cancellation.status.value),
+                    "external_effect_status": cancellation.external_effect_status,
+                },
+            )
+
+        if cancel_error is not None:
+            raise cancel_error
+        result: dict[str, object] = {
+            "status": cancellation.status.value if cancellation else "unchanged",
+            "external_effect_status": (
+                cancellation.external_effect_status if cancellation else "unknown"
+            ),
+        }
+        await self._commands.complete_command(
+            command.command_id,
+            status=CommandStatus.COMPLETED,
+            result=result,
+        )
+        return result
+
+    async def _execute_run(
+        self, command: RunCommand, run_id: str
+    ) -> dict[str, object] | None:
+        """执行一次 Run/Resume，并按结果分派等待、失败或完成收敛。"""
         started = await self._lifecycle.update_status(
-            command.run_id, RunStatus.RUNNING
+            run_id, RunStatus.RUNNING
         )
         if not started:
             result = {"status": RunStatus.CANCELLED.value}
@@ -129,17 +138,19 @@ class RunExecutionService:
                 result=result,
             )
             return result
-        if command.run_id not in self._run_started:
-            self._run_started[command.run_id] = (datetime.now(timezone.utc), perf_counter())
+        if run_id not in self._run_started:
+            self._run_started[run_id] = (datetime.now(timezone.utc), perf_counter())
         start_event = (
             EventType.RUN_RESUMED
-            if command.command_type.value == CommandType.RUN_RESUME.value
+            if command.command_type == CommandType.RUN_RESUME
             else EventType.RUN_STARTED
         )
         await self._publish(
             command,
             start_event,
-            payload=self._run_payload(command, "running", started_at=self._run_started[command.run_id][0]),
+            payload=self._run_payload(
+                command, "running", started_at=self._run_started[run_id][0]
+            ),
         )
         try:
             outcome = await self._executor.execute(command)
@@ -148,42 +159,31 @@ class RunExecutionService:
                 command,
                 {"code": "run_failed", "message": str(exc) or type(exc).__name__},
             )
-            return
-        if outcome.waiting:
-            self._waiting_commands[command.run_id] = command.command_id
-            await self._arm_root_wait(command.run_id, outcome.result)
-            await self._publish(command, EventType.RUN_ROOT_SUSPENDED, payload=self._run_payload(command, "waiting"))
             return None
-        if outcome.error is not None:
-            await self.fail(
+        if outcome.root_wait is not None:
+            await self._arm_root_wait(run_id, outcome.root_wait)
+            self._waiting_commands[run_id] = command.command_id
+            await self._publish(
                 command,
-                (
-                    outcome.error
-                    if isinstance(outcome.error, dict)
-                    else {"message": str(outcome.error)}
-                ),
+                EventType.RUN_ROOT_SUSPENDED,
+                payload=self._run_payload(command, "waiting"),
             )
             return None
-        result = (
-            dict(outcome.result)
-            if isinstance(outcome.result, dict)
-            else {"result": outcome.result}
-        )
-        await self._lifecycle.complete(command.run_id, result)
-        if not getattr(
-            self._lifecycle, "writes_completion_artifacts_to_outbox", False
-        ):
+        if outcome.error is not None:
+            await self.fail(command, outcome.error)
+            return None
+        result = outcome.result or {}
+        await self._lifecycle.complete(run_id, result)
+        if not self._lifecycle.writes_completion_artifacts_to_outbox:
             await self._publish_result_message(command, result)
             await self._enqueue_memory(command, result)
             await self._publish(
                 command,
                 EventType.RUN_COMPLETED,
-                payload=self._run_payload(
-                    command, "completed", summary="运行已完成"
-                ),
+                payload=self._run_payload(command, "completed", summary="运行已完成"),
             )
-        self._run_started.pop(command.run_id, None)
-        original_command_id = self._waiting_commands.pop(command.run_id, None)
+        self._run_started.pop(run_id, None)
+        original_command_id = self._waiting_commands.pop(run_id, None)
         await self._commands.complete_command(
             command.command_id, status=CommandStatus.COMPLETED, result=result
         )
@@ -191,36 +191,39 @@ class RunExecutionService:
             await self._commands.complete_command(
                 original_command_id, status=CommandStatus.COMPLETED, result=result
             )
-        converge = getattr(self._commands, "complete_active_command_for_run", None)
-        if converge is not None:
-            await converge(command.run_id, status=CommandStatus.COMPLETED, result=result)
+        await self._commands.complete_active_command_for_run(
+            run_id, status=CommandStatus.COMPLETED, result=result
+        )
         return result
 
-    async def _arm_root_wait(self, run_id: str, result: object) -> None:
-        """Persist the exact Round interrupt before a resume worker can claim it."""
-        arm = getattr(self._lifecycle, "arm_root_wait", None)
-        if not callable(arm) or not isinstance(result, dict):
-            return
-        interrupts = result.get("__interrupt__", ())
-        if not isinstance(interrupts, (list, tuple)) or len(interrupts) != 1:
-            return
-        interrupt = interrupts[0]
-        value = getattr(interrupt, "value", None)
-        checkpoint_id = result.get("__root_checkpoint_id__")
-        if (
-            not isinstance(value, dict)
-            or value.get("type") != "round_wait"
-            or not checkpoint_id
-        ):
-            return
-        await arm(
+    async def _arm_root_wait(
+        self, run_id: str, root_wait: RootWaitCheckpoint
+    ) -> None:
+        """登记已由 LangGraph 适配器验证的中断身份。
+
+        Args:
+            run_id: 当前运行 ID。
+            root_wait: 包含 Run、Plan、Round、interrupt 和 checkpoint 身份的数据。
+
+        Returns:
+            成功登记时不返回值。
+
+        Raises:
+            ValueError: 等待身份不属于当前 Run。
+            RuntimeError: 仓储拒绝登记该 checkpoint。
+        """
+        if root_wait.run_id != run_id:
+            raise ValueError("root_wait_run_identity_mismatch")
+        armed = await self._lifecycle.arm_root_wait(
             run_id,
-            plan_id=str(value.get("plan_id", "")),
-            round_id=str(value.get("round_id", "")),
-            plan_version=int(value.get("plan_version", 0)),
-            interrupt_id=str(getattr(interrupt, "id", "")),
-            checkpoint_id=str(checkpoint_id),
+            plan_id=root_wait.plan_id,
+            round_id=root_wait.round_id,
+            plan_version=root_wait.plan_version,
+            interrupt_id=root_wait.interrupt_id,
+            checkpoint_id=root_wait.checkpoint_id,
         )
+        if not armed:
+            raise RuntimeError("root_wait_checkpoint_not_armed")
 
     async def fail(self, command: RunCommand, error: dict[str, object]) -> None:
         if command.run_id:
@@ -235,9 +238,10 @@ class RunExecutionService:
             await self._commands.complete_command(
                 original_command_id, status=CommandStatus.FAILED, error=error
             )
-        converge = getattr(self._commands, "complete_active_command_for_run", None)
-        if converge is not None:
-            await converge(command.run_id, status=CommandStatus.FAILED, error=error)
+        if command.run_id:
+            await self._commands.complete_active_command_for_run(
+                command.run_id, status=CommandStatus.FAILED, error=error
+            )
 
     async def _publish(
         self,

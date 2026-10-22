@@ -157,6 +157,17 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
         )
         receipt = await commands.submit_plan(submit, plan, tasks)
         assert set(receipt.task_ids) == {"task-a", "task-b"}
+        async with session_factory() as session:
+            created_event = await session.scalar(
+                select(OrchestrationOutboxModel).where(
+                    OrchestrationOutboxModel.dedupe_key
+                    == f"plan:{plan_id}:created"
+                )
+            )
+        assert created_event is not None
+        assert created_event.event_type == "PlanCreated"
+        assert created_event.payload_json["task_ids"] == list(plan.task_ids)
+        assert created_event.payload_json["tasks"][0]["task_id"] == "task-a"
         round_id = receipt.round_id
 
         worker_jobs = PostgresWorkerJobRepository(

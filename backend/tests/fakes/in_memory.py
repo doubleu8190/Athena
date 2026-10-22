@@ -119,10 +119,14 @@ class InMemoryRunStore(
     RunLifecyclePort,
     RunQueryPort,
 ):
+    writes_cancellation_events_to_outbox = False
+    writes_completion_artifacts_to_outbox = False
+
     def __init__(self) -> None:
         self.commands: dict[str, RunCommand] = {}
         self.command_status: dict[str, CommandStatusRecord] = {}
         self.runs: dict[str, RunSummary] = {}
+        self.root_waits: dict[str, dict[str, object]] = {}
 
     async def enqueue_command(self, command: RunCommand) -> CommandEnqueueResult:
         existing = self.command_status.get(command.command_id)
@@ -160,6 +164,27 @@ class InMemoryRunStore(
         if current:
             self.command_status[command_id] = replace(current, status=status, result=result, error=error)
 
+    async def complete_active_command_for_run(
+        self,
+        run_id: str,
+        *,
+        status: CommandStatus,
+        result: object = None,
+        error: object = None,
+    ) -> bool:
+        active = next(
+            (
+                command_id
+                for command_id, record in self.command_status.items()
+                if record.run_id == run_id and record.status == CommandStatus.RUNNING
+            ),
+            None,
+        )
+        if active is None:
+            return False
+        await self.complete_command(active, status=status, result=result, error=error)
+        return True
+
     async def update_status(self, run_id: str, status: RunStatus | str) -> bool:
         current = self.runs.get(run_id)
         if current is None:
@@ -172,6 +197,33 @@ class InMemoryRunStore(
 
     async def fail(self, run_id: str, error: dict[str, object]) -> bool:
         return await self.update_status(run_id, RunStatus.FAILED)
+
+    async def arm_root_wait(
+        self,
+        run_id: str,
+        *,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+        interrupt_id: str,
+        checkpoint_id: str,
+    ) -> bool:
+        run = self.runs.get(run_id)
+        if (
+            run is None
+            or run.status != RunStatus.RUNNING
+            or not all((plan_id, round_id, interrupt_id, checkpoint_id))
+            or plan_version < 1
+        ):
+            return False
+        self.root_waits[run_id] = {
+            "plan_id": plan_id,
+            "round_id": round_id,
+            "plan_version": plan_version,
+            "interrupt_id": interrupt_id,
+            "checkpoint_id": checkpoint_id,
+        }
+        return True
 
     async def cancel(self, run_id: str) -> bool:
         return await self.update_status(run_id, RunStatus.CANCELLED)

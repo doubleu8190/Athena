@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
 from typing import Any, TypedDict
 
 
@@ -48,21 +47,4 @@ class WorkerGraphState(TypedDict, total=False):
     pending_approval: dict[str, Any] | None
 
 
-def json_value(value: Any) -> Any:
-    """Convert common domain values to checkpoint-safe JSON values."""
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if is_dataclass(value):
-        return json_value(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [json_value(item) for item in value]
-    if hasattr(value, "value") and isinstance(value.value, (str, int, float, bool)):
-        return value.value
-    if hasattr(value, "__dict__"):
-        return json_value(vars(value))
-    return str(value)
-
-
-__all__ = ["RootGraphState", "WorkerGraphState", "json_value"]
+__all__ = ["RootGraphState", "WorkerGraphState"]

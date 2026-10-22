@@ -476,14 +476,14 @@ async def test_worker_terminal_commit_with_lost_receipt_is_deduplicated() -> Non
         )
 
         class LoseReceiptAfterCommit:
-            async def apply_terminal_event(self, value):
+            async def apply_worker_terminal_event(self, value):
                 receipt = await repository.apply_worker_terminal_event(value)
                 assert receipt.accepted
                 raise RuntimeError("simulated lost Worker terminal receipt")
 
         handler = LoseReceiptAfterCommit()
         with pytest.raises(RuntimeError, match="simulated lost Worker terminal receipt"):
-            await handler.apply_terminal_event(event)
+            await handler.apply_worker_terminal_event(event)
 
         async with session_factory() as session:
             task = await session.get(AgentTaskModel, lease.task_id)

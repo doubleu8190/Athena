@@ -10,14 +10,13 @@ from domain.integrations import LLMPort
 from domain.memory import (
     CompletedTurn,
     MemoryCandidate,
-    MemoryFactExtractorPort,
     MemoryListRequest,
     MemoryRepositoryPort,
     MemoryResolution,
-    MemoryResolverPort,
-    MemoryWriteTriggerPort,
     ResolutionAction,
 )
+
+from application.memory.ports import MemoryFactExtractor, MemoryResolver, MemoryWriteTrigger
 
 _PROMPT_ROOT = Path(__file__).resolve().parents[3] / "prompt"
 _CATEGORIES = {
@@ -72,7 +71,7 @@ def _candidate_key(content: str) -> str:
     return content.split(":", 1)[0].strip().lower() if ":" in content else ""
 
 
-class DefaultMemoryWriteTrigger(MemoryWriteTriggerPort):
+class DefaultMemoryWriteTrigger(MemoryWriteTrigger):
     """Process every non-empty completed user turn."""
 
     def should_process(self, turn: CompletedTurn) -> bool:
@@ -80,7 +79,7 @@ class DefaultMemoryWriteTrigger(MemoryWriteTriggerPort):
         return bool(text) and not text.startswith("/") and len(text) <= 20_000
 
 
-class LLMFactExtractor(MemoryFactExtractorPort):
+class LLMFactExtractor(MemoryFactExtractor):
     """Extract explicit, durable user facts with the configured secondary LLM."""
 
     def __init__(
@@ -158,7 +157,7 @@ class LLMFactExtractor(MemoryFactExtractorPort):
         )
 
 
-class LLMMemoryResolver(MemoryResolverPort):
+class LLMMemoryResolver(MemoryResolver):
     """Deduplicate candidates and decide CREATE, UPDATE or IGNORE."""
 
     def __init__(

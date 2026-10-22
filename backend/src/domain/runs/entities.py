@@ -89,12 +89,42 @@ class CommandEnqueueResult:
 
 
 @dataclass(frozen=True, slots=True)
-class CommandExecutionResult:
-    """执行器返回的稳定结果。"""
+class RootWaitCheckpoint:
+    """由 Root Graph 中断产生、用于登记恢复位置的身份信息。"""
 
-    result: Any = None
-    error: Any = None
-    waiting: bool = False
+    run_id: str
+    plan_id: str
+    round_id: str
+    plan_version: int
+    interrupt_id: str
+    checkpoint_id: str
+
+    def __post_init__(self) -> None:
+        identity = (
+            self.run_id,
+            self.plan_id,
+            self.round_id,
+            self.interrupt_id,
+            self.checkpoint_id,
+        )
+        if any(not isinstance(value, str) or not value.strip() for value in identity):
+            raise ValueError("Root wait identity fields must not be empty")
+        if type(self.plan_version) is not int or self.plan_version < 1:
+            raise ValueError("plan_version must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class CommandExecutionResult:
+    """执行器返回的结果；等待时必须携带经过验证的 Root checkpoint。"""
+
+    result: dict[str, object] | None = None
+    error: dict[str, object] | None = None
+    root_wait: RootWaitCheckpoint | None = None
+
+    @property
+    def waiting(self) -> bool:
+        """Whether the executor suspended at a durable Root checkpoint."""
+        return self.root_wait is not None
 
 
 @dataclass(frozen=True, slots=True)

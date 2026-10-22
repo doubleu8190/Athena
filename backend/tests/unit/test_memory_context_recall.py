@@ -10,7 +10,7 @@ from application.memory.retrieval_service import MemoryContextProvider
 from application.runs.context import ContextPlan
 from application.runs.task_understanding import TaskUnderstandingService
 from domain.memory import MemoryRecord, MemorySearchRequest
-from application.orchestration.langgraph.runtime.root_agent import ConfiguredRootAgent
+from application.orchestration.agents.root_agent import ConfiguredRootAgent
 
 
 class MemoryRepository:

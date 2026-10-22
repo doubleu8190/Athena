@@ -7,7 +7,7 @@ import json
 from math import isfinite
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -58,6 +58,17 @@ class OrchestrationCommandConflict(ValueError):
     """相同命令幂等键被不同内容复用。"""
 
 
+@dataclass(frozen=True, slots=True)
+class _LockedReviewRows:
+    """校验完成且已按命令顺序锁定的 Review 持久化状态。"""
+
+    run: AgentRunModel
+    plan: AgentPlanModel
+    round: PlanRoundModel
+    version: PlanVersionModel
+    task_by_id: dict[str, AgentTaskModel]
+
+
 class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
     """在事务中保存 Plan、版本、首轮、执行作业和可靠事件。"""
 
@@ -87,21 +98,64 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         plan: Plan,
         tasks: list[Task],
     ) -> CommandReceipt:
-        """原子创建 Plan Version 1、首个 Round 和对应 Worker Jobs。
+        """在同一事务中接受首版 Plan、冻结首轮並建立 Worker Jobs。
 
         Args:
             command: SubmitPlan 命令，correlation_id 指向 Run。
-            plan: 经应用层验证且绑定 run_id/session_id 的 Plan。
-            tasks: Plan 中全部 Task 定义。
+            plan: 已绑定 run_id 和 session_id 的计划。
+            tasks: 计划中的完整 Task 定义。
 
         Returns:
-            固定回执；相同幂等键和内容的重试会返回原回执。
+            首次接受或幂等重放的命令回执。
 
         Raises:
-            ValueError: 命令类型、Plan 版本或关联 ID 不合法。
-            OrchestrationCommandConflict: 幂等键已用于其他请求内容。
+            ValueError: 命令与计划身份或版本不合法。
+            OrchestrationCommandConflict: 幂等键已对应其他请求内容。
             PlanCommandRejected: Run 不存在、已停止或已有 Plan。
         """
+        self._validate_submit_plan(command, plan)
+        now = self._clock()
+        command_hash = _plan_hash(command, plan, tasks)
+        async with self._session_factory() as session:
+            async with session.begin():
+                run, prior_receipt = await self._lock_submit_plan_run(
+                    session, command=command, plan=plan, command_hash=command_hash
+                )
+                if prior_receipt is not None:
+                    return prior_receipt
+
+                round_snapshot, receipt, task_rows = await self._insert_initial_plan_rows(
+                    session,
+                    command=command,
+                    plan=plan,
+                    tasks=tasks,
+                    now=now,
+                )
+                self._schedule_initial_round(
+                    session,
+                    plan=plan,
+                    round_snapshot=round_snapshot,
+                    task_rows=task_rows,
+                    now=now,
+                )
+                self._record_plan_submission(
+                    session,
+                    run=run,
+                    command=command,
+                    plan=plan,
+                    tasks=tasks,
+                    command_hash=command_hash,
+                    round_snapshot=round_snapshot,
+                    receipt=receipt,
+                    now=now,
+                )
+                return receipt
+
+    @staticmethod
+    def _validate_submit_plan(
+        command: OrchestrationCommand, plan: Plan
+    ) -> None:
+        """在打开事务前校验 SubmitPlan 的静态身份约束。"""
         if command.command_type != OrchestrationCommandType.SUBMIT_PLAN:
             raise ValueError("submit_plan requires a SubmitPlan command")
         if plan.run_id != command.correlation_id or plan.plan_id != command.plan_id:
@@ -113,8 +167,330 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         if not plan.session_id:
             raise ValueError("plan.session_id is required")
 
+    async def _lock_submit_plan_run(
+        self,
+        session: AsyncSession,
+        *,
+        command: OrchestrationCommand,
+        plan: Plan,
+        command_hash: str,
+    ) -> tuple[AgentRunModel, CommandReceipt | None]:
+        """先锁 Run，再检查幂等回执和计划接收条件。"""
+        run = await session.get(
+            AgentRunModel, command.correlation_id, with_for_update=True
+        )
+        if run is None:
+            raise PlanCommandRejected("run_not_found")
+        prior = (
+            await session.execute(
+                select(OrchestrationCommandModel)
+                .where(
+                    OrchestrationCommandModel.scope_key == command.scope_key,
+                    OrchestrationCommandModel.idempotency_key
+                    == command.idempotency_key,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if prior is not None:
+            if prior.payload_hash != command_hash:
+                raise OrchestrationCommandConflict(
+                    "idempotency_key_reused_with_different_payload"
+                )
+            return run, _receipt(prior.result_json, deduplicated=True)
+
+        if run.status not in {"created", "running"}:
+            raise PlanCommandRejected("run_not_active")
+        if run.session_id != plan.session_id:
+            raise PlanCommandRejected("run_session_mismatch")
+        existing = (
+            await session.execute(
+                select(AgentPlanModel.plan_id).where(
+                    AgentPlanModel.run_id == plan.run_id
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise PlanCommandRejected("plan_already_exists")
+        return run, None
+
+    async def _insert_initial_plan_rows(
+        self,
+        session: AsyncSession,
+        *,
+        command: OrchestrationCommand,
+        plan: Plan,
+        tasks: list[Task],
+        now: datetime,
+    ) -> tuple[PlanRound, CommandReceipt, dict[str, AgentTaskModel]]:
+        """创建首版 Plan、不可变 DAG、任务和首轮记录。"""
+        initial_states = {task.task_id: TaskStatus.PENDING.value for task in tasks}
+        plan_document = _plan_document(plan, tasks, version=1)
+        round_snapshot = freeze_ready_round(
+            plan,
+            plan_version=1,
+            round_number=1,
+            round_id=self._id_factory(),
+            task_states=initial_states,
+            created_at=now,
+        )
+        receipt = CommandReceipt(
+            message_id=command.message_id,
+            plan_id=plan.plan_id,
+            plan_version=1,
+            round_id=round_snapshot.round_id,
+            task_ids=round_snapshot.task_ids,
+        )
+        session.add(
+            AgentPlanModel(
+                plan_id=plan.plan_id,
+                run_id=plan.run_id,
+                session_id=plan.session_id,
+                status=PlanStatus.RUNNING.value,
+                user_goal=plan.goal,
+                max_parallelism=plan.max_parallelism,
+                current_version=1,
+                active_round_id=round_snapshot.round_id,
+                cancellation_epoch=0,
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+            )
+        )
+        # 显式 flush 保证无 ORM relationship 时复合外键目标先于引用行落库。
+        await session.flush()
+        session.add(
+            PlanVersionModel(
+                plan_id=plan.plan_id,
+                version=1,
+                dag_json=plan_document,
+                change_reason=None,
+                based_on_round_id=None,
+                created_at=now,
+            )
+        )
+        await session.flush()
+
+        task_rows = {
+            task.task_id: AgentTaskModel(
+                task_id=task.task_id,
+                plan_id=plan.plan_id,
+                run_id=plan.run_id,
+                title=task.title,
+                objective=task.objective,
+                input_json=json.dumps(
+                    dict(task.input), ensure_ascii=False, default=_json_default
+                ),
+                expected_output_json=json.dumps(
+                    dict(task.expected_output),
+                    ensure_ascii=False,
+                    default=_json_default,
+                ),
+                allowed_tools_json=json.dumps(
+                    list(task.allowed_tools), ensure_ascii=False
+                ),
+                worker_type=task.worker_type,
+                timeout_seconds=task.timeout_seconds,
+                status="pending",
+                execution_generation=1,
+                worker_thread_id=f"task:{task.task_id}:exec:1",
+                llm_turn_count=0,
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+            )
+            for task in tasks
+        }
+        session.add_all(list(task_rows.values()))
+        session.add(
+            PlanRoundModel(
+                round_id=round_snapshot.round_id,
+                plan_id=plan.plan_id,
+                plan_version=round_snapshot.plan_version,
+                round_number=round_snapshot.round_number,
+                status=RoundStatus.RUNNING.value,
+                expected_task_count=len(round_snapshot.task_ids),
+                terminal_task_count=0,
+                created_at=now,
+            )
+        )
+        await session.flush()
+        return round_snapshot, receipt, task_rows
+
+    def _schedule_initial_round(
+        self,
+        session: AsyncSession,
+        *,
+        plan: Plan,
+        round_snapshot: PlanRound,
+        task_rows: dict[str, AgentTaskModel],
+        now: datetime,
+    ) -> None:
+        """为首轮就绪任务写入 RoundTask、Execution 和待领取 Job。"""
+        execution_rows: list[TaskExecutionModel] = []
+        job_rows: list[WorkerJobModel] = []
+        for task_id in round_snapshot.task_ids:
+            execution_id = self._id_factory()
+            worker_thread_id = f"task:{task_id}:exec:1"
+            attempt = TaskAttempt(
+                execution_id=execution_id,
+                task_id=task_id,
+                round_id=round_snapshot.round_id,
+                attempt=1,
+                worker_thread_id=worker_thread_id,
+                fencing_token=1,
+                status=ExecutionStatus.QUEUED,
+            )
+            session.add(
+                RoundTaskModel(
+                    round_id=round_snapshot.round_id,
+                    task_id=task_id,
+                    status="pending",
+                    active_execution_id=attempt.execution_id,
+                )
+            )
+            task_rows[task_id].active_execution_id = attempt.execution_id
+            execution_rows.append(
+                TaskExecutionModel(
+                    execution_id=attempt.execution_id,
+                    round_id=attempt.round_id,
+                    task_id=attempt.task_id,
+                    attempt=attempt.attempt,
+                    worker_thread_id=attempt.worker_thread_id,
+                    status=attempt.status.value,
+                    fencing_token=attempt.fencing_token,
+                    cancellation_epoch=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            job_rows.append(
+                WorkerJobModel(
+                    job_id=self._id_factory(),
+                    dedupe_key=f"execute:{attempt.execution_id}",
+                    job_type="execute",
+                    execution_id=attempt.execution_id,
+                    payload_json={
+                        "plan_id": plan.plan_id,
+                        "round_id": round_snapshot.round_id,
+                        "task_id": task_id,
+                    },
+                    status="pending",
+                    attempt=0,
+                    available_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        session.add_all(execution_rows + job_rows)
+
+    def _record_plan_submission(
+        self,
+        session: AsyncSession,
+        *,
+        run: AgentRunModel,
+        command: OrchestrationCommand,
+        plan: Plan,
+        tasks: list[Task],
+        command_hash: str,
+        round_snapshot: PlanRound,
+        receipt: CommandReceipt,
+        now: datetime,
+    ) -> None:
+        """在首轮记录完成后写入 Run、幂等回执和接受事件。"""
+        run.status = "running"
+        run.updated_at = now.isoformat()
+        session.add(
+            OrchestrationCommandModel(
+                message_id=command.message_id,
+                scope_key=command.scope_key,
+                idempotency_key=command.idempotency_key,
+                payload_hash=command_hash,
+                command_type=command.command_type.value,
+                plan_id=plan.plan_id,
+                plan_version=1,
+                round_id=round_snapshot.round_id,
+                status="accepted",
+                result_json=_receipt_document(receipt),
+                created_at=now,
+            )
+        )
+        self._write_outbox(
+            session,
+            command,
+            event_type="PlanAccepted",
+            dedupe_key=f"plan:{plan.plan_id}:accepted",
+            round_snapshot=round_snapshot,
+            payload={"task_ids": list(plan.task_ids)},
+            now=now,
+        )
+        self._write_outbox(
+            session,
+            command,
+            event_type="RoundStarted",
+            dedupe_key=f"round:{round_snapshot.round_id}:started",
+            round_snapshot=round_snapshot,
+            payload={"task_ids": list(round_snapshot.task_ids)},
+            now=now,
+        )
+        self._write_outbox(
+            session,
+            command,
+            event_type="PlanCreated",
+            dedupe_key=f"plan:{plan.plan_id}:created",
+            round_snapshot=round_snapshot,
+            payload={
+                "activity_id": f"plan:{plan.plan_id}",
+                "activity_type": "plan",
+                "name": "execution_plan",
+                "parent_activity_id": f"run:{plan.run_id or ''}",
+                "plan_id": plan.plan_id,
+                "goal": plan.goal,
+                "status": "running",
+                "task_ids": list(plan.task_ids),
+                "edges": [
+                    {
+                        "from_task_id": edge.from_task_id,
+                        "to_task_id": edge.to_task_id,
+                    }
+                    for edge in plan.edges
+                ],
+                "tasks": [
+                    {
+                        "task_id": task.task_id,
+                        "title": task.title,
+                        "objective": task.objective,
+                        "input": dict(task.input),
+                        "expected_output": dict(task.expected_output),
+                        "allowed_tools": list(task.allowed_tools),
+                        "worker_type": task.worker_type,
+                        "timeout_seconds": task.timeout_seconds,
+                    }
+                    for task in tasks
+                ],
+            },
+            now=now,
+        )
+
+    async def apply_review_decision(
+        self,
+        command: OrchestrationCommand,
+        decision: ReviewDecision,
+    ) -> CommandReceipt:
+        """在单一事务内应用 Review 决策并登记幂等回执。
+
+        Args:
+            command: 绑定 Run、Plan、版本和已完成 Round 的命令。
+            decision: Root 选择的 Continue、Replan 或 Finish 动作。
+
+        Returns:
+            已应用动作对应的命令回执；重复命令返回原回执。
+
+        Raises:
+            PlanCommandRejected: 命令身份、Round 状态或计划转换不合法时。
+            OrchestrationCommandConflict: 幂等键被不同决策复用时。
+        """
+        self._validate_review_command(command, decision)
+        command_hash = _review_command_hash(command, decision)
         now = self._clock()
-        command_hash = _plan_hash(command, plan, tasks)
         async with self._session_factory() as session:
             async with session.begin():
                 run = await session.get(
@@ -122,240 +498,38 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                 )
                 if run is None:
                     raise PlanCommandRejected("run_not_found")
+                prior_receipt = await self._existing_review_receipt(
+                    session, command=command, command_hash=command_hash
+                )
+                if prior_receipt is not None:
+                    return prior_receipt
+                rows = await self._lock_review_rows(
+                    session, command=command, run=run
+                )
 
-                prior = (
-                    await session.execute(
-                        select(OrchestrationCommandModel)
-                        .where(
-                            OrchestrationCommandModel.scope_key == command.scope_key,
-                            OrchestrationCommandModel.idempotency_key
-                            == command.idempotency_key,
-                        )
-                        .with_for_update()
+                if decision.action == ReviewAction.FINISH:
+                    receipt = self._finish_reviewed_plan(
+                        session, command, decision, rows, now
                     )
-                ).scalar_one_or_none()
-                if prior is not None:
-                    if prior.payload_hash != command_hash:
-                        raise OrchestrationCommandConflict(
-                            "idempotency_key_reused_with_different_payload"
-                        )
-                    return _receipt(prior.result_json, deduplicated=True)
-
-                if run.status not in {"created", "running"}:
-                    raise PlanCommandRejected("run_not_active")
-                if run.session_id != plan.session_id:
-                    raise PlanCommandRejected("run_session_mismatch")
-                existing = (
-                    await session.execute(
-                        select(AgentPlanModel.plan_id).where(
-                            AgentPlanModel.run_id == plan.run_id
-                        )
+                else:
+                    receipt = await self._schedule_reviewed_plan(
+                        session, command, decision, rows, now
                     )
-                ).scalar_one_or_none()
-                if existing is not None:
-                    raise PlanCommandRejected("plan_already_exists")
-
-                initial_states = {task.task_id: TaskStatus.PENDING.value for task in tasks}
-                plan_document = _plan_document(plan, tasks, version=1)
-                plan_version = PlanVersion(
-                    plan_id=plan.plan_id,
-                    version=1,
-                    dag=plan_document,
-                    created_at=now,
-                )
-                round_id = self._id_factory()
-                round_snapshot = freeze_ready_round(
-                    plan,
-                    plan_version=plan_version.version,
-                    round_number=1,
-                    round_id=round_id,
-                    task_states=initial_states,
-                    created_at=now,
-                )
-                receipt = CommandReceipt(
-                    message_id=command.message_id,
-                    plan_id=plan.plan_id,
-                    plan_version=plan_version.version,
-                    round_id=round_snapshot.round_id,
-                    task_ids=round_snapshot.task_ids,
-                )
-                plan_row = AgentPlanModel(
-                    plan_id=plan.plan_id,
-                    run_id=plan.run_id,
-                    session_id=plan.session_id,
-                    status=PlanStatus.RUNNING.value,
-                    user_goal=plan.goal,
-                    max_parallelism=plan.max_parallelism,
-                    current_version=1,
-                    active_round_id=round_snapshot.round_id,
-                    cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
-                )
-                session.add(plan_row)
-                # Bare ORM instances are not linked by relationships, so make
-                # the referenced Plan visible before inserting PlanVersion.
-                await session.flush()
-                session.add(
-                    PlanVersionModel(
-                        plan_id=plan.plan_id,
-                        version=1,
-                        dag_json=plan_document,
-                        change_reason=None,
-                        based_on_round_id=None,
-                        created_at=now,
-                    )
-                )
-                # Flush the composite FK target before the first Round row is
-                # queued; bare ORM objects here have no relationship mapping
-                # for the unit of work to order reliably.
-                await session.flush()
-                task_rows = {
-                    task.task_id: AgentTaskModel(
-                        task_id=task.task_id,
-                        plan_id=plan.plan_id,
-                        run_id=plan.run_id,
-                        title=task.title,
-                        objective=task.objective,
-                        input_json=json.dumps(
-                            dict(task.input),
-                            ensure_ascii=False,
-                            default=_json_default,
-                        ),
-                        expected_output_json=json.dumps(
-                            dict(task.expected_output),
-                            ensure_ascii=False,
-                            default=_json_default,
-                        ),
-                        allowed_tools_json=json.dumps(
-                            list(task.allowed_tools), ensure_ascii=False
-                        ),
-                        worker_type=task.worker_type,
-                        timeout_seconds=task.timeout_seconds,
-                        status="pending",
-                        execution_generation=1,
-                        worker_thread_id=f"task:{task.task_id}:exec:1",
-                        llm_turn_count=0,
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
-                    )
-                    for task in tasks
-                }
-                session.add_all(list(task_rows.values()))
-                session.add(
-                    PlanRoundModel(
-                        round_id=round_snapshot.round_id,
-                        plan_id=plan.plan_id,
-                        plan_version=round_snapshot.plan_version,
-                        round_number=round_snapshot.round_number,
-                        status=RoundStatus.RUNNING.value,
-                        expected_task_count=len(round_snapshot.task_ids),
-                        terminal_task_count=0,
-                        created_at=now,
-                    )
-                )
-                await session.flush()
-
-                execution_rows: list[TaskExecutionModel] = []
-                job_rows: list[WorkerJobModel] = []
-                for task_id in round_snapshot.task_ids:
-                    execution_id = self._id_factory()
-                    worker_thread_id = f"task:{task_id}:exec:1"
-                    attempt = TaskAttempt(
-                        execution_id=execution_id,
-                        task_id=task_id,
-                        round_id=round_snapshot.round_id,
-                        attempt=1,
-                        worker_thread_id=worker_thread_id,
-                        fencing_token=1,
-                        status=ExecutionStatus.QUEUED,
-                    )
-                    session.add(
-                        RoundTaskModel(
-                            round_id=round_snapshot.round_id,
-                            task_id=task_id,
-                            status="pending",
-                            active_execution_id=attempt.execution_id,
-                        )
-                    )
-                    task_row = task_rows[task_id]
-                    task_row.active_execution_id = attempt.execution_id
-                    execution_rows.append(
-                        TaskExecutionModel(
-                            execution_id=attempt.execution_id,
-                            round_id=attempt.round_id,
-                            task_id=attempt.task_id,
-                            attempt=attempt.attempt,
-                            worker_thread_id=attempt.worker_thread_id,
-                            status=attempt.status.value,
-                            fencing_token=attempt.fencing_token,
-                            cancellation_epoch=0,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    )
-                    job_rows.append(
-                        WorkerJobModel(
-                            job_id=self._id_factory(),
-                            dedupe_key=f"execute:{attempt.execution_id}",
-                            job_type="execute",
-                            execution_id=attempt.execution_id,
-                            payload_json={
-                                "plan_id": plan.plan_id,
-                                "round_id": round_snapshot.round_id,
-                                "task_id": task_id,
-                            },
-                            status="pending",
-                            attempt=0,
-                            available_at=now,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    )
-                session.add_all(execution_rows + job_rows)
-                run.status = "running"
-                run.updated_at = now.isoformat()
-                session.add(
-                    OrchestrationCommandModel(
-                        message_id=command.message_id,
-                        scope_key=command.scope_key,
-                        idempotency_key=command.idempotency_key,
-                        payload_hash=command_hash,
-                        command_type=command.command_type.value,
-                        plan_id=plan.plan_id,
-                        plan_version=1,
-                        round_id=round_snapshot.round_id,
-                        status="accepted",
-                        result_json=_receipt_document(receipt),
-                        created_at=now,
-                    )
-                )
-                self._write_outbox(
+                self._record_review_command(
                     session,
-                    command,
-                    event_type="PlanAccepted",
-                    dedupe_key=f"plan:{plan.plan_id}:accepted",
-                    round_snapshot=round_snapshot,
-                    payload={"task_ids": list(plan.task_ids)},
-                    now=now,
-                )
-                self._write_outbox(
-                    session,
-                    command,
-                    event_type="RoundStarted",
-                    dedupe_key=f"round:{round_snapshot.round_id}:started",
-                    round_snapshot=round_snapshot,
-                    payload={"task_ids": list(round_snapshot.task_ids)},
+                    command=command,
+                    decision=decision,
+                    command_hash=command_hash,
+                    receipt=receipt,
                     now=now,
                 )
                 return receipt
 
-    async def apply_review_decision(
-        self,
-        command: OrchestrationCommand,
-        decision: ReviewDecision,
-    ) -> CommandReceipt:
-        """Atomically apply a round-scoped Root decision and schedule its next round."""
+    @staticmethod
+    def _validate_review_command(
+        command: OrchestrationCommand, decision: ReviewDecision
+    ) -> None:
+        """校验决策类型、Round 身份和 Plan Revision 版本。"""
         expected_type = {
             ReviewAction.CONTINUE: OrchestrationCommandType.CONTINUE_PLAN,
             ReviewAction.REPLAN: OrchestrationCommandType.REVISE_PLAN,
@@ -378,268 +552,310 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         ):
             raise PlanCommandRejected("review_revision_version_mismatch")
 
-        command_hash = _review_command_hash(command, decision)
-        now = self._clock()
-        async with self._session_factory() as session:
-            async with session.begin():
-                run = await session.get(
-                    AgentRunModel, command.correlation_id, with_for_update=True
+    async def _lock_review_rows(
+        self,
+        session: AsyncSession,
+        *,
+        command: OrchestrationCommand,
+        run: AgentRunModel,
+    ) -> _LockedReviewRows:
+        """在 Run 和命令行已锁定后验证并锁住 Plan、Round 与任务。"""
+        if run.status not in {"created", "running"}:
+            raise PlanCommandRejected("run_not_active")
+
+        plan = await session.get(AgentPlanModel, command.plan_id, with_for_update=True)
+        if plan is None:
+            raise PlanCommandRejected("plan_not_found")
+        if plan.run_id != command.correlation_id:
+            raise PlanCommandRejected("review_run_mismatch")
+        if (
+            plan.status != PlanStatus.WAITING_REVIEW.value
+            or plan.current_version != command.plan_version
+            or plan.active_round_id != command.round_id
+        ):
+            raise PlanCommandRejected("review_round_identity_stale")
+
+        round_row = await session.get(
+            PlanRoundModel, command.round_id, with_for_update=True
+        )
+        if (
+            round_row is None
+            or round_row.plan_id != plan.plan_id
+            or round_row.plan_version != command.plan_version
+            or round_row.status != RoundStatus.COMPLETED.value
+            or round_row.expected_task_count != round_row.terminal_task_count
+        ):
+            raise PlanCommandRejected("review_round_not_complete")
+        version = await session.get(
+            PlanVersionModel,
+            (plan.plan_id, command.plan_version),
+            with_for_update=True,
+        )
+        if version is None or not isinstance(version.dag_json, Mapping):
+            raise PlanCommandRejected("review_plan_version_invalid")
+        task_rows = (
+            await session.execute(
+                select(AgentTaskModel)
+                .where(AgentTaskModel.plan_id == plan.plan_id)
+                .with_for_update()
+            )
+        ).scalars().all()
+        return _LockedReviewRows(
+            run=run,
+            plan=plan,
+            round=round_row,
+            version=version,
+            task_by_id={row.task_id: row for row in task_rows},
+        )
+
+    async def _existing_review_receipt(
+        self,
+        session: AsyncSession,
+        *,
+        command: OrchestrationCommand,
+        command_hash: str,
+    ) -> CommandReceipt | None:
+        """锁定 Review 幂等记录并返回已完成动作的原始回执。"""
+        prior = (
+            await session.execute(
+                select(OrchestrationCommandModel)
+                .where(
+                    OrchestrationCommandModel.scope_key == command.scope_key,
+                    OrchestrationCommandModel.idempotency_key
+                    == command.idempotency_key,
                 )
-                if run is None:
-                    raise PlanCommandRejected("run_not_found")
-
-                prior = (
-                    await session.execute(
-                        select(OrchestrationCommandModel)
-                        .where(
-                            OrchestrationCommandModel.scope_key == command.scope_key,
-                            OrchestrationCommandModel.idempotency_key
-                            == command.idempotency_key,
-                        )
-                        .with_for_update()
-                    )
-                ).scalar_one_or_none()
-                if prior is not None:
-                    if prior.payload_hash != command_hash:
-                        raise OrchestrationCommandConflict(
-                            "idempotency_key_reused_with_different_payload"
-                        )
-                    return _receipt(prior.result_json, deduplicated=True)
-                if run.status not in {"created", "running"}:
-                    raise PlanCommandRejected("run_not_active")
-
-                plan_row = await session.get(
-                    AgentPlanModel, command.plan_id, with_for_update=True
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if prior is not None:
+            if prior.payload_hash != command_hash:
+                raise OrchestrationCommandConflict(
+                    "idempotency_key_reused_with_different_payload"
                 )
-                if plan_row is None:
-                    raise PlanCommandRejected("plan_not_found")
-                if plan_row.run_id != command.correlation_id:
-                    raise PlanCommandRejected("review_run_mismatch")
-                if (
-                    plan_row.status != PlanStatus.WAITING_REVIEW.value
-                    or plan_row.current_version != command.plan_version
-                    or plan_row.active_round_id != command.round_id
-                ):
-                    raise PlanCommandRejected("review_round_identity_stale")
+            return _receipt(prior.result_json, deduplicated=True)
+        return None
 
-                round_row = await session.get(
-                    PlanRoundModel, command.round_id, with_for_update=True
+    def _finish_reviewed_plan(
+        self,
+        session: AsyncSession,
+        command: OrchestrationCommand,
+        decision: ReviewDecision,
+        rows: _LockedReviewRows,
+        now: datetime,
+    ) -> CommandReceipt:
+        """结束 Plan 并在事务内取消未启动任务、写入终态事件。"""
+        assert decision.final_status is not None
+        plan_status = PlanStatus(decision.final_status)
+        for task_row in rows.task_by_id.values():
+            if task_row.status == TaskStatus.PENDING.value:
+                task_row.status = TaskStatus.CANCELLED.value
+                task_row.error_json = json.dumps(
+                    {"reason": "plan_finished"}, ensure_ascii=False
                 )
-                if (
-                    round_row is None
-                    or round_row.plan_id != plan_row.plan_id
-                    or round_row.plan_version != command.plan_version
-                    or round_row.status != RoundStatus.COMPLETED.value
-                    or round_row.expected_task_count != round_row.terminal_task_count
-                ):
-                    raise PlanCommandRejected("review_round_not_complete")
-                version_row = await session.get(
-                    PlanVersionModel,
-                    (plan_row.plan_id, command.plan_version),
-                    with_for_update=True,
+                task_row.updated_at = now.isoformat()
+        rows.plan.status = plan_status.value
+        rows.plan.updated_at = now.isoformat()
+        receipt = CommandReceipt(
+            message_id=command.message_id,
+            plan_id=rows.plan.plan_id,
+            plan_version=command.plan_version,
+            round_id=rows.round.round_id,
+            task_ids=(),
+        )
+        self._write_review_terminal_outbox(
+            session,
+            command,
+            decision,
+            rows.plan,
+            rows.round,
+            plan_status,
+            now,
+        )
+        return receipt
+
+    async def _schedule_reviewed_plan(
+        self,
+        session: AsyncSession,
+        command: OrchestrationCommand,
+        decision: ReviewDecision,
+        rows: _LockedReviewRows,
+        now: datetime,
+    ) -> CommandReceipt:
+        """校验当前 DAG、应用 Replan 并在同事务内冻结下一轮。"""
+        current_document = dict(rows.version.dag_json)
+        current_tasks = _tasks_from_document(current_document, rows.task_by_id)
+        current_plan = _plan_from_document(rows.plan, current_document, current_tasks)
+        current_legal_tools = {
+            tool for task in current_tasks for tool in task.allowed_tools
+        }
+        PlanValidator(legal_tools=current_legal_tools).validate(current_plan, current_tasks)
+
+        if decision.action == ReviewAction.REPLAN:
+            current_plan = await self._apply_plan_revision(
+                session,
+                command=command,
+                decision=decision,
+                rows=rows,
+                current_document=current_document,
+                current_tasks=current_tasks,
+                now=now,
+            )
+        elif decision.action != ReviewAction.CONTINUE:
+            raise PlanCommandRejected("review_action_unsupported")
+
+        # Continue 与 Replan 在此汇合；统一传播依赖失败后再冻结下一轮。
+        task_ids = set(current_plan.task_ids)
+        states = {task_id: rows.task_by_id[task_id].status for task_id in task_ids}
+        cancelled = PlanDAG(current_plan).propagate_dependency_failures(states)
+        for task_id in cancelled:
+            row = rows.task_by_id[task_id]
+            row.status = TaskStatus.CANCELLED.value
+            row.error_json = json.dumps(
+                {"reason": "dependency_failed"}, ensure_ascii=False
+            )
+            row.updated_at = now.isoformat()
+
+        try:
+            next_round = freeze_ready_round(
+                current_plan,
+                plan_version=rows.plan.current_version,
+                round_number=rows.round.round_number + 1,
+                round_id=self._id_factory(),
+                task_states=states,
+                created_at=now,
+            )
+        except NoReadyTasksError as error:
+            code = "BLOCKED_DEPENDENCIES" if cancelled else "NO_REMAINING_TASKS"
+            raise PlanCommandRejected(code) from error
+        self._schedule_review_round(
+            session,
+            command,
+            decision,
+            rows.plan,
+            next_round,
+            current_plan,
+            rows.task_by_id,
+            now,
+        )
+        return CommandReceipt(
+            message_id=command.message_id,
+            plan_id=rows.plan.plan_id,
+            plan_version=next_round.plan_version,
+            round_id=next_round.round_id,
+            task_ids=next_round.task_ids,
+        )
+
+    async def _apply_plan_revision(
+        self,
+        session: AsyncSession,
+        *,
+        command: OrchestrationCommand,
+        decision: ReviewDecision,
+        rows: _LockedReviewRows,
+        current_document: dict[str, Any],
+        current_tasks: list[Task],
+        now: datetime,
+    ) -> Plan:
+        """应用 Revision 的任务变更并先持久化新版本，再生成 Round。"""
+        revision = decision.revision
+        if revision is None:
+            raise PlanCommandRejected("review_revision_missing")
+        next_document, next_tasks, newly_added = _revise_plan_document(
+            current_document,
+            current_tasks,
+            rows.task_by_id,
+            revision,
+            plan_row=rows.plan,
+            run_id=rows.run.run_id,
+        )
+        next_plan = _plan_from_document(rows.plan, next_document, next_tasks)
+        legal_tools = {
+            tool for task in next_tasks for tool in task.allowed_tools
+        }
+        PlanValidator(legal_tools=legal_tools).validate(next_plan, next_tasks)
+        for task_id in revision.cancel_task_ids:
+            row = rows.task_by_id[task_id]
+            if row.status == TaskStatus.PENDING.value:
+                row.status = TaskStatus.CANCELLED.value
+                row.error_json = json.dumps(
+                    {"reason": "removed_by_root_revision"}, ensure_ascii=False
                 )
-                if version_row is None or not isinstance(
-                    version_row.dag_json, Mapping
-                ):
-                    raise PlanCommandRejected("review_plan_version_invalid")
-                task_rows = (
-                    await session.execute(
-                        select(AgentTaskModel)
-                        .where(AgentTaskModel.plan_id == plan_row.plan_id)
-                        .with_for_update()
-                    )
-                ).scalars().all()
-                task_by_id = {row.task_id: row for row in task_rows}
+                row.updated_at = now.isoformat()
+        for task in newly_added:
+            task_row = AgentTaskModel(
+                task_id=task.task_id,
+                plan_id=rows.plan.plan_id,
+                run_id=rows.run.run_id,
+                title=task.title,
+                objective=task.objective,
+                input_json=json.dumps(
+                    dict(task.input), ensure_ascii=False, default=_json_default
+                ),
+                expected_output_json=json.dumps(
+                    dict(task.expected_output),
+                    ensure_ascii=False,
+                    default=_json_default,
+                ),
+                allowed_tools_json=json.dumps(
+                    list(task.allowed_tools), ensure_ascii=False
+                ),
+                worker_type=task.worker_type,
+                timeout_seconds=task.timeout_seconds,
+                status=TaskStatus.PENDING.value,
+                execution_generation=0,
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+            )
+            rows.task_by_id[task.task_id] = task_row
+            session.add(task_row)
 
-                if decision.action == ReviewAction.FINISH:
-                    assert decision.final_status is not None
-                    plan_status = PlanStatus(decision.final_status)
-                    for task_row in task_rows:
-                        if task_row.status == TaskStatus.PENDING.value:
-                            task_row.status = TaskStatus.CANCELLED.value
-                            task_row.error_json = json.dumps(
-                                {"reason": "plan_finished"}, ensure_ascii=False
-                            )
-                            task_row.updated_at = now.isoformat()
-                    plan_row.status = plan_status.value
-                    plan_row.updated_at = now.isoformat()
-                    receipt = CommandReceipt(
-                        message_id=command.message_id,
-                        plan_id=plan_row.plan_id,
-                        plan_version=command.plan_version,
-                        round_id=round_row.round_id,
-                        task_ids=(),
-                    )
-                    self._write_review_terminal_outbox(
-                        session,
-                        command,
-                        decision,
-                        plan_row,
-                        round_row,
-                        plan_status,
-                        now,
-                    )
-                else:
-                    current_document = dict(version_row.dag_json)
-                    current_tasks = _tasks_from_document(
-                        current_document, task_by_id
-                    )
-                    current_plan = _plan_from_document(
-                        plan_row, current_document, current_tasks
-                    )
-                    current_legal_tools = {
-                        tool for task in current_tasks for tool in task.allowed_tools
-                    }
-                    PlanValidator(legal_tools=current_legal_tools).validate(
-                        current_plan, current_tasks
-                    )
-                    if decision.action == ReviewAction.REPLAN:
-                        assert decision.revision is not None
-                        next_document, next_tasks, newly_added = _revise_plan_document(
-                            current_document,
-                            current_tasks,
-                            task_by_id,
-                            decision.revision,
-                            plan_row=plan_row,
-                            run_id=run.run_id,
-                        )
-                        next_plan = _plan_from_document(
-                            plan_row, next_document, next_tasks
-                        )
-                        legal_tools = {
-                            tool for task in next_tasks for tool in task.allowed_tools
-                        }
-                        PlanValidator(legal_tools=legal_tools).validate(
-                            next_plan, next_tasks
-                        )
-                        for task_id in decision.revision.cancel_task_ids:
-                            row = task_by_id[task_id]
-                            if row.status == TaskStatus.PENDING.value:
-                                row.status = TaskStatus.CANCELLED.value
-                                row.error_json = json.dumps(
-                                    {"reason": "removed_by_root_revision"},
-                                    ensure_ascii=False,
-                                )
-                                row.updated_at = now.isoformat()
-                        for task in newly_added:
-                            task_row = AgentTaskModel(
-                                task_id=task.task_id,
-                                plan_id=plan_row.plan_id,
-                                run_id=run.run_id,
-                                title=task.title,
-                                objective=task.objective,
-                                input_json=json.dumps(
-                                    dict(task.input),
-                                    ensure_ascii=False,
-                                    default=_json_default,
-                                ),
-                                expected_output_json=json.dumps(
-                                    dict(task.expected_output),
-                                    ensure_ascii=False,
-                                    default=_json_default,
-                                ),
-                                allowed_tools_json=json.dumps(
-                                    list(task.allowed_tools), ensure_ascii=False
-                                ),
-                                worker_type=task.worker_type,
-                                timeout_seconds=task.timeout_seconds,
-                                status=TaskStatus.PENDING.value,
-                                execution_generation=0,
-                                created_at=now.isoformat(),
-                                updated_at=now.isoformat(),
-                            )
-                            task_by_id[task.task_id] = task_row
-                            session.add(task_row)
-                        next_version = command.plan_version + 1
-                        next_document["plan_id"] = plan_row.plan_id
-                        next_document["version"] = next_version
-                        version_row = PlanVersionModel(
-                            plan_id=plan_row.plan_id,
-                            version=next_version,
-                            dag_json=next_document,
-                            change_reason=decision.reason,
-                            based_on_round_id=round_row.round_id,
-                            created_at=now,
-                        )
-                        session.add(version_row)
-                        plan_row.current_version = next_version
-                        current_plan = next_plan
-                        # The ORM mappings use scalar foreign-key columns
-                        # without relationships, so insertion order is not
-                        # inferred for the composite PlanVersion -> Round FK.
-                        # Persist the new immutable version and tasks before
-                        # the next Round schedules executions against them.
-                        await session.flush()
-                    elif decision.action != ReviewAction.CONTINUE:
-                        raise PlanCommandRejected("review_action_unsupported")
+        next_version = command.plan_version + 1
+        next_document["plan_id"] = rows.plan.plan_id
+        next_document["version"] = next_version
+        session.add(
+            PlanVersionModel(
+                plan_id=rows.plan.plan_id,
+                version=next_version,
+                dag_json=next_document,
+                change_reason=decision.reason,
+                based_on_round_id=rows.round.round_id,
+                created_at=now,
+            )
+        )
+        rows.plan.current_version = next_version
+        # PlanVersion 的复合外键必须先落库，下一步才可登记引用它的 Round。
+        await session.flush()
+        return next_plan
 
-                    task_ids = set(current_plan.task_ids)
-                    states = {
-                        task_id: task_by_id[task_id].status for task_id in task_ids
-                    }
-                    dag = PlanDAG(current_plan)
-                    cancelled = dag.propagate_dependency_failures(states)
-                    for task_id in cancelled:
-                        row = task_by_id[task_id]
-                        row.status = TaskStatus.CANCELLED.value
-                        row.error_json = json.dumps(
-                            {"reason": "dependency_failed"}, ensure_ascii=False
-                        )
-                        row.updated_at = now.isoformat()
-                    next_round_id = self._id_factory()
-                    try:
-                        next_round = freeze_ready_round(
-                            current_plan,
-                            plan_version=plan_row.current_version,
-                            round_number=round_row.round_number + 1,
-                            round_id=next_round_id,
-                            task_states=states,
-                            created_at=now,
-                        )
-                    except NoReadyTasksError as exc:
-                        error_code = (
-                            "BLOCKED_DEPENDENCIES"
-                            if cancelled
-                            else "NO_REMAINING_TASKS"
-                        )
-                        raise PlanCommandRejected(error_code) from exc
-                    self._schedule_review_round(
-                        session,
-                        command,
-                        decision,
-                        plan_row,
-                        next_round,
-                        current_plan,
-                        task_by_id,
-                        now,
-                    )
-                    receipt = CommandReceipt(
-                        message_id=command.message_id,
-                        plan_id=plan_row.plan_id,
-                        plan_version=next_round.plan_version,
-                        round_id=next_round.round_id,
-                        task_ids=next_round.task_ids,
-                    )
-
-                session.add(
-                    OrchestrationCommandModel(
-                        message_id=command.message_id,
-                        scope_key=command.scope_key,
-                        idempotency_key=command.idempotency_key,
-                        payload_hash=command_hash,
-                        command_type=command.command_type.value,
-                        plan_id=command.plan_id,
-                        plan_version=command.plan_version,
-                        round_id=command.round_id,
-                        status="accepted",
-                        result_json={
-                            **_receipt_document(receipt),
-                            "review_decision": _review_decision_document(decision),
-                        },
-                        created_at=now,
-                    )
-                )
-                return receipt
+    @staticmethod
+    def _record_review_command(
+        session: AsyncSession,
+        *,
+        command: OrchestrationCommand,
+        decision: ReviewDecision,
+        command_hash: str,
+        receipt: CommandReceipt,
+        now: datetime,
+    ) -> None:
+        """保存审查命令与决策结果，供 checkpoint 重试直接复用。"""
+        session.add(
+            OrchestrationCommandModel(
+                message_id=command.message_id,
+                scope_key=command.scope_key,
+                idempotency_key=command.idempotency_key,
+                payload_hash=command_hash,
+                command_type=command.command_type.value,
+                plan_id=command.plan_id,
+                plan_version=command.plan_version,
+                round_id=command.round_id,
+                status="accepted",
+                result_json={
+                    **_receipt_document(receipt),
+                    "review_decision": _review_decision_document(decision),
+                },
+                created_at=now,
+            )
+        )
 
     async def load_review_decision(
         self,

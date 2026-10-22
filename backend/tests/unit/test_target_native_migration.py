@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from application.retrieval import RetrievalFusionService
+from domain.retrieval.fusion import RetrievalRankFusion
 from application.runs.context import ContextAcquisitionService, ContextItem, ContextPlan, ProviderResult
 from application.runs.task_understanding import TaskUnderstandingService
 from domain.retrieval import RetrievalCandidate
@@ -85,7 +85,7 @@ def test_target_retrieval_evaluation_and_entrypoint(monkeypatch):
 
 
 def test_target_retrieval_fuses_rankings_and_registry_supports_formats():
-    service = RetrievalFusionService()
+    service = RetrievalRankFusion()
     values = service.fuse_ranked_candidates([RetrievalCandidate("a", "a")], [RetrievalCandidate("b", "b"), RetrievalCandidate("a", "a")], limit=2)
     assert [item.source_id for item in values] == ["a", "b"]
     registry = NativeFileAdapterRegistry()

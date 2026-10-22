@@ -73,16 +73,20 @@ async def test_run_command_service_validation_bool_and_cancel_paths() -> None:
 @pytest.mark.asyncio
 async def test_run_execution_cancel_missing_id_and_error_result_paths() -> None:
     class Lifecycle:
+        writes_cancellation_events_to_outbox = False
+        writes_completion_artifacts_to_outbox = False
         async def update_status(self, *a): pass
         async def complete(self, *a): pass
         async def fail(self, *a): pass
         async def cancel(self, *a): pass
+        async def arm_root_wait(self, *a, **kw): return True
     class Queue:
         def __init__(self): self.done=[]
         async def complete_command(self, *a, **kw): self.done.append((a,kw))
+        async def complete_active_command_for_run(self, *a, **kw): return True
     class Executor:
         async def cancel(self, value): pass
-        async def execute(self, value): return CommandExecutionResult(error="bad")
+        async def execute(self, value): return CommandExecutionResult(error={"code": "bad"})
     class Events:
         async def publish(self, value): return value
     queue = Queue(); service = RunExecutionService(Lifecycle(), queue, Executor(), Events())

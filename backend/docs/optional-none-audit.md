@@ -121,7 +121,7 @@
 - `runtime/stream_coalescer.py`: `StreamCoalescer.__init__(message_id)`。
 - `runtime/task_executor.py`: `TaskExecutor.__init__(context_assembler, event_manager, checkpointer, approval_store)`。
 - `runtime/task_understanding/service.py`: `understand(history, attachment_refs, knowledge_bases)`。
-- `utils/logging.py`: `get_logger(name)`。
+- `shared/logging.py`: 通过 `structlog` 提供结构化日志，并接入进程现有的日志处理器。
 - `utils/message_conversion.py`: `format_messages_brief(role_labels)`。
 
 ## 变量/字段清单及必要性

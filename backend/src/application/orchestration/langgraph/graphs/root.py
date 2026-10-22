@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
@@ -10,12 +10,9 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from application.orchestration.protocols import (
-    RootWorkflowDependencies,
-    RootWorkflowPort,
-)
+from application.orchestration.dependencies import RootWorkflowDependencies
+from application.orchestration.protocols import RootWorkflowPort
 
-from ..shared.utils import call
 from .state import RootGraphState
 
 
@@ -30,15 +27,11 @@ async def _publish(
     duration_ms: int | None = None,
     error: str | None = None,
 ) -> None:
-    publisher = getattr(dependencies, "event_publisher", None)
-    if publisher is None or not hasattr(publisher, "publish"):
-        return
     request = state.get("request", {})
     try:
         from domain.events import ApplicationEvent, EventDurability
 
-        await call(
-            publisher.publish,
+        await dependencies.event_publisher.publish(
             ApplicationEvent(
                 event_type=event_type,
                 durability=EventDurability.DURABLE,
@@ -64,7 +57,7 @@ async def _publish(
 
 def _node(
     name: str,
-    handler: Callable[[RootGraphState], Any],
+    handler: Callable[[RootGraphState], Awaitable[dict[str, Any]]],
     dependencies: RootWorkflowDependencies,
 ):
     async def wrapped(state: RootGraphState) -> dict[str, Any]:
@@ -72,7 +65,7 @@ def _node(
         started_clock = perf_counter()
         await _publish(dependencies, "node.started", state, node_name=name, started_at=started_at)
         try:
-            value = await call(handler, state)
+            value = await handler(state)
         except Exception as exc:
             await _publish(dependencies, "node.failed", state, node_name=name, started_at=started_at, duration_ms=int((perf_counter() - started_clock) * 1000), error=type(exc).__name__)
             return {
@@ -123,8 +116,7 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
     """Suspend Root until a durable Round completion resumes its checkpoint."""
 
     async def wait_for_plan_completion(state: RootGraphState) -> dict[str, Any]:
-        value = await call(workflow.wait_for_plan_completion, state)
-        result = dict(value) if isinstance(value, Mapping) else {}
+        result = await workflow.wait_for_plan_completion(state)
         if not result.get("waiting"):
             return result
         wait_context = result.get("root_wait")
@@ -140,32 +132,25 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
         if wait_context.get("run_id") != request.get("run_id"):
             raise RuntimeError("root_round_wait_run_mismatch")
         resume_value = interrupt(dict(wait_context))
-        review_round = getattr(workflow, "review_completed_round", None)
-        if callable(review_round):
-            if not isinstance(resume_value, Mapping):
-                raise RuntimeError("root_round_resume_value_invalid")
-            if resume_value.get("type") != "round_completed":
-                raise RuntimeError("root_round_resume_type_invalid")
-            if any(
-                resume_value.get(name) != wait_context.get(name)
-                for name in ("run_id", "plan_id", "round_id", "plan_version")
-            ):
-                raise RuntimeError("root_round_resume_identity_mismatch")
-            await call(
-                review_round,
-                {
-                    **state,
-                    "root_wait": dict(wait_context),
-                    "resume_value": dict(resume_value),
-                },
-            )
-            # A review can start another Round. Return its wait state so the
-            # graph re-enters this node as a new LangGraph task. Each Round
-            # then owns one interrupt index and cannot consume an older
-            # resume value from a previous loop iteration.
-            next_value = await call(workflow.wait_for_plan_completion, state)
-            return dict(next_value) if isinstance(next_value, Mapping) else {}
-        return result
+        if not isinstance(resume_value, Mapping):
+            raise RuntimeError("root_round_resume_value_invalid")
+        if resume_value.get("type") != "round_completed":
+            raise RuntimeError("root_round_resume_type_invalid")
+        if any(
+            resume_value.get(name) != wait_context.get(name)
+            for name in ("run_id", "plan_id", "round_id", "plan_version")
+        ):
+            raise RuntimeError("root_round_resume_identity_mismatch")
+        await workflow.review_completed_round(
+            {
+                **state,
+                "root_wait": dict(wait_context),
+                "resume_value": dict(resume_value),
+            }
+        )
+        # A review can start another Round. Return its wait state so the graph
+        # re-enters this node as a new LangGraph task with a fresh interrupt.
+        return await workflow.wait_for_plan_completion(state)
 
     wait_for_plan_completion.__name__ = "wait_for_plan_completion"
     return wait_for_plan_completion
@@ -174,7 +159,7 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
 def build_root_graph(
     *,
     workflow: RootWorkflowPort,
-    dependencies: RootWorkflowDependencies ,
+    dependencies: RootWorkflowDependencies,
     checkpointer: Any = None,
 ) -> Any:
     """Compile a graph whose nodes delegate business work to an application port."""
@@ -278,16 +263,15 @@ async def invoke_root_graph(
     if resume_value is not None:
         if resume_value.get("type") != "round_completed":
             raise RuntimeError("root_resume_value_type_invalid")
-        result = await call(
-            graph.ainvoke,
+        result = await graph.ainvoke(
             Command(resume=dict(resume_value)),
             config=config,
         )
     else:
-        result = await call(graph.ainvoke, state, config=config)
+        result = await graph.ainvoke(state, config=config)
     if isinstance(result, Mapping) and result.get("__interrupt__"):
-        snapshot = await call(graph.aget_state, config)
-        snapshot_config = getattr(snapshot, "config", {})
+        snapshot = await graph.aget_state(config)
+        snapshot_config = snapshot.config
         configurable = (
             snapshot_config.get("configurable", {})
             if isinstance(snapshot_config, Mapping)

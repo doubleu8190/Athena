@@ -16,7 +16,6 @@ from .entities import (
 from .job_ports import MemoryJobPort, MemoryJobQueue
 from .repository_ports import MemoryRepositoryPort
 from .retrieval_ports import MemoryVectorIndexPort, MemoryVectorSearchPort
-from .write_ports import MemoryFactExtractorPort, MemoryResolverPort, MemoryWriteTriggerPort
 
 __all__ = [
     "MemoryListRequest",
@@ -33,9 +32,6 @@ __all__ = [
     "MemoryCandidate",
     "MemoryResolution",
     "ResolutionAction",
-    "MemoryFactExtractorPort",
     "MemoryJobPort",
     "MemoryJobQueue",
-    "MemoryResolverPort",
-    "MemoryWriteTriggerPort",
 ]

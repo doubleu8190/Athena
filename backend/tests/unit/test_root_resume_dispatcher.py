@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -57,7 +58,21 @@ async def test_root_wait_node_interrupts_and_rechecks_after_resume():
     assert len(paused["__interrupt__"]) == 1
     assert paused["__interrupt__"][0].value["round_id"] == "round-1"
     assert paused["__root_checkpoint_id__"]
-    adapter = LangGraphRootGraph(workflow=None, dependencies=None)
+    class ThreadLock:
+        @asynccontextmanager
+        async def hold(self, _thread_id):
+            yield
+
+    class Checkpointer:
+        def get_saver(self):
+            return InMemorySaver()
+
+    adapter = LangGraphRootGraph(
+        workflow=None,
+        dependencies=None,
+        checkpointer=Checkpointer(),
+        thread_lock=ThreadLock(),
+    )
     adapter._graph = graph
     identity = {
         "run_id": "run-1",

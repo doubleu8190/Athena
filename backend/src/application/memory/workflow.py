@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from domain.memory import (
     CompletedTurn,
-    MemoryFactExtractorPort,
     MemoryRepositoryPort,
     MemoryVectorIndexPort,
-    MemoryResolverPort,
     MemoryWriteCommand,
-    MemoryWriteTriggerPort,
     ResolutionAction,
 )
+
+from application.memory.ports import MemoryFactExtractor, MemoryResolver, MemoryWriteTrigger
 
 
 class MemoryWriteWorkflow:
@@ -20,9 +19,9 @@ class MemoryWriteWorkflow:
     def __init__(
         self,
         memory: MemoryRepositoryPort,
-        trigger: MemoryWriteTriggerPort,
-        extractor: MemoryFactExtractorPort,
-        resolver: MemoryResolverPort,
+        trigger: MemoryWriteTrigger,
+        extractor: MemoryFactExtractor,
+        resolver: MemoryResolver,
         vector_index: MemoryVectorIndexPort | None = None,
     ) -> None:
         self._memory = memory

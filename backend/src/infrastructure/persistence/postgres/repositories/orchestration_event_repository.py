@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -33,6 +34,19 @@ from .task_execution_results import strict_result_json
 
 _CONSUMER_NAME = "round-task-terminal-v1"
 _INLINE_RESULT_LIMIT_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalEventRows:
+    """按固定加锁顺序读取的 Worker 终态相关数据库行。"""
+
+    run: AgentRunModel | None
+    plan: AgentPlanModel | None
+    round: PlanRoundModel | None
+    task: AgentTaskModel | None
+    round_task: RoundTaskModel | None
+    execution: TaskExecutionModel | None
+    job: WorkerJobModel | None
 
 
 class TaskEventConflict(ValueError):
@@ -63,288 +77,380 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
     async def apply_worker_terminal_event(
         self, event: WorkerTaskTerminalEvent
     ) -> TaskEventReceipt:
-        """应用一次 Worker 完成/失败事件，重复事件只返回原回执。"""
+        """在一个事务中校验 Worker 终态并推进任务与 Round 状态。
+
+        Args:
+            event: Worker 执行结束后提交的带 fencing 身份事件。
+
+        Returns:
+            事件受理、拒绝或重复投递的稳定回执。
+
+        Raises:
+            TaskEventConflict: 同一消息 ID 被不同事件内容复用时。
+            Exception: 数据库错误由事件消费者按重试策略处理。
+        """
         payload = _event_document(event)
         payload_hash = _hash(payload)
         result_json = strict_result_json(event.result)
         result_bytes = result_json.encode("utf-8")
         result_sha256 = hashlib.sha256(result_bytes).hexdigest()
+
         async with self._session_factory() as session:
             async with session.begin():
-                now = (
-                    self._clock()
-                    if self._clock is not None
-                    else await session.scalar(select(func.clock_timestamp()))
+                now = await self._event_time(session)
+                inbox, duplicate_receipt = await self._receive_terminal_event(
+                    session,
+                    event=event,
+                    payload=payload,
+                    payload_hash=payload_hash,
+                    result_sha256=result_sha256,
+                    result_bytes=len(result_bytes),
+                    now=now,
                 )
-                if now.tzinfo is None:
-                    now = now.replace(tzinfo=timezone.utc)
-                else:
-                    now = now.astimezone(timezone.utc)
-                await session.execute(
-                    insert(OrchestrationInboxModel)
-                    .values(
-                        consumer_name=_CONSUMER_NAME,
-                        message_id=event.message_id,
-                        event_type="WorkerTaskTerminal",
-                        payload_json={
-                            key: value
-                            for key, value in payload.items()
-                            if key not in {"result", "error"}
-                        }
-                        | {
-                            "result_sha256": result_sha256,
-                            "result_bytes": len(result_bytes),
-                        },
-                        payload_hash=payload_hash,
-                        status="received",
-                        attempt=1,
-                        created_at=now,
-                    )
-                    .on_conflict_do_nothing(
-                        index_elements=["consumer_name", "message_id"]
-                    )
-                )
-                inbox = (
-                    await session.execute(
-                        select(OrchestrationInboxModel)
-                        .where(
-                            OrchestrationInboxModel.consumer_name == _CONSUMER_NAME,
-                            OrchestrationInboxModel.message_id == event.message_id,
-                        )
-                        .with_for_update()
-                    )
-                ).scalar_one()
-                if inbox.payload_hash != payload_hash:
-                    raise TaskEventConflict(
-                        "message_id_reused_with_different_payload"
-                    )
-                if inbox.status == "processed":
-                    return _receipt(inbox.receipt_json, deduplicated=True)
+                if duplicate_receipt is not None:
+                    return duplicate_receipt
 
-                # 按 Run -> Plan -> Round -> Task -> Execution 的顺序加锁。
-                run = await _locked_one(
-                    session,
-                    AgentRunModel,
-                    AgentRunModel.run_id == event.run_id,
-                )
-                plan = await _locked_one(
-                    session,
-                    AgentPlanModel,
-                    AgentPlanModel.plan_id == event.plan_id,
-                )
-                round_row = await _locked_one(
-                    session,
-                    PlanRoundModel,
-                    PlanRoundModel.round_id == event.round_id,
-                )
-                task = await _locked_one(
-                    session,
-                    AgentTaskModel,
-                    AgentTaskModel.task_id == event.task_id,
-                )
-                round_task = await _locked_one(
-                    session,
-                    RoundTaskModel,
-                    (RoundTaskModel.round_id == event.round_id)
-                    & (RoundTaskModel.task_id == event.task_id),
-                )
-                execution = await _locked_one(
-                    session,
-                    TaskExecutionModel,
-                    TaskExecutionModel.execution_id == event.execution_id,
-                )
-                job = await _locked_one(
-                    session,
-                    WorkerJobModel,
-                    (WorkerJobModel.execution_id == event.execution_id)
-                    & WorkerJobModel.job_type.in_(
-                        ("execute", "resume_worker")
-                    )
-                    & (WorkerJobModel.status == "running")
-                    & (WorkerJobModel.lease_owner == event.worker_id),
-                )
-
+                rows = await self._lock_terminal_event_rows(session, event)
                 rejection = _rejection_reason(
-                    event, run, plan, round_row, task, execution, round_task, job, now
+                    event,
+                    rows.run,
+                    rows.plan,
+                    rows.round,
+                    rows.task,
+                    rows.execution,
+                    rows.round_task,
+                    rows.job,
+                    now,
                 )
                 if rejection is not None:
-                    receipt = TaskEventReceipt(
-                        message_id=event.message_id,
-                        accepted=False,
-                        reason=rejection,
-                        terminal_task_count=(
-                            round_row.terminal_task_count
-                            if round_row is not None
-                            else None
-                        ),
-                        expected_task_count=(
-                            round_row.expected_task_count
-                            if round_row is not None
-                            else None
-                        ),
-                    )
+                    receipt = self._rejected_receipt(event, rows.round, rejection)
                     _mark_processed(inbox, receipt, now)
                     return receipt
 
-                assert task is not None
-                assert execution is not None
-                assert round_task is not None
-                assert round_row is not None
-                assert plan is not None
-                assert job is not None
-
-                status = event.status.value
-                result_document = {
-                    "status": status,
-                    "output": dict(event.result),
-                    "error": dict(event.error) if event.error is not None else None,
-                    "retryable": event.retryable,
-                    "evidence": list(event.result.get("evidence", ())),
-                    "uncertainties": list(event.result.get("uncertainties", ())),
-                    "metrics": dict(event.result.get("metrics", {})),
-                }
-                execution.status = status
-                if len(result_bytes) > _INLINE_RESULT_LIMIT_BYTES:
-                    result_ref = f"task-result:{execution.execution_id}"
-                    session.add(
-                        TaskExecutionResultModel(
-                            result_ref=result_ref,
-                            execution_id=execution.execution_id,
-                            result_json=dict(event.result),
-                            content_sha256=result_sha256,
-                            content_bytes=len(result_bytes),
-                            created_at=now,
-                        )
-                    )
-                    execution.result_ref = result_ref
-                    execution.result_json = {
-                        "status": status,
-                        "result_ref": result_ref,
-                        "result_bytes": len(result_bytes),
-                        "result_sha256": result_sha256,
-                        "error": (
-                            dict(event.error)
-                            if event.error is not None
-                            else None
-                        ),
-                        "retryable": event.retryable,
-                    }
-                else:
-                    execution.result_ref = None
-                    execution.result_json = result_document
-                execution.error_json = (
-                    dict(event.error) if event.error is not None else None
+                assert rows.run is not None
+                assert rows.plan is not None
+                assert rows.round is not None
+                assert rows.task is not None
+                assert rows.round_task is not None
+                assert rows.execution is not None
+                assert rows.job is not None
+                retry_scheduled, next_execution_id = await self._apply_terminal_result(
+                    session,
+                    event=event,
+                    rows=rows,
+                    now=now,
+                    result_bytes=len(result_bytes),
+                    result_sha256=result_sha256,
                 )
-                execution.lease_owner = None
-                execution.lease_until = None
-                execution.updated_at = now
-                job.status = "completed"
-                job.lease_owner = None
-                job.lease_until = None
-                job.updated_at = now
-
-                retry_scheduled = (
-                    event.retryable
-                    and status == "failed"
-                    and execution.attempt < self._max_attempts
+                round_completed = await self._advance_terminal_round(
+                    session,
+                    event=event,
+                    rows=rows,
+                    retry_scheduled=retry_scheduled,
+                    now=now,
                 )
-                next_execution_id: str | None = None
-                if retry_scheduled:
-                    next_execution_id = self._schedule_retry(
-                        session,
-                        event=event,
-                        task=task,
-                        execution=execution,
-                        round_task=round_task,
-                        now=now,
-                    )
-                    self._write_task_retrying_outbox(
-                        session,
-                        event=event,
-                        attempt=execution.attempt,
-                        next_execution_id=next_execution_id,
-                        now=now,
-                    )
-                else:
-                    task.status = status
-                    task.output_json = (
-                        _strict_json(
-                            {
-                                "result_ref": execution.result_ref,
-                                "result_bytes": len(result_bytes),
-                                "result_sha256": result_sha256,
-                            }
-                        )
-                        if execution.result_ref is not None
-                        else _strict_json(dict(event.result))
-                    )
-                    task.error_json = (
-                        _strict_json(dict(event.error))
-                        if event.error is not None
-                        else None
-                    )
-                    task.updated_at = now.isoformat()
-                    round_task.status = status
-                    round_task.terminal_at = now
-                    self._write_task_terminal_outbox(
-                        session,
-                        event=event,
-                        task=task,
-                        execution=execution,
-                        result_bytes=len(result_bytes),
-                        result_sha256=result_sha256,
-                        now=now,
-                    )
-
-                if not retry_scheduled:
-                    round_row.terminal_task_count += 1
-                completed = not retry_scheduled and (
-                    round_row.terminal_task_count == round_row.expected_task_count
-                )
-                if completed:
-                    round_row.status = "completed"
-                    round_row.completed_at = now
-                    plan.status = "waiting_review"
-                    self._write_round_completed_outbox(
-                        session, event, round_row, now
-                    )
-                    if (
-                        run.root_wait_round_id != round_row.round_id
-                        or run.root_wait_plan_version != round_row.plan_version
-                    ):
-                        run.root_wait_generation = int(run.root_wait_generation or 0) + 1
-                        run.root_wait_round_id = round_row.round_id
-                        run.root_wait_plan_version = round_row.plan_version
-                        run.root_wait_armed_at = None
-                        run.root_wait_interrupt_id = None
-                        run.root_wait_checkpoint_id = None
-                    session.add(
-                        RootResumeJobModel(
-                            job_id=self._id_factory(),
-                            dedupe_key=f"round:{round_row.round_id}:root-resume:{run.root_wait_generation}",
-                            run_id=run.run_id,
-                            plan_id=plan.plan_id,
-                            round_id=round_row.round_id,
-                            root_wait_generation=run.root_wait_generation,
-                            status="pending",
-                            attempt=0,
-                            available_at=now,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    )
-
                 receipt = TaskEventReceipt(
                     message_id=event.message_id,
                     accepted=True,
-                    round_completed=completed,
+                    round_completed=round_completed,
                     retry_scheduled=retry_scheduled,
                     next_execution_id=next_execution_id,
-                    terminal_task_count=round_row.terminal_task_count,
-                    expected_task_count=round_row.expected_task_count,
+                    terminal_task_count=rows.round.terminal_task_count,
+                    expected_task_count=rows.round.expected_task_count,
                 )
                 _mark_processed(inbox, receipt, now)
                 return receipt
+
+    async def _event_time(self, session: AsyncSession) -> datetime:
+        """使用注入时钟或数据库时钟生成统一 UTC 事件时间。"""
+        now = (
+            self._clock()
+            if self._clock is not None
+            else await session.scalar(select(func.clock_timestamp()))
+        )
+        if now.tzinfo is None:
+            return now.replace(tzinfo=timezone.utc)
+        return now.astimezone(timezone.utc)
+
+    async def _receive_terminal_event(
+        self,
+        session: AsyncSession,
+        *,
+        event: WorkerTaskTerminalEvent,
+        payload: dict[str, Any],
+        payload_hash: str,
+        result_sha256: str,
+        result_bytes: int,
+        now: datetime,
+    ) -> tuple[OrchestrationInboxModel, TaskEventReceipt | None]:
+        """在当前事务内登记事件、校验消息 ID 并读取重放回执。"""
+        inbox_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"result", "error"}
+        } | {"result_sha256": result_sha256, "result_bytes": result_bytes}
+        await session.execute(
+            insert(OrchestrationInboxModel)
+            .values(
+                consumer_name=_CONSUMER_NAME,
+                message_id=event.message_id,
+                event_type="WorkerTaskTerminal",
+                payload_json=inbox_payload,
+                payload_hash=payload_hash,
+                status="received",
+                attempt=1,
+                created_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=["consumer_name", "message_id"])
+        )
+        inbox = (
+            await session.execute(
+                select(OrchestrationInboxModel)
+                .where(
+                    OrchestrationInboxModel.consumer_name == _CONSUMER_NAME,
+                    OrchestrationInboxModel.message_id == event.message_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one()
+        if inbox.payload_hash != payload_hash:
+            raise TaskEventConflict("message_id_reused_with_different_payload")
+        if inbox.status == "processed":
+            return inbox, _receipt(inbox.receipt_json, deduplicated=True)
+        return inbox, None
+
+    async def _lock_terminal_event_rows(
+        self, session: AsyncSession, event: WorkerTaskTerminalEvent
+    ) -> _TerminalEventRows:
+        """按 Run、Plan、Round、Task、Execution 的既定顺序加锁。"""
+        # 所有终态事件使用同一锁顺序，以免与取消事务形成死锁环。
+        run = await _locked_one(
+            session, AgentRunModel, AgentRunModel.run_id == event.run_id
+        )
+        plan = await _locked_one(
+            session, AgentPlanModel, AgentPlanModel.plan_id == event.plan_id
+        )
+        round_row = await _locked_one(
+            session, PlanRoundModel, PlanRoundModel.round_id == event.round_id
+        )
+        task = await _locked_one(
+            session, AgentTaskModel, AgentTaskModel.task_id == event.task_id
+        )
+        round_task = await _locked_one(
+            session,
+            RoundTaskModel,
+            (RoundTaskModel.round_id == event.round_id)
+            & (RoundTaskModel.task_id == event.task_id),
+        )
+        execution = await _locked_one(
+            session,
+            TaskExecutionModel,
+            TaskExecutionModel.execution_id == event.execution_id,
+        )
+        job = await _locked_one(
+            session,
+            WorkerJobModel,
+            (WorkerJobModel.execution_id == event.execution_id)
+            & WorkerJobModel.job_type.in_(("execute", "resume_worker"))
+            & (WorkerJobModel.status == "running")
+            & (WorkerJobModel.lease_owner == event.worker_id),
+        )
+        return _TerminalEventRows(
+            run, plan, round_row, task, round_task, execution, job
+        )
+
+    @staticmethod
+    def _rejected_receipt(
+        event: WorkerTaskTerminalEvent,
+        round_row: PlanRoundModel | None,
+        reason: str,
+    ) -> TaskEventReceipt:
+        """构造已记录但未应用的过期或无效终态事件回执。"""
+        return TaskEventReceipt(
+            message_id=event.message_id,
+            accepted=False,
+            reason=reason,
+            terminal_task_count=(
+                round_row.terminal_task_count if round_row is not None else None
+            ),
+            expected_task_count=(
+                round_row.expected_task_count if round_row is not None else None
+            ),
+        )
+
+    async def _apply_terminal_result(
+        self,
+        session: AsyncSession,
+        *,
+        event: WorkerTaskTerminalEvent,
+        rows: _TerminalEventRows,
+        now: datetime,
+        result_bytes: int,
+        result_sha256: str,
+    ) -> tuple[bool, str | None]:
+        """保存 Execution 结果并推进 Task，必要时创建下一次重试。"""
+        assert rows.task is not None
+        assert rows.execution is not None
+        assert rows.round_task is not None
+        assert rows.job is not None
+        execution = rows.execution
+        task = rows.task
+        round_task = rows.round_task
+        job = rows.job
+        status = event.status.value
+        result_document = {
+            "status": status,
+            "output": dict(event.result),
+            "error": dict(event.error) if event.error is not None else None,
+            "retryable": event.retryable,
+            "evidence": list(event.result.get("evidence", ())),
+            "uncertainties": list(event.result.get("uncertainties", ())),
+            "metrics": dict(event.result.get("metrics", {})),
+        }
+        execution.status = status
+        if result_bytes > _INLINE_RESULT_LIMIT_BYTES:
+            # 大结果单独持久化，Execution 行只保留可校验的引用和摘要。
+            result_ref = f"task-result:{execution.execution_id}"
+            session.add(
+                TaskExecutionResultModel(
+                    result_ref=result_ref,
+                    execution_id=execution.execution_id,
+                    result_json=dict(event.result),
+                    content_sha256=result_sha256,
+                    content_bytes=result_bytes,
+                    created_at=now,
+                )
+            )
+            execution.result_ref = result_ref
+            execution.result_json = {
+                "status": status,
+                "result_ref": result_ref,
+                "result_bytes": result_bytes,
+                "result_sha256": result_sha256,
+                "error": dict(event.error) if event.error is not None else None,
+                "retryable": event.retryable,
+            }
+        else:
+            execution.result_ref = None
+            execution.result_json = result_document
+        execution.error_json = dict(event.error) if event.error is not None else None
+        execution.lease_owner = None
+        execution.lease_until = None
+        execution.updated_at = now
+        job.status = "completed"
+        job.lease_owner = None
+        job.lease_until = None
+        job.updated_at = now
+
+        retry_scheduled = (
+            event.retryable
+            and status == "failed"
+            and execution.attempt < self._max_attempts
+        )
+        next_execution_id: str | None = None
+        if retry_scheduled:
+            next_execution_id = self._schedule_retry(
+                session,
+                event=event,
+                task=task,
+                execution=execution,
+                round_task=round_task,
+                now=now,
+            )
+            self._write_task_retrying_outbox(
+                session,
+                event=event,
+                attempt=execution.attempt,
+                next_execution_id=next_execution_id,
+                now=now,
+            )
+            return True, next_execution_id
+
+        task.status = status
+        task.output_json = (
+            _strict_json(
+                {
+                    "result_ref": execution.result_ref,
+                    "result_bytes": result_bytes,
+                    "result_sha256": result_sha256,
+                }
+            )
+            if execution.result_ref is not None
+            else _strict_json(dict(event.result))
+        )
+        task.error_json = (
+            _strict_json(dict(event.error)) if event.error is not None else None
+        )
+        task.updated_at = now.isoformat()
+        round_task.status = status
+        round_task.terminal_at = now
+        self._write_task_terminal_outbox(
+            session,
+            event=event,
+            task=task,
+            execution=execution,
+            result_bytes=result_bytes,
+            result_sha256=result_sha256,
+            now=now,
+        )
+        return False, None
+
+    async def _advance_terminal_round(
+        self,
+        session: AsyncSession,
+        *,
+        event: WorkerTaskTerminalEvent,
+        rows: _TerminalEventRows,
+        retry_scheduled: bool,
+        now: datetime,
+    ) -> bool:
+        """更新 Round 终态屏障，并在全部任务收敛后安排 Root Resume。"""
+        assert rows.run is not None
+        assert rows.plan is not None
+        assert rows.round is not None
+        round_row = rows.round
+        if not retry_scheduled:
+            round_row.terminal_task_count += 1
+        completed = not retry_scheduled and (
+            round_row.terminal_task_count == round_row.expected_task_count
+        )
+        if not completed:
+            return False
+
+        round_row.status = "completed"
+        round_row.completed_at = now
+        rows.plan.status = "waiting_review"
+        self._write_round_completed_outbox(session, event, round_row, now)
+        if (
+            rows.run.root_wait_round_id != round_row.round_id
+            or rows.run.root_wait_plan_version != round_row.plan_version
+        ):
+            # 每个新 Round 使用新 generation，避免复用旧 Root checkpoint。
+            rows.run.root_wait_generation = int(rows.run.root_wait_generation or 0) + 1
+            rows.run.root_wait_round_id = round_row.round_id
+            rows.run.root_wait_plan_version = round_row.plan_version
+            rows.run.root_wait_armed_at = None
+            rows.run.root_wait_interrupt_id = None
+            rows.run.root_wait_checkpoint_id = None
+        session.add(
+            RootResumeJobModel(
+                job_id=self._id_factory(),
+                dedupe_key=(
+                    f"round:{round_row.round_id}:root-resume:"
+                    f"{rows.run.root_wait_generation}"
+                ),
+                run_id=rows.run.run_id,
+                plan_id=rows.plan.plan_id,
+                round_id=round_row.round_id,
+                root_wait_generation=rows.run.root_wait_generation,
+                status="pending",
+                attempt=0,
+                available_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        return True
 
     def _write_task_retrying_outbox(
         self,

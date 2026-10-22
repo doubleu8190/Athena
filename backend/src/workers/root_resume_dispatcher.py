@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from application.orchestration.protocols import RootGraphPort
 from domain.runs import CommandType, RunCommand
-from domain.orchestration.ports import RootGraphPort
+from shared.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class RootResumeDispatcher:
@@ -79,7 +79,7 @@ class RootResumeDispatcher:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Root Resume Job claim failed")
+                logger.error("root_resume_job_claim_failed", exc_info=True)
             if not claimed:
                 try:
                     await asyncio.wait_for(
@@ -107,7 +107,11 @@ class RootResumeDispatcher:
                     plan_version=lease.plan_version,
                 )
             except Exception:
-                logger.exception("Root checkpoint recovery failed: %s", lease.job_id)
+                logger.error(
+                    "root_checkpoint_recovery_failed",
+                    job_id=lease.job_id,
+                    exc_info=True,
+                )
                 await self._jobs.retry(lease, delay_seconds=self._retry_delay)
                 return
             if (
@@ -138,7 +142,11 @@ class RootResumeDispatcher:
                 checkpoint_id=checkpoint_id,
             )
         except Exception:
-            logger.exception("Root checkpoint inspection failed: %s", lease.job_id)
+            logger.error(
+                "root_checkpoint_inspection_failed",
+                job_id=lease.job_id,
+                exc_info=True,
+            )
             await self._jobs.retry(lease, delay_seconds=self._retry_delay)
             return
         if not has_pending:
@@ -181,7 +189,11 @@ class RootResumeDispatcher:
                 raise
             return
         except Exception:
-            logger.exception("Root checkpoint resume failed: %s", lease.job_id)
+            logger.error(
+                "root_checkpoint_resume_failed",
+                job_id=lease.job_id,
+                exc_info=True,
+            )
             await self._jobs.retry(lease, delay_seconds=self._retry_delay)
             return
         finally:
@@ -199,7 +211,11 @@ class RootResumeDispatcher:
             else:
                 await self._jobs.complete(lease)
         except Exception:
-            logger.exception("Root Resume Job convergence failed: %s", lease.job_id)
+            logger.error(
+                "root_resume_job_convergence_failed",
+                job_id=lease.job_id,
+                exc_info=True,
+            )
             await self._jobs.retry(lease, delay_seconds=self._retry_delay)
 
     async def _maintain_lease(
@@ -216,7 +232,11 @@ class RootResumeDispatcher:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Root Resume lease renewal failed: %s", lease.job_id)
+                logger.error(
+                    "root_resume_lease_renewal_failed",
+                    job_id=lease.job_id,
+                    exc_info=True,
+                )
                 renewed = None
             if renewed is None:
                 lease_lost.set()
@@ -230,7 +250,9 @@ class RootResumeDispatcher:
             return
         error = task.exception()
         if error is not None:
-            logger.error("Root Resume Job failed before convergence", exc_info=error)
+            logger.error(
+                "root_resume_job_failed_before_convergence", exc_info=error
+            )
 
 
 __all__ = ["RootResumeDispatcher"]

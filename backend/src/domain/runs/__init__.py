@@ -8,13 +8,13 @@ from .entities import (
     CommandType,
     RunCommand,
     RunCancellationResult,
+    RootWaitCheckpoint,
     RunStatus,
     RunSummary,
 )
 from .ports import (
     CommandQueuePort,
     CommandStorePort,
-    RunExecutorPort,
     RunLifecyclePort,
     RunQueryPort,
 )
@@ -29,7 +29,7 @@ __all__ = [
     "CommandType",
     "RunCommand",
     "RunCancellationResult",
-    "RunExecutorPort",
+    "RootWaitCheckpoint",
     "RunLifecyclePort",
     "RunQueryPort",
     "RunStatus",

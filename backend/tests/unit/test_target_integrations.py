@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from application.common.responses import ToolResponse
-from application.orchestration.langgraph.runtime.root_agent import ConfiguredWorkerAgent
+from application.orchestration.agents.worker_agent import ConfiguredWorkerAgent
 from application.orchestration.langgraph.runtime.worker_executor import LangGraphWorkerExecutor
 from application.orchestration.worker_workflow import WorkerWorkflow
 from domain.orchestration import Task, TaskExecution

@@ -6,12 +6,13 @@ import json
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 
-from application.orchestration.langgraph.runtime.root_agent import (
+from application.orchestration.agents.root_agent import (
     ConfiguredRootAgent,
-    _decode_worker_reply,
     _partition_plan_versions,
 )
+from application.orchestration.agents.worker_agent import _decode_worker_reply
 
 
 class _SequenceLLM:
@@ -24,6 +25,43 @@ class _SequenceLLM:
     async def invoke(self, messages: list[dict[str, Any]]) -> dict[str, str]:
         self.messages.append(messages)
         return {"content": self.values[len(self.messages) - 1]}
+
+
+@pytest.mark.asyncio
+async def test_root_agent_reads_langchain_message_content() -> None:
+    """生产模型返回 AIMessage 时，Root 仍按其内容解析计划。"""
+    plan = {
+        "plan_id": "message-plan",
+        "goal": "complete one task",
+        "max_parallelism": 1,
+        "edges": [],
+        "tasks": [
+            {
+                "task_id": "task-1",
+                "title": "Complete task",
+                "objective": "Return a result",
+                "worker_type": "general",
+                "allowed_tools": [],
+                "input": {},
+                "expected_output": {},
+            }
+        ],
+    }
+
+    class MessageLLM:
+        async def invoke(self, _messages: list[dict[str, Any]]) -> AIMessage:
+            return AIMessage(content=json.dumps(plan))
+
+    result = await ConfiguredRootAgent(MessageLLM())(
+        harness_input={
+            "request": {"run_id": "run-1", "session_id": "session-1"},
+            "messages": [{"role": "user", "content": "Complete one task"}],
+            "task": {"mode": "plan"},
+            "available_worker_tools": [],
+        }
+    )
+
+    assert result["plan"] == plan
 
 
 @pytest.mark.asyncio

@@ -7,8 +7,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from application.retrieval import RetrievalFusionService
 from domain.memory import MemoryRepositoryPort, MemorySearchRequest, MemoryVectorSearchPort
+from domain.retrieval.fusion import RetrievalRankFusion
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
 from application.runs.context.protocols import ContextProvider
@@ -90,7 +90,7 @@ class MemoryContextProvider(ContextProvider):
                 )
                 for item in vector
             ]
-            fused = RetrievalFusionService().fuse_ranked_candidates(
+            fused = RetrievalRankFusion().fuse_ranked_candidates(
                 keyword_candidates,
                 vector_candidates,
                 limit=min(self._limit, plan.max_items),

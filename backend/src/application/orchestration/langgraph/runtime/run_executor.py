@@ -6,8 +6,15 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from domain.orchestration import RootGraphPort
-from domain.runs import CommandExecutionResult, RunCommand, RunExecutorPort
+from langgraph.types import Interrupt
+
+from application.orchestration.protocols import RootGraphPort
+from application.runs.ports import RunExecutorPort
+from domain.runs import (
+    CommandExecutionResult,
+    RootWaitCheckpoint,
+    RunCommand,
+)
 
 
 @dataclass(slots=True)
@@ -57,19 +64,25 @@ class LangGraphRunExecutor(RunExecutorPort):
                 if active is not None and active.task is current:
                     self._active.pop(command.run_id, None)
         if isinstance(value, Mapping):
-            # LangGraph surfaces a persisted ``interrupt()`` as an
-            # ``__interrupt__`` entry in the graph result. Keep that result
-            # out of the completed-run JSON path; RunExecutionService uses it
-            # to arm the exact checkpoint before the resume dispatcher can
-            # continue the Root graph.
-            if value.get("__interrupt__"):
-                return CommandExecutionResult(waiting=True, result=dict(value))
-            if value.get("waiting") or value.get("status") == "waiting":
-                return CommandExecutionResult(waiting=True, result=dict(value))
+            # 在 LangGraph 边界把框架中断对象转换为领域身份；应用服务不解析框架返回值。
+            if "__interrupt__" in value:
+                root_wait = _root_wait_checkpoint(value, command.run_id)
+                return CommandExecutionResult(
+                    root_wait=root_wait,
+                    result=dict(value),
+                )
             if value.get("error") or value.get("status") == "failed":
-                return CommandExecutionResult(error=dict(value.get("error") or value))
-            return CommandExecutionResult(result=dict(value.get("result", value)))
-        return CommandExecutionResult(result=value)
+                error = value.get("error") or value
+                if not isinstance(error, Mapping):
+                    return CommandExecutionResult(
+                        error={"message": str(error)}
+                    )
+                return CommandExecutionResult(error=dict(error))
+            result = value.get("result", value)
+            if not isinstance(result, Mapping):
+                return CommandExecutionResult(result={"result": result})
+            return CommandExecutionResult(result=dict(result))
+        return CommandExecutionResult(result={"result": value})
 
     async def cancel(self, run_id: str | None) -> None:
         """Stop an active graph invocation for ``run_id``.
@@ -89,6 +102,46 @@ class LangGraphRunExecutor(RunExecutorPort):
         current = asyncio.current_task()
         if active.task is not current and not active.task.done():
             active.task.cancel()
+
+
+def _root_wait_checkpoint(
+    result: Mapping[str, object], expected_run_id: str
+) -> RootWaitCheckpoint:
+    """Validate LangGraph's sole Round interrupt and convert it to a domain value."""
+    interrupts = result["__interrupt__"]
+    if not isinstance(interrupts, (list, tuple)) or len(interrupts) != 1:
+        raise RuntimeError("root_round_interrupt_count_invalid")
+    interrupt = interrupts[0]
+    if not isinstance(interrupt, Interrupt):
+        raise RuntimeError("root_round_interrupt_invalid")
+    value = interrupt.value
+    interrupt_id = interrupt.id
+    checkpoint_id = result.get("__root_checkpoint_id__")
+    if not isinstance(value, Mapping) or value.get("type") != "round_wait":
+        raise RuntimeError("root_round_interrupt_payload_invalid")
+    run_id = value.get("run_id")
+    plan_id = value.get("plan_id")
+    round_id = value.get("round_id")
+    plan_version = value.get("plan_version")
+    if (
+        not isinstance(run_id, str)
+        or run_id != expected_run_id
+        or not isinstance(plan_id, str)
+        or not isinstance(round_id, str)
+        or not isinstance(plan_version, int)
+        or isinstance(plan_version, bool)
+        or not isinstance(interrupt_id, str)
+        or not isinstance(checkpoint_id, str)
+    ):
+        raise RuntimeError("root_round_interrupt_identity_invalid")
+    return RootWaitCheckpoint(
+        run_id=run_id,
+        plan_id=plan_id,
+        round_id=round_id,
+        plan_version=plan_version,
+        interrupt_id=interrupt_id,
+        checkpoint_id=checkpoint_id,
+    )
 
 
 __all__ = ["LangGraphRunExecutor"]

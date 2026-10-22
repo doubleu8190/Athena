@@ -6,8 +6,8 @@ import pytest
 
 from application.orchestration.root_workflow import (
     RootWorkflow,
-    _deferred_version_review_decision,
 )
+from application.orchestration.plan_versions import deferred_version_review_decision
 from domain.orchestration import OrchestrationCommandType, ReviewAction, ReviewContext
 
 
@@ -67,7 +67,6 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
             tool_service=ToolService(),
             orchestration_command_handler=handler,
             event_publisher=None,
-            plan_builder=None,
         )
     )
 
@@ -136,7 +135,6 @@ async def test_explicit_user_tool_allowlist_binds_to_matching_task_input():
             tool_service=ShellToolService(),
             orchestration_command_handler=handler,
             event_publisher=None,
-            plan_builder=None,
         )
     )
 
@@ -180,7 +178,7 @@ def test_completed_version_review_automatically_submits_deferred_version():
         full_dag_summary={},
         round_results=({"task_id": "draft:run-1", "status": "completed"},),
     )
-    decision = _deferred_version_review_decision(
+    decision = deferred_version_review_decision(
         context,
         {
             "request": {"run_id": "run-1"},
@@ -225,7 +223,7 @@ def test_later_version_review_keeps_all_tasks_from_current_dag():
         ),
         round_results=({"task_id": "review:run-1", "status": "completed"},),
     )
-    decision = _deferred_version_review_decision(
+    decision = deferred_version_review_decision(
         context,
         {
             "request": {"run_id": "run-1"},
@@ -258,7 +256,7 @@ def test_deferred_tasks_can_depend_on_another_task_in_the_same_version():
         round_results=({"task_id": "draft:run-1", "status": "completed"},),
     )
 
-    decision = _deferred_version_review_decision(
+    decision = deferred_version_review_decision(
         context,
         {
             "request": {"run_id": "run-1"},
@@ -295,7 +293,7 @@ def test_deferred_version_with_unknown_dependency_is_not_submitted():
         round_results=({"task_id": "draft:run-1", "status": "completed"},),
     )
 
-    decision = _deferred_version_review_decision(
+    decision = deferred_version_review_decision(
         context,
         {
             "request": {"run_id": "run-1"},

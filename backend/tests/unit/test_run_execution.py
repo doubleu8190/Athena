@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +15,7 @@ from domain.runs import (
     CommandType,
     RunCommand,
     RunCancellationResult,
+    RootWaitCheckpoint,
     RunStatus,
 )
 
@@ -32,8 +32,12 @@ def command(command_type=CommandType.RUN_START, run_id="run-1"):
 
 
 class Lifecycle:
+    writes_cancellation_events_to_outbox = False
+    writes_completion_artifacts_to_outbox = False
+
     def __init__(self):
         self.calls = []
+        self.root_wait = None
 
     async def update_status(self, run_id, status):
         self.calls.append(("update", run_id, str(status)))
@@ -50,6 +54,10 @@ class Lifecycle:
     async def cancel(self, run_id, **_kwargs):
         self.calls.append(("cancel", run_id))
         return RunCancellationResult(RunStatus.CANCELLING, True)
+
+    async def arm_root_wait(self, run_id, **identity):
+        self.root_wait = (run_id, identity)
+        return True
 
 
 class Queue:
@@ -246,7 +254,16 @@ async def test_execution_service_converges_executor_failure() -> None:
 @pytest.mark.asyncio
 async def test_execution_service_preserves_resume_and_waiting_events() -> None:
     lifecycle, queue, executor, events = Lifecycle(), Queue(), Executor(
-        outcome=CommandExecutionResult(waiting=True)
+        outcome=CommandExecutionResult(
+            root_wait=RootWaitCheckpoint(
+                run_id="run-1",
+                plan_id="plan-1",
+                round_id="round-1",
+                plan_version=2,
+                interrupt_id="interrupt-1",
+                checkpoint_id="checkpoint-1",
+            )
+        )
     ), Events()
     service = RunExecutionService(lifecycle, queue, executor, events)
 
@@ -261,33 +278,17 @@ async def test_execution_service_preserves_resume_and_waiting_events() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_service_arms_exact_root_interrupt_checkpoint() -> None:
-    class WaitingLifecycle(Lifecycle):
-        def __init__(self):
-            super().__init__()
-            self.root_wait = None
-
-        async def arm_root_wait(self, run_id, **identity):
-            self.root_wait = (run_id, identity)
-            return True
-
-    interrupt = SimpleNamespace(
-        id="interrupt-1",
-        value={
-            "type": "round_wait",
-            "run_id": "run-1",
-            "plan_id": "plan-1",
-            "round_id": "round-1",
-            "plan_version": 2,
-        },
-    )
-    lifecycle = WaitingLifecycle()
+    lifecycle = Lifecycle()
     executor = Executor(
         outcome=CommandExecutionResult(
-            result={
-                "__interrupt__": [interrupt],
-                "__root_checkpoint_id__": "checkpoint-1",
-            },
-            waiting=True,
+            root_wait=RootWaitCheckpoint(
+                run_id="run-1",
+                plan_id="plan-1",
+                round_id="round-1",
+                plan_version=2,
+                interrupt_id="interrupt-1",
+                checkpoint_id="checkpoint-1",
+            )
         )
     )
     service = RunExecutionService(lifecycle, Queue(), executor, Events())
@@ -304,6 +305,34 @@ async def test_execution_service_arms_exact_root_interrupt_checkpoint() -> None:
             "checkpoint_id": "checkpoint-1",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_execution_service_rejects_unarmed_root_checkpoint() -> None:
+    class RejectingLifecycle(Lifecycle):
+        async def arm_root_wait(self, run_id, **identity):
+            return False
+
+    service = RunExecutionService(
+        RejectingLifecycle(),
+        Queue(),
+        Executor(
+            outcome=CommandExecutionResult(
+                root_wait=RootWaitCheckpoint(
+                    run_id="run-1",
+                    plan_id="plan-1",
+                    round_id="round-1",
+                    plan_version=2,
+                    interrupt_id="interrupt-1",
+                    checkpoint_id="checkpoint-1",
+                )
+            )
+        ),
+        Events(),
+    )
+
+    with pytest.raises(RuntimeError, match="root_wait_checkpoint_not_armed"):
+        await service.execute(command())
 
 
 @pytest.mark.asyncio

@@ -5,13 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 import asyncio
 import inspect
-import logging
 from typing import Any
+
+from shared.logging import get_logger
 
 from .options import EmbeddingOptions, coerce_embedding_options
 
 
-_LOGGER = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class EmbeddingProvider:
@@ -68,8 +69,10 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
                     or "MPS backend is supported on macOS" not in str(exc)
                 ):
                     raise
-                _LOGGER.warning(
-                    "MPS is unavailable for this runtime; loading embedding model on CPU"
+                logger.warning(
+                    "embedding_mps_unavailable_using_cpu",
+                    provider=config.provider,
+                    requested_device=config.device,
                 )
                 return SentenceTransformer(config.model, device="cpu")
         if provider == "openai":

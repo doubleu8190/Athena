@@ -8,9 +8,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from application.orchestration.protocols import WorkerWorkflowPort
+from application.orchestration.serialization import json_value
 
-from ..shared.utils import call
-from .state import WorkerGraphState, json_value
+from .state import WorkerGraphState
 
 
 def build_worker_graph(
@@ -99,8 +99,8 @@ async def invoke_worker_graph(
     config = {"configurable": {"thread_id": str(thread_id)}}
     if resume_value is not None:
         current_execution = encoded if isinstance(encoded, Mapping) else {}
-        checkpoint = await call(graph.aget_state, config=config)
-        values = getattr(checkpoint, "values", {})
+        checkpoint = await graph.aget_state(config=config)
+        values = checkpoint.values
         saved_execution = (
             values.get("execution", {}) if isinstance(values, Mapping) else {}
         )
@@ -113,12 +113,11 @@ async def invoke_worker_graph(
                 merged_execution[key] = saved_execution[key]
         resume_payload = dict(resume_value)
         resume_payload["__worker_execution_update"] = merged_execution
-        return await call(
-            graph.ainvoke,
+        return await graph.ainvoke(
             Command(resume=resume_payload),
             config=config,
         )
-    return await call(graph.ainvoke, state, config=config)
+    return await graph.ainvoke(state, config=config)
 
 
 __all__ = ["build_worker_graph", "invoke_worker_graph"]

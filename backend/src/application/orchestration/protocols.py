@@ -1,58 +1,107 @@
-"""Application ports used by the LangGraph orchestration adapter.
+"""Application-owned contracts between orchestration use cases and adapters.
 
-The graph adapter depends on these contracts, while the concrete workflows
-remain application implementations assembled by bootstrap.
+The LangGraph adapter implements the graph ports; bootstrap supplies the
+workflow and persistence capabilities used by the application.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from collections.abc import Iterable, Mapping
+from typing import Any, AsyncContextManager, Protocol
 
-from application.runs.context.planner import ContextPlanner
-from application.runs.context.service import ContextAcquisitionService
-from application.runs.request_preparation import (
-    RunRequestPreparationService,
-)
-from application.runs.task_understanding.service import TaskUnderstandingService
-from application.tools.service import ToolService
-from domain.events.ports import EventPort
+from application.orchestration.langgraph import RootGraphState
 from domain.orchestration import (
     CommandReceipt,
     OrchestrationCommand,
     Plan,
+    ReviewContext,
     ReviewDecision,
     Task,
+    TaskExecution,
+    TaskResult,
 )
-from domain.orchestration.ports import ReviewContextRepository
-
-if TYPE_CHECKING:
-    from application.orchestration.langgraph.runtime.root_agent import (
-        ConfiguredRootAgent,
-    )
 
 
-@dataclass(slots=True)
-class RootWorkflowDependencies:
-    """Application capabilities used by the Root workflow."""
+class RootAgent(Protocol):
+    """Root 工作流所需的 Agent 能力。"""
 
-    task_understanding: TaskUnderstandingService
-    context_acquisition: ContextAcquisitionService
-    context_planner: ContextPlanner
-    request_preparation: RunRequestPreparationService
-    agent: ConfiguredRootAgent
-    event_publisher: EventPort
-    tool_service: ToolService
-    review_context_repository: ReviewContextRepository | None = None
-    orchestration_command_handler: OrchestrationCommandHandlerPort | None = None
-    plan_builder: Callable[..., Any] | None = None
-    plan_loader: Callable[..., Any] | None = None
-    finalizer: Callable[..., Any] | None = None
+    async def __call__(
+        self, *, harness_input: Mapping[str, Any]
+    ) -> Mapping[str, Any]: ...
+
+    async def review(
+        self, context: ReviewContext, *, request: Mapping[str, Any]
+    ) -> ReviewDecision: ...
 
 
-class OrchestrationCommandHandlerPort(Protocol):
-    """Application command boundary used by Root plan submission and review."""
+class RootGraphPort(Protocol):
+    """Application execution boundary implemented by the LangGraph adapter."""
+
+    async def invoke(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        user_message: str,
+        message_id: str = "",
+        attachment_ids: list[str] | None = None,
+        resume_value: dict[str, object] | None = None,
+        stop_signal: object | None = None,
+    ) -> object: ...
+
+    async def has_pending_round_wait(
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+        interrupt_id: str,
+        checkpoint_id: str,
+    ) -> bool: ...
+
+    async def find_pending_round_wait(
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+    ) -> tuple[str, str] | None: ...
+
+
+class WorkerExecutor(Protocol):
+    """Application capability used by the durable Worker job dispatcher."""
+
+    async def execute(self, execution: TaskExecution) -> TaskResult: ...
+
+    async def resume(
+        self,
+        execution: TaskExecution,
+        decisions: dict[str, str],
+    ) -> TaskResult: ...
+
+    async def pending_interrupt(
+        self, execution: TaskExecution
+    ) -> dict[str, Any] | None: ...
+
+
+class GraphThreadLock(Protocol):
+    """Serialize graph calls for one checkpoint thread."""
+
+    def hold(self, thread_id: str) -> AsyncContextManager[None]: ...
+
+
+class PlanLoader(Protocol):
+    """Load persisted plan status and results for the Root workflow."""
+
+    async def __call__(
+        self, *, plan_id: str | None
+    ) -> Mapping[str, Any]: ...
+
+
+class RootPlanCommandPort(Protocol):
+    """Application commands required by Root plan submission and review."""
 
     async def submit_plan(
         self,
@@ -79,37 +128,37 @@ class OrchestrationCommandHandlerPort(Protocol):
 
 
 class RootWorkflowPort(Protocol):
-    async def prepare_request(self, state: Mapping[str, Any]) -> dict[str, Any]: ...
-    async def understand_task(self, state: Mapping[str, Any]) -> dict[str, Any]: ...
+    async def prepare_request(self, state: RootGraphState) -> dict[str, Any]: ...
+    async def understand_task(self, state: RootGraphState) -> dict[str, Any]: ...
     async def clarification_response(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
-    async def plan_context(self, state: Mapping[str, Any]) -> dict[str, Any]: ...
-    async def acquire_context(self, state: Mapping[str, Any]) -> dict[str, Any]: ...
+    async def plan_context(self, state: RootGraphState) -> dict[str, Any]: ...
+    async def acquire_context(self, state: RootGraphState) -> dict[str, Any]: ...
     async def prepare_harness_input(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
     async def run_root_execution_loop(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
     async def materialize_execution_plan(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
     async def wait_for_plan_completion(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
     async def review_completed_round(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
-    async def project_plan_result(self, state: Mapping[str, Any]) -> dict[str, Any]: ...
+    async def project_plan_result(self, state: RootGraphState) -> dict[str, Any]: ...
     async def finalize_plan_stream(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
     async def post_process_and_build_result(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
     async def assemble_final_response(
-        self, state: Mapping[str, Any]
+        self, state: RootGraphState
     ) -> dict[str, Any]: ...
 
 
@@ -127,8 +176,12 @@ class WorkerWorkflowPort(Protocol):
 
 
 __all__ = [
-    "RootWorkflowDependencies",
-    "OrchestrationCommandHandlerPort",
+    "RootAgent",
+    "PlanLoader",
+    "RootGraphPort",
+    "WorkerExecutor",
+    "GraphThreadLock",
+    "RootPlanCommandPort",
     "RootWorkflowPort",
     "WorkerWorkflowPort",
 ]

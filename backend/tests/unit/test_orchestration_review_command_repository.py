@@ -168,7 +168,12 @@ async def test_submit_plan_atomically_creates_first_round_executions_and_jobs():
     assert any(isinstance(item, RoundTaskModel) for item in session.added)
     assert any(isinstance(item, TaskExecutionModel) for item in session.added)
     assert any(isinstance(item, WorkerJobModel) for item in session.added)
-    assert sum(isinstance(item, OrchestrationOutboxModel) for item in session.added) == 2
+    outbox_events = [
+        item.event_type
+        for item in session.added
+        if isinstance(item, OrchestrationOutboxModel)
+    ]
+    assert outbox_events == ["PlanAccepted", "RoundStarted", "PlanCreated"]
 
     command_row = next(
         item

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
 
-from .root_workflow import as_dict, call, json_value
+from .serialization import as_dict, json_value
 
 
 class WorkerWorkflow:
@@ -13,8 +14,8 @@ class WorkerWorkflow:
     def __init__(
         self,
         *,
-        execute_tool: Callable[..., Any] | None = None,
-        execute: Callable[..., Any] | None = None,
+        execute_tool: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
+        execute: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
         max_tool_rounds: int = 4,
         max_tool_calls_per_round: int = 8,
     ) -> None:
@@ -35,17 +36,39 @@ class WorkerWorkflow:
 
     async def run(self, state: Mapping[str, Any]) -> dict[str, Any]:
         if self.execute is None:
-            return {"result": {"status": "failed", "error": {"code": "worker_not_configured"}}}
-        payload = as_dict(await call(self.execute, execution=state.get("execution", {}), state=state))
-        return {"result": payload, "waiting": str(payload.get("status", "completed")) == "waiting_approval"}
+            return {
+                "result": {
+                    "status": "failed",
+                    "error": {"code": "worker_not_configured"},
+                }
+            }
+        payload = as_dict(
+            await self.execute(execution=state.get("execution", {}), state=state)
+        )
+        return {
+            "result": payload,
+            "waiting": str(payload.get("status", "completed")) == "waiting_approval",
+        }
 
     async def approval_gate(self, state: Mapping[str, Any]) -> dict[str, Any]:
         result = state.get("result", {})
-        return {"status": "waiting_approval" if state.get("waiting") else str(result.get("status", "completed"))}
+        return {
+            "status": (
+                "waiting_approval"
+                if state.get("waiting")
+                else str(result.get("status", "completed"))
+            )
+        }
 
     async def execute_tool_batch(self, state: Mapping[str, Any]) -> dict[str, Any]:
         if self.execute_tool is None:
-            return {"result": {"status": "failed", "error": {"code": "tool_executor_not_configured"}}, "waiting": False}
+            return {
+                "result": {
+                    "status": "failed",
+                    "error": {"code": "tool_executor_not_configured"},
+                },
+                "waiting": False,
+            }
         result = state.get("result", {})
         raw_calls = result.get("tool_calls", []) if isinstance(result, Mapping) else []
         calls = raw_calls if isinstance(raw_calls, (list, tuple)) else []
@@ -75,8 +98,7 @@ class WorkerWorkflow:
         tool_results: list[dict[str, Any]] = []
         for index, item in enumerate(calls):
             result = as_dict(
-                await call(
-                    self.execute_tool,
+                await self.execute_tool(
                     tool_call=item,
                     execution=state.get("execution", {}),
                     state=state,
@@ -127,10 +149,29 @@ class WorkerWorkflow:
         Raises:
             RuntimeError: 审批身份与中断中的工具操作不一致时抛出。
         """
-        approval = state.get("pending_approval", {})
-        approval = approval if isinstance(approval, Mapping) else {}
         if not isinstance(decision, Mapping):
             raise RuntimeError("worker_approval_resume_payload_invalid")
+
+        state, approval, execution = self._restore_approval_execution(
+            state, decision
+        )
+        self._validate_approval_resume(approval, decision, execution)
+        result = await self._resolve_approval(approval, decision, execution, state)
+        if result.get("status") == "approval_required":
+            raise RuntimeError("worker_tool_reapproval_required")
+        return self._append_tool_results(
+            state,
+            [result],
+            tool_round=int(approval.get("tool_round", 0)),
+        )
+
+    @staticmethod
+    def _restore_approval_execution(
+        state: Mapping[str, Any], decision: Mapping[str, Any]
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+        """合并恢复执行上下文，同时保留中断时的工具结果和私有引用。"""
+        approval = state.get("pending_approval", {})
+        approval = approval if isinstance(approval, Mapping) else {}
         execution = state.get("execution", {})
         execution = execution if isinstance(execution, Mapping) else {}
         execution_update = decision.get("__worker_execution_update")
@@ -165,6 +206,16 @@ class WorkerWorkflow:
                     updated_execution[key] = execution[key]
             execution = updated_execution
             state = {**state, "execution": updated_execution}
+
+        return state, approval, execution
+
+    @staticmethod
+    def _validate_approval_resume(
+        approval: Mapping[str, Any],
+        decision: Mapping[str, Any],
+        execution: Mapping[str, Any],
+    ) -> None:
+        """确保恢复回执仍绑定中断时批准的工具操作。"""
         expected = {
             "approval_id": approval.get("approval_id"),
             "execution_id": approval.get("execution_id"),
@@ -178,6 +229,14 @@ class WorkerWorkflow:
         if execution.get("execution_id") != approval.get("execution_id"):
             raise RuntimeError("worker_approval_execution_identity_mismatch")
 
+    async def _resolve_approval(
+        self,
+        approval: Mapping[str, Any],
+        decision: Mapping[str, Any],
+        execution: Mapping[str, Any],
+        state: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """执行已批准操作，或构造拒绝和过期回执。"""
         resolution = str(decision.get("decision", "")).lower()
         tool_call = {
             "name": approval.get("tool_name"),
@@ -191,8 +250,7 @@ class WorkerWorkflow:
             if self.execute_tool is None:
                 raise RuntimeError("worker_tool_executor_not_configured")
             result = as_dict(
-                await call(
-                    self.execute_tool,
+                await self.execute_tool(
                     tool_call=tool_call,
                     execution=execution,
                     state=state,
@@ -215,13 +273,7 @@ class WorkerWorkflow:
         else:
             raise RuntimeError("worker_approval_decision_invalid")
 
-        if result.get("status") == "approval_required":
-            raise RuntimeError("worker_tool_reapproval_required")
-        return self._append_tool_results(
-            state,
-            [result],
-            tool_round=int(approval.get("tool_round", 0)),
-        )
+        return result
 
     @staticmethod
     def _append_tool_results(
@@ -239,14 +291,13 @@ class WorkerWorkflow:
 
         Returns:
             包含安全投影、内部结果引用和下一轮计数的状态补丁。
-
-        Raises:
-            无：该方法只整理已产生的 JSON 风格结果。
         """
         execution = dict(state.get("execution", {}))
         previous_results = execution.get("tool_results", [])
         previous_refs = execution.get("_worker_result_refs", {})
-        result_refs = dict(previous_refs) if isinstance(previous_refs, Mapping) else {}
+        result_refs = (
+            dict(previous_refs) if isinstance(previous_refs, Mapping) else {}
+        )
         public_results = []
         for result in tool_results:
             storage_key = result.pop("_storage_key", None)
@@ -269,7 +320,12 @@ class WorkerWorkflow:
 
     async def finalize(self, state: Mapping[str, Any]) -> dict[str, Any]:
         result = dict(state.get("result", {}))
-        return {"result": result, "waiting": bool(state.get("waiting")), "status": "waiting_approval" if state.get("waiting") else str(result.get("status", "completed"))}
+        status = (
+            "waiting_approval"
+            if state.get("waiting")
+            else str(result.get("status", "completed"))
+        )
+        return {"result": result, "waiting": bool(state.get("waiting")), "status": status}
 
     @staticmethod
     def route_after_gate(state: Mapping[str, Any]) -> str:
@@ -279,7 +335,11 @@ class WorkerWorkflow:
         status = str(result.get("status", "completed"))
         if status not in {"running", "completed"}:
             return "finish_worker"
-        return "execute_tool_batch" if state.get("result", {}).get("tool_calls") else "finish_worker"
+        return (
+            "execute_tool_batch"
+            if state.get("result", {}).get("tool_calls")
+            else "finish_worker"
+        )
 
     @staticmethod
     def route_after_tools(state: Mapping[str, Any]) -> str:

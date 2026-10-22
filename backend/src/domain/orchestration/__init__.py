@@ -37,10 +37,8 @@ from .ports import (
     OrchestrationCommandRepository,
     OrchestrationOutboxRepository,
     ReviewContextRepository,
-    RootGraphPort,
     TaskEventRepository,
     WorkerJobRepository,
-    WorkerExecutor,
 )
 
 __all__ = [
@@ -56,12 +54,10 @@ __all__ = [
     "PlanStatus",
     "PlanValidationError",
     "PlanValidator",
-    "RootGraphPort",
     "Task",
     "TaskResult",
     "TaskStatus",
     "TaskExecution",
-    "WorkerExecutor",
     "freeze_ready_round",
     "ExecutionStatus",
     "OrchestrationCommand",

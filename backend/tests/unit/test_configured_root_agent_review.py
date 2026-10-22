@@ -4,9 +4,7 @@ import json
 
 import pytest
 
-from application.orchestration.langgraph.runtime.root_agent import (
-    ConfiguredRootAgent,
-)
+from application.orchestration.agents.root_agent import ConfiguredRootAgent
 from domain.orchestration import ReviewAction, ReviewContext
 
 

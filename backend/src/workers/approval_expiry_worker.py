@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
 from application.approval import ApprovalService
+from shared.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ApprovalExpiryWorker:
@@ -65,7 +65,7 @@ class ApprovalExpiryWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Approval expiry scan failed")
+                logger.error("approval_expiry_scan_failed", exc_info=True)
                 expired = 0
             if expired >= self._batch_limit:
                 continue

@@ -19,11 +19,12 @@ from domain.evaluation import (
     MetricValue,
     ExecutionArtifact,
 )
-from domain.evaluation.ports import EvaluationEventSink, EvaluationRepository, EvaluationTarget, MetricEvaluator
+from domain.evaluation.ports import EvaluationRepository
 from shared import new_id
 
 from .evaluators import default_evaluators
 from .gates import evaluate_gates
+from .ports import EvaluationEventSink, EvaluationTarget, MetricEvaluator
 
 
 def _now() -> str:

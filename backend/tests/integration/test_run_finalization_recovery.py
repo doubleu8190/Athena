@@ -121,6 +121,7 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
         assert claimed_command is not None
 
         class LoseCompletionReceipt:
+            writes_cancellation_events_to_outbox = False
             writes_completion_artifacts_to_outbox = True
 
             async def update_status(self, target_run_id, status):
@@ -129,6 +130,9 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             async def complete(self, target_run_id, result):
                 assert await repository.complete(target_run_id, result)
                 raise asyncio.CancelledError
+
+            async def arm_root_wait(self, target_run_id, **identity):
+                return await repository.arm_root_wait(target_run_id, **identity)
 
         class Executor:
             def __init__(self) -> None:

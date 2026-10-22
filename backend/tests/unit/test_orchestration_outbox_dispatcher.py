@@ -91,6 +91,17 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
     ("event_type", "expected_type", "activity_id", "status", "payload"),
     [
         (
+            "PlanCreated",
+            "plan.created",
+            "plan:plan-1",
+            "running",
+            {
+                "goal": "goal",
+                "task_ids": ["task-1"],
+                "tasks": [{"task_id": "task-1", "title": "Task"}],
+            },
+        ),
+        (
             "PlanAccepted",
             "plan.accepted",
             "plan:plan-1",

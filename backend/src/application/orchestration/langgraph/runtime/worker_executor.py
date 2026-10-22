@@ -5,8 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from domain.orchestration import TaskExecution, TaskResult, TaskStatus, WorkerExecutor
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from application.orchestration.protocols import WorkerExecutor
+from domain.orchestration import TaskExecution, TaskResult, TaskStatus
+
+from .protocols import CheckpointerProvider
 from ..graphs.worker import build_worker_graph, invoke_worker_graph
 
 
@@ -18,7 +22,7 @@ class LangGraphWorkerExecutor(WorkerExecutor):
         *,
         graph_factory: Any | None = None,
         workflow_factory: Callable[[], Any] | None = None,
-        checkpointer: Any | None = None,
+        checkpointer: CheckpointerProvider | BaseCheckpointSaver[Any] | None = None,
     ) -> None:
         """保存 Worker graph 工厂；未提供时使用默认 Worker graph。"""
         self._graph_factory = graph_factory
@@ -33,10 +37,12 @@ class LangGraphWorkerExecutor(WorkerExecutor):
             if self._graph_factory is not None:
                 self._graphs[key] = self._graph_factory()
             elif self._workflow_factory is not None:
-                saver = self._checkpointer
-                getter = getattr(saver, "get_saver", None)
-                if getter is not None:
-                    saver = getter()
+                if isinstance(self._checkpointer, BaseCheckpointSaver):
+                    saver = self._checkpointer
+                elif self._checkpointer is not None:
+                    saver = self._checkpointer.get_saver()
+                else:
+                    saver = None
                 self._graphs[key] = build_worker_graph(
                     workflow=self._workflow_factory(),
                     checkpointer=saver,
@@ -83,19 +89,19 @@ class LangGraphWorkerExecutor(WorkerExecutor):
         )
         interrupts = [
             pending
-            for task in getattr(snapshot, "tasks", ())
-            for pending in getattr(task, "interrupts", ())
+            for task in snapshot.tasks
+            for pending in task.interrupts
         ]
         if not interrupts:
             return None
         if len(interrupts) != 1:
             raise RuntimeError("worker_graph_multiple_interrupts_not_supported")
         pending = interrupts[0]
-        value = getattr(pending, "value", None)
+        value = pending.value
         if not isinstance(value, dict):
             raise RuntimeError("worker_graph_interrupt_payload_invalid")
         recovered = dict(value)
-        recovered["interrupt_id"] = str(getattr(pending, "id", ""))
+        recovered["interrupt_id"] = str(pending.id)
         return recovered
 
     @staticmethod
@@ -105,10 +111,10 @@ class LangGraphWorkerExecutor(WorkerExecutor):
         if isinstance(interrupts, (list, tuple)) and interrupts:
             if len(interrupts) != 1:
                 raise RuntimeError("worker_graph_multiple_interrupts_not_supported")
-            interrupt_value = getattr(interrupts[0], "value", {})
+            interrupt_value = interrupts[0].value
             if not isinstance(interrupt_value, dict):
                 raise RuntimeError("worker_graph_interrupt_payload_invalid")
-            interrupt_id = getattr(interrupts[0], "id", None)
+            interrupt_id = interrupts[0].id
             approval = dict(interrupt_value)
             approval["interrupt_id"] = str(interrupt_id or "")
             return TaskResult(

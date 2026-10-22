@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from application.orchestration.langgraph.graphs.state import RootGraphState
 from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
 from infrastructure.persistence.postgres.checkpointer import PostgresCheckpointer
+from infrastructure.persistence.postgres.graph_thread_lock import PostgresGraphThreadLock
 from infrastructure.persistence.postgres.models import (
     AgentPlanModel,
     AgentRunModel,
@@ -219,7 +220,12 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
         compiled_graph = graph_builder.compile(
             checkpointer=restarted_checkpointer.get_saver()
         )
-        root_graph = LangGraphRootGraph(workflow=None, dependencies=None)
+        root_graph = LangGraphRootGraph(
+            workflow=None,
+            dependencies=None,
+            checkpointer=restarted_checkpointer,
+            thread_lock=PostgresGraphThreadLock(checkpoint_connection_string),
+        )
         root_graph._graph = compiled_graph
         root_jobs = PostgresRootResumeJobRepository(session_factory, clock=lambda: now)
         lease = await root_jobs.claim_next("root-resumer-before-restart", lease_seconds=60)

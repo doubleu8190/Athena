@@ -328,40 +328,35 @@ class PostgresRunRepository(
     async def cancel(
         self, run_id: str, *, reason: str = "USER_REQUEST"
     ) -> RunCancellationResult | None:
-        """原子进入 Plan 取消中并撤销尚未执行的审批恢复与 Worker Job。
+        """在一个事务内设置取消栅栏并收敛关联计划状态。
 
         Args:
             run_id: 用户请求停止的 Run ID。
+            reason: 取消原因，写入任务和计划事件。
 
         Returns:
-            首次受理时返回 `CANCELLING` 或立即终结的 `CANCELLED`；重复请求、
-            不存在的 Run 和已终态 Run 返回 None。
+            首次受理时返回取消状态；重复请求、缺失或终态 Run 返回 None。
 
         Raises:
-            无：数据库错误由调用方按可重试命令处理。
+            Exception: 数据库错误由调用方按可重试命令处理。
         """
         now = datetime.now(timezone.utc)
-        now_iso = now.isoformat()
         async with self._session_factory() as session:
             async with session.begin():
-                run = await session.get(
-                    AgentRunModel, run_id, with_for_update=True
-                )
-                if run is None or run.status in {
+                run = await session.get(AgentRunModel, run_id, with_for_update=True)
+                if run is None:
+                    return None
+                if run.status in {
                     RunStatus.CANCELLING.value,
                     RunStatus.CANCELLED.value,
                     RunStatus.COMPLETED.value,
                     RunStatus.FAILED.value,
                 }:
-                    if run is not None:
-                        return RunCancellationResult(
-                            RunStatus(run.status),
-                            False,
-                            str(
-                                run.cancellation_external_effect_status or "none"
-                            ),
-                        )
-                    return None
+                    return RunCancellationResult(
+                        RunStatus(run.status),
+                        False,
+                        str(run.cancellation_external_effect_status or "none"),
+                    )
 
                 plan = (
                     await session.execute(
@@ -370,76 +365,11 @@ class PostgresRunRepository(
                         .with_for_update()
                     )
                 ).scalar_one_or_none()
-                if plan is None or plan.status in {
-                    "completed",
-                    "failed",
-                    "cancelled",
-                }:
-                    external_effect_status = (
-                        "unknown"
-                        if run.status == RunStatus.RUNNING.value
-                        else "none"
-                    )
-                    run.status = RunStatus.CANCELLED.value
-                    run.cancellation_epoch = int(run.cancellation_epoch or 0) + 1
-                    run.cancellation_external_effect_status = external_effect_status
-                    run.updated_at = now_iso
-                    await self._cancel_root_resume_jobs(session, run_id, now)
-                    await self._cancel_pending_approvals(
-                        session, run_id=run_id, plan=None, now=now
-                    )
-                    await session.execute(
-                        update(AgentCommandModel)
-                        .where(
-                            AgentCommandModel.run_id == run_id,
-                            AgentCommandModel.status == CommandStatus.QUEUED.value,
-                            AgentCommandModel.command_type.in_(
-                                (
-                                    CommandType.RUN_START.value,
-                                    CommandType.RUN_RESUME.value,
-                                )
-                            ),
-                        )
-                        .values(
-                            status=CommandStatus.CANCELLED.value,
-                            completed_at=now_iso,
-                            result_json=json.dumps(
-                                {"status": RunStatus.CANCELLED.value}
-                            ),
-                        )
-                    )
-                    session.add(
-                        OrchestrationOutboxModel(
-                            message_id=uuid4().hex,
-                            dedupe_key=(
-                                f"run:{run_id}:cancelled:{run.cancellation_epoch}"
-                            ),
-                            event_type="RunCancelled",
-                            correlation_id=run_id,
-                            plan_id=plan.plan_id if plan else None,
-                            plan_version=(
-                                plan.current_version if plan is not None else None
-                            ),
-                            round_id=plan.active_round_id if plan is not None else None,
-                            payload_json={
-                                "cancellation_epoch": run.cancellation_epoch,
-                                "external_effect_status": external_effect_status,
-                            },
-                            schema_version=1,
-                            status="pending",
-                            attempt=0,
-                            available_at=now,
-                            occurred_at=now,
-                        )
-                    )
-                    return RunCancellationResult(
-                        RunStatus.CANCELLED,
-                        True,
-                        external_effect_status,
+                if plan is None or plan.status in {"completed", "failed", "cancelled"}:
+                    return await self._cancel_run_without_active_plan(
+                        session, run_id, run, plan, now
                     )
 
-                # Worker Job 领取与终态写入同样先锁 Run；该 epoch 变更使旧租约、
-                # Worker 结果和已批准但尚未恢复的工具调用同时失效。
                 active_execution_count = (
                     await session.execute(
                         select(func.count())
@@ -454,213 +384,309 @@ class PostgresRunRepository(
                         )
                     )
                 ).scalar_one()
-                external_effect_status = (
-                    "unknown"
-                    if run.status == RunStatus.RUNNING.value or active_execution_count
-                    else "none"
+                return await self._begin_plan_cancellation(
+                    session,
+                    run_id,
+                    run,
+                    plan,
+                    reason=reason,
+                    now=now,
+                    active_execution_count=active_execution_count,
                 )
-                cancellation_epoch = max(
-                    int(run.cancellation_epoch or 0),
-                    int(plan.cancellation_epoch or 0),
-                ) + 1
-                run.status = RunStatus.CANCELLING.value
-                run.cancellation_epoch = cancellation_epoch
-                run.cancellation_external_effect_status = external_effect_status
-                run.updated_at = now_iso
-                plan.status = "cancelling"
-                plan.cancellation_epoch = cancellation_epoch
-                plan.updated_at = now_iso
 
-                task_ids = select(AgentTaskModel.task_id).where(
-                    AgentTaskModel.plan_id == plan.plan_id
+    async def _cancel_run_without_active_plan(
+        self,
+        session: AsyncSession,
+        run_id: str,
+        run: AgentRunModel,
+        plan: AgentPlanModel | None,
+        now: datetime,
+    ) -> RunCancellationResult:
+        """直接终结没有活动 Plan 的 Run，并在同一事务写入清理事件。"""
+        now_iso = now.isoformat()
+        external_effect_status = (
+            "unknown" if run.status == RunStatus.RUNNING.value else "none"
+        )
+        run.status = RunStatus.CANCELLED.value
+        run.cancellation_epoch = int(run.cancellation_epoch or 0) + 1
+        run.cancellation_external_effect_status = external_effect_status
+        run.updated_at = now_iso
+        await self._cancel_root_resume_jobs(session, run_id, now)
+        await self._cancel_pending_approvals(
+            session, run_id=run_id, plan=None, now=now
+        )
+        await session.execute(
+            update(AgentCommandModel)
+            .where(
+                AgentCommandModel.run_id == run_id,
+                AgentCommandModel.status == CommandStatus.QUEUED.value,
+                AgentCommandModel.command_type.in_(
+                    (CommandType.RUN_START.value, CommandType.RUN_RESUME.value)
+                ),
+            )
+            .values(
+                status=CommandStatus.CANCELLED.value,
+                completed_at=now_iso,
+                result_json=json.dumps({"status": RunStatus.CANCELLED.value}),
+            )
+        )
+        session.add(
+            OrchestrationOutboxModel(
+                message_id=uuid4().hex,
+                dedupe_key=f"run:{run_id}:cancelled:{run.cancellation_epoch}",
+                event_type="RunCancelled",
+                correlation_id=run_id,
+                plan_id=plan.plan_id if plan is not None else None,
+                plan_version=plan.current_version if plan is not None else None,
+                round_id=plan.active_round_id if plan is not None else None,
+                payload_json={
+                    "cancellation_epoch": run.cancellation_epoch,
+                    "external_effect_status": external_effect_status,
+                },
+                schema_version=1,
+                status="pending",
+                attempt=0,
+                available_at=now,
+                occurred_at=now,
+            )
+        )
+        return RunCancellationResult(
+            RunStatus.CANCELLED, True, external_effect_status
+        )
+
+    async def _begin_plan_cancellation(
+        self,
+        session: AsyncSession,
+        run_id: str,
+        run: AgentRunModel,
+        plan: AgentPlanModel,
+        *,
+        reason: str,
+        now: datetime,
+        active_execution_count: int,
+    ) -> RunCancellationResult:
+        """在 Run 锁内推进 Plan 取消并撤销尚未开始的工作。"""
+        now_iso = now.isoformat()
+        external_effect_status = (
+            "unknown"
+            if run.status == RunStatus.RUNNING.value or active_execution_count
+            else "none"
+        )
+        cancellation_epoch = max(
+            int(run.cancellation_epoch or 0), int(plan.cancellation_epoch or 0)
+        ) + 1
+        run.status = RunStatus.CANCELLING.value
+        run.cancellation_epoch = cancellation_epoch
+        run.cancellation_external_effect_status = external_effect_status
+        run.updated_at = now_iso
+        plan.status = "cancelling"
+        plan.cancellation_epoch = cancellation_epoch
+        plan.updated_at = now_iso
+
+        await self._cancel_pending_plan_tasks(
+            session,
+            run_id=run_id,
+            plan=plan,
+            cancellation_epoch=cancellation_epoch,
+            reason=reason,
+            now=now,
+        )
+        await self._cancel_active_plan_executions(
+            session,
+            plan=plan,
+            cancellation_epoch=cancellation_epoch,
+            now=now,
+        )
+        await self._cancel_pending_approvals(
+            session, run_id=run_id, plan=plan, now=now
+        )
+        await self._cancel_root_resume_jobs(session, run_id, now)
+        for event_type, scope in (
+            ("PlanCancelling", f"plan:{plan.plan_id}"),
+            ("RunCancelling", f"run:{run_id}"),
+        ):
+            session.add(
+                OrchestrationOutboxModel(
+                    message_id=uuid4().hex,
+                    dedupe_key=f"{scope}:cancelling:{cancellation_epoch}",
+                    event_type=event_type,
+                    correlation_id=run_id,
+                    plan_id=plan.plan_id,
+                    plan_version=plan.current_version,
+                    round_id=plan.active_round_id,
+                    payload_json={
+                        "cancellation_epoch": cancellation_epoch,
+                        "reason": reason,
+                        "external_effect_status": external_effect_status,
+                    },
+                    schema_version=1,
+                    status="pending",
+                    attempt=0,
+                    available_at=now,
+                    occurred_at=now,
                 )
-                pending_task_ids = select(AgentTaskModel.task_id).where(
+            )
+        return RunCancellationResult(
+            RunStatus.CANCELLING, True, external_effect_status
+        )
+
+    async def _cancel_pending_plan_tasks(
+        self,
+        session: AsyncSession,
+        *,
+        run_id: str,
+        plan: AgentPlanModel,
+        cancellation_epoch: int,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        """取消未启动任务并为每个任务写入同事务事件。"""
+        task_ids = select(AgentTaskModel.task_id).where(
+            AgentTaskModel.plan_id == plan.plan_id
+        )
+        pending_task_ids = select(AgentTaskModel.task_id).where(
+            AgentTaskModel.plan_id == plan.plan_id,
+            AgentTaskModel.status.in_(("pending", "waiting_approval")),
+        )
+        pending_tasks = (
+            await session.execute(
+                select(AgentTaskModel)
+                .where(
                     AgentTaskModel.plan_id == plan.plan_id,
                     AgentTaskModel.status.in_(("pending", "waiting_approval")),
                 )
-                pending_tasks = (
-                    await session.execute(
-                        select(AgentTaskModel)
-                        .where(
-                            AgentTaskModel.plan_id == plan.plan_id,
-                            AgentTaskModel.status.in_(
-                                ("pending", "waiting_approval")
-                            ),
-                        )
-                        .order_by(AgentTaskModel.task_id)
-                        .with_for_update()
-                    )
-                ).scalars().all()
-                execution_ids = select(TaskExecutionModel.execution_id).where(
-                    TaskExecutionModel.task_id.in_(task_ids)
-                )
-                await session.execute(
-                    update(RoundTaskModel)
-                    .where(
-                        RoundTaskModel.task_id.in_(pending_task_ids),
-                        RoundTaskModel.status.in_(("pending", "waiting_approval")),
-                    )
-                    .values(status="cancelled", terminal_at=now)
-                )
-                await session.execute(
-                    update(RoundTaskModel)
-                    .where(
-                        RoundTaskModel.task_id.in_(task_ids),
-                        RoundTaskModel.status == "running",
-                    )
-                    .values(status="cancelling")
-                )
-                await session.execute(
-                    update(AgentTaskModel)
-                    .where(
-                        AgentTaskModel.plan_id == plan.plan_id,
-                        AgentTaskModel.status.in_(("pending", "waiting_approval")),
-                    )
-                    .values(status="cancelled", updated_at=now_iso)
-                )
-                for task in pending_tasks:
-                    session.add(
-                        OrchestrationOutboxModel(
-                            message_id=uuid4().hex,
-                            dedupe_key=(
-                                f"task:{task.task_id}:cancelled:{cancellation_epoch}"
-                            ),
-                            event_type="TaskCancelled",
-                            correlation_id=run_id,
-                            plan_id=plan.plan_id,
-                            plan_version=plan.current_version,
-                            round_id=plan.active_round_id,
-                            task_id=task.task_id,
-                            execution_id=task.active_execution_id,
-                            payload_json={
-                                "task_id": task.task_id,
-                                "execution_id": task.active_execution_id,
-                                "execution_generation": task.execution_generation,
-                                "title": task.title,
-                                "objective": task.objective,
-                                "status": "cancelled",
-                                "reason": reason,
-                                "parent_activity_id": (
-                                    f"round:{plan.active_round_id}"
-                                    if plan.active_round_id
-                                    else f"plan:{plan.plan_id}"
-                                ),
-                            },
-                            schema_version=1,
-                            status="pending",
-                            attempt=0,
-                            available_at=now,
-                            occurred_at=now,
-                        )
-                    )
-                await session.execute(
-                    update(AgentTaskModel)
-                    .where(
-                        AgentTaskModel.plan_id == plan.plan_id,
-                        AgentTaskModel.status == "running",
-                    )
-                    .values(status="cancelling", updated_at=now_iso)
-                )
-                await session.execute(
-                    update(TaskExecutionModel)
-                    .where(
-                        TaskExecutionModel.task_id.in_(task_ids),
-                        TaskExecutionModel.status.in_(
-                            ("queued", "waiting_approval", "interrupted")
+                .order_by(AgentTaskModel.task_id)
+                .with_for_update()
+            )
+        ).scalars().all()
+        await session.execute(
+            update(RoundTaskModel)
+            .where(
+                RoundTaskModel.task_id.in_(pending_task_ids),
+                RoundTaskModel.status.in_(("pending", "waiting_approval")),
+            )
+            .values(status="cancelled", terminal_at=now)
+        )
+        await session.execute(
+            update(RoundTaskModel)
+            .where(
+                RoundTaskModel.task_id.in_(task_ids),
+                RoundTaskModel.status == "running",
+            )
+            .values(status="cancelling")
+        )
+        await session.execute(
+            update(AgentTaskModel)
+            .where(
+                AgentTaskModel.plan_id == plan.plan_id,
+                AgentTaskModel.status.in_(("pending", "waiting_approval")),
+            )
+            .values(status="cancelled", updated_at=now.isoformat())
+        )
+        for task in pending_tasks:
+            session.add(
+                OrchestrationOutboxModel(
+                    message_id=uuid4().hex,
+                    dedupe_key=f"task:{task.task_id}:cancelled:{cancellation_epoch}",
+                    event_type="TaskCancelled",
+                    correlation_id=run_id,
+                    plan_id=plan.plan_id,
+                    plan_version=plan.current_version,
+                    round_id=plan.active_round_id,
+                    task_id=task.task_id,
+                    execution_id=task.active_execution_id,
+                    payload_json={
+                        "task_id": task.task_id,
+                        "execution_id": task.active_execution_id,
+                        "execution_generation": task.execution_generation,
+                        "title": task.title,
+                        "objective": task.objective,
+                        "status": "cancelled",
+                        "reason": reason,
+                        "parent_activity_id": (
+                            f"round:{plan.active_round_id}"
+                            if plan.active_round_id
+                            else f"plan:{plan.plan_id}"
                         ),
-                    )
-                    .values(
-                        status="cancelled",
-                        cancellation_epoch=cancellation_epoch,
-                        lease_owner=None,
-                        lease_until=None,
-                        updated_at=now,
-                    )
+                    },
+                    schema_version=1,
+                    status="pending",
+                    attempt=0,
+                    available_at=now,
+                    occurred_at=now,
                 )
-                await session.execute(
-                    update(TaskExecutionModel)
-                    .where(
-                        TaskExecutionModel.task_id.in_(task_ids),
-                        TaskExecutionModel.status == "running",
-                    )
-                    .values(
-                        status="cancel_requested",
-                        cancellation_epoch=cancellation_epoch,
-                        updated_at=now,
-                    )
-                )
-                await session.execute(
-                    update(WorkerJobModel)
-                    .where(
-                        WorkerJobModel.execution_id.in_(execution_ids),
-                        WorkerJobModel.status == "pending",
-                    )
-                    .values(
-                        status="cancelled",
-                        lease_owner=None,
-                        lease_until=None,
-                        updated_at=now,
-                    )
-                )
-                await session.execute(
-                    update(WorkerJobModel)
-                    .where(
-                        WorkerJobModel.execution_id.in_(execution_ids),
-                        WorkerJobModel.status == "running",
-                    )
-                    .values(status="cancel_requested", updated_at=now)
-                )
-                await self._cancel_pending_approvals(
-                    session, run_id=run_id, plan=plan, now=now
-                )
-                await self._cancel_root_resume_jobs(session, run_id, now)
-                session.add(
-                    OrchestrationOutboxModel(
-                        message_id=uuid4().hex,
-                        dedupe_key=f"plan:{plan.plan_id}:cancelling:{cancellation_epoch}",
-                        event_type="PlanCancelling",
-                        correlation_id=run_id,
-                        plan_id=plan.plan_id,
-                        plan_version=plan.current_version,
-                        round_id=plan.active_round_id,
-                        payload_json={
-                            "cancellation_epoch": cancellation_epoch,
-                            "reason": reason,
-                            "external_effect_status": external_effect_status,
-                        },
-                        schema_version=1,
-                        status="pending",
-                        attempt=0,
-                        available_at=now,
-                        occurred_at=now,
-                    )
-                )
-                session.add(
-                    OrchestrationOutboxModel(
-                        message_id=uuid4().hex,
-                        dedupe_key=f"run:{run_id}:cancelling:{cancellation_epoch}",
-                        event_type="RunCancelling",
-                        correlation_id=run_id,
-                        plan_id=plan.plan_id,
-                        plan_version=plan.current_version,
-                        round_id=plan.active_round_id,
-                        payload_json={
-                            "cancellation_epoch": cancellation_epoch,
-                            "reason": reason,
-                            "external_effect_status": external_effect_status,
-                        },
-                        schema_version=1,
-                        status="pending",
-                        attempt=0,
-                        available_at=now,
-                        occurred_at=now,
-                    )
-                )
-                return RunCancellationResult(
-                    RunStatus.CANCELLING,
-                    True,
-                    external_effect_status,
-                )
+            )
+        await session.execute(
+            update(AgentTaskModel)
+            .where(
+                AgentTaskModel.plan_id == plan.plan_id,
+                AgentTaskModel.status == "running",
+            )
+            .values(status="cancelling", updated_at=now.isoformat())
+        )
+
+    async def _cancel_active_plan_executions(
+        self,
+        session: AsyncSession,
+        *,
+        plan: AgentPlanModel,
+        cancellation_epoch: int,
+        now: datetime,
+    ) -> None:
+        """推进执行与 Job 的取消栅栏，阻止旧 Worker 写入结果。"""
+        task_ids = select(AgentTaskModel.task_id).where(
+            AgentTaskModel.plan_id == plan.plan_id
+        )
+        execution_ids = select(TaskExecutionModel.execution_id).where(
+            TaskExecutionModel.task_id.in_(task_ids)
+        )
+        await session.execute(
+            update(TaskExecutionModel)
+            .where(
+                TaskExecutionModel.task_id.in_(task_ids),
+                TaskExecutionModel.status.in_(("queued", "waiting_approval", "interrupted")),
+            )
+            .values(
+                status="cancelled",
+                cancellation_epoch=cancellation_epoch,
+                lease_owner=None,
+                lease_until=None,
+                updated_at=now,
+            )
+        )
+        await session.execute(
+            update(TaskExecutionModel)
+            .where(
+                TaskExecutionModel.task_id.in_(task_ids),
+                TaskExecutionModel.status == "running",
+            )
+            .values(
+                status="cancel_requested",
+                cancellation_epoch=cancellation_epoch,
+                updated_at=now,
+            )
+        )
+        await session.execute(
+            update(WorkerJobModel)
+            .where(
+                WorkerJobModel.execution_id.in_(execution_ids),
+                WorkerJobModel.status == "pending",
+            )
+            .values(
+                status="cancelled",
+                lease_owner=None,
+                lease_until=None,
+                updated_at=now,
+            )
+        )
+        await session.execute(
+            update(WorkerJobModel)
+            .where(
+                WorkerJobModel.execution_id.in_(execution_ids),
+                WorkerJobModel.status == "running",
+            )
+            .values(status="cancel_requested", updated_at=now)
+        )
 
     async def _cancel_pending_approvals(
         self,

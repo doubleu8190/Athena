@@ -13,6 +13,10 @@ from domain.orchestration import (
     WorkerJobLease,
 )
 from workers.worker_job_dispatcher import WorkerJobDispatcher
+from tests.fakes.worker_runtime import (
+    AcceptingWorkerApprovalService,
+    NoopGraphThreadLock,
+)
 
 
 @pytest.mark.asyncio
@@ -41,7 +45,7 @@ async def test_worker_timeout_cancels_graph_and_reports_retryable_timeout():
         def __init__(self):
             self.events = []
 
-        async def apply_terminal_event(self, event):
+        async def apply_worker_terminal_event(self, event):
             self.events.append(event)
             return SimpleNamespace(accepted=True, reason=None)
 
@@ -54,6 +58,8 @@ async def test_worker_timeout_cancels_graph_and_reports_retryable_timeout():
         worker_id="worker-1",
         lease_seconds=30,
         max_concurrency=1,
+        approval_service=AcceptingWorkerApprovalService(),
+        thread_lock=NoopGraphThreadLock(),
     )
     lease = WorkerJobLease(
         job_id="job-1",

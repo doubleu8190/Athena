@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
+from langgraph.types import Interrupt
 
-from domain.runs import CommandType, RunCommand
+from domain.runs import CommandType, RunCommand, RootWaitCheckpoint
 from application.orchestration.langgraph import LangGraphRunExecutor
 
 
@@ -34,9 +34,15 @@ class _InterruptedGraph:
     async def invoke(self, **kwargs):
         return {
             "__interrupt__": [
-                SimpleNamespace(
+                Interrupt(
                     id="interrupt-1",
-                    value={"type": "round_wait", "run_id": "run-1"},
+                    value={
+                        "type": "round_wait",
+                        "run_id": "run-1",
+                        "plan_id": "plan-1",
+                        "round_id": "round-1",
+                        "plan_version": 2,
+                    },
                 )
             ],
             "__root_checkpoint_id__": "checkpoint-1",
@@ -71,6 +77,14 @@ async def test_langgraph_interrupt_is_returned_as_waiting_execution() -> None:
     outcome = await executor.execute(_command())
 
     assert outcome.waiting is True
+    assert outcome.root_wait == RootWaitCheckpoint(
+        run_id="run-1",
+        plan_id="plan-1",
+        round_id="round-1",
+        plan_version=2,
+        interrupt_id="interrupt-1",
+        checkpoint_id="checkpoint-1",
+    )
     assert outcome.result["__root_checkpoint_id__"] == "checkpoint-1"
     assert outcome.result["__interrupt__"][0].id == "interrupt-1"
 

@@ -5,11 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from domain.events import EventPort
-from domain.orchestration.ports import RootGraphPort
+from langgraph.graph.state import CompiledStateGraph
 
-from application.orchestration.protocols import RootWorkflowDependencies, RootWorkflowPort
+from application.orchestration.protocols import (
+    GraphThreadLock,
+    RootGraphPort,
+    RootWorkflowPort,
+)
+from application.orchestration.dependencies import RootWorkflowDependencies
 
+from .protocols import CheckpointerProvider
 from ..graphs.root import build_root_graph, invoke_root_graph
 
 
@@ -21,26 +26,22 @@ class LangGraphRootGraph(RootGraphPort):
         *,
         workflow: RootWorkflowPort,
         dependencies: RootWorkflowDependencies,
-        checkpointer: Any = None,
-        thread_lock: Any | None = None,
+        checkpointer: CheckpointerProvider,
+        thread_lock: GraphThreadLock,
     ) -> None:
         self._workflow = workflow
         self._dependencies = dependencies
         self._checkpointer = checkpointer
         self._thread_lock = thread_lock
-        self._graph: Any | None = None
+        self._graph: CompiledStateGraph[Any, Any, Any, Any] | None = None
 
-    def _compiled_graph(self) -> Any:
-        """Compile lazily so lifecycle-managed PostgreSQL savers can start first."""
+    def _compiled_graph(self) -> CompiledStateGraph[Any, Any, Any, Any]:
+        """Compile lazily after the lifecycle-managed saver has started."""
         if self._graph is None:
-            saver = self._checkpointer
-            getter = getattr(saver, "get_saver", None)
-            if callable(getter):
-                saver = getter()
             self._graph = build_root_graph(
                 workflow=self._workflow,
                 dependencies=self._dependencies,
-                checkpointer=saver,
+                checkpointer=self._checkpointer.get_saver(),
             )
         return self._graph
 
@@ -67,8 +68,6 @@ class LangGraphRootGraph(RootGraphPort):
                 stop_signal=stop_signal,
             )
 
-        if self._thread_lock is None:
-            return await invoke()
         async with self._thread_lock.hold(f"run:{run_id}"):
             return await invoke()
 
@@ -108,7 +107,7 @@ class LangGraphRootGraph(RootGraphPort):
         snapshot = await self._compiled_graph().aget_state(
             {"configurable": {"thread_id": f"run:{run_id}"}}
         )
-        snapshot_config = getattr(snapshot, "config", {})
+        snapshot_config = snapshot.config
         configurable = (
             snapshot_config.get("configurable", {})
             if isinstance(snapshot_config, Mapping)
@@ -119,9 +118,9 @@ class LangGraphRootGraph(RootGraphPort):
         checkpoint_id = configurable.get("checkpoint_id")
         if not isinstance(checkpoint_id, str) or not checkpoint_id:
             return None
-        for task in getattr(snapshot, "tasks", ()):
-            for pending in getattr(task, "interrupts", ()):
-                value = getattr(pending, "value", None)
+        for task in snapshot.tasks:
+            for pending in task.interrupts:
+                value = pending.value
                 if (
                     isinstance(value, Mapping)
                     and value.get("type") == "round_wait"
@@ -130,7 +129,7 @@ class LangGraphRootGraph(RootGraphPort):
                     and value.get("round_id") == round_id
                     and value.get("plan_version") == plan_version
                 ):
-                    interrupt_id = getattr(pending, "id", None)
+                    interrupt_id = pending.id
                     if isinstance(interrupt_id, str) and interrupt_id:
                         return interrupt_id, checkpoint_id
         return None

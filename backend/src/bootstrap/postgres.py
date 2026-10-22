@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
 
 from application.approval import ApprovalService
-from application.evaluation import EvaluationService
 from application.configuration import ProviderQueryService, SettingsQueryService
 from application.events import EventStreamService
 from application.files import AttachmentService, IngestionService
@@ -34,7 +32,7 @@ from application.orchestration import (
     WorkerJobService,
     WorkerApprovalService,
     WorkerToolExecutor,
-    WorkerTaskEventHandler,
+    WorkerResultStore,
     WorkerWorkflow,
     OrchestrationQueryService,
 )
@@ -83,12 +81,11 @@ from infrastructure.integrations.sandbox.options import SandboxOptions
 from infrastructure.tools.executor import BuiltinToolExecutor
 from infrastructure.integrations.storage.storage import LocalFileStorage
 from application.orchestration.langgraph import (
-    ConfiguredRootAgent,
-    ConfiguredWorkerAgent,
     LangGraphRootGraph,
     LangGraphRunExecutor,
     LangGraphWorkerExecutor,
 )
+from application.orchestration.agents import ConfiguredRootAgent, ConfiguredWorkerAgent
 from infrastructure.configuration import (
     ConfiguredSettingsQueries,
     PublicConfiguration,
@@ -197,9 +194,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
     orchestration_command_handler = OrchestrationCommandHandler(
         orchestration_command_repository
-    )
-    worker_task_event_handler = WorkerTaskEventHandler(
-        orchestration_event_repository
     )
     worker_job_service = WorkerJobService(
         worker_job_repository,
@@ -375,9 +369,10 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         / f"{settings.files_path.name}-worker-results",
         settings.file_max_upload_bytes,
     )
+    worker_result_store = WorkerResultStore(worker_result_storage)
     worker_tool_executor = WorkerToolExecutor(
         builtin_tool_service,
-        storage=worker_result_storage,
+        result_store=worker_result_store,
         operation_ledger=worker_tool_operation_repository,
     )
     worker_agent = ConfiguredWorkerAgent(
@@ -400,7 +395,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     worker_dispatcher = WorkerJobDispatcher(
         worker_job_service,
         worker_executor,
-        worker_task_event_handler,
+        orchestration_event_repository,
         worker_id=f"worker-dispatcher:{ids()}",
         lease_seconds=settings.worker_job_lease_seconds,
         max_concurrency=settings.worker_dispatch_max_concurrency,

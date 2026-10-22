@@ -139,6 +139,9 @@ class Jobs:
 
 
 class Lifecycle:
+    writes_cancellation_events_to_outbox = False
+    writes_completion_artifacts_to_outbox = False
+
     async def update_status(self, *args):
         return True
 
@@ -146,6 +149,9 @@ class Lifecycle:
         return True
 
     async def fail(self, *args):
+        return True
+
+    async def arm_root_wait(self, *args, **kwargs):
         return True
 
 

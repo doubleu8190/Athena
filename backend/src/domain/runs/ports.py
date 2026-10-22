@@ -6,7 +6,6 @@ from typing import Protocol
 
 from .entities import (
     CommandEnqueueResult,
-    CommandExecutionResult,
     CommandStatus,
     CommandStatusRecord,
     RunCancellationResult,
@@ -30,9 +29,21 @@ class CommandQueuePort(Protocol):
         error: object = None,
     ) -> None: ...
 
+    async def complete_active_command_for_run(
+        self,
+        run_id: str,
+        *,
+        status: CommandStatus,
+        result: object = None,
+        error: object = None,
+    ) -> bool: ...
+
 
 class RunLifecyclePort(Protocol):
     """运行状态转换端口。"""
+
+    writes_cancellation_events_to_outbox: bool
+    writes_completion_artifacts_to_outbox: bool
 
     async def update_status(self, run_id: str, status: RunStatus | str) -> bool: ...
 
@@ -44,13 +55,16 @@ class RunLifecyclePort(Protocol):
         self, run_id: str, *, reason: str = "USER_REQUEST"
     ) -> RunCancellationResult | None: ...
 
-
-class RunExecutorPort(Protocol):
-    """一次运行的实际执行能力，由 Runtime/LangGraph 适配器提供。"""
-
-    async def execute(self, command: RunCommand) -> CommandExecutionResult: ...
-
-    async def cancel(self, run_id: str | None) -> None: ...
+    async def arm_root_wait(
+        self,
+        run_id: str,
+        *,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+        interrupt_id: str,
+        checkpoint_id: str,
+    ) -> bool: ...
 
 
 class CommandStorePort(Protocol):

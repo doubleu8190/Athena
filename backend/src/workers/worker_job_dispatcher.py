@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from application.orchestration import WorkerApprovalService
+from application.orchestration.protocols import GraphThreadLock, WorkerExecutor
 from application.orchestration.worker_job_service import WorkerJobService
 from domain.orchestration import (
     TaskExecution,
     TaskResult,
     TaskStatus,
+    TaskEventRepository,
     WorkerJobLease,
     WorkerTaskTerminalEvent,
-    WorkerExecutor,
 )
+from shared.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class WorkerJobDispatcher:
@@ -29,13 +31,13 @@ class WorkerJobDispatcher:
         self,
         jobs: WorkerJobService,
         worker: WorkerExecutor,
-        event_handler: Any,
+        task_events: TaskEventRepository,
         *,
         worker_id: str,
         lease_seconds: float,
         max_concurrency: int,
-        approval_service: Any | None = None,
-        thread_lock: Any | None = None,
+        approval_service: WorkerApprovalService,
+        thread_lock: GraphThreadLock,
         poll_interval: float = 0.25,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -47,7 +49,7 @@ class WorkerJobDispatcher:
             raise ValueError("worker lease, concurrency, and polling must be positive")
         self._jobs = jobs
         self._worker = worker
-        self._event_handler = event_handler
+        self._task_events = task_events
         self._approval_service = approval_service
         self._thread_lock = thread_lock
         self._worker_id = worker_id
@@ -104,7 +106,7 @@ class WorkerJobDispatcher:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Worker Job claim failed")
+                logger.error("worker_job_claim_failed", exc_info=True)
             if not claimed:
                 try:
                     await asyncio.wait_for(
@@ -114,6 +116,32 @@ class WorkerJobDispatcher:
                     pass
 
     async def _execute(self, lease: WorkerJobLease) -> None:
+        """运行已领取的 Worker，并将审批或终态交给对应边界处理。"""
+        result = await self._run_with_lease(lease)
+        if result is None:
+            await self._acknowledge_lost_lease(lease)
+            return
+        terminal_candidate = await self._request_approval_if_needed(lease, result)
+        if terminal_candidate is None:
+            return
+
+        terminal_result = self._terminal_result(terminal_candidate, lease.task_id)
+        await self._commit_terminal_event(lease, terminal_result)
+
+    async def _run_with_lease(
+        self, lease: WorkerJobLease
+    ) -> TaskResult | None:
+        """在心跳续租期间等待 Worker；租约丢失时返回 None。
+
+        Args:
+            lease: 当前 Worker Job 的所有权凭据。
+
+        Returns:
+            Worker 的执行结果；租约丢失时返回 None。
+
+        Raises:
+            asyncio.CancelledError: Dispatcher 主动关闭且租约仍有效时。
+        """
         execution = TaskExecution(
             plan_id=lease.plan_id,
             run_id=lease.run_id,
@@ -136,6 +164,7 @@ class WorkerJobDispatcher:
             self._maintain_lease(lease, worker_task, lease_lost),
             name=f"athena-worker-heartbeat:{lease.execution_id}",
         )
+        result: TaskResult | None = None
         try:
             try:
                 timeout_scope = asyncio.timeout(lease.task.timeout_seconds)
@@ -168,7 +197,11 @@ class WorkerJobDispatcher:
                 if not lease_lost.is_set():
                     raise
             except Exception as exc:
-                logger.exception("Worker execution failed: %s", lease.execution_id)
+                logger.error(
+                    "worker_execution_failed",
+                    execution_id=lease.execution_id,
+                    exc_info=True,
+                )
                 result = TaskResult(
                     task_id=lease.task_id,
                     status=TaskStatus.FAILED,
@@ -182,18 +215,34 @@ class WorkerJobDispatcher:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
 
-        if lease_lost.is_set():
-            try:
-                await self._jobs.acknowledge_cancelled(lease)
-            except Exception:
-                logger.exception(
-                    "Worker cancellation acknowledgement failed: %s",
-                    lease.execution_id,
-                )
-            return
+        return None if lease_lost.is_set() else result
+
+    async def _acknowledge_lost_lease(self, lease: WorkerJobLease) -> None:
+        """通知队列租约已失效，避免提交旧 Worker 的终态结果。"""
+        try:
+            await self._jobs.acknowledge_cancelled(lease)
+        except Exception:
+            logger.error(
+                "worker_cancellation_acknowledgement_failed",
+                execution_id=lease.execution_id,
+                exc_info=True,
+            )
+
+    async def _request_approval_if_needed(
+        self, lease: WorkerJobLease, result: TaskResult
+    ) -> TaskResult | None:
+        """提交审批请求，或返回应进入终态事件的结果。
+
+        Args:
+            lease: 当前 Worker Job 的所有权凭据。
+            result: Worker 执行结果。
+
+        Returns:
+            需要持久化为终态的结果；已交给审批流程时返回 None。
+        """
         if result.status == TaskStatus.WAITING_APPROVAL:
             if self._approval_service is None:
-                result = TaskResult(
+                return TaskResult(
                     task_id=lease.task_id,
                     status=TaskStatus.FAILED,
                     error={"code": "worker_approval_service_not_configured"},
@@ -204,11 +253,16 @@ class WorkerJobDispatcher:
                 )
                 if not accepted:
                     logger.warning(
-                        "Worker approval request rejected: execution=%s",
-                        lease.execution_id,
+                        "worker_approval_request_rejected",
+                        execution_id=lease.execution_id,
                     )
-                return
-        result = self._terminal_result(result, lease.task_id)
+                return None
+        return result
+
+    async def _commit_terminal_event(
+        self, lease: WorkerJobLease, result: TaskResult
+    ) -> None:
+        """把 Worker 结果转换为终态事件并交给持久化命令边界。"""
         event = WorkerTaskTerminalEvent(
             message_id=self._id_factory(),
             occurred_at=self._clock(),
@@ -236,12 +290,12 @@ class WorkerJobDispatcher:
             error=dict(result.error) if result.error is not None else None,
             retryable=result.retryable,
         )
-        receipt = await self._event_handler.apply_terminal_event(event)
+        receipt = await self._task_events.apply_worker_terminal_event(event)
         if not receipt.accepted:
             logger.warning(
-                "Worker terminal event rejected: execution=%s reason=%s",
-                lease.execution_id,
-                receipt.reason,
+                "worker_terminal_event_rejected",
+                execution_id=lease.execution_id,
+                reason=receipt.reason,
             )
 
     async def _run_worker(
@@ -284,7 +338,11 @@ class WorkerJobDispatcher:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Worker lease renewal failed: %s", lease.execution_id)
+                logger.error(
+                    "worker_lease_renewal_failed",
+                    execution_id=lease.execution_id,
+                    exc_info=True,
+                )
                 renewed = None
             if renewed is None:
                 lease_lost.set()
@@ -323,7 +381,9 @@ class WorkerJobDispatcher:
             return
         error = task.exception()
         if error is not None:
-            logger.error("Worker Job failed before event persistence", exc_info=error)
+            logger.error(
+                "worker_job_failed_before_event_persistence", exc_info=error
+            )
 
 def _mapping(value: Any) -> dict[str, Any]:
     """返回 JSON 风格的字典值。"""

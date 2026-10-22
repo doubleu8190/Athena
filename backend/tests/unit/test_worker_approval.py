@@ -35,6 +35,10 @@ from infrastructure.persistence.postgres.repositories.approval_repository import
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
 )
+from tests.fakes.worker_runtime import (
+    AcceptingWorkerApprovalService,
+    NoopGraphThreadLock,
+)
 from infrastructure.persistence.postgres.models import OrchestrationOutboxModel
 from workers.worker_job_dispatcher import WorkerJobDispatcher
 
@@ -555,7 +559,7 @@ async def test_reclaimed_worker_job_registers_checkpointed_approval_without_rein
             return True
 
     class EventHandler:
-        async def apply_terminal_event(self, _event):
+        async def apply_worker_terminal_event(self, _event):
             raise AssertionError("approval wait is not a terminal Task event")
 
     approvals = ApprovalService()
@@ -567,6 +571,7 @@ async def test_reclaimed_worker_job_registers_checkpointed_approval_without_rein
         lease_seconds=10,
         max_concurrency=1,
         approval_service=approvals,
+        thread_lock=NoopGraphThreadLock(),
     )
     lease = WorkerJobLease(
         job_id="job-1",
@@ -620,7 +625,7 @@ async def test_resume_worker_job_resumes_same_checkpoint_and_reports_task_termin
         def __init__(self):
             self.events = []
 
-        async def apply_terminal_event(self, event):
+        async def apply_worker_terminal_event(self, event):
             self.events.append(event)
             return SimpleNamespace(accepted=True, reason=None)
 
@@ -633,6 +638,8 @@ async def test_resume_worker_job_resumes_same_checkpoint_and_reports_task_termin
         worker_id="dispatcher-1",
         lease_seconds=10,
         max_concurrency=1,
+        approval_service=AcceptingWorkerApprovalService(),
+        thread_lock=NoopGraphThreadLock(),
         id_factory=lambda: "terminal-event-1",
         clock=lambda: datetime(2026, 10, 22, tzinfo=timezone.utc),
     )

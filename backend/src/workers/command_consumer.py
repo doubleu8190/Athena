@@ -7,15 +7,13 @@ import asyncio
 from application.runs.execution_service import RunExecutionService
 from domain.runs import CommandQueuePort, RunCommand
 
-
 class CommandConsumer:
     """只管理命令队列生命周期，执行细节委托给 RunExecutionService。"""
 
-    def __init__(self, queue: CommandQueuePort, execution: RunExecutionService, *, poll_interval: float = 0.25, notifier: object | None = None) -> None:
+    def __init__(self, queue: CommandQueuePort, execution: RunExecutionService, *, poll_interval: float = 0.25) -> None:
         self._queue = queue
         self._execution = execution
         self._poll_interval = poll_interval
-        self._notifier = notifier
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._inflight: set[asyncio.Task[None]] = set()
@@ -26,8 +24,6 @@ class CommandConsumer:
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._notifier is not None and hasattr(self._notifier, "notify"):
-            await self._notifier.notify()
         if self._task is not None:
             await self._task
             self._task = None
@@ -41,13 +37,10 @@ class CommandConsumer:
         while not self._stop.is_set():
             command = await self._queue.claim_next_command()
             if command is None:
-                if self._notifier is not None and hasattr(self._notifier, "wait"):
-                    await self._notifier.wait()
-                else:
-                    try:
-                        await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
-                    except asyncio.TimeoutError:
-                        pass
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
+                except asyncio.TimeoutError:
+                    pass
                 continue
             task = asyncio.create_task(
                 self._execute_command(command),
@@ -64,6 +57,7 @@ class CommandConsumer:
         try:
             await self._execution.execute(command)
         except asyncio.CancelledError:
+
             return
         except Exception as exc:
             await self._execution.fail(

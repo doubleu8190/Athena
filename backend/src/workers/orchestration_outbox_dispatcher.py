@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
 from domain.events import ApplicationEvent, EventDurability, EventType, EventPort
@@ -11,11 +10,13 @@ from domain.orchestration import (
     OrchestrationOutboxLease,
     OrchestrationOutboxRepository,
 )
+from shared.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 _EVENT_TYPES = {
+    "PlanCreated": (EventType.PLAN_CREATED, "running", "plan"),
     "PlanAccepted": (EventType.PLAN_ACCEPTED, "running", "plan"),
     "PlanRevised": (EventType.PLAN_REVISED, "running", "plan"),
     "PlanCompleted": (EventType.PLAN_COMPLETED, "completed", "plan"),
@@ -86,7 +87,7 @@ class OrchestrationOutboxDispatcher:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Orchestration Outbox claim failed")
+                logger.error("orchestration_outbox_claim_failed", exc_info=True)
                 claimed = False
             if not claimed:
                 try:
@@ -111,17 +112,18 @@ class OrchestrationOutboxDispatcher:
         except Exception:
             delay = min(30.0, 0.5 * (2 ** min(lease.attempt - 1, 6)))
             await self._outbox.retry_event(lease, delay_seconds=delay)
-            logger.exception(
-                "Orchestration Outbox delivery failed: message=%s attempt=%s",
-                lease.message_id,
-                lease.attempt,
+            logger.error(
+                "orchestration_outbox_delivery_failed",
+                message_id=lease.message_id,
+                attempt=lease.attempt,
+                exc_info=True,
             )
             return True
 
         if not await self._outbox.mark_event_published(lease):
             logger.warning(
-                "Orchestration Outbox lease expired before acknowledgement: %s",
-                lease.message_id,
+                "orchestration_outbox_lease_expired_before_acknowledgement",
+                message_id=lease.message_id,
             )
         return True
 

@@ -19,6 +19,10 @@ from infrastructure.persistence.postgres.repositories.worker_job_repository impo
 )
 from infrastructure.persistence.postgres.models import OrchestrationOutboxModel
 from workers.worker_job_dispatcher import WorkerJobDispatcher
+from tests.fakes.worker_runtime import (
+    AcceptingWorkerApprovalService,
+    NoopGraphThreadLock,
+)
 
 NOW = datetime(2026, 10, 22, tzinfo=timezone.utc)
 
@@ -419,6 +423,8 @@ async def test_dispatcher_acknowledges_cancellation_after_lease_fence_fails():
         worker_id="dispatcher-1",
         lease_seconds=0.1,
         max_concurrency=1,
+        approval_service=AcceptingWorkerApprovalService(),
+        thread_lock=NoopGraphThreadLock(),
     )
 
     await asyncio.wait_for(dispatcher._execute(cancellation_lease()), timeout=1)

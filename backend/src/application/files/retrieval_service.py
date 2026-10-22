@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Any
 
-from application.retrieval import RetrievalFusionService
+from domain.retrieval.fusion import RetrievalRankFusion
 from domain.files import (
     AttachmentRepository,
     AttachmentStatus,
@@ -117,7 +117,7 @@ class FileContextProvider(ContextProvider):
                 )
                 for chunk in vector
             ]
-            fused = RetrievalFusionService().fuse_ranked_candidates(
+            fused = RetrievalRankFusion().fuse_ranked_candidates(
                 keyword_candidates,
                 vector_candidates,
                 limit=min(

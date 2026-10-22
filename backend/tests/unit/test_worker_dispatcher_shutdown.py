@@ -8,6 +8,10 @@ import pytest
 
 from domain.orchestration import Task, TaskExecution, TaskResult, TaskStatus, WorkerJobLease
 from workers.worker_job_dispatcher import WorkerJobDispatcher
+from tests.fakes.worker_runtime import (
+    AcceptingWorkerApprovalService,
+    NoopGraphThreadLock,
+)
 
 
 @pytest.mark.asyncio
@@ -52,7 +56,7 @@ async def test_dispatcher_stop_cancels_inflight_graph_without_waiting_for_task_t
             return None
 
     class EventHandler:
-        async def apply_terminal_event(self, _event):
+        async def apply_worker_terminal_event(self, _event):
             raise AssertionError("shutdown cancellation must not report a Task result")
 
     lease = WorkerJobLease(
@@ -82,6 +86,8 @@ async def test_dispatcher_stop_cancels_inflight_graph_without_waiting_for_task_t
         lease_seconds=30,
         max_concurrency=1,
         poll_interval=0.01,
+        approval_service=AcceptingWorkerApprovalService(),
+        thread_lock=NoopGraphThreadLock(),
     )
 
     await dispatcher.start()
@@ -148,6 +154,7 @@ async def test_dispatcher_holds_thread_lock_for_graph_invocation():
         worker_id="worker-1",
         lease_seconds=30,
         max_concurrency=1,
+        approval_service=AcceptingWorkerApprovalService(),
         thread_lock=lock,
     )
     execution = TaskExecution(

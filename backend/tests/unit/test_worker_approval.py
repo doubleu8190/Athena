@@ -779,8 +779,10 @@ async def test_worker_tool_operation_ledger_replays_completed_result_without_ree
         def __init__(self):
             self.result = None
             self.completed = []
+            self.claimed = []
 
-        async def claim(self, _request, *, args_hash):
+        async def claim(self, request, *, args_hash):
+            self.claimed.append(request)
             self.args_hash = args_hash
             if self.result is not None:
                 return ToolOperationClaim(
@@ -818,12 +820,32 @@ async def test_worker_tool_operation_ledger_replays_completed_result_without_ree
     replay = await executor(
         tool_call=call, execution=execution, tool_round=0, call_index=0
     )
+    retry_execution = {
+        **execution,
+        "execution_id": "execution-2",
+        "fencing_token": 4,
+        "execution_generation": 2,
+    }
+    retry_replay = await executor(
+        tool_call=call,
+        execution=retry_execution,
+        tool_round=0,
+        call_index=0,
+    )
 
     assert first == replay
+    assert retry_replay["status"] == "success"
+    assert retry_replay["output"] == "created"
+    assert retry_replay["id"] != first["id"]
     assert first["status"] == "success"
     assert first["output"] == "created"
     assert len(tools.executed) == 1
     assert len(ledger.completed) == 1
+    assert ledger.claimed[0].operation_key != ledger.claimed[2].operation_key
+    assert (
+        ledger.claimed[0].logical_operation_key
+        == ledger.claimed[2].logical_operation_key
+    )
     assert tools.executed[0].operation_key
     assert tools.executed[0].fencing_token == 3
 

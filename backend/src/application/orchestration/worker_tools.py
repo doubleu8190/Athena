@@ -113,6 +113,9 @@ class WorkerToolExecutor:
         operation_key = _operation_key(
             run_id, task_id, generation, tool_round, call_index
         )
+        logical_operation_key = _logical_operation_key(
+            run_id, task_id, tool_round, call_index
+        )
         approval_decision = str(tool_call.get("approval_decision", "")).lower()
         if approval_decision == "approved":
             if (
@@ -165,6 +168,7 @@ class WorkerToolExecutor:
             tool_call_id=tool_call_id,
             agent_role="worker",
             operation_key=operation_key,
+            logical_operation_key=logical_operation_key,
             execution_id=str(execution.get("execution_id", "")) or None,
             fencing_token=(
                 int(execution["fencing_token"])
@@ -311,6 +315,16 @@ def _operation_key(
     if len(value) <= 128:
         return value
     return "athena:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _logical_operation_key(
+    run_id: str,
+    task_id: str,
+    tool_round: int,
+    call_index: int,
+) -> str:
+    """Identify the same planned tool-call position across execution attempts."""
+    return f"athena:{run_id}:{task_id}:logical:{tool_round}:{call_index}"
 
 
 def _strict_json(value: Any) -> str:

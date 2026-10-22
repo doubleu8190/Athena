@@ -410,6 +410,7 @@ CREATE INDEX IF NOT EXISTS idx_worker_jobs_lease ON worker_jobs(status, lease_un
 
 CREATE TABLE IF NOT EXISTS worker_tool_operations (
     operation_key VARCHAR PRIMARY KEY,
+    logical_operation_key VARCHAR NOT NULL,
     run_id VARCHAR NOT NULL REFERENCES agent_runs(run_id),
     plan_id VARCHAR NOT NULL REFERENCES agent_plans(plan_id),
     task_id VARCHAR NOT NULL REFERENCES agent_tasks(task_id),
@@ -424,6 +425,8 @@ CREATE TABLE IF NOT EXISTS worker_tool_operations (
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tool_operations_execution
     ON worker_tool_operations(execution_id);
+CREATE INDEX IF NOT EXISTS idx_worker_tool_operations_logical
+    ON worker_tool_operations(logical_operation_key);
 CREATE INDEX IF NOT EXISTS idx_worker_tool_operations_incomplete
     ON worker_tool_operations(status, created_at)
     WHERE status = 'executing';

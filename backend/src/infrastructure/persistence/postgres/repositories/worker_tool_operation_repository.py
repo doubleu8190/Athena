@@ -30,7 +30,7 @@ from ..models import (
 
 
 class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
-    """Claim one operation key once and replay its persisted outcome."""
+    """Claim one logical operation once and replay its persisted outcome."""
 
     def __init__(
         self,
@@ -54,6 +54,7 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
         """
         if (
             not request.operation_key
+            or not request.logical_operation_key
             or not request.plan_id
             or not request.task_id
             or not request.execution_id
@@ -67,12 +68,13 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
 
         async with self._session_factory() as session:
             async with session.begin():
-                # The advisory lock serializes first claims for the same key;
+                # The logical key survives retries that get a new execution id.
+                # Its lock serializes first claims across those attempts.
                 # row locks below serialize the side-effect gate with cancel.
                 await session.execute(
                     select(
                         func.pg_advisory_xact_lock(
-                            func.hashtext(request.operation_key)
+                            func.hashtext(request.logical_operation_key)
                         )
                     )
                 )
@@ -146,30 +148,67 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
                         reason="worker_operation_lease_not_active",
                     )
 
-                existing = await session.get(
+                existing_attempt = await session.get(
                     WorkerToolOperationModel,
                     request.operation_key,
                     with_for_update=True,
                 )
-                if existing is not None:
-                    if not _matches(existing, request, args_hash):
+                if (
+                    existing_attempt is not None
+                    and existing_attempt.logical_operation_key
+                    != request.logical_operation_key
+                ):
+                    return ToolOperationClaim(
+                        ToolOperationClaimStatus.CONFLICT,
+                        reason="worker_operation_key_conflict",
+                    )
+
+                operations = (
+                    await session.scalars(
+                        select(WorkerToolOperationModel)
+                        .where(
+                            WorkerToolOperationModel.logical_operation_key
+                            == request.logical_operation_key
+                        )
+                        .order_by(WorkerToolOperationModel.created_at)
+                        .with_for_update()
+                    )
+                ).all()
+                if operations:
+                    if any(
+                        not _matches_logical_operation(
+                            operation, request, args_hash
+                        )
+                        for operation in operations
+                    ):
                         return ToolOperationClaim(
                             ToolOperationClaimStatus.CONFLICT,
-                            reason="worker_operation_key_conflict",
+                            reason="worker_logical_operation_conflict",
                         )
-                    if existing.status == "completed":
+                    if any(operation.status != "completed" for operation in operations):
+                        return ToolOperationClaim(
+                            ToolOperationClaimStatus.IN_PROGRESS,
+                            reason="worker_operation_outcome_unknown",
+                        )
+                    results = {
+                        _result_from_document(operation.result_json)
+                        for operation in operations
+                    }
+                    if len(results) != 1:
+                        return ToolOperationClaim(
+                            ToolOperationClaimStatus.CONFLICT,
+                            reason="worker_logical_operation_result_conflict",
+                        )
+                    if operations[0].status == "completed":
                         return ToolOperationClaim(
                             ToolOperationClaimStatus.COMPLETED,
-                            result=_result_from_document(existing.result_json),
+                            result=_result_from_document(operations[0].result_json),
                         )
-                    return ToolOperationClaim(
-                        ToolOperationClaimStatus.IN_PROGRESS,
-                        reason="worker_operation_outcome_unknown",
-                    )
 
                 session.add(
                     WorkerToolOperationModel(
                         operation_key=request.operation_key,
+                        logical_operation_key=request.logical_operation_key,
                         run_id=request.run_id,
                         plan_id=request.plan_id,
                         task_id=request.task_id,
@@ -223,9 +262,26 @@ def _matches(
         row.run_id == request.run_id
         and row.plan_id == request.plan_id
         and row.task_id == request.task_id
+        and row.logical_operation_key == request.logical_operation_key
         and row.execution_id == request.execution_id
         and row.tool_name == request.tool_name
         and row.tool_call_id == request.tool_call_id
+        and row.args_hash == args_hash
+    )
+
+
+def _matches_logical_operation(
+    row: WorkerToolOperationModel,
+    request: ToolExecutionRequest,
+    args_hash: str,
+) -> bool:
+    """Match effect semantics while allowing a new execution attempt."""
+    return (
+        row.logical_operation_key == request.logical_operation_key
+        and row.run_id == request.run_id
+        and row.plan_id == request.plan_id
+        and row.task_id == request.task_id
+        and row.tool_name == request.tool_name
         and row.args_hash == args_hash
     )
 

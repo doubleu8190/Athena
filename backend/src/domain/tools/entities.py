@@ -83,6 +83,7 @@ class ToolExecutionRequest:
     plan_id: str | None = None
     task_id: str | None = None
     operation_key: str | None = None
+    logical_operation_key: str | None = None
     execution_id: str | None = None
     fencing_token: int | None = None
     cancellation_epoch: int | None = None

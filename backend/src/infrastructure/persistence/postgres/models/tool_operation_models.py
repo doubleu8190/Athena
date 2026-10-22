@@ -20,6 +20,7 @@ class WorkerToolOperationModel(Base):
     __tablename__ = "worker_tool_operations"
     __table_args__ = (
         Index("idx_worker_tool_operations_execution", "execution_id"),
+        Index("idx_worker_tool_operations_logical", "logical_operation_key"),
         Index(
             "idx_worker_tool_operations_incomplete",
             "status",
@@ -29,6 +30,7 @@ class WorkerToolOperationModel(Base):
     )
 
     operation_key: Mapped[str] = mapped_column(String, primary_key=True)
+    logical_operation_key: Mapped[str] = mapped_column(String)
     run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.run_id"))
     plan_id: Mapped[str] = mapped_column(ForeignKey("agent_plans.plan_id"))
     task_id: Mapped[str] = mapped_column(ForeignKey("agent_tasks.task_id"))

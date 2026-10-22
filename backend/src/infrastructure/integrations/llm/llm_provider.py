@@ -11,6 +11,7 @@ from typing import Any
 from langchain_core.language_models import BaseChatModel
 
 from domain.integrations import LLMPort
+from shared import get_logger
 
 from .options import LLMOptions, coerce_llm_options
 
@@ -21,6 +22,13 @@ class RetryPolicy:
     timeout_seconds: float = 120.0
     delay_seconds: float = 0.0
 
+
+def _count_whitespace_tokens(text: str) -> int:
+    """Fallback counter used when no provider-specific tokenizer is supplied."""
+    return len(text.split())
+
+
+logger = get_logger(__name__)
 
 class RetryingLLMProvider(LLMPort):
     """为任意异步模型提供重试、超时和 token 统计。"""
@@ -39,7 +47,11 @@ class RetryingLLMProvider(LLMPort):
         """
         self._model = model
         self._policy = policy or RetryPolicy()
-        self._token_counter = token_counter or (lambda value: len(value.split()))
+        self._token_counter: Callable[[str], int] = (
+            token_counter
+            if token_counter is not None
+            else _count_whitespace_tokens
+        )
 
     async def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
         """调用底层模型并在失败时按策略重试。"""
@@ -48,6 +60,7 @@ class RetryingLLMProvider(LLMPort):
             try:
                 return await self._invoke_once(messages, **kwargs)
             except asyncio.CancelledError:
+                logger.info("LLM invocation cancelled")
                 raise
             except Exception as exc:
                 last_error = exc

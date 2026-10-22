@@ -9,6 +9,7 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 
+from domain.integrations import LLMPort
 from domain.orchestration import (
     PlanRevision,
     ReviewAction,
@@ -17,7 +18,8 @@ from domain.orchestration import (
 )
 from domain.events.ports import EventPort
 
-from .llm_activity import LLMInvoker, invoke_llm_with_activity
+from .llm_activity import invoke_llm_with_activity
+from ..protocols import RootAgent
 
 
 def _strip_json_fence(text: str) -> str:
@@ -76,11 +78,11 @@ def _last_user_message(messages: list[Any]) -> str:
     )
 
 
-class ConfiguredRootAgent:
+class ConfiguredRootAgent(RootAgent):
     """Translate Root harness input into one configured LLM invocation."""
 
     def __init__(
-        self, llm: LLMInvoker, event_publisher: EventPort | None = None
+        self, llm: LLMPort, event_publisher: EventPort | None = None
     ) -> None:
         """保存 LLM provider；不在构造阶段建立外部连接。"""
         self._llm = llm

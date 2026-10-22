@@ -10,13 +10,13 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage
 
 from application.orchestration.agents.llm_activity import (
-    LLMInvoker,
     invoke_llm_with_activity,
 )
 from application.orchestration.worker_tools import worker_tool_manifest
 from application.tools.service import ToolService
 
 from domain.events.ports import EventPort
+from domain.integrations import LLMPort
 from shared.logging import get_logger
 
 logger = get_logger(__name__)
@@ -27,7 +27,7 @@ class ConfiguredWorkerAgent:
 
     def __init__(
         self,
-        llm: LLMInvoker,
+        llm: LLMPort,
         event_publisher: EventPort | None = None,
         tool_service: ToolService | None = None,
     ) -> None:

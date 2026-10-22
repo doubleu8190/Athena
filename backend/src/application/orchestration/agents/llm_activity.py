@@ -2,26 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, Protocol
+from typing import Any
 from uuid import uuid4
 
 from domain.events import ApplicationEvent, EventDurability
 from domain.events.ports import EventPort
-
-
-class LLMInvoker(Protocol):
-    """支持异步消息调用的模型接口。"""
-
-    async def invoke(self, messages: Sequence[Any]) -> Any: ...
+from domain.integrations import LLMPort
 
 
 async def invoke_llm_with_activity(
-    llm: LLMInvoker,
+    llm: LLMPort,
     event_publisher: EventPort | None,
-    messages: Sequence[Any],
+    messages: list[Any],
     *,
     session_id: str,
     run_id: str,
@@ -119,4 +113,4 @@ async def _publish_llm_event(
         )
     except Exception:
         return
-__all__ = ["LLMInvoker", "invoke_llm_with_activity"]
+__all__ = ["invoke_llm_with_activity"]

@@ -298,7 +298,7 @@ SSE 增加 plan_version/round_id/execution_id 和通用追踪身份；关键事�
 - `Chat`：停止后先显示“正在停止”，收到终态显示“已停止”；未知外部结果另列。
 - `RunChainView`：关联 Plan Version → Round → Task → Execution → Tool/Approval；Review 和 Revision 有可读原因。已有演示数据必须与真实历史清楚区分。
 
-所有 API 从认证主体取得 actor 并校验资源归属；全局登录保护不能代替 Run/审批的资源权限。
+Athena 按单用户产品实施，不增加多租户隔离或 `user_id` actor 映射。全局登录保护用于访问控制；Run 快照按 `run_id` 读取其 Plan 和审批事实，Plan Version 按 `(plan_id, version)` 读取，命令仍需校验 Run、Plan、Task、审批之间的业务身份关系，避免错误关联。
 
 ## 11. 分阶段实施与完成条件
 
@@ -394,7 +394,7 @@ P1 就建立取消状态、Outbox、幂等身份和共享事务；P2 就建立 l
 
 截至 2026-10-22，Root Review、版本化 Round、持久 Worker Job、审批恢复、取消与超时控制，以及工具副作用账本已有运行时代码。P1–P4 的实现主干已进入联调，但阶段完成条件尚未全部满足，因此不将其标记为验收完成。
 
-P5 已切换审批决定路径：新增 `POST /api/approvals/{approval_id}/decision`，返回 202；待审批查询补充 `run_id`、`plan_id` 和 `task_id`；前端保留批次分组展示，但对每条审批分别提交决定。新增 `GET /api/runs/{run_id}/orchestration`，从 PostgreSQL 汇总 Run 取消事实、Plan Version 摘要、固定 Round 成员、每个 Task 的 Execution 尝试和审批决定；新增 `GET /api/plans/{plan_id}/versions/{version}` 返回不可变 DAG 与修订原因。Run Chain 现在在加载历史运行时同时读取事件时间线和持久化快照，执行树可沿 Version → Round → Task → Execution → Approval 恢复，选择 Version 可查看对应 DAG。查询接口契约测试、PostgreSQL 快照集成测试和前端 TypeScript 检查通过；仍需浏览器验收多审批、轮次状态、停止收敛和断线后恢复。当前认证中间件只校验共享登录会话，尚未提供可映射到 `agent_runs.user_id` 的认证主体，因此不能将本次新增查询宣称为多用户资源授权完成。
+P5 已切换审批决定路径：新增 `POST /api/approvals/{approval_id}/decision`，返回 202；待审批查询补充 `run_id`、`plan_id` 和 `task_id`；前端保留批次分组展示，但对每条审批分别提交决定。新增 `GET /api/runs/{run_id}/orchestration`，从 PostgreSQL 汇总 Run 取消事实、Plan Version 摘要、固定 Round 成员、每个 Task 的 Execution 尝试和审批决定；新增 `GET /api/plans/{plan_id}/versions/{version}` 返回不可变 DAG 与修订原因。Run Chain 现在在加载历史运行时同时读取事件时间线和持久化快照，执行树可沿 Version → Round → Task → Execution → Approval 恢复，选择 Version 可查看对应 DAG。查询接口契约测试、PostgreSQL 快照集成测试和前端 TypeScript 检查通过；仍需浏览器验收多审批、轮次状态、停止收敛和断线后恢复。当前共享登录认证符合 Athena 的单用户产品定位，不要求将登录用户映射到 `agent_runs.user_id`；查询与命令通过持久化身份关联校验 Run、Plan、Version、Task 和审批关系。
 
 P6 当前补充了三条 PostgreSQL 验收：一条模拟 Worker 崩溃留下的过期租约，由两个独立数据库会话同时领取，验证只产生一个新租约、fencing token 从 7 增至 8、执行代际保持不变、Job 投递次数增加，且旧持有者无法续租；一条在 PostgreSQL checkpointer 中持久化 Worker 审批 interrupt，关闭并重建 checkpointer 和 executor 后找回原 interrupt，获批后仅执行一次工具并完成原任务；一条从 PostgreSQL 直接读取 Run 快照和不可变版本，核对取消状态、Round 成员、Execution fence、审批决定及 DAG。三条测试都在随机临时 schema 内运行并于结束时删除。
 

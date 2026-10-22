@@ -19,6 +19,8 @@ from domain.orchestration import (
     OrchestrationCommandType,
     Plan,
     Task,
+    TaskStatus,
+    WorkerTaskTerminalEvent,
 )
 from infrastructure.persistence.postgres.models import (
     AgentCommandModel,
@@ -28,6 +30,7 @@ from infrastructure.persistence.postgres.models import (
     ApprovalRecordModel,
     Base,
     OrchestrationCommandModel,
+    OrchestrationInboxModel,
     OrchestrationOutboxModel,
     PlanRoundModel,
     PlanVersionModel,
@@ -41,6 +44,9 @@ from infrastructure.persistence.postgres.repositories.approval_repository import
 )
 from infrastructure.persistence.postgres.repositories.orchestration_command_repository import (
     PostgresOrchestrationCommandRepository,
+)
+from infrastructure.persistence.postgres.repositories.orchestration_event_repository import (
+    PostgresOrchestrationEventRepository,
 )
 from infrastructure.persistence.postgres.repositories.run_repository import (
     PostgresRunRepository,
@@ -280,6 +286,165 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
             if row.approval_id == approvals["task-c"]
         )
         assert root_resume_count == 0
+    finally:
+        await test_engine.dispose()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() -> None:
+    """Stop and the final Worker event linearize on the Run row in PostgreSQL."""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"stop_terminal_race_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    test_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    schema_created = False
+    now = datetime.now(timezone.utc)
+    run_id = f"run-{uuid4().hex}"
+    session_id = f"session-{run_id}"
+    plan_id = f"plan-{run_id}"
+
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+
+        tables = [
+            AgentCommandModel.__table__,
+            AgentRunModel.__table__,
+            AgentPlanModel.__table__,
+            AgentTaskModel.__table__,
+            ApprovalRecordModel.__table__,
+            OrchestrationCommandModel.__table__,
+            OrchestrationInboxModel.__table__,
+            OrchestrationOutboxModel.__table__,
+            PlanVersionModel.__table__,
+            PlanRoundModel.__table__,
+            RoundTaskModel.__table__,
+            TaskExecutionModel.__table__,
+            WorkerJobModel.__table__,
+            RootResumeJobModel.__table__,
+        ]
+        async with test_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, tables=tables
+                )
+            )
+
+        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+        async with session_factory() as session, session.begin():
+            session.add(
+                AgentRunModel(
+                    run_id=run_id,
+                    session_id=session_id,
+                    status="created",
+                    root_thread_id=f"run:{run_id}",
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+
+        plan = Plan(
+            plan_id=plan_id,
+            goal="Complete one Worker task while Stop may arrive",
+            task_ids=("task-only",),
+            max_parallelism=1,
+            session_id=session_id,
+            run_id=run_id,
+        )
+        command = OrchestrationCommand(
+            message_id=f"submit:{run_id}",
+            command_type=OrchestrationCommandType.SUBMIT_PLAN,
+            idempotency_key=f"submit:{run_id}",
+            correlation_id=run_id,
+            occurred_at=now,
+            plan_id=plan_id,
+            scope_key=run_id,
+            plan_version=1,
+        )
+        ids = count()
+        command_repository = PostgresOrchestrationCommandRepository(
+            session_factory,
+            id_factory=lambda: f"generated-{next(ids)}",
+            clock=lambda: now,
+        )
+        submitted = await command_repository.submit_plan(
+            command,
+            plan,
+            [Task(task_id="task-only", title="Task", objective="Finish")],
+        )
+        lease = await PostgresWorkerJobRepository(
+            session_factory, clock=lambda: now
+        ).claim_next("worker", lease_seconds=60)
+        assert lease is not None
+
+        terminal_event = WorkerTaskTerminalEvent(
+            message_id=f"terminal:{run_id}",
+            occurred_at=now,
+            worker_id=lease.worker_id,
+            run_id=run_id,
+            plan_id=plan_id,
+            plan_version=lease.plan_version,
+            round_id=submitted.round_id,
+            task_id="task-only",
+            execution_id=lease.execution_id,
+            fencing_token=lease.fencing_token,
+            cancellation_epoch=lease.cancellation_epoch,
+            status=TaskStatus.COMPLETED,
+            result={"answer": "completed"},
+        )
+        event_repository = PostgresOrchestrationEventRepository(
+            session_factory,
+            clock=lambda: now,
+            id_factory=lambda: f"event-{uuid4().hex}",
+        )
+        event_receipt, stop_receipt = await asyncio.gather(
+            event_repository.apply_worker_terminal_event(terminal_event),
+            PostgresRunRepository(session_factory).cancel(run_id),
+        )
+
+        assert stop_receipt is not None
+        assert stop_receipt.status.value == "cancelling"
+        async with session_factory() as session:
+            run = await session.get(AgentRunModel, run_id)
+            plan_row = await session.get(AgentPlanModel, plan_id)
+            task = await session.get(AgentTaskModel, "task-only")
+            round_row = await session.get(PlanRoundModel, submitted.round_id)
+            resume_jobs = (
+                await session.execute(select(RootResumeJobModel))
+            ).scalars().all()
+            inbox = (
+                await session.execute(select(OrchestrationInboxModel))
+            ).scalars().all()
+            outbox = (
+                await session.execute(select(OrchestrationOutboxModel))
+            ).scalars().all()
+        assert run is not None and run.status == "cancelling"
+        assert plan_row is not None and plan_row.status == "cancelling"
+        assert task is not None
+        assert event_receipt.accepted is (task.status == "completed")
+        assert event_receipt.accepted is (
+            round_row is not None and round_row.status == "completed"
+        )
+        assert len(inbox) == 1 and inbox[0].status == "processed"
+        assert len(resume_jobs) == int(event_receipt.accepted)
+        assert all(job.status == "cancelled" for job in resume_jobs)
+        assert sum(row.event_type == "RoundCompleted" for row in outbox) == int(
+            event_receipt.accepted
+        )
+        assert sum(row.event_type == "RunCancelling" for row in outbox) == 1
     finally:
         await test_engine.dispose()
         if schema_created:

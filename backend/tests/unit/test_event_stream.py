@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -84,6 +85,11 @@ def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
     from  interfaces.http.sse.events import build_events_router
 
     events = Events()
+    replayed_event = events.replayed[0]
+    events.queue.put_nowait(replayed_event)
+    events.queue.put_nowait(
+        replace(replayed_event, session_seq=6, event_type=EventType.RUN_COMPLETED)
+    )
     service = EventStreamService(Sessions(), events)
     app = __import__("fastapi").FastAPI()
     router = build_events_router(lambda: service)
@@ -102,21 +108,27 @@ def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
             "app": app,
         }
     )
-    request.is_disconnected = lambda: _disconnected_once()  # type: ignore[method-assign]
+    disconnect_checks = 0
+
+    async def disconnect_after_live_event() -> bool:
+        nonlocal disconnect_checks
+        disconnect_checks += 1
+        return disconnect_checks > 2
+
+    request.is_disconnected = disconnect_after_live_event  # type: ignore[method-assign]
 
     async def run():
         response = await endpoint("session-1", request, 0, service)
         chunks = [chunk async for chunk in response.body_iterator]
         assert "id: 5" in chunks[0]
         assert "run.started" in chunks[0]
+        assert "id: 6" in chunks[1]
+        assert "run.completed" in chunks[1]
+        assert len(chunks) == 2
 
     asyncio.run(run())
     assert events.closed
     assert events.closed[0][0] == "session-1"
-
-
-async def _disconnected_once() -> bool:
-    return True
 
 
 def test_sse_rejects_unknown_session_and_negative_cursor() -> None:

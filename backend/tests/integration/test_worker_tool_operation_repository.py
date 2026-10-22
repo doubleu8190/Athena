@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -23,6 +25,7 @@ from infrastructure.persistence.postgres.models import (
     PlanVersionModel,
     RoundTaskModel,
     TaskExecutionModel,
+    WorkerToolOperationModel,
 )
 from infrastructure.persistence.postgres.repositories.worker_tool_operation_repository import (
     PostgresWorkerToolOperationRepository,
@@ -255,6 +258,31 @@ async def test_postgres_migration_backfills_and_replays_across_attempts() -> Non
         assert claim.result is not None
         assert claim.result.status == "success"
         assert claim.result.output == "created"
+
+        concurrent_request = replace(
+            retry_request,
+            tool_call_id="worker:task-1:2:0:1",
+            operation_key="athena:run-1:task-1:2:0:1",
+            logical_operation_key="athena:run-1:task-1:logical:0:1",
+        )
+        concurrent_claims = await asyncio.gather(
+            repository.claim(concurrent_request, args_hash="second-call-hash"),
+            repository.claim(concurrent_request, args_hash="second-call-hash"),
+        )
+        assert sorted(item.status.value for item in concurrent_claims) == [
+            ToolOperationClaimStatus.ACQUIRED.value,
+            ToolOperationClaimStatus.IN_PROGRESS.value,
+        ]
+        async with session_factory() as session:
+            operation_count = await session.scalar(
+                select(func.count())
+                .select_from(WorkerToolOperationModel)
+                .where(
+                    WorkerToolOperationModel.logical_operation_key
+                    == concurrent_request.logical_operation_key
+                )
+            )
+        assert operation_count == 1
     finally:
         await test_engine.dispose()
         if created_schema:

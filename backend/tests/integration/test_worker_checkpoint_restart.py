@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from psycopg.conninfo import make_conninfo
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from application.orchestration.langgraph.runtime.worker_executor import (
     LangGraphWorkerExecutor,
@@ -23,9 +24,51 @@ from application.orchestration.langgraph.graphs.worker import (
 )
 from application.orchestration.worker_tools import WorkerToolExecutor
 from application.orchestration.worker_workflow import WorkerWorkflow
-from domain.orchestration import Task, TaskExecution, TaskStatus
+from domain.approval import ApprovalDecision
+from domain.orchestration import (
+    OrchestrationCommand,
+    OrchestrationCommandType,
+    Plan,
+    Task,
+    TaskExecution,
+    TaskStatus,
+    WorkerTaskTerminalEvent,
+)
 from domain.tools import ToolExecutionRequest, ToolExecutionResult
 from infrastructure.persistence.postgres.checkpointer import PostgresCheckpointer
+from infrastructure.persistence.postgres.models import (
+    AgentCommandModel,
+    AgentPlanModel,
+    AgentRunModel,
+    AgentTaskModel,
+    ApprovalRecordModel,
+    Base,
+    OrchestrationCommandModel,
+    OrchestrationInboxModel,
+    OrchestrationOutboxModel,
+    PlanRoundModel,
+    PlanVersionModel,
+    RootResumeJobModel,
+    RoundTaskModel,
+    TaskExecutionModel,
+    WorkerJobModel,
+    WorkerToolOperationModel,
+)
+from infrastructure.persistence.postgres.repositories.approval_repository import (
+    PostgresApprovalRepository,
+)
+from infrastructure.persistence.postgres.repositories.orchestration_command_repository import (
+    PostgresOrchestrationCommandRepository,
+)
+from infrastructure.persistence.postgres.repositories.orchestration_event_repository import (
+    PostgresOrchestrationEventRepository,
+)
+from infrastructure.persistence.postgres.repositories.worker_job_repository import (
+    PostgresWorkerJobRepository,
+)
+from infrastructure.persistence.postgres.repositories.worker_tool_operation_repository import (
+    PostgresWorkerToolOperationRepository,
+)
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -34,9 +77,9 @@ DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 class _ApprovalToolService:
     """为 checkpoint 验收提供一个需要人工审批的工具。"""
 
-    def __init__(self) -> None:
+    def __init__(self, executed: list[ToolExecutionRequest] | None = None) -> None:
         """初始化工具执行记录；不接收参数，也不主动抛出业务异常。"""
-        self.executed: list[ToolExecutionRequest] = []
+        self.executed = executed if executed is not None else []
 
     async def get(self, name: str) -> Any:
         """返回高风险工具配置。
@@ -252,6 +295,307 @@ async def test_worker_approval_resumes_after_postgres_checkpointer_restart(
     finally:
         for checkpointer in reversed(checkpointers):
             await checkpointer.stop()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> None:
+    """Approval, resume Job, checkpoint, and one tool effect survive restart."""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"worker_approval_restart_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    test_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    checkpoint_options: dict[str, str | int] = {
+        "host": base_url.host or "",
+        "port": base_url.port or 5432,
+        "dbname": base_url.database or "",
+        "user": base_url.username or "",
+        "password": base_url.password or "",
+        "options": f"-c search_path={schema}",
+    }
+    checkpoint_options.update(
+        {
+            name: value
+            for name, value in base_url.query.items()
+            if isinstance(value, (str, int)) and name != "options"
+        }
+    )
+    checkpoint_connection_string = make_conninfo(**checkpoint_options)
+    schema_created = False
+    now = datetime.now(timezone.utc)
+    run_id = f"run-{uuid4().hex}"
+    session_id = f"session-{run_id}"
+    plan_id = f"plan-{run_id}"
+    task_id = f"task-{run_id}"
+    checkpointers: list[PostgresCheckpointer] = []
+    external_effects: list[ToolExecutionRequest] = []
+
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+
+        tables = [
+            AgentCommandModel.__table__,
+            AgentRunModel.__table__,
+            AgentPlanModel.__table__,
+            AgentTaskModel.__table__,
+            ApprovalRecordModel.__table__,
+            OrchestrationCommandModel.__table__,
+            OrchestrationInboxModel.__table__,
+            OrchestrationOutboxModel.__table__,
+            PlanVersionModel.__table__,
+            PlanRoundModel.__table__,
+            RoundTaskModel.__table__,
+            TaskExecutionModel.__table__,
+            WorkerJobModel.__table__,
+            RootResumeJobModel.__table__,
+            WorkerToolOperationModel.__table__,
+        ]
+        async with test_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, tables=tables
+                )
+            )
+
+        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+        async with session_factory() as session, session.begin():
+            session.add(
+                AgentRunModel(
+                    run_id=run_id,
+                    session_id=session_id,
+                    status="created",
+                    root_thread_id=f"run:{run_id}",
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+
+        command_repository = PostgresOrchestrationCommandRepository(
+            session_factory,
+            id_factory=lambda: f"command-{uuid4().hex}",
+            clock=lambda: now,
+        )
+        plan = Plan(
+            plan_id=plan_id,
+            goal="Write the approved report",
+            task_ids=(task_id,),
+            max_parallelism=1,
+            session_id=session_id,
+            run_id=run_id,
+        )
+        submitted = await command_repository.submit_plan(
+            OrchestrationCommand(
+                message_id=f"submit:{run_id}",
+                command_type=OrchestrationCommandType.SUBMIT_PLAN,
+                idempotency_key=f"submit:{run_id}",
+                correlation_id=run_id,
+                occurred_at=now,
+                plan_id=plan_id,
+                scope_key=run_id,
+                plan_version=1,
+            ),
+            plan,
+            [
+                Task(
+                    task_id=task_id,
+                    title="Write report",
+                    objective="Write the requested report",
+                    allowed_tools=("write_file",),
+                )
+            ],
+        )
+
+        worker_jobs = PostgresWorkerJobRepository(
+            session_factory, clock=lambda: now
+        )
+        first_lease = await worker_jobs.claim_next(
+            "worker-before-restart", lease_seconds=60
+        )
+        assert first_lease is not None and first_lease.job_type == "execute"
+        first_execution = TaskExecution(
+            plan_id=plan_id,
+            run_id=run_id,
+            session_id=session_id,
+            task=first_lease.task,
+            execution_generation=first_lease.attempt,
+            execution_id=first_lease.execution_id,
+            worker_thread_id=first_lease.worker_thread_id,
+            fencing_token=first_lease.fencing_token,
+            cancellation_epoch=first_lease.cancellation_epoch,
+        )
+
+        first_tool_executor = WorkerToolExecutor(
+            _ApprovalToolService(external_effects),
+            operation_ledger=PostgresWorkerToolOperationRepository(
+                session_factory, clock=lambda: now
+            ),
+        )
+        first_agent = _WorkerAgent()
+        first_checkpointer = PostgresCheckpointer(checkpoint_connection_string)
+        checkpointers.append(first_checkpointer)
+        await first_checkpointer.start()
+        first_executor = LangGraphWorkerExecutor(
+            workflow_factory=lambda: WorkerWorkflow(
+                execute=first_agent,
+                execute_tool=first_tool_executor,
+            ),
+            checkpointer=first_checkpointer,
+        )
+        paused = await first_executor.execute(first_execution)
+        assert paused.status is TaskStatus.WAITING_APPROVAL
+        assert paused.approval_batch is not None
+        assert not external_effects
+        assert await worker_jobs.wait_for_approval(
+            first_lease, paused.approval_batch
+        )
+        approval_id = str(paused.approval_batch["approval_id"])
+
+        approvals = PostgresApprovalRepository(
+            session_factory, clock=lambda: now
+        )
+        assert await approvals.resolve(
+            approval_id,
+            run_id=run_id,
+            task_id=task_id,
+            decision=ApprovalDecision.APPROVED,
+        )
+        await first_checkpointer.stop()
+
+        # 新进程只从 PostgreSQL 恢复审批决定与 Resume Job，从 checkpoint 恢复 interrupt。
+        restarted_checkpointer = PostgresCheckpointer(checkpoint_connection_string)
+        checkpointers.append(restarted_checkpointer)
+        await restarted_checkpointer.start()
+        restarted_jobs = PostgresWorkerJobRepository(
+            session_factory, clock=lambda: now
+        )
+        resumed_lease = await restarted_jobs.claim_next(
+            "worker-after-restart", lease_seconds=60
+        )
+        assert resumed_lease is not None
+        assert resumed_lease.job_type == "resume_worker"
+        assert resumed_lease.execution_id == first_lease.execution_id
+        assert resumed_lease.worker_thread_id == first_lease.worker_thread_id
+        assert resumed_lease.resume_value["decision"] == "approved"
+
+        persisted_approval = await approvals.get(approval_id)
+        assert persisted_approval is not None
+        assert persisted_approval.decision is ApprovalDecision.APPROVED
+        resumed_execution = TaskExecution(
+            plan_id=plan_id,
+            run_id=run_id,
+            session_id=session_id,
+            task=resumed_lease.task,
+            execution_generation=resumed_lease.attempt,
+            execution_id=resumed_lease.execution_id,
+            worker_thread_id=resumed_lease.worker_thread_id,
+            fencing_token=resumed_lease.fencing_token,
+            cancellation_epoch=resumed_lease.cancellation_epoch,
+        )
+        restarted_tool_executor = WorkerToolExecutor(
+            _ApprovalToolService(external_effects),
+            operation_ledger=PostgresWorkerToolOperationRepository(
+                session_factory, clock=lambda: now
+            ),
+        )
+        restarted_agent = _WorkerAgent()
+        restarted_executor = LangGraphWorkerExecutor(
+            workflow_factory=lambda: WorkerWorkflow(
+                execute=restarted_agent,
+                execute_tool=restarted_tool_executor,
+            ),
+            checkpointer=restarted_checkpointer,
+        )
+        recovered_interrupt = await restarted_executor.pending_interrupt(
+            resumed_execution
+        )
+        assert recovered_interrupt is not None
+        assert recovered_interrupt["approval_id"] == approval_id
+        assert recovered_interrupt["interrupt_id"] == resumed_lease.resume_value[
+            "interrupt_id"
+        ]
+
+        result = await restarted_executor.resume(
+            resumed_execution, dict(resumed_lease.resume_value)
+        )
+        assert result.status is TaskStatus.DONE
+        assert result.output == {"confirmed": True}
+        assert restarted_agent.calls == 1
+        assert len(restarted_agent.observed_tool_results) == 1
+        assert len(external_effects) == 1
+        assert external_effects[0].approval_decision == "approved"
+        assert external_effects[0].arguments == {
+            "path": "report.txt",
+            "content": "ready",
+        }
+
+        receipt = await PostgresOrchestrationEventRepository(
+            session_factory, clock=lambda: now
+        ).apply_worker_terminal_event(
+            WorkerTaskTerminalEvent(
+                message_id=f"terminal:{run_id}",
+                occurred_at=now,
+                worker_id=resumed_lease.worker_id,
+                run_id=run_id,
+                plan_id=plan_id,
+                plan_version=resumed_lease.plan_version,
+                round_id=submitted.round_id,
+                task_id=task_id,
+                execution_id=resumed_lease.execution_id,
+                fencing_token=resumed_lease.fencing_token,
+                cancellation_epoch=resumed_lease.cancellation_epoch,
+                status=TaskStatus.COMPLETED,
+                result={
+                    "output": dict(result.output),
+                    "evidence": [],
+                    "uncertainties": [],
+                    "metrics": {},
+                },
+            )
+        )
+        assert receipt.accepted and receipt.round_completed
+
+        async with session_factory() as session:
+            approval_row = await session.get(ApprovalRecordModel, approval_id)
+            execution_row = await session.get(
+                TaskExecutionModel, resumed_lease.execution_id
+            )
+            job_rows = (
+                await session.execute(
+                    select(WorkerJobModel).where(
+                        WorkerJobModel.job_type == "resume_worker"
+                    )
+                )
+            ).scalars().all()
+            operation_rows = (
+                await session.execute(select(WorkerToolOperationModel))
+            ).scalars().all()
+            operation_count = await session.scalar(
+                select(func.count()).select_from(WorkerToolOperationModel)
+            )
+        assert approval_row is not None
+        assert approval_row.status == "resolved"
+        assert approval_row.decision == "approved"
+        assert execution_row is not None and execution_row.status == "completed"
+        assert len(job_rows) == 1 and job_rows[0].status == "completed"
+        assert operation_count == 1
+        assert len(operation_rows) == 1 and operation_rows[0].status == "completed"
+    finally:
+        for checkpointer in reversed(checkpointers):
+            await checkpointer.stop()
+        await test_engine.dispose()
         if schema_created:
             async with base_engine.begin() as connection:
                 await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))

@@ -133,7 +133,6 @@ CREATE TABLE IF NOT EXISTS agent_plans (
     status VARCHAR NOT NULL DEFAULT 'created',
     user_goal TEXT NOT NULL,
     max_parallelism INTEGER NOT NULL DEFAULT 1,
-    plan_json TEXT NOT NULL,
     current_version INTEGER NOT NULL DEFAULT 1,
     active_round_id VARCHAR,
     cancellation_epoch INTEGER NOT NULL DEFAULT 0,

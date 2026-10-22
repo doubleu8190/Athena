@@ -638,13 +638,13 @@ function approvalEvent(
 
 function snapshotStatus(value: string): EventStatus {
   const status = value.toLowerCase()
-  if (status.includes("fail") || status.includes("error") || status === "timed_out") return "failed"
+  if (status.includes("fail") || status.includes("error")) return "failed"
   if (status === "waiting_review") return "review"
   if (status.includes("approv")) return "waiting"
   if (status.includes("cancel")) return "cancelled"
   if (status.includes("running") || status.includes("cancelling") || status.includes("queued")) return "running"
   if (status.includes("pending") || status.includes("created") || status.includes("interrupted")) return "waiting"
-  if (status.includes("completed") || status === "done") return "completed"
+  if (status.includes("completed")) return "completed"
   return "info"
 }
 

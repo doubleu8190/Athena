@@ -35,7 +35,7 @@ def test_validator_accepts_plan_and_dag_is_deterministic() -> None:
     PlanValidator().validate(value, tasks("a", "b", "c"))
     dag = PlanDAG(value)
     assert dag.ready_tasks({"a": "pending", "b": "pending", "c": "pending"}) == ["a", "b"]
-    assert dag.ready_tasks({"a": "done", "b": "done", "c": "pending"}) == ["c"]
+    assert dag.ready_tasks({"a": "completed", "b": "completed", "c": "pending"}) == ["c"]
 
 
 def test_dag_propagates_dependency_failure_recursively() -> None:

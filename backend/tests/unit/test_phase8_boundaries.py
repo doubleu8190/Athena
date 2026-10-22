@@ -112,7 +112,6 @@ def test_controller_error_mappings_for_approval_tools_files_and_knowledge() -> N
         async def pending(self, session_id=None): raise RuntimeError("x")
         async def history(self, *args, **kwargs): return []
         async def resolve(self, *args, **kwargs): return False
-        async def resolve_batch(self, *args, **kwargs): return False
     class Tool:
         async def list_tools(self): return []
         async def update_governance(self, *args, **kwargs): raise ValueError("bad risk")

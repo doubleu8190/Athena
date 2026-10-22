@@ -34,6 +34,9 @@ async def test_worker_timeout_cancels_graph_and_reports_retryable_timeout():
         async def resume(self, _execution, _resume_value):
             raise AssertionError("execute job must start the Worker graph")
 
+        async def pending_interrupt(self, _execution):
+            return None
+
     class EventHandler:
         def __init__(self):
             self.events = []
@@ -75,6 +78,6 @@ async def test_worker_timeout_cancels_graph_and_reports_retryable_timeout():
     assert worker.cancelled.is_set()
     assert len(event_handler.events) == 1
     event = event_handler.events[0]
-    assert event.status is TaskStatus.TIMED_OUT
+    assert event.status is TaskStatus.FAILED
     assert event.retryable is True
     assert event.error == {"code": "task_timeout", "timeout_seconds": 0.01}

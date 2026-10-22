@@ -144,7 +144,6 @@ async def test_postgres_migration_backfills_and_replays_across_attempts() -> Non
                     status="running",
                     user_goal="write a report",
                     max_parallelism=1,
-                    plan_json="{}",
                     current_version=1,
                     active_round_id="round-1",
                     cancellation_epoch=0,

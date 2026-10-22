@@ -40,7 +40,6 @@ function statusLabel(status: OrchestrationTask["status"]): string {
     case "waiting_approval": return "待确认"
     case "retry_wait": return "准备重试"
     case "failed":
-    case "timed_out":
     case "invalid_output": return "失败"
     case "cancelled":
     case "cancel_requested": return "已取消"
@@ -50,7 +49,7 @@ function statusLabel(status: OrchestrationTask["status"]): string {
 
 function taskTone(status: OrchestrationTask["status"]): string {
   if (status === "completed") return "text-athena-success"
-  if (["failed", "timed_out", "invalid_output"].includes(status)) return "text-athena-danger"
+  if (["failed", "invalid_output"].includes(status)) return "text-athena-danger"
   if (status === "waiting_approval") return "text-athena-warning"
   if (["running", "retry_wait"].includes(status)) return "text-athena-accent"
   return "text-athena-muted"
@@ -58,7 +57,7 @@ function taskTone(status: OrchestrationTask["status"]): string {
 
 function TaskIcon({ status }: { status: OrchestrationTask["status"] }) {
   if (status === "completed") return <CheckCircle2 className="h-4 w-4 text-athena-success" />
-  if (["failed", "timed_out", "invalid_output"].includes(status)) return <XCircle className="h-4 w-4 text-athena-danger" />
+  if (["failed", "invalid_output"].includes(status)) return <XCircle className="h-4 w-4 text-athena-danger" />
   if (status === "waiting_approval") return <ShieldAlert className="h-4 w-4 text-athena-warning" />
   if (["running", "retry_wait"].includes(status)) return <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />
   return <Clock3 className="h-4 w-4 text-athena-muted" />

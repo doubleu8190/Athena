@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Protocol
+from typing import Any, Mapping, Protocol
 
 from .contracts import (
     CommandReceipt,
@@ -15,7 +15,7 @@ from .contracts import (
     WorkerJobLease,
     WorkerTaskTerminalEvent,
 )
-from .entities import Plan, PlanStatus, Task, TaskExecution, TaskResult
+from .entities import Plan, Task, TaskExecution, TaskResult
 
 
 class OrchestrationCommandRepository(Protocol):
@@ -90,37 +90,7 @@ class PlanRepository(Protocol):
 
     async def get(self, plan_id: str) -> tuple[Plan, list[Task]] | None: ...
 
-    async def claim_ready_tasks(
-        self, plan_id: str, max_parallelism: int
-    ) -> list[TaskExecution]: ...
-
-    async def finish_task(
-        self,
-        task_id: str,
-        execution_generation: int,
-        *,
-        status: str,
-        output: dict[str, object] | None = None,
-        error: dict[str, object] | None = None,
-        finalize_plan: bool = True,
-    ) -> dict[str, object]: ...
-
-    async def finalize_plan(self, plan_id: str) -> PlanStatus | None: ...
-
-    async def set_task_waiting_approval(
-        self,
-        task_id: str,
-        execution_generation: int,
-        approval_batch: dict[str, object] | None = None,
-    ) -> bool: ...
-
-    async def set_task_running(self, task_id: str, execution_generation: int) -> bool: ...
-
-    async def retry_task(self, task_id: str) -> dict[str, object] | None: ...
-
     async def get_results(self, plan_id: str) -> Mapping[str, TaskResult]: ...
-
-    async def get_task_execution(self, task_id: str) -> TaskExecution | None: ...
 
 
 class ReviewContextRepository(Protocol):
@@ -135,6 +105,10 @@ class WorkerExecutor(Protocol):
         execution: TaskExecution,
         decisions: dict[str, str],
     ) -> TaskResult: ...
+
+    async def pending_interrupt(
+        self, execution: TaskExecution
+    ) -> dict[str, Any] | None: ...
 
 class RootGraphPort(Protocol):
 

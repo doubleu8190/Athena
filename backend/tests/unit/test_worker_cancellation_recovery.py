@@ -402,6 +402,12 @@ async def test_dispatcher_acknowledges_cancellation_after_lease_fence_fails():
             await asyncio.Event().wait()
             return TaskResult(execution.task.task_id, TaskStatus.COMPLETED)
 
+        async def resume(self, _execution, _resume_value):
+            raise AssertionError("execute job must not resume the Worker")
+
+        async def pending_interrupt(self, _execution):
+            return None
+
     class EventHandler:
         pass
 

@@ -194,8 +194,6 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
         )
         assert await approval_repository.resolve(
             approvals["task-a"],
-            run_id=run_id,
-            task_id="task-a",
             decision=ApprovalDecision.APPROVED,
         )
 
@@ -243,8 +241,6 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
 
         assert await approval_repository.resolve(
             approvals["task-b"],
-            run_id=run_id,
-            task_id="task-b",
             decision=ApprovalDecision.DENIED,
         )
         resumed_b = await worker_jobs.claim_next("resume-b", lease_seconds=60)
@@ -254,8 +250,6 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
         approval_result, cancellation_result = await asyncio.gather(
             approval_repository.resolve(
                 approvals["task-c"],
-                run_id=run_id,
-                task_id="task-c",
                 decision=ApprovalDecision.APPROVED,
             ),
             PostgresRunRepository(session_factory).cancel(run_id),
@@ -641,8 +635,6 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
             session_factory, clock=lambda: now
         ).resolve(
             f"approval-b-{run_id}",
-            run_id=run_id,
-            task_id="task-b",
             decision=ApprovalDecision.APPROVED,
         )
 

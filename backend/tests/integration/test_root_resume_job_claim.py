@@ -105,7 +105,6 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
                     status="waiting_review",
                     user_goal="Complete one round and resume Root exactly once",
                     max_parallelism=1,
-                    plan_json='{"nodes":[],"edges":[]}',
                     current_version=1,
                     active_round_id=round_id,
                     cancellation_epoch=0,

@@ -30,7 +30,7 @@ class PlanDAG:
             if str(states.get(task_id)) == TaskStatus.PENDING.value
             and all(
                 str(states.get(parent))
-                in {TaskStatus.DONE.value, TaskStatus.COMPLETED.value}
+                == TaskStatus.COMPLETED.value
                 for parent in self.dependencies[task_id]
             )
         ]

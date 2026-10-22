@@ -357,19 +357,14 @@ class ApiClient {
   }
 
   async respondApproval(
-    approval: Pick<ApprovalRequest, "approval_id" | "run_id" | "task_id">,
+    approval: Pick<ApprovalRequest, "approval_id">,
     decision: "approved" | "denied",
   ): Promise<{ status: string; approval_id: string; decision: string }> {
-    if (!approval.run_id) throw new Error("approval_run_context_missing")
     return this.request<{ status: string; approval_id: string; decision: string }>(
       `/api/approvals/${encodeURIComponent(approval.approval_id)}/decision`,
       {
         method: "POST",
-        body: JSON.stringify({
-          decision,
-          run_id: approval.run_id,
-          task_id: approval.task_id,
-        }),
+        body: JSON.stringify({ decision }),
       },
     )
   }

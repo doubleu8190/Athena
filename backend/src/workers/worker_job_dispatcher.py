@@ -147,7 +147,7 @@ class WorkerJobDispatcher:
                     await asyncio.gather(worker_task, return_exceptions=True)
                     result = TaskResult(
                         task_id=lease.task_id,
-                        status=TaskStatus.TIMED_OUT,
+                        status=TaskStatus.FAILED,
                         error={
                             "code": "task_timeout",
                             "timeout_seconds": lease.task.timeout_seconds,
@@ -259,15 +259,13 @@ class WorkerJobDispatcher:
         """Invoke the Worker only while its thread lock is held."""
         if lease.job_type == "resume_worker":
             return await self._worker.resume(execution, dict(lease.resume_value))
-        recover = getattr(self._worker, "pending_interrupt", None)
-        if callable(recover):
-            pending = await recover(execution)
-            if pending:
-                return TaskResult(
-                    task_id=lease.task_id,
-                    status=TaskStatus.WAITING_APPROVAL,
-                    approval_batch=pending,
-                )
+        pending = await self._worker.pending_interrupt(execution)
+        if pending:
+            return TaskResult(
+                task_id=lease.task_id,
+                status=TaskStatus.WAITING_APPROVAL,
+                approval_batch=pending,
+            )
         return await self._worker.execute(execution)
 
     async def _maintain_lease(
@@ -295,7 +293,7 @@ class WorkerJobDispatcher:
             current = renewed
 
     def _terminal_result(self, result: TaskResult, task_id: str) -> TaskResult:
-        """将旧 Worker 状态投影为新终态；未实现的审批中断安全失败。"""
+        """校验 Worker 终态；未实现的审批中断安全失败。"""
         if result.task_id != task_id:
             return TaskResult(
                 task_id=task_id,
@@ -305,31 +303,11 @@ class WorkerJobDispatcher:
                     "reported_task_id": result.task_id,
                 },
             )
-        if result.status == TaskStatus.DONE:
-            return TaskResult(
-                task_id=task_id,
-                status=TaskStatus.COMPLETED,
-                output=result.output,
-                evidence=result.evidence,
-                uncertainties=result.uncertainties,
-                error=result.error,
-                retryable=result.retryable,
-            )
         if result.status in {
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
-            TaskStatus.TIMED_OUT,
         }:
             return result
-        if result.status == TaskStatus.WAITING_APPROVAL:
-            return TaskResult(
-                task_id=task_id,
-                status=TaskStatus.FAILED,
-                error={
-                    "code": "approval_runtime_not_ready",
-                    "message": "Worker approval dispatch is implemented in P4",
-                },
-            )
         return TaskResult(
             task_id=task_id,
             status=TaskStatus.FAILED,

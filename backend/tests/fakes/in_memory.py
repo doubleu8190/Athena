@@ -255,25 +255,17 @@ class InMemoryMemoryPort(MemoryRepositoryPort):
 
 class InMemoryApprovalRepository(ApprovalRepository):
     def __init__(self) -> None: self.items: dict[str, ApprovalRequest] = {}
-    async def create(self, request: ApprovalRequest) -> bool:
-        if request.approval_id in self.items: return False
-        self.items[request.approval_id] = request
-        return True
     async def get(self, approval_id: str) -> ApprovalRequest | None: return self.items.get(approval_id)
     async def list_pending(self, session_id: str | None = None) -> list[ApprovalRequest]:
         return [value for value in self.items.values() if value.decision is None and (session_id is None or value.session_id == session_id)]
     async def list_history(self, session_id: str | None = None, *, limit: int = 50, offset: int = 0) -> list[ApprovalRequest]:
         values = [value for value in self.items.values() if value.decision is not None and (session_id is None or value.session_id == session_id)]
         return values[offset:offset + limit]
-    async def resolve(self, approval_id: str, *, run_id: str, task_id: str, decision: ApprovalDecision) -> bool:
+    async def resolve(self, approval_id: str, *, decision: ApprovalDecision) -> bool:
         value = self.items.get(approval_id)
-        if value is None or value.decision is not None or value.run_id != run_id: return False
+        if value is None or value.decision is not None: return False
         self.items[approval_id] = replace(value, decision=decision, status=decision.value)
         return True
-    async def resolve_batch(self, batch_id: str, decisions: dict[str, ApprovalDecision], *, run_id: str | None = None) -> bool:
-        changed = False
-        for key, decision in decisions.items(): changed = await self.resolve(key, run_id=run_id or self.items[key].run_id, task_id=self.items[key].task_id or "", decision=decision) or changed
-        return changed
 
 
 class InMemoryProviderQueries(ProviderQueryPort, SettingsQueryPort, RetrievalPort, ToolUsageQueryPort, MemoryQueryPort):

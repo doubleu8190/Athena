@@ -22,7 +22,6 @@ class ExecutionStatus(StrEnum):
     INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
-    TIMED_OUT = "timed_out"
     CANCEL_REQUESTED = "cancel_requested"
     CANCELLED = "cancelled"
 
@@ -311,8 +310,8 @@ class WorkerTaskTerminalEvent:
             raise ValueError("fencing_token must be positive")
         if self.cancellation_epoch < 0:
             raise ValueError("cancellation_epoch cannot be negative")
-        if self.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.TIMED_OUT}:
-            raise ValueError("worker terminal event requires completed, failed, or timed_out status")
+        if self.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+            raise ValueError("worker terminal event requires completed or failed status")
 
 
 @dataclass(frozen=True, slots=True)

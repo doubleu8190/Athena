@@ -16,7 +16,6 @@ from application.runs.request_preparation import (
     RunRequestPreparationService,
 )
 from application.runs.task_understanding.service import TaskUnderstandingService
-from application.approval.service import ApprovalService
 from application.tools.service import ToolService
 from domain.events.ports import EventPort
 from domain.orchestration import (
@@ -26,7 +25,7 @@ from domain.orchestration import (
     ReviewDecision,
     Task,
 )
-from domain.orchestration.ports import PlanRepository, ReviewContextRepository
+from domain.orchestration.ports import ReviewContextRepository
 
 if TYPE_CHECKING:
     from application.orchestration.langgraph.runtime.root_agent import (
@@ -41,12 +40,10 @@ class RootWorkflowDependencies:
     task_understanding: TaskUnderstandingService
     context_acquisition: ContextAcquisitionService
     context_planner: ContextPlanner
-    plan_repository: PlanRepository
     request_preparation: RunRequestPreparationService
     agent: ConfiguredRootAgent
     event_publisher: EventPort
     tool_service: ToolService
-    approval_service: ApprovalService
     review_context_repository: ReviewContextRepository | None = None
     orchestration_command_handler: OrchestrationCommandHandlerPort | None = None
     plan_builder: Callable[..., Any] | None = None
@@ -124,18 +121,9 @@ class WorkerWorkflowPort(Protocol):
     async def complete_tool_approval(
         self, state: Mapping[str, Any], decision: Any
     ) -> dict[str, Any]: ...
-    async def resume_node(self, state: Mapping[str, Any]) -> dict[str, Any]: ...
     async def finalize(self, state: Mapping[str, Any]) -> dict[str, Any]: ...
-    def route(self, state: Mapping[str, Any]) -> str: ...
     def route_after_gate(self, state: Mapping[str, Any]) -> str: ...
     def route_after_tools(self, state: Mapping[str, Any]) -> str: ...
-
-
-def make_root_workflow(dependencies: RootWorkflowDependencies) -> RootWorkflowPort:
-    """Compatibility factory for callers migrating to explicit injection."""
-    from .root_workflow import RootWorkflow
-
-    return RootWorkflow(dependencies)
 
 
 __all__ = [
@@ -143,5 +131,4 @@ __all__ = [
     "OrchestrationCommandHandlerPort",
     "RootWorkflowPort",
     "WorkerWorkflowPort",
-    "make_root_workflow",
 ]

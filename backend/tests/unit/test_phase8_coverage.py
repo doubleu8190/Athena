@@ -34,24 +34,14 @@ async def test_approval_recovery_and_memory_lifecycle_branches() -> None:
     request = ApprovalRequest("a-1", "s", "r", "c", "tool", {}, "high", created_at=NOW)
 
     class Repo:
-        def __init__(self): self.calls = 0
-        async def get(self, key): return request if self.calls else None
-        async def create(self, value): self.calls += 1; return False
         async def resolve(self, *args, **kwargs): return True
-        async def resolve_batch(self, *args, **kwargs): return True
         async def list_pending(self, session_id=None): return [request]
         async def list_history(self, *args, **kwargs): return [request]
 
-    class Events:
-        async def required(self, value): self.value = value
-        async def publish(self, value): self.value = value
-
-    service = ApprovalService(Repo(), Events(), id_factory=lambda: "new")
-    assert await service.request(session_id="s", run_id="r", tool_call_id="c", tool_name="x", arguments={}, risk_level="low") == request
-    assert await service.resolve("a-1", run_id="r", task_id="t", decision=ApprovalDecision.APPROVED)
-    assert await service.resolve_batch("b", {}, run_id="r")
-    assert await service.pending("s") == [request]
-    assert await service.history("s", limit=1, offset=0) == [request]
+    service = ApprovalService(Repo())
+    assert await service.resolve("a-1", decision=ApprovalDecision.APPROVED)
+    assert (await service.pending("s"))[0].approval_id == request.approval_id
+    assert (await service.history("s", limit=1, offset=0))[0].approval_id == request.approval_id
 
     class Memory:
         async def initialize(self): self.initialized = True

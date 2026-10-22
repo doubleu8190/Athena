@@ -15,7 +15,7 @@ from domain.orchestration import (
     TaskStatus,
 )
 from infrastructure.persistence.postgres.models import (
-    OrchestrationOutboxModel,
+    PlanVersionModel,
     TaskExecutionResultModel,
 )
 from infrastructure.persistence.postgres.repositories import (
@@ -60,6 +60,9 @@ class Session:
     def add_all(self, values):
         self.added.extend(values)
 
+    async def flush(self):
+        return None
+
     async def get(self, *_args, **_kwargs):
         return self.get_values.pop(0) if self.get_values else None
 
@@ -101,6 +104,7 @@ def task(task_id, *, status=TaskStatus.PENDING, generation=0, output=None, error
         worker_type="general",
         status=status.value,
         execution_generation=generation,
+        timeout_seconds=3600.0,
         worker_thread_id=None,
         active_execution_id=None,
         output_json=output,
@@ -109,37 +113,31 @@ def task(task_id, *, status=TaskStatus.PENDING, generation=0, output=None, error
 
 
 @pytest.mark.asyncio
-async def test_target_orchestration_repository_claims_and_completes_dag():
+async def test_plan_repository_reads_the_current_immutable_version():
     session = Session()
     repository = PostgresOrchestrationRepository(factory(session))
     await repository.create(plan(), [Task("a", "A", "do A"), Task("b", "B", "do B")])
-    assert len(session.added) == 3
+    assert len(session.added) == 4
+    assert any(isinstance(value, PlanVersionModel) for value in session.added)
 
     plan_row = SimpleNamespace(
         plan_id="p-1", run_id="r-1", session_id="s-1", user_goal="goal",
         max_parallelism=2, status="created",
-        plan_json='{"nodes":[{"task_id":"a"},{"task_id":"b"}],"edges":[{"from":"a","to":"b"}]}',
+        current_version=1,
+    )
+    version_row = SimpleNamespace(
+        dag_json={
+            "goal": "goal",
+            "max_parallelism": 2,
+            "nodes": [{"task_id": "a"}, {"task_id": "b"}],
+            "edges": [{"from": "a", "to": "b"}],
+        }
     )
     a_row, b_row = task("a"), task("b")
-    session.get_values = [plan_row]
+    session.get_values = [plan_row, version_row]
     session.execute_values = [Result(rows=[a_row, b_row])]
     loaded = await repository.get("p-1")
     assert loaded and loaded[0].edges[0].to_task_id == "b"
-
-    session.get_values = [plan_row]
-    session.execute_values = [Result(rows=[a_row, b_row])]
-    claimed = await repository.claim_ready_tasks("p-1", 2)
-    assert [item.task.task_id for item in claimed] == ["a"]
-    assert a_row.status == TaskStatus.RUNNING.value and a_row.execution_generation == 1
-
-    session.execute_values = [Result(scalar=a_row), Result(rows=[("done",), ("pending",)])]
-    session.get_values = [SimpleNamespace(status="created", updated_at=None)]
-    outcome = await repository.finish_task("a", 1, status=TaskStatus.DONE.value, output={"ok": True})
-    assert outcome == {"accepted": True, "plan_completed": False}
-    session.execute_values = [Result(rows=[("done",), ("done",)])]
-    assert await repository._terminal_plan_status(session, "p-1") is PlanStatus.COMPLETED
-    session.execute_values = [Result(rows=[("done",), ("cancelled",)])]
-    assert await repository._terminal_plan_status(session, "p-1") is PlanStatus.FAILED
 
 
 @pytest.mark.asyncio
@@ -164,10 +162,10 @@ async def test_load_review_context_uses_requested_round_and_its_plan_version():
     )
     dag = {
         "nodes": [
-            {"task_id": "a", "title": "Research", "objective": "Find facts"},
-            {"task_id": "b", "title": "Analyze", "objective": "Analyze facts"},
-            {"task_id": "c", "title": "Draft", "objective": "Write draft"},
-            {"task_id": "d", "title": "Publish", "objective": "Publish report"},
+            {"task_id": "a", "title": "Research", "objective": "Find facts", "input": {}, "expected_output": {}, "allowed_tools": [], "worker_type": "general", "timeout_seconds": 3600},
+            {"task_id": "b", "title": "Analyze", "objective": "Analyze facts", "input": {}, "expected_output": {}, "allowed_tools": [], "worker_type": "general", "timeout_seconds": 3600},
+            {"task_id": "c", "title": "Draft", "objective": "Write draft", "input": {}, "expected_output": {}, "allowed_tools": [], "worker_type": "general", "timeout_seconds": 3600},
+            {"task_id": "d", "title": "Publish", "objective": "Publish report", "input": {}, "expected_output": {}, "allowed_tools": [], "worker_type": "general", "timeout_seconds": 3600},
         ],
         "edges": [
             {"from": "a", "to": "d"},
@@ -179,7 +177,7 @@ async def test_load_review_context_uses_requested_round_and_its_plan_version():
     version_row = SimpleNamespace(dag_json=dag)
     tasks = [
         task("a", status=TaskStatus.FAILED, error='{"reason":"source_missing"}'),
-        task("b", status=TaskStatus.DONE),
+        task("b", status=TaskStatus.COMPLETED),
         task("c", status=TaskStatus.PENDING),
         task(
             "d",
@@ -230,7 +228,7 @@ async def test_load_review_context_uses_requested_round_and_its_plan_version():
         round_id="round-1", task_id="a", status="failed"
     )
     current_round_task = SimpleNamespace(
-        round_id="round-2", task_id="b", status="done"
+        round_id="round-2", task_id="b", status="completed"
     )
     session.get_values = [round_row, plan_row, version_row]
     session.execute_values = [
@@ -292,155 +290,11 @@ async def test_load_review_context_rejects_a_round_that_is_no_longer_active():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("terminal_statuses", "expected_plan_status", "expected_event"),
-    [
-        (["done", "completed"], PlanStatus.COMPLETED, "PlanCompleted"),
-        (["done", "failed"], PlanStatus.FAILED, "PlanFailed"),
-    ],
-)
-async def test_finish_task_writes_plan_terminal_outbox_with_state(
-    terminal_statuses, expected_plan_status, expected_event
-):
-    session = Session()
-    repository = PostgresOrchestrationRepository(factory(session))
-    task_row = task("b", status=TaskStatus.RUNNING, generation=3)
-    plan_row = SimpleNamespace(
-        plan_id="p-1",
-        run_id="r-1",
-        session_id="s-1",
-        user_goal="goal",
-        status=PlanStatus.RUNNING.value,
-        current_version=2,
-        active_round_id="round-2",
-        updated_at=None,
-    )
-    session.execute_values = [
-        Result(scalar=task_row),
-        Result(rows=[(value,) for value in terminal_statuses]),
-    ]
-    session.get_values = [plan_row]
-
-    outcome = await repository.finish_task(
-        "b", 3, status=terminal_statuses[-1]
-    )
-
-    assert outcome == {"accepted": True, "plan_completed": True}
-    assert plan_row.status == expected_plan_status.value
-    outbox = next(
-        value
-        for value in session.added
-        if isinstance(value, OrchestrationOutboxModel)
-    )
-    assert outbox.event_type == expected_event
-    assert outbox.dedupe_key == f"plan:p-1:{expected_plan_status.value}"
-    assert outbox.plan_version == 2
-    assert outbox.round_id == "round-2"
-    assert outbox.payload_json["goal"] == "goal"
-
-
 @pytest.mark.asyncio
-async def test_finish_task_does_not_reopen_cancelled_plan_or_emit_terminal_outbox():
+async def test_target_orchestration_repository_loads_task_results():
     session = Session()
     repository = PostgresOrchestrationRepository(factory(session))
-    task_row = task("b", status=TaskStatus.RUNNING, generation=3)
-    plan_row = SimpleNamespace(
-        plan_id="p-1",
-        run_id="r-1",
-        session_id="s-1",
-        user_goal="goal",
-        status=PlanStatus.CANCELLED.value,
-        current_version=2,
-        active_round_id="round-2",
-        updated_at=None,
-    )
-    session.execute_values = [
-        Result(scalar=task_row),
-        Result(rows=[("done",), ("cancelled",)]),
-    ]
-    session.get_values = [plan_row]
-
-    outcome = await repository.finish_task("b", 3, status="done")
-
-    assert outcome == {"accepted": True, "plan_completed": False}
-    assert plan_row.status == PlanStatus.CANCELLED.value
-    assert not any(
-        isinstance(value, OrchestrationOutboxModel) for value in session.added
-    )
-
-
-@pytest.mark.asyncio
-async def test_finalize_plan_records_deferred_terminal_after_retry_is_not_scheduled():
-    session = Session()
-    repository = PostgresOrchestrationRepository(factory(session))
-    task_row = task("b", status=TaskStatus.RUNNING, generation=3)
-    plan_row = SimpleNamespace(
-        plan_id="p-1",
-        run_id="r-1",
-        session_id="s-1",
-        user_goal="goal",
-        status=PlanStatus.RUNNING.value,
-        current_version=2,
-        active_round_id="round-2",
-        updated_at=None,
-    )
-    session.execute_values = [
-        Result(scalar=task_row),
-        Result(rows=[("done",), ("failed",)]),
-    ]
-    session.get_values = [plan_row]
-
-    outcome = await repository.finish_task(
-        "b", 3, status="failed", finalize_plan=False
-    )
-
-    assert outcome == {"accepted": True, "plan_completed": True}
-    assert plan_row.status == PlanStatus.RUNNING.value
-    assert not session.added
-
-    session.get_values = [plan_row]
-    session.execute_values = [Result(rows=[("done",), ("failed",)])]
-    status = await repository.finalize_plan("p-1")
-
-    assert status is PlanStatus.FAILED
-    assert plan_row.status == PlanStatus.FAILED.value
-    assert session.added[0].event_type == "PlanFailed"
-
-
-@pytest.mark.asyncio
-async def test_target_orchestration_repository_dependency_failure_retry_and_results():
-    session = Session()
-    repository = PostgresOrchestrationRepository(factory(session))
-    plan_row = SimpleNamespace(
-        plan_id="p-1", run_id="r-1", session_id="s-1", user_goal="goal",
-        max_parallelism=2, status="running",
-        plan_json='{"nodes":[{"task_id":"a"},{"task_id":"b"}],"edges":[{"from":"a","to":"b"}]}',
-    )
     failed, pending = task("a", status=TaskStatus.FAILED), task("b")
-    session.get_values = [plan_row]
-    session.execute_values = [Result(rows=[failed, pending])]
-    assert await repository.claim_ready_tasks("p-1", 2) == []
-    assert pending.status == TaskStatus.CANCELLED.value
-
-    session.execute_values = [Result(rowcount=1)]
-    assert await repository.retry_task("a") == {"task_id": "a"}
     session.execute_values = [Result(rows=[failed, pending])]
     results = await repository.get_results("p-1")
     assert results["a"].status is TaskStatus.FAILED
-
-    session.get_values = [failed, plan_row]
-    session.execute_values = [Result(rows=[failed, pending])]
-    execution = await repository.get_task_execution("a")
-    assert execution and execution.task.task_id == "a"
-
-
-@pytest.mark.asyncio
-async def test_target_orchestration_repository_approval_and_stale_execution():
-    session = Session()
-    repository = PostgresOrchestrationRepository(factory(session))
-    session.execute_values = [Result(rowcount=1), Result(rowcount=1)]
-    assert await repository.set_task_waiting_approval("a", 1, {"approval_id": "x"})
-    assert await repository.set_task_running("a", 1)
-
-    session.execute_values = [Result(scalar=None)]
-    assert (await repository.finish_task("a", 99, status=TaskStatus.DONE.value))["accepted"] is False

@@ -103,9 +103,6 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
                     status="waiting_review",
                     user_goal="Complete a plan after its only task finishes",
                     max_parallelism=1,
-                    plan_json=json.dumps(
-                        {"nodes": [{"task_id": "task-a"}], "edges": []}
-                    ),
                     current_version=1,
                     active_round_id=round_id,
                     cancellation_epoch=0,

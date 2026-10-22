@@ -86,7 +86,6 @@ class AgentPlanModel(Base):
     status: Mapped[str] = mapped_column(String, default="created")
     user_goal: Mapped[str] = mapped_column(Text)
     max_parallelism: Mapped[int] = mapped_column(Integer, default=1)
-    plan_json: Mapped[str] = mapped_column(Text)
     current_version: Mapped[int] = mapped_column(Integer, default=1)
     active_round_id: Mapped[str | None] = mapped_column(String, nullable=True)
     cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)

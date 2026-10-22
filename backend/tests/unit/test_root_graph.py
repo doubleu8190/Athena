@@ -69,12 +69,10 @@ def _dependencies(task_understanding, *, provider=None):
             event_publisher=events,
         ),
         context_planner=ContextPlanner(),
-        plan_repository=SimpleNamespace(),
         request_preparation=_RequestPreparation(),
         agent=_Agent(),
         event_publisher=events,
         tool_service=SimpleNamespace(),
-        approval_service=SimpleNamespace(),
     )
 
 
@@ -124,3 +122,15 @@ async def test_root_graph_routes_nested_task_clarification() -> None:
         "content": "请选择目标文件。",
         "kind": "clarification",
     }
+
+
+@pytest.mark.asyncio
+async def test_root_graph_rejects_legacy_state_based_resume() -> None:
+    with pytest.raises(RuntimeError, match="root_resume_value_type_invalid"):
+        await invoke_root_graph(
+            None,
+            session_id="session-1",
+            run_id="run-legacy-resume",
+            user_message="",
+            resume_value={"tool_call_id": "old-root-approval"},
+        )

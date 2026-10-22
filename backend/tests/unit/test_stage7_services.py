@@ -96,49 +96,17 @@ async def test_memory_worker_recovers_and_stops() -> None:
 
 
 class ApprovalRepository:
-    def __init__(self):
-        self.values = {}
-
-    async def create(self, request):
-        if request.approval_id in self.values:
-            return False
-        self.values[request.approval_id] = request
+    async def resolve(self, approval_id, *, decision):
+        self.resolved = (approval_id, decision)
         return True
-
-    async def get(self, approval_id):
-        return self.values.get(approval_id)
-
-    async def list_pending(self, session_id=None):
-        return list(self.values.values())
-
-    async def list_history(self, session_id=None, *, limit=50, offset=0):
-        return list(self.values.values())
-
-    async def resolve(self, *args, **kwargs):
-        return True
-
-    async def resolve_batch(self, *args, **kwargs):
-        return True
-
-
-class Events:
-    def __init__(self):
-        self.values = []
-
-    async def publish(self, event):
-        self.values.append(event)
 
 
 @pytest.mark.asyncio
-async def test_approval_service_is_idempotent_and_publishes_once() -> None:
-    repository, events = ApprovalRepository(), Events()
-    service = ApprovalService(repository, events, id_factory=lambda: "a-1")
-    kwargs = dict(session_id="s-1", run_id="r-1", tool_call_id="c-1", tool_name="shell", arguments={}, risk_level="high")
-    first = await service.request(**kwargs)
-    second = await service.request(**kwargs, approval_id=first.approval_id)
-    assert first == second
-    assert len(events.values) == 1
-    assert await service.resolve(first.approval_id, run_id="r-1", task_id="t-1", decision=ApprovalDecision.APPROVED)
+async def test_approval_service_resolves_by_authoritative_approval_id() -> None:
+    repository = ApprovalRepository()
+    service = ApprovalService(repository)
+    assert await service.resolve("a-1", decision=ApprovalDecision.APPROVED)
+    assert repository.resolved == ("a-1", ApprovalDecision.APPROVED)
 
 
 class ToolRepository:

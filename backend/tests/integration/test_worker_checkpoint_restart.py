@@ -150,7 +150,7 @@ class _WorkerAgent:
             for result in tool_results
             if isinstance(result, Mapping)
         ]
-        return {"status": "done", "output": {"confirmed": True}}
+        return {"status": "completed", "output": {"confirmed": True}}
 
 
 @pytest.mark.integration
@@ -278,7 +278,7 @@ async def test_worker_approval_resumes_after_postgres_checkpointer_restart(
             },
         )
 
-        assert resumed.status is TaskStatus.DONE
+        assert resumed.status is TaskStatus.COMPLETED
         assert resumed.output == {"confirmed": True}
         assert len(agent.observed_tool_results) == 1
         tool_result = agent.observed_tool_results[0]
@@ -470,8 +470,6 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
         )
         assert await approvals.resolve(
             approval_id,
-            run_id=run_id,
-            task_id=task_id,
             decision=ApprovalDecision.APPROVED,
         )
         await first_checkpointer.stop()
@@ -618,7 +616,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
         result = await final_executor.resume(
             final_execution, dict(final_lease.resume_value)
         )
-        assert result.status is TaskStatus.DONE
+        assert result.status is TaskStatus.COMPLETED
         assert result.output == {"confirmed": True}
         assert final_agent.calls == 1
         assert len(final_agent.observed_tool_results) == 1

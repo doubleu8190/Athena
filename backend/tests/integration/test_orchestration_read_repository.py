@@ -90,7 +90,6 @@ async def test_run_snapshot_and_plan_version_read_postgres_facts() -> None:
                     status="waiting_review",
                     user_goal="Prepare a report",
                     max_parallelism=2,
-                    plan_json='{"nodes":[{"task_id":"task-read-1"}],"edges":[]}',
                     current_version=1,
                     cancellation_epoch=2,
                     created_at=now.isoformat(),

@@ -56,7 +56,7 @@ export function WorkerTaskCard({ task, index, allTasks, steps, toolCalls }: Work
 
 function StatusIcon({ status }: { status: OrchestrationTask["status"] }) {
   if (status === "completed") return <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-athena-success" />
-  if (status === "failed" || status === "timed_out" || status === "invalid_output") return <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-athena-danger" />
+  if (status === "failed" || status === "invalid_output") return <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-athena-danger" />
   if (status === "running") return <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-athena-accent" />
   return <Clock className="mt-0.5 h-4 w-4 shrink-0 text-athena-muted" />
 }

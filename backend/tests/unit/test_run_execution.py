@@ -228,7 +228,7 @@ async def test_execution_service_projects_completed_content_into_chat_stream() -
         "run.completed",
     ]
     assert events.values[1].payload == {"delta": "ATHENA_EXEC_REAL"}
-    assert events.values[2].payload == {"content": "ATHENA_EXEC_REAL"}
+    assert events.values[2].payload == {}
 
 
 @pytest.mark.asyncio

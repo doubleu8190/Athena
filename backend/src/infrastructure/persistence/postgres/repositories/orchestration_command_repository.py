@@ -186,9 +186,6 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                     status=PlanStatus.RUNNING.value,
                     user_goal=plan.goal,
                     max_parallelism=plan.max_parallelism,
-                    plan_json=json.dumps(
-                        _legacy_plan_document(plan), ensure_ascii=False
-                    ),
                     current_version=1,
                     active_round_id=round_snapshot.round_id,
                     cancellation_epoch=0,
@@ -566,9 +563,6 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                         )
                         session.add(version_row)
                         plan_row.current_version = next_version
-                        plan_row.plan_json = json.dumps(
-                            _legacy_plan_document(next_plan), ensure_ascii=False
-                        )
                         current_plan = next_plan
                         # The ORM mappings use scalar foreign-key columns
                         # without relationships, so insertion order is not
@@ -922,20 +916,13 @@ def _tasks_from_document(
         task_id = node.get("task_id")
         if not isinstance(task_id, str) or task_id not in task_rows:
             raise PlanCommandRejected("review_plan_task_definition_missing")
-        row = task_rows[task_id]
-        title = node.get("title", row.title)
-        objective = node.get("objective", row.objective)
-        raw_input = node.get("input", _json_document(row.input_json, {}))
-        expected_output = node.get(
-            "expected_output", _json_document(row.expected_output_json, {})
-        )
-        allowed_tools = node.get(
-            "allowed_tools", _json_document(row.allowed_tools_json, [])
-        )
-        worker_type = node.get("worker_type", row.worker_type)
-        timeout_seconds = node.get(
-            "timeout_seconds", getattr(row, "timeout_seconds", 3600.0) or 3600.0
-        )
+        title = node.get("title")
+        objective = node.get("objective")
+        raw_input = node.get("input")
+        expected_output = node.get("expected_output")
+        allowed_tools = node.get("allowed_tools")
+        worker_type = node.get("worker_type")
+        timeout_seconds = node.get("timeout_seconds")
         if (
             not isinstance(title, str)
             or not isinstance(objective, str)
@@ -1168,16 +1155,6 @@ def _scope_task_id(task_id: str, run_id: str) -> str:
     return task_id if task_id.endswith(suffix) else f"{task_id}{suffix}"
 
 
-def _json_document(value: str | None, default: Any) -> Any:
-    """Parse task JSON columns and fall back on invalid legacy values."""
-    if not value:
-        return default
-    try:
-        return json.loads(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _valid_timeout_seconds(value: Any) -> bool:
     """判断持久任务定义中的超时是否为有限正数。"""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -1187,17 +1164,6 @@ def _valid_timeout_seconds(value: Any) -> bool:
     except OverflowError:
         return False
     return isfinite(timeout_seconds) and timeout_seconds > 0
-
-
-def _legacy_plan_document(plan: Plan) -> dict[str, Any]:
-    """保留现有只读 Plan 投影使用的 nodes/edges 形状。"""
-    return {
-        "nodes": [{"task_id": task_id} for task_id in plan.task_ids],
-        "edges": [
-            {"from": edge.from_task_id, "to": edge.to_task_id}
-            for edge in plan.edges
-        ],
-    }
 
 
 def _plan_hash(

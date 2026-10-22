@@ -46,10 +46,10 @@ async def test_memory_approval_mcp_and_event_adapters():
     assert (await memory.list_memories(MemoryListRequest())).total == 1; assert await memory.revise(key, "updated") == key
     assert await memory.update_validity(key, "valid"); await memory.delete(key); assert (await memory.get(key)).status.value == "deleted"
     approvals = InMemoryApprovalRepository(); request = ApprovalRequest("a", "s", "r", "t", "noop", {}, "low", created_at=NOW)
-    assert await approvals.create(request); assert len(await approvals.list_pending()) == 1
-    assert await approvals.resolve("a", run_id="r", task_id="", decision=ApprovalDecision.APPROVED)
-    assert await approvals.list_history(); assert not await approvals.resolve("missing", run_id="r", task_id="", decision=ApprovalDecision.DENIED)
-    assert await approvals.resolve_batch("b", {}) is False
+    approvals.items[request.approval_id] = request
+    assert len(await approvals.list_pending()) == 1
+    assert await approvals.resolve("a", decision=ApprovalDecision.APPROVED)
+    assert await approvals.list_history(); assert not await approvals.resolve("missing", decision=ApprovalDecision.DENIED)
     mcp = InMemoryMCPPort(); config = MCPServerConfig("echo", (), {}, None, "none", True)
     assert (await mcp.register("x", config))["status"] == "connected"; assert len(await mcp.list_servers()) == 1; await mcp.unregister("x"); await mcp.shutdown()
     events = InMemoryEventStore(); event = ApplicationEvent(EventType.RUN_STARTED, EventDurability.DURABLE, "s")

@@ -19,18 +19,12 @@ class LangGraphWorkerExecutor(WorkerExecutor):
         graph_factory: Any | None = None,
         workflow_factory: Callable[[], Any] | None = None,
         checkpointer: Any | None = None,
-        execute: Any | None = None,
     ) -> None:
         """保存 Worker graph 工厂；未提供时使用默认 Worker graph。"""
         self._graph_factory = graph_factory
         self._workflow_factory = workflow_factory
         self._checkpointer = checkpointer
-        self._execute = execute
         self._graphs: dict[str, Any] = {}
-
-    def with_execute(self, execute: Any) -> "LangGraphWorkerExecutor":
-        self._execute = execute
-        return self
 
     def _graph_for(self, execution: TaskExecution) -> Any:
         """按 Task 和执行代次创建或复用 Worker graph。"""
@@ -103,19 +97,6 @@ class LangGraphWorkerExecutor(WorkerExecutor):
         recovered = dict(value)
         recovered["interrupt_id"] = str(getattr(pending, "id", ""))
         return recovered
-
-    @staticmethod
-    async def _default_execute(*, execution: Any, **_kwargs: Any) -> dict[str, Any]:
-        """Complete a worker with its objective and upstream evidence.
-
-        The production hook can be replaced with an LLM/tool harness.  This
-        fallback keeps orchestration durable and testable when no worker model
-        has been configured yet.
-        """
-        task = execution.get("task", {}) if isinstance(execution, dict) else {}
-        objective = task.get("objective", "") if isinstance(task, dict) else ""
-        upstream = execution.get("upstream_results", {}) if isinstance(execution, dict) else {}
-        return {"status": "done", "output": {"objective": objective, "upstream": upstream}}
 
     @staticmethod
     def _result(execution: TaskExecution, value: dict[str, Any]) -> TaskResult:

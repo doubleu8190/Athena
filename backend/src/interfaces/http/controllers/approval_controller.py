@@ -14,13 +14,6 @@ from application.approval.responses import ApprovalResponse
 
 class ApprovalDecisionRequest(BaseModel):
     decision: str = Field(pattern="^(approved|denied)$")
-    run_id: str
-    task_id: str | None = None
-
-
-class ApprovalBatchRequest(BaseModel):
-    decisions: dict[str, str]
-    run_id: str | None = None
 
 
 def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
@@ -41,16 +34,8 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
 
     @router.get("/stats")
     async def stats(session_id: str | None = None) -> dict[str, int]:
-        service = factory()
-        stats_method = getattr(service, "stats", None)
-        if stats_method is not None:
-            value = await stats_method(session_id)
-            return {"pending": value.pending, "approved": value.approved, "denied": value.denied, "total": value.total}
-        pending_items = await service.pending(session_id)
-        history_items = await service.history(session_id, limit=100000, offset=0)
-        approved = sum(_resolution(item) == "approved" for item in history_items)
-        denied = sum(_resolution(item) == "denied" for item in history_items)
-        return {"pending": len(pending_items), "approved": approved, "denied": denied, "total": len(pending_items) + len(history_items)}
+        value = await factory().stats(session_id)
+        return {"pending": value.pending, "approved": value.approved, "denied": value.denied, "total": value.total}
 
     async def record_decision(
         approval_id: str,
@@ -60,8 +45,6 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
     ) -> dict[str, Any]:
         updated = await factory().resolve(
             approval_id,
-            run_id=body.run_id,
-            task_id=body.task_id or "",
             decision=body.decision,
         )
         if not updated:
@@ -73,16 +56,6 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
         return await record_decision(
             approval_id, body, status="decision_recorded"
         )
-
-    @router.post("/{approval_id}/resolve")
-    async def resolve(approval_id: str, body: ApprovalDecisionRequest) -> dict[str, Any]:
-        return await record_decision(approval_id, body, status="resolved")
-
-    @router.post("/batches/{batch_id}/resolve")
-    async def resolve_batch(batch_id: str, body: ApprovalBatchRequest) -> dict[str, Any]:
-        if not await factory().resolve_batch(batch_id, body.decisions, run_id=body.run_id):
-            raise HTTPException(status_code=409, detail="approval_batch_not_pending")
-        return {"status": "resolved", "approval_batch_id": batch_id}
 
     return router
 
@@ -102,18 +75,9 @@ def _response(value: ApprovalResponse) -> dict[str, Any]:
         "task_id": value.task_id,
         "tool_call_id": value.tool_call_id,
         "approval_batch_id": value.approval_batch_id,
-        "resolved": bool(getattr(value, "resolved", False)),
-        "resolution": getattr(value, "resolution", "pending"),
+        "resolved": value.resolved,
+        "resolution": value.resolution,
     }
-
-
-def _resolution(value: Any) -> str | None:
-    """兼容旧审批实体和新的应用响应。"""
-    resolution = getattr(value, "resolution", None)
-    if resolution is not None:
-        return str(getattr(resolution, "value", resolution))
-    decision = getattr(value, "decision", None)
-    return None if decision is None else str(getattr(decision, "value", decision))
 
 
 __all__ = ["build_approval_router"]

@@ -353,7 +353,7 @@ class RunExecutionService:
                 stream_id=stream_id,
                 stream_type="answer",
                 is_complete=True,
-                payload={"content": content},
+                payload={},
             )
         )
 

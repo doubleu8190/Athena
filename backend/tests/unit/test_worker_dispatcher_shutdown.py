@@ -48,6 +48,9 @@ async def test_dispatcher_stop_cancels_inflight_graph_without_waiting_for_task_t
         async def resume(self, _execution, _resume_value):
             raise AssertionError("execute job must start the Worker graph")
 
+        async def pending_interrupt(self, _execution):
+            return None
+
     class EventHandler:
         async def apply_terminal_event(self, _event):
             raise AssertionError("shutdown cancellation must not report a Task result")
@@ -110,6 +113,9 @@ async def test_dispatcher_holds_thread_lock_for_graph_invocation():
 
         async def resume(self, _execution, _resume_value):
             raise AssertionError("execute job must start the Worker graph")
+
+        async def pending_interrupt(self, _execution):
+            return None
 
     class Jobs:
         pass

@@ -35,8 +35,6 @@ def _json(value: Any, default: Any) -> Any:
     return parsed
 
 class PostgresApprovalRepository(ApprovalRepository):
-    writes_approval_events_to_outbox = True
-
     def __init__(
         self,
         session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]],
@@ -45,83 +43,6 @@ class PostgresApprovalRepository(ApprovalRepository):
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock or _now
-
-    async def create(self, request: ApprovalRequest) -> bool:
-        async with self._session_factory() as session:
-            async with session.begin():
-                if await session.get(ApprovalRecordModel, request.approval_id):
-                    return False
-                plan = None
-                if request.plan_id:
-                    plan = await session.get(
-                        AgentPlanModel, request.plan_id, with_for_update=True
-                    )
-                    if (
-                        plan is None
-                        or plan.run_id != request.run_id
-                        or plan.status != "running"
-                    ):
-                        return False
-                created_at = request.created_at or datetime.now(timezone.utc)
-                session.add(
-                    ApprovalRecordModel(
-                        approval_id=request.approval_id,
-                        session_id=request.session_id,
-                        run_id=request.run_id,
-                        approval_batch_id=request.approval_batch_id,
-                        plan_id=request.plan_id,
-                        task_id=request.task_id,
-                        tool_call_id=request.tool_call_id,
-                        tool_name=request.tool_name,
-                        arguments_json=json.dumps(request.arguments),
-                        risk_level=request.risk_level,
-                        execution_id=request.execution_id,
-                        worker_thread_id=request.worker_thread_id,
-                        interrupt_id=request.interrupt_id,
-                        args_hash=request.args_hash,
-                        operation_key=request.operation_key,
-                        status=request.status.value,
-                        decision=request.decision.value if request.decision else None,
-                        created_at=created_at.isoformat(),
-                        expires_at=request.expires_at,
-                        decided_by=request.decided_by,
-                    )
-                )
-                session.add(
-                    OrchestrationOutboxModel(
-                        message_id=uuid4().hex,
-                        dedupe_key=f"approval:{request.approval_id}:requested",
-                        event_type="ApprovalRequested",
-                        correlation_id=request.run_id,
-                        plan_id=plan.plan_id if plan else request.plan_id,
-                        plan_version=plan.current_version if plan else None,
-                        round_id=plan.active_round_id if plan else None,
-                        payload_json={
-                            "approval_id": request.approval_id,
-                            "task_id": request.task_id,
-                            "execution_id": request.execution_id,
-                            "worker_thread_id": request.worker_thread_id,
-                            "interrupt_id": request.interrupt_id,
-                            "tool_call_id": request.tool_call_id,
-                            "tool_name": request.tool_name,
-                            "arguments": dict(request.arguments),
-                            "risk_level": request.risk_level,
-                            "args_hash": request.args_hash,
-                            "operation_key": request.operation_key,
-                            "parent_activity_id": (
-                                f"task:{request.task_id}"
-                                if request.task_id
-                                else f"tool:{request.tool_call_id}"
-                            ),
-                        },
-                        schema_version=1,
-                        status="pending",
-                        attempt=0,
-                        available_at=created_at,
-                        occurred_at=created_at,
-                    )
-                )
-        return True
 
     async def get(self, approval_id: str):
         async with self._session_factory() as session:
@@ -163,17 +84,18 @@ class PostgresApprovalRepository(ApprovalRepository):
         return [self._domain(row) for row in rows]
 
     async def resolve(
-        self, approval_id: str, *, run_id: str, task_id: str, decision: ApprovalDecision
+        self, approval_id: str, *, decision: ApprovalDecision
     ) -> bool:
-        """在活跃 Run/Plan 内原子记录决策、通知 Outbox 和 Worker Resume Job。"""
+        """从审批行读取归属，在同一事务写入决定、Outbox 和 Worker Resume Job。"""
         if decision not in {ApprovalDecision.APPROVED, ApprovalDecision.DENIED}:
             return False
         async with self._session_factory() as session:
             async with session.begin():
                 # 先读取不可变归属，再按 Run、Plan、Approval 加锁，与取消事务保持同序以消除竞态。
                 hint = await session.get(ApprovalRecordModel, approval_id)
-                if hint is None or hint.run_id != run_id:
+                if hint is None:
                     return False
+                run_id = hint.run_id
                 run = await session.get(
                     AgentRunModel, run_id, with_for_update=True
                 )
@@ -204,13 +126,16 @@ class PostgresApprovalRepository(ApprovalRepository):
                     or approval.run_id != run_id
                     or approval.status != ApprovalStatus.PENDING.value
                     or approval.plan_id != hint.plan_id
+                    or not approval.plan_id
+                    or not approval.task_id
+                    or not approval.execution_id
+                    or not approval.worker_thread_id
+                    or not approval.interrupt_id
+                    or not approval.args_hash
+                    or not approval.operation_key
                     or (
-                        getattr(approval, "expires_at", None) is not None
+                        approval.expires_at is not None
                         and _as_utc(approval.expires_at) <= now
-                    )
-                    or (
-                        approval.task_id is not None
-                        and approval.task_id != task_id
                     )
                 ):
                     return False
@@ -309,6 +234,13 @@ class PostgresApprovalRepository(ApprovalRepository):
                         .where(
                             ApprovalRecordModel.status
                             == ApprovalStatus.PENDING.value,
+                            ApprovalRecordModel.execution_id.is_not(None),
+                            ApprovalRecordModel.worker_thread_id.is_not(None),
+                            ApprovalRecordModel.interrupt_id.is_not(None),
+                            ApprovalRecordModel.plan_id.is_not(None),
+                            ApprovalRecordModel.task_id.is_not(None),
+                            ApprovalRecordModel.args_hash.is_not(None),
+                            ApprovalRecordModel.operation_key.is_not(None),
                             ApprovalRecordModel.expires_at.is_not(None),
                             ApprovalRecordModel.expires_at <= now,
                         )
@@ -421,32 +353,6 @@ class PostgresApprovalRepository(ApprovalRepository):
                         )
                     expired_count += 1
         return expired_count
-
-    async def resolve_batch(
-        self,
-        batch_id: str,
-        decisions: dict[str, ApprovalDecision],
-        *,
-        run_id: str | None = None,
-    ) -> bool:
-        changed = False
-        for approval_id, decision in decisions.items():
-            row = await self.get(approval_id)
-            if (
-                row
-                and (row.approval_batch_id == batch_id or (row.approval_batch_id is None and row.approval_id == batch_id))
-                and (run_id is None or row.run_id == run_id)
-            ):
-                changed = (
-                    await self.resolve(
-                        approval_id,
-                        run_id=row.run_id,
-                        task_id=row.task_id or "",
-                        decision=decision,
-                    )
-                    or changed
-                )
-        return changed
 
     @staticmethod
     def _domain(row):

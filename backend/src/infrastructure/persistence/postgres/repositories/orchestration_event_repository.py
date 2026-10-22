@@ -245,7 +245,7 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
 
                 retry_scheduled = (
                     event.retryable
-                    and status in {"failed", "timed_out"}
+                    and status == "failed"
                     and execution.attempt < self._max_attempts
                 )
                 next_execution_id: str | None = None
@@ -588,7 +588,7 @@ def _rejection_reason(
         return "plan_or_run_not_running"
     if round_row.status != "running":
         return "round_not_running"
-    if round_task.status in {"completed", "failed", "timed_out", "cancelled"}:
+    if round_task.status in {"completed", "failed", "cancelled"}:
         return "task_already_terminal"
     return None
 

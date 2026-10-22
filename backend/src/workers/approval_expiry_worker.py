@@ -6,6 +6,8 @@ import asyncio
 import logging
 from typing import Any
 
+from application.approval import ApprovalService
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,7 +16,7 @@ class ApprovalExpiryWorker:
 
     def __init__(
         self,
-        approvals: Any,
+        approvals: ApprovalService,
         *,
         poll_interval: float = 1.0,
         batch_limit: int = 64,

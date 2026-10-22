@@ -12,7 +12,6 @@ import pytest
 
 from bootstrap import build_default_dependencies, create_app
 from configuration.settings import Settings
-from domain.approval import ApprovalDecision, ApprovalRequest
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
 from domain.runs import CommandStatus, CommandType, RunCommand, RunStatus
@@ -30,10 +29,6 @@ from infrastructure.persistence.postgres.repositories import (
 )
 from infrastructure.persistence.postgres.engine import PostgresEngine
 from infrastructure.persistence.postgres.options import PostgresOptions
-from infrastructure.persistence.postgres.models import (
-    ApprovalRecordModel,
-    OrchestrationOutboxModel,
-)
 from workers import WorkerSupervisor
 from workers import KnowledgeDocumentWorker
 from bootstrap.check import check_app
@@ -139,9 +134,6 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     await events.close_subscription("s-1", queue)
 
     approvals = PostgresApprovalRepository(factory(db))
-    request = ApprovalRequest("a-1", "s-1", "r-1", "call", "shell", {"x": 1}, "high", created_at=NOW)
-    db.get_values = [None]
-    assert await approvals.create(request)
     row = SimpleNamespace(approval_id="a-1", session_id="s-1", run_id="r-1", approval_batch_id="b-1", plan_id=None, task_id="t-1", tool_call_id="call", tool_name="shell", arguments_json='{"x":1}', risk_level="high", status="pending", decision=None, created_at=NOW.isoformat(), decided_at=None)
     db.get_values = [row]
     assert (await approvals.get("a-1")).approval_id == "a-1"
@@ -161,9 +153,6 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     db.results = [Result(rows=[cancelled_row])]
     cancelled_history = await approvals.list_history("s-1")
     assert cancelled_history[0].status.value == "cancelled"
-    await approvals.resolve("a-1", run_id="r-1", task_id="t-1", decision=ApprovalDecision.APPROVED)
-    db.get_values = [row]
-    await approvals.resolve_batch("b-1", {"a-1": ApprovalDecision.DENIED}, run_id="r-1")
 
     memory = PostgresMemoryRepository(factory(db))
     mem_row = SimpleNamespace(id="m-1", content="hello memory", metadata_json='{"x":1}', source_kind="chat", status="active", created_at=NOW.isoformat(), expires_at=None, last_accessed_at=None, access_count=0, last_observed_at=NOW.isoformat(), valid_until=None, validity_status="valid")
@@ -550,115 +539,3 @@ async def test_memory_access_is_atomic_and_management_reads_do_not_write():
     assert "memories.expires_at" in search_sql and "memories.valid_until" in search_sql
     list_sql = str(db.statements[1].compile(dialect=postgresql.dialect()))
     assert "<= now()" in list_sql
-
-
-@pytest.mark.asyncio
-async def test_postgres_task_approval_creation_writes_requested_outbox():
-    db = DB()
-    repository = PostgresApprovalRepository(factory(db))
-    db.get_values = [
-        None,
-        SimpleNamespace(
-            plan_id="p-1",
-            run_id="r-1",
-            status="running",
-            current_version=3,
-            active_round_id="round-3",
-        ),
-    ]
-    request = ApprovalRequest(
-        approval_id="approval-1",
-        session_id="s-1",
-        run_id="r-1",
-        tool_call_id="call-1",
-        tool_name="write_file",
-        arguments={"path": "report.txt"},
-        risk_level="high",
-        task_id="task-1",
-        plan_id="p-1",
-        execution_id="execution-1",
-        worker_thread_id="task:task-1:exec:1",
-        interrupt_id="interrupt-1",
-        args_hash="args-hash",
-        operation_key="operation-1",
-        created_at=NOW,
-    )
-
-    assert await repository.create(request)
-    approval_row = next(
-        item for item in db.added if isinstance(item, ApprovalRecordModel)
-    )
-    outbox = next(
-        item for item in db.added if isinstance(item, OrchestrationOutboxModel)
-    )
-    assert approval_row.approval_id == "approval-1"
-    assert outbox.event_type == "ApprovalRequested"
-    assert outbox.dedupe_key == "approval:approval-1:requested"
-    assert outbox.plan_version == 3
-    assert outbox.round_id == "round-3"
-
-
-@pytest.mark.asyncio
-async def test_postgres_root_approval_creation_writes_requested_outbox():
-    db = DB()
-    repository = PostgresApprovalRepository(factory(db))
-    db.get_values = [None]
-    request = ApprovalRequest(
-        approval_id="root-approval-1",
-        session_id="s-1",
-        run_id="r-1",
-        tool_call_id="call-1",
-        tool_name="send_message",
-        arguments={"recipient": "team"},
-        risk_level="medium",
-        created_at=NOW,
-    )
-
-    assert await repository.create(request)
-    outbox = next(
-        item for item in db.added if isinstance(item, OrchestrationOutboxModel)
-    )
-    assert outbox.event_type == "ApprovalRequested"
-    assert outbox.dedupe_key == "approval:root-approval-1:requested"
-    assert outbox.plan_id is None
-    assert outbox.payload_json["parent_activity_id"] == "tool:call-1"
-
-
-@pytest.mark.asyncio
-async def test_postgres_root_approval_resolution_writes_resolved_outbox():
-    approval = SimpleNamespace(
-        approval_id="root-approval-1",
-        run_id="r-1",
-        plan_id=None,
-        task_id=None,
-        tool_call_id="call-1",
-        tool_name="send_message",
-        status="pending",
-        execution_id=None,
-        worker_thread_id=None,
-        interrupt_id=None,
-        args_hash=None,
-        operation_key=None,
-    )
-
-    class ApprovalDB(DB):
-        def __init__(self):
-            super().__init__()
-            self.get_values = [approval, SimpleNamespace(status="running"), approval]
-
-    db = ApprovalDB()
-    repository = PostgresApprovalRepository(factory(db))
-
-    assert await repository.resolve(
-        "root-approval-1",
-        run_id="r-1",
-        task_id="",
-        decision=ApprovalDecision.APPROVED,
-    )
-    outbox = next(
-        item for item in db.added if isinstance(item, OrchestrationOutboxModel)
-    )
-    assert outbox.event_type == "ApprovalResolved"
-    assert outbox.dedupe_key == "approval:root-approval-1:resolved"
-    assert outbox.plan_id is None
-    assert outbox.payload_json["decision"] == "approved"

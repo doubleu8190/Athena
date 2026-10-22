@@ -197,14 +197,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           upsertAssistant(runId, stream.content, occurredAt, streamId)
         } else if (type === "message.completed") {
           const stream = streamsRef.current.get(streamId)
-          const legacyContent = String(data.content || "")
           if (stream) {
             stream.status = "completed"
-            // v2 completion is a lifecycle marker; content comes from chunks/snapshot.
-            if (!stream.content && legacyContent) stream.content = legacyContent
             upsertAssistant(runId, stream.content, occurredAt, streamId)
-          } else if (legacyContent) {
-            upsertAssistant(runId, legacyContent, occurredAt, streamId)
           }
         } else if (type === "thinking.started" || type === "thinking.summary") {
           setThinking({ active: true, content: String(data.content || ""), messageId: streamId || null })

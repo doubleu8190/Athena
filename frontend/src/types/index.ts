@@ -147,7 +147,7 @@ export interface OrchestrationTask {
   plan_id: string
   task_id: string
   title: string
-  status: "queued" | "claimed" | "running" | "waiting_approval" | "retry_wait" | "cancel_requested" | "completed" | "failed" | "timed_out" | "invalid_output" | "cancelled"
+  status: "queued" | "claimed" | "running" | "waiting_approval" | "retry_wait" | "cancel_requested" | "completed" | "failed" | "invalid_output" | "cancelled"
   run_id?: string
   objective?: string
   worker_type?: string

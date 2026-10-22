@@ -1154,7 +1154,7 @@ def _result_from_row(
 
 
 def _load_json(value: str | dict[str, Any] | None, default: Any) -> Any:
-    """兼容当前字符串 JSON 投影与新 JSONB 文档。"""
+    """从 Text JSON 列或 JSONB 列读取对象。"""
     if value is None or value == "":
         return default
     if isinstance(value, dict):

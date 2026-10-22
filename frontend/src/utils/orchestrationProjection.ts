@@ -29,7 +29,6 @@ const STATUS_LABELS: Record<WorkerStatus, string> = {
   cancel_requested: "正在取消",
   completed: "已完成",
   failed: "失败",
-  timed_out: "已超时",
   invalid_output: "结果待修正",
   cancelled: "已取消",
 }
@@ -40,7 +39,7 @@ export function workerStatusLabel(status: WorkerStatus): string {
 
 export function workerStatusTone(status: WorkerStatus): "muted" | "accent" | "warning" | "success" | "danger" {
   if (status === "completed") return "success"
-  if (status === "failed" || status === "timed_out" || status === "invalid_output") return "danger"
+  if (status === "failed" || status === "invalid_output") return "danger"
   if (status === "waiting_approval" || status === "retry_wait" || status === "cancel_requested") return "warning"
   if (status === "running") return "accent"
   return "muted"
@@ -79,7 +78,7 @@ export function deriveOrchestrationView(
     waitingApproval: tasks.filter((task) => task.status === "waiting_approval").length,
     retrying: tasks.filter((task) => task.status === "retry_wait").length,
     completed: tasks.filter((task) => task.status === "completed").length,
-    failed: tasks.filter((task) => task.status === "failed" || task.status === "timed_out" || task.status === "invalid_output").length,
+    failed: tasks.filter((task) => task.status === "failed" || task.status === "invalid_output").length,
     cancelled: tasks.filter((task) => task.status === "cancelled" || task.status === "cancel_requested").length,
   }
   const status = plan.status || inferPlanStatus(counts)

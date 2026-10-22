@@ -13,18 +13,10 @@ from domain.tools import JsonSchema, RiskLevel, ToolConfig, ToolExecutionMode, T
 
 
 class ApprovalRepo:
-    async def create(self, value): return True
     async def get(self, approval_id): return None
     async def list_pending(self, session_id=None): return []
     async def list_history(self, session_id=None, *, limit=50, offset=0): return []
     async def resolve(self, *args, **kwargs): return True
-    async def resolve_batch(self, *args, **kwargs): return True
-
-
-class ApprovalEvents:
-    async def required(self, value): return None
-
-
 class ToolRepo:
     def __init__(self):
         now = datetime.now(timezone.utc)
@@ -47,7 +39,7 @@ class MCPPort:
 
 
 def test_target_approval_tools_and_mcp_controllers_are_wired() -> None:
-    approval = ApprovalService(ApprovalRepo(), ApprovalEvents(), id_factory=lambda: "a-1")
+    approval = ApprovalService(ApprovalRepo())
     tools = ToolService(ToolRepo(), ToolExec())
     mcp = MCPService(MCPPort())
     client = TestClient(create_app(approval_service_factory=lambda: approval, tool_service_factory=lambda: tools, mcp_service_factory=lambda: mcp))

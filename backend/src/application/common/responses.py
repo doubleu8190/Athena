@@ -198,23 +198,6 @@ class ApprovalResponse:
     plan_id: str | None = None
     task_id: str | None = None
 
-    def __eq__(self, other: object) -> bool:
-        """允许旧领域断言按审批数据比较，迁移后接口仍保持只读。"""
-        return isinstance(other, ApprovalResponse) and (
-            self.approval_id, self.tool_name, self.arguments, self.risk_level, self.created_at,
-            self.session_id, self.run_id, self.tool_call_id, self.approval_batch_id,
-        ) == (
-            getattr(other, "approval_id", None), getattr(other, "tool_name", None), getattr(other, "arguments", None),
-            getattr(other, "risk_level", None), getattr(other, "created_at", None), getattr(other, "session_id", None),
-            getattr(other, "run_id", None), getattr(other, "tool_call_id", None), getattr(other, "approval_batch_id", None),
-        ) if isinstance(other, ApprovalResponse) else (
-            getattr(other, "approval_id", None) == self.approval_id and getattr(other, "tool_name", None) == self.tool_name
-            and getattr(other, "arguments", None) == self.arguments and getattr(other, "risk_level", None) == self.risk_level
-            and getattr(other, "created_at", None) == self.created_at and getattr(other, "session_id", None) == self.session_id
-            and getattr(other, "run_id", None) == self.run_id and getattr(other, "tool_call_id", None) == self.tool_call_id
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class ApprovalStatsResponse:
     pending: int

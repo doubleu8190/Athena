@@ -727,7 +727,7 @@ class ConfiguredWorkerAgent:
         elif not isinstance(uncertainties, (list, tuple)):
             uncertainties = []
         result = {
-            "status": str(parsed.get("status", "done")),
+            "status": str(parsed.get("status", "completed")),
             "output": output,
             "evidence": evidence,
             "uncertainties": uncertainties,

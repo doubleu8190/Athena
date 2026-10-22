@@ -17,7 +17,6 @@ from application.orchestration.langgraph.runtime.worker_executor import (
 from application.orchestration.worker_tools import WorkerToolExecutor
 from application.orchestration.worker_workflow import WorkerWorkflow
 from application.orchestration.worker_approval import WorkerApprovalService
-from application.approval.service import ApprovalService
 from domain.orchestration import (
     Task,
     TaskExecution,
@@ -79,7 +78,24 @@ class WorkerAgent:
                     }
                 ],
             }
-        return {"status": "done", "output": {"confirmed": True}}
+        return {"status": "completed", "output": {"confirmed": True}}
+
+
+def test_worker_executor_rejects_legacy_done_status():
+    execution = TaskExecution(
+        plan_id="plan-1",
+        run_id="run-1",
+        session_id="session-1",
+        task=Task("task-1", "test", "test legacy status"),
+        execution_generation=1,
+    )
+
+    result = LangGraphWorkerExecutor._result(execution, {
+        "status": "done",
+        "result": {"output": {"confirmed": True}},
+    })
+
+    assert result.status is TaskStatus.FAILED
 
 
 class RepositorySession:
@@ -114,14 +130,6 @@ class RepositorySession:
 
     def add(self, value):
         self.added.append(value)
-
-
-class Events:
-    def __init__(self):
-        self.values = []
-
-    async def publish(self, event):
-        self.values.append(event)
 
 
 @pytest.mark.asyncio
@@ -177,7 +185,7 @@ async def test_high_risk_worker_tool_interrupts_and_executes_same_arguments_afte
         },
     )
 
-    assert finished["status"] == "done"
+    assert finished["status"] == "completed"
     assert finished["result"]["output"] == {"confirmed": True}
     assert len(tools.executed) == 1
     assert tools.executed[0].arguments == {
@@ -252,7 +260,7 @@ async def test_approval_resume_uses_refreshed_worker_lease_fence():
     assert ledger.fencing_tokens == [8]
     assert len(tools.executed) == 1
     assert tools.executed[0].fencing_token == 8
-    assert finished["status"] == "done"
+    assert finished["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -318,6 +326,7 @@ async def test_resolving_worker_approval_enqueues_resume_job_in_same_repository_
         interrupt_id="interrupt-1",
         args_hash="args-hash",
         operation_key="operation-1",
+        expires_at=None,
     )
     session = RepositorySession(approval)
 
@@ -335,8 +344,6 @@ async def test_resolving_worker_approval_enqueues_resume_job_in_same_repository_
     repository = PostgresApprovalRepository(Factory())
     assert await repository.resolve(
         "approval-1",
-        run_id="run-1",
-        task_id="task-1",
         decision=ApprovalDecision.APPROVED,
     )
     resume_job = next(
@@ -474,164 +481,6 @@ async def test_tool_results_before_approval_are_checkpointed_for_resume():
 
 
 @pytest.mark.asyncio
-async def test_worker_batch_approval_does_not_resume_root_run():
-    worker_approval = SimpleNamespace(
-        approval_id="approval-1",
-        execution_id="execution-1",
-        session_id="session-1",
-        run_id="run-1",
-        task_id="task-1",
-    )
-
-    class ApprovalRepo:
-        async def resolve_batch(self, *_args, **_kwargs):
-            return True
-
-        async def get(self, _approval_id):
-            return worker_approval
-
-    root_resumes = []
-    events = Events()
-    service = ApprovalService(
-        ApprovalRepo(),
-        events,
-        id_factory=lambda: "unused",
-        resumer=lambda *args: root_resumes.append(args),
-    )
-
-    assert await service.resolve_batch(
-        "batch-1", {"approval-1": "approved"}, run_id="run-1"
-    )
-    assert root_resumes == []
-    assert len(events.values) == 1
-    assert events.values[0].event_type.value == "approval.resolved"
-
-
-@pytest.mark.asyncio
-async def test_task_approval_resolution_uses_transactional_outbox():
-    approval = SimpleNamespace(
-        approval_id="approval-1",
-        session_id="session-1",
-        run_id="run-1",
-        plan_id="plan-1",
-        task_id="task-1",
-        execution_id="execution-1",
-    )
-
-    class ApprovalRepo:
-        async def get(self, _approval_id):
-            return approval
-
-        async def resolve(self, *_args, **_kwargs):
-            return True
-
-    events = Events()
-    service = ApprovalService(ApprovalRepo(), events, id_factory=lambda: "unused")
-
-    assert await service.resolve(
-        "approval-1",
-        run_id="run-1",
-        task_id="task-1",
-        decision="approved",
-    )
-    assert events.values == []
-
-
-@pytest.mark.asyncio
-async def test_root_approval_resolution_writes_transactional_outbox():
-    approval = SimpleNamespace(
-        approval_id="approval-root",
-        run_id="run-1",
-        plan_id=None,
-        task_id=None,
-        tool_call_id="call-1",
-        tool_name="send_message",
-        status="pending",
-        execution_id=None,
-        worker_thread_id=None,
-        interrupt_id=None,
-    )
-    session = RepositorySession(approval)
-
-    class Factory:
-        def __call__(self):
-            class Context:
-                async def __aenter__(self):
-                    return session
-
-                async def __aexit__(self, *_args):
-                    return False
-
-            return Context()
-
-    repository = PostgresApprovalRepository(Factory())
-
-    assert await repository.resolve(
-        "approval-root",
-        run_id="run-1",
-        task_id="",
-        decision=ApprovalDecision.APPROVED,
-    )
-    outbox = next(
-        item for item in session.added if isinstance(item, OrchestrationOutboxModel)
-    )
-    assert outbox.event_type == "ApprovalResolved"
-    assert outbox.plan_id is None
-    assert outbox.payload_json["parent_activity_id"] == "tool:call-1"
-
-
-@pytest.mark.asyncio
-async def test_approval_service_avoids_duplicate_events_for_outbox_repository():
-    approval = SimpleNamespace(
-        approval_id="approval-root",
-        session_id="session-1",
-        run_id="run-1",
-        plan_id=None,
-        task_id=None,
-        tool_call_id="call-1",
-        tool_name="send_message",
-        arguments={"recipient": "team"},
-        risk_level="medium",
-        status=SimpleNamespace(value="pending"),
-        decision=None,
-        execution_id=None,
-    )
-
-    class ApprovalRepo:
-        writes_approval_events_to_outbox = True
-
-        async def create(self, _request):
-            return True
-
-        async def get(self, _approval_id):
-            return approval
-
-        async def resolve(self, *_args, **_kwargs):
-            return True
-
-    events = Events()
-    service = ApprovalService(
-        ApprovalRepo(), events, id_factory=lambda: "approval-root"
-    )
-
-    await service.request(
-        session_id="session-1",
-        run_id="run-1",
-        tool_call_id="call-1",
-        tool_name="send_message",
-        arguments={"recipient": "team"},
-        risk_level="medium",
-    )
-    assert await service.resolve(
-        "approval-root",
-        run_id="run-1",
-        task_id="",
-        decision="approved",
-    )
-    assert events.values == []
-
-
-@pytest.mark.asyncio
 async def test_worker_executor_recovers_checkpointed_interrupt_after_process_restart():
     tools = ToolService()
     executor = LangGraphWorkerExecutor(
@@ -693,6 +542,9 @@ async def test_reclaimed_worker_job_registers_checkpointed_approval_without_rein
 
         async def execute(self, _execution):
             raise AssertionError("reclaimed interrupt must not invoke the agent")
+
+        async def resume(self, _execution, _resume_value):
+            raise AssertionError("execute job must not resume the Worker")
 
     class ApprovalService:
         def __init__(self):
@@ -760,6 +612,9 @@ async def test_resume_worker_job_resumes_same_checkpoint_and_reports_task_termin
 
         async def execute(self, _execution):
             raise AssertionError("resume job must continue the saved checkpoint")
+
+        async def pending_interrupt(self, _execution):
+            return None
 
     class EventHandler:
         def __init__(self):

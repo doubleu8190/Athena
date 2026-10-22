@@ -838,7 +838,6 @@ class PostgresRunRepository(
                                         "stream_id": stream_id,
                                         "stream_type": "answer",
                                         "is_complete": True,
-                                        "content": content,
                                     },
                                     now=now,
                                 )

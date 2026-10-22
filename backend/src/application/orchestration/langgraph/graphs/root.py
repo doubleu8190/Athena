@@ -16,7 +16,7 @@ from application.orchestration.protocols import (
 )
 
 from ..shared.utils import call
-from .state import RootGraphState, json_value
+from .state import RootGraphState
 
 
 
@@ -115,12 +115,6 @@ def _route_after_agent(state: RootGraphState) -> str:
     )
 
 
-def _route_after_prepare(state: RootGraphState) -> str:
-    if state.get("resume_value") and state.get("resume_value", {}).get("tool_call_id"):
-        return "understand_task"
-    return "project_plan_result" if state.get("resume_value") else "understand_task"
-
-
 def _route_after_wait(state: RootGraphState) -> str:
     return "wait_for_plan_completion" if state.get("waiting") else "project_plan_result"
 
@@ -206,14 +200,7 @@ def build_root_graph(
         else:
             graph.add_node(name, _node(name, handler, dependencies))
     graph.add_edge(START, "prepare_request")
-    graph.add_conditional_edges(
-        "prepare_request",
-        _route_after_prepare,
-        {
-            "understand_task": "understand_task",
-            "project_plan_result": "project_plan_result",
-        },
-    )
+    graph.add_edge("prepare_request", "understand_task")
     graph.add_conditional_edges(
         "understand_task",
         _route_after_understanding,
@@ -288,15 +275,15 @@ async def invoke_root_graph(
     config = {"configurable": {"thread_id": f"run:{run_id}"}}
     if stop_signal is not None:
         config["configurable"]["stop_signal"] = stop_signal
-    if resume_value is not None and resume_value.get("type") == "round_completed":
+    if resume_value is not None:
+        if resume_value.get("type") != "round_completed":
+            raise RuntimeError("root_resume_value_type_invalid")
         result = await call(
             graph.ainvoke,
             Command(resume=dict(resume_value)),
             config=config,
         )
     else:
-        if resume_value is not None:
-            state["resume_value"] = json_value(resume_value)
         result = await call(graph.ainvoke, state, config=config)
     if isinstance(result, Mapping) and result.get("__interrupt__"):
         snapshot = await call(graph.aget_state, config)

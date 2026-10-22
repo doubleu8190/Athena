@@ -15,8 +15,6 @@ class WorkerWorkflow:
         *,
         execute_tool: Callable[..., Any] | None = None,
         execute: Callable[..., Any] | None = None,
-        worker: Any | None = None,
-        resume: Callable[..., Any] | None = None,
         max_tool_rounds: int = 4,
         max_tool_calls_per_round: int = 8,
     ) -> None:
@@ -24,8 +22,6 @@ class WorkerWorkflow:
             raise ValueError("worker tool budgets are invalid")
         self.execute_tool = execute_tool
         self.execute = execute
-        self.worker = worker
-        self.resume = resume
         self.max_tool_rounds = max_tool_rounds
         self.max_tool_calls_per_round = max_tool_calls_per_round
 
@@ -38,17 +34,14 @@ class WorkerWorkflow:
         }
 
     async def run(self, state: Mapping[str, Any]) -> dict[str, Any]:
-        execution_fn = self.execute
-        if execution_fn is None and self.worker is not None and hasattr(self.worker, "execute"):
-            execution_fn = self.worker.execute
-        if execution_fn is None:
+        if self.execute is None:
             return {"result": {"status": "failed", "error": {"code": "worker_not_configured"}}}
-        payload = as_dict(await call(execution_fn, execution=state.get("execution", {}), state=state))
-        return {"result": payload, "waiting": str(payload.get("status", "done")) == "waiting_approval"}
+        payload = as_dict(await call(self.execute, execution=state.get("execution", {}), state=state))
+        return {"result": payload, "waiting": str(payload.get("status", "completed")) == "waiting_approval"}
 
     async def approval_gate(self, state: Mapping[str, Any]) -> dict[str, Any]:
         result = state.get("result", {})
-        return {"status": "waiting_approval" if state.get("waiting") else str(result.get("status", "done"))}
+        return {"status": "waiting_approval" if state.get("waiting") else str(result.get("status", "completed"))}
 
     async def execute_tool_batch(self, state: Mapping[str, Any]) -> dict[str, Any]:
         if self.execute_tool is None:
@@ -274,31 +267,17 @@ class WorkerWorkflow:
             "pending_approval": None,
         }
 
-    async def resume_node(self, state: Mapping[str, Any]) -> dict[str, Any]:
-        resume_fn = self.resume
-        if resume_fn is None and self.worker is not None and hasattr(self.worker, "resume"):
-            resume_fn = self.worker.resume
-        if resume_fn is None:
-            return {"result": {"status": "failed", "error": {"code": "worker_resume_not_configured"}}, "waiting": False}
-        decisions = state.get("response", {}).get("decisions", {})
-        payload = as_dict(await call(resume_fn, execution=state.get("execution", {}), decisions=decisions, state=state))
-        return {"result": payload, "waiting": str(payload.get("status", "done")) == "waiting_approval"}
-
     async def finalize(self, state: Mapping[str, Any]) -> dict[str, Any]:
         result = dict(state.get("result", {}))
-        return {"result": result, "waiting": bool(state.get("waiting")), "status": "waiting_approval" if state.get("waiting") else str(result.get("status", "done"))}
-
-    @staticmethod
-    def route(state: Mapping[str, Any]) -> str:
-        return "resume" if state.get("response", {}).get("resume") else "worker_agent_loop"
+        return {"result": result, "waiting": bool(state.get("waiting")), "status": "waiting_approval" if state.get("waiting") else str(result.get("status", "completed"))}
 
     @staticmethod
     def route_after_gate(state: Mapping[str, Any]) -> str:
         if state.get("waiting"):
             return "finish_worker"
         result = state.get("result", {})
-        status = str(result.get("status", "done"))
-        if status not in {"done", "completed"} and result.get("error"):
+        status = str(result.get("status", "completed"))
+        if status not in {"running", "completed"}:
             return "finish_worker"
         return "execute_tool_batch" if state.get("result", {}).get("tool_calls") else "finish_worker"
 

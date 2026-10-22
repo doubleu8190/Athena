@@ -216,7 +216,6 @@ def persisted_chain(*, current_version=1):
         status=PlanStatus.WAITING_REVIEW.value,
         current_version=current_version,
         active_round_id="round-1",
-        plan_json="{}",
         updated_at=None,
     )
     round_row = SimpleNamespace(
@@ -266,6 +265,7 @@ def version_document():
                 "expected_output": {},
                 "allowed_tools": [],
                 "worker_type": "general",
+                "timeout_seconds": 3600,
             },
             {
                 "task_id": "b",
@@ -275,6 +275,7 @@ def version_document():
                 "expected_output": {},
                 "allowed_tools": [],
                 "worker_type": "general",
+                "timeout_seconds": 3600,
             },
         ],
         "edges": [{"from": "a", "to": "b"}],

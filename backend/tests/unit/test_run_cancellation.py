@@ -242,8 +242,6 @@ async def test_approval_resolution_is_rejected_after_run_enters_cancelling():
 
     accepted = await repository.resolve(
         "approval-1",
-        run_id="run-1",
-        task_id="task-1",
         decision=ApprovalDecision.APPROVED,
     )
 

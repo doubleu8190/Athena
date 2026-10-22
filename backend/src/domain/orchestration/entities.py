@@ -24,24 +24,19 @@ class TaskStatus(StrEnum):
     WAITING_APPROVAL = "waiting_approval"
     CANCELLING = "cancelling"
     COMPLETED = "completed"
-    # Legacy state remains readable while persisted pre-v1.1 runs are drained.
-    DONE = "done"
     FAILED = "failed"
-    TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
 
 
 TERMINAL_TASK_STATUSES = frozenset(
     {
         TaskStatus.COMPLETED,
-        TaskStatus.DONE,
         TaskStatus.FAILED,
-        TaskStatus.TIMED_OUT,
         TaskStatus.CANCELLED,
     }
 )
 FAILED_TASK_STATUSES = frozenset(
-    {TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.CANCELLED}
+    {TaskStatus.FAILED, TaskStatus.CANCELLED}
 )
 
 

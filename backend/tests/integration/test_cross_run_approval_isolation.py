@@ -28,8 +28,8 @@ DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_cross_run_approval_reference_is_rejected_without_side_effects() -> None:
-    """拒绝跨 Run 审批及冒用 Task，并验证拒绝事务没有副作用。
+async def test_legacy_run_level_approval_is_not_resolvable() -> None:
+    """拒绝没有 Worker execution/interrupt 身份的旧式 Run 审批。
 
     参数：无。
     返回：无。
@@ -48,8 +48,7 @@ async def test_cross_run_approval_reference_is_rejected_without_side_effects() -
     )
     schema_created = False
     now = datetime.now(timezone.utc)
-    owner_run_id = f"run-owner-{uuid4().hex}"
-    other_run_id = f"run-other-{uuid4().hex}"
+    run_id = f"run-{uuid4().hex}"
     session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
 
     try:
@@ -70,25 +69,24 @@ async def test_cross_run_approval_reference_is_rejected_without_side_effects() -
 
         approval_id = f"approval-{uuid4().hex}"
         async with session_factory() as session, session.begin():
-            for run_id in (owner_run_id, other_run_id):
-                session.add(
-                    AgentRunModel(
-                        run_id=run_id,
-                        session_id=f"session-{run_id}",
-                        status="running",
-                        root_thread_id=f"run:{run_id}",
-                        cancellation_epoch=0,
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
-                    )
+            session.add(
+                AgentRunModel(
+                    run_id=run_id,
+                    session_id=f"session-{run_id}",
+                    status="running",
+                    root_thread_id=f"run:{run_id}",
+                    cancellation_epoch=0,
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
                 )
+            )
             session.add(
                 ApprovalRecordModel(
                     approval_id=approval_id,
-                    session_id=f"session-{owner_run_id}",
-                    run_id=owner_run_id,
+                    session_id=f"session-{run_id}",
+                    run_id=run_id,
                     plan_id=None,
-                    task_id=f"task-{owner_run_id}",
+                    task_id=f"task-{run_id}",
                     execution_id=None,
                     worker_thread_id=None,
                     interrupt_id=None,
@@ -105,14 +103,6 @@ async def test_cross_run_approval_reference_is_rejected_without_side_effects() -
         repository = PostgresApprovalRepository(session_factory, clock=lambda: now)
         assert not await repository.resolve(
             approval_id,
-            run_id=other_run_id,
-            task_id=f"task-{owner_run_id}",
-            decision=ApprovalDecision.APPROVED,
-        )
-        assert not await repository.resolve(
-            approval_id,
-            run_id=owner_run_id,
-            task_id=f"task-{other_run_id}",
             decision=ApprovalDecision.APPROVED,
         )
 
@@ -125,20 +115,6 @@ async def test_cross_run_approval_reference_is_rejected_without_side_effects() -
         assert approval.status == "pending" and approval.decision is None
         assert outbox_count == 0
 
-        assert await repository.resolve(
-            approval_id,
-            run_id=owner_run_id,
-            task_id=f"task-{owner_run_id}",
-            decision=ApprovalDecision.APPROVED,
-        )
-        async with session_factory() as session:
-            approval = await session.get(ApprovalRecordModel, approval_id)
-            outbox = (
-                await session.execute(select(OrchestrationOutboxModel))
-            ).scalars().all()
-        assert approval is not None
-        assert approval.status == "resolved" and approval.decision == "approved"
-        assert len(outbox) == 1 and outbox[0].correlation_id == owner_run_id
     finally:
         await test_engine.dispose()
         if schema_created:

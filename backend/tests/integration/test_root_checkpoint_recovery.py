@@ -132,7 +132,6 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                     status="waiting_review",
                     user_goal="Resume Root after recovering its checkpoint identity",
                     max_parallelism=1,
-                    plan_json=json.dumps({"nodes": [], "edges": []}),
                     current_version=1,
                     active_round_id=round_id,
                     cancellation_epoch=0,

@@ -197,7 +197,7 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
             "task.failed",
             "task:task-1",
             "failed",
-            {"task_id": "task-1", "execution_id": "execution-1", "execution_status": "timed_out"},
+            {"task_id": "task-1", "execution_id": "execution-1", "execution_status": "failed"},
         ),
         (
             "TaskCancelled",

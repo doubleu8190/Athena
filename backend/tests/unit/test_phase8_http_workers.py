@@ -21,6 +21,7 @@ from application.runs import RunCommandService, RunNotFoundError, CommandNotFoun
 from workers import KnowledgeDocumentWorker, MemoryWorker
 from application.sessions import SessionNotFoundError
 from application.approval import ApprovalService
+from application.approval.responses import ApprovalResponse
 from bootstrap import create_app
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.files import Attachment, AttachmentStatus, FileChunk, FileLocator, FileMetadata, ParsedDocument
@@ -156,23 +157,26 @@ def test_run_controller_maps_all_command_errors() -> None:
 
 
 def test_approval_controller_maps_conflicts_and_serializes_history() -> None:
-    request = ApprovalRequest(
-        "a",
-        "s",
-        "r",
-        "c",
-        "tool",
-        {"x": 1},
-        "low",
+    request = ApprovalResponse(
+        approval_id="a",
+        session_id="s",
+        run_id="r",
+        tool_call_id="c",
+        tool_name="tool",
+        arguments={"x": 1},
+        risk_level="low",
+        created_at=NOW,
+        approval_batch_id=None,
+        resolved=False,
+        resolution="pending",
+        expires_at=None,
         task_id="task-1",
         plan_id="plan-1",
-        created_at=NOW,
     )
     class Approval:
         async def pending(self, session_id=None): return [request]
         async def history(self, *args, **kwargs): return [request]
         async def resolve(self, *args, **kwargs): return False
-        async def resolve_batch(self, *args, **kwargs): return False
     client = TestClient(create_app(approval_service_factory=lambda: Approval()))
     pending = client.get("/api/approvals").json()[0]
     assert pending["approval_id"] == "a"
@@ -180,9 +184,9 @@ def test_approval_controller_maps_conflicts_and_serializes_history() -> None:
     assert pending["plan_id"] == "plan-1"
     assert pending["task_id"] == "task-1"
     assert client.get("/api/approvals/logs").json()[0]["tool_name"] == "tool"
-    assert client.post("/api/approvals/a/resolve", json={"decision": "approved", "run_id": "r", "task_id": "t"}).status_code == 409
-    assert client.post("/api/approvals/a/decision", json={"decision": "approved", "run_id": "r", "task_id": "t"}).status_code == 409
-    assert client.post("/api/approvals/batches/b/resolve", json={"decisions": {}, "run_id": "r"}).status_code == 409
+    assert client.post("/api/approvals/a/resolve", json={"decision": "approved"}).status_code == 404
+    assert client.post("/api/approvals/batches/b/resolve", json={"decisions": {}}).status_code == 404
+    assert client.post("/api/approvals/a/decision", json={"decision": "approved"}).status_code == 409
 
 
 def test_approval_decision_endpoint_records_one_decision() -> None:
@@ -199,7 +203,7 @@ def test_approval_decision_endpoint_records_one_decision() -> None:
 
     response = client.post(
         "/api/approvals/approval-1/decision",
-        json={"decision": "approved", "run_id": "run-1", "task_id": "task-1"},
+        json={"decision": "approved"},
     )
 
     assert response.status_code == 202
@@ -211,7 +215,7 @@ def test_approval_decision_endpoint_records_one_decision() -> None:
     assert service.calls == [
         (
             "approval-1",
-            {"run_id": "run-1", "task_id": "task-1", "decision": "approved"},
+            {"decision": "approved"},
         )
     ]
 

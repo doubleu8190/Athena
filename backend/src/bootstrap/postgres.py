@@ -144,39 +144,8 @@ from workers import (
     ApprovalExpiryWorker,
     WorkerSupervisor,
 )
-from domain.runs import CommandStatus, CommandType, RunCommand
-from datetime import datetime, timezone
 
 from .dependencies import ApplicationDependencies, Provider, build_dependencies
-
-
-def _build_approval_resumer(command_execution, runs, ids):
-    """Build the resumed-approval command callback outside composition."""
-
-    async def resume_approval(request, decision: str) -> None:
-        command = RunCommand(
-            command_id=f"approval-resume-{ids()}",
-            command_type=CommandType.RUN_RESUME,
-            session_id=request.session_id,
-            run_id=request.run_id,
-            payload={
-                "message": f"执行命令 {request.arguments.get('command', '')}",
-                "message_id": f"approval-result-{request.approval_id}",
-                "resume_value": {
-                    "decision": decision,
-                    "tool_call_id": request.tool_call_id,
-                },
-            },
-            issued_at=datetime.now(timezone.utc),
-        )
-        result = await command_execution.execute(command)
-        converge = getattr(runs, "complete_active_command_for_run", None)
-        if converge is not None and result is not None:
-            await converge(
-                request.run_id, status=CommandStatus.COMPLETED, result=result
-            )
-
-    return resume_approval
 
 
 def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
@@ -423,9 +392,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         ),
         checkpointer=checkpointer,
     )
-    approval_service = ApprovalService(
-        approvals, events, id_factory=ids
-    )
+    approval_service = ApprovalService(approvals)
     worker_approval_service = WorkerApprovalService(
         worker_job_repository,
         timeout_seconds=settings.worker_approval_timeout_seconds,
@@ -447,11 +414,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         context_acquisition=context_service,
         context_planner=context_planner,
         request_preparation=request_preparation,
-        plan_repository=orchestration_repository,
         plan_loader=PostgresPlanLoader(orchestration_repository),
         agent=ConfiguredRootAgent(llm_provider, events),
         tool_service=builtin_tool_service,
-        approval_service=approval_service,
         review_context_repository=orchestration_repository,
         orchestration_command_handler=orchestration_command_handler,
         event_publisher=events,
@@ -523,9 +488,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             root_run_executor,
             events,
             memory_jobs,
-        )
-        approval_service.set_resumer(
-            _build_approval_resumer(command_execution, runs, ids)
         )
         command_worker = CommandConsumer(runs, command_execution)
         root_resume_dispatcher = RootResumeDispatcher(

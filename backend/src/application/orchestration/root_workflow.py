@@ -226,7 +226,7 @@ def _deferred_version_review_decision(
         return None
     results = (*context.previous_results_summary, *context.round_results)
     if not results or any(
-        item.get("status") not in {"completed", "done"} for item in results
+        item.get("status") != "completed" for item in results
     ):
         return None
 
@@ -376,18 +376,15 @@ class RootWorkflow(RootWorkflowPort):
         request["attachment_ids"] = list(
             dict.fromkeys(request.get("attachment_ids", []))
         )
+        update = await deps.request_preparation.prepare(request=request, state=state)
         extra: dict[str, Any] = {}
-        if not state.get("resume_value"):
-            update = await deps.request_preparation.prepare(
-                request=request, state=state
-            )
-            if isinstance(update, Mapping):
-                request.update(json_value(update.get("request", update)))
-                extra = {
-                    key: json_value(value)
-                    for key, value in update.items()
-                    if key != "request"
-                }
+        if isinstance(update, Mapping):
+            request.update(json_value(update.get("request", update)))
+            extra = {
+                key: json_value(value)
+                for key, value in update.items()
+                if key != "request"
+            }
         if "history" not in request:
             request["history"] = json_value(
                 await deps.request_preparation.load_history(
@@ -860,29 +857,11 @@ class RootWorkflow(RootWorkflowPort):
             loaded = await call(
                 deps.plan_loader, plan=plan, plan_id=plan.get("plan_id"), state=state
             )
-        elif (
-            deps.plan_repository is not None
-            and plan.get("plan_id")
-            and hasattr(deps.plan_repository, "get_plan")
-        ):
-            loaded = {
-                "plan": await call(
-                    deps.plan_repository.get_plan, plan_id=plan["plan_id"]
-                )
-            }
         results = (
             loaded.get("results", loaded.get("plan_results", {}))
             if isinstance(loaded, Mapping)
             else {}
         )
-        repository = deps.plan_repository
-        if (
-            not results
-            and repository is not None
-            and plan.get("plan_id")
-            and hasattr(repository, "get_results")
-        ):
-            results = await call(repository.get_results, plan_id=plan["plan_id"])
         return {
             "plan_results": json_value(results),
             "response": {"plan_results": json_value(results)},

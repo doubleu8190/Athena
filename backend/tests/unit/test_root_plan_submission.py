@@ -105,4 +105,3 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
     assert legal_tools == {"read_local_file"}
     assert scheduler.started == []
     assert result["plan"]["plan_id"] == plan.plan_id
-

@@ -38,6 +38,7 @@ from domain.orchestration import (
     TaskStatus,
     freeze_ready_round,
     OrchestrationCommandRepository,
+    PlanCommandRejected,
 )
 from ..models import (
     AgentPlanModel,
@@ -55,10 +56,6 @@ from ..models import (
 
 class OrchestrationCommandConflict(ValueError):
     """相同命令幂等键被不同内容复用。"""
-
-
-class PlanCommandRejected(ValueError):
-    """当前 Run 状态或 Plan 事实不允许接受命令。"""
 
 
 class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
@@ -460,6 +457,13 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                 if decision.action == ReviewAction.FINISH:
                     assert decision.final_status is not None
                     plan_status = PlanStatus(decision.final_status)
+                    for task_row in task_rows:
+                        if task_row.status == TaskStatus.PENDING.value:
+                            task_row.status = TaskStatus.CANCELLED.value
+                            task_row.error_json = json.dumps(
+                                {"reason": "plan_finished"}, ensure_ascii=False
+                            )
+                            task_row.updated_at = now.isoformat()
                     plan_row.status = plan_status.value
                     plan_row.updated_at = now.isoformat()
                     receipt = CommandReceipt(
@@ -599,7 +603,12 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                             created_at=now,
                         )
                     except NoReadyTasksError as exc:
-                        raise PlanCommandRejected("no_remaining_tasks") from exc
+                        error_code = (
+                            "BLOCKED_DEPENDENCIES"
+                            if cancelled
+                            else "NO_REMAINING_TASKS"
+                        )
+                        raise PlanCommandRejected(error_code) from exc
                     self._schedule_review_round(
                         session,
                         command,

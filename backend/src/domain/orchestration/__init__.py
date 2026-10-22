@@ -32,6 +32,7 @@ from .contracts import (
 )
 from .validation import PlanValidationError, PlanValidator
 from .rounds import NoReadyTasksError, freeze_ready_round
+from .errors import PlanCommandRejected
 from .ports import (
     OrchestrationCommandRepository,
     PlanRepository,
@@ -50,6 +51,7 @@ __all__ = [
     "PlanRound",
     "PlanVersion",
     "NoReadyTasksError",
+    "PlanCommandRejected",
     "PlanDAG",
     "PlanEdge",
     "PlanStatus",

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Callable, Mapping
@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping
 from domain.orchestration import (
     OrchestrationCommand,
     OrchestrationCommandType,
+    PlanCommandRejected,
     Plan,
     PlanEdge,
     PlanRevision,
@@ -741,6 +742,8 @@ class RootWorkflow(RootWorkflowPort):
         if not isinstance(plan_version, int) or isinstance(plan_version, bool):
             raise RuntimeError("root_review_plan_version_invalid")
         idempotency_key = f"root-review:{round_id}"
+        review_context: ReviewContext | None = None
+        reviewer = getattr(deps.agent, "review", None)
         decision = await deps.orchestration_command_handler.load_review_decision(
             scope_key=run_id,
             idempotency_key=idempotency_key,
@@ -754,6 +757,7 @@ class RootWorkflow(RootWorkflowPort):
             context = await deps.review_context_repository.load_review_context(
                 round_id
             )
+            review_context = context
             if (
                 context.round_id != round_id
                 or context.plan_id != plan_id
@@ -764,38 +768,84 @@ class RootWorkflow(RootWorkflowPort):
             if deferred_decision is not None:
                 decision = deferred_decision
             else:
-                reviewer = getattr(deps.agent, "review", None)
                 if not callable(reviewer):
                     raise RuntimeError("root_review_agent_not_configured")
                 decision = await call(reviewer, context, request=request)
         if not isinstance(decision, ReviewDecision):
             raise RuntimeError("root_review_decision_invalid")
 
-        command_type = {
-            ReviewAction.CONTINUE: OrchestrationCommandType.CONTINUE_PLAN,
-            ReviewAction.REPLAN: OrchestrationCommandType.REVISE_PLAN,
-            ReviewAction.FINISH: OrchestrationCommandType.FINISH_PLAN,
-        }[decision.action]
-        command = OrchestrationCommand(
-            message_id=f"root-review:{round_id}",
-            command_type=command_type,
-            idempotency_key=idempotency_key,
-            correlation_id=run_id,
-            occurred_at=datetime.now(timezone.utc),
-            plan_id=plan_id,
-            scope_key=run_id,
-            payload={"action": decision.action.value, "reason": decision.reason},
-            plan_version=plan_version,
-            round_id=round_id,
-            causation_id=(
-                str(resume_value["interrupt_id"])
-                if resume_value.get("interrupt_id")
-                else None
-            ),
-        )
-        receipt = await deps.orchestration_command_handler.apply_review_decision(
-            command, decision
-        )
+        def review_command(value: ReviewDecision) -> OrchestrationCommand:
+            """把一次有界 Review 决策绑定到固定 Round 身份。"""
+            command_type = {
+                ReviewAction.CONTINUE: OrchestrationCommandType.CONTINUE_PLAN,
+                ReviewAction.REPLAN: OrchestrationCommandType.REVISE_PLAN,
+                ReviewAction.FINISH: OrchestrationCommandType.FINISH_PLAN,
+            }[value.action]
+            return OrchestrationCommand(
+                message_id=f"root-review:{round_id}",
+                command_type=command_type,
+                idempotency_key=idempotency_key,
+                correlation_id=run_id,
+                occurred_at=datetime.now(timezone.utc),
+                plan_id=plan_id,
+                scope_key=run_id,
+                payload={"action": value.action.value, "reason": value.reason},
+                plan_version=plan_version,
+                round_id=round_id,
+                causation_id=(
+                    str(resume_value["interrupt_id"])
+                    if resume_value.get("interrupt_id")
+                    else None
+                ),
+            )
+
+        try:
+            receipt = await deps.orchestration_command_handler.apply_review_decision(
+                review_command(decision), decision
+            )
+        except PlanCommandRejected as error:
+            if (
+                error.code != "BLOCKED_DEPENDENCIES"
+                or decision.action != ReviewAction.CONTINUE
+            ):
+                raise
+
+            # Continue 被依赖失败阻断时，只向 Root 追问一次；重复 Continue
+            # 或仍无法调度的修订会确定性结束为 failed，避免 Resume Job 无限重试。
+            replacement: ReviewDecision | None = None
+            if review_context is not None and callable(reviewer):
+                blocked_context = replace(
+                    review_context,
+                    user_constraints=(
+                        *review_context.user_constraints,
+                        "Continue 返回 BLOCKED_DEPENDENCIES。请改为 REPLAN 并解除失败依赖，或 FINISH 结束；不得再次选择 CONTINUE。",
+                    ),
+                )
+                candidate = await call(reviewer, blocked_context, request=request)
+                if isinstance(candidate, ReviewDecision):
+                    replacement = candidate
+            if replacement is None or replacement.action == ReviewAction.CONTINUE:
+                replacement = ReviewDecision(
+                    ReviewAction.FINISH,
+                    "依赖失败后 Root 未提供可运行修订，按有界 Review 预算结束 Plan。",
+                    final_status="failed",
+                )
+            try:
+                receipt = await deps.orchestration_command_handler.apply_review_decision(
+                    review_command(replacement), replacement
+                )
+            except PlanCommandRejected as retry_error:
+                if retry_error.code != "BLOCKED_DEPENDENCIES":
+                    raise
+                replacement = ReviewDecision(
+                    ReviewAction.FINISH,
+                    "Root 修订后仍没有可运行任务，按有界 Review 预算结束 Plan。",
+                    final_status="failed",
+                )
+                receipt = await deps.orchestration_command_handler.apply_review_decision(
+                    review_command(replacement), replacement
+                )
+            decision = replacement
         return {
             "review_action": decision.action.value,
             "review_reason": decision.reason,

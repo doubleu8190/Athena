@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -15,7 +17,12 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from domain.tools import ToolExecutionRequest, ToolOperationClaimStatus
+from application.orchestration.worker_tools import WorkerToolExecutor
+from domain.tools import (
+    ToolExecutionRequest,
+    ToolExecutionResult,
+    ToolOperationClaimStatus,
+)
 from infrastructure.persistence.postgres.models import (
     AgentPlanModel,
     AgentRunModel,
@@ -35,6 +42,44 @@ from infrastructure.persistence.postgres.repositories.worker_tool_operation_repo
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_DIR = BACKEND_ROOT / "sql" / "migrations"
+
+
+class _UncertaintyToolService:
+    """确保未知副作用被拒绝时不会触达外部工具。"""
+
+    def __init__(self) -> None:
+        """初始化调用记录。
+
+        参数：无。
+        返回：无。
+        异常：不主动抛出业务异常。
+        """
+        self.executed: list[ToolExecutionRequest] = []
+
+    async def get(self, name: str) -> SimpleNamespace:
+        """返回低风险、启用的本地工具配置。
+
+        参数：name 是 Worker 请求查询的工具名称。
+        返回：供 WorkerToolExecutor 校验的原生工具配置。
+        异常：不主动抛出业务异常。
+        """
+        return SimpleNamespace(
+            name=name,
+            enabled=True,
+            risk_level="low",
+            require_approval=False,
+            execution_mode="native",
+        )
+
+    async def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult:
+        """记录外部调用；本验收期望此方法始终不会被调用。
+
+        参数：request 是经过 Worker 授权校验的工具请求。
+        返回：固定成功结果，便于在意外调用时继续报告断言失败。
+        异常：不主动抛出业务异常。
+        """
+        self.executed.append(request)
+        return ToolExecutionResult(status="success", output="unexpected")
 
 
 @pytest.mark.integration
@@ -265,9 +310,19 @@ async def test_postgres_migration_backfills_and_replays_across_attempts() -> Non
             operation_key="athena:run-1:task-1:2:0:1",
             logical_operation_key="athena:run-1:task-1:logical:0:1",
         )
+        call_arguments = {"path": "report.txt", "content": "ready"}
+        args_hash = hashlib.sha256(
+            json.dumps(
+                call_arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
         concurrent_claims = await asyncio.gather(
-            repository.claim(concurrent_request, args_hash="second-call-hash"),
-            repository.claim(concurrent_request, args_hash="second-call-hash"),
+            repository.claim(concurrent_request, args_hash=args_hash),
+            repository.claim(concurrent_request, args_hash=args_hash),
         )
         assert sorted(item.status.value for item in concurrent_claims) == [
             ToolOperationClaimStatus.ACQUIRED.value,
@@ -283,6 +338,60 @@ async def test_postgres_migration_backfills_and_replays_across_attempts() -> Non
                 )
             )
         assert operation_count == 1
+
+        # 模拟该调用已进入外部执行但 Worker 在写回结果前崩溃，再由新代际接管。
+        async with session_factory() as session, session.begin():
+            task = await session.get(AgentTaskModel, "task-1")
+            round_task = await session.get(RoundTaskModel, ("round-1", "task-1"))
+            previous_execution = await session.get(TaskExecutionModel, "execution-2")
+            assert task is not None
+            assert round_task is not None
+            assert previous_execution is not None
+            previous_execution.status = "failed"
+            previous_execution.lease_until = now - timedelta(seconds=1)
+            task.execution_generation = 3
+            task.active_execution_id = "execution-3"
+            round_task.active_execution_id = "execution-3"
+            session.add(
+                TaskExecutionModel(
+                    execution_id="execution-3",
+                    round_id="round-1",
+                    task_id="task-1",
+                    attempt=3,
+                    worker_thread_id="task:task-1:exec:3",
+                    status="running",
+                    lease_owner="recovered-worker",
+                    lease_until=now + timedelta(minutes=1),
+                    fencing_token=3,
+                    cancellation_epoch=0,
+                    created_at=now + timedelta(seconds=1),
+                    updated_at=now + timedelta(seconds=1),
+                )
+            )
+
+        tools = _UncertaintyToolService()
+        executor = WorkerToolExecutor(tools, operation_ledger=repository)
+        recovered_result = await executor(
+            tool_call={"name": "write_file", "arguments": call_arguments},
+            execution={
+                "plan_id": "plan-1",
+                "run_id": "run-1",
+                "session_id": "session-1",
+                "task": {"task_id": "task-1", "allowed_tools": ["write_file"]},
+                "execution_id": "execution-3",
+                "fencing_token": 3,
+                "cancellation_epoch": 0,
+                "execution_generation": 3,
+            },
+            tool_round=0,
+            call_index=1,
+        )
+
+        assert recovered_result["status"] == "failed"
+        assert recovered_result["error"]["code"] == (
+            "worker_tool_operation_outcome_unknown"
+        )
+        assert tools.executed == []
     finally:
         await test_engine.dispose()
         if created_schema:

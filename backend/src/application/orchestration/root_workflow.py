@@ -172,6 +172,7 @@ def _coerce_plan(
                 if isinstance(payload.get("allowed_tools", []), (list, tuple, set))
                 else (),
                 worker_type="general",
+                timeout_seconds=payload.get("timeout_seconds", 3600.0),
             )
         )
     return plan, tasks
@@ -384,6 +385,7 @@ class RootWorkflow(RootWorkflowPort):
                     name for name in item.allowed_tools if name in worker_tools
                 ),
                 worker_type="general",
+                timeout_seconds=item.timeout_seconds,
             )
             for item in tasks
         ]

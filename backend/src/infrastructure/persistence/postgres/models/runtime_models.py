@@ -106,6 +106,7 @@ class AgentTaskModel(Base):
     expected_output_json: Mapped[str] = mapped_column(Text, default="{}")
     allowed_tools_json: Mapped[str] = mapped_column(Text, default="[]")
     worker_type: Mapped[str] = mapped_column(String, default="general")
+    timeout_seconds: Mapped[float] = mapped_column(Float, default=3600.0)
     status: Mapped[str] = mapped_column(String, default="pending")
     output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)

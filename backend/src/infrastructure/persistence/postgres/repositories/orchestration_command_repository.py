@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from math import isfinite
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import asdict, is_dataclass
@@ -228,6 +229,7 @@ class PostgresOrchestrationCommandRepository:
                             list(task.allowed_tools), ensure_ascii=False
                         ),
                         worker_type=task.worker_type,
+                        timeout_seconds=task.timeout_seconds,
                         status="pending",
                         execution_generation=1,
                         worker_thread_id=f"task:{task.task_id}:exec:1",
@@ -531,6 +533,7 @@ class PostgresOrchestrationCommandRepository:
                                     list(task.allowed_tools), ensure_ascii=False
                                 ),
                                 worker_type=task.worker_type,
+                                timeout_seconds=task.timeout_seconds,
                                 status=TaskStatus.PENDING.value,
                                 execution_generation=0,
                                 created_at=now.isoformat(),
@@ -871,6 +874,7 @@ def _plan_document(plan: Plan, tasks: list[Task], *, version: int) -> dict[str, 
                 "expected_output": dict(task.expected_output),
                 "allowed_tools": list(task.allowed_tools),
                 "worker_type": task.worker_type,
+                "timeout_seconds": task.timeout_seconds,
             }
             for task in tasks
         ],
@@ -906,6 +910,9 @@ def _tasks_from_document(
             "allowed_tools", _json_document(row.allowed_tools_json, [])
         )
         worker_type = node.get("worker_type", row.worker_type)
+        timeout_seconds = node.get(
+            "timeout_seconds", getattr(row, "timeout_seconds", 3600.0) or 3600.0
+        )
         if (
             not isinstance(title, str)
             or not isinstance(objective, str)
@@ -914,6 +921,7 @@ def _tasks_from_document(
             or not isinstance(allowed_tools, list)
             or any(not isinstance(item, str) for item in allowed_tools)
             or not isinstance(worker_type, str)
+            or not _valid_timeout_seconds(timeout_seconds)
         ):
             raise PlanCommandRejected("review_plan_task_invalid")
         tasks.append(
@@ -925,6 +933,7 @@ def _tasks_from_document(
                 expected_output=dict(expected_output),
                 allowed_tools=tuple(allowed_tools),
                 worker_type=worker_type,
+                timeout_seconds=timeout_seconds,
             )
         )
     return tasks
@@ -996,11 +1005,21 @@ def _revise_plan_document(
     if any(task.task_id in task_rows for task in new_tasks):
         raise PlanCommandRejected("revision_task_id_already_exists")
 
-    retained_nodes = [
-        dict(node)
-        for node in old_nodes
-        if isinstance(node, Mapping) and node.get("task_id") in keep_ids
-    ]
+    retained_nodes = []
+    for node in old_nodes:
+        if not isinstance(node, Mapping) or node.get("task_id") not in keep_ids:
+            continue
+        task_id = str(node["task_id"])
+        retained_nodes.append(
+            {
+                **node,
+                "timeout_seconds": node.get(
+                    "timeout_seconds",
+                    getattr(task_rows[task_id], "timeout_seconds", 3600.0)
+                    or 3600.0,
+                ),
+            }
+        )
     new_ids = {task.task_id for task in new_tasks}
     scoped_ids_by_requested_id = {
         str(raw["task_id"]): task.task_id
@@ -1027,6 +1046,7 @@ def _revise_plan_document(
         expected_output = raw_task.get("expected_output", {})
         allowed_tools = raw_task.get("allowed_tools", ())
         worker_type = raw_task.get("worker_type", "general")
+        timeout_seconds = raw_task.get("timeout_seconds", 3600.0)
         if (
             not isinstance(title, str)
             or not isinstance(objective, str)
@@ -1038,6 +1058,7 @@ def _revise_plan_document(
             or not isinstance(allowed_tools, (list, tuple))
             or any(not isinstance(item, str) for item in allowed_tools)
             or not isinstance(worker_type, str)
+            or not _valid_timeout_seconds(timeout_seconds)
         ):
             raise PlanCommandRejected("revision_task_invalid")
         new_nodes.append(
@@ -1049,6 +1070,7 @@ def _revise_plan_document(
                 "expected_output": dict(expected_output),
                 "allowed_tools": list(allowed_tools),
                 "worker_type": worker_type,
+                "timeout_seconds": timeout_seconds,
             }
         )
         revised_edges.extend(
@@ -1090,12 +1112,14 @@ def _revision_tasks(revision: PlanRevision, *, run_id: str) -> list[Task]:
         expected_output = raw.get("expected_output", {})
         raw_tools = raw.get("allowed_tools", ())
         worker_type = raw.get("worker_type", "general")
+        timeout_seconds = raw.get("timeout_seconds", 3600.0)
         if (
             not isinstance(raw_input, Mapping)
             or not isinstance(expected_output, Mapping)
             or not isinstance(raw_tools, (list, tuple))
             or any(not isinstance(item, str) for item in raw_tools)
             or not isinstance(worker_type, str)
+            or not _valid_timeout_seconds(timeout_seconds)
         ):
             raise PlanCommandRejected("revision_task_invalid")
         tasks.append(
@@ -1107,6 +1131,7 @@ def _revision_tasks(revision: PlanRevision, *, run_id: str) -> list[Task]:
                 expected_output=dict(expected_output),
                 allowed_tools=tuple(raw_tools),
                 worker_type=worker_type,
+                timeout_seconds=timeout_seconds,
             )
         )
     if len({task.task_id for task in tasks}) != len(tasks):
@@ -1128,6 +1153,17 @@ def _json_document(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError):
         return default
+
+
+def _valid_timeout_seconds(value: Any) -> bool:
+    """判断持久任务定义中的超时是否为有限正数。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        timeout_seconds = float(value)
+    except OverflowError:
+        return False
+    return isfinite(timeout_seconds) and timeout_seconds > 0
 
 
 def _legacy_plan_document(plan: Plan) -> dict[str, Any]:

@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     expected_output_json TEXT NOT NULL DEFAULT '{}',
     allowed_tools_json TEXT NOT NULL DEFAULT '[]',
     worker_type VARCHAR NOT NULL DEFAULT 'general',
+    timeout_seconds DOUBLE PRECISION NOT NULL DEFAULT 3600,
     status VARCHAR NOT NULL DEFAULT 'pending',
     output_json TEXT,
     error_json TEXT,
@@ -160,7 +161,8 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     active_execution_id VARCHAR,
     llm_turn_count INTEGER NOT NULL DEFAULT 0,
     created_at VARCHAR NOT NULL,
-    updated_at VARCHAR NOT NULL
+    updated_at VARCHAR NOT NULL,
+    CONSTRAINT ck_agent_tasks_timeout_positive CHECK (timeout_seconds > 0)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_plan_status ON agent_tasks(plan_id, status);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_run_status ON agent_tasks(run_id, status);

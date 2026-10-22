@@ -1110,6 +1110,7 @@ def _task_from_row(row: AgentTaskModel) -> Task:
         expected_output=_load_json(row.expected_output_json, {}),
         allowed_tools=tuple(_load_json(row.allowed_tools_json, [])),
         worker_type=row.worker_type,
+        timeout_seconds=getattr(row, "timeout_seconds", 3600.0) or 3600.0,
     )
 
 

@@ -74,6 +74,14 @@ def test_validator_enforces_worker_and_tool_boundaries() -> None:
     assert {"node_task_mismatch", "unknown_worker_type", "unknown_tool"} <= codes
 
 
+@pytest.mark.parametrize(
+    "timeout_seconds", [0, -1, float("inf"), float("nan"), True, 10**400]
+)
+def test_task_rejects_invalid_timeout(timeout_seconds: object) -> None:
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        Task("task", "title", "objective", timeout_seconds=timeout_seconds)
+
+
 @pytest.mark.asyncio
 async def test_orchestration_service_validates_before_persisting() -> None:
     class Repository:

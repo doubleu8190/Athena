@@ -133,7 +133,32 @@ class WorkerJobDispatcher:
         )
         try:
             try:
-                result = await worker_task
+                timeout_scope = asyncio.timeout(lease.task.timeout_seconds)
+                async with timeout_scope:
+                    result = await worker_task
+            except TimeoutError as exc:
+                if timeout_scope.expired():
+                    worker_task.cancel()
+                    await asyncio.gather(worker_task, return_exceptions=True)
+                    result = TaskResult(
+                        task_id=lease.task_id,
+                        status=TaskStatus.TIMED_OUT,
+                        error={
+                            "code": "task_timeout",
+                            "timeout_seconds": lease.task.timeout_seconds,
+                        },
+                        retryable=True,
+                    )
+                else:
+                    result = TaskResult(
+                        task_id=lease.task_id,
+                        status=TaskStatus.FAILED,
+                        error={
+                            "code": "worker_execution_failed",
+                            "message": str(exc) or type(exc).__name__,
+                        },
+                        retryable=True,
+                    )
             except asyncio.CancelledError:
                 if not lease_lost.is_set():
                     raise

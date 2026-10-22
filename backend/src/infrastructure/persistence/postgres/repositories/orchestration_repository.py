@@ -106,7 +106,7 @@ class PostgresOrchestrationRepository(PlanRepository, ReviewContextRepository):
         async with self._session_factory() as session:
             async with session.begin():
                 session.add(AgentPlanModel(plan_id=plan.plan_id, run_id=plan.run_id or "", session_id=plan.session_id or "", status=plan.status.value, user_goal=plan.goal, max_parallelism=plan.max_parallelism, plan_json=_dump(payload), created_at=now, updated_at=now))
-                session.add_all([AgentTaskModel(task_id=task.task_id, plan_id=plan.plan_id, run_id=plan.run_id or "", title=task.title, objective=task.objective, input_json=_dump(dict(task.input)), expected_output_json=_dump(dict(task.expected_output)), allowed_tools_json=_dump(list(task.allowed_tools)), worker_type=task.worker_type, status=TaskStatus.PENDING.value, execution_generation=0, created_at=now, updated_at=now) for task in tasks])
+                session.add_all([AgentTaskModel(task_id=task.task_id, plan_id=plan.plan_id, run_id=plan.run_id or "", title=task.title, objective=task.objective, input_json=_dump(dict(task.input)), expected_output_json=_dump(dict(task.expected_output)), allowed_tools_json=_dump(list(task.allowed_tools)), worker_type=task.worker_type, timeout_seconds=task.timeout_seconds, status=TaskStatus.PENDING.value, execution_generation=0, created_at=now, updated_at=now) for task in tasks])
         return plan
 
     async def get(self, plan_id: str) -> tuple[Plan, list[Task]] | None:
@@ -576,7 +576,16 @@ class PostgresOrchestrationRepository(PlanRepository, ReviewContextRepository):
 
     @staticmethod
     def _task(row) -> Task:
-        return Task(row.task_id, row.title, row.objective, _load(row.input_json, {}), _load(row.expected_output_json, {}), tuple(_load(row.allowed_tools_json, [])), row.worker_type)
+        return Task(
+            row.task_id,
+            row.title,
+            row.objective,
+            _load(row.input_json, {}),
+            _load(row.expected_output_json, {}),
+            tuple(_load(row.allowed_tools_json, [])),
+            row.worker_type,
+            getattr(row, "timeout_seconds", 3600.0) or 3600.0,
+        )
 
     async def _upstream(
         self,

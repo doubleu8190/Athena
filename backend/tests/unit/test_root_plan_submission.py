@@ -84,6 +84,7 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
                         "title": "Gather data",
                         "objective": "Collect local source data",
                         "allowed_tools": ["read_local_file", "disabled_tool"],
+                        "timeout_seconds": 42,
                     }
                 ],
             },
@@ -102,6 +103,7 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
     assert plan.run_id == "run-42"
     assert tasks[0].task_id == "gather:run-42"
     assert tasks[0].allowed_tools == ("read_local_file",)
+    assert tasks[0].timeout_seconds == 42
     assert legal_tools == {"read_local_file"}
     assert scheduler.started == []
     assert result["plan"]["plan_id"] == plan.plan_id

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Mapping
 
 
@@ -59,6 +60,24 @@ class Task:
     expected_output: Mapping[str, Any] = field(default_factory=dict)
     allowed_tools: tuple[str, ...] = ()
     worker_type: str = "general"
+    timeout_seconds: float = 3600.0
+
+    def __post_init__(self) -> None:
+        """拒绝非正数或非有限值，避免 Worker 永不超时或立即失效。"""
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+        ):
+            raise ValueError("timeout_seconds must be a finite positive number")
+        try:
+            timeout_seconds = float(self.timeout_seconds)
+        except OverflowError as exc:
+            raise ValueError(
+                "timeout_seconds must be a finite positive number"
+            ) from exc
+        if not isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be a finite positive number")
+        object.__setattr__(self, "timeout_seconds", timeout_seconds)
 
 
 @dataclass(frozen=True, slots=True)

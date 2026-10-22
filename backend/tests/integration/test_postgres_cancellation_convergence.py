@@ -11,7 +11,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from domain.orchestration import RunCancellationReceipt
+from domain.orchestration import RunCancellationReceipt, Task, WorkerJobLease
 from domain.runs import RunStatus
 from infrastructure.persistence.postgres.models import (
     AgentCommandModel,
@@ -293,6 +293,32 @@ async def test_run_cancellation_converges_after_expired_worker_lease() -> None:
                 run_id, session_id, plan_id, 1, "unknown"
             )
         ]
+        stale_lease = WorkerJobLease(
+            job_id=job_id,
+            worker_id="worker-old",
+            run_id=run_id,
+            plan_id=plan_id,
+            round_id=round_id,
+            plan_version=1,
+            task_id=running_task_id,
+            execution_id=running_execution_id,
+            session_id=session_id,
+            attempt=1,
+            worker_thread_id=f"thread-{running_execution_id}",
+            fencing_token=7,
+            cancellation_epoch=0,
+            lease_until=now - timedelta(seconds=5),
+            task=Task(
+                task_id=running_task_id,
+                title="Active work",
+                objective="Simulate an unresponsive Worker",
+            ),
+        )
+        assert not await repository.acknowledge_cancelled(stale_lease)
+        terminal_repeat = await run_repository.cancel(run_id)
+        assert terminal_repeat is not None and not terminal_repeat.changed
+        assert terminal_repeat.status == RunStatus.CANCELLED
+        assert terminal_repeat.external_effect_status == "unknown"
 
         async with session_factory() as session:
             run = await session.get(AgentRunModel, run_id)
@@ -310,6 +336,7 @@ async def test_run_cancellation_converges_after_expired_worker_lease() -> None:
                     )
                 )
             ).scalars().all()
+            event_count = len(events)
 
         assert run is not None and run.status == "cancelled"
         assert run.cancellation_epoch == 1
@@ -332,6 +359,8 @@ async def test_run_cancellation_converges_after_expired_worker_lease() -> None:
         }
         assert len([event for event in events if event.event_type == "RunCancelling"]) == 1
         assert len([event for event in events if event.event_type == "RunCancelled"]) == 1
+        assert event_count == 7
+        assert len([event for event in events if event.event_type == "TaskCancelled"]) == 2
     finally:
         await test_engine.dispose()
         if schema_created:

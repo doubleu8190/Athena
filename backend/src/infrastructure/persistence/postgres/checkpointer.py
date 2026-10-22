@@ -31,8 +31,8 @@ class PostgresCheckpointer:
         if self._saver is not None:
             return
         context = AsyncPostgresSaver.from_conn_string(self.conn_string)
+        saver = await context.__aenter__()
         try:
-            saver = await context.__aenter__()
             await saver.setup()
         except BaseException:
             await context.__aexit__(*sys.exc_info())

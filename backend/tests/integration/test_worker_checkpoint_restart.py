@@ -72,6 +72,7 @@ class _WorkerAgent:
     def __init__(self) -> None:
         """将 LLM 调用次数置零；不接收参数，也不主动抛出业务异常。"""
         self.calls = 0
+        self.observed_tool_results: list[dict[str, Any]] = []
 
     async def __call__(
         self,
@@ -85,7 +86,8 @@ class _WorkerAgent:
         返回 Worker 图可持久化的 JSON 数据。本替身不主动抛出业务异常。
         """
         self.calls += 1
-        if self.calls == 1:
+        tool_results = execution.get("tool_results", [])
+        if not tool_results:
             return {
                 "status": "running",
                 "tool_calls": [
@@ -98,12 +100,29 @@ class _WorkerAgent:
                     }
                 ],
             }
+        self.observed_tool_results = [
+            dict(result)
+            for result in tool_results
+            if isinstance(result, Mapping)
+        ]
         return {"status": "done", "output": {"confirmed": True}}
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_worker_approval_resumes_after_postgres_checkpointer_restart() -> None:
+@pytest.mark.parametrize(
+    ("decision", "expected_tool_status", "expected_error"),
+    [
+        ("approved", "success", None),
+        ("denied", "denied", "approval_denied"),
+        ("expired", "denied", "approval_expired"),
+    ],
+)
+async def test_worker_approval_resumes_after_postgres_checkpointer_restart(
+    decision: str,
+    expected_tool_status: str,
+    expected_error: str | None,
+) -> None:
     """重建 checkpointer 和 executor 后找回 interrupt 并继续同一执行。
 
     该测试需要可连接且允许创建临时 schema 的 PostgreSQL 测试库；
@@ -198,6 +217,8 @@ async def test_worker_approval_resumes_after_postgres_checkpointer_restart() -> 
             workflow_factory=workflow_factory,
             checkpointer=second_checkpointer,
         )
+        # 模拟新 app 进程：checkpointer 和 Worker agent 都重新创建。
+        agent = _WorkerAgent()
 
         recovered_approval = await recovered_executor.pending_interrupt(execution)
 
@@ -208,19 +229,26 @@ async def test_worker_approval_resumes_after_postgres_checkpointer_restart() -> 
             execution,
             {
                 **recovered_approval,
-                "decision": "approved",
+                "decision": decision,
             },
         )
 
         assert resumed.status is TaskStatus.DONE
         assert resumed.output == {"confirmed": True}
-        assert len(tools.executed) == 1
-        assert tools.executed[0].arguments == {
-            "path": "report.txt",
-            "content": "ready",
-        }
-        assert tools.executed[0].approval_decision == "approved"
-        assert agent.calls == 2
+        assert len(agent.observed_tool_results) == 1
+        tool_result = agent.observed_tool_results[0]
+        assert tool_result["status"] == expected_tool_status
+        if decision == "approved":
+            assert len(tools.executed) == 1
+            assert tools.executed[0].arguments == {
+                "path": "report.txt",
+                "content": "ready",
+            }
+            assert tools.executed[0].approval_decision == "approved"
+        else:
+            assert tools.executed == []
+            assert tool_result["error"]["code"] == expected_error
+        assert agent.calls == 1
     finally:
         for checkpointer in reversed(checkpointers):
             await checkpointer.stop()

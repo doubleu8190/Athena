@@ -416,7 +416,7 @@ P6 本轮新增真实 Provider、浏览器、PostgreSQL、正常审批与 Docker
 
 在用户授权的本地单用户测试会话中，另以真实浏览器和 PostgreSQL 完成一次高风险工具审批闭环，Run ID 为 `2026.10.22.04.47.54.126`：只建立一个 Worker task，明确 allowlist 仅为 `exec_shell`；Athena 先生成待审批卡片，用户在界面批准后由 Worker 在 Docker `--network none`、无工作区挂载、只读根文件系统的容器中执行唯一命令 `python -c 'import sys; print(sys.version.split()[0])'`，退出码 0、输出 `3.12.14`，ToolOperation 只成功一次。用于本次验收的临时工具行已删除，测试会话已通过 Athena 界面软删除；失败的前置尝试未执行命令。该记录验证工具审批和隔离执行路径，不替代其余 A01–A20 矩阵覆盖。
 
-本轮将 pytest 默认导入模式设为 `importlib`，避免 unit/integration 中同名测试模块冲突。以项目本地 PostgreSQL URL 在当前测试进程中设置 `ATHENA_TEST_DATABASE_URL` 后，全量后端与 PostgreSQL 测试最终为 `350 passed, 2 warnings`；`compileall` 与 `git diff --check` 通过。警告为既有的 FastAPI duplicate operation ID。PostgreSQL 验收覆盖 A01 Round 屏障与重投去重、A02 双 engine 下的并行上限与固定 DAG 成员、A04 每个 Worker 独立审批恢复，以及 A06 终态 Inbox/Resume Job 原子写入和 checkpoint 就绪前延迟。新增 A07 并发 Continue 幂等与冲突检查；A09 通过 app engine 重建、lease 接管、迟到结果拒绝及失败后重试验证 attempt 计数与 Round 状态持久化；A11 新增审批已提交后重建 app engine 并恢复同一 execution/thread 的 Worker Job 验收，与现有 PostgreSQL checkpointer 恢复及获批工具单次执行验收互补；A13 覆盖 Stop 与 Worker 审批、终态事件、Continue 和 Revise 的并发裁决，Stop 后没有活动审批或可领取 Worker Job。A19 在 Run 完成事务中原子写入最终回答 Outbox、RunCompleted Outbox、唯一 memory job 和命令终态，并通过丢失完成回执、Outbox 重放及 Memory Worker 崩溃恢复验证可收敛。Ruff 未安装在项目虚拟环境中，未执行 lint。Athena 按用户确认以单用户产品为目标，不要求多用户身份映射。
+本轮将 pytest 默认导入模式设为 `importlib`，避免 unit/integration 中同名测试模块冲突。以项目本地 PostgreSQL URL 在当前测试进程中设置 `ATHENA_TEST_DATABASE_URL` 后，全量后端与 PostgreSQL 测试为 `352 passed, 2 warnings`；`compileall` 与 `git diff --check` 通过。警告为既有的 FastAPI duplicate operation ID。PostgreSQL 验收覆盖 A01 Round 屏障与重投去重、A02 双 engine 下的并行上限与固定 DAG 成员、A04 每个 Worker 独立审批恢复，以及 A06 终态 Inbox/Resume Job 原子写入和 checkpoint 就绪前延迟。新增 A05 用真实 PostgreSQL checkpointer 重启恢复 approved/denied/expired 三种审批结果，拒绝与过期均由 Worker 观察到明确 ToolDenied 且不执行工具；A07 并发 Continue 幂等与冲突检查；A09 通过 app engine 重建、lease 接管、迟到结果拒绝及失败后重试验证 attempt 计数与 Round 状态持久化；A11 新增审批已提交后重建 app engine 并恢复同一 execution/thread 的 Worker Job 验收，与现有 PostgreSQL checkpointer 恢复及获批工具单次执行验收互补；A13 覆盖 Stop 与 Worker 审批、终态事件、Continue 和 Revise 的并发裁决，Stop 后没有活动审批或可领取 Worker Job。A19 在 Run 完成事务中原子写入最终回答 Outbox、RunCompleted Outbox、唯一 memory job 和命令终态，并通过丢失完成回执、Outbox 重放及 Memory Worker 崩溃恢复验证可收敛。Ruff 未安装在项目虚拟环境中，未执行 lint。Athena 按用户确认以单用户产品为目标，不要求多用户身份映射。
 
 ### A01–A20 覆盖盘点（2026-10-22）
 
@@ -428,7 +428,7 @@ P6 本轮新增真实 Provider、浏览器、PostgreSQL、正常审批与 Docker
 | A02 | 已覆盖 | `test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks` 用两个独立 engine 竞争同一 Plan，首轮固定 10 个成员且最多 3 个 Execution/Job 获租；依赖下一层的第 11 个 Task 保持 pending，不会混入本轮。 |
 | A03 | 部分覆盖 | `test_root_resume_dispatcher_retries_until_matching_interrupt_exists` 和 checkpointer 重启验收覆盖中断恢复；尚无 A 完成而 B 等审批时 Root 不恢复、无后台等待协程的完整屏障验收。 |
 | A04 | 已覆盖 | `test_resolving_one_worker_approval_only_unblocks_its_execution` 在 PG 中让两个 Worker 同时进入 waiting_approval；批准 A 只产生并可领取 A 的恢复 Job，B 仍 pending 且没有可领取 Job；拒绝 B 后才恢复 B 自己的 execution。 |
-| A05 | 部分覆盖 | 审批过期审计/拒绝及真实批准执行分别有单测或浏览器证据；尚未在 Worker Graph 端到端证明 REJECT/EXPIRE 进入 ToolDenied，且不调用工具、不触发全局 Replan。 |
+| A05 | 已覆盖 | `test_worker_approval_resumes_after_postgres_checkpointer_restart` 以真实 PostgreSQL checkpointer 重建验证 approved/denied/expired 决议；denied/expired 两支的 ToolDenied 被重启后的 Worker 观察到，工具执行记录为空。审批过期仓储测试另验证 EXPIRED 决议与 Resume Job 同事务写入。 |
 | A06 | 已覆盖 | `test_round_barrier_holds_dependent_task_and_resumes_root_once` 验证终态 Inbox 与 RoundCompleted/Root Resume Job 在 PostgreSQL 事务内一并持久化，任务先于 interrupt 就绪时保留并延迟，checkpoint arm 后 dispatcher 仅 resume 一次；`test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt` 另验证两个 app engine 竞争只有一个 Root Resume Job 获租。 |
 | A07 | 已覆盖 | `test_round_barrier_holds_dependent_task_and_resumes_root_once` 在 PG 中并发提交 10 次同内容 Continue，仅一个回执非 deduplicated 且只创建一个下一 Round/Job；复用相同 key 改变 Review 内容会明确冲突。 |
 | A08 | 已覆盖 | `test_submit_and_replan_preserve_completed_results_in_postgres` 验证保留完成结果、取消旧任务、写入新版本与 Round/Job。 |
@@ -445,4 +445,4 @@ P6 本轮新增真实 Provider、浏览器、PostgreSQL、正常审批与 Docker
 | A19 | 已覆盖 | `test_final_answer_and_memory_job_survive_completion_receipt_loss` 在同一 PostgreSQL Run 完成事务中写入最终回答的两条 Outbox、RunCompleted Outbox、唯一 memory job 和活动命令终态；模拟事务提交后回执丢失，再由新 Outbox dispatcher 投递，并模拟 Memory Worker claim 后崩溃/恢复，最终每类记录仅一份且 Run/命令/记忆 Job 收敛。 |
 | A20 | 部分覆盖 | 单用户身份隔离按产品决策不适用；跨 Run 的审批、Task、结果引用在应用/查询边界有校验单测，但尚无跨 Run 伪造引用的 PG 端到端拒绝测试。 |
 
-该盘点表用于安排 P6 后续工作，不把相邻测试或成功的真实 Provider 闭环当作整条矩阵通过。当前优先级为 A03/A05/A10–A12/A14/A15/A16–A18/A20，尤其是审批拒绝/过期的 Worker 闭环（A05）、依赖失败无 ready task 的有界收敛（A10）、Root checkpoint 与外部效果对账的崩溃窗口（A12），以及规划、审批、Review、Finalize 阶段的停止矩阵（A14）。单用户身份映射仍按产品决策不适用。
+该盘点表用于安排 P6 后续工作，不把相邻测试或成功的真实 Provider 闭环当作整条矩阵通过。当前优先级为 A03/A10–A12/A14/A15/A16–A18/A20，尤其是依赖失败无 ready task 的有界收敛（A10）、Root checkpoint 与外部效果对账的崩溃窗口（A12），以及规划、审批、Review、Finalize 阶段的停止矩阵（A14）。单用户身份映射仍按产品决策不适用。

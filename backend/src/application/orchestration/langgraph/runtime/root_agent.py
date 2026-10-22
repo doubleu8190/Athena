@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
+import logging
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,8 @@ from domain.orchestration import (
     ReviewContext,
     ReviewDecision,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _strip_json_fence(text: str) -> str:
@@ -439,6 +442,14 @@ class ConfiguredWorkerAgent:
         tool_specs = [
             item for item in manifest if item["name"] in set(allowed_tools)
         ]
+        logger.debug(
+            "Worker tool capability snapshot run_id=%s task_id=%s allowed=%s available=%s selected=%s",
+            execution.get("run_id", ""),
+            task.get("task_id", ""),
+            allowed_tools,
+            tuple(item["name"] for item in manifest),
+            tuple(item["name"] for item in tool_specs),
+        )
         if execution.get("_worker_result_refs"):
             tool_specs.append(
                 {

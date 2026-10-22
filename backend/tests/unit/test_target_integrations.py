@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from application.common.responses import ToolResponse
+from application.orchestration.langgraph.runtime.root_agent import ConfiguredWorkerAgent
+from application.orchestration.langgraph.runtime.worker_executor import LangGraphWorkerExecutor
+from application.orchestration.worker_workflow import WorkerWorkflow
+from domain.orchestration import Task, TaskExecution
 from infrastructure.integrations.llm.embedding_provider import EmbeddingProvider
 from infrastructure.integrations.llm.llm_provider import RetryPolicy, RetryingLLMProvider
 from infrastructure.integrations.neo4j.adapter import Neo4jGraphAdapter
+from infrastructure.integrations.sandbox.docker_runner import DockerSandbox
+from infrastructure.integrations.sandbox.options import SandboxOptions
 from infrastructure.integrations.sandbox.subprocess_runner import SubprocessSandbox
 from infrastructure.tools.native import BuiltinToolExecutor
 from domain.tools import ToolExecutionRequest
@@ -122,6 +131,118 @@ async def test_subprocess_sandbox_cancellation_stops_child_processes(tmp_path: P
 
     assert marker.exists() is False
     assert sandbox._processes == set()
+
+
+@pytest.mark.asyncio
+async def test_docker_sandbox_can_run_read_only_without_workspace_mount(
+    monkeypatch, tmp_path: Path
+):
+    calls = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"3.12.14\n", b""
+
+    async def create(*args, **_kwargs):
+        calls.append(args)
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    sandbox = DockerSandbox(
+        SandboxOptions(
+            mount_workspace=False,
+            read_only_root=True,
+            default_network="none",
+            memory_mb=512,
+            cpu_limit=1,
+            pids_limit=64,
+        )
+    )
+    result = await sandbox.execute(
+        SimpleNamespace(
+            workspace=tmp_path,
+            image="python:3.12-slim",
+            argv=(
+                "/bin/sh",
+                "-lc",
+                "python -c 'import sys; print(sys.version.split()[0])'",
+            ),
+            timeout_seconds=10,
+        )
+    )
+
+    docker_args = calls[0]
+    assert result.status == "success"
+    assert result.stdout == "3.12.14\n"
+    assert docker_args[1:4] == ("run", "--rm", "--network")
+    assert "none" in docker_args
+    assert "--read-only" in docker_args
+    assert "--memory" in docker_args and "512m" in docker_args
+    assert "--cpus" in docker_args and "1" in docker_args
+    assert "--pids-limit" in docker_args and "64" in docker_args
+    assert "-v" not in docker_args and "-w" not in docker_args
+
+
+@pytest.mark.asyncio
+async def test_worker_graph_passes_allowed_tool_manifest_to_worker_model():
+    """验证 Worker Graph 会把任务获准的工具和审批策略交给模型。"""
+
+    class ToolService:
+        async def list_tools(self) -> list[ToolResponse]:
+            """返回测试用的唯一高风险工具配置。"""
+            return [
+                ToolResponse(
+                    name="exec_shell",
+                    description="Run a sandboxed command.",
+                    risk_level="high",
+                    execution_mode="native",
+                    require_approval=True,
+                    enabled=True,
+                    parameters={
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                    },
+                )
+            ]
+
+    class CaptureLLM:
+        def __init__(self) -> None:
+            """初始化用于记录 Worker 输入的模拟模型。"""
+            self.messages: list[dict[str, Any]] = []
+
+        async def invoke(
+            self, messages: list[dict[str, Any]]
+        ) -> dict[str, str]:
+            """保存提示并返回不触发工具执行的测试结果。"""
+            self.messages = messages
+            return {"content": json.dumps({"output": "mock"})}
+
+    llm = CaptureLLM()
+    worker_agent = ConfiguredWorkerAgent(llm, tool_service=ToolService())
+    executor = LangGraphWorkerExecutor(
+        workflow_factory=lambda: WorkerWorkflow(execute=worker_agent)
+    )
+    task = Task(
+        task_id="task-1",
+        title="Run one approved command",
+        objective="Request exec_shell once.",
+        allowed_tools=("exec_shell",),
+    )
+
+    await executor.execute(
+        TaskExecution(
+            plan_id="plan-1",
+            run_id="run-1",
+            session_id="session-1",
+            task=task,
+            execution_generation=1,
+        )
+    )
+
+    assert '"name": "exec_shell"' in llm.messages[0]["content"]
+    assert '"allowed_tools": ["exec_shell"]' in llm.messages[1]["content"]
 
 
 @pytest.mark.asyncio

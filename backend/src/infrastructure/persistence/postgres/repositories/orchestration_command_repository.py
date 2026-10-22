@@ -565,6 +565,12 @@ class PostgresOrchestrationCommandRepository:
                             _legacy_plan_document(next_plan), ensure_ascii=False
                         )
                         current_plan = next_plan
+                        # The ORM mappings use scalar foreign-key columns
+                        # without relationships, so insertion order is not
+                        # inferred for the composite PlanVersion -> Round FK.
+                        # Persist the new immutable version and tasks before
+                        # the next Round schedules executions against them.
+                        await session.flush()
                     elif decision.action != ReviewAction.CONTINUE:
                         raise PlanCommandRejected("review_action_unsupported")
 

@@ -22,6 +22,8 @@ class DockerSandbox(SandboxPort):
             memory_mb=options.sandbox_memory_mb,
             cpu_limit=options.sandbox_cpu_limit,
             pids_limit=getattr(options, "sandbox_pids_limit", 128),
+            mount_workspace=getattr(options, "sandbox_mount_workspace", True),
+            read_only_root=getattr(options, "sandbox_read_only_root", False),
         )
         self._processes: set[asyncio.subprocess.Process] = set()
 
@@ -38,7 +40,11 @@ class DockerSandbox(SandboxPort):
             "--cpus", str(self.options.cpu_limit),
             "--pids-limit", str(self.options.pids_limit),
         ])
-        argv.extend(["-v", f"{request.workspace}:/workspace", "-w", "/workspace", request.image])
+        if self.options.read_only_root:
+            argv.append("--read-only")
+        if self.options.mount_workspace:
+            argv.extend(["-v", f"{request.workspace}:/workspace", "-w", "/workspace"])
+        argv.append(request.image)
         argv.extend(request.argv)
         process = None
         communicate_task = None

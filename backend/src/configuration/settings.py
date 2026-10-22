@@ -177,6 +177,8 @@ class Settings(BaseSettings):
     sandbox_image_allowlist: list[str] = Field(default_factory=list)
     sandbox_mcp_images: dict[str, str] = Field(default_factory=dict)
     sandbox_default_network: str = "none"
+    sandbox_mount_workspace: bool = True
+    sandbox_read_only_root: bool = False
     sandbox_max_timeout: int = Field(default=60, ge=1, le=3600)
     sandbox_max_output_bytes: int = Field(default=1_000_000, ge=1024)
     sandbox_memory_mb: int = Field(default=512, ge=64)

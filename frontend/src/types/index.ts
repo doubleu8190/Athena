@@ -127,7 +127,7 @@ export interface ThinkingState {
   messageId: string | null
 }
 
-export type ExecutionTimelineStatus = "running" | "completed" | "failed" | "waiting" | "paused" | "info"
+export type ExecutionTimelineStatus = "running" | "completed" | "failed" | "waiting" | "paused" | "cancelled" | "info"
 
 export interface ExecutionTimelineEntry {
   id: string

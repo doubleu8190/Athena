@@ -11,6 +11,8 @@ class SandboxOptions:
     memory_mb: int = 512
     cpu_limit: float = 1.0
     pids_limit: int = 128
+    mount_workspace: bool = True
+    read_only_root: bool = False
 
 
 __all__ = ["SandboxOptions"]

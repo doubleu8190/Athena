@@ -281,6 +281,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             max_output_bytes=settings.sandbox_max_output_bytes,
             memory_mb=settings.sandbox_memory_mb,
             cpu_limit=settings.sandbox_cpu_limit,
+            pids_limit=settings.sandbox_pids_limit,
+            mount_workspace=settings.sandbox_mount_workspace,
+            read_only_root=settings.sandbox_read_only_root,
         )
     )
     mcp = PostgresMCPAdapter(mcp_repository)

@@ -358,6 +358,28 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           clearThinking()
         } else if (type === "run.cancelled") {
           const completedAt = occurredAt
+          for (const entry of useChatStore.getState().executionTimeline) {
+            if (entry.run_id !== runId || !["running", "waiting"].includes(entry.status)) continue
+            const label = entry.event_type.startsWith("round.")
+              ? "本轮任务已取消"
+              : entry.event_type.startsWith("tool.")
+                ? "工具操作已取消"
+                : entry.event_type.startsWith("approval.")
+                  ? "审批请求已取消"
+                  : entry.event_type.startsWith("synthesis.")
+                    ? "结果汇总已取消"
+                    : entry.label
+            upsertExecutionTimelineEntry({
+              ...entry,
+              event_type: entry.event_type.endsWith(".started")
+                ? entry.event_type.replace(/\.started$/, ".cancelled")
+                : entry.event_type,
+              label,
+              detail: [entry.detail, "运行已取消。"].filter(Boolean).join(" "),
+              status: "cancelled",
+              timestamp: completedAt,
+            })
+          }
           for (const step of useChatStore.getState().steps) {
             if (step.run_id === runId && step.status === "running") {
               updateStep(step.id, { status: "failed", completed_at: completedAt, error_message: "Stopped by user" })
@@ -505,7 +527,7 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
         ? `${terminalCount} / ${expectedCount} 个任务已结束`
         : undefined
     return base({
-      id: `round:${roundId}:${type.endsWith("started") ? "started" : "completed"}`,
+      id: `round:${roundId}`,
       label: type === "round.started" ? "开始执行一轮任务" : "本轮任务已处理完毕",
       detail,
       status: type === "round.started" ? "running" : "completed",

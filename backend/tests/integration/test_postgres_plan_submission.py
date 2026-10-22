@@ -17,7 +17,13 @@ from domain.orchestration import (
     OrchestrationCommandType,
     Plan,
     PlanEdge,
+    PlanRevision,
+    PlanStatus,
+    ReviewAction,
+    ReviewDecision,
+    RoundStatus,
     Task,
+    TaskStatus,
 )
 from infrastructure.persistence.postgres.models import (
     AgentPlanModel,
@@ -43,8 +49,8 @@ DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_submit_plan_persists_version_before_its_round() -> None:
-    """PlanVersion FK is satisfied before the initial Round is inserted."""
+async def test_submit_and_replan_preserve_completed_results_in_postgres() -> None:
+    """Initial persistence and a later replan preserve immutable history/results."""
     if not DATABASE_URL:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
@@ -152,6 +158,107 @@ async def test_submit_plan_persists_version_before_its_round() -> None:
             persisted_run = await session.get(AgentRunModel, run_id)
             assert persisted_run is not None
             assert persisted_run.status == "running"
+
+        async with session_factory() as session, session.begin():
+            persisted_plan = await session.get(AgentPlanModel, plan_id)
+            persisted_round = await session.get(PlanRoundModel, receipt.round_id)
+            assert persisted_plan is not None
+            assert persisted_round is not None
+            persisted_plan.status = PlanStatus.WAITING_REVIEW.value
+            persisted_round.status = RoundStatus.COMPLETED.value
+            persisted_round.terminal_task_count = 2
+            persisted_round.completed_at = now
+            for task_id in ("task-a", "task-b"):
+                task = await session.get(AgentTaskModel, task_id)
+                round_task = await session.get(
+                    RoundTaskModel, (receipt.round_id, task_id)
+                )
+                assert task is not None
+                assert round_task is not None
+                task.status = TaskStatus.COMPLETED.value
+                round_task.status = TaskStatus.COMPLETED.value
+                if task_id == "task-a":
+                    task.output_json = '{"answer":"preserve this result"}'
+
+        revision = PlanRevision(
+            base_version=1,
+            keep_task_ids=("task-a",),
+            cancel_task_ids=("task-b", "task-merge"),
+            new_tasks=(
+                {
+                    "task_id": "task-verify",
+                    "title": "Verify retained result",
+                    "objective": "Verify the result from task-a",
+                    "depends_on": ["task-a"],
+                },
+            ),
+        )
+        review_command = OrchestrationCommand(
+            message_id=f"review:{run_id}:v1",
+            command_type=OrchestrationCommandType.REVISE_PLAN,
+            idempotency_key=f"review:{plan_id}:round-1",
+            correlation_id=run_id,
+            occurred_at=now,
+            plan_id=plan_id,
+            scope_key=run_id,
+            plan_version=1,
+            round_id=receipt.round_id,
+        )
+        revised = await repository.apply_review_decision(
+            review_command,
+            ReviewDecision(
+                ReviewAction.REPLAN,
+                "Retain the completed result and add a verification task.",
+                revision=revision,
+            ),
+        )
+
+        new_task_id = "task-verify:" + run_id
+        assert revised.plan_version == 2
+        assert revised.round_id != receipt.round_id
+        assert revised.task_ids == (new_task_id,)
+        async with session_factory() as session:
+            plan_versions = (
+                await session.execute(
+                    select(PlanVersionModel)
+                    .where(PlanVersionModel.plan_id == plan_id)
+                    .order_by(PlanVersionModel.version)
+                )
+            ).scalars().all()
+            assert [version.version for version in plan_versions] == [1, 2]
+            assert plan_versions[0].dag_json["version"] == 1
+            assert [node["task_id"] for node in plan_versions[1].dag_json["nodes"]] == [
+                "task-a",
+                new_task_id,
+            ]
+            persisted_plan = await session.get(AgentPlanModel, plan_id)
+            assert persisted_plan is not None
+            assert persisted_plan.current_version == 2
+            assert persisted_plan.status == PlanStatus.RUNNING.value
+            retained = await session.get(AgentTaskModel, "task-a")
+            removed_pending = await session.get(AgentTaskModel, "task-merge")
+            created = await session.get(AgentTaskModel, new_task_id)
+            assert retained is not None
+            assert retained.status == TaskStatus.COMPLETED.value
+            assert retained.output_json == '{"answer":"preserve this result"}'
+            assert removed_pending is not None
+            assert removed_pending.status == TaskStatus.CANCELLED.value
+            assert created is not None
+            assert created.status == TaskStatus.PENDING.value
+            next_round = await session.get(PlanRoundModel, revised.round_id)
+            assert next_round is not None
+            assert next_round.plan_version == 2
+            assert next_round.round_number == 2
+            assert next_round.status == RoundStatus.RUNNING.value
+            assert await session.scalar(
+                select(func.count()).select_from(WorkerJobModel).where(
+                    WorkerJobModel.execution_id.in_(
+                        select(TaskExecutionModel.execution_id).where(
+                            TaskExecutionModel.round_id == revised.round_id
+                        )
+                    )
+                )
+            ) == 1
     finally:
         if schema_created:
             async with base_engine.begin() as connection:

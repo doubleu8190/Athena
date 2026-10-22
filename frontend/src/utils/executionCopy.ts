@@ -88,6 +88,7 @@ export function localizedStatus(status: string): string {
     failed: "失败",
     waiting: "等待确认",
     paused: "已暂停",
+    cancelled: "已取消",
     info: "提示",
   }
   return labels[status] || "处理中"

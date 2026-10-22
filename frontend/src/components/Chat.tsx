@@ -8,7 +8,7 @@ import { OrchestrationSummary } from "./OrchestrationSummary"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
+import type { ApprovalRequest, Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
 import { deriveOrchestrationView } from "../utils/orchestrationProjection"
 
 interface ChatProps {
@@ -413,6 +413,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
 
   const handleApproval = useCallback(async (
     batchId: string,
+    requests: ApprovalRequest[],
     decisions: Record<string, "approved" | "denied" | "cancelled">,
   ) => {
     if (demoMode) {
@@ -447,7 +448,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
       return
     }
     try {
-      await apiClient.respondApprovalBatch(batchId, decisions)
+      await apiClient.respondApprovalsIndividually(requests, decisions)
       clearError()
     } catch (err) {
       const message = err instanceof Error ? err.message : "Approval response failed"

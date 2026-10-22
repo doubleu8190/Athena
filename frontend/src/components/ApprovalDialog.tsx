@@ -6,7 +6,7 @@ import { approvalActionDescription } from "../utils/executionCopy"
 interface ApprovalCardProps {
   batchId: string
   requests: ApprovalRequest[]
-  onSubmit: (batchId: string, decisions: Record<string, "approved" | "denied" | "cancelled">) => Promise<void>
+  onSubmit: (batchId: string, requests: ApprovalRequest[], decisions: Record<string, "approved" | "denied" | "cancelled">) => Promise<void>
 }
 
 function riskClass(risk: ApprovalRequest["risk_level"]): string {
@@ -28,7 +28,7 @@ export function ApprovalCard({ batchId, requests, onSubmit }: ApprovalCardProps)
     if (submitting || requests.some((request) => !next[request.approval_id])) return
     setSubmitting(true)
     try {
-      await onSubmit(batchId, next)
+      await onSubmit(batchId, requests, next)
     } catch {
       setSubmitting(false)
     }

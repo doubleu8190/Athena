@@ -195,6 +195,8 @@ class ApprovalResponse:
     resolved: bool
     resolution: str
     expires_at: datetime | None = None
+    plan_id: str | None = None
+    task_id: str | None = None
 
     def __eq__(self, other: object) -> bool:
         """允许旧领域断言按审批数据比较，迁移后接口仍保持只读。"""

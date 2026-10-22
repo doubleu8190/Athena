@@ -166,17 +166,64 @@ def test_run_controller_maps_all_command_errors() -> None:
 
 
 def test_approval_controller_maps_conflicts_and_serializes_history() -> None:
-    request = ApprovalRequest("a", "s", "r", "c", "tool", {"x": 1}, "low", created_at=NOW)
+    request = ApprovalRequest(
+        "a",
+        "s",
+        "r",
+        "c",
+        "tool",
+        {"x": 1},
+        "low",
+        task_id="task-1",
+        plan_id="plan-1",
+        created_at=NOW,
+    )
     class Approval:
         async def pending(self, session_id=None): return [request]
         async def history(self, *args, **kwargs): return [request]
         async def resolve(self, *args, **kwargs): return False
         async def resolve_batch(self, *args, **kwargs): return False
     client = TestClient(create_app(approval_service_factory=lambda: Approval()))
-    assert client.get("/api/approvals").json()[0]["approval_id"] == "a"
+    pending = client.get("/api/approvals").json()[0]
+    assert pending["approval_id"] == "a"
+    assert pending["run_id"] == "r"
+    assert pending["plan_id"] == "plan-1"
+    assert pending["task_id"] == "task-1"
     assert client.get("/api/approvals/logs").json()[0]["tool_name"] == "tool"
     assert client.post("/api/approvals/a/resolve", json={"decision": "approved", "run_id": "r", "task_id": "t"}).status_code == 409
+    assert client.post("/api/approvals/a/decision", json={"decision": "approved", "run_id": "r", "task_id": "t"}).status_code == 409
     assert client.post("/api/approvals/batches/b/resolve", json={"decisions": {}, "run_id": "r"}).status_code == 409
+
+
+def test_approval_decision_endpoint_records_one_decision() -> None:
+    class Approval:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def resolve(self, approval_id, **kwargs):
+            self.calls.append((approval_id, kwargs))
+            return True
+
+    service = Approval()
+    client = TestClient(create_app(approval_service_factory=lambda: service))
+
+    response = client.post(
+        "/api/approvals/approval-1/decision",
+        json={"decision": "approved", "run_id": "run-1", "task_id": "task-1"},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "status": "decision_recorded",
+        "approval_id": "approval-1",
+        "decision": "approved",
+    }
+    assert service.calls == [
+        (
+            "approval-1",
+            {"run_id": "run-1", "task_id": "task-1", "decision": "approved"},
+        )
+    ]
 
 
 @pytest.mark.asyncio

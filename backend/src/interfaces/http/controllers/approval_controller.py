@@ -15,7 +15,7 @@ from application.approval.responses import ApprovalResponse
 class ApprovalDecisionRequest(BaseModel):
     decision: str = Field(pattern="^(approved|denied)$")
     run_id: str
-    task_id: str
+    task_id: str | None = None
 
 
 class ApprovalBatchRequest(BaseModel):
@@ -52,17 +52,31 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
         denied = sum(_resolution(item) == "denied" for item in history_items)
         return {"pending": len(pending_items), "approved": approved, "denied": denied, "total": len(pending_items) + len(history_items)}
 
-    @router.post("/{approval_id}/resolve")
-    async def resolve(approval_id: str, body: ApprovalDecisionRequest) -> dict[str, Any]:
+    async def record_decision(
+        approval_id: str,
+        body: ApprovalDecisionRequest,
+        *,
+        status: str,
+    ) -> dict[str, Any]:
         updated = await factory().resolve(
             approval_id,
             run_id=body.run_id,
-            task_id=body.task_id,
+            task_id=body.task_id or "",
             decision=body.decision,
         )
         if not updated:
             raise HTTPException(status_code=409, detail="approval_not_pending")
-        return {"status": "resolved", "approval_id": approval_id, "decision": body.decision}
+        return {"status": status, "approval_id": approval_id, "decision": body.decision}
+
+    @router.post("/{approval_id}/decision", status_code=202)
+    async def decide(approval_id: str, body: ApprovalDecisionRequest) -> dict[str, Any]:
+        return await record_decision(
+            approval_id, body, status="decision_recorded"
+        )
+
+    @router.post("/{approval_id}/resolve")
+    async def resolve(approval_id: str, body: ApprovalDecisionRequest) -> dict[str, Any]:
+        return await record_decision(approval_id, body, status="resolved")
 
     @router.post("/batches/{batch_id}/resolve")
     async def resolve_batch(batch_id: str, body: ApprovalBatchRequest) -> dict[str, Any]:
@@ -84,6 +98,8 @@ def _response(value: ApprovalResponse) -> dict[str, Any]:
         "expires_at": value.expires_at.isoformat() if value.expires_at else None,
         "session_id": value.session_id,
         "run_id": value.run_id,
+        "plan_id": value.plan_id,
+        "task_id": value.task_id,
         "tool_call_id": value.tool_call_id,
         "approval_batch_id": value.approval_batch_id,
         "resolved": bool(getattr(value, "resolved", False)),

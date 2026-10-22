@@ -266,6 +266,8 @@ def _to_response(value: ApprovalRequest) -> ApprovalResponse:
         resolved=value.status != ApprovalStatus.PENDING,
         resolution=value.decision.value if value.decision else value.status.value,
         expires_at=value.expires_at,
+        plan_id=value.plan_id,
+        task_id=value.task_id,
     )
 
 

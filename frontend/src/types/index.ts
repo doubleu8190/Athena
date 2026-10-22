@@ -280,6 +280,7 @@ export interface ApprovalRequest {
   approval_batch_id?: string | null
   description?: string
   session_id?: string
+  run_id?: string
   plan_id?: string
   task_id?: string
   task_title?: string

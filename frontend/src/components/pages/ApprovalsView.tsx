@@ -25,6 +25,7 @@ const PAGE_SIZE = 20
 const DECISION_META = {
   approved: { tone: "success", label: "通过" },
   denied: { tone: "danger", label: "拒绝" },
+  expired: { tone: "warning", label: "已过期" },
   cancelled: { tone: "default", label: "取消" },
 } as const
 
@@ -146,8 +147,8 @@ function ApprovalsView() {
                 const key = item.approval_batch_id || item.approval_id
                 groups[key] = [...(groups[key] || []), item]
                 return groups
-              }, {})).map(([batchId, requests]) => <ApprovalCard key={batchId} batchId={batchId} requests={requests} onSubmit={async (id, decisions) => {
-                await apiClient.respondApprovalBatch(id, decisions)
+              }, {})).map(([batchId, requests]) => <ApprovalCard key={batchId} batchId={batchId} requests={requests} onSubmit={async (_id, approvalRequests, decisions) => {
+                await apiClient.respondApprovalsIndividually(approvalRequests, decisions)
                 await reload()
               }} />)}
             </section> : <div className="rounded-md border border-athena-border px-4 py-3 text-sm text-athena-muted">当前没有待审批操作</div>}

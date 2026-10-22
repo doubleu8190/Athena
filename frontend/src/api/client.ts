@@ -342,14 +342,40 @@ class ApiClient {
     return this.request<ApprovalRequest[]>(`/api/approvals${params}`)
   }
 
-  async respondApprovalBatch(
-    approvalBatchId: string,
+  async respondApproval(
+    approval: Pick<ApprovalRequest, "approval_id" | "run_id" | "task_id">,
+    decision: "approved" | "denied",
+  ): Promise<{ status: string; approval_id: string; decision: string }> {
+    if (!approval.run_id) throw new Error("approval_run_context_missing")
+    return this.request<{ status: string; approval_id: string; decision: string }>(
+      `/api/approvals/${encodeURIComponent(approval.approval_id)}/decision`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          decision,
+          run_id: approval.run_id,
+          task_id: approval.task_id,
+        }),
+      },
+    )
+  }
+
+  /** 展示分组中的审批仍逐条授权和提交。 */
+  async respondApprovalsIndividually(
+    requests: ApprovalRequest[],
     decisions: Record<string, "approved" | "denied" | "cancelled">,
-  ): Promise<{ status: string }> {
-    return this.request<{ status: string }>(`/api/approvals/batches/${encodeURIComponent(approvalBatchId)}/resolve`, {
-      method: "POST",
-      body: JSON.stringify({ decisions }),
-    })
+  ): Promise<void> {
+    const results = await Promise.allSettled(
+      requests.map((request) => {
+        const decision = decisions[request.approval_id]
+        if (decision !== "approved" && decision !== "denied") {
+          return Promise.reject(new Error("approval_decision_invalid"))
+        }
+        return this.respondApproval(request, decision)
+      }),
+    )
+    const failure = results.find((result) => result.status === "rejected")
+    if (failure?.status === "rejected") throw failure.reason
   }
 
   /** 修改会话标题。 */

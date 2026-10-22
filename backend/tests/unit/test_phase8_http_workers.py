@@ -16,7 +16,7 @@ from starlette.requests import Request
 from application.events import EventStreamService
 from application.files import IngestionService
 from application.memory import MemoryWriteWorkflow
-from application.orchestration import OrchestrationService, WorkerSchedulerService
+from application.orchestration import OrchestrationService
 from application.runs import RunCommandService, RunNotFoundError, CommandNotFoundError
 from workers import KnowledgeDocumentWorker, MemoryWorker
 from application.sessions import SessionNotFoundError
@@ -25,7 +25,6 @@ from bootstrap import create_app
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.files import Attachment, AttachmentStatus, FileChunk, FileLocator, FileMetadata, ParsedDocument
 from domain.memory import CompletedTurn, MemoryCandidate, MemoryResolution, ResolutionAction
-from domain.orchestration import Plan, Task, TaskExecution, TaskResult, TaskStatus
 from domain.sessions import Session
 from domain.approval import ApprovalDecision, ApprovalRequest
 from domain.runs import CommandEnqueueResult, CommandStatus, CommandStatusRecord, CommandType, RunSummary
@@ -130,22 +129,13 @@ async def test_memory_workflow_create_update_and_skip_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestration_service_and_scheduler_error_paths() -> None:
+async def test_orchestration_service_missing_plan_error() -> None:
     class Repo:
         async def get(self, key): return None
         async def create(self, plan, tasks): return plan
     service = OrchestrationService(Repo())
-    with pytest.raises(Exception): await service.get_plan("missing")
-    with pytest.raises(RuntimeError): await service.start_ready_tasks("missing")
-    class Worker:
-        async def cancel(self, run): return 2
-        async def execute(self, execution): raise RuntimeError("x")
-    class SchedulerRepo:
-        async def get(self, key): return None
-        async def claim_ready_tasks(self, *args): return []
-    scheduler = WorkerSchedulerService(SchedulerRepo(), Worker())
-    with pytest.raises(ValueError): await scheduler.start_ready_tasks("missing")
-    assert await scheduler.cancel_run("r") == 2
+    with pytest.raises(LookupError):
+        await service.get_plan("missing")
 
 
 def test_run_controller_maps_all_command_errors() -> None:
@@ -236,12 +226,13 @@ async def test_sse_heartbeat_and_untagged_event_paths() -> None:
         async def replay(self, *args): return []
         async def close(self, *args): self.closed = True
     events = Events(); service = SimpleNamespace(open_subscription=events.open_subscription, replay=events.replay, close=events.close)
-    app = FastAPI(); app.include_router(build_events_router(lambda: service))
+    router = build_events_router(lambda: service)
+    app = FastAPI(); app.include_router(router)
     disconnected = iter([False, True])
     request = Request({"type": "http", "method": "GET", "path": "/sessions/s/events", "headers": [], "app": app})
     async def is_disconnected(): return next(disconnected)
     request.is_disconnected = is_disconnected  # type: ignore[method-assign]
-    response = await app.routes[-1].endpoint("s", request, 0, service)
+    response = await router.routes[0].endpoint("s", request, 0, service)
     chunks = [item async for item in response.body_iterator]
     assert chunks == [": heartbeat\n\n"]
     assert events.closed

@@ -1,4 +1,4 @@
-"""Default Worker executor used by the orchestration scheduler."""
+"""Default Worker executor used by the durable Job dispatcher."""
 
 from __future__ import annotations
 
@@ -103,10 +103,6 @@ class LangGraphWorkerExecutor(WorkerExecutor):
         recovered = dict(value)
         recovered["interrupt_id"] = str(getattr(pending, "id", ""))
         return recovered
-
-    async def cancel(self, run_id: str) -> int:
-        """取消当前进程中属于指定运行的 Worker；返回取消数量。"""
-        return 0
 
     @staticmethod
     async def _default_execute(*, execution: Any, **_kwargs: Any) -> dict[str, Any]:

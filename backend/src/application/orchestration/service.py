@@ -1,4 +1,4 @@
-"""计划校验、持久化和调度入口。"""
+"""计划定义校验与仓储访问用例。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from domain.orchestration import (
     Plan,
     PlanDAG,
     PlanRepository,
-    PlanScheduler,
     PlanValidator,
     Task,
 )
@@ -26,11 +25,9 @@ class OrchestrationService:
         repository: PlanRepository,
         *,
         validator: PlanValidator | None = None,
-        scheduler: PlanScheduler | None = None,
     ) -> None:
         self._repository = repository
         self._validator = validator or PlanValidator()
-        self._scheduler = scheduler
 
     async def create_plan(self, plan: Plan, tasks: Iterable[Task]) -> Plan:
         values = list(tasks)
@@ -42,12 +39,6 @@ class OrchestrationService:
         if value is None:
             raise PlanNotFoundError(plan_id)
         return value
-
-    async def start_ready_tasks(self, plan_id: str) -> dict[str, object]:
-        if self._scheduler is None:
-            raise RuntimeError("plan scheduler is not configured")
-        await self.get_plan(plan_id)
-        return await self._scheduler.start_ready_tasks(plan_id)
 
     async def ready_tasks(self, plan_id: str, states: dict[str, str]) -> list[str]:
         plan, _ = await self.get_plan(plan_id)

@@ -10,6 +10,7 @@ import pytest
 from application.orchestration.langgraph.runtime.root_agent import (
     ConfiguredRootAgent,
     _decode_worker_reply,
+    _partition_plan_versions,
 )
 
 
@@ -111,7 +112,7 @@ async def test_empty_plan_gets_one_repair_instead_of_failing_materialization() -
             "messages": [
                 {
                     "role": "user",
-                    "content": "Version 1 contains only a draft; review after the round.",
+                    "content": "Create a draft; review after the round.",
                 }
             ],
             "task": {"mode": "plan"},
@@ -138,6 +139,7 @@ async def test_plan_prompt_respects_explicit_version_boundaries() -> None:
                 "task_id": "draft",
                 "title": "Draft",
                 "objective": "Create the first draft",
+                "plan_version": 1,
                 "worker_type": "general",
                 "allowed_tools": [],
                 "input": "Create a draft",
@@ -145,7 +147,14 @@ async def test_plan_prompt_respects_explicit_version_boundaries() -> None:
             }
         ],
     }
-    llm = _SequenceLLM([json.dumps(plan)])
+    unversioned_plan = {
+        **plan,
+        "tasks": [
+            {key: value for key, value in task.items() if key != "plan_version"}
+            for task in plan["tasks"]
+        ],
+    }
+    llm = _SequenceLLM([json.dumps(unversioned_plan), json.dumps(plan)])
 
     await ConfiguredRootAgent(llm)(
         harness_input={
@@ -164,6 +173,95 @@ async def test_plan_prompt_respects_explicit_version_boundaries() -> None:
     prompt = llm.messages[0][0]["content"]
     assert "Plan Version or phase boundaries" in prompt
     assert "do not schedule later-phase tasks early" in prompt
+    assert "Each task must include an integer plan_version" in prompt
+
+
+@pytest.mark.asyncio
+async def test_explicit_plan_versions_are_partitioned_before_submission() -> None:
+    plan = {
+        "plan_id": "versioned-plan",
+        "goal": "Draft then review after Root Review",
+        "max_parallelism": 1,
+        "edges": [{"from": "draft", "to": "review"}],
+        "tasks": [
+            {
+                "task_id": "draft",
+                "title": "Draft",
+                "objective": "Write the draft",
+                "plan_version": 1,
+                "worker_type": "general",
+                "allowed_tools": [],
+                "input": {"topic": "x"},
+                "expected_output": {"format": "text"},
+            },
+            {
+                "task_id": "review",
+                "title": "Review",
+                "objective": "Review the completed draft",
+                "plan_version": 2,
+                "worker_type": "general",
+                "allowed_tools": [],
+                "input": {"topic": "x"},
+                "expected_output": {"format": "review"},
+            },
+        ],
+    }
+    unversioned_plan = {
+        **plan,
+        "tasks": [
+            {key: value for key, value in task.items() if key != "plan_version"}
+            for task in plan["tasks"]
+        ],
+    }
+    llm = _SequenceLLM([json.dumps(unversioned_plan), json.dumps(plan)])
+
+    result = await ConfiguredRootAgent(llm)(
+        harness_input={
+            "request": {"run_id": "run-versioned", "session_id": "session-versioned"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Create Plan Version 1 with only a draft; after Root Review, "
+                        "create Plan Version 2 with the review."
+                    ),
+                }
+            ],
+            "task": {"mode": "plan"},
+            "available_worker_tools": [],
+        }
+    )
+
+    assert [task["task_id"] for task in result["plan"]["tasks"]] == ["draft"]
+    assert result["plan"]["edges"] == []
+    assert result["deferred_plan_versions"] == {
+        "2": [
+            {
+                "task_id": "review",
+                "title": "Review",
+                "objective": "Review the completed draft",
+                "worker_type": "general",
+                "allowed_tools": [],
+                "input": {"topic": "x"},
+                "expected_output": {"format": "review"},
+                "depends_on": ["draft"],
+            }
+        ]
+    }
+    assert len(llm.messages) == 2
+    assert "Each task must include an integer plan_version" in llm.messages[1][0]["content"]
+
+
+def test_plan_version_rejects_dependency_on_a_later_version() -> None:
+    plan = {
+        "tasks": [
+            {"task_id": "draft", "plan_version": 1, "depends_on": ["review"]},
+            {"task_id": "review", "plan_version": 2},
+        ],
+        "edges": [],
+    }
+
+    assert _partition_plan_versions(plan, required=True) is None
 
 
 def test_plan_decoder_accepts_markdown_fence_and_json_with_escaped_braces() -> None:

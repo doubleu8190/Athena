@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -24,15 +25,21 @@ from infrastructure.persistence.postgres.models import (
     ApprovalRecordModel,
     Base,
     OrchestrationOutboxModel,
+    OrchestrationInboxModel,
     PlanRoundModel,
     PlanVersionModel,
     RoundTaskModel,
+    RootResumeJobModel,
     TaskExecutionModel,
     WorkerJobModel,
 )
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
 )
+from infrastructure.persistence.postgres.repositories.orchestration_event_repository import (
+    PostgresOrchestrationEventRepository,
+)
+from domain.orchestration import TaskStatus, WorkerTaskTerminalEvent
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -77,6 +84,8 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
             TaskExecutionModel.__table__,
             WorkerJobModel.__table__,
             OrchestrationOutboxModel.__table__,
+            OrchestrationInboxModel.__table__,
+            RootResumeJobModel.__table__,
         ]
         async with test_engine.begin() as connection:
             await connection.run_sync(
@@ -126,6 +135,137 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
         assert execution.attempt == 1
         assert job.lease_owner == current_lease.worker_id
         assert job.attempt == 2
+    finally:
+        await test_engine.dispose()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_worker_terminal_commit_with_lost_receipt_is_deduplicated() -> None:
+    """Worker 终态事务提交后丢失回执，重投只返回原回执、不重复推进。"""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"worker_receipt_test_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    test_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    schema_created = False
+    now = datetime.now(timezone.utc)
+
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+
+        required_tables = [
+            AgentRunModel.__table__,
+            AgentPlanModel.__table__,
+            AgentTaskModel.__table__,
+            ApprovalRecordModel.__table__,
+            PlanVersionModel.__table__,
+            PlanRoundModel.__table__,
+            RoundTaskModel.__table__,
+            TaskExecutionModel.__table__,
+            WorkerJobModel.__table__,
+            OrchestrationOutboxModel.__table__,
+            OrchestrationInboxModel.__table__,
+            RootResumeJobModel.__table__,
+        ]
+        async with test_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, tables=required_tables
+                )
+            )
+
+        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+        await _seed_expired_worker_job(session_factory, now=now)
+        worker_jobs = PostgresWorkerJobRepository(
+            session_factory,
+            clock=lambda: now,
+        )
+        lease = await worker_jobs.claim_next("recovery-worker", lease_seconds=60)
+        assert lease is not None
+
+        event = WorkerTaskTerminalEvent(
+            message_id="terminal-event-receipt-loss",
+            occurred_at=now,
+            worker_id=lease.worker_id,
+            run_id=lease.run_id,
+            plan_id=lease.plan_id,
+            plan_version=lease.plan_version,
+            round_id=lease.round_id,
+            task_id=lease.task_id,
+            execution_id=lease.execution_id,
+            fencing_token=lease.fencing_token,
+            cancellation_epoch=lease.cancellation_epoch,
+            status=TaskStatus.COMPLETED,
+            result={"output": {"summary": "finished"}},
+            error=None,
+            retryable=False,
+        )
+        repository = PostgresOrchestrationEventRepository(
+            session_factory,
+            clock=lambda: now,
+        )
+
+        class LoseReceiptAfterCommit:
+            async def apply_terminal_event(self, value):
+                receipt = await repository.apply_worker_terminal_event(value)
+                assert receipt.accepted
+                raise RuntimeError("simulated lost Worker terminal receipt")
+
+        handler = LoseReceiptAfterCommit()
+        with pytest.raises(RuntimeError, match="simulated lost Worker terminal receipt"):
+            await handler.apply_terminal_event(event)
+
+        async with session_factory() as session:
+            task = await session.get(AgentTaskModel, lease.task_id)
+            execution = await session.get(TaskExecutionModel, lease.execution_id)
+            job = await session.get(WorkerJobModel, lease.job_id)
+            inbox = await session.get(
+                OrchestrationInboxModel,
+                ("round-task-terminal-v1", event.message_id),
+            )
+            outbox = (
+                await session.execute(select(OrchestrationOutboxModel))
+            ).scalars().all()
+            resumes = (
+                await session.execute(select(RootResumeJobModel))
+            ).scalars().all()
+
+        assert task is not None and task.status == "completed"
+        assert execution is not None and execution.status == "completed"
+        assert job is not None and job.status == "completed"
+        assert inbox is not None and inbox.status == "processed"
+        assert len(outbox) == 2
+        assert len(resumes) == 1
+
+        replay = await repository.apply_worker_terminal_event(event)
+        assert replay.accepted is True
+        assert replay.deduplicated is True
+        assert replay.round_completed is True
+
+        async with session_factory() as session:
+            round_row = await session.get(PlanRoundModel, lease.round_id)
+            task_rows = (
+                await session.execute(select(AgentTaskModel))
+            ).scalars().all()
+            outbox_rows = (
+                await session.execute(select(OrchestrationOutboxModel))
+            ).scalars().all()
+        assert round_row is not None and round_row.terminal_task_count == 1
+        assert len(task_rows) == 1
+        assert len(outbox_rows) == 2
     finally:
         await test_engine.dispose()
         if schema_created:

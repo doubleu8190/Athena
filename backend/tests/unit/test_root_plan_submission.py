@@ -4,8 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from application.orchestration.root_workflow import RootWorkflow
-from domain.orchestration import OrchestrationCommandType
+from application.orchestration.root_workflow import (
+    RootWorkflow,
+    _deferred_version_review_decision,
+)
+from domain.orchestration import OrchestrationCommandType, ReviewAction, ReviewContext
 
 
 class ToolService:
@@ -56,27 +59,13 @@ class CommandHandler:
         self.submissions.append((command, plan, tasks, legal_tools))
 
 
-class Scheduler:
-    def __init__(self):
-        self.started = []
-
-    async def start_ready_tasks(self, plan_id):
-        self.started.append(plan_id)
-
-
 @pytest.mark.asyncio
 async def test_root_submits_initial_plan_through_atomic_command_handler():
     handler = CommandHandler()
-    scheduler = Scheduler()
-    legacy_orchestration = SimpleNamespace(create_plan=lambda **_kwargs: None)
     workflow = RootWorkflow(
         SimpleNamespace(
             tool_service=ToolService(),
             orchestration_command_handler=handler,
-            orchestration=legacy_orchestration,
-            worker_scheduler=scheduler,
-            persist_plan=None,
-            validate_plan=None,
             event_publisher=None,
             plan_builder=None,
         )
@@ -136,7 +125,6 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
         ("gather:run-42", "summarize:run-42")
     ]
     assert legal_tools == {"read_local_file"}
-    assert scheduler.started == []
     assert result["plan"]["plan_id"] == plan.plan_id
 
 
@@ -147,10 +135,6 @@ async def test_explicit_user_tool_allowlist_binds_to_matching_task_input():
         SimpleNamespace(
             tool_service=ShellToolService(),
             orchestration_command_handler=handler,
-            orchestration=SimpleNamespace(create_plan=lambda **_kwargs: None),
-            worker_scheduler=Scheduler(),
-            persist_plan=None,
-            validate_plan=None,
             event_publisher=None,
             plan_builder=None,
         )
@@ -185,3 +169,216 @@ async def test_explicit_user_tool_allowlist_binds_to_matching_task_input():
     _, _plan, tasks, legal_tools = handler.submissions[0]
     assert tasks[0].allowed_tools == ("exec_shell",)
     assert "exec_shell" in legal_tools
+
+
+def test_completed_version_review_automatically_submits_deferred_version():
+    context = ReviewContext(
+        original_goal="Version 1 drafts; Version 2 reviews after Root Review",
+        plan_id="plan:run-1",
+        plan_version=1,
+        round_id="round-1",
+        full_dag_summary={},
+        round_results=({"task_id": "draft:run-1", "status": "completed"},),
+    )
+    decision = _deferred_version_review_decision(
+        context,
+        {
+            "request": {"run_id": "run-1"},
+            "plan": {"task_ids": ["draft:run-1"]},
+            "deferred_plan_versions": {
+                "2": [
+                    {
+                        "task_id": "review",
+                        "title": "Review",
+                        "objective": "Review the draft",
+                        "input": {"source": "draft"},
+                        "expected_output": {"format": "review"},
+                        "allowed_tools": [],
+                        "depends_on": ["draft"],
+                    }
+                ]
+            },
+        },
+    )
+
+    assert decision is not None
+    assert decision.action is ReviewAction.REPLAN
+    assert decision.revision is not None
+    assert decision.revision.keep_task_ids == ("draft:run-1",)
+    assert decision.revision.new_tasks[0]["depends_on"] == ["draft:run-1"]
+
+
+def test_later_version_review_keeps_all_tasks_from_current_dag():
+    context = ReviewContext(
+        original_goal="Version 3 produces final output",
+        plan_id="plan:run-1",
+        plan_version=2,
+        round_id="round-2",
+        full_dag_summary={
+            "nodes": [
+                {"task_id": "draft:run-1"},
+                {"task_id": "review:run-1"},
+            ]
+        },
+        previous_results_summary=(
+            {"task_id": "draft:run-1", "status": "completed"},
+        ),
+        round_results=({"task_id": "review:run-1", "status": "completed"},),
+    )
+    decision = _deferred_version_review_decision(
+        context,
+        {
+            "request": {"run_id": "run-1"},
+            "plan": {"task_ids": ["draft:run-1"]},
+            "deferred_plan_versions": {
+                "3": [
+                    {
+                        "task_id": "finalize",
+                        "title": "Finalize",
+                        "objective": "Produce final output",
+                        "depends_on": ["review"],
+                    }
+                ]
+            },
+        },
+    )
+
+    assert decision is not None and decision.revision is not None
+    assert decision.revision.keep_task_ids == ("draft:run-1", "review:run-1")
+    assert decision.revision.new_tasks[0]["depends_on"] == ["review:run-1"]
+
+
+def test_deferred_tasks_can_depend_on_another_task_in_the_same_version():
+    context = ReviewContext(
+        original_goal="Version 2 contains a review and a summary",
+        plan_id="plan:run-1",
+        plan_version=1,
+        round_id="round-1",
+        full_dag_summary={},
+        round_results=({"task_id": "draft:run-1", "status": "completed"},),
+    )
+
+    decision = _deferred_version_review_decision(
+        context,
+        {
+            "request": {"run_id": "run-1"},
+            "plan": {"task_ids": ["draft:run-1"]},
+            "deferred_plan_versions": {
+                "2": [
+                    {
+                        "task_id": "review",
+                        "title": "Review",
+                        "objective": "Review the draft",
+                    },
+                    {
+                        "task_id": "summary",
+                        "title": "Summary",
+                        "objective": "Summarize the review",
+                        "depends_on": ["review"],
+                    },
+                ]
+            },
+        },
+    )
+
+    assert decision is not None and decision.revision is not None
+    assert decision.revision.new_tasks[1]["depends_on"] == ["review:run-1"]
+
+
+def test_deferred_version_with_unknown_dependency_is_not_submitted():
+    context = ReviewContext(
+        original_goal="Version 2 reviews",
+        plan_id="plan:run-1",
+        plan_version=1,
+        round_id="round-1",
+        full_dag_summary={},
+        round_results=({"task_id": "draft:run-1", "status": "completed"},),
+    )
+
+    decision = _deferred_version_review_decision(
+        context,
+        {
+            "request": {"run_id": "run-1"},
+            "plan": {"task_ids": ["draft:run-1"]},
+            "deferred_plan_versions": {
+                "2": [
+                    {
+                        "task_id": "review",
+                        "title": "Review",
+                        "objective": "Review the draft",
+                        "depends_on": ["missing"],
+                    }
+                ]
+            },
+        },
+    )
+
+    assert decision is None
+
+
+@pytest.mark.asyncio
+async def test_root_review_overrides_continue_when_deferred_version_is_due():
+    context = ReviewContext(
+        original_goal="Version 1 drafts; Version 2 reviews after Root Review",
+        plan_id="plan:run-1",
+        plan_version=1,
+        round_id="round-1",
+        full_dag_summary={},
+        round_results=({"task_id": "draft:run-1", "status": "completed"},),
+    )
+
+    class ReviewContexts:
+        async def load_review_context(self, _round_id):
+            return context
+
+    class Agent:
+        async def review(self, *_args, **_kwargs):
+            raise AssertionError("deferred version review must be deterministic")
+
+    class Commands:
+        def __init__(self):
+            self.decision = None
+
+        async def load_review_decision(self, **_kwargs):
+            return None
+
+        async def apply_review_decision(self, _command, decision):
+            self.decision = decision
+            return SimpleNamespace(status="accepted")
+
+    commands = Commands()
+    workflow = RootWorkflow(
+        SimpleNamespace(
+            agent=Agent(),
+            review_context_repository=ReviewContexts(),
+            orchestration_command_handler=commands,
+        )
+    )
+    identity = {
+        "run_id": "run-1",
+        "plan_id": "plan:run-1",
+        "round_id": "round-1",
+        "plan_version": 1,
+    }
+
+    result = await workflow.review_completed_round(
+        {
+            "request": {"run_id": "run-1"},
+            "root_wait": identity,
+            "resume_value": {"type": "round_completed", **identity},
+            "plan": {"task_ids": ["draft:run-1"]},
+            "deferred_plan_versions": {
+                "2": [
+                    {
+                        "task_id": "review",
+                        "title": "Review",
+                        "objective": "Review the draft",
+                        "depends_on": ["draft"],
+                    }
+                ]
+            },
+        }
+    )
+
+    assert result["review_action"] == "REPLAN"
+    assert commands.decision.action is ReviewAction.REPLAN

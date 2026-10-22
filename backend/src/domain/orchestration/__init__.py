@@ -35,9 +35,7 @@ from .rounds import NoReadyTasksError, freeze_ready_round
 from .ports import (
     OrchestrationCommandRepository,
     PlanRepository,
-    PlanScheduler,
     OrchestrationOutboxRepository,
-    ResultSynthesizer,
     ReviewContextRepository,
     RootGraphPort,
     TaskEventRepository,
@@ -58,8 +56,6 @@ __all__ = [
     "PlanValidationError",
     "PlanValidator",
     "PlanRepository",
-    "PlanScheduler",
-    "ResultSynthesizer",
     "RootGraphPort",
     "Task",
     "TaskResult",

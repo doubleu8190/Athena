@@ -408,6 +408,12 @@ P6 本轮新增真实 Provider、浏览器、PostgreSQL、正常审批与 Docker
 
 为使该真实闭环成立，本轮修复 Worker Job 从 PostgreSQL 加载 allowlist 时丢弃 JSON 列表、用户显式工具白名单未贯穿任务理解与 Plan 物化、Provider 的 Qwen 风格文本工具调用未解码、审批恢复仍使用旧 fencing token 等问题。Root 现在持久化完整原始用户目标，提示模型遵守明确的 Plan Version/阶段边界，并将空任务列表作为无效计划进行一次有界格式修复。43 条定向单元测试及全部 11 条 PostgreSQL 集成测试通过。更广的单测运行有 133 条通过、5 条失败，涉及认证路由期望、旧取消状态契约、审批事件替身缺少 `publish`、旧 SSE 路由访问方式；全量收集还遇到引用不存在 `infrastructure.observability` 的旧测试，以及 unit/integration 同名模块冲突，因此当前不能宣称全后端单测通过。清理已完成：移除临时 `exec_shell` 配置、软删除合成测试会话，保留 Approval/ToolOperation 审计行；未发现待处理审批、未确认 Outbox 或验收 Run 的活动 Worker Job。
 
-真实 Provider Replan 验收尚未通过。最新浏览器运行将完整原始用户指令保存到 `Plan.user_goal`，但 Provider 仍把“独立审查”提前加入 Version 1；首轮 Review 选择 CONTINUE 并开始 Version 1 第二轮，没有创建 Version 2。为结束这条偏离验收目标的运行，界面停止后确认 Run/Plan 已取消、没有活动 Job；合成会话已软删除并保留运行事实供审计。这证明了原始目标持久化修复，但不能作为 Replan 闭环证据。
+上一轮真实 Provider Replan 曾把“独立审查”提前放进 Version 1，因此没有创建 Version 2。随后加入应用层版本约束：明确分版的计划必须给每个任务标注连续 `plan_version`，Root 只提交 V1，并在当版所有任务完成且经过 Root Review 后，以保留现有 DAG 的幂等 Revision 提交下一版；跨版和同版新任务依赖都会映射到 Run 级 Task ID，未知依赖拒绝提交。
 
-P6 尚有明确缺口：真实 Provider 的 Replan 浏览器验收，以及命令/Worker 确认边界的额外故障注入。虽已有 PostgreSQL 取消收敛、Outbox 重投和工具副作用账本故障测试，但仍需扩充提交/确认窗口覆盖。全量单测目前未通过，具体结果如上；还需修复或更新失效测试，并按第 13 节清理旧调度链。在这些完成前不将 P6 标记为验收完成。用户已确认 Athena 是单用户服务，且当前使用可修改的测试库，无需迁移保护。
+最新真实浏览器验收 Run ID 为 `2026.10.22.04.18.58.408`。V1 恰有一个 `initial_draft` 并完成；Root Review 后 PostgreSQL 中 Version 2 保留原任务，只新增依赖它的 `independent_review`；第三次 Worker 尝试完成审查，最终 Run、Plan、两轮 Round 和两个 Task 全部完成。前两次 Provider 调用超时，第三次成功。执行期间服务器热重载暴露出 `MAX(session_seq)+1` 的并发竞态：业务终态已经提交，但 `run.completed` 与同序号事件冲突，刷新页面仍显示运行中。事件序号现通过 PostgreSQL advisory transaction lock 按会话串行分配，并新增 24 个并发 Publisher 的 PostgreSQL 集成测试。为让本次合成验收记录可从页面重放，测试库中补记了唯一缺失的 `run.completed` 事件；刷新后浏览器显示对话完成和 2/2 Worker 完成。此补记只作用于该合成验收记录。
+
+本轮还新增 Worker 终态事务提交后丢失回执的 PostgreSQL 故障注入：重放同一事件只返回既有回执，Task/Execution/Job/Round、Inbox、Outbox 和 Root Resume 均未重复推进。生产 Root 现要求通过 `OrchestrationCommandHandler` 原子提交计划；旧进程内 `WorkerSchedulerService`、直接调度后备路径及无操作的 `WorkerExecutor.cancel()` 已删除。
+
+在用户授权的本地单用户测试会话中，另以真实浏览器和 PostgreSQL 完成一次高风险工具审批闭环，Run ID 为 `2026.10.22.04.47.54.126`：只建立一个 Worker task，明确 allowlist 仅为 `exec_shell`；Athena 先生成待审批卡片，用户在界面批准后由 Worker 在 Docker `--network none`、无工作区挂载、只读根文件系统的容器中执行唯一命令 `python -c 'import sys; print(sys.version.split()[0])'`，退出码 0、输出 `3.12.14`，ToolOperation 只成功一次。用于本次验收的临时工具行已删除，测试会话已通过 Athena 界面软删除；失败的前置尝试未执行命令。该记录验证工具审批和隔离执行路径，不替代其余 A01–A20 矩阵覆盖。
+
+本轮将 pytest 默认导入模式设为 `importlib`，避免 unit/integration 中同名测试模块冲突。以项目本地 PostgreSQL URL 在当前测试进程中设置 `ATHENA_TEST_DATABASE_URL` 后，全量后端与 PostgreSQL 测试为 `341 passed, 2 warnings`（25.10 秒）；`compileall` 与 `git diff --check` 通过。警告为既有的 FastAPI duplicate operation ID。Ruff 未安装在项目虚拟环境中，未执行 lint。剩余 P6 验收仍以第 12 节 A01–A20 矩阵为准；双应用实例竞争和尚无独立证据的故障窗口仍需逐项标记覆盖状态。Athena 按用户确认以单用户产品为目标，不要求多用户身份映射。

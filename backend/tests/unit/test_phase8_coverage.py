@@ -44,6 +44,7 @@ async def test_approval_recovery_and_memory_lifecycle_branches() -> None:
 
     class Events:
         async def required(self, value): self.value = value
+        async def publish(self, value): self.value = value
 
     service = ApprovalService(Repo(), Events(), id_factory=lambda: "new")
     assert await service.request(session_id="s", run_id="r", tool_call_id="c", tool_name="x", arguments={}, risk_level="low") == request

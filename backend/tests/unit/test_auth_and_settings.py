@@ -42,8 +42,7 @@ def test_auth_routes_issue_and_revoke_signed_cookie() -> None:
         auth_password="secret",
         auth_session_secret="x" * 32,
     )
-    app = create_app()
-    app.router.routes = [route for route in app.router.routes if not getattr(route, "path", "").startswith("/api/auth")]
+    app = FastAPI()
     app.include_router(build_auth_router(lambda: settings), prefix="/api")
     client = TestClient(app)
 
@@ -64,7 +63,7 @@ def test_auth_routes_issue_and_revoke_signed_cookie() -> None:
 
 def test_default_app_exposes_compatibility_health_and_auth_paths() -> None:
     app = create_app()
-    paths = {getattr(route, "path", None) for route in app.routes}
+    paths = set(app.openapi()["paths"])
     assert {"/health", "/api/health", "/api/auth/login", "/api/auth/logout"} <= paths
 
 

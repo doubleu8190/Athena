@@ -127,10 +127,6 @@ class ReviewContextRepository(Protocol):
     async def load_review_context(self, round_id: str) -> ReviewContext: ...
 
 
-class PlanScheduler(Protocol):
-    async def start_ready_tasks(self, plan_id: str) -> dict[str, object]: ...
-
-
 class WorkerExecutor(Protocol):
     async def execute(self, execution: TaskExecution) -> TaskResult: ...
 
@@ -139,17 +135,6 @@ class WorkerExecutor(Protocol):
         execution: TaskExecution,
         decisions: dict[str, str],
     ) -> TaskResult: ...
-
-    async def cancel(self, run_id: str) -> int: ...
-
-
-class ResultSynthesizer(Protocol):
-    async def synthesize(
-        self,
-        plan: Plan,
-        results: Mapping[str, TaskResult],
-    ) -> str: ...
-
 
 class RootGraphPort(Protocol):
 
@@ -181,8 +166,6 @@ __all__ = [
     "OrchestrationCommandRepository",
     "OrchestrationOutboxRepository",
     "PlanRepository",
-    "PlanScheduler",
-    "ResultSynthesizer",
     "ReviewContextRepository",
     "RootGraphPort",
     "TaskEventRepository",

@@ -20,8 +20,10 @@ from domain.orchestration import (
     OrchestrationCommandType,
     Plan,
     PlanEdge,
+    PlanRevision,
     ReviewAction,
     ReviewDecision,
+    ReviewContext,
     Task,
 )
 
@@ -209,6 +211,137 @@ def _result_text(value: Any) -> str:
     return value if isinstance(value, str) else str(value)
 
 
+def _deferred_version_review_decision(
+    context: ReviewContext, state: Mapping[str, Any]
+) -> ReviewDecision | None:
+    """在当前版本完成并 Review 后生成下一阶段的确定性修订。"""
+    deferred = state.get("deferred_plan_versions")
+    if not isinstance(deferred, Mapping):
+        return None
+    raw_tasks = deferred.get(str(context.plan_version + 1))
+    if not isinstance(raw_tasks, (list, tuple)) or not raw_tasks:
+        return None
+    if context.remaining_tasks:
+        return None
+    results = (*context.previous_results_summary, *context.round_results)
+    if not results or any(
+        item.get("status") not in {"completed", "done"} for item in results
+    ):
+        return None
+
+    plan = state.get("plan", {})
+    request = state.get("request", {})
+    dag_nodes = context.full_dag_summary.get("nodes", ())
+    dag_task_ids = (
+        [
+            node.get("task_id")
+            for node in dag_nodes
+            if isinstance(node, Mapping) and isinstance(node.get("task_id"), str)
+        ]
+        if isinstance(dag_nodes, (list, tuple))
+        else []
+    )
+    existing_ids = (
+        dag_task_ids
+        or (plan.get("task_ids", ()) if isinstance(plan, Mapping) else ())
+    )
+    run_id = request.get("run_id") if isinstance(request, Mapping) else None
+    if (
+        not isinstance(existing_ids, (list, tuple))
+        or not existing_ids
+        or any(not isinstance(task_id, str) for task_id in existing_ids)
+        or len(existing_ids) != len(set(existing_ids))
+        or not isinstance(run_id, str)
+        or not run_id
+    ):
+        return None
+    existing_id_set = set(existing_ids)
+    new_task_ids = {
+        str(item.get("task_id"))
+        for item in raw_tasks
+        if isinstance(item, Mapping) and isinstance(item.get("task_id"), str)
+    }
+    requested_to_scoped = {
+        task_id: f"{task_id}:{run_id}" for task_id in new_task_ids
+    }
+    if (
+        len(new_task_ids) != len(raw_tasks)
+        or existing_id_set & new_task_ids
+        or existing_id_set & set(requested_to_scoped.values())
+    ):
+        return None
+
+    new_tasks: list[dict[str, Any]] = []
+    for item in raw_tasks:
+        if not isinstance(item, Mapping):
+            return None
+        task_id = item.get("task_id")
+        title = item.get("title")
+        objective = item.get("objective", item.get("instruction"))
+        dependencies = item.get("depends_on", ())
+        if (
+            not isinstance(task_id, str)
+            or not task_id.strip()
+            or not isinstance(title, str)
+            or not isinstance(objective, str)
+            or not isinstance(dependencies, (list, tuple))
+            or any(not isinstance(dep, str) for dep in dependencies)
+        ):
+            return None
+        scoped_dependencies = []
+        for dependency in dependencies:
+            scoped = f"{dependency}:{run_id}"
+            if dependency in existing_id_set:
+                scoped_dependencies.append(dependency)
+            elif scoped in existing_id_set:
+                scoped_dependencies.append(scoped)
+            elif dependency in requested_to_scoped:
+                scoped_dependencies.append(requested_to_scoped[dependency])
+            elif dependency in requested_to_scoped.values():
+                scoped_dependencies.append(dependency)
+            else:
+                return None
+            if scoped_dependencies[-1] == requested_to_scoped[task_id]:
+                return None
+        input_value = item.get("input", {})
+        expected_output = item.get("expected_output", {})
+        tools = item.get("allowed_tools", ())
+        if not isinstance(input_value, Mapping):
+            input_value = {"value": input_value}
+        if not isinstance(expected_output, Mapping):
+            expected_output = {"value": expected_output}
+        if not isinstance(tools, (list, tuple)) or any(
+            not isinstance(tool, str) for tool in tools
+        ):
+            return None
+        new_tasks.append(
+            {
+                "task_id": task_id,
+                "title": title,
+                "objective": objective,
+                "input": dict(input_value),
+                "expected_output": dict(expected_output),
+                "allowed_tools": list(tools),
+                "worker_type": str(item.get("worker_type") or "general"),
+                "timeout_seconds": item.get("timeout_seconds", 3600.0),
+                "depends_on": list(dict.fromkeys(scoped_dependencies)),
+            }
+        )
+    return ReviewDecision(
+        action=ReviewAction.REPLAN,
+        reason=(
+            f"User-requested Plan Version {context.plan_version + 1} is due after "
+            "completion and Root Review of the current version."
+        ),
+        revision=PlanRevision(
+            base_version=context.plan_version,
+            keep_task_ids=tuple(existing_ids),
+            cancel_task_ids=(),
+            new_tasks=tuple(new_tasks),
+        ),
+    )
+
+
 def render_plan_results(
     results: Mapping[str, Any], tasks: list[Mapping[str, Any]] | None = None
 ) -> str:
@@ -368,6 +501,9 @@ class RootWorkflow(RootWorkflowPort):
             "execution": payload.get("execution", {}),
             "next_route": route,
             "plan": payload.get("plan", {}),
+            "deferred_plan_versions": json_value(
+                payload.get("deferred_plan_versions", {})
+            ),
         }
 
     async def materialize_execution_plan(
@@ -474,37 +610,28 @@ class RootWorkflow(RootWorkflowPort):
             session_id=plan.session_id,
             run_id=plan.run_id,
         )
-        if deps.validate_plan is not None:
-            await call(deps.validate_plan, plan=plan, tasks=tasks)
-        created_locally = False
-        if deps.persist_plan is not None:
-            await call(deps.persist_plan, plan=plan, tasks=tasks, state=state)
-        elif deps.orchestration_command_handler is not None:
-            if not run_id:
-                raise ValueError("run_id is required for SubmitPlan")
-            command = OrchestrationCommand(
-                message_id=f"root-submit-plan:{run_id}",
-                command_type=OrchestrationCommandType.SUBMIT_PLAN,
-                idempotency_key=f"submit-plan:{run_id}",
-                correlation_id=run_id,
-                occurred_at=datetime.now(timezone.utc),
-                plan_id=plan.plan_id,
-                scope_key=run_id,
-                plan_version=1,
-                payload={"source": "root_agent"},
-            )
-            await call(
-                deps.orchestration_command_handler.submit_plan,
-                command,
-                plan,
-                tasks,
-                legal_tools=worker_tools,
-            )
-        elif deps.orchestration is not None and hasattr(
-            deps.orchestration, "create_plan"
-        ):
-            await call(deps.orchestration.create_plan, plan=plan, tasks=tasks)
-            created_locally = True
+        if deps.orchestration_command_handler is None:
+            raise RuntimeError("root_orchestration_command_handler_not_configured")
+        if not run_id:
+            raise ValueError("run_id is required for SubmitPlan")
+        command = OrchestrationCommand(
+            message_id=f"root-submit-plan:{run_id}",
+            command_type=OrchestrationCommandType.SUBMIT_PLAN,
+            idempotency_key=f"submit-plan:{run_id}",
+            correlation_id=run_id,
+            occurred_at=datetime.now(timezone.utc),
+            plan_id=plan.plan_id,
+            scope_key=run_id,
+            plan_version=1,
+            payload={"source": "root_agent"},
+        )
+        await call(
+            deps.orchestration_command_handler.submit_plan,
+            command,
+            plan,
+            tasks,
+            legal_tools=worker_tools,
+        )
         if deps.event_publisher is not None:
             from domain.events import ApplicationEvent, EventDurability, EventType
 
@@ -535,8 +662,6 @@ class RootWorkflow(RootWorkflowPort):
                     },
                 ),
             )
-        if created_locally and deps.worker_scheduler is not None:
-            await call(deps.worker_scheduler.start_ready_tasks, plan.plan_id)
         return {"plan": _plan_dict(plan, tasks), "status": "running"}
 
     async def wait_for_plan_completion(
@@ -635,10 +760,14 @@ class RootWorkflow(RootWorkflowPort):
                 or context.plan_version != plan_version
             ):
                 raise RuntimeError("root_review_context_identity_mismatch")
-            reviewer = getattr(deps.agent, "review", None)
-            if not callable(reviewer):
-                raise RuntimeError("root_review_agent_not_configured")
-            decision = await call(reviewer, context, request=request)
+            deferred_decision = _deferred_version_review_decision(context, state)
+            if deferred_decision is not None:
+                decision = deferred_decision
+            else:
+                reviewer = getattr(deps.agent, "review", None)
+                if not callable(reviewer):
+                    raise RuntimeError("root_review_agent_not_configured")
+                decision = await call(reviewer, context, request=request)
         if not isinstance(decision, ReviewDecision):
             raise RuntimeError("root_review_decision_invalid")
 
@@ -696,7 +825,7 @@ class RootWorkflow(RootWorkflowPort):
             if isinstance(loaded, Mapping)
             else {}
         )
-        repository = deps.plan_repository or deps.orchestration
+        repository = deps.plan_repository
         if (
             not results
             and repository is not None

@@ -8,14 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from application.orchestration import WorkerSchedulerService
 from application.runs import RunExecutionService, RunQueryService
 from workers import CommandConsumer
 from application.sessions import SessionNotFoundError
 from bootstrap import create_app
 from bootstrap.lifespan import lifespan
 from domain.events import ApplicationEvent
-from domain.orchestration import Plan, Task, TaskExecution, TaskResult, TaskStatus
 from domain.runs import CommandType, RunCommand, RunSummary
 from domain.sessions import Session
 from fastapi.testclient import TestClient
@@ -63,80 +61,3 @@ async def test_run_query_and_command_consumer_error_paths() -> None:
         async def fail(self, command, error): self.error = error
     consumer = CommandConsumer(Queue(), Execution(), poll_interval=0.001)
     task = asyncio.create_task(consumer.run()); await asyncio.sleep(0.005); consumer._stop.set(); await asyncio.wait_for(task, timeout=1)
-
-
-@pytest.mark.asyncio
-async def test_scheduler_duplicate_wait_reject_resume_and_synthesize_branches() -> None:
-    execution = TaskExecution("p", "r", "s", Task("t", "t", "do"), 1)
-    class Repo:
-        def __init__(self): self.mode = "reject"; self.tasks = [execution]
-        async def get(self, key): return (Plan("p", "g", ("t",), session_id="s"), [])
-        async def claim_ready_tasks(self, *args): return self.tasks
-        async def finish_task(self, *args, **kwargs): return {"accepted": self.mode != "reject", "plan_completed": False}
-        async def set_task_waiting_approval(self, *args): self.waiting = True
-        async def set_task_running(self, *args): return self.mode != "not_waiting"
-        async def retry_task(self, *args): return None
-        async def get_task_execution(self, key): return None if self.mode == "missing" else execution
-        async def get_results(self, key): return {}
-    class Worker:
-        async def execute(self, value): return TaskResult("t", TaskStatus.WAITING_APPROVAL, approval_batch={"a": 1})
-        async def resume(self, value, decisions): return TaskResult("t", TaskStatus.DONE, output={})
-        async def cancel(self, value): return 1
-    repo = Repo(); scheduler = WorkerSchedulerService(repo, Worker())
-    await scheduler.start_ready_tasks("p")
-    await scheduler.start_ready_tasks("p")
-    await asyncio.sleep(0.01)
-    repo = Repo(); scheduler = WorkerSchedulerService(repo, Worker())
-    repo.mode = "missing"
-    assert await scheduler.resume_task("missing", {}) == {"accepted": False, "reason": "worker_not_found"}
-    repo.mode = "not_waiting"
-    assert await scheduler.resume_worker(execution, {}) == {"accepted": False, "reason": "task_not_waiting_approval"}
-
-
-@pytest.mark.asyncio
-async def test_scheduler_worker_exception_and_rejected_finish_paths() -> None:
-    execution = TaskExecution("p", "r", "s", Task("t", "t", "do"), 1)
-
-    class Repo:
-        async def get(self, key):
-            return Plan("p", "g", ("t",), session_id="s"), []
-
-        async def claim_ready_tasks(self, *args):
-            return [execution]
-
-        async def finish_task(self, *args, **kwargs):
-            return {"accepted": False, "plan_completed": False}
-
-        async def set_task_waiting_approval(self, *args):
-            raise AssertionError("approval path should not run")
-
-        async def set_task_running(self, *args):
-            return True
-
-        async def retry_task(self, *args):
-            return None
-
-        async def get_task_execution(self, key):
-            return execution
-
-        async def get_results(self, key):
-            return {}
-
-    class Worker:
-        async def execute(self, value):
-            raise RuntimeError("boom")
-
-        async def resume(self, value, decisions):
-            return TaskResult("t", TaskStatus.FAILED, error={"reason": "rejected"})
-
-        async def cancel(self, value):
-            return 0
-
-    repo = Repo()
-    scheduler = WorkerSchedulerService(repo, Worker())
-    await scheduler.start_ready_tasks("p")
-    await asyncio.sleep(0.01)
-    assert await scheduler.resume_worker(execution, {}) == {
-        "accepted": False,
-        "plan_completed": False,
-    }

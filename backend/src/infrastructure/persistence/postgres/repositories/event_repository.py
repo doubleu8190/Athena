@@ -104,6 +104,15 @@ class PostgresEventRepository(
                         value = _event_from_model(existing)
                         _ensure_same_transition(value, event)
                     else:
+                        # MAX(session_seq) + 1 必须按会话串行化；否则并发发布
+                        # 会同时读取相同最大值，并争用同一个主键。
+                        await session.scalar(
+                            select(
+                                func.pg_advisory_xact_lock(
+                                    func.hashtextextended(event.session_id, 0)
+                                )
+                            )
+                        )
                         max_seq = (
                             await session.scalar(
                                 select(func.max(AgentEventModel.session_seq)).where(

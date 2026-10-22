@@ -67,7 +67,7 @@ async def test_run_command_service_validation_bool_and_cancel_paths() -> None:
     with pytest.raises(CommandRejectedError): await make_run_service(commands).submit("s", command_id="c", message="x")
     cancel_commands = CommandRepo(result=CommandEnqueueResult("c", "r", None, (), CommandStatus.QUEUED, False))
     accepted = await make_run_service(cancel_commands).cancel_session("s")
-    assert accepted.status is CommandStatus.QUEUED
+    assert accepted.status == "cancelling"
 
 
 @pytest.mark.asyncio

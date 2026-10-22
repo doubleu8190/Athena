@@ -20,7 +20,6 @@ from configuration.settings import Settings, LLMProviderConfig
 from infrastructure.integrations.llm.embedding_provider import ConfiguredEmbeddingProvider, EmbeddingProvider
 from infrastructure.integrations.llm.llm_provider import ConfiguredLLMProvider, RetryingLLMProvider
 from infrastructure.integrations.neo4j.resource import Neo4jResource
-from infrastructure.observability import trace_run
 from shared import dumps, loads, new_id, now_utc
 from workers import MemoryWorker as DurableMemoryWorker
 from infrastructure.integrations.pgvector import PostgresFileVectorIndex, PostgresMemoryVectorIndex
@@ -28,11 +27,37 @@ from tests.fakes.llm import _EchoModel
 from tests.fakes.embedding import _EchoEmbedder
 
 
+class _ContextEvents:
+    async def publish(self, _event):
+        return None
+
+
+class _ContextTrace:
+    async def record_context(self, **_kwargs):
+        return "retrieval-test"
+
+
+class _ContextProvider:
+    def __init__(self, handler):
+        self.handler = handler
+
+    async def retrieve_context(self, **kwargs):
+        return await self.handler(**kwargs)
+
+
+def _context_service(providers):
+    return ContextAcquisitionService(
+        {name: _ContextProvider(provider) for name, provider in providers.items()},
+        trace_repository=_ContextTrace(),
+        event_publisher=_ContextEvents(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_target_context_and_task_understanding_are_bounded():
     async def provider(**_kwargs):
         return ProviderResult("memory", "succeeded", (ContextItem("memory", "one two", "m1"), ContextItem("memory", "three", "m2")))
-    result = await ContextAcquisitionService({"memory": provider}).retrieve_context(session_id="s", task=object(), plan=ContextPlan(("memory",), max_items=1, max_tokens=2))
+    result = await _context_service({"memory": provider}).retrieve_context(session_id="s", task=object(), plan=ContextPlan(("memory",), max_items=1, max_tokens=2))
     assert len(result.items) == 1 and result.truncated
     understood = await TaskUnderstandingService().understand(user_message="查找这个", attachment_refs=[{"id": "a"}])
     assert understood.source == "fast_path" and understood.task.attachment_ids == ("a",)
@@ -163,12 +188,22 @@ async def test_docker_sandbox_has_target_lifecycle(monkeypatch, tmp_path: Path):
     assert sandbox.build_mcp_process(command="python").command == "python"
 
     class Process:
-        def __init__(self, code=0, timeout=False): self.returncode = code; self.timeout = timeout; self.killed = False
+        def __init__(self, code=0, timeout=False):
+            self.returncode = None if timeout else code
+            self.timeout = timeout
+            self.killed = False
+            self.waited = False
+            self.terminated = asyncio.Event()
         async def communicate(self):
-            if self.timeout: raise asyncio.TimeoutError
+            if self.timeout: await self.terminated.wait()
             return b"out", b"err"
         def kill(self): self.killed = True
-        async def wait(self): return self.returncode
+        async def wait(self):
+            self.waited = True
+            self.returncode = -15 if self.timeout else self.returncode
+            self.terminated.set()
+            return self.returncode
+        pid = 99999999
     calls = []
     async def create(*args, **kwargs):
         calls.append(args)
@@ -183,7 +218,7 @@ async def test_docker_sandbox_has_target_lifecycle(monkeypatch, tmp_path: Path):
     hanging = Process(timeout=True)
     async def hanging_create(*args, **kwargs): return hanging
     monkeypatch.setattr(asyncio, "create_subprocess_exec", hanging_create)
-    assert (await sandbox.execute(request)).status == "timeout" and hanging.killed
+    assert (await sandbox.execute(request)).status == "timeout" and hanging.waited
     sandbox._processes.add(Process())
     await sandbox.close_all()
 
@@ -245,7 +280,7 @@ async def test_configured_llm_retries_after_lazy_model_failure():
 
 @pytest.mark.asyncio
 async def test_context_unknown_and_task_understanding_fallback_paths():
-    result = await ContextAcquisitionService({}).retrieve_context(session_id="s", task=object(), plan=ContextPlan(("missing",), max_items=2, max_tokens=2))
+    result = await _context_service({}).retrieve_context(session_id="s", task=object(), plan=ContextPlan(("missing",), max_items=2, max_tokens=2))
     assert result.providers_failed == () and result.provider_results[0].status == "skipped"
     class BadLLM:
         async def invoke(self, *_args, **_kwargs): raise RuntimeError("bad")
@@ -254,9 +289,7 @@ async def test_context_unknown_and_task_understanding_fallback_paths():
 
 
 @pytest.mark.asyncio
-async def test_observability_and_neo4j_resource_lifecycle(monkeypatch):
-    async with trace_run("test") as value:
-        assert value["name"] == "test"
+async def test_neo4j_resource_lifecycle(monkeypatch):
     class Driver:
         async def close(self): self.closed = True
     class Factory:

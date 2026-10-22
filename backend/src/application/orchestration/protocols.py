@@ -10,8 +10,6 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from application.orchestration.scheduler import WorkerSchedulerService
-from application.orchestration.service import OrchestrationService
 from application.runs.context.planner import ContextPlanner
 from application.runs.context.service import ContextAcquisitionService
 from application.runs.request_preparation import (
@@ -43,9 +41,7 @@ class RootWorkflowDependencies:
     task_understanding: TaskUnderstandingService
     context_acquisition: ContextAcquisitionService
     context_planner: ContextPlanner
-    orchestration: OrchestrationService
     plan_repository: PlanRepository
-    worker_scheduler: WorkerSchedulerService
     request_preparation: RunRequestPreparationService
     agent: ConfiguredRootAgent
     event_publisher: EventPort
@@ -56,8 +52,6 @@ class RootWorkflowDependencies:
     plan_builder: Callable[..., Any] | None = None
     plan_loader: Callable[..., Any] | None = None
     finalizer: Callable[..., Any] | None = None
-    persist_plan: Callable[..., Any] | None = None
-    validate_plan: Callable[..., Any] | None = None
 
 
 class OrchestrationCommandHandlerPort(Protocol):

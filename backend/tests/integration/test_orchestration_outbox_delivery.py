@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from domain.orchestration import OrchestrationOutboxLease
+from domain.events import ApplicationEvent, EventDurability, EventType
 from infrastructure.persistence.postgres.models import (
     AgentEventModel,
     AgentRunModel,
@@ -27,6 +29,77 @@ from workers.orchestration_outbox_dispatcher import OrchestrationOutboxDispatche
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_event_writers_allocate_unique_session_sequences() -> None:
+    """并发 Publisher 为同一会话分配互不冲突且连续的事件序号。"""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"event_sequence_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    test_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    schema_created = False
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+        async with test_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, tables=[AgentEventModel.__table__]
+                )
+            )
+
+        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+        repositories = (
+            PostgresEventRepository(session_factory),
+            PostgresEventRepository(session_factory),
+        )
+        now = datetime.now(timezone.utc)
+        events = [
+            ApplicationEvent(
+                event_type=EventType.RUN_STARTED,
+                durability=EventDurability.DURABLE,
+                session_id="session-sequence-race",
+                run_id=f"run-{index}",
+                occurred_at=now,
+                payload={"writer": index},
+            )
+            for index in range(24)
+        ]
+        published = await asyncio.gather(
+            *(
+                repositories[index % len(repositories)].publish(event)
+                for index, event in enumerate(events)
+            )
+        )
+
+        assert sorted(event.session_seq for event in published) == list(
+            range(1, len(events) + 1)
+        )
+        async with session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(AgentEventModel.session_seq).order_by(
+                        AgentEventModel.session_seq
+                    )
+                )
+            ).scalars().all()
+        assert rows == list(range(1, len(events) + 1))
+    finally:
+        await test_engine.dispose()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()
 
 
 class _FailOnceAfterPublishOutbox:

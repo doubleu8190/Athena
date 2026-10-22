@@ -125,8 +125,8 @@ class Events:
     def __init__(self):
         self.values = []
 
-    async def required(self, request):
-        self.values.append(request)
+    async def publish(self, event):
+        self.values.append(event)
 
 
 @pytest.mark.asyncio

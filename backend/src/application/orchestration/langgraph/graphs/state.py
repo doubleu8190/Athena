@@ -21,6 +21,7 @@ class RootGraphState(TypedDict, total=False):
     harness_input: dict[str, Any]
     execution: dict[str, Any]
     plan: dict[str, Any]
+    deferred_plan_versions: dict[str, list[dict[str, Any]]]
     plan_results: dict[str, Any]
     root_wait: dict[str, Any]
     response: dict[str, Any]

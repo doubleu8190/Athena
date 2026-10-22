@@ -29,11 +29,9 @@ from application.sessions import SessionMessageQueryService, SessionService
 from application.tools import MCPService, ToolQueryService, ToolService
 from application.orchestration import (
     OrchestrationCommandHandler,
-    OrchestrationService,
     RootWorkflow,
     RootWorkflowDependencies,
     WorkerJobService,
-    WorkerSchedulerService,
     WorkerApprovalService,
     WorkerToolExecutor,
     WorkerTaskEventHandler,
@@ -439,20 +437,12 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         poll_interval=settings.worker_job_poll_interval_seconds,
         id_factory=ids,
     )
-    worker_scheduler = WorkerSchedulerService(
-        orchestration_repository,
-        worker_executor,
-        events=events,
-    )
-
     dependencies = RootWorkflowDependencies(
         task_understanding=task_understanding,
         context_acquisition=context_service,
         context_planner=context_planner,
         request_preparation=request_preparation,
-        orchestration=OrchestrationService(orchestration_repository),
         plan_repository=orchestration_repository,
-        worker_scheduler=worker_scheduler,
         plan_loader=PostgresPlanLoader(orchestration_repository),
         agent=ConfiguredRootAgent(llm_provider, events),
         tool_service=builtin_tool_service,
@@ -505,14 +495,12 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "orchestration_query_factory": lambda: OrchestrationQueryService(
             orchestration_repository
         ),
-        "orchestration_service_factory": lambda: OrchestrationService(orchestration_repository),
         "orchestration_command_handler_factory": lambda: orchestration_command_handler,
         "worker_task_event_handler_factory": lambda: worker_task_event_handler,
         "worker_job_service_factory": lambda: worker_job_service,
         "worker_job_dispatcher_factory": lambda: worker_dispatcher,
         "root_graph_factory": lambda: root_graph,
         "run_executor_factory": lambda: root_run_executor,
-        "worker_scheduler_factory": lambda: worker_scheduler,
         "ingestion_service_factory": lambda: ingestion,
         "llm_provider": lambda: llm_provider,
         "embedding_provider": lambda: embedding,

@@ -80,6 +80,23 @@ class ConfiguredRootAgent:
         context = harness_input.get("context", {})
         task = harness_input.get("task", {})
         planning = isinstance(task, Mapping) and task.get("mode") == "plan"
+        user_message = next(
+            (
+                str(message.get("content", ""))
+                for message in reversed(messages)
+                if isinstance(message, Mapping) and message.get("role") == "user"
+            ),
+            "",
+        )
+        requires_plan_versions = planning and _explicit_plan_versions(user_message)
+        version_contract = (
+            " Each task must include an integer plan_version. Use contiguous versions "
+            "starting at 1; version 1 runs first and later versions run only after Root "
+            "Review creates a new Plan Version. Put cross-version dependencies in the "
+            "plan edges."
+            if requires_plan_versions
+            else ""
+        )
         if planning:
             available_tools = harness_input.get("available_worker_tools", [])
             user_allowed_tools = task.get("allowed_tools")
@@ -105,6 +122,7 @@ class ConfiguredRootAgent:
                         "request. If later-phase work must wait for Review or a new Plan "
                         "Version, include only current-phase tasks in this plan; do not "
                         "schedule later-phase tasks early. "
+                        f"{version_contract} "
                         "Keep the DAG acyclic."
                     ),
                 },
@@ -123,6 +141,13 @@ class ConfiguredRootAgent:
             content = getattr(value, "content", value)
         if planning:
             payload = self._decode_plan(content)
+            partitioned = (
+                _partition_plan_versions(payload, required=requires_plan_versions)
+                if payload is not None
+                else None
+            )
+            if payload is not None and partitioned is None:
+                payload = None
             if payload is None:
                 allowed_tools = harness_input.get("available_worker_tools", [])
                 repair_messages = [
@@ -141,6 +166,7 @@ class ConfiguredRootAgent:
                             "acyclic. Do not include Markdown fences or explanation. "
                             "Respect explicit Plan Version or phase boundaries in the "
                             "user request; defer later-phase work until Review. "
+                            f"{version_contract} "
                             f"Allowed tools: {json.dumps(allowed_tools, ensure_ascii=False)}"
                         ),
                     },
@@ -174,8 +200,24 @@ class ConfiguredRootAgent:
                     else getattr(repaired, "content", repaired)
                 )
                 payload = self._decode_plan(content)
-            if payload is not None:
-                return {"plan": payload, "next_route": "materialize_execution_plan"}
+                partitioned = (
+                    _partition_plan_versions(
+                        payload, required=requires_plan_versions
+                    )
+                    if payload is not None
+                    else None
+                )
+                if payload is not None and partitioned is None:
+                    payload = None
+            if payload is not None and partitioned is not None:
+                current_plan, deferred_versions = partitioned
+                result = {
+                    "plan": current_plan,
+                    "next_route": "materialize_execution_plan",
+                }
+                if deferred_versions:
+                    result["deferred_plan_versions"] = deferred_versions
+                return result
         return {"response": {"content": str(content)}}
 
     async def review(
@@ -386,6 +428,138 @@ def _non_empty_plan(candidate: Any) -> dict[str, Any] | None:
     if not isinstance(tasks, (list, tuple)) or not tasks:
         return None
     return dict(candidate)
+
+
+def _explicit_plan_versions(user_message: str) -> bool:
+    """识别用户明确指定的、作为执行边界的计划版本。"""
+    return bool(
+        re.search(r"\b(?:plan\s*)?version\s*[1-9]\d*\b", user_message, re.I)
+        or re.search(
+            r"(?:第\s*[一二三四五六七八九十0-9]+\s*版|版本\s*[一二三四五六七八九十0-9]+)",
+            user_message,
+        )
+    )
+
+
+def _partition_plan_versions(
+    plan: Mapping[str, Any], *, required: bool
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]] | None:
+    """首轮仅提交 V1，并把后续版本保留到对应 Review 后提交。
+
+    版本号由规划结果提供，但持久化前由应用层强制执行。跨版本依赖
+    只会出现在后续版本中，避免后续任务提前进入当前轮次。
+    """
+    raw_tasks = plan.get("tasks")
+    if not isinstance(raw_tasks, (list, tuple)) or not raw_tasks:
+        return None
+    has_versions = any(
+        isinstance(task, Mapping) and "plan_version" in task
+        for task in raw_tasks
+    )
+    if not has_versions:
+        return None if required else (dict(plan), {})
+
+    versions: dict[str, int] = {}
+    tasks_by_version: dict[int, list[dict[str, Any]]] = {}
+    for raw_task in raw_tasks:
+        if not isinstance(raw_task, Mapping):
+            return None
+        task_id = raw_task.get("task_id")
+        version = raw_task.get("plan_version")
+        if (
+            not isinstance(task_id, str)
+            or not task_id.strip()
+            or task_id in versions
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+        ):
+            return None
+        versions[task_id] = version
+        tasks_by_version.setdefault(version, []).append(dict(raw_task))
+    if required and any("plan_version" not in task for task in raw_tasks):
+        return None
+    version_numbers = sorted(tasks_by_version)
+    if not version_numbers or version_numbers != list(range(1, version_numbers[-1] + 1)):
+        return None
+
+    edges = plan.get("edges", [])
+    if not isinstance(edges, (list, tuple)):
+        return None
+    incoming: dict[str, list[str]] = {task_id: [] for task_id in versions}
+    normalized_edges: list[tuple[str, str]] = []
+    for raw_edge in edges:
+        if isinstance(raw_edge, Mapping):
+            source = raw_edge.get("from_task_id") or raw_edge.get("from")
+            target = raw_edge.get("to_task_id") or raw_edge.get("to")
+        elif isinstance(raw_edge, (list, tuple)) and len(raw_edge) == 2:
+            source, target = raw_edge
+        else:
+            return None
+        if (
+            not isinstance(source, str)
+            or not isinstance(target, str)
+            or source not in versions
+            or target not in versions
+            or versions[source] > versions[target]
+        ):
+            return None
+        incoming[target].append(source)
+        normalized_edges.append((source, target))
+
+    for raw_task in raw_tasks:
+        task_id = str(raw_task["task_id"])
+        dependencies = raw_task.get("depends_on", ())
+        if not isinstance(dependencies, (list, tuple)) or any(
+            not isinstance(item, str) or item not in versions for item in dependencies
+        ):
+            return None
+        if any(versions[item] > versions[task_id] for item in dependencies):
+            return None
+        incoming[task_id].extend(dependencies)
+
+    current_ids = {
+        task_id for task_id, version in versions.items() if version == 1
+    }
+    current_tasks: list[dict[str, Any]] = []
+    deferred: dict[str, list[dict[str, Any]]] = {}
+    for version in version_numbers:
+        for raw_task in tasks_by_version[version]:
+            task_id = str(raw_task["task_id"])
+            task = {
+                key: value for key, value in raw_task.items() if key != "plan_version"
+            }
+            if version == 1:
+                task.pop("depends_on", None)
+                current_tasks.append(task)
+            else:
+                task["depends_on"] = list(dict.fromkeys(incoming[task_id]))
+                deferred.setdefault(str(version), []).append(task)
+
+    version_one_edge_pairs = {
+        (source, target)
+        for source, target in normalized_edges
+        if source in current_ids and target in current_ids
+    }
+    raw_tasks_by_id = {
+        str(item["task_id"]): item
+        for item in raw_tasks
+        if isinstance(item, Mapping) and isinstance(item.get("task_id"), str)
+    }
+    for task in current_tasks:
+        for source in raw_tasks_by_id[str(task["task_id"])].get("depends_on", ()):
+            if source in current_ids:
+                version_one_edge_pairs.add((source, task["task_id"]))
+    version_one_edges = [
+        {"from": source, "to": target}
+        for source, target in sorted(version_one_edge_pairs)
+    ]
+
+    current_plan = dict(plan)
+    current_plan["tasks"] = current_tasks
+    current_plan["task_ids"] = [str(task["task_id"]) for task in current_tasks]
+    current_plan["edges"] = version_one_edges
+    return current_plan, deferred
 
 
 def _decode_review_decision(value: Any) -> ReviewDecision:

@@ -11,12 +11,14 @@ from typing import Any
 class ApprovalStatus(StrEnum):
     PENDING = "pending"
     RESOLVED = "resolved"
+    EXPIRED = "expired"
     CANCELLED = "cancelled"
 
 
 class ApprovalDecision(StrEnum):
     APPROVED = "approved"
     DENIED = "denied"
+    EXPIRED = "expired"
 
 
 @dataclass(frozen=True, slots=True)

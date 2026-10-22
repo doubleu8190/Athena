@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     worker_max_tool_calls_per_round: int = Field(default=8, ge=1, le=32)
     worker_job_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10.0)
     worker_dispatch_max_concurrency: int = Field(default=4, ge=1, le=64)
+    worker_approval_timeout_seconds: float = Field(default=86400.0, gt=0)
     evaluation_enabled: bool = False
     evaluation_dataset_root: str = "./data/evaluations/datasets"
     evaluation_output_root: str = "./data/evaluations/runs"

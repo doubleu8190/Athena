@@ -141,9 +141,12 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
     else:
         activity_identity = lease.run_id
     if lease.event_type == "ApprovalResolved":
+        decision = lease.payload.get("decision")
         status = (
             "approved"
-            if lease.payload.get("decision") == "approved"
+            if decision == "approved"
+            else "expired"
+            if decision == "expired"
             else "failed"
         )
     activity_id = f"{activity_type}:{activity_identity}"

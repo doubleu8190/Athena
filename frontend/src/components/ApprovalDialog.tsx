@@ -66,6 +66,7 @@ export function ApprovalCard({ batchId, requests, onSubmit }: ApprovalCardProps)
                 <div className="min-w-0">
                   {request.task_title && <div className="text-xs text-athena-warning">任务「{request.task_title}」需要确认</div>}
                   <span className="text-sm font-medium text-athena-text">{request.description || approvalActionDescription(request.tool_name, request.arguments)}</span>
+                  {request.expires_at && <span className="text-xs text-athena-muted">到期后自动拒绝 · {new Date(request.expires_at).toLocaleString("zh-CN")}</span>}
                 </div>
                 <span className={`rounded border px-2 py-0.5 text-[11px] font-medium ${riskClass(request.risk_level)}`}>
                   {request.risk_level === "high" ? "高风险" : request.risk_level === "medium" ? "中风险" : "低风险"}

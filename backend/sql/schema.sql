@@ -383,6 +383,9 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_session_status ON approvals(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_approvals_pending_expiry
+ON approvals(expires_at, created_at)
+WHERE status = 'pending' AND expires_at IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_approvals_worker_interrupt
 ON approvals(worker_thread_id, interrupt_id)
 WHERE worker_thread_id IS NOT NULL AND interrupt_id IS NOT NULL;

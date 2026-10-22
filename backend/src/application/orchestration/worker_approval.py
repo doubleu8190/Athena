@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from domain.orchestration import WorkerJobLease, WorkerJobRepository
@@ -11,9 +12,22 @@ from domain.orchestration import WorkerJobLease, WorkerJobRepository
 class WorkerApprovalService:
     """持久化 Worker interrupt 审批；通知由事务性 Outbox 投递。"""
 
-    def __init__(self, repository: WorkerJobRepository) -> None:
-        """保存 Worker Job 仓储；请求通知与业务状态原子写入 Outbox。"""
+    def __init__(
+        self, repository: WorkerJobRepository, *, timeout_seconds: float = 86400.0
+    ) -> None:
+        """保存 Worker Job 仓储和人工审批等待时限。
+
+        Args:
+            repository: 原子保存审批状态、Outbox 和 Worker Resume Job 的仓储。
+            timeout_seconds: 用户未决时自动拒绝的时长，必须大于零。
+
+        Raises:
+            ValueError: 审批等待时长不是正数。
+        """
+        if timeout_seconds <= 0:
+            raise ValueError("approval timeout_seconds must be positive")
         self._repository = repository
+        self._timeout_seconds = timeout_seconds
 
     async def request(
         self,
@@ -67,6 +81,8 @@ class WorkerApprovalService:
             "risk_level": str(approval.get("risk_level", "high")),
             "args_hash": str(approval["args_hash"]),
             "operation_key": str(approval["operation_key"]),
+            "expires_at": datetime.now(timezone.utc)
+            + timedelta(seconds=self._timeout_seconds),
         }
         return await self._repository.wait_for_approval(lease, request)
 

@@ -196,6 +196,22 @@ class ApprovalService:
                     await self._resumer(existing, decision.value)
         return value
 
+    async def expire_due_approvals(self, *, limit: int = 64) -> int:
+        """将已到期审批写为拒绝并持久化对应 Worker 恢复作业。
+
+        Args:
+            limit: 一次数据库事务最多处理的审批数量，必须为正数。
+
+        Returns:
+            本次成功转换为 EXPIRED 的审批数量。
+
+        Raises:
+            ValueError: 批量上限小于 1。
+        """
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        return await self._repository.expire_due_approvals(limit=limit)
+
     def _uses_transactional_event_outbox(self, approval: Any) -> bool:
         """Avoid duplicate SSE writes when the repository commits the event."""
         if getattr(self._repository, "writes_approval_events_to_outbox", False):
@@ -249,6 +265,7 @@ def _to_response(value: ApprovalRequest) -> ApprovalResponse:
         approval_batch_id=value.approval_batch_id,
         resolved=value.status != ApprovalStatus.PENDING,
         resolution=value.decision.value if value.decision else value.status.value,
+        expires_at=value.expires_at,
     )
 
 

@@ -81,6 +81,7 @@ def _response(value: ApprovalResponse) -> dict[str, Any]:
         "arguments": dict(value.arguments),
         "risk_level": value.risk_level,
         "created_at": value.created_at.isoformat() if value.created_at else None,
+        "expires_at": value.expires_at.isoformat() if value.expires_at else None,
         "session_id": value.session_id,
         "run_id": value.run_id,
         "tool_call_id": value.tool_call_id,

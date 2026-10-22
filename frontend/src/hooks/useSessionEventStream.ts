@@ -214,7 +214,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
 
         if (type === "approval.required") {
-          addApproval({ approval_id: String(data.approval_id || ""), tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, risk_level: (String(data.risk_level || "low") as "low" | "medium" | "high"), approval_batch_id: data.approval_batch_id ? String(data.approval_batch_id) : null, session_id: sessionId, plan_id: text(data.plan_id) || undefined, task_id: text(data.task_id) || undefined, task_title: text(data.task_title) || undefined, worker_run_id: text(data.worker_run_id) || undefined })
+          addApproval({ approval_id: String(data.approval_id || ""), tool_name: String(data.tool_name || "tool"), arguments: (data.arguments as Record<string, unknown>) || {}, risk_level: (String(data.risk_level || "low") as "low" | "medium" | "high"), approval_batch_id: data.approval_batch_id ? String(data.approval_batch_id) : null, session_id: sessionId, plan_id: text(data.plan_id) || undefined, task_id: text(data.task_id) || undefined, task_title: text(data.task_title) || undefined, worker_run_id: text(data.worker_run_id) || undefined, expires_at: text(data.expires_at) || undefined })
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("waiting_approval")
         } else if (type === "approval.resolved") {
           const decisions = (data.decisions as Record<string, string> | undefined) || {}
@@ -482,8 +482,8 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
   }
   if (type === "approval.resolved") {
     const decision = text(data.decision)
-    const detail = decision === "approved" ? "你已允许此操作继续。" : decision === "cancelled" ? "此操作已取消，未继续执行。" : "你已拒绝此操作，未继续执行。"
-    return base({ id: `approval:${text(data.approval_id)}`, label: "确认已提交", detail, status: "completed" })
+    const detail = decision === "approved" ? "你已允许此操作继续。" : decision === "cancelled" ? "此操作已取消，未继续执行。" : decision === "expired" ? "审批已到期，操作已拒绝且未执行。" : "你已拒绝此操作，未继续执行。"
+    return base({ id: `approval:${text(data.approval_id)}`, label: decision === "expired" ? "审批已到期" : "确认已提交", detail, status: decision === "expired" ? "failed" : "completed" })
   }
 
   if (type.startsWith("plan.")) {

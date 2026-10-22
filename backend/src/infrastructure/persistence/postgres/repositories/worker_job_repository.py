@@ -242,6 +242,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                         operation_key=str(approval["operation_key"]),
                         status="pending",
                         created_at=now.isoformat(),
+                        expires_at=approval.get("expires_at"),
                     )
                 )
                 session.add(
@@ -267,6 +268,9 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                             "risk_level": str(approval.get("risk_level", "high")),
                             "args_hash": str(approval["args_hash"]),
                             "operation_key": str(approval["operation_key"]),
+                            "expires_at": approval.get("expires_at").isoformat()
+                            if approval.get("expires_at") is not None
+                            else None,
                             "parent_activity_id": f"task:{task.task_id}",
                         },
                         schema_version=1,
@@ -798,8 +802,8 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             )
             if (
                 approval is None
-                or approval.status != "resolved"
-                or approval.decision not in {"approved", "denied"}
+                or approval.status not in {"resolved", "expired"}
+                or approval.decision not in {"approved", "denied", "expired"}
                 or approval.execution_id != execution.execution_id
                 or approval.worker_thread_id != execution.worker_thread_id
                 or approval.interrupt_id != resume_value.get("interrupt_id")

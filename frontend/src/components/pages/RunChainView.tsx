@@ -482,6 +482,7 @@ function projectTimeline(rawEvents: RunTimelineEvent[]): RunEvent[] {
 
 function timelineStatus(status: string, eventType: string): EventStatus {
   if (status.includes("fail") || status.includes("error")) return "failed"
+  if (status.includes("expir")) return "failed"
   if (status.includes("retry") || eventType.includes("retry")) return "retry"
   if (status.includes("approv") || eventType === "approval.resolved") return "approved"
   if (status.includes("waiting") || status.includes("pending")) return "waiting"

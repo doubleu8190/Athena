@@ -139,6 +139,7 @@ from workers import (
     WorkerJobDispatcher,
     RootResumeDispatcher,
     OrchestrationOutboxDispatcher,
+    ApprovalExpiryWorker,
     WorkerSupervisor,
 )
 from domain.runs import CommandStatus, CommandType, RunCommand
@@ -419,7 +420,10 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     approval_service = ApprovalService(
         approvals, events, id_factory=ids
     )
-    worker_approval_service = WorkerApprovalService(worker_job_repository)
+    worker_approval_service = WorkerApprovalService(
+        worker_job_repository,
+        timeout_seconds=settings.worker_approval_timeout_seconds,
+    )
     worker_dispatcher = WorkerJobDispatcher(
         worker_job_service,
         worker_executor,
@@ -539,6 +543,10 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             lease_seconds=settings.worker_job_lease_seconds,
             poll_interval=settings.worker_job_poll_interval_seconds,
         )
+        approval_expiry_worker = ApprovalExpiryWorker(
+            approval_service,
+            poll_interval=settings.worker_job_poll_interval_seconds,
+        )
         document_worker = KnowledgeDocumentWorker(jobs, ingestion)
         memory_worker = MemoryWorker(memory_jobs, memory_workflow)
         resources.append(
@@ -550,6 +558,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
                     worker_dispatcher,
                     root_resume_dispatcher,
                     orchestration_outbox_dispatcher,
+                    approval_expiry_worker,
                 )
             )
         )

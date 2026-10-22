@@ -151,6 +151,12 @@ class ApprovalRecordModel(Base):
     __tablename__ = "approvals"
     __table_args__ = (
         Index("idx_approvals_session_status", "session_id", "status"),
+        Index(
+            "idx_approvals_pending_expiry",
+            "expires_at",
+            "created_at",
+            postgresql_where=text("status = 'pending' AND expires_at IS NOT NULL"),
+        ),
         UniqueConstraint("worker_thread_id", "interrupt_id", name="uq_approvals_worker_interrupt"),
     )
     approval_id: Mapped[str] = mapped_column(String, primary_key=True)

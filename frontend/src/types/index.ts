@@ -284,11 +284,12 @@ export interface ApprovalRequest {
   task_id?: string
   task_title?: string
   worker_run_id?: string
+  expires_at?: string
 }
 
 export interface ApprovalResult {
   approval_id: string
-  decision: "approved" | "denied" | "cancelled"
+  decision: "approved" | "denied" | "expired" | "cancelled"
 }
 
 // ─── 事件相关 ────────────────────────────────────────────────────
@@ -493,7 +494,7 @@ export interface MemoryListResponse {
 
 // ─── 审批日志 ────────────────────────────────────────────────────
 
-export type ApprovalDecision = "approved" | "denied" | "cancelled"
+export type ApprovalDecision = "approved" | "denied" | "expired" | "cancelled"
 
 export interface ApprovalLog {
   id: string

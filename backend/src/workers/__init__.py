@@ -7,11 +7,13 @@ from .worker_job_dispatcher import WorkerJobDispatcher
 from .root_resume_dispatcher import RootResumeDispatcher
 from .orchestration_outbox_dispatcher import OrchestrationOutboxDispatcher
 from .memory_worker import MemoryWorker
+from .approval_expiry_worker import ApprovalExpiryWorker
 
 __all__ = [
     "CommandConsumer",
     "KnowledgeDocumentWorker",
     "MemoryWorker",
+    "ApprovalExpiryWorker",
     "WorkerSupervisor",
     "WorkerJobDispatcher",
     "RootResumeDispatcher",

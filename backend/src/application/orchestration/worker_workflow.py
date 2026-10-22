@@ -175,12 +175,17 @@ class WorkerWorkflow:
                     call_index=int(approval.get("call_index", 0)),
                 )
             )
-        elif resolution == "denied":
+        elif resolution in {"denied", "expired"}:
             result = {
                 "id": str(approval.get("tool_call_id", "")),
                 "name": str(approval.get("tool_name", "")),
                 "status": "denied",
-                "error": {"code": "approval_denied"},
+                "error": {
+                    "code": (
+                        "approval_expired" if resolution == "expired"
+                        else "approval_denied"
+                    )
+                },
             }
         else:
             raise RuntimeError("worker_approval_decision_invalid")

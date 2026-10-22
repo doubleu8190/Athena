@@ -367,3 +367,105 @@ async def test_run_cancellation_converges_after_expired_worker_lease() -> None:
             async with base_engine.begin() as connection:
                 await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await base_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_stop_preserves_completed_and_failed_run_without_duplicate_events() -> None:
+    """Stop on terminal Runs preserves status, cancellation metadata, and event log."""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"terminal_run_stop_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    test_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    schema_created = False
+    now = datetime.now(timezone.utc)
+    initial_states = {
+        f"completed-{uuid4().hex}": (RunStatus.COMPLETED, 0, "none"),
+        f"failed-{uuid4().hex}": (RunStatus.FAILED, 2, "unknown"),
+    }
+
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+        async with test_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection,
+                    tables=[
+                        AgentRunModel.__table__,
+                        OrchestrationOutboxModel.__table__,
+                    ],
+                )
+            )
+
+        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+        async with session_factory() as session, session.begin():
+            for run_id, (
+                status,
+                cancellation_epoch,
+                effect_status,
+            ) in initial_states.items():
+                session.add(
+                    AgentRunModel(
+                        run_id=run_id,
+                        session_id=f"session-{run_id}",
+                        status=status.value,
+                        root_thread_id=f"thread-{run_id}",
+                        cancellation_epoch=cancellation_epoch,
+                        cancellation_external_effect_status=effect_status,
+                        created_at=now.isoformat(),
+                        updated_at=now.isoformat(),
+                    )
+                )
+
+        repository = PostgresRunRepository(session_factory)
+        for run_id, (
+            status,
+            cancellation_epoch,
+            effect_status,
+        ) in initial_states.items():
+            first = await repository.cancel(run_id)
+            repeated = await repository.cancel(run_id)
+            assert first is not None and not first.changed
+            assert repeated is not None and not repeated.changed
+            assert first.status == repeated.status == status
+            assert (
+                first.external_effect_status
+                == repeated.external_effect_status
+                == effect_status
+            )
+
+        async with session_factory() as session:
+            runs = {
+                run.run_id: run
+                for run in (
+                    await session.execute(select(AgentRunModel))
+                ).scalars().all()
+            }
+            event_count = await session.scalar(
+                select(func.count()).select_from(OrchestrationOutboxModel)
+            )
+        assert event_count == 0
+        for run_id, (
+            status,
+            cancellation_epoch,
+            effect_status,
+        ) in initial_states.items():
+            run = runs[run_id]
+            assert run.status == status.value
+            assert run.cancellation_epoch == cancellation_epoch
+            assert run.cancellation_external_effect_status == effect_status
+    finally:
+        await test_engine.dispose()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()

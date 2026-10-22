@@ -175,7 +175,7 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
         dispatcher = OrchestrationOutboxDispatcher(
             PostgresOrchestrationOutboxRepository(
                 session_factory,
-                clock=lambda: now.replace(microsecond=0) + timedelta(seconds=1),
+                clock=lambda: datetime.now(timezone.utc) + timedelta(seconds=1),
             ),
             events,
             worker_id=f"outbox-{run_id}",

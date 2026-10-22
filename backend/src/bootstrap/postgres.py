@@ -444,6 +444,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         agent=ConfiguredRootAgent(llm_provider, events),
         tool_service=builtin_tool_service,
         approval_service=approval_service,
+        review_context_repository=orchestration_repository,
+        orchestration_command_handler=orchestration_command_handler,
         event_publisher=events,
     )
     root_workflow = RootWorkflow(dependencies)

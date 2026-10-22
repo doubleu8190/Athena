@@ -6,7 +6,7 @@ remain application implementations assembled by bootstrap.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -21,7 +21,14 @@ from application.runs.task_understanding.service import TaskUnderstandingService
 from application.approval.service import ApprovalService
 from application.tools.service import ToolService
 from domain.events.ports import EventPort
-from domain.orchestration.ports import PlanRepository
+from domain.orchestration import (
+    CommandReceipt,
+    OrchestrationCommand,
+    Plan,
+    ReviewDecision,
+    Task,
+)
+from domain.orchestration.ports import PlanRepository, ReviewContextRepository
 
 if TYPE_CHECKING:
     from application.orchestration.langgraph.runtime.root_agent import (
@@ -44,11 +51,40 @@ class RootWorkflowDependencies:
     event_publisher: EventPort
     tool_service: ToolService
     approval_service: ApprovalService
+    review_context_repository: ReviewContextRepository | None = None
+    orchestration_command_handler: OrchestrationCommandHandlerPort | None = None
     plan_builder: Callable[..., Any] | None = None
     plan_loader: Callable[..., Any] | None = None
     finalizer: Callable[..., Any] | None = None
     persist_plan: Callable[..., Any] | None = None
     validate_plan: Callable[..., Any] | None = None
+
+
+class OrchestrationCommandHandlerPort(Protocol):
+    """Application command boundary used by Root plan submission and review."""
+
+    async def submit_plan(
+        self,
+        command: OrchestrationCommand,
+        plan: Plan,
+        tasks: list[Task],
+        *,
+        legal_tools: Iterable[str] | None = None,
+    ) -> CommandReceipt: ...
+
+    async def apply_review_decision(
+        self, command: OrchestrationCommand, decision: ReviewDecision
+    ) -> CommandReceipt: ...
+
+    async def load_review_decision(
+        self,
+        *,
+        scope_key: str,
+        idempotency_key: str,
+        plan_id: str,
+        plan_version: int,
+        round_id: str,
+    ) -> ReviewDecision | None: ...
 
 
 class RootWorkflowPort(Protocol):
@@ -69,6 +105,9 @@ class RootWorkflowPort(Protocol):
         self, state: Mapping[str, Any]
     ) -> dict[str, Any]: ...
     async def wait_for_plan_completion(
+        self, state: Mapping[str, Any]
+    ) -> dict[str, Any]: ...
+    async def review_completed_round(
         self, state: Mapping[str, Any]
     ) -> dict[str, Any]: ...
     async def project_plan_result(self, state: Mapping[str, Any]) -> dict[str, Any]: ...
@@ -107,6 +146,7 @@ def make_root_workflow(dependencies: RootWorkflowDependencies) -> RootWorkflowPo
 
 __all__ = [
     "RootWorkflowDependencies",
+    "OrchestrationCommandHandlerPort",
     "RootWorkflowPort",
     "WorkerWorkflowPort",
     "make_root_workflow",

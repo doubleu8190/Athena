@@ -32,6 +32,16 @@ class OrchestrationCommandRepository(Protocol):
         decision: ReviewDecision,
     ) -> CommandReceipt: ...
 
+    async def load_review_decision(
+        self,
+        *,
+        scope_key: str,
+        idempotency_key: str,
+        plan_id: str,
+        plan_version: int,
+        round_id: str,
+    ) -> ReviewDecision | None: ...
+
 
 class TaskEventRepository(Protocol):
     async def apply_worker_terminal_event(

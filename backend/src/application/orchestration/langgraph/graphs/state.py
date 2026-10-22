@@ -22,6 +22,7 @@ class RootGraphState(TypedDict, total=False):
     execution: dict[str, Any]
     plan: dict[str, Any]
     plan_results: dict[str, Any]
+    root_wait: dict[str, Any]
     response: dict[str, Any]
     result: dict[str, Any]
     resume_value: dict[str, Any]

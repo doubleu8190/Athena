@@ -91,6 +91,60 @@ async def test_root_wait_node_interrupts_and_rechecks_after_resume():
 
 
 @pytest.mark.asyncio
+async def test_root_wait_node_reviews_completed_round_before_waiting_again():
+    class Workflow:
+        def __init__(self):
+            self.wait_calls = 0
+            self.reviewed = []
+
+        async def wait_for_plan_completion(self, _state):
+            self.wait_calls += 1
+            if not self.reviewed:
+                return {
+                    "waiting": True,
+                    "root_wait": {
+                        "type": "round_wait",
+                        "run_id": "run-1",
+                        "plan_id": "plan-1",
+                        "round_id": "round-1",
+                        "plan_version": 1,
+                    },
+                }
+            return {"waiting": False, "plan_results": {"task-1": {"ok": True}}}
+
+        async def review_completed_round(self, state):
+            self.reviewed.append(state)
+
+    workflow = Workflow()
+    builder = StateGraph(RootGraphState)
+    builder.add_node("wait", _wait_for_plan_completion_node(workflow))
+    builder.add_edge(START, "wait")
+    builder.add_edge("wait", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "run:run-1"}}
+    paused = await invoke_root_graph(graph, session_id="session-1", run_id="run-1")
+
+    resumed = await graph.ainvoke(
+        Command(
+            resume={
+                "type": "round_completed",
+                "run_id": "run-1",
+                "plan_id": "plan-1",
+                "round_id": "round-1",
+                "plan_version": 1,
+            }
+        ),
+        config=config,
+    )
+
+    assert len(paused["__interrupt__"]) == 1
+    assert resumed["waiting"] is False
+    assert workflow.wait_calls == 3
+    assert workflow.reviewed[0]["root_wait"]["round_id"] == "round-1"
+    assert workflow.reviewed[0]["resume_value"]["type"] == "round_completed"
+
+
+@pytest.mark.asyncio
 async def test_root_resume_dispatcher_retries_until_matching_interrupt_exists():
     class Jobs:
         def __init__(self):
@@ -218,7 +272,7 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
 
 
 @pytest.mark.asyncio
-async def test_plan_loader_treats_completed_round_as_ready_for_root_review():
+async def test_plan_loader_keeps_completed_round_waiting_for_root_review():
     class Repository:
         async def get(self, _plan_id):
             return SimpleNamespace(status=PlanStatus.WAITING_REVIEW), []
@@ -237,5 +291,5 @@ async def test_plan_loader_treats_completed_round_as_ready_for_root_review():
 
     value = await PostgresPlanLoader(Repository())(plan_id="plan-1")
 
-    assert value["completed"] is True
+    assert value["completed"] is False
     assert value["root_wait"]["round_id"] == "round-1"

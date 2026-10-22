@@ -10,13 +10,17 @@ import pytest
 from domain.orchestration import (
     OrchestrationCommand,
     OrchestrationCommandType,
+    Plan,
     PlanRevision,
     PlanStatus,
     ReviewAction,
     ReviewDecision,
+    Task,
     TaskStatus,
 )
 from infrastructure.persistence.postgres.models import (
+    AgentPlanModel,
+    AgentTaskModel,
     OrchestrationCommandModel,
     OrchestrationOutboxModel,
     PlanRoundModel,
@@ -30,6 +34,7 @@ from infrastructure.persistence.postgres.repositories.orchestration_command_repo
     PlanCommandRejected,
     PostgresOrchestrationCommandRepository,
     _review_command_hash,
+    _plan_hash,
     _receipt_document,
 )
 
@@ -67,6 +72,12 @@ class Session:
     def add(self, value):
         self.added.append(value)
 
+    def add_all(self, values):
+        self.added.extend(values)
+
+    async def flush(self):
+        return None
+
     async def get(self, *_args, **_kwargs):
         return self.get_values.pop(0)
 
@@ -94,6 +105,104 @@ def command(command_type=OrchestrationCommandType.CONTINUE_PLAN):
         plan_version=1,
         round_id="round-1",
     )
+
+
+def submit_plan_request():
+    plan = Plan(
+        plan_id="plan-1",
+        goal="Finish the report",
+        task_ids=("task-1",),
+        edges=(),
+        max_parallelism=2,
+        session_id="session-1",
+        run_id="run-1",
+    )
+    tasks = [
+        Task(
+            task_id="task-1",
+            title="Gather data",
+            objective="Collect source data",
+        )
+    ]
+    submit_command = OrchestrationCommand(
+        message_id="submit-1",
+        command_type=OrchestrationCommandType.SUBMIT_PLAN,
+        idempotency_key="submit-plan:run-1",
+        correlation_id="run-1",
+        occurred_at=datetime.now(timezone.utc),
+        plan_id="plan-1",
+        scope_key="run-1",
+        plan_version=1,
+    )
+    return submit_command, plan, tasks
+
+
+@pytest.mark.asyncio
+async def test_submit_plan_atomically_creates_first_round_executions_and_jobs():
+    session = Session()
+    id_counter = count()
+    repository = PostgresOrchestrationCommandRepository(
+        factory(session), id_factory=lambda: f"generated-{next(id_counter)}"
+    )
+    run = SimpleNamespace(
+        run_id="run-1",
+        session_id="session-1",
+        status="created",
+        updated_at=None,
+    )
+    session.get_values = [run]
+    session.execute_values = [Result(scalar=None), Result(scalar=None)]
+    submit_command, plan, tasks = submit_plan_request()
+
+    receipt = await repository.submit_plan(submit_command, plan, tasks)
+
+    assert receipt.plan_id == "plan-1"
+    assert receipt.plan_version == 1
+    assert receipt.round_id == "generated-0"
+    assert receipt.task_ids == ("task-1",)
+    assert run.status == "running"
+    assert any(isinstance(item, AgentPlanModel) for item in session.added)
+    assert any(isinstance(item, AgentTaskModel) for item in session.added)
+    assert any(isinstance(item, PlanVersionModel) for item in session.added)
+    assert any(isinstance(item, PlanRoundModel) for item in session.added)
+    assert any(isinstance(item, RoundTaskModel) for item in session.added)
+    assert any(isinstance(item, TaskExecutionModel) for item in session.added)
+    assert any(isinstance(item, WorkerJobModel) for item in session.added)
+    assert sum(isinstance(item, OrchestrationOutboxModel) for item in session.added) == 2
+
+    command_row = next(
+        item
+        for item in session.added
+        if isinstance(item, OrchestrationCommandModel)
+    )
+    assert command_row.payload_hash == _plan_hash(submit_command, plan, tasks)
+    assert command_row.round_id == receipt.round_id
+
+
+@pytest.mark.asyncio
+async def test_submit_plan_deduplicates_a_retry_after_run_becomes_terminal():
+    submit_command, plan, tasks = submit_plan_request()
+    original_receipt = SimpleNamespace(
+        message_id=submit_command.message_id,
+        plan_id=plan.plan_id,
+        plan_version=1,
+        round_id="round-1",
+        task_ids=["task-1"],
+    )
+    prior = SimpleNamespace(
+        payload_hash=_plan_hash(submit_command, plan, tasks),
+        result_json=_receipt_document(original_receipt),
+    )
+    session = Session()
+    session.get_values = [SimpleNamespace(run_id="run-1", status="completed")]
+    session.execute_values = [Result(scalar=prior)]
+
+    receipt = await PostgresOrchestrationCommandRepository(
+        factory(session)
+    ).submit_plan(submit_command, plan, tasks)
+
+    assert receipt.deduplicated is True
+    assert receipt.round_id == "round-1"
 
 
 def persisted_chain(*, current_version=1):
@@ -213,6 +322,18 @@ async def test_continue_decision_freezes_all_ready_tasks_and_is_idempotent():
         for item in session.added
         if isinstance(item, OrchestrationCommandModel)
     )
+    decision_session = Session()
+    decision_session.execute_values = [Result(scalar=command_row)]
+    persisted_decision = await PostgresOrchestrationCommandRepository(
+        factory(decision_session)
+    ).load_review_decision(
+        scope_key="run-1",
+        idempotency_key=review_command.idempotency_key,
+        plan_id="plan-1",
+        plan_version=1,
+        round_id="round-1",
+    )
+    assert persisted_decision == decision
 
     retry_session = Session()
     retry_session.get_values = [SimpleNamespace(run_id="run-1", status="completed")]

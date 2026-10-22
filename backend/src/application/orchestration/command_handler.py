@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from domain.orchestration import (
     CommandReceipt,
     OrchestrationCommand,
@@ -38,6 +40,8 @@ class OrchestrationCommandHandler:
         command: OrchestrationCommand,
         plan: Plan,
         tasks: list[Task],
+        *,
+        legal_tools: Iterable[str] | None = None,
     ) -> CommandReceipt:
         """验证并持久化首版 Plan。
 
@@ -59,7 +63,7 @@ class OrchestrationCommandHandler:
             raise ValueError("command and plan IDs do not match")
         if command.correlation_id != plan.run_id:
             raise ValueError("command correlation_id must equal plan.run_id")
-        self._validator.validate(plan, tasks)
+        self._validator.validate(plan, tasks, legal_tools=legal_tools)
         return await self._repository.submit_plan(command, plan, tasks)
 
     async def apply_review_decision(
@@ -86,6 +90,24 @@ class OrchestrationCommandHandler:
         ):
             raise ValueError("review_command_revision_version_mismatch")
         return await self._repository.apply_review_decision(command, decision)
+
+    async def load_review_decision(
+        self,
+        *,
+        scope_key: str,
+        idempotency_key: str,
+        plan_id: str,
+        plan_version: int,
+        round_id: str,
+    ) -> ReviewDecision | None:
+        """Recover an already committed decision before retrying the Root LLM."""
+        return await self._repository.load_review_decision(
+            scope_key=scope_key,
+            idempotency_key=idempotency_key,
+            plan_id=plan_id,
+            plan_version=plan_version,
+            round_id=round_id,
+        )
 
 
 __all__ = ["OrchestrationCommandHandler"]

@@ -146,7 +146,26 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
                 raise RuntimeError("root_round_wait_identity_missing")
             if wait_context.get("run_id") != request.get("run_id"):
                 raise RuntimeError("root_round_wait_run_mismatch")
-            interrupt(dict(wait_context))
+            resume_value = interrupt(dict(wait_context))
+            review_round = getattr(workflow, "review_completed_round", None)
+            if callable(review_round):
+                if not isinstance(resume_value, Mapping):
+                    raise RuntimeError("root_round_resume_value_invalid")
+                if resume_value.get("type") != "round_completed":
+                    raise RuntimeError("root_round_resume_type_invalid")
+                if any(
+                    resume_value.get(name) != wait_context.get(name)
+                    for name in ("run_id", "plan_id", "round_id", "plan_version")
+                ):
+                    raise RuntimeError("root_round_resume_identity_mismatch")
+                await call(
+                    review_round,
+                    {
+                        **state,
+                        "root_wait": dict(wait_context),
+                        "resume_value": dict(resume_value),
+                    },
+                )
 
     wait_for_plan_completion.__name__ = "wait_for_plan_completion"
     return wait_for_plan_completion

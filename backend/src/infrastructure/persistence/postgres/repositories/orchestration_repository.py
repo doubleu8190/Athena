@@ -687,7 +687,6 @@ class PostgresPlanLoader:
         results = await self._repository.get_results(plan_id)
         wait_context = await self._repository.get_wait_context(plan_id)
         completed = plan.status in {
-            PlanStatus.WAITING_REVIEW,
             PlanStatus.COMPLETED,
             PlanStatus.FAILED,
             PlanStatus.CANCELLED,

@@ -230,7 +230,7 @@ class PostgresOrchestrationCommandRepository:
                         worker_type=task.worker_type,
                         status="pending",
                         execution_generation=1,
-                        worker_thread_id=f"task:{task_id}:exec:1",
+                        worker_thread_id=f"task:{task.task_id}:exec:1",
                         llm_turn_count=0,
                         created_at=now.isoformat(),
                         updated_at=now.isoformat(),
@@ -612,11 +612,58 @@ class PostgresOrchestrationCommandRepository:
                         plan_version=command.plan_version,
                         round_id=command.round_id,
                         status="accepted",
-                        result_json=_receipt_document(receipt),
+                        result_json={
+                            **_receipt_document(receipt),
+                            "review_decision": _review_decision_document(decision),
+                        },
                         created_at=now,
                     )
                 )
                 return receipt
+
+    async def load_review_decision(
+        self,
+        *,
+        scope_key: str,
+        idempotency_key: str,
+        plan_id: str,
+        plan_version: int,
+        round_id: str,
+    ) -> ReviewDecision | None:
+        """Load the stored decision so checkpoint retries never call Root twice."""
+        async with self._session_factory() as session:
+            row = (
+                await session.execute(
+                    select(OrchestrationCommandModel).where(
+                        OrchestrationCommandModel.scope_key == scope_key,
+                        OrchestrationCommandModel.idempotency_key
+                        == idempotency_key,
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        if (
+            row.plan_id != plan_id
+            or row.plan_version != plan_version
+            or row.round_id != round_id
+            or row.status != "accepted"
+        ):
+            raise OrchestrationCommandConflict("review_idempotency_identity_conflict")
+        result = row.result_json
+        if not isinstance(result, Mapping) or not isinstance(
+            result.get("review_decision"), Mapping
+        ):
+            raise RuntimeError("stored_review_decision_missing")
+        decision = _review_decision_from_document(result["review_decision"])
+        expected_type = {
+            ReviewAction.CONTINUE: OrchestrationCommandType.CONTINUE_PLAN.value,
+            ReviewAction.REPLAN: OrchestrationCommandType.REVISE_PLAN.value,
+            ReviewAction.FINISH: OrchestrationCommandType.FINISH_PLAN.value,
+        }[decision.action]
+        if row.command_type != expected_type:
+            raise OrchestrationCommandConflict("stored_review_decision_type_conflict")
+        return decision
 
     def _schedule_review_round(
         self,
@@ -1158,6 +1205,74 @@ def _receipt_document(receipt: CommandReceipt) -> dict[str, Any]:
         "round_id": receipt.round_id,
         "task_ids": list(receipt.task_ids),
     }
+
+
+def _review_decision_document(decision: ReviewDecision) -> dict[str, Any]:
+    """Serialize the exact accepted Root decision alongside its receipt."""
+    revision = decision.revision
+    return {
+        "action": decision.action.value,
+        "reason": decision.reason,
+        "revision": (
+            {
+                "base_version": revision.base_version,
+                "keep_task_ids": list(revision.keep_task_ids),
+                "cancel_task_ids": list(revision.cancel_task_ids),
+                "new_tasks": [dict(task) for task in revision.new_tasks],
+            }
+            if revision is not None
+            else None
+        ),
+        "final_status": decision.final_status,
+    }
+
+
+def _review_decision_from_document(value: Mapping[str, Any]) -> ReviewDecision:
+    """Restore a stored ReviewDecision through its strict domain contract."""
+    try:
+        action = ReviewAction(value["action"])
+        reason = value["reason"]
+    except (KeyError, ValueError, TypeError) as exc:
+        raise RuntimeError("stored_review_decision_invalid") from exc
+    if not isinstance(reason, str):
+        raise RuntimeError("stored_review_decision_invalid")
+    revision: PlanRevision | None = None
+    if action == ReviewAction.REPLAN:
+        raw_revision = value.get("revision")
+        if not isinstance(raw_revision, Mapping):
+            raise RuntimeError("stored_review_revision_invalid")
+        base_version = raw_revision.get("base_version")
+        keep_ids = raw_revision.get("keep_task_ids")
+        cancel_ids = raw_revision.get("cancel_task_ids")
+        new_tasks = raw_revision.get("new_tasks")
+        if (
+            not isinstance(base_version, int)
+            or isinstance(base_version, bool)
+            or not isinstance(keep_ids, list)
+            or not isinstance(cancel_ids, list)
+            or not isinstance(new_tasks, list)
+            or any(not isinstance(item, str) for item in (*keep_ids, *cancel_ids))
+            or any(not isinstance(item, Mapping) for item in new_tasks)
+        ):
+            raise RuntimeError("stored_review_revision_invalid")
+        revision = PlanRevision(
+            base_version=base_version,
+            keep_task_ids=tuple(keep_ids),
+            cancel_task_ids=tuple(cancel_ids),
+            new_tasks=tuple(dict(task) for task in new_tasks),
+        )
+    final_status = value.get("final_status")
+    if final_status is not None and not isinstance(final_status, str):
+        raise RuntimeError("stored_review_decision_invalid")
+    try:
+        return ReviewDecision(
+            action=action,
+            reason=reason,
+            revision=revision,
+            final_status=final_status,
+        )
+    except ValueError as exc:
+        raise RuntimeError("stored_review_decision_invalid") from exc
 
 
 def _receipt(value: dict[str, Any] | None, *, deduplicated: bool) -> CommandReceipt:

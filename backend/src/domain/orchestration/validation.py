@@ -25,9 +25,24 @@ class PlanValidator:
         self._legal_tools = set(legal_tools)
         self._max_parallelism = max_parallelism
 
-    def validate(self, plan: Plan, tasks: Iterable[Task]) -> None:
+    def validate(
+        self,
+        plan: Plan,
+        tasks: Iterable[Task],
+        *,
+        legal_tools: Iterable[str] | None = None,
+    ) -> None:
+        """Validate a plan against the configured or current tool snapshot.
+
+        ``legal_tools`` lets the caller pass a capability snapshot loaded from
+        the live tool registry.  ``None`` retains the validator's configured
+        allow-list; an empty iterable deliberately means no tools are allowed.
+        """
         errors: list[dict[str, str]] = []
         task_list = list(tasks)
+        allowed_tools = (
+            self._legal_tools if legal_tools is None else set(legal_tools)
+        )
         task_ids = [task.task_id for task in task_list]
         if not plan.task_ids:
             errors.append({"code": "empty_plan", "message": "Plan must contain at least one task"})
@@ -63,7 +78,7 @@ class PlanValidator:
                 errors.append({"code": "invalid_objective", "message": f"task objective is required: {task.task_id}"})
             if task.worker_type not in self._worker_types:
                 errors.append({"code": "unknown_worker_type", "message": f"worker type is not registered: {task.worker_type}"})
-            if any(tool not in self._legal_tools for tool in task.allowed_tools):
+            if any(tool not in allowed_tools for tool in task.allowed_tools):
                 errors.append({"code": "unknown_tool", "message": f"task uses an unregistered tool: {task.task_id}"})
         if errors:
             raise PlanValidationError(errors)

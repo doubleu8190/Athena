@@ -8,6 +8,9 @@ from application.orchestration.command_handler import OrchestrationCommandHandle
 from domain.orchestration import (
     OrchestrationCommand,
     OrchestrationCommandType,
+    Plan,
+    PlanStatus,
+    Task,
     PlanRevision,
     ReviewAction,
     ReviewDecision,
@@ -23,6 +26,15 @@ class ReviewCommandRepository:
         return "receipt"
 
 
+class SubmitCommandRepository:
+    def __init__(self):
+        self.submitted = None
+
+    async def submit_plan(self, command, plan, tasks):
+        self.submitted = (command, plan, tasks)
+        return "receipt"
+
+
 def command(command_type: OrchestrationCommandType) -> OrchestrationCommand:
     return OrchestrationCommand(
         message_id="message-1",
@@ -35,6 +47,62 @@ def command(command_type: OrchestrationCommandType) -> OrchestrationCommand:
         plan_version=4,
         round_id="round-1",
     )
+
+
+def submission():
+    plan = Plan(
+        plan_id="plan-1",
+        goal="Prepare a report",
+        task_ids=("task-1",),
+        status=PlanStatus.CREATED,
+        session_id="session-1",
+        run_id="run-1",
+    )
+    task = Task(
+        task_id="task-1",
+        title="Gather data",
+        objective="Collect source data",
+        allowed_tools=("read_local_file",),
+    )
+    submit_command = OrchestrationCommand(
+        message_id="submit-1",
+        command_type=OrchestrationCommandType.SUBMIT_PLAN,
+        idempotency_key="submit-plan:run-1",
+        correlation_id="run-1",
+        occurred_at=datetime.now(timezone.utc),
+        plan_id=plan.plan_id,
+        scope_key="run-1",
+        plan_version=1,
+    )
+    return submit_command, plan, [task]
+
+
+@pytest.mark.asyncio
+async def test_submit_plan_validates_against_live_worker_tool_snapshot():
+    repository = SubmitCommandRepository()
+    handler = OrchestrationCommandHandler(repository)
+    submit_command, plan, tasks = submission()
+
+    receipt = await handler.submit_plan(
+        submit_command, plan, tasks, legal_tools={"read_local_file"}
+    )
+
+    assert receipt == "receipt"
+    assert repository.submitted == (submit_command, plan, tasks)
+
+
+@pytest.mark.asyncio
+async def test_submit_plan_rejects_tools_missing_from_live_snapshot():
+    repository = SubmitCommandRepository()
+    handler = OrchestrationCommandHandler(repository)
+    submit_command, plan, tasks = submission()
+
+    with pytest.raises(ValueError, match="unregistered tool"):
+        await handler.submit_plan(
+            submit_command, plan, tasks, legal_tools=set()
+        )
+
+    assert repository.submitted is None
 
 
 @pytest.mark.asyncio

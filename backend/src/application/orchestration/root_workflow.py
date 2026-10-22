@@ -15,7 +15,15 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Callable, Mapping
 
-from domain.orchestration import Plan, PlanEdge, Task
+from domain.orchestration import (
+    OrchestrationCommand,
+    OrchestrationCommandType,
+    Plan,
+    PlanEdge,
+    ReviewAction,
+    ReviewDecision,
+    Task,
+)
 
 from .protocols import RootWorkflowDependencies, RootWorkflowPort
 from .worker_tools import list_worker_tools, worker_tool_manifest
@@ -404,6 +412,27 @@ class RootWorkflow(RootWorkflowPort):
         created_locally = False
         if deps.persist_plan is not None:
             await call(deps.persist_plan, plan=plan, tasks=tasks, state=state)
+        elif deps.orchestration_command_handler is not None:
+            if not run_id:
+                raise ValueError("run_id is required for SubmitPlan")
+            command = OrchestrationCommand(
+                message_id=f"root-submit-plan:{run_id}",
+                command_type=OrchestrationCommandType.SUBMIT_PLAN,
+                idempotency_key=f"submit-plan:{run_id}",
+                correlation_id=run_id,
+                occurred_at=datetime.now(timezone.utc),
+                plan_id=plan.plan_id,
+                scope_key=run_id,
+                plan_version=1,
+                payload={"source": "root_agent"},
+            )
+            await call(
+                deps.orchestration_command_handler.submit_plan,
+                command,
+                plan,
+                tasks,
+                legal_tools=worker_tools,
+            )
         elif deps.orchestration is not None and hasattr(
             deps.orchestration, "create_plan"
         ):
@@ -481,6 +510,100 @@ class RootWorkflow(RootWorkflowPort):
             "waiting": True,
             "status": "waiting_for_plan",
             "root_wait": wait_context,
+        }
+
+    async def review_completed_round(
+        self, state: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Load a fixed Round context, decide once, and persist the action."""
+        deps = self.dependencies
+        resume_value = state.get("resume_value", {})
+        wait_context = state.get("root_wait", {})
+        if not isinstance(resume_value, Mapping) or not isinstance(
+            wait_context, Mapping
+        ):
+            raise RuntimeError("root_review_resume_identity_missing")
+        if resume_value.get("type") != "round_completed":
+            raise RuntimeError("root_review_resume_type_invalid")
+        identity_fields = ("run_id", "plan_id", "round_id", "plan_version")
+        if (
+            any(name not in resume_value or name not in wait_context for name in identity_fields)
+            or any(
+                resume_value.get(name) != wait_context.get(name)
+                for name in identity_fields
+            )
+        ):
+            raise RuntimeError("root_review_resume_identity_mismatch")
+        request = state.get("request", {})
+        if not isinstance(request, Mapping) or request.get("run_id") != resume_value.get(
+            "run_id"
+        ):
+            raise RuntimeError("root_review_run_identity_mismatch")
+        if deps.orchestration_command_handler is None:
+            raise RuntimeError("root_review_command_handler_not_configured")
+
+        round_id = str(resume_value["round_id"])
+        plan_id = str(resume_value["plan_id"])
+        plan_version = resume_value["plan_version"]
+        run_id = str(resume_value["run_id"])
+        if not isinstance(plan_version, int) or isinstance(plan_version, bool):
+            raise RuntimeError("root_review_plan_version_invalid")
+        idempotency_key = f"root-review:{round_id}"
+        decision = await deps.orchestration_command_handler.load_review_decision(
+            scope_key=run_id,
+            idempotency_key=idempotency_key,
+            plan_id=plan_id,
+            plan_version=plan_version,
+            round_id=round_id,
+        )
+        if decision is None:
+            if deps.review_context_repository is None:
+                raise RuntimeError("root_review_context_repository_not_configured")
+            context = await deps.review_context_repository.load_review_context(
+                round_id
+            )
+            if (
+                context.round_id != round_id
+                or context.plan_id != plan_id
+                or context.plan_version != plan_version
+            ):
+                raise RuntimeError("root_review_context_identity_mismatch")
+            reviewer = getattr(deps.agent, "review", None)
+            if not callable(reviewer):
+                raise RuntimeError("root_review_agent_not_configured")
+            decision = await call(reviewer, context, request=request)
+        if not isinstance(decision, ReviewDecision):
+            raise RuntimeError("root_review_decision_invalid")
+
+        command_type = {
+            ReviewAction.CONTINUE: OrchestrationCommandType.CONTINUE_PLAN,
+            ReviewAction.REPLAN: OrchestrationCommandType.REVISE_PLAN,
+            ReviewAction.FINISH: OrchestrationCommandType.FINISH_PLAN,
+        }[decision.action]
+        command = OrchestrationCommand(
+            message_id=f"root-review:{round_id}",
+            command_type=command_type,
+            idempotency_key=idempotency_key,
+            correlation_id=run_id,
+            occurred_at=datetime.now(timezone.utc),
+            plan_id=plan_id,
+            scope_key=run_id,
+            payload={"action": decision.action.value, "reason": decision.reason},
+            plan_version=plan_version,
+            round_id=round_id,
+            causation_id=(
+                str(resume_value["interrupt_id"])
+                if resume_value.get("interrupt_id")
+                else None
+            ),
+        )
+        receipt = await deps.orchestration_command_handler.apply_review_decision(
+            command, decision
+        )
+        return {
+            "review_action": decision.action.value,
+            "review_reason": decision.reason,
+            "review_receipt": as_dict(receipt),
         }
 
     async def project_plan_result(self, state: Mapping[str, Any]) -> dict[str, Any]:

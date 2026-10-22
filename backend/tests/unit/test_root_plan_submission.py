@@ -32,6 +32,22 @@ class ToolService:
         ]
 
 
+class ShellToolService(ToolService):
+    async def list_tools(self):
+        return [
+            *await super().list_tools(),
+            SimpleNamespace(
+                name="exec_shell",
+                description="Run a command in the sandbox",
+                parameters={"type": "object"},
+                risk_level="high",
+                execution_mode="native",
+                enabled=True,
+                require_approval=True,
+            ),
+        ]
+
+
 class CommandHandler:
     def __init__(self):
         self.submissions = []
@@ -71,9 +87,13 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
             "request": {
                 "run_id": "run-42",
                 "session_id": "session-9",
-                "user_message": "Prepare a report",
+                "user_message": "Prepare a report, but delay Version 2 until after Root Review.",
             },
-            "understanding": {"task_spec": {"goal": "Prepare a report"}},
+            "understanding": {
+                "task_spec": {
+                    "goal": "Prepare a report, but delay Version 2 until after Root Review."
+                }
+            },
             "plan": {
                 "plan_id": "report-plan",
                 "goal": "Prepare a report",
@@ -108,6 +128,7 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
     assert command.plan_version == 1
     assert plan.session_id == "session-9"
     assert plan.run_id == "run-42"
+    assert plan.goal == "Prepare a report, but delay Version 2 until after Root Review."
     assert tasks[0].task_id == "gather:run-42"
     assert tasks[0].allowed_tools == ("read_local_file",)
     assert tasks[0].timeout_seconds == 42
@@ -117,3 +138,50 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
     assert legal_tools == {"read_local_file"}
     assert scheduler.started == []
     assert result["plan"]["plan_id"] == plan.plan_id
+
+
+@pytest.mark.asyncio
+async def test_explicit_user_tool_allowlist_binds_to_matching_task_input():
+    handler = CommandHandler()
+    workflow = RootWorkflow(
+        SimpleNamespace(
+            tool_service=ShellToolService(),
+            orchestration_command_handler=handler,
+            orchestration=SimpleNamespace(create_plan=lambda **_kwargs: None),
+            worker_scheduler=Scheduler(),
+            persist_plan=None,
+            validate_plan=None,
+            event_publisher=None,
+            plan_builder=None,
+        )
+    )
+
+    await workflow.materialize_execution_plan(
+        {
+            "request": {"run_id": "run-shell", "session_id": "session-1"},
+            "understanding": {
+                "task_spec": {"goal": "run one command", "allowed_tools": ["exec_shell"]}
+            },
+            "plan": {
+                "plan_id": "shell-plan",
+                "goal": "run one command",
+                "tasks": [
+                    {
+                        "task_id": "version",
+                        "title": "Python version",
+                        "objective": "Call exec_shell once and return stdout",
+                        "input": {
+                            "exec_shell": {
+                                "command": "python -c 'import sys; print(sys.version.split()[0])'"
+                            }
+                        },
+                        "allowed_tools": [],
+                    }
+                ],
+            },
+        }
+    )
+
+    _, _plan, tasks, legal_tools = handler.submissions[0]
+    assert tasks[0].allowed_tools == ("exec_shell",)
+    assert "exec_shell" in legal_tools

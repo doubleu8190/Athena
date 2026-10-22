@@ -118,9 +118,25 @@ async def invoke_worker_graph(
     ) or f"task:{task_id}:exec:{execution_generation}"
     config = {"configurable": {"thread_id": str(thread_id)}}
     if resume_value is not None:
+        current_execution = encoded if isinstance(encoded, Mapping) else {}
+        checkpoint = await call(graph.aget_state, config=config)
+        values = getattr(checkpoint, "values", {})
+        saved_execution = (
+            values.get("execution", {}) if isinstance(values, Mapping) else {}
+        )
+        merged_execution = (
+            dict(saved_execution) if isinstance(saved_execution, Mapping) else {}
+        )
+        merged_execution.update(current_execution)
+        for key in ("tool_results", "_worker_result_refs"):
+            if key in saved_execution:
+                merged_execution[key] = saved_execution[key]
         return await call(
             graph.ainvoke,
-            Command(resume=dict(resume_value)),
+            Command(
+                resume=dict(resume_value),
+                update={"execution": merged_execution},
+            ),
             config=config,
         )
     return await call(graph.ainvoke, state, config=config)

@@ -57,6 +57,22 @@ async def test_explicit_multi_agent_execution_uses_plan_fast_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_worker_task_creation_uses_plan_fast_path() -> None:
+    """显式创建 Worker 任务时，不让 LLM 将请求降级为普通问答。"""
+    llm = _AnswerLLM()
+    understood = await TaskUnderstandingService(llm).understand(
+        user_message=(
+            '请为本次新 Run 创建唯一一个 Worker 任务（allowed_tools=["exec_shell"]）。'
+        )
+    )
+
+    assert understood.source == "fast_path"
+    assert understood.task.mode == "plan"
+    assert understood.task.allowed_tools == ("exec_shell",)
+    assert llm.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_discussing_multi_agent_without_execution_stays_with_model() -> None:
     """仅讨论多 Agent 概念时不强制启动执行计划。"""
     llm = _AnswerLLM()

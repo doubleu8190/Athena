@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.orchestration import TaskEventReceipt, WorkerTaskTerminalEvent
+from domain.orchestration import TaskEventReceipt, WorkerTaskTerminalEvent, TaskEventRepository
 from ..models import (
     AgentPlanModel,
     AgentRunModel,
@@ -39,7 +39,7 @@ class TaskEventConflict(ValueError):
     """相同事件 ID 被不同事件内容复用。"""
 
 
-class PostgresOrchestrationEventRepository:
+class PostgresOrchestrationEventRepository(TaskEventRepository):
     """在单个 PostgreSQL 事务中验证执行栅栏并推进 Round。"""
 
     def __init__(

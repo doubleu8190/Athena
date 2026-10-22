@@ -116,12 +116,24 @@ def _coerce_plan_edge(value: Any) -> PlanEdge:
 def _coerce_plan(
     value: Any, *, request: Mapping[str, Any], task: Mapping[str, Any]
 ) -> tuple[Plan, list[Task]]:
+    original_goal = str(
+        request.get("user_message") or task.get("goal") or ""
+    ).strip()
     if isinstance(value, tuple) and len(value) == 2:
         value, raw_tasks = value
     else:
         raw_tasks = None
     if isinstance(value, Plan):
-        plan = value
+        plan = Plan(
+            plan_id=value.plan_id,
+            goal=original_goal or value.goal,
+            task_ids=value.task_ids,
+            edges=value.edges,
+            max_parallelism=value.max_parallelism,
+            status=value.status,
+            session_id=value.session_id,
+            run_id=value.run_id,
+        )
         raw_tasks = raw_tasks or []
     else:
         payload = as_dict(value)
@@ -134,11 +146,7 @@ def _coerce_plan(
         edges = tuple(_coerce_plan_edge(item) for item in payload.get("edges", []))
         plan = Plan(
             plan_id=str(payload.get("plan_id") or f"plan:{request.get('run_id', '')}"),
-            goal=str(
-                payload.get("goal")
-                or task.get("goal")
-                or request.get("user_message", "")
-            ),
+            goal=original_goal or str(payload.get("goal") or ""),
             task_ids=task_ids,
             edges=edges,
             max_parallelism=max(1, int(payload.get("max_parallelism", 1))),
@@ -397,6 +405,19 @@ class RootWorkflow(RootWorkflowPort):
                 run_id=run_id,
             )
         worker_tools = set(await list_worker_tools(deps.tool_service))
+        explicit_allowed_tools = task.get("allowed_tools")
+        explicit_tool_set = (
+            set(explicit_allowed_tools)
+            if isinstance(explicit_allowed_tools, (list, tuple, set, frozenset))
+            else None
+        )
+        if explicit_tool_set is not None:
+            unavailable_tools = explicit_tool_set - worker_tools
+            if unavailable_tools:
+                raise ValueError(
+                    "explicit_worker_tools_unavailable: "
+                    + ", ".join(sorted(unavailable_tools))
+                )
         # Task ids are database-global, so bind model-produced ids to this run.
         task_id_map = (
             {item.task_id: f"{item.task_id}:{run_id}" for item in tasks}
@@ -411,7 +432,22 @@ class RootWorkflow(RootWorkflowPort):
                 input=item.input,
                 expected_output=item.expected_output,
                 allowed_tools=tuple(
-                    name for name in item.allowed_tools if name in worker_tools
+                    dict.fromkeys(
+                        name
+                        for name in (
+                            *item.allowed_tools,
+                            *(
+                                tool_name
+                                for tool_name in explicit_tool_set or ()
+                                if tool_name in item.input
+                            ),
+                        )
+                        if name in worker_tools
+                        and (
+                            explicit_tool_set is None
+                            or name in explicit_tool_set
+                        )
+                    )
                 ),
                 worker_type="general",
                 timeout_seconds=item.timeout_seconds,

@@ -42,6 +42,7 @@ class UserTaskSpec(BaseModel):
     domain: str = "general"
     mode: TaskMode = "answer"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    allowed_tools: tuple[str, ...] | None = None
     context_requirements: tuple[ContextRequirement, ...] = ("conversation",)
     slots: dict[str, Any] = Field(default_factory=dict)
     output: OutputSpec = Field(default_factory=OutputSpec)
@@ -67,6 +68,19 @@ class UserTaskSpec(BaseModel):
         if isinstance(value, str):
             value = (value,)
         return tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+    @field_validator("allowed_tools", mode="before")
+    @classmethod
+    def normalize_allowed_tools(cls, value: Any) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = (value,)
+        if not isinstance(value, (list, tuple, set, frozenset)):
+            raise ValueError("allowed_tools must be a list of tool names")
+        if any(not isinstance(item, str) for item in value):
+            raise ValueError("allowed_tools must contain only tool names")
+        return tuple(dict.fromkeys(item.strip() for item in value if item.strip()))
 
     @model_validator(mode="before")
     @classmethod

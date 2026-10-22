@@ -189,6 +189,73 @@ async def test_high_risk_worker_tool_interrupts_and_executes_same_arguments_afte
 
 
 @pytest.mark.asyncio
+async def test_approval_resume_uses_refreshed_worker_lease_fence():
+    class FenceLedger:
+        def __init__(self):
+            self.fencing_tokens = []
+
+        async def claim(self, _request, *, args_hash):
+            self.fencing_tokens.append(_request.fencing_token)
+            if _request.fencing_token != 8:
+                return ToolOperationClaim(
+                    ToolOperationClaimStatus.REJECTED,
+                    reason="worker_operation_lease_not_active",
+                )
+            return ToolOperationClaim(ToolOperationClaimStatus.ACQUIRED)
+
+        async def complete(self, *_args, **_kwargs):
+            return True
+
+    tools = ToolService()
+    ledger = FenceLedger()
+    executor = WorkerToolExecutor(tools, operation_ledger=ledger)
+    workflow = WorkerWorkflow(execute=WorkerAgent(), execute_tool=executor)
+    graph = build_worker_graph(workflow=workflow, checkpointer=InMemorySaver())
+    initial_execution = {
+        "plan_id": "plan-1",
+        "run_id": "run-1",
+        "session_id": "session-1",
+        "execution_id": "execution-1",
+        "worker_thread_id": "task:task-1:exec:1",
+        "execution_generation": 1,
+        "fencing_token": 7,
+        "cancellation_epoch": 0,
+        "task": {
+            "task_id": "task-1",
+            "allowed_tools": ["write_file"],
+            "objective": "write a report",
+        },
+    }
+
+    paused = await invoke_worker_graph(
+        graph,
+        task_id="task-1",
+        execution_generation=1,
+        execution=initial_execution,
+    )
+    interrupt = paused["__interrupt__"][0]
+    approval = dict(interrupt.value)
+    refreshed_execution = {**initial_execution, "fencing_token": 8}
+
+    finished = await invoke_worker_graph(
+        graph,
+        task_id="task-1",
+        execution_generation=1,
+        execution=refreshed_execution,
+        resume_value={
+            **approval,
+            "interrupt_id": interrupt.id,
+            "decision": "approved",
+        },
+    )
+
+    assert ledger.fencing_tokens == [8]
+    assert len(tools.executed) == 1
+    assert tools.executed[0].fencing_token == 8
+    assert finished["status"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_worker_approval_request_persists_interrupt_identity_and_notifies():
     class Jobs:
         def __init__(self):

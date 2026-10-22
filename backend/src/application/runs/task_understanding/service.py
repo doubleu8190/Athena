@@ -14,6 +14,23 @@ from .specs import QueryHints, UserTaskSpec
 _PROMPT_ROOT = Path(__file__).resolve().parents[4] / "prompt"
 
 
+def _explicit_allowed_tools(text: str) -> tuple[str, ...] | None:
+    """Extract a literal JSON allowlist when the user supplies one."""
+    marker = text.lower().find("allowed_tools")
+    if marker < 0:
+        return None
+    start = text.find("[", marker + len("allowed_tools"))
+    if start < 0:
+        return ()
+    try:
+        value, _end = json.JSONDecoder().raw_decode(text[start:])
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        return ()
+    return tuple(dict.fromkeys(item.strip() for item in value if item.strip()))
+
+
 @dataclass(frozen=True, slots=True)
 class TaskUnderstandingResult:
     task: UserTaskSpec
@@ -163,10 +180,25 @@ class TaskUnderstandingService:
             marker in lowered
             for marker in ("运行", "执行", "拆分", "分工", "并行")
         )
-        if requests_multi_agent_execution:
+        requests_explicit_worker_plan = any(
+            marker in lowered
+            for marker in (
+                "worker 任务",
+                "worker task",
+                "worker job",
+                "plan version",
+                "plan round",
+                "计划中",
+            )
+        ) and any(
+            marker in lowered
+            for marker in ("创建", "提交", "启动", "运行", "执行", "生成")
+        )
+        if requests_multi_agent_execution or requests_explicit_worker_plan:
             return UserTaskSpec(
                 goal=text,
                 mode="plan",
+                allowed_tools=_explicit_allowed_tools(text),
                 attachment_ids=attachments,
                 confidence=1.0,
             )

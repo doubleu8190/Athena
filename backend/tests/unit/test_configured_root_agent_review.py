@@ -76,6 +76,7 @@ async def test_configured_root_agent_decodes_review_decision_and_sends_round_con
     user_payload = json.loads(llm.messages[1]["content"])
     assert user_payload["round_id"] == "round-7"
     assert user_payload["round_results"][0]["task_id"] == "task-a"
+    assert "requested point to start another Plan Version" in llm.messages[0]["content"]
 
 
 @pytest.mark.asyncio

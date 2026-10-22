@@ -37,6 +37,7 @@ from domain.orchestration import (
     ExecutionStatus,
     TaskStatus,
     freeze_ready_round,
+    OrchestrationCommandRepository,
 )
 from ..models import (
     AgentPlanModel,
@@ -60,7 +61,7 @@ class PlanCommandRejected(ValueError):
     """当前 Run 状态或 Plan 事实不允许接受命令。"""
 
 
-class PostgresOrchestrationCommandRepository:
+class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
     """在事务中保存 Plan、版本、首轮、执行作业和可靠事件。"""
 
     def __init__(
@@ -157,7 +158,7 @@ class PostgresOrchestrationCommandRepository:
                 if existing is not None:
                     raise PlanCommandRejected("plan_already_exists")
 
-                initial_states = {task.task_id: "pending" for task in tasks}
+                initial_states = {task.task_id: TaskStatus.PENDING.value for task in tasks}
                 plan_document = _plan_document(plan, tasks, version=1)
                 plan_version = PlanVersion(
                     plan_id=plan.plan_id,

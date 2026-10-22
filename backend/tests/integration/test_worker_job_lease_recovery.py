@@ -103,6 +103,7 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
         assert current_lease.fencing_token == 8
         assert current_lease.attempt == 1
         assert current_lease.worker_id in {"worker-a", "worker-b"}
+        assert current_lease.task.allowed_tools == ("exec_shell",)
 
         previous_lease = replace(
             current_lease,
@@ -178,7 +179,7 @@ async def _seed_expired_worker_job(
                 run_id="run-1",
                 title="Recover task",
                 objective="Resume after Worker process loss",
-                allowed_tools_json="[]",
+                allowed_tools_json='["exec_shell"]',
                 timeout_seconds=600,
                 status="running",
                 execution_generation=1,

@@ -1112,7 +1112,7 @@ def _task_from_row(row: AgentTaskModel) -> Task:
         objective=row.objective,
         input=_load_json(row.input_json, {}),
         expected_output=_load_json(row.expected_output_json, {}),
-        allowed_tools=tuple(_load_json(row.allowed_tools_json, [])),
+        allowed_tools=_load_json_string_list(row.allowed_tools_json),
         worker_type=row.worker_type,
         timeout_seconds=getattr(row, "timeout_seconds", 3600.0) or 3600.0,
     )
@@ -1164,6 +1164,24 @@ def _load_json(value: str | dict[str, Any] | None, default: Any) -> Any:
     except (TypeError, ValueError):
         return default
     return loaded if isinstance(loaded, dict) else default
+
+
+def _load_json_string_list(value: str | list[Any] | None) -> tuple[str, ...]:
+    """读取 JSON 字符串列表；格式错误或元素类型不符时返回空元组。"""
+    if isinstance(value, list):
+        loaded = value
+    elif value:
+        try:
+            loaded = json.loads(value)
+        except (TypeError, ValueError):
+            return ()
+    else:
+        return ()
+    if not isinstance(loaded, list) or any(
+        not isinstance(item, str) for item in loaded
+    ):
+        return ()
+    return tuple(loaded)
 
 
 def _utc(value: datetime) -> datetime:

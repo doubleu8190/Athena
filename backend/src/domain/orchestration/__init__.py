@@ -35,7 +35,6 @@ from .rounds import NoReadyTasksError, freeze_ready_round
 from .errors import PlanCommandRejected
 from .ports import (
     OrchestrationCommandRepository,
-    PlanRepository,
     OrchestrationOutboxRepository,
     ReviewContextRepository,
     RootGraphPort,
@@ -57,7 +56,6 @@ __all__ = [
     "PlanStatus",
     "PlanValidationError",
     "PlanValidator",
-    "PlanRepository",
     "RootGraphPort",
     "Task",
     "TaskResult",

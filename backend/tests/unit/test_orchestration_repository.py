@@ -8,14 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from domain.orchestration import (
-    Plan,
-    PlanEdge,
     PlanStatus,
-    Task,
     TaskStatus,
 )
 from infrastructure.persistence.postgres.models import (
-    PlanVersionModel,
     TaskExecutionResultModel,
 )
 from infrastructure.persistence.postgres.repositories import (
@@ -43,25 +39,12 @@ class Session:
     def __init__(self):
         self.get_values = []
         self.execute_values = []
-        self.added = []
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *_args):
         return False
-
-    def begin(self):
-        return self
-
-    def add(self, value):
-        self.added.append(value)
-
-    def add_all(self, values):
-        self.added.extend(values)
-
-    async def flush(self):
-        return None
 
     async def get(self, *_args, **_kwargs):
         return self.get_values.pop(0) if self.get_values else None
@@ -76,19 +59,6 @@ def factory(session):
         yield session
 
     return provide
-
-
-def plan(status=PlanStatus.CREATED):
-    return Plan(
-        "p-1",
-        "goal",
-        ("a", "b"),
-        (PlanEdge("a", "b"),),
-        max_parallelism=2,
-        status=status,
-        session_id="s-1",
-        run_id="r-1",
-    )
 
 
 def task(task_id, *, status=TaskStatus.PENDING, generation=0, output=None, error=None):
@@ -113,31 +83,14 @@ def task(task_id, *, status=TaskStatus.PENDING, generation=0, output=None, error
 
 
 @pytest.mark.asyncio
-async def test_plan_repository_reads_the_current_immutable_version():
+async def test_orchestration_repository_reads_plan_status():
     session = Session()
     repository = PostgresOrchestrationRepository(factory(session))
-    await repository.create(plan(), [Task("a", "A", "do A"), Task("b", "B", "do B")])
-    assert len(session.added) == 4
-    assert any(isinstance(value, PlanVersionModel) for value in session.added)
-
     plan_row = SimpleNamespace(
-        plan_id="p-1", run_id="r-1", session_id="s-1", user_goal="goal",
-        max_parallelism=2, status="created",
-        current_version=1,
+        plan_id="p-1", status="created"
     )
-    version_row = SimpleNamespace(
-        dag_json={
-            "goal": "goal",
-            "max_parallelism": 2,
-            "nodes": [{"task_id": "a"}, {"task_id": "b"}],
-            "edges": [{"from": "a", "to": "b"}],
-        }
-    )
-    a_row, b_row = task("a"), task("b")
-    session.get_values = [plan_row, version_row]
-    session.execute_values = [Result(rows=[a_row, b_row])]
-    loaded = await repository.get("p-1")
-    assert loaded and loaded[0].edges[0].to_task_id == "b"
+    session.get_values = [plan_row]
+    assert await repository.get_plan_status("p-1") is PlanStatus.CREATED
 
 
 @pytest.mark.asyncio

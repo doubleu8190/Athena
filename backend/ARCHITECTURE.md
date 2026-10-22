@@ -93,7 +93,7 @@ athena_restructured/
 | --- | --- | --- | --- |
 | sessions | `SessionService` | Session、Message、状态规则 | session/message repository |
 | runs | `RunCommandService`、`RunExecutionService` | Run、Command、事件 | agent store、checkpoint、event store |
-| orchestration | `OrchestrationService`、`RootWorkflow`、`WorkerWorkflow` | Plan、Task、DAG 规则 | orchestration repository、LangGraph adapter |
+| orchestration | `OrchestrationCommandHandler`、`OrchestrationQueryService`、`RootWorkflow`、`WorkerWorkflow` | Plan、Task、DAG 规则 | command/read repositories、LangGraph adapter |
 | files | `AttachmentService`、`IngestionService`、`FileRetrievalService` | Attachment、Chunk、访问规则 | file repository、storage、vector store |
 | knowledge | `KnowledgeBaseService` | KnowledgeBase、文档状态 | knowledge repository、graph indexer |
 | memory | `MemoryService` | Memory、Revision、记忆规则 | memory repository、vector/graph store |

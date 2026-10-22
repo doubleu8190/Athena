@@ -15,7 +15,7 @@ from .contracts import (
     WorkerJobLease,
     WorkerTaskTerminalEvent,
 )
-from .entities import Plan, Task, TaskExecution, TaskResult
+from .entities import TaskExecution, TaskResult
 
 
 class OrchestrationCommandRepository(Protocol):
@@ -85,14 +85,6 @@ class OrchestrationOutboxRepository(Protocol):
     ) -> bool: ...
 
 
-class PlanRepository(Protocol):
-    async def create(self, plan: Plan, tasks: list[Task]) -> Plan: ...
-
-    async def get(self, plan_id: str) -> tuple[Plan, list[Task]] | None: ...
-
-    async def get_results(self, plan_id: str) -> Mapping[str, TaskResult]: ...
-
-
 class ReviewContextRepository(Protocol):
     async def load_review_context(self, round_id: str) -> ReviewContext: ...
 
@@ -150,7 +142,6 @@ class RootGraphPort(Protocol):
 __all__ = [
     "OrchestrationCommandRepository",
     "OrchestrationOutboxRepository",
-    "PlanRepository",
     "ReviewContextRepository",
     "RootGraphPort",
     "TaskEventRepository",

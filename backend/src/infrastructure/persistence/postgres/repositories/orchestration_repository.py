@@ -12,13 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.orchestration import (
-    Plan,
-    PlanEdge,
-    PlanRepository,
     PlanStatus,
     ReviewContext,
     ReviewContextRepository,
-    Task,
     TaskResult,
     TaskStatus,
 )
@@ -122,64 +118,18 @@ def _execution_snapshot(execution: TaskExecutionModel) -> dict[str, object]:
     }
 
 
-class PostgresOrchestrationRepository(PlanRepository, ReviewContextRepository):
+class PostgresOrchestrationRepository(ReviewContextRepository):
     """Read persisted plan and round data for Root review and result projection."""
 
     def __init__(self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]) -> None:
         self._session_factory = session_factory
 
-    async def create(self, plan: Plan, tasks: list[Task]) -> Plan:
-        now = datetime.now(timezone.utc)
-        document = {
-            "plan_id": plan.plan_id,
-            "version": 1,
-            "goal": plan.goal,
-            "max_parallelism": plan.max_parallelism,
-            "nodes": [
-                {
-                    "task_id": task.task_id,
-                    "title": task.title,
-                    "objective": task.objective,
-                    "input": dict(task.input),
-                    "expected_output": dict(task.expected_output),
-                    "allowed_tools": list(task.allowed_tools),
-                    "worker_type": task.worker_type,
-                    "timeout_seconds": task.timeout_seconds,
-                }
-                for task in tasks
-            ],
-            "edges": [
-                {"from": edge.from_task_id, "to": edge.to_task_id}
-                for edge in plan.edges
-            ],
-        }
-        async with self._session_factory() as session:
-            async with session.begin():
-                session.add(AgentPlanModel(plan_id=plan.plan_id, run_id=plan.run_id or "", session_id=plan.session_id or "", status=plan.status.value, user_goal=plan.goal, max_parallelism=plan.max_parallelism, current_version=1, created_at=now.isoformat(), updated_at=now.isoformat()))
-                await session.flush()
-                session.add(PlanVersionModel(
-                    plan_id=plan.plan_id,
-                    version=1,
-                    dag_json=document,
-                    change_reason=None,
-                    based_on_round_id=None,
-                    created_at=now,
-                ))
-                session.add_all([AgentTaskModel(task_id=task.task_id, plan_id=plan.plan_id, run_id=plan.run_id or "", title=task.title, objective=task.objective, input_json=_dump(dict(task.input)), expected_output_json=_dump(dict(task.expected_output)), allowed_tools_json=_dump(list(task.allowed_tools)), worker_type=task.worker_type, timeout_seconds=task.timeout_seconds, status=TaskStatus.PENDING.value, execution_generation=0, created_at=now, updated_at=now) for task in tasks])
-        return plan
-
-    async def get(self, plan_id: str) -> tuple[Plan, list[Task]] | None:
+    async def get_plan_status(self, plan_id: str) -> PlanStatus | None:
         async with self._session_factory() as session:
             plan_row = await session.get(AgentPlanModel, plan_id)
-            if plan_row is None:
-                return None
-            version_row = await session.get(
-                PlanVersionModel, (plan_id, plan_row.current_version)
-            )
-            if version_row is None or not isinstance(version_row.dag_json, Mapping):
-                raise RuntimeError("plan_version_document_unavailable")
-            rows = (await session.execute(select(AgentTaskModel).where(AgentTaskModel.plan_id == plan_id).order_by(AgentTaskModel.task_id))).scalars().all()
-        return self._plan(plan_row, version_row.dag_json), [self._task(row) for row in rows]
+        if plan_row is None:
+            return None
+        return PlanStatus(plan_row.status)
 
     async def get_run_orchestration_snapshot(
         self, run_id: str
@@ -582,40 +532,6 @@ class PostgresOrchestrationRepository(PlanRepository, ReviewContextRepository):
             results = await self._task_results(session, rows)
         return results
 
-    @staticmethod
-    def _plan(row, document: Mapping[str, Any]) -> Plan:
-        nodes = document.get("nodes", [])
-        edges = document.get("edges", [])
-        if not isinstance(nodes, list) or not isinstance(edges, list):
-            raise RuntimeError("plan_version_document_invalid")
-        return Plan(
-            row.plan_id,
-            str(document.get("goal", row.user_goal)),
-            tuple(item["task_id"] for item in nodes if isinstance(item, Mapping)),
-            tuple(
-                PlanEdge(item["from"], item["to"])
-                for item in edges
-                if isinstance(item, Mapping)
-            ),
-            int(document.get("max_parallelism", row.max_parallelism)),
-            PlanStatus(row.status),
-            row.session_id,
-            row.run_id,
-        )
-
-    @staticmethod
-    def _task(row) -> Task:
-        return Task(
-            row.task_id,
-            row.title,
-            row.objective,
-            _load(row.input_json, {}),
-            _load(row.expected_output_json, {}),
-            tuple(_load(row.allowed_tools_json, [])),
-            row.worker_type,
-            row.timeout_seconds,
-        )
-
     async def _task_results(
         self,
         session: AsyncSession,
@@ -689,13 +605,12 @@ class PostgresPlanLoader:
     async def __call__(self, *, plan_id: str | None, **_kwargs: object) -> dict[str, object]:
         if not plan_id:
             return {"completed": False, "results": {}}
-        value = await self._repository.get(plan_id)
-        if value is None:
+        status = await self._repository.get_plan_status(plan_id)
+        if status is None:
             return {"completed": False, "results": {}}
-        plan, _ = value
         results = await self._repository.get_results(plan_id)
         wait_context = await self._repository.get_wait_context(plan_id)
-        completed = plan.status in {
+        completed = status in {
             PlanStatus.COMPLETED,
             PlanStatus.FAILED,
             PlanStatus.CANCELLED,

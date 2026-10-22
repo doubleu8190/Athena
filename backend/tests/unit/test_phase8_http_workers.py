@@ -16,7 +16,6 @@ from starlette.requests import Request
 from application.events import EventStreamService
 from application.files import IngestionService
 from application.memory import MemoryWriteWorkflow
-from application.orchestration import OrchestrationService
 from application.runs import RunCommandService, RunNotFoundError, CommandNotFoundError
 from workers import KnowledgeDocumentWorker, MemoryWorker
 from application.sessions import SessionNotFoundError
@@ -127,16 +126,6 @@ async def test_memory_workflow_create_update_and_skip_paths() -> None:
     assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.UPDATE)).process_completed_turn(turn) == 1
     assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.IGNORE)).process_completed_turn(turn) == 0
     assert [item[0] for item in memory.calls] == ["add", "revise"]
-
-
-@pytest.mark.asyncio
-async def test_orchestration_service_missing_plan_error() -> None:
-    class Repo:
-        async def get(self, key): return None
-        async def create(self, plan, tasks): return plan
-    service = OrchestrationService(Repo())
-    with pytest.raises(LookupError):
-        await service.get_plan("missing")
 
 
 def test_run_controller_maps_all_command_errors() -> None:

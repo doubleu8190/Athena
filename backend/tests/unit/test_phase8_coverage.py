@@ -13,14 +13,12 @@ from application.approval import ApprovalService
 from application.files import IngestionService
 from application.knowledge import KnowledgeBaseService
 from application.memory import MemoryService
-from application.orchestration import OrchestrationService
 from application.tools import MCPService, ToolQueryService, ToolService
 from domain.approval import ApprovalDecision, ApprovalRequest
 from domain.files import (
     AdapterInfo, Attachment, AttachmentStatus, FileChunk, FileLocator, FileMetadata, ParsedDocument, StoredBlob,
 )
 from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
-from domain.orchestration import Plan, Task
 from domain.tools import (
     JsonSchema, MCPServerConfig, RiskLevel, ToolConfig, ToolExecutionMode,
 )

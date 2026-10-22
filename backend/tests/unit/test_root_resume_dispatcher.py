@@ -419,8 +419,8 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
 @pytest.mark.asyncio
 async def test_plan_loader_keeps_completed_round_waiting_for_root_review():
     class Repository:
-        async def get(self, _plan_id):
-            return SimpleNamespace(status=PlanStatus.WAITING_REVIEW), []
+        async def get_plan_status(self, _plan_id):
+            return PlanStatus.WAITING_REVIEW
 
         async def get_results(self, _plan_id):
             return {"task-1": {"status": "completed"}}

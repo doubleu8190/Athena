@@ -33,12 +33,12 @@
 | `core/harness/` | `application/runs` | 已迁移 | RunExecutionService、CommandConsumer 和 WorkerSchedulerService 提供目标执行边界 |
 | `core/retrieval/` | `application/retrieval` + infrastructure | 已迁移 | 目标 RetrievalCandidate/Run 和 HybridRetrievalService 提供候选融合与限额选择 |
 | `core/sandbox/`、`core/security/` | `domain/integrations` + `infrastructure/integrations/sandbox` | 已迁移 | 目标 DockerSandbox、SubprocessSandbox、workspace 路径和生命周期已实现 |
-| `agents/` | `application/orchestration`、`application/runs` | 已迁移 | Root facade、Worker executor/scheduler 和目标 Plan/Task/DAG port 已接入，具体 graph 由 infrastructure 注入 |
-| `planning/` | `domain/orchestration` + application materializer | 已迁移 | 目标 PlanValidator、PlanDAG、OrchestrationService、scheduler 和 result synthesizer 已实现 |
+| `agents/` | `application/orchestration`、`application/runs` | 已迁移 | Root/Worker workflow、Worker executor 和命令消费者通过持久化命令/任务端口接入，具体 graph 由 infrastructure 注入 |
+| `planning/` | `domain/orchestration` + application command handler | 已迁移 | PlanValidator、PlanDAG 和 OrchestrationCommandHandler 负责校验、提交与审查决策；旧 OrchestrationService 写入入口已删除 |
 | `runtime/context/` | `application/runs/context` | 已迁移 | 目标 ContextPlan、ContextBundle 和 ContextAcquisitionService 已实现 |
 | `runtime/execution_loop/` | `application/runs` + LangGraph infrastructure | 已迁移 | RunExecutionService/CommandConsumer 和 WorkerSchedulerService 覆盖执行、取消、失败、重试、审批等待和事件收敛 |
 | `runtime/nodes/` | `infrastructure/orchestration/langgraph/nodes` | 已迁移 | WorkerExecutor port 隔离 graph 技术适配，业务状态由 application 管理 |
-| `runtime/orchestration/` | `application/orchestration` | 已迁移 | PlanValidator、DAG、OrchestrationService、scheduler、worker 和 synthesizer 已原生实现 |
+| `runtime/orchestration/` | `application/orchestration` | 已迁移 | 命令处理、Root/Worker workflow、WorkerJobDispatcher 与 Postgres 持久化协作；旧 scheduler/synthesizer 并行入口已删除 |
 | `runtime/task_understanding/` | `application/runs/task_understanding` | 已迁移 | 目标 UserTaskSpec、fast path/fallback 和可注入 structured LLM service 已实现 |
 | `runtime/services/`、`processor_lifecycle.py` | `application/runs`、`bootstrap/lifespan` | 已迁移 | 目标 RunExecutionService、Root/Worker facade 和统一 lifespan 已接入 |
 | `runtime/transport.py`、`node_events.py` | `application/events` + `interfaces/http/sse` + infrastructure | 已迁移 | 目标 EventStreamService、SSE 历史/实时订阅、心跳和断开清理已完成 |

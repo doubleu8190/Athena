@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
-from application.orchestration import OrchestrationService, PlanNotFoundError
 from domain.orchestration import (
     Plan,
     PlanDAG,
@@ -80,26 +78,3 @@ def test_validator_enforces_worker_and_tool_boundaries() -> None:
 def test_task_rejects_invalid_timeout(timeout_seconds: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         Task("task", "title", "objective", timeout_seconds=timeout_seconds)
-
-
-@pytest.mark.asyncio
-async def test_orchestration_service_validates_before_persisting() -> None:
-    class Repository:
-        def __init__(self):
-            self.created = None
-
-        async def create(self, value, task_values):
-            self.created = (value, task_values)
-            return value
-
-        async def get(self, plan_id):
-            return self.created if self.created and self.created[0].plan_id == plan_id else None
-
-    repository = Repository()
-    service = OrchestrationService(repository)
-    value = plan(("a", "c"), ("b", "c"))
-    await service.create_plan(value, tasks("a", "b", "c"))
-    assert repository.created is not None
-
-    with pytest.raises(PlanNotFoundError):
-        await service.get_plan("missing")

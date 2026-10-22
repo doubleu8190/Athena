@@ -474,3 +474,209 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
             async with base_engine.begin() as connection:
                 await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await base_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> None:
+    """A 完成而 B 等审批时 Root 不恢复；B 原 thread 完成后只恢复一次。"""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"root_barrier_approval_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    test_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    schema_created = False
+    now = datetime.now(timezone.utc)
+    run_id = f"run-{uuid4().hex}"
+    session_id = f"session-{run_id}"
+    plan_id = f"plan-{run_id}"
+
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+
+        tables = [
+            AgentCommandModel.__table__,
+            AgentRunModel.__table__,
+            AgentPlanModel.__table__,
+            AgentTaskModel.__table__,
+            ApprovalRecordModel.__table__,
+            OrchestrationCommandModel.__table__,
+            OrchestrationInboxModel.__table__,
+            OrchestrationOutboxModel.__table__,
+            PlanVersionModel.__table__,
+            PlanRoundModel.__table__,
+            RoundTaskModel.__table__,
+            TaskExecutionModel.__table__,
+            WorkerJobModel.__table__,
+            RootResumeJobModel.__table__,
+        ]
+        async with test_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, tables=tables
+                )
+            )
+
+        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+        async with session_factory() as session, session.begin():
+            session.add(
+                AgentRunModel(
+                    run_id=run_id,
+                    session_id=session_id,
+                    status="created",
+                    root_thread_id=f"run:{run_id}",
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+
+        command_repository = PostgresOrchestrationCommandRepository(
+            session_factory,
+            id_factory=lambda: f"generated-{uuid4().hex}",
+            clock=lambda: now,
+        )
+        plan = Plan(
+            plan_id=plan_id,
+            goal="Complete both tasks in the same Round",
+            task_ids=("task-a", "task-b"),
+            max_parallelism=2,
+            session_id=session_id,
+            run_id=run_id,
+        )
+        submitted = await command_repository.submit_plan(
+            OrchestrationCommand(
+                message_id=f"submit:{run_id}",
+                command_type=OrchestrationCommandType.SUBMIT_PLAN,
+                idempotency_key=f"submit:{run_id}",
+                correlation_id=run_id,
+                occurred_at=now,
+                plan_id=plan_id,
+                scope_key=run_id,
+                plan_version=1,
+            ),
+            plan,
+            [
+                Task(task_id="task-a", title="A", objective="Complete A"),
+                Task(task_id="task-b", title="B", objective="Complete B"),
+            ],
+        )
+        worker_jobs = PostgresWorkerJobRepository(session_factory, clock=lambda: now)
+        leases = [
+            await worker_jobs.claim_next(worker_id, lease_seconds=60)
+            for worker_id in ("worker-a", "worker-b")
+        ]
+        assert all(lease is not None for lease in leases)
+        lease_by_task = {lease.task_id: lease for lease in leases if lease is not None}
+        lease_a = lease_by_task["task-a"]
+        lease_b = lease_by_task["task-b"]
+        assert await worker_jobs.wait_for_approval(
+            lease_b,
+            {
+                "approval_id": f"approval-b-{run_id}",
+                "run_id": run_id,
+                "plan_id": plan_id,
+                "task_id": "task-b",
+                "execution_id": lease_b.execution_id,
+                "worker_thread_id": lease_b.worker_thread_id,
+                "interrupt_id": "interrupt-b",
+                "tool_call_id": "call-b",
+                "tool_name": "write_file",
+                "arguments": {"path": "b.txt", "content": "B"},
+                "risk_level": "high",
+                "args_hash": "hash-b",
+                "operation_key": "operation-b",
+            },
+        )
+
+        events = PostgresOrchestrationEventRepository(
+            session_factory,
+            clock=lambda: now,
+            id_factory=lambda: f"event-{uuid4().hex}",
+        )
+
+        def terminal_event(lease, *, task_id: str, message_id: str):
+            """为同一 Round 的 Worker attempt 创建完成事件。"""
+            return WorkerTaskTerminalEvent(
+                message_id=message_id,
+                occurred_at=now,
+                worker_id=lease.worker_id,
+                run_id=run_id,
+                plan_id=plan_id,
+                plan_version=lease.plan_version,
+                round_id=submitted.round_id,
+                task_id=task_id,
+                execution_id=lease.execution_id,
+                fencing_token=lease.fencing_token,
+                cancellation_epoch=lease.cancellation_epoch,
+                status=TaskStatus.COMPLETED,
+                result={"answer": f"{task_id} complete"},
+            )
+
+        a_receipt = await events.apply_worker_terminal_event(
+            terminal_event(
+                lease_a, task_id="task-a", message_id=f"terminal-a:{run_id}"
+            )
+        )
+        assert a_receipt.accepted and not a_receipt.round_completed
+        async with session_factory() as session:
+            round_row = await session.get(PlanRoundModel, submitted.round_id)
+            plan_row = await session.get(AgentPlanModel, plan_id)
+            task_b = await session.get(AgentTaskModel, "task-b")
+            resume_count = await session.scalar(
+                select(func.count()).select_from(RootResumeJobModel)
+            )
+        assert round_row is not None and round_row.terminal_task_count == 1
+        assert plan_row is not None and plan_row.status == "running"
+        assert task_b is not None and task_b.status == "waiting_approval"
+        assert resume_count == 0
+        assert await PostgresApprovalRepository(
+            session_factory, clock=lambda: now
+        ).resolve(
+            f"approval-b-{run_id}",
+            run_id=run_id,
+            task_id="task-b",
+            decision=ApprovalDecision.APPROVED,
+        )
+
+        resumed_b = await worker_jobs.claim_next("worker-b-restarted", lease_seconds=60)
+        assert resumed_b is not None
+        assert resumed_b.job_type == "resume_worker"
+        assert resumed_b.task_id == "task-b"
+        assert resumed_b.execution_id == lease_b.execution_id
+        assert resumed_b.worker_thread_id == lease_b.worker_thread_id
+        b_receipt = await events.apply_worker_terminal_event(
+            terminal_event(
+                resumed_b, task_id="task-b", message_id=f"terminal-b:{run_id}"
+            )
+        )
+        assert b_receipt.accepted and b_receipt.round_completed
+
+        async with session_factory() as session:
+            round_row = await session.get(PlanRoundModel, submitted.round_id)
+            plan_row = await session.get(AgentPlanModel, plan_id)
+            resume_rows = (
+                await session.execute(select(RootResumeJobModel))
+            ).scalars().all()
+            round_completed_count = await session.scalar(
+                select(func.count()).select_from(OrchestrationOutboxModel).where(
+                    OrchestrationOutboxModel.event_type == "RoundCompleted"
+                )
+            )
+        assert round_row is not None and round_row.terminal_task_count == 2
+        assert plan_row is not None and plan_row.status == "waiting_review"
+        assert round_completed_count == 1
+        assert len(resume_rows) == 1 and resume_rows[0].status == "pending"
+    finally:
+        await test_engine.dispose()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()

@@ -6,6 +6,10 @@ import asyncio
 from types import SimpleNamespace
 
 from domain.integrations import SandboxPort
+from infrastructure.process_control import (
+    isolated_process_options,
+    terminate_process_group,
+)
 from .options import SandboxOptions
 
 
@@ -36,18 +40,46 @@ class DockerSandbox(SandboxPort):
         ])
         argv.extend(["-v", f"{request.workspace}:/workspace", "-w", "/workspace", request.image])
         argv.extend(request.argv)
+        process = None
+        communicate_task = None
+        started = asyncio.get_running_loop().time()
         try:
-            process = await asyncio.create_subprocess_exec(argv[0], *argv[1:], stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(
+                argv[0],
+                *argv[1:],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **isolated_process_options(),
+            )
             self._processes.add(process)
-            stdout, stderr = await asyncio.wait_for(process.communicate(), request.timeout_seconds)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            return SimpleNamespace(status="timeout", exit_code=None, stdout="", stderr="sandbox_timeout")
+            communicate_task = asyncio.create_task(process.communicate())
+            done, _pending = await asyncio.wait(
+                {communicate_task}, timeout=request.timeout_seconds
+            )
+            if not done:
+                await terminate_process_group(process)
+                stdout, stderr = await communicate_task
+                return SimpleNamespace(
+                    status="timeout",
+                    exit_code=None,
+                    stdout=stdout[: self.options.max_output_bytes].decode(
+                        "utf-8", errors="replace"
+                    ),
+                    stderr="sandbox_timeout",
+                    duration_ms=(asyncio.get_running_loop().time() - started)
+                    * 1000,
+                )
+            stdout, stderr = communicate_task.result()
+        except asyncio.CancelledError:
+            if process is not None:
+                await terminate_process_group(process)
+            if communicate_task is not None:
+                await asyncio.gather(communicate_task, return_exceptions=True)
+            raise
         except OSError as exc:
             return SimpleNamespace(status="runner_unavailable", exit_code=None, stdout="", stderr=str(exc))
         finally:
-            if "process" in locals():
+            if process is not None:
                 self._processes.discard(process)
         return SimpleNamespace(
             status="success" if process.returncode == 0 else "failed",
@@ -61,8 +93,13 @@ class DockerSandbox(SandboxPort):
         return await process.wait() == 0
 
     async def close_all(self) -> None:
-        for process in tuple(self._processes):
-            process.kill()
+        await asyncio.gather(
+            *(
+                terminate_process_group(process)
+                for process in tuple(self._processes)
+            ),
+            return_exceptions=True,
+        )
         self._processes.clear()
 
     def build_mcp_process(self, **kwargs):

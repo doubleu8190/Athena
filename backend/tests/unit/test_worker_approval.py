@@ -25,6 +25,11 @@ from domain.orchestration import (
     TaskStatus,
     WorkerJobLease,
 )
+from domain.tools import (
+    ToolExecutionResult,
+    ToolOperationClaim,
+    ToolOperationClaimStatus,
+)
 from infrastructure.persistence.postgres.repositories.approval_repository import (
     PostgresApprovalRepository,
 )
@@ -749,3 +754,130 @@ async def test_resume_worker_job_resumes_same_checkpoint_and_reports_task_termin
     assert events.events[0].message_id == "terminal-event-1"
     assert events.events[0].status is TaskStatus.COMPLETED
     assert events.events[0].result["output"] == {"saved": True}
+
+
+@pytest.mark.asyncio
+async def test_worker_tool_operation_ledger_replays_completed_result_without_reexecution():
+    class LowRiskToolService:
+        def __init__(self):
+            self.executed = []
+
+        async def get(self, name):
+            return SimpleNamespace(
+                name=name,
+                enabled=True,
+                risk_level="low",
+                require_approval=False,
+                execution_mode="native",
+            )
+
+        async def execute(self, request):
+            self.executed.append(request)
+            return ToolExecutionResult("success", output="created")
+
+    class Ledger:
+        def __init__(self):
+            self.result = None
+            self.completed = []
+
+        async def claim(self, _request, *, args_hash):
+            self.args_hash = args_hash
+            if self.result is not None:
+                return ToolOperationClaim(
+                    ToolOperationClaimStatus.COMPLETED, result=self.result
+                )
+            return ToolOperationClaim(ToolOperationClaimStatus.ACQUIRED)
+
+        async def complete(self, _request, *, args_hash, result):
+            assert args_hash == self.args_hash
+            self.result = result
+            self.completed.append(result)
+            return True
+
+    tools = LowRiskToolService()
+    ledger = Ledger()
+    executor = WorkerToolExecutor(tools, operation_ledger=ledger)
+    call = {
+        "name": "write_file",
+        "arguments": {"path": "report.txt", "content": "ready"},
+    }
+    execution = {
+        "plan_id": "plan-1",
+        "run_id": "run-1",
+        "session_id": "session-1",
+        "task": {"task_id": "task-1", "allowed_tools": ["write_file"]},
+        "execution_id": "execution-1",
+        "fencing_token": 3,
+        "cancellation_epoch": 0,
+        "execution_generation": 1,
+    }
+
+    first = await executor(
+        tool_call=call, execution=execution, tool_round=0, call_index=0
+    )
+    replay = await executor(
+        tool_call=call, execution=execution, tool_round=0, call_index=0
+    )
+
+    assert first == replay
+    assert first["status"] == "success"
+    assert first["output"] == "created"
+    assert len(tools.executed) == 1
+    assert len(ledger.completed) == 1
+    assert tools.executed[0].operation_key
+    assert tools.executed[0].fencing_token == 3
+
+
+@pytest.mark.asyncio
+async def test_worker_tool_operation_with_unknown_prior_outcome_fails_closed():
+    class LowRiskToolService:
+        def __init__(self):
+            self.executed = []
+
+        async def get(self, name):
+            return SimpleNamespace(
+                name=name,
+                enabled=True,
+                risk_level="low",
+                require_approval=False,
+                execution_mode="native",
+            )
+
+        async def execute(self, request):
+            self.executed.append(request)
+            raise AssertionError("uncertain operations must never be replayed")
+
+    class Ledger:
+        async def claim(self, _request, *, args_hash):
+            return ToolOperationClaim(
+                ToolOperationClaimStatus.IN_PROGRESS,
+                reason="worker_operation_outcome_unknown",
+            )
+
+        async def complete(self, *_args, **_kwargs):
+            raise AssertionError("an unclaimed operation cannot be completed")
+
+    tools = LowRiskToolService()
+    executor = WorkerToolExecutor(tools, operation_ledger=Ledger())
+    result = await executor(
+        tool_call={
+            "name": "write_file",
+            "arguments": {"path": "report.txt", "content": "ready"},
+        },
+        execution={
+            "plan_id": "plan-1",
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "task": {"task_id": "task-1", "allowed_tools": ["write_file"]},
+            "execution_id": "execution-1",
+            "fencing_token": 3,
+            "cancellation_epoch": 0,
+            "execution_generation": 1,
+        },
+        tool_round=0,
+        call_index=0,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "worker_tool_operation_outcome_unknown"
+    assert tools.executed == []

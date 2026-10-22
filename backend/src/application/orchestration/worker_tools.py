@@ -9,7 +9,11 @@ from typing import Any
 
 from application.tools.service import ToolService
 from domain.files import FileStoragePort
-from domain.tools import ToolExecutionRequest
+from domain.tools import (
+    ToolExecutionRequest,
+    ToolOperationClaimStatus,
+    WorkerToolOperationLedger,
+)
 
 
 async def list_worker_tools(tool_service: Any) -> tuple[str, ...]:
@@ -52,6 +56,7 @@ class WorkerToolExecutor:
         tool_service: ToolService,
         *,
         storage: FileStoragePort | None = None,
+        operation_ledger: WorkerToolOperationLedger | None = None,
         inline_result_bytes: int = 8192,
         max_result_read_chars: int = 16000,
     ) -> None:
@@ -59,6 +64,7 @@ class WorkerToolExecutor:
             raise ValueError("worker result limits must be positive")
         self._tool_service = tool_service
         self._storage = storage
+        self._operation_ledger = operation_ledger
         self._inline_result_bytes = inline_result_bytes
         self._max_result_read_chars = max_result_read_chars
 
@@ -102,17 +108,16 @@ class WorkerToolExecutor:
         tool_call_id = (
             f"worker:{task_id}:{generation}:{tool_round}:{call_index}"
         )
+        arguments_json = _strict_json(dict(arguments))
+        args_hash = hashlib.sha256(arguments_json.encode("utf-8")).hexdigest()
+        operation_key = _operation_key(
+            run_id, task_id, generation, tool_round, call_index
+        )
         approval_decision = str(tool_call.get("approval_decision", "")).lower()
         if approval_decision == "approved":
-            expected_args_hash = hashlib.sha256(
-                _strict_json(dict(arguments)).encode("utf-8")
-            ).hexdigest()
-            expected_operation_key = _operation_key(
-                run_id, task_id, generation, tool_round, call_index
-            )
             if (
-                tool_call.get("args_hash") != expected_args_hash
-                or tool_call.get("operation_key") != expected_operation_key
+                tool_call.get("args_hash") != args_hash
+                or tool_call.get("operation_key") != operation_key
                 or tool_call.get("tool_call_id")
                 != f"worker:{task_id}:{generation}:{tool_round}:{call_index}"
             ):
@@ -125,11 +130,6 @@ class WorkerToolExecutor:
             )
             if not execution_id:
                 return _denied("worker_execution_identity_missing", name=name)
-            arguments_json = _strict_json(dict(arguments))
-            args_hash = hashlib.sha256(arguments_json.encode("utf-8")).hexdigest()
-            operation_key = _operation_key(
-                run_id, task_id, generation, tool_round, call_index
-            )
             approval_id = "approval:" + hashlib.sha256(
                 f"{worker_thread_id}:{operation_key}".encode("utf-8")
             ).hexdigest()[:32]
@@ -154,24 +154,60 @@ class WorkerToolExecutor:
                 },
             }
 
-        result = await self._tool_service.execute(
-            ToolExecutionRequest(
-                tool_name=name,
-                arguments=dict(arguments),
-                session_id=session_id,
-                run_id=run_id,
-                approval_decision=approval_decision or None,
-                plan_id=str(execution.get("plan_id", "")) or None,
-                task_id=task_id,
-                tool_call_id=tool_call_id,
-                agent_role="worker",
-                operation_key=(
-                    str(tool_call.get("operation_key"))
-                    if tool_call.get("operation_key")
-                    else None
-                ),
-            )
+        request = ToolExecutionRequest(
+            tool_name=name,
+            arguments=dict(arguments),
+            session_id=session_id,
+            run_id=run_id,
+            approval_decision=approval_decision or None,
+            plan_id=str(execution.get("plan_id", "")) or None,
+            task_id=task_id,
+            tool_call_id=tool_call_id,
+            agent_role="worker",
+            operation_key=operation_key,
+            execution_id=str(execution.get("execution_id", "")) or None,
+            fencing_token=(
+                int(execution["fencing_token"])
+                if execution.get("fencing_token") is not None
+                else None
+            ),
+            cancellation_epoch=(
+                int(execution["cancellation_epoch"])
+                if execution.get("cancellation_epoch") is not None
+                else None
+            ),
         )
+        ledger_claim = None
+        if self._operation_ledger is not None:
+            ledger_claim = await self._operation_ledger.claim(
+                request, args_hash=args_hash
+            )
+            if ledger_claim.status == ToolOperationClaimStatus.COMPLETED:
+                if ledger_claim.result is None:
+                    raise RuntimeError("worker_tool_operation_result_missing")
+                result = ledger_claim.result
+            elif ledger_claim.status == ToolOperationClaimStatus.ACQUIRED:
+                result = await self._tool_service.execute(request)
+                if not await self._operation_ledger.complete(
+                    request, args_hash=args_hash, result=result
+                ):
+                    raise RuntimeError("worker_tool_operation_result_not_persisted")
+            elif ledger_claim.status == ToolOperationClaimStatus.IN_PROGRESS:
+                return {
+                    "id": tool_call_id,
+                    "name": name,
+                    "status": "failed",
+                    "error": {"code": "worker_tool_operation_outcome_unknown"},
+                }
+            elif ledger_claim.status == ToolOperationClaimStatus.CONFLICT:
+                return _denied("worker_tool_operation_key_conflict", name=name)
+            else:
+                return _denied(
+                    ledger_claim.reason or "worker_tool_execution_not_active",
+                    name=name,
+                )
+        else:
+            result = await self._tool_service.execute(request)
         payload = {
             "id": tool_call_id,
             "name": name,

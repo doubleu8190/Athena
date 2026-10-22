@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .entities import MCPServer, MCPServerConfig, ToolConfig, ToolExecutionRequest, ToolExecutionResult
+from .entities import (
+    MCPServer,
+    MCPServerConfig,
+    ToolConfig,
+    ToolExecutionRequest,
+    ToolExecutionResult,
+    ToolOperationClaim,
+)
 
 
 class ToolConfigRepository(Protocol):
@@ -21,6 +28,22 @@ class ToolConfigRepository(Protocol):
 
 class ToolExecutionPort(Protocol):
     async def execute(self, request: ToolExecutionRequest) -> ToolExecutionResult: ...
+
+
+class WorkerToolOperationLedger(Protocol):
+    """Durably claim and complete side-effecting Worker tool operations."""
+
+    async def claim(
+        self, request: ToolExecutionRequest, *, args_hash: str
+    ) -> ToolOperationClaim: ...
+
+    async def complete(
+        self,
+        request: ToolExecutionRequest,
+        *,
+        args_hash: str,
+        result: ToolExecutionResult,
+    ) -> bool: ...
 
 
 class MCPPort(Protocol):

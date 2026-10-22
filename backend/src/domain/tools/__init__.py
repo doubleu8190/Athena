@@ -9,8 +9,16 @@ from .entities import (
     ToolExecutionMode,
     ToolExecutionRequest,
     ToolExecutionResult,
+    ToolOperationClaim,
+    ToolOperationClaimStatus,
 )
-from .ports import MCPPort, MCPServerRepository, ToolConfigRepository, ToolExecutionPort
+from .ports import (
+    MCPPort,
+    MCPServerRepository,
+    ToolConfigRepository,
+    ToolExecutionPort,
+    WorkerToolOperationLedger,
+)
 
 __all__ = [
     "JsonSchema",
@@ -24,5 +32,8 @@ __all__ = [
     "ToolExecutionPort",
     "ToolExecutionRequest",
     "ToolExecutionResult",
+    "ToolOperationClaim",
+    "ToolOperationClaimStatus",
+    "WorkerToolOperationLedger",
     "MCPPort",
 ]

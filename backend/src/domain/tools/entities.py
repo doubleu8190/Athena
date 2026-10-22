@@ -83,6 +83,9 @@ class ToolExecutionRequest:
     plan_id: str | None = None
     task_id: str | None = None
     operation_key: str | None = None
+    execution_id: str | None = None
+    fencing_token: int | None = None
+    cancellation_epoch: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,3 +96,22 @@ class ToolExecutionResult:
     output: str | None = None
     error: str | None = None
     duration_ms: float = 0
+
+
+class ToolOperationClaimStatus(StrEnum):
+    """Outcome of claiming a durable Worker tool operation key."""
+
+    ACQUIRED = "acquired"
+    COMPLETED = "completed"
+    IN_PROGRESS = "in_progress"
+    CONFLICT = "conflict"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOperationClaim:
+    """A new operation lease or the durable outcome of an earlier attempt."""
+
+    status: ToolOperationClaimStatus
+    result: ToolExecutionResult | None = None
+    reason: str | None = None

@@ -12,6 +12,10 @@ from typing import Any
 
 from domain.tools import ToolExecutionPort, ToolExecutionRequest, ToolExecutionResult
 from domain.integrations import SandboxPort
+from infrastructure.process_control import (
+    isolated_process_options,
+    terminate_process_group,
+)
 
 
 class BuiltinToolExecutor(ToolExecutionPort):
@@ -103,8 +107,38 @@ class BuiltinToolExecutor(ToolExecutionPort):
                     if status in {"runner_unavailable", "sandbox_unavailable"}:
                         return ToolExecutionResult("sandbox_unavailable", output=combined[:self._max_output_bytes], error=str(getattr(result, "stderr", "") or "sandbox_unavailable"), duration_ms=(time.monotonic()-started)*1000)
                     return ToolExecutionResult("failed", output=combined[:self._max_output_bytes], error=f"exit_code={getattr(result, 'exit_code', None)}", duration_ms=(time.monotonic()-started)*1000)
-                process = await asyncio.create_subprocess_exec("/bin/sh", "-lc", command, cwd=self._root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                process = await asyncio.create_subprocess_exec(
+                    "/bin/sh",
+                    "-lc",
+                    command,
+                    cwd=self._root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **isolated_process_options(),
+                )
+                communicate_task = asyncio.create_task(process.communicate())
+                try:
+                    done, _pending = await asyncio.wait(
+                        {communicate_task}, timeout=timeout
+                    )
+                    if not done:
+                        await terminate_process_group(process)
+                        stdout, stderr = await communicate_task
+                        return ToolExecutionResult(
+                            "timeout",
+                            output=(stdout + stderr).decode(
+                                "utf-8", errors="replace"
+                            )[: self._max_output_bytes],
+                            error="tool_execution_timeout",
+                            duration_ms=(time.monotonic() - started) * 1000,
+                        )
+                    stdout, stderr = communicate_task.result()
+                except asyncio.CancelledError:
+                    await terminate_process_group(process)
+                    await asyncio.gather(
+                        communicate_task, return_exceptions=True
+                    )
+                    raise
                 output = (stdout + stderr).decode("utf-8", errors="replace")
                 if process.returncode:
                     return ToolExecutionResult("failed", output=output[:self._max_output_bytes], error=f"exit_code={process.returncode}", duration_ms=(time.monotonic()-started)*1000)

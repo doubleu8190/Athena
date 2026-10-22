@@ -403,6 +403,26 @@ CREATE TABLE IF NOT EXISTS worker_jobs (
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_ready ON worker_jobs(status, available_at);
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_lease ON worker_jobs(status, lease_until);
 
+CREATE TABLE IF NOT EXISTS worker_tool_operations (
+    operation_key VARCHAR PRIMARY KEY,
+    run_id VARCHAR NOT NULL REFERENCES agent_runs(run_id),
+    plan_id VARCHAR NOT NULL REFERENCES agent_plans(plan_id),
+    task_id VARCHAR NOT NULL REFERENCES agent_tasks(task_id),
+    execution_id VARCHAR NOT NULL REFERENCES task_executions(execution_id),
+    tool_name VARCHAR NOT NULL,
+    tool_call_id VARCHAR NOT NULL,
+    args_hash VARCHAR NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'executing',
+    result_json JSONB,
+    created_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_worker_tool_operations_execution
+    ON worker_tool_operations(execution_id);
+CREATE INDEX IF NOT EXISTS idx_worker_tool_operations_incomplete
+    ON worker_tool_operations(status, created_at)
+    WHERE status = 'executing';
+
 -- 知识库文档的持久解析/索引队列。运行态任务在应用启动时恢复为 retry；
 -- 附件删除时会转为 cancelled，避免 worker 在删除后重新写入索引。
 CREATE TABLE IF NOT EXISTS knowledge_document_jobs (

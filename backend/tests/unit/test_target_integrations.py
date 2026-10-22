@@ -14,6 +14,8 @@ from infrastructure.integrations.llm.embedding_provider import EmbeddingProvider
 from infrastructure.integrations.llm.llm_provider import RetryPolicy, RetryingLLMProvider
 from infrastructure.integrations.neo4j.adapter import Neo4jGraphAdapter
 from infrastructure.integrations.sandbox.subprocess_runner import SubprocessSandbox
+from infrastructure.tools.native import BuiltinToolExecutor
+from domain.tools import ToolExecutionRequest
 
 
 @pytest.mark.asyncio
@@ -98,6 +100,51 @@ async def test_subprocess_sandbox_success_failure_timeout_and_lifecycle(tmp_path
     assert await sandbox.health()
     assert sandbox.build_mcp_process(command="python", args=["-V"], env={}).command == "python"
     await sandbox.close_all()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_sandbox_cancellation_stops_child_processes(tmp_path: Path):
+    sandbox = SubprocessSandbox()
+    marker = tmp_path / "late-child-effect.txt"
+    request = SimpleNamespace(
+        argv=("/bin/sh", "-c", f"sleep 0.5; touch {marker}"),
+        workspace=tmp_path,
+        env={},
+        timeout_seconds=2,
+    )
+    execution = asyncio.create_task(sandbox.execute(request))
+    await asyncio.sleep(0.05)
+    execution.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    await asyncio.sleep(0.6)
+
+    assert marker.exists() is False
+    assert sandbox._processes == set()
+
+
+@pytest.mark.asyncio
+async def test_worker_shell_cancellation_stops_child_processes(tmp_path: Path):
+    marker = tmp_path / "late-worker-effect.txt"
+    executor = BuiltinToolExecutor(tmp_path)
+    request = ToolExecutionRequest(
+        tool_name="exec_shell",
+        arguments={"command": f"sleep 0.5; touch {marker}"},
+        session_id="session-1",
+        run_id="run-1",
+        tool_call_id="tool-call-1",
+        agent_role="worker",
+    )
+    execution = asyncio.create_task(executor.execute(request))
+    await asyncio.sleep(0.05)
+    execution.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    await asyncio.sleep(0.6)
+
+    assert marker.exists() is False
 
 
 @pytest.mark.asyncio

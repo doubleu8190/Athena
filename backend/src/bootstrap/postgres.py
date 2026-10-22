@@ -123,6 +123,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationCommandRepository,
     PostgresOrchestrationEventRepository,
     PostgresWorkerJobRepository,
+    PostgresWorkerToolOperationRepository,
     PostgresRootResumeJobRepository,
     PostgresOrchestrationOutboxRepository,
     PostgresPlanLoader,
@@ -214,6 +215,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         max_attempts=settings.worker_max_attempts,
     )
     worker_job_repository = PostgresWorkerJobRepository(session_factory)
+    worker_tool_operation_repository = PostgresWorkerToolOperationRepository(
+        session_factory
+    )
     root_resume_job_repository = PostgresRootResumeJobRepository(session_factory)
     orchestration_outbox_repository = PostgresOrchestrationOutboxRepository(
         session_factory
@@ -398,6 +402,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     worker_tool_executor = WorkerToolExecutor(
         builtin_tool_service,
         storage=worker_result_storage,
+        operation_ledger=worker_tool_operation_repository,
     )
     worker_agent = ConfiguredWorkerAgent(
         llm_provider, events, tool_service=builtin_tool_service

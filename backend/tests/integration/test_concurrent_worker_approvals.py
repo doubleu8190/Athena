@@ -74,6 +74,9 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
     test_engine = create_async_engine(
         base_url.update_query_dict({"options": f"-c search_path={schema}"})
     )
+    restarted_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
     schema_created = False
     now = datetime.now(timezone.utc)
     run_id = f"run-{uuid4().hex}"
@@ -195,9 +198,28 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
             task_id="task-a",
             decision=ApprovalDecision.APPROVED,
         )
+
+        # 模拟审批决议已提交、旧 app 随即退出；新 app 从数据库领取恢复作业。
+        await test_engine.dispose()
+        session_factory = async_sessionmaker(restarted_engine, expire_on_commit=False)
+        worker_jobs = PostgresWorkerJobRepository(
+            session_factory, clock=lambda: now
+        )
+        approval_repository = PostgresApprovalRepository(
+            session_factory, clock=lambda: now
+        )
         resumed_a = await worker_jobs.claim_next("resume-a", lease_seconds=60)
         assert resumed_a is not None and resumed_a.task_id == "task-a"
         assert resumed_a.job_type == "resume_worker"
+        assert resumed_a.worker_thread_id == leases_by_task["task-a"].worker_thread_id
+        assert resumed_a.resume_value == {
+            "approval_id": approvals["task-a"],
+            "decision": "approved",
+            "interrupt_id": "interrupt-a",
+            "execution_id": leases_by_task["task-a"].execution_id,
+            "args_hash": "hash-a",
+            "operation_key": "operation-a",
+        }
         assert await worker_jobs.claim_next("resume-b-too-early", lease_seconds=60) is None
 
         async with session_factory() as session:
@@ -287,6 +309,7 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
         )
         assert root_resume_count == 0
     finally:
+        await restarted_engine.dispose()
         await test_engine.dispose()
         if schema_created:
             async with base_engine.begin() as connection:

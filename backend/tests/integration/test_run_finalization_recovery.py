@@ -13,7 +13,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from application.runs import RunExecutionService
-from domain.runs import CommandExecutionResult, CommandType, RunCommand
+from domain.runs import CommandExecutionResult, CommandType, RunCommand, RunStartPayload
 from infrastructure.persistence.postgres.models import (
     AgentCommandModel,
     AgentEventModel,
@@ -110,10 +110,10 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             command_type=CommandType.RUN_START,
             session_id=session_id,
             run_id=run_id,
-            payload={
-                "message": "Remember that I prefer concise reports",
-                "message_id": message_id,
-            },
+            payload=RunStartPayload(
+                message="Remember that I prefer concise reports",
+                message_id=message_id,
+            ),
             issued_at=now,
         )
         await repository.enqueue_command(command)

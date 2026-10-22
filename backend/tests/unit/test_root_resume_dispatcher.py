@@ -355,7 +355,7 @@ async def test_root_resume_recovers_checkpoint_identity_before_dispatch():
             },
         )
     ]
-    assert execution.command.payload["resume_value"]["interrupt_id"] == (
+    assert execution.command.payload.resume_value.interrupt_id == (
         "interrupt-recovered"
     )
     assert jobs.completed == [lease]
@@ -426,8 +426,8 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
     await dispatcher._resume(lease)
 
     assert execution.command.run_id == "run-1"
-    assert execution.command.payload["resume_value"]["round_id"] == "round-1"
-    assert execution.command.payload["resume_value"]["interrupt_id"] == "interrupt-1"
+    assert execution.command.payload.resume_value.round_id == "round-1"
+    assert execution.command.payload.resume_value.interrupt_id == "interrupt-1"
     assert len(jobs.completed) == 1
 
 

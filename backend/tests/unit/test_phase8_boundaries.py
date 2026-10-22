@@ -17,7 +17,7 @@ from bootstrap import create_app
 from domain.events import ApplicationEvent
 from domain.runs import (
     CommandEnqueueResult, CommandExecutionResult, CommandStatus, CommandStatusRecord, CommandType,
-    RunCommand, RunStatus, RunSummary,
+    RunCancelPayload, RunCommand, RunStartPayload, RunStatus, RunSummary,
 )
 from domain.sessions import Session
 from bootstrap.check import check_app
@@ -90,8 +90,15 @@ async def test_run_execution_cancel_missing_id_and_error_result_paths() -> None:
     class Events:
         async def publish(self, value): return value
     queue = Queue(); service = RunExecutionService(Lifecycle(), queue, Executor(), Events())
-    await service.execute(RunCommand("c", CommandType.RUN_CANCEL, "s", None, {}, NOW))
-    await service.execute(RunCommand("c2", CommandType.RUN_START, "s", None, {}, NOW))
+    await service.execute(
+        RunCommand("c", CommandType.RUN_CANCEL, "s", None, RunCancelPayload(), NOW)
+    )
+    await service.execute(
+        RunCommand(
+            "c2", CommandType.RUN_START, "s", None,
+            RunStartPayload(message="hello", message_id="m"), NOW
+        )
+    )
     assert len(queue.done) == 2
 
 

@@ -7,7 +7,7 @@ from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.files import Attachment, AttachmentStatus, FileMetadata
 from domain.knowledge import KnowledgeBase
 from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
-from domain.runs import CommandType, RunCommand, RunStatus
+from domain.runs import CommandType, RunCommand, RunStartPayload, RunStatus
 from domain.tools import MCPServerConfig, ToolExecutionRequest
 from backend.tests.fakes.in_memory import *
 
@@ -20,7 +20,10 @@ async def test_default_session_message_run_and_tool_adapters():
     session = __import__("domain.sessions", fromlist=["Session"]).Session.create(session_id="s", title="x", now=NOW)
     await sessions.create(session); assert await sessions.get("s") == session
     assert await sessions.list_sessions() == [session]; await sessions.save(session.rename("y", now=NOW)); assert await sessions.delete("missing") is False
-    command = RunCommand("c", CommandType.RUN_START, "s", "r", {"message_id": "m"}, NOW)
+    command = RunCommand(
+        "c", CommandType.RUN_START, "s", "r",
+        RunStartPayload(message="hello", message_id="m"), NOW
+    )
     result = await runs.enqueue_command(command); assert result.status == "queued"
     assert (await runs.claim_next_command()).command_id == "c"; await runs.complete_command("c", status="completed")
     assert await runs.get_command("c")

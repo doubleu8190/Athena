@@ -17,16 +17,36 @@ from domain.runs import (
     RunCancellationResult,
     RootWaitCheckpoint,
     RunStatus,
+    RunStartPayload,
+    RunCancelPayload,
+    RunResumePayload,
+    RoundCompletedResumeValue,
 )
 
 
 def command(command_type=CommandType.RUN_START, run_id="run-1"):
+    if command_type == CommandType.RUN_CANCEL:
+        payload = RunCancelPayload()
+    elif command_type == CommandType.RUN_RESUME:
+        payload = RunResumePayload(
+            resume_value=RoundCompletedResumeValue(
+                type="round_completed",
+                run_id="run-1",
+                plan_id="plan-1",
+                round_id="round-1",
+                plan_version=1,
+                root_wait_generation=1,
+                interrupt_id="interrupt-1",
+            ),
+        )
+    else:
+        payload = RunStartPayload(message="hello", message_id="message-1")
     return RunCommand(
         command_id="command-1",
         command_type=command_type,
         session_id="session-1",
         run_id=run_id,
-        payload={"message": "hello"},
+        payload=payload,
         issued_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
@@ -222,7 +242,9 @@ async def test_execution_service_projects_completed_content_into_chat_stream() -
         command_type=value.command_type,
         session_id=value.session_id,
         run_id=value.run_id,
-        payload={"message": "执行命令 printf ATHENA_EXEC_REAL", "message_id": "message-1"},
+        payload=RunStartPayload(
+            message="执行命令 printf ATHENA_EXEC_REAL", message_id="message-1"
+        ),
         issued_at=value.issued_at,
     )
     service = RunExecutionService(lifecycle, queue, executor, events)
@@ -237,6 +259,49 @@ async def test_execution_service_projects_completed_content_into_chat_stream() -
     ]
     assert events.values[1].payload == {"delta": "ATHENA_EXEC_REAL"}
     assert events.values[2].payload == {}
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_projects_answer_with_original_user_message_id() -> None:
+    class WaitingThenCompletingExecutor(Executor):
+        def __init__(self) -> None:
+            self.outcomes = [
+                CommandExecutionResult(
+                    root_wait=RootWaitCheckpoint(
+                        run_id="run-1",
+                        plan_id="plan-1",
+                        round_id="round-1",
+                        plan_version=1,
+                        interrupt_id="interrupt-1",
+                        checkpoint_id="checkpoint-1",
+                    )
+                ),
+                CommandExecutionResult(result={"content": "resumed answer"}),
+            ]
+
+        async def execute(self, _command: RunCommand) -> CommandExecutionResult:
+            return self.outcomes.pop(0)
+
+    lifecycle, queue, executor, events = (
+        Lifecycle(),
+        Queue(),
+        WaitingThenCompletingExecutor(),
+        Events(),
+    )
+    service = RunExecutionService(lifecycle, queue, executor, events)
+
+    await service.execute(command())
+    await service.execute(command(CommandType.RUN_RESUME))
+
+    answer_events = [
+        event
+        for event in events.values
+        if event.event_type in {"message.delta", "message.completed"}
+    ]
+    assert [event.message_id for event in answer_events] == [
+        "message-1",
+        "message-1",
+    ]
 
 
 @pytest.mark.asyncio

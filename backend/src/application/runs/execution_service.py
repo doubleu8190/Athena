@@ -17,8 +17,10 @@ from domain.runs import (
     CommandStatus,
     CommandQueuePort,
     RunCommand,
+    RunCancelPayload,
     RunCancellationResult,
     RunLifecyclePort,
+    RunStartPayload,
     RootWaitCheckpoint,
     RunStatus,
 )
@@ -45,6 +47,9 @@ class RunExecutionService:
         # command so its status can converge when the resumed execution ends.
         self._waiting_commands: dict[str, str] = {}
         self._run_started: dict[str, tuple[datetime, float]] = {}
+        # Volatile adapters still need the original user message ID when a
+        # resumed run publishes its final answer outside a completion outbox.
+        self._user_message_ids_by_run_id: dict[str, str] = {}
 
     async def execute(self, command: RunCommand) -> dict[str, object] | None:
         """执行取消或 Root 命令，并委托对应分支完成状态收敛。
@@ -76,9 +81,11 @@ class RunExecutionService:
         """先持久化取消栅栏，再停止 Root 并完成取消命令。"""
         cancellation: RunCancellationResult | None = None
         if command.run_id:
+            if not isinstance(command.payload, RunCancelPayload):
+                raise TypeError("run.cancel requires RunCancelPayload")
             cancellation = await self._lifecycle.cancel(
                 command.run_id,
-                reason=str(command.payload.get("reason", "USER_REQUEST")),
+                reason=command.payload.reason,
             )
 
         # 数据库事务先设置取消栅栏，之后才中断 Root，避免新 Worker 越过取消边界。
@@ -87,6 +94,8 @@ class RunExecutionService:
             await self._executor.cancel(command.run_id)
         except Exception as error:
             cancel_error = error
+        if command.run_id and cancellation and cancellation.changed:
+            self._user_message_ids_by_run_id.pop(command.run_id, None)
 
         if (
             command.run_id
@@ -131,6 +140,7 @@ class RunExecutionService:
             run_id, RunStatus.RUNNING
         )
         if not started:
+            self._user_message_ids_by_run_id.pop(run_id, None)
             result = {"status": RunStatus.CANCELLED.value}
             await self._commands.complete_command(
                 command.command_id,
@@ -140,6 +150,9 @@ class RunExecutionService:
             return result
         if run_id not in self._run_started:
             self._run_started[run_id] = (datetime.now(timezone.utc), perf_counter())
+        if isinstance(command.payload, RunStartPayload):
+            self._user_message_ids_by_run_id[run_id] = command.payload.message_id
+
         start_event = (
             EventType.RUN_RESUMED
             if command.command_type == CommandType.RUN_RESUME
@@ -152,6 +165,7 @@ class RunExecutionService:
                 command, "running", started_at=self._run_started[run_id][0]
             ),
         )
+
         try:
             outcome = await self._executor.execute(command)
         except Exception as exc:
@@ -160,6 +174,7 @@ class RunExecutionService:
                 {"code": "run_failed", "message": str(exc) or type(exc).__name__},
             )
             return None
+        # 处理root agent的等待事件
         if outcome.root_wait is not None:
             await self._arm_root_wait(run_id, outcome.root_wait)
             self._waiting_commands[run_id] = command.command_id
@@ -169,13 +184,17 @@ class RunExecutionService:
                 payload=self._run_payload(command, "waiting"),
             )
             return None
+
         if outcome.error is not None:
             await self.fail(command, outcome.error)
             return None
+
         result = outcome.result or {}
         await self._lifecycle.complete(run_id, result)
         if not self._lifecycle.writes_completion_artifacts_to_outbox:
+            # 将结果通过事件发送给用户
             await self._publish_result_message(command, result)
+            # 入队一个记忆提取任务
             await self._enqueue_memory(command, result)
             await self._publish(
                 command,
@@ -183,6 +202,7 @@ class RunExecutionService:
                 payload=self._run_payload(command, "completed", summary="运行已完成"),
             )
         self._run_started.pop(run_id, None)
+        self._user_message_ids_by_run_id.pop(run_id, None)
         original_command_id = self._waiting_commands.pop(run_id, None)
         await self._commands.complete_command(
             command.command_id, status=CommandStatus.COMPLETED, result=result
@@ -230,6 +250,7 @@ class RunExecutionService:
             await self._lifecycle.fail(command.run_id, error)
             await self._publish(command, EventType.RUN_FAILED, payload=self._run_payload(command, "failed", error=error))
             self._run_started.pop(command.run_id, None)
+            self._user_message_ids_by_run_id.pop(command.run_id, None)
         await self._commands.complete_command(
             command.command_id, status=CommandStatus.FAILED, error=error
         )
@@ -301,7 +322,9 @@ class RunExecutionService:
         """Submit the completed user/assistant turn without breaking the run."""
         if self._memory_jobs is None or not command.run_id:
             return
-        user_text = str(command.payload.get("message", "")).strip()
+        if not isinstance(command.payload, RunStartPayload):
+            return
+        user_text = command.payload.message.strip()
         if not user_text:
             return
         content = result.get("content")
@@ -324,8 +347,15 @@ class RunExecutionService:
         self, command: RunCommand, result: dict[str, object]
     ) -> None:
         """Project a completed graph result into the session chat stream."""
-        message_id = str(command.payload.get("message_id", ""))
-        if not message_id or not command.run_id:
+        if not command.run_id:
+            return
+        if isinstance(command.payload, RunStartPayload):
+            message_id = command.payload.message_id
+        elif command.command_type == CommandType.RUN_RESUME:
+            message_id = self._user_message_ids_by_run_id.get(command.run_id)
+        else:
+            return
+        if not message_id:
             return
         content = result.get("content")
         if not isinstance(content, str):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -13,6 +14,7 @@ from application.orchestration.protocols import (
     RootWorkflowPort,
 )
 from application.orchestration.dependencies import RootWorkflowDependencies
+from domain.runs import RoundCompletedResumeValue
 
 from .protocols import CheckpointerProvider
 from ..graphs.root import build_root_graph, invoke_root_graph
@@ -53,8 +55,8 @@ class LangGraphRootGraph(RootGraphPort):
         user_message: str,
         message_id: str = "",
         attachment_ids: list[str] | None = None,
-        resume_value: dict[str, object] | None = None,
-        stop_signal: object | None = None,
+        resume_value: RoundCompletedResumeValue | None = None,
+        stop_signal: asyncio.Event | None = None,
     ) -> object:
         async def invoke() -> object:
             return await invoke_root_graph(

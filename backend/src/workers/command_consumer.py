@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 
 from application.runs.execution_service import RunExecutionService
+from backend.src.shared.logging import get_logger
 from domain.runs import CommandQueuePort, RunCommand
+
+logger = get_logger(__name__)
 
 class CommandConsumer:
     """只管理命令队列生命周期，执行细节委托给 RunExecutionService。"""
@@ -57,7 +60,7 @@ class CommandConsumer:
         try:
             await self._execution.execute(command)
         except asyncio.CancelledError:
-
+            logger.info(f"Command cancelled: {command.command_id}")
             return
         except Exception as exc:
             await self._execution.fail(

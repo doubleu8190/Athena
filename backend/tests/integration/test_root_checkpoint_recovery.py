@@ -246,7 +246,7 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                     session_id=session_id,
                     run_id=run_id,
                     user_message="",
-                    resume_value=command.payload["resume_value"],
+                    resume_value=command.payload.resume_value.model_dump(mode="json"),
                 )
                 async with session_factory() as session, session.begin():
                     run = await session.get(AgentRunModel, run_id)

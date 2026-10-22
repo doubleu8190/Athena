@@ -18,13 +18,38 @@ from application.orchestration.langgraph.runtime.worker_executor import LangGrap
 from application.orchestration.worker_workflow import WorkerWorkflow
 from domain.orchestration import Task, TaskExecution
 from infrastructure.integrations.llm.embedding_provider import EmbeddingProvider
-from infrastructure.integrations.llm.llm_provider import RetryPolicy, RetryingLLMProvider
+from infrastructure.integrations.llm.llm_provider import ConfiguredLLMProvider
+from infrastructure.integrations.llm.options import (
+    LLMOptions,
+    LLMProviderOptions,
+    RetryOptions,
+)
 from infrastructure.integrations.neo4j.adapter import Neo4jGraphAdapter
 from infrastructure.integrations.sandbox.docker_runner import DockerSandbox
 from infrastructure.integrations.sandbox.options import SandboxOptions
 from infrastructure.integrations.sandbox.subprocess_runner import SubprocessSandbox
 from infrastructure.tools.native import BuiltinToolExecutor
 from domain.tools import ToolExecutionRequest
+
+
+def _configured_llm_for_test(
+    model: object,
+    *,
+    attempts: int = 3,
+    timeout_seconds: float = 1.0,
+) -> ConfiguredLLMProvider:
+    provider = ConfiguredLLMProvider(
+        LLMOptions(
+            providers=(LLMProviderOptions(provider="ollama"),),
+            retry=RetryOptions(
+                attempts=attempts,
+                timeout_seconds=timeout_seconds,
+                delay_seconds=0,
+            ),
+        )
+    )
+    provider._model = model
+    return provider
 
 
 @pytest.mark.asyncio
@@ -36,7 +61,7 @@ async def test_target_llm_retries_and_counts_tokens():
             if self.calls == 1: raise RuntimeError("temporary")
             return {"messages": messages}
     model = Model()
-    provider = RetryingLLMProvider(model, policy=RetryPolicy(attempts=2, timeout_seconds=1))
+    provider = _configured_llm_for_test(model, attempts=2)
     assert (await provider.invoke(["hello"]))["messages"] == ["hello"]
     assert model.calls == 2
     assert provider.count_text_tokens("one two") == 2
@@ -55,7 +80,9 @@ async def test_target_llm_timeout_and_failure_are_bounded():
         async def invoke(self, *_args, **_kwargs):
             await asyncio.sleep(0.02)
     with pytest.raises(RuntimeError):
-        await RetryingLLMProvider(Model(), policy=RetryPolicy(attempts=1, timeout_seconds=0.001)).invoke([])
+        await _configured_llm_for_test(
+            Model(), attempts=1, timeout_seconds=0.001
+        ).invoke([])
 
 
 @pytest.mark.asyncio
@@ -66,9 +93,7 @@ async def test_sync_llm_and_embedding_calls_do_not_block_the_event_loop():
             return {"messages": messages}
 
     model = SyncModel()
-    provider = RetryingLLMProvider(
-        model, policy=RetryPolicy(attempts=1, timeout_seconds=1)
-    )
+    provider = _configured_llm_for_test(model, attempts=1)
     ticks = 0
 
     async def heartbeat():

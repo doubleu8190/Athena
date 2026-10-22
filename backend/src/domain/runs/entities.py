@@ -1,11 +1,20 @@
-"""运行查询所需的无框架领域类型。"""
+"""运行命令、生命周期和查询所需的领域类型。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any
+
+from pydantic import ValidationError
+
+from .payloads import (
+    RunCancelPayload,
+    RunCommandPayload,
+    RunResumePayload,
+    RunStartPayload,
+)
 
 
 class CommandType(StrEnum):
@@ -58,9 +67,45 @@ class RunCommand:
     command_type: CommandType
     session_id: str
     run_id: str | None
-    payload: Mapping[str, Any]
+    payload: RunCommandPayload
     issued_at: datetime
     schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        """Reject commands whose concrete payload does not match their type."""
+        expected_payload = _payload_type_for(self.command_type)
+        if not isinstance(self.payload, expected_payload):
+            raise ValueError(
+                f"{self.command_type.value} requires {expected_payload.__name__}"
+            )
+
+
+def parse_run_command_payload(
+    command_type: CommandType, value: object
+) -> RunCommandPayload:
+    """Validate JSON data from persistence into the command's domain payload."""
+    payload_type = _payload_type_for(command_type)
+    try:
+        if isinstance(value, str):
+            return payload_type.model_validate_json(value)
+        return payload_type.model_validate(value)
+    except ValidationError as error:
+        raise ValueError(
+            f"invalid_payload_for_{command_type.value}"
+        ) from error
+
+
+def _payload_type_for(command_type: CommandType) -> type[RunCommandPayload]:
+    """Return the one supported payload schema for an executable run command."""
+    payload_types: dict[CommandType, type[RunCommandPayload]] = {
+        CommandType.RUN_START: RunStartPayload,
+        CommandType.RUN_CANCEL: RunCancelPayload,
+        CommandType.RUN_RESUME: RunResumePayload,
+    }
+    try:
+        return payload_types[command_type]
+    except KeyError as error:
+        raise ValueError(f"unsupported_run_command_type:{command_type}") from error
 
 
 @dataclass(frozen=True, slots=True)

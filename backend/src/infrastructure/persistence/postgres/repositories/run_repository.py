@@ -20,10 +20,13 @@ from domain.runs import (
     CommandStatusRecord,
     CommandType,
     RunCommand,
+    RunCommandPayload,
+    RunStartPayload,
     RunCancellationResult,
     RunQueryPort,
     RunStatus,
     RunSummary,
+    parse_run_command_payload,
 )
 from domain.runs.ports import CommandQueuePort, CommandStorePort, RunLifecyclePort
 
@@ -41,8 +44,10 @@ from ..models import (
     WorkerJobModel,
 )
 
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _json(value: Any, default: Any) -> Any:
     if value is None:
@@ -65,6 +70,27 @@ def _final_answer_text(result: dict[str, object]) -> str:
         if isinstance(content, str):
             return content
     return ""
+
+
+def _message_id(payload: RunCommandPayload) -> str | None:
+    """Return the user message identity only for a new run."""
+    if isinstance(payload, RunStartPayload):
+        return payload.message_id
+    return None
+
+
+def _attachment_ids(payload: RunCommandPayload) -> tuple[str, ...]:
+    """Expose attachments only for user-submitted start commands."""
+    if isinstance(payload, RunStartPayload):
+        return payload.attachment_ids
+    return ()
+
+
+def _run_start_payload_or_none(request_json: str) -> RunStartPayload | None:
+    """Treat an empty run request as absent; validate every populated request."""
+    if not request_json or request_json.strip() == "{}":
+        return None
+    return RunStartPayload.model_validate_json(request_json)
 
 
 class PostgresRunRepository(
@@ -99,7 +125,8 @@ class PostgresRunRepository(
                         schema_version=command.schema_version,
                         idempotency_key=command.command_id,
                         payload_json=json.dumps(
-                            dict(command.payload), ensure_ascii=False
+                            command.payload.model_dump(mode="json", exclude_none=True),
+                            ensure_ascii=False,
                         ),
                         status=CommandStatus.QUEUED.value,
                         queued_at=now,
@@ -114,7 +141,11 @@ class PostgresRunRepository(
                             run_id=command.run_id,
                             session_id=command.session_id,
                             status=RunStatus.CREATED.value,
-                            request_json=json.dumps(dict(command.payload)),
+                            request_json=json.dumps(
+                                command.payload.model_dump(
+                                    mode="json", exclude_none=True
+                                )
+                            ),
                             root_thread_id=f"thread-{command.run_id}",
                             created_at=now,
                             updated_at=now,
@@ -123,8 +154,8 @@ class PostgresRunRepository(
             return CommandEnqueueResult(
                 command.command_id,
                 command.run_id,
-                command.payload.get("message_id"),
-                tuple(command.payload.get("attachment_ids", ())),
+                _message_id(command.payload),
+                _attachment_ids(command.payload),
                 CommandStatus.QUEUED,
                 False,
             )
@@ -155,7 +186,9 @@ class PostgresRunRepository(
                     CommandType(row.command_type),
                     row.session_id,
                     row.run_id,
-                    _json(row.payload_json, {}),
+                    parse_run_command_payload(
+                        CommandType(row.command_type), row.payload_json
+                    ),
                     datetime.fromisoformat(row.queued_at),
                     row.schema_version,
                 )
@@ -206,8 +239,12 @@ class PostgresRunRepository(
                 if row is None:
                     return False
                 row.status = str(status)
-                row.result_json = json.dumps(result, default=str) if result is not None else None
-                row.error_json = json.dumps(error, default=str) if error is not None else None
+                row.result_json = (
+                    json.dumps(result, default=str) if result is not None else None
+                )
+                row.error_json = (
+                    json.dumps(error, default=str) if error is not None else None
+                )
                 row.completed_at = _now()
                 return True
 
@@ -289,12 +326,8 @@ class PostgresRunRepository(
         """Record a checkpointed Root wait only for its current Round generation."""
         async with self._session_factory() as session:
             async with session.begin():
-                row = await session.get(
-                    AgentRunModel, run_id, with_for_update=True
-                )
-                plan = await session.get(
-                    AgentPlanModel, plan_id, with_for_update=True
-                )
+                row = await session.get(AgentRunModel, run_id, with_for_update=True)
+                plan = await session.get(AgentPlanModel, plan_id, with_for_update=True)
                 if (
                     row is None
                     or plan is None
@@ -306,6 +339,7 @@ class PostgresRunRepository(
                     or not checkpoint_id
                 ):
                     return False
+
                 if (
                     row.root_wait_round_id != round_id
                     or row.root_wait_plan_version != plan_version
@@ -313,6 +347,7 @@ class PostgresRunRepository(
                     row.root_wait_generation = int(row.root_wait_generation or 0) + 1
                     row.root_wait_round_id = round_id
                     row.root_wait_plan_version = plan_version
+
                 row.root_wait_armed_at = _now()
                 row.root_wait_interrupt_id = interrupt_id
                 row.root_wait_checkpoint_id = checkpoint_id
@@ -412,9 +447,7 @@ class PostgresRunRepository(
         run.cancellation_external_effect_status = external_effect_status
         run.updated_at = now_iso
         await self._cancel_root_resume_jobs(session, run_id, now)
-        await self._cancel_pending_approvals(
-            session, run_id=run_id, plan=None, now=now
-        )
+        await self._cancel_pending_approvals(session, run_id=run_id, plan=None, now=now)
         await session.execute(
             update(AgentCommandModel)
             .where(
@@ -450,9 +483,7 @@ class PostgresRunRepository(
                 occurred_at=now,
             )
         )
-        return RunCancellationResult(
-            RunStatus.CANCELLED, True, external_effect_status
-        )
+        return RunCancellationResult(RunStatus.CANCELLED, True, external_effect_status)
 
     async def _begin_plan_cancellation(
         self,
@@ -472,9 +503,9 @@ class PostgresRunRepository(
             if run.status == RunStatus.RUNNING.value or active_execution_count
             else "none"
         )
-        cancellation_epoch = max(
-            int(run.cancellation_epoch or 0), int(plan.cancellation_epoch or 0)
-        ) + 1
+        cancellation_epoch = (
+            max(int(run.cancellation_epoch or 0), int(plan.cancellation_epoch or 0)) + 1
+        )
         run.status = RunStatus.CANCELLING.value
         run.cancellation_epoch = cancellation_epoch
         run.cancellation_external_effect_status = external_effect_status
@@ -497,9 +528,7 @@ class PostgresRunRepository(
             cancellation_epoch=cancellation_epoch,
             now=now,
         )
-        await self._cancel_pending_approvals(
-            session, run_id=run_id, plan=plan, now=now
-        )
+        await self._cancel_pending_approvals(session, run_id=run_id, plan=plan, now=now)
         await self._cancel_root_resume_jobs(session, run_id, now)
         for event_type, scope in (
             ("PlanCancelling", f"plan:{plan.plan_id}"),
@@ -526,9 +555,7 @@ class PostgresRunRepository(
                     occurred_at=now,
                 )
             )
-        return RunCancellationResult(
-            RunStatus.CANCELLING, True, external_effect_status
-        )
+        return RunCancellationResult(RunStatus.CANCELLING, True, external_effect_status)
 
     async def _cancel_pending_plan_tasks(
         self,
@@ -549,16 +576,20 @@ class PostgresRunRepository(
             AgentTaskModel.status.in_(("pending", "waiting_approval")),
         )
         pending_tasks = (
-            await session.execute(
-                select(AgentTaskModel)
-                .where(
-                    AgentTaskModel.plan_id == plan.plan_id,
-                    AgentTaskModel.status.in_(("pending", "waiting_approval")),
+            (
+                await session.execute(
+                    select(AgentTaskModel)
+                    .where(
+                        AgentTaskModel.plan_id == plan.plan_id,
+                        AgentTaskModel.status.in_(("pending", "waiting_approval")),
+                    )
+                    .order_by(AgentTaskModel.task_id)
+                    .with_for_update()
                 )
-                .order_by(AgentTaskModel.task_id)
-                .with_for_update()
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         await session.execute(
             update(RoundTaskModel)
             .where(
@@ -644,7 +675,9 @@ class PostgresRunRepository(
             update(TaskExecutionModel)
             .where(
                 TaskExecutionModel.task_id.in_(task_ids),
-                TaskExecutionModel.status.in_(("queued", "waiting_approval", "interrupted")),
+                TaskExecutionModel.status.in_(
+                    ("queued", "waiting_approval", "interrupted")
+                ),
             )
             .values(
                 status="cancelled",
@@ -698,15 +731,19 @@ class PostgresRunRepository(
     ) -> None:
         """Cancel pending approvals and persist their user events atomically."""
         approvals = (
-            await session.execute(
-                select(ApprovalRecordModel)
-                .where(
-                    ApprovalRecordModel.run_id == run_id,
-                    ApprovalRecordModel.status == "pending",
+            (
+                await session.execute(
+                    select(ApprovalRecordModel)
+                    .where(
+                        ApprovalRecordModel.run_id == run_id,
+                        ApprovalRecordModel.status == "pending",
+                    )
+                    .with_for_update()
                 )
-                .with_for_update()
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for approval in approvals:
             approval.status = "cancelled"
             approval_plan_id = approval.plan_id or (plan.plan_id if plan else None)
@@ -794,9 +831,7 @@ class PostgresRunRepository(
                         update(RootResumeJobModel)
                         .where(
                             RootResumeJobModel.run_id == run_id,
-                            RootResumeJobModel.status.in_(
-                                ("pending", "running")
-                            ),
+                            RootResumeJobModel.status.in_(("pending", "running")),
                         )
                         .values(
                             status=(
@@ -812,10 +847,10 @@ class PostgresRunRepository(
                     if status == RunStatus.COMPLETED and response is not None:
                         run = await session.get(AgentRunModel, run_id)
                         if run is not None:
-                            request = _json(run.request_json, {})
-                            user_text = str(request.get("message", "")).strip()
+                            request = _run_start_payload_or_none(run.request_json)
+                            user_text = request.message.strip() if request else ""
                             content = _final_answer_text(response)
-                            message_id = str(request.get("message_id", ""))
+                            message_id = request.message_id if request else ""
                             if user_text:
                                 await session.execute(
                                     pg_insert(MemoryProcessingJobModel)
@@ -831,9 +866,7 @@ class PostgresRunRepository(
                                         created_at=now_iso,
                                         updated_at=now_iso,
                                     )
-                                    .on_conflict_do_nothing(
-                                        index_elements=["turn_id"]
-                                    )
+                                    .on_conflict_do_nothing(index_elements=["turn_id"])
                                 )
                             if message_id and content:
                                 stream_id = f"answer-{run_id}"
@@ -936,12 +969,14 @@ class PostgresRunRepository(
 
     @staticmethod
     def _result(row: AgentCommandModel, deduplicated: bool) -> CommandEnqueueResult:
-        payload = _json(row.payload_json, {})
+        payload = parse_run_command_payload(
+            CommandType(row.command_type), row.payload_json
+        )
         return CommandEnqueueResult(
             row.command_id,
             row.run_id,
-            payload.get("message_id"),
-            tuple(payload.get("attachment_ids", ())),
+            _message_id(payload),
+            _attachment_ids(payload),
             row.status,
             deduplicated,
         )
@@ -969,6 +1004,7 @@ class PostgresRunRepository(
             datetime.fromisoformat(row.created_at),
             datetime.fromisoformat(row.updated_at),
         )
+
 
 __all__ = [
     "PostgresRunRepository",

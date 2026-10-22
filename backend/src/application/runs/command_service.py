@@ -15,6 +15,8 @@ from domain.runs import (
     CommandStorePort,
     CommandType,
     RunCommand,
+    RunStartPayload,
+    RunCancelPayload,
     RunQueryPort,
     RunStatus,
     RunSummary,
@@ -80,11 +82,11 @@ class RunCommandService:
             command_type=CommandType.RUN_START,
             session_id=session_id,
             run_id=self._id_factory(),
-            payload={
-                "message": message,
-                "message_id": actual_message_id,
-                "attachment_ids": list(attachment_ids),
-            },
+            payload=RunStartPayload(
+                message=message,
+                message_id=actual_message_id,
+                attachment_ids=tuple(attachment_ids),
+            ),
             issued_at=self._clock(),
         )
         try:
@@ -187,7 +189,7 @@ class RunCommandService:
             command_type=CommandType.RUN_CANCEL,
             session_id=session_id,
             run_id=run_id,
-            payload={"reason": "USER_REQUEST"},
+            payload=RunCancelPayload(reason="USER_REQUEST"),
             issued_at=self._clock(),
         )
         await self._commands.enqueue_command(command)

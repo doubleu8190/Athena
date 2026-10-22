@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from application.orchestration.protocols import RootGraphPort
-from domain.runs import CommandType, RunCommand
+from domain.runs import (
+    CommandType,
+    RoundCompletedResumeValue,
+    RunCommand,
+    RunResumePayload,
+)
 from shared.logging import get_logger
 
 logger = get_logger(__name__)
@@ -158,19 +163,17 @@ class RootResumeDispatcher:
             command_type=CommandType.RUN_RESUME,
             session_id=lease.session_id,
             run_id=lease.run_id,
-            payload={
-                "message": "",
-                "message_id": f"root-resume-result:{lease.job_id}",
-                "resume_value": {
-                    "type": "round_completed",
-                    "run_id": lease.run_id,
-                    "plan_id": lease.plan_id,
-                    "round_id": lease.round_id,
-                    "plan_version": lease.plan_version,
-                    "root_wait_generation": lease.root_wait_generation,
-                    "interrupt_id": interrupt_id,
-                },
-            },
+            payload=RunResumePayload(
+                resume_value=RoundCompletedResumeValue(
+                    type="round_completed",
+                    run_id=lease.run_id,
+                    plan_id=lease.plan_id,
+                    round_id=lease.round_id,
+                    plan_version=lease.plan_version,
+                    root_wait_generation=lease.root_wait_generation,
+                    interrupt_id=interrupt_id,
+                ),
+            ),
             issued_at=datetime.now(timezone.utc),
         )
         invocation = asyncio.create_task(

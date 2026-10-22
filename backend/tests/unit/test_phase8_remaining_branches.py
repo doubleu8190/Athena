@@ -14,7 +14,7 @@ from application.sessions import SessionNotFoundError
 from bootstrap import create_app
 from bootstrap.lifespan import lifespan
 from domain.events import ApplicationEvent
-from domain.runs import CommandType, RunCommand, RunSummary
+from domain.runs import CommandType, RunCommand, RunStartPayload, RunSummary
 from domain.sessions import Session
 from fastapi.testclient import TestClient
 
@@ -55,7 +55,10 @@ async def test_run_query_and_command_consumer_error_paths() -> None:
         async def claim_next_command(self):
             if self.claimed: return None
             self.claimed = True
-            return RunCommand("c", CommandType.RUN_START, "s", "r", {}, NOW)
+            return RunCommand(
+                "c", CommandType.RUN_START, "s", "r",
+                RunStartPayload(message="hello", message_id="m"), NOW
+            )
     class Execution:
         async def execute(self, command): raise RuntimeError("fail")
         async def fail(self, command, error): self.error = error

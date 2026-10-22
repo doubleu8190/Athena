@@ -6,7 +6,14 @@ from datetime import datetime, timezone
 import pytest
 from langgraph.types import Interrupt
 
-from domain.runs import CommandType, RunCommand, RootWaitCheckpoint
+from domain.runs import (
+    CommandType,
+    RoundCompletedResumeValue,
+    RunCommand,
+    RunResumePayload,
+    RootWaitCheckpoint,
+    RunStartPayload,
+)
 from application.orchestration.langgraph import LangGraphRunExecutor
 
 
@@ -16,7 +23,7 @@ def _command(run_id: str = "run-1") -> RunCommand:
         command_type=CommandType.RUN_START,
         session_id="session-1",
         run_id=run_id,
-        payload={"message": "hello"},
+        payload=RunStartPayload(message="hello", message_id="message-1"),
         issued_at=datetime.now(timezone.utc),
     )
 
@@ -47,6 +54,15 @@ class _InterruptedGraph:
             ],
             "__root_checkpoint_id__": "checkpoint-1",
         }
+
+
+class _CapturingGraph:
+    def __init__(self) -> None:
+        self.arguments: dict[str, object] = {}
+
+    async def invoke(self, **kwargs):
+        self.arguments = kwargs
+        return {"result": {"content": "resumed answer"}}
 
 
 @pytest.mark.asyncio
@@ -87,4 +103,43 @@ async def test_langgraph_interrupt_is_returned_as_waiting_execution() -> None:
     )
     assert outcome.result["__root_checkpoint_id__"] == "checkpoint-1"
     assert outcome.result["__interrupt__"][0].id == "interrupt-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_uses_only_checkpoint_resume_identity() -> None:
+    graph = _CapturingGraph()
+    executor = LangGraphRunExecutor(graph)
+    command = RunCommand(
+        command_id="resume-command-1",
+        command_type=CommandType.RUN_RESUME,
+        session_id="session-1",
+        run_id="run-1",
+        payload=RunResumePayload(
+            resume_value=RoundCompletedResumeValue(
+                type="round_completed",
+                run_id="run-1",
+                plan_id="plan-1",
+                round_id="round-1",
+                plan_version=1,
+                root_wait_generation=1,
+                interrupt_id="interrupt-1",
+            )
+        ),
+        issued_at=datetime.now(timezone.utc),
+    )
+
+    await executor.execute(command)
+
+    assert graph.arguments["user_message"] == ""
+    assert graph.arguments["message_id"] == ""
+    assert graph.arguments["attachment_ids"] == []
+    assert graph.arguments["resume_value"] == {
+        "type": "round_completed",
+        "run_id": "run-1",
+        "plan_id": "plan-1",
+        "round_id": "round-1",
+        "plan_version": 1,
+        "root_wait_generation": 1,
+        "interrupt_id": "interrupt-1",
+    }
 

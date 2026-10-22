@@ -48,6 +48,8 @@ from domain.runs import (
     CommandStatus,
     CommandStatusRecord,
     RunCommand,
+    RunCommandPayload,
+    RunStartPayload,
     CommandQueuePort,
     CommandStorePort,
     RunLifecyclePort,
@@ -113,6 +115,12 @@ class InMemoryMessageRepository(MessageRepository):
         return [item for item in values if item.id > after_id]
 
 
+def _command_message_fields(payload: RunCommandPayload) -> tuple[str | None, tuple[str, ...]]:
+    if isinstance(payload, RunStartPayload):
+        return payload.message_id, payload.attachment_ids
+    return None, ()
+
+
 class InMemoryRunStore(
     CommandQueuePort,
     CommandStorePort,
@@ -129,19 +137,19 @@ class InMemoryRunStore(
         self.root_waits: dict[str, dict[str, object]] = {}
 
     async def enqueue_command(self, command: RunCommand) -> CommandEnqueueResult:
+        message_id, attachment_ids = _command_message_fields(command.payload)
         existing = self.command_status.get(command.command_id)
         if existing is not None:
-            return CommandEnqueueResult(command.command_id, command.run_id, command.payload.get("message_id"), tuple(command.payload.get("attachment_ids", ())), existing.status, True)
+            return CommandEnqueueResult(command.command_id, command.run_id, message_id, attachment_ids, existing.status, True)
         self.commands[command.command_id] = command
         self.command_status[command.command_id] = CommandStatusRecord(command.command_id, command.session_id, command.run_id, command.command_type, CommandStatus.QUEUED)
         if command.run_id:
             now = datetime.now(timezone.utc)
             self.runs.setdefault(command.run_id, RunSummary(command.run_id, command.session_id, RunStatus.CREATED, f"thread-{command.run_id}", created_at=now, updated_at=now))
-        return CommandEnqueueResult(command.command_id, command.run_id, command.payload.get("message_id"), tuple(command.payload.get("attachment_ids", ())), CommandStatus.QUEUED, False)
+        return CommandEnqueueResult(command.command_id, command.run_id, message_id, attachment_ids, CommandStatus.QUEUED, False)
 
     async def get_command(self, command_id: str) -> CommandStatusRecord | None:
         return self.command_status.get(command_id)
-
     async def list_for_session(self, session_id: str) -> list[RunSummary]:
         return [value for value in self.runs.values() if value.session_id == session_id]
 

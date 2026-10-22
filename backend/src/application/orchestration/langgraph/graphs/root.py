@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any
+from typing import Any, Mapping
 
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from application.orchestration.dependencies import RootWorkflowDependencies
 from application.orchestration.protocols import RootWorkflowPort
+from domain.runs import RoundCompletedResumeValue
 
 from .state import RootGraphState
 
@@ -236,16 +239,16 @@ def build_root_graph(
 
 
 async def invoke_root_graph(
-    graph: Any,
+    graph: CompiledStateGraph[Any, Any, Any, Any],
     *,
     session_id: str,
     run_id: str,
     user_message: str = "",
     message_id: str = "",
     attachment_ids: list[str] | None = None,
-    resume_value: dict[str, object] | None = None,
-    stop_signal: Any = None,
-) -> dict[str, Any]:
+    resume_value: RoundCompletedResumeValue | None = None,
+    stop_signal: asyncio.Event| None = None,
+) -> Mapping | dict[str, str] | Any:
     if not run_id:
         raise ValueError("run_id is required")
     state: RootGraphState = {
@@ -258,17 +261,21 @@ async def invoke_root_graph(
         }
     }
     config = {"configurable": {"thread_id": f"run:{run_id}"}}
+
     if stop_signal is not None:
         config["configurable"]["stop_signal"] = stop_signal
+    # 恢复中断流程
     if resume_value is not None:
-        if resume_value.get("type") != "round_completed":
+        if resume_value.type != "round_completed":
             raise RuntimeError("root_resume_value_type_invalid")
         result = await graph.ainvoke(
-            Command(resume=dict(resume_value)),
+            Command(resume=dict(resume_value.model_dump(mode="json"))),
             config=config,
         )
     else:
+        # 任务启动流程
         result = await graph.ainvoke(state, config=config)
+    # 处理root agent interrupt事件
     if isinstance(result, Mapping) and result.get("__interrupt__"):
         snapshot = await graph.aget_state(config)
         snapshot_config = snapshot.config

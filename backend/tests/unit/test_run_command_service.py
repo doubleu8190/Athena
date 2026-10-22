@@ -18,6 +18,7 @@ from domain.runs import (
     CommandStatus,
     CommandStatusRecord,
     CommandType,
+    RunStartPayload,
     RunSummary,
 )
 from domain.sessions import Session
@@ -89,8 +90,16 @@ class Commands:
         return CommandEnqueueResult(
             command_id=command.command_id,
             run_id=command.run_id,
-            message_id=command.payload.get("message_id"),
-            attachment_ids=tuple(command.payload.get("attachment_ids", ())),
+            message_id=(
+                command.payload.message_id
+                if isinstance(command.payload, RunStartPayload)
+                else None
+            ),
+            attachment_ids=(
+                command.payload.attachment_ids
+                if isinstance(command.payload, RunStartPayload)
+                else ()
+            ),
             status=CommandStatus.QUEUED,
             deduplicated=False,
         )

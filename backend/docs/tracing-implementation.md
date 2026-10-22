@@ -187,7 +187,7 @@ run
 
 - `graphs/root.py` 的 `_node` 接收 `name`，发布事件时把真实节点名传给 payload；记录 started 时间，在 completed/failed 计算 `duration_ms`。
 - `root_workflow.py` 的工具开始/结束事件生成稳定 `activity_id`/`call_id`；异常出口发布 `tool.failed`，而不是只返回一个失败结果。
-- `RetryingLLMProvider` 或其上层统一调用点发布 `llm.started`/`llm.completed`/`llm.failed`，每次重试用 `attempt` 字段区分。采集 provider、model、输入/输出 token 数和耗时；不采集原文。
+- 由 `llm_activity.invoke_llm_with_activity` 与基础设施层协作发布 `llm.started`/`llm.completed`/`llm.failed`，每次重试用 `attempt` 字段区分。采集 provider、model、输入/输出 token 数和耗时；不采集原文。
 - `ContextAcquisitionService` 为总检索和每个 provider 记录开始/结束、状态、耗时、候选数和失败原因；调用 `record_context` 时传入真实 status、duration 和 `retrieval_run_id`。
 - `WorkerSchedulerService` 的 task 事件补齐 `worker_run_id`、`execution_generation`、开始/结束时间、retrying 关系和父活动 ID。
 - `RunExecutionService` 的 run 终态事件补齐开始时间、duration 和统一错误摘要。

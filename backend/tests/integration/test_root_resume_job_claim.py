@@ -222,7 +222,7 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
         await dispatcher._resume(armed_lease)
         assert len(execution.commands) == 1
         assert (
-            execution.commands[0].payload["resume_value"]["interrupt_id"]
+            execution.commands[0].payload.resume_value.interrupt_id
             == "interrupt-4"
         )
 

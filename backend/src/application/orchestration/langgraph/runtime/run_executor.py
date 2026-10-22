@@ -14,8 +14,12 @@ from domain.runs import (
     CommandExecutionResult,
     RootWaitCheckpoint,
     RunCommand,
+    RunResumePayload,
+    RunStartPayload,
 )
+from shared import get_logger
 
+logger = get_logger(__name__)
 
 @dataclass(slots=True)
 class _ActiveRun:
@@ -41,6 +45,19 @@ class LangGraphRunExecutor(RunExecutorPort):
     async def execute(self, command: RunCommand) -> CommandExecutionResult:
         if not command.run_id:
             return CommandExecutionResult(error={"code": "run_id_required"})
+        if isinstance(command.payload, RunStartPayload):
+            user_message = command.payload.message
+            message_id = command.payload.message_id
+            attachment_ids = list(command.payload.attachment_ids)
+            resume_value = None
+        elif isinstance(command.payload, RunResumePayload):
+            # 恢复身份来自 checkpoint；这些启动参数不会参与恢复状态。
+            user_message = ""
+            message_id = ""
+            attachment_ids = []
+            resume_value = command.payload.resume_value
+        else:
+            raise TypeError("LangGraph execution accepts start or resume commands")
 
         stop_signal = asyncio.Event()
         current = asyncio.current_task()
@@ -52,10 +69,10 @@ class LangGraphRunExecutor(RunExecutorPort):
             value = await self._graph.invoke(
                 session_id=command.session_id,
                 run_id=command.run_id,
-                user_message=str(command.payload.get("message", "")),
-                message_id=str(command.payload.get("message_id", "")),
-                attachment_ids=list(command.payload.get("attachment_ids", ())),
-                resume_value=command.payload.get("resume_value"),
+                user_message=user_message,
+                message_id=message_id,
+                attachment_ids=attachment_ids,
+                resume_value=resume_value,
                 stop_signal=stop_signal,
             )
         finally:
@@ -97,6 +114,7 @@ class LangGraphRunExecutor(RunExecutorPort):
         async with self._lock:
             active = self._active.get(run_id)
         if active is None:
+            logger.info("run is not active", run_id=run_id)
             return
         active.stop_signal.set()
         current = asyncio.current_task()

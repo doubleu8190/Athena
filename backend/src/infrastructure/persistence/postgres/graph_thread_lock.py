@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from psycopg import AsyncConnection
 
 
-class PostgresGraphThreadLock:
+class PostgresGraphThreadLock():
     """Hold a cross-process advisory lock for one complete graph invocation."""
 
     def __init__(self, connection_string: str, *, poll_interval: float = 0.1) -> None:

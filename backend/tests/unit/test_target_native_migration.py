@@ -18,12 +18,11 @@ from infrastructure.tools.native import NativeToolExecution
 from domain.tools import ToolExecutionRequest
 from configuration.settings import Settings, LLMProviderConfig
 from infrastructure.integrations.llm.embedding_provider import ConfiguredEmbeddingProvider, EmbeddingProvider
-from infrastructure.integrations.llm.llm_provider import ConfiguredLLMProvider, RetryingLLMProvider
+from infrastructure.integrations.llm.llm_provider import ConfiguredLLMProvider
 from infrastructure.integrations.neo4j.resource import Neo4jResource
 from shared import dumps, loads, new_id, now_utc
 from workers import MemoryWorker as DurableMemoryWorker
 from infrastructure.integrations.pgvector import PostgresFileVectorIndex, PostgresMemoryVectorIndex
-from tests.fakes.llm import _EchoModel
 from tests.fakes.embedding import _EchoEmbedder
 
 
@@ -233,12 +232,11 @@ def test_target_shared_helpers_and_registry_reject_unknown():
 
 
 @pytest.mark.asyncio
-async def test_configured_embedding_is_lazy_and_test_llm_is_explicit():
+async def test_configured_embedding_is_lazy_and_unknown_llm_is_rejected():
     settings = Settings(llm_providers=[LLMProviderConfig(provider="echo", api_key="")], embedding_provider="echo", embedding_dimension=2)
     llm = ConfiguredLLMProvider(settings)
     with pytest.raises(ValueError, match="Unsupported"):
         await llm.invoke(["hello"])
-    assert (await RetryingLLMProvider(_EchoModel()).invoke(["hello"]))["content"] == "hello"
     with pytest.raises(ValueError, match="Unsupported"):
         await ConfiguredEmbeddingProvider(settings).embed_query("x")
     embedding = EmbeddingProvider(_EchoEmbedder(2), dimension=2)
@@ -249,7 +247,6 @@ def test_configured_openai_llm_counts_tokens_with_model_tokenizer():
     settings = Settings(llm_providers=[LLMProviderConfig(provider="openai", api_key="key", model="gpt-4o")])
     provider = ConfiguredLLMProvider(settings)
     provider._model = SimpleNamespace()
-    provider._loaded = True
     assert provider.count_text_tokens("你好世界") == 2
 
 
@@ -273,7 +270,6 @@ async def test_configured_llm_retries_after_lazy_model_failure():
 
     flaky = Flaky()
     provider._model = flaky
-    provider._loaded = True
     assert (await provider.invoke(["hello"]))["content"] == "ok"
     assert flaky.calls == 2
 

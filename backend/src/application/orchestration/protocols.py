@@ -6,6 +6,7 @@ workflow and persistence capabilities used by the application.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Mapping
 from typing import Any, AsyncContextManager, Protocol
 
@@ -20,6 +21,7 @@ from domain.orchestration import (
     TaskExecution,
     TaskResult,
 )
+from domain.runs import RoundCompletedResumeValue
 
 
 class RootAgent(Protocol):
@@ -45,8 +47,8 @@ class RootGraphPort(Protocol):
         user_message: str,
         message_id: str = "",
         attachment_ids: list[str] | None = None,
-        resume_value: dict[str, object] | None = None,
-        stop_signal: object | None = None,
+        resume_value: RoundCompletedResumeValue | None = None,
+        stop_signal: asyncio.Event | None = None,
     ) -> object: ...
 
     async def has_pending_round_wait(

@@ -28,18 +28,19 @@
 Root graph 节点和顺序：
 
 ```text
-prepare_request_and_persist_message
+prepare_request
   -> understand_task
-  -> clarification_response                         (需要澄清)
-  -> plan_context -> acquire_context
-  -> prepare_harness_input -> root_agent_loop
-       -> post_process_and_build_result             (直接回答/工具循环结束)
-       -> materialize_execution_plan -> run_planned_orchestration
-          -> build_orchestration_response -> close_execution_stream
-  -> assemble_final_response
+       ├─ clarification_response -> assemble_final_response -> END
+       └─ plan_context -> acquire_context -> prepare_harness_input
+            -> run_root_execution_loop
+                 ├─ direct answer -> assemble_final_response -> END
+                 └─ plan -> materialize_execution_plan -> wait_for_plan_completion
+                       ├─ incomplete -> wait_for_plan_completion
+                       └─ completed -> build_plan_response
+                            -> assemble_final_response -> END
 ```
 
-每个节点由 `node.started/node.completed/node.failed` 事件包裹。初始 request 至少包含 session_id、run_id、message_id、user_message、attachment_ids。图状态必须 JSON 安全；Python 连接、LLM、Event、stop signal 不写入 checkpoint。
+SubmitPlan 与 Wait 保持为独立节点，恢复等待 checkpoint 时不会重跑计划提交。普通节点发布 `node.started/node.completed/node.failed` 事件；Wait 节点直接持有 LangGraph interrupt 边界。初始 request 至少包含 session_id、run_id、message_id、user_message、attachment_ids。图状态必须 JSON 安全；Python 连接、LLM、Event、stop signal 不写入 checkpoint。
 
 ### 3.1 任务理解
 

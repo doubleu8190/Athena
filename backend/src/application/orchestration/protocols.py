@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable, Mapping
-from typing import Any, AsyncContextManager, Protocol
+from typing import TYPE_CHECKING, Any, AsyncContextManager, Protocol
 
-from application.orchestration.langgraph import RootGraphState
 from domain.orchestration import (
     CommandReceipt,
     OrchestrationCommand,
@@ -22,6 +21,9 @@ from domain.orchestration import (
     TaskResult,
 )
 from domain.runs import RoundCompletedResumeValue
+
+if TYPE_CHECKING:
+    from application.orchestration.langgraph.graphs.state import RootGraphState
 
 
 class RootAgent(Protocol):
@@ -152,13 +154,7 @@ class RootWorkflowPort(Protocol):
     async def review_completed_round(
         self, state: RootGraphState
     ) -> dict[str, Any]: ...
-    async def project_plan_result(self, state: RootGraphState) -> dict[str, Any]: ...
-    async def finalize_plan_stream(
-        self, state: RootGraphState
-    ) -> dict[str, Any]: ...
-    async def post_process_and_build_result(
-        self, state: RootGraphState
-    ) -> dict[str, Any]: ...
+    async def build_plan_response(self, state: RootGraphState) -> dict[str, Any]: ...
     async def assemble_final_response(
         self, state: RootGraphState
     ) -> dict[str, Any]: ...

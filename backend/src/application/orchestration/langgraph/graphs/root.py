@@ -6,19 +6,20 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, Mapping
+from typing import Any
 
-from langgraph.graph.state import CompiledStateGraph
+from langgraph.graph.state import CompiledStateGraph, RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from application.orchestration.dependencies import RootWorkflowDependencies
 from application.orchestration.protocols import RootWorkflowPort
 from domain.runs import RoundCompletedResumeValue
+from shared import get_logger
 
 from .state import RootGraphState
 
-
+logger = get_logger(__name__)
 
 async def _publish(
     dependencies: RootWorkflowDependencies,
@@ -78,7 +79,6 @@ def _node(
                     "node": name,
                     "message": str(exc) or type(exc).__name__,
                 },
-                "next_route": "assemble_final_response",
             }
         await _publish(dependencies, "node.completed", state, node_name=name, started_at=started_at, duration_ms=int((perf_counter() - started_clock) * 1000))
         return value or {}
@@ -103,16 +103,18 @@ def _route_after_understanding(state: RootGraphState) -> str:
 
 
 def _route_after_agent(state: RootGraphState) -> str:
+    if state.get("error"):
+        return "assemble_final_response"
     route = state.get("next_route") or state.get("execution", {}).get("route")
     return (
         "materialize_execution_plan"
         if route in {"materialize_execution_plan", "plan_requested", "plan"}
-        else "post_process_and_build_result"
+        else "assemble_final_response"
     )
 
 
 def _route_after_wait(state: RootGraphState) -> str:
-    return "wait_for_plan_completion" if state.get("waiting") else "project_plan_result"
+    return "wait_for_plan_completion" if state.get("waiting") else "build_plan_response"
 
 
 def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
@@ -175,18 +177,17 @@ def build_root_graph(
         "prepare_harness_input": workflow.prepare_harness_input,
         "run_root_execution_loop": workflow.run_root_execution_loop,
         "materialize_execution_plan": workflow.materialize_execution_plan,
-        "wait_for_plan_completion": workflow.wait_for_plan_completion,
-        "project_plan_result": workflow.project_plan_result,
-        "finalize_plan_stream": workflow.finalize_plan_stream,
-        "post_process_and_build_result": workflow.post_process_and_build_result,
+        "build_plan_response": workflow.build_plan_response,
         "assemble_final_response": workflow.assemble_final_response,
     }
     graph = StateGraph(RootGraphState)
     for name, handler in handlers.items():
-        if name == "wait_for_plan_completion":
-            graph.add_node(name, _wait_for_plan_completion_node(workflow))
-        else:
-            graph.add_node(name, _node(name, handler, dependencies))
+        graph.add_node(name, _node(name, handler, dependencies))
+    # This node owns LangGraph's interrupt boundary and must not be wrapped by
+    # _node, which would catch and turn the interrupt into an application error.
+    graph.add_node(
+        "wait_for_plan_completion", _wait_for_plan_completion_node(workflow)
+    )
     graph.add_edge(START, "prepare_request")
     graph.add_edge("prepare_request", "understand_task")
     graph.add_conditional_edges(
@@ -205,7 +206,7 @@ def build_root_graph(
         "run_root_execution_loop",
         _route_after_agent,
         {
-            "post_process_and_build_result": "post_process_and_build_result",
+            "assemble_final_response": "assemble_final_response",
             "materialize_execution_plan": "materialize_execution_plan",
         },
     )
@@ -216,11 +217,11 @@ def build_root_graph(
             if state.get("plan")
             and not state.get("error")
             and not state.get("response", {}).get("error")
-            else "post_process_and_build_result"
+            else "assemble_final_response"
         ),
         {
             "wait_for_plan_completion": "wait_for_plan_completion",
-            "post_process_and_build_result": "post_process_and_build_result",
+            "assemble_final_response": "assemble_final_response",
         },
     )
     graph.add_conditional_edges(
@@ -228,12 +229,10 @@ def build_root_graph(
         _route_after_wait,
         {
             "wait_for_plan_completion": "wait_for_plan_completion",
-            "project_plan_result": "project_plan_result",
+            "build_plan_response": "build_plan_response",
         },
     )
-    graph.add_edge("project_plan_result", "finalize_plan_stream")
-    graph.add_edge("finalize_plan_stream", "assemble_final_response")
-    graph.add_edge("post_process_and_build_result", "assemble_final_response")
+    graph.add_edge("build_plan_response", "assemble_final_response")
     graph.add_edge("assemble_final_response", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -260,7 +259,7 @@ async def invoke_root_graph(
             "attachment_ids": list(attachment_ids or []),
         }
     }
-    config = {"configurable": {"thread_id": f"run:{run_id}"}}
+    config: RunnableConfig = {"configurable": {"thread_id": f"run:{run_id}"}}
 
     if stop_signal is not None:
         config["configurable"]["stop_signal"] = stop_signal
@@ -268,12 +267,14 @@ async def invoke_root_graph(
     if resume_value is not None:
         if resume_value.type != "round_completed":
             raise RuntimeError("root_resume_value_type_invalid")
+        logger.info(f"Resuming root graph for run {run_id} from round {resume_value.round_id}")
         result = await graph.ainvoke(
             Command(resume=dict(resume_value.model_dump(mode="json"))),
             config=config,
         )
     else:
         # 任务启动流程
+        logger.info(f"Invoking root graph for run {run_id}")
         result = await graph.ainvoke(state, config=config)
     # 处理root agent interrupt事件
     if isinstance(result, Mapping) and result.get("__interrupt__"):

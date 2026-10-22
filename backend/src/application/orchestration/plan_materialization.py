@@ -51,7 +51,6 @@ def plan_generation_failure() -> dict[str, Any]:
             },
         },
         "status": "failed",
-        "next_route": "post_process_and_build_result",
     }
 
 

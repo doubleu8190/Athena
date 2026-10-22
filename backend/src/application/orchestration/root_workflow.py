@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from domain.orchestration import (
     CommandReceipt,
@@ -22,7 +22,6 @@ from domain.orchestration import (
 )
 
 from .dependencies import RootWorkflowDependencies
-from .langgraph import RootGraphState
 from .plan_materialization import (
     coerce_plan,
     plan_dict,
@@ -33,6 +32,9 @@ from .plan_versions import deferred_version_review_decision
 from .protocols import RootWorkflowPort
 from .serialization import as_dict, json_value
 from .worker_tools import list_worker_tools, worker_tool_manifest
+
+if TYPE_CHECKING:
+    from .langgraph.graphs.state import RootGraphState
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,7 +346,6 @@ class RootWorkflow(RootWorkflowPort):
         return {
             "response": {"content": str(text), "kind": "clarification"},
             "status": "completed",
-            "next_route": "assemble_final_response",
         }
 
     async def plan_context(self, state: RootGraphState) -> dict[str, Any]:
@@ -409,7 +410,7 @@ class RootWorkflow(RootWorkflowPort):
         }:
             route = "materialize_execution_plan"
         else:
-            route = "post_process_and_build_result"
+            route = "assemble_final_response"
         return {
             "response": payload.get("response", payload),
             "execution": payload.get("execution", {}),
@@ -525,50 +526,27 @@ class RootWorkflow(RootWorkflowPort):
             "review_receipt": as_dict(receipt),
         }
 
-    async def project_plan_result(self, state: RootGraphState) -> dict[str, Any]:
-        deps = self.dependencies
+    async def build_plan_response(self, state: RootGraphState) -> dict[str, Any]:
+        """Render the results already loaded by the completed-plan wait step."""
         plan = state.get("plan", {})
-        loaded: Any = None
-        if deps.plan_loader is not None:
-            loaded = await deps.plan_loader(plan_id=plan.get("plan_id"))
-        results = (
-            loaded.get("results", loaded.get("plan_results", {}))
-            if isinstance(loaded, Mapping)
-            else {}
-        )
+        results = state.get("plan_results", {})
+        if not isinstance(results, Mapping):
+            results = {}
         return {
-            "plan_results": json_value(results),
-            "response": {"plan_results": json_value(results)},
-            "next_route": "finalize_plan_stream",
-        }
-
-    async def finalize_plan_stream(self, state: RootGraphState) -> dict[str, Any]:
-        response = {
-            "content": render_plan_results(
-                state.get("plan_results", {}),
-                state.get("plan", {}).get("tasks", []),
-            )
-        }
-        return {
-            "response": response,
-            "next_route": "assemble_final_response",
+            "response": {
+                "content": render_plan_results(
+                    results,
+                    plan.get("tasks", []),
+                )
+            },
             "waiting": False,
         }
 
-    async def post_process_and_build_result(
-        self, state: RootGraphState
-    ) -> dict[str, Any]:
+    async def assemble_final_response(self, state: RootGraphState) -> dict[str, Any]:
+        """Build the terminal result and status from the accumulated graph state."""
         response = dict(state.get("response", {}))
         if not response and state.get("error"):
             response = {"error": state.get("error")}
-        return {
-            "result": response,
-            "next_route": "assemble_final_response",
-            "status": state.get("status", "completed"),
-        }
-
-    async def assemble_final_response(self, state: RootGraphState) -> dict[str, Any]:
-        response = dict(state.get("response", {}))
         result = dict(state.get("result", {}))
         if response and not result:
             result = response

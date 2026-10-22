@@ -99,6 +99,88 @@ async def test_root_graph_builds_context_plan_from_dependency_graph() -> None:
     assert observed["plan"].providers == ["conversation"]
 
 
+def test_root_graph_merges_terminal_steps_and_keeps_plan_wait_boundary() -> None:
+    dependencies = _dependencies(
+        _TaskUnderstanding(UserTaskSpec(goal="hello"))
+    )
+    graph = build_root_graph(
+        workflow=RootWorkflow(dependencies), dependencies=dependencies
+    )
+
+    node_names = set(graph.get_graph().nodes)
+
+    assert "wait_for_plan_completion" in node_names
+    assert "build_plan_response" in node_names
+    assert "assemble_final_response" in node_names
+    assert not {
+        "project_plan_result",
+        "finalize_plan_stream",
+        "post_process_and_build_result",
+    } & node_names
+
+
+@pytest.mark.asyncio
+async def test_root_workflow_loads_plan_results_once_and_renders_response() -> None:
+    dependencies = _dependencies(
+        _TaskUnderstanding(UserTaskSpec(goal="hello"))
+    )
+    load_calls = 0
+
+    async def load_plan(*, plan_id):
+        nonlocal load_calls
+        load_calls += 1
+        return {
+            "completed": True,
+            "results": {"task-1": {"output": "done"}},
+        }
+
+    dependencies.plan_loader = load_plan
+    workflow = RootWorkflow(dependencies)
+    state = {
+        "request": {"run_id": "run-1"},
+        "plan": {
+            "plan_id": "plan-1",
+            "tasks": [{"task_id": "task-1", "title": "Task one"}],
+        },
+    }
+
+    wait_result = await workflow.wait_for_plan_completion(state)
+    response_result = await workflow.build_plan_response(
+        {**state, **wait_result}
+    )
+    final_result = await workflow.assemble_final_response(
+        {**state, **response_result}
+    )
+
+    assert load_calls == 1
+    assert response_result == {
+        "response": {"content": "Task one：done"},
+        "waiting": False,
+    }
+    assert final_result == {
+        "result": {"content": "Task one：done"},
+        "status": "completed",
+        "waiting": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_root_workflow_assembles_node_error_as_failed_result() -> None:
+    workflow = RootWorkflow(
+        _dependencies(_TaskUnderstanding(UserTaskSpec(goal="hello")))
+    )
+
+    result = await workflow.assemble_final_response(
+        {"error": {"code": "node_failed", "message": "failed"}}
+    )
+
+    assert result == {
+        "result": {"error": {"code": "node_failed", "message": "failed"}},
+        "status": "failed",
+        "waiting": False,
+    }
+
+
 @pytest.mark.asyncio
 async def test_root_graph_routes_nested_task_clarification() -> None:
     dependencies = _dependencies(

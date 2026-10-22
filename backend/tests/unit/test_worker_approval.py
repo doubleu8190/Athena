@@ -18,7 +18,13 @@ from application.orchestration.worker_tools import WorkerToolExecutor
 from application.orchestration.worker_workflow import WorkerWorkflow
 from application.orchestration.worker_approval import WorkerApprovalService
 from application.approval.service import ApprovalService
-from domain.orchestration import Task, TaskExecution, TaskStatus, WorkerJobLease
+from domain.orchestration import (
+    Task,
+    TaskExecution,
+    TaskResult,
+    TaskStatus,
+    WorkerJobLease,
+)
 from infrastructure.persistence.postgres.repositories.approval_repository import (
     PostgresApprovalRepository,
 )
@@ -660,3 +666,86 @@ async def test_reclaimed_worker_job_registers_checkpointed_approval_without_rein
 
     assert approvals.request_value[1]["interrupt_id"] == "interrupt-1"
     assert approvals.request_value[1]["execution_id"] == "execution-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_worker_job_resumes_same_checkpoint_and_reports_task_terminal():
+    class Jobs:
+        async def renew_lease(self, lease):
+            return lease
+
+    class Worker:
+        def __init__(self):
+            self.resumed = None
+
+        async def resume(self, execution, resume_value):
+            self.resumed = (execution, resume_value)
+            return TaskResult(
+                task_id="task-1",
+                status=TaskStatus.COMPLETED,
+                output={"saved": True},
+            )
+
+        async def execute(self, _execution):
+            raise AssertionError("resume job must continue the saved checkpoint")
+
+    class EventHandler:
+        def __init__(self):
+            self.events = []
+
+        async def apply_terminal_event(self, event):
+            self.events.append(event)
+            return SimpleNamespace(accepted=True, reason=None)
+
+    worker = Worker()
+    events = EventHandler()
+    dispatcher = WorkerJobDispatcher(
+        Jobs(),
+        worker,
+        events,
+        worker_id="dispatcher-1",
+        lease_seconds=10,
+        max_concurrency=1,
+        id_factory=lambda: "terminal-event-1",
+        clock=lambda: datetime(2026, 10, 22, tzinfo=timezone.utc),
+    )
+    resume_value = {
+        "approval_id": "approval-1",
+        "decision": "approved",
+        "interrupt_id": "interrupt-1",
+        "execution_id": "execution-1",
+        "args_hash": "args-hash",
+        "operation_key": "operation-1",
+    }
+    lease = WorkerJobLease(
+        job_id="resume-job-1",
+        worker_id="dispatcher-1",
+        run_id="run-1",
+        plan_id="plan-1",
+        round_id="round-1",
+        plan_version=1,
+        task_id="task-1",
+        execution_id="execution-1",
+        session_id="session-1",
+        attempt=1,
+        worker_thread_id="task:task-1:exec:1",
+        fencing_token=4,
+        cancellation_epoch=0,
+        lease_until=datetime(2026, 10, 22, tzinfo=timezone.utc),
+        task=Task("task-1", "write", "write a report"),
+        job_type="resume_worker",
+        approval_id="approval-1",
+        resume_value=resume_value,
+    )
+
+    await dispatcher._execute(lease)
+
+    assert worker.resumed is not None
+    execution, actual_resume_value = worker.resumed
+    assert execution.execution_id == "execution-1"
+    assert execution.worker_thread_id == "task:task-1:exec:1"
+    assert actual_resume_value == resume_value
+    assert len(events.events) == 1
+    assert events.events[0].message_id == "terminal-event-1"
+    assert events.events[0].status is TaskStatus.COMPLETED
+    assert events.events[0].result["output"] == {"saved": True}

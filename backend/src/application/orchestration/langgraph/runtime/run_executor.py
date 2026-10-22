@@ -57,6 +57,13 @@ class LangGraphRunExecutor(RunExecutorPort):
                 if active is not None and active.task is current:
                     self._active.pop(command.run_id, None)
         if isinstance(value, Mapping):
+            # LangGraph surfaces a persisted ``interrupt()`` as an
+            # ``__interrupt__`` entry in the graph result. Keep that result
+            # out of the completed-run JSON path; RunExecutionService uses it
+            # to arm the exact checkpoint before the resume dispatcher can
+            # continue the Root graph.
+            if value.get("__interrupt__"):
+                return CommandExecutionResult(waiting=True, result=dict(value))
             if value.get("waiting") or value.get("status") == "waiting":
                 return CommandExecutionResult(waiting=True, result=dict(value))
             if value.get("error") or value.get("status") == "failed":

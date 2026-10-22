@@ -99,7 +99,7 @@ async def test_root_wait_node_reviews_completed_round_before_waiting_again():
 
         async def wait_for_plan_completion(self, _state):
             self.wait_calls += 1
-            if not self.reviewed:
+            if len(self.reviewed) == 0:
                 return {
                     "waiting": True,
                     "root_wait": {
@@ -107,6 +107,17 @@ async def test_root_wait_node_reviews_completed_round_before_waiting_again():
                         "run_id": "run-1",
                         "plan_id": "plan-1",
                         "round_id": "round-1",
+                        "plan_version": 1,
+                    },
+                }
+            if len(self.reviewed) == 1:
+                return {
+                    "waiting": True,
+                    "root_wait": {
+                        "type": "round_wait",
+                        "run_id": "run-1",
+                        "plan_id": "plan-1",
+                        "round_id": "round-2",
                         "plan_version": 1,
                     },
                 }
@@ -119,12 +130,16 @@ async def test_root_wait_node_reviews_completed_round_before_waiting_again():
     builder = StateGraph(RootGraphState)
     builder.add_node("wait", _wait_for_plan_completion_node(workflow))
     builder.add_edge(START, "wait")
-    builder.add_edge("wait", END)
+    builder.add_conditional_edges(
+        "wait",
+        lambda state: "wait" if state.get("waiting") else END,
+        {"wait": "wait", END: END},
+    )
     graph = builder.compile(checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "run:run-1"}}
     paused = await invoke_root_graph(graph, session_id="session-1", run_id="run-1")
 
-    resumed = await graph.ainvoke(
+    first_resumed = await graph.ainvoke(
         Command(
             resume={
                 "type": "round_completed",
@@ -138,8 +153,29 @@ async def test_root_wait_node_reviews_completed_round_before_waiting_again():
     )
 
     assert len(paused["__interrupt__"]) == 1
+    assert paused["__interrupt__"][0].value["round_id"] == "round-1"
+    assert len(first_resumed["__interrupt__"]) == 1
+    assert first_resumed["__interrupt__"][0].value["round_id"] == "round-2"
+
+    resumed = await graph.ainvoke(
+        Command(
+            resume={
+                "type": "round_completed",
+                "run_id": "run-1",
+                "plan_id": "plan-1",
+                "round_id": "round-2",
+                "plan_version": 1,
+            }
+        ),
+        config=config,
+    )
+
     assert resumed["waiting"] is False
-    assert workflow.wait_calls == 3
+    assert workflow.wait_calls == 6
+    assert [item["root_wait"]["round_id"] for item in workflow.reviewed] == [
+        "round-1",
+        "round-2",
+    ]
     assert workflow.reviewed[0]["root_wait"]["round_id"] == "round-1"
     assert workflow.reviewed[0]["resume_value"]["type"] == "round_completed"
 

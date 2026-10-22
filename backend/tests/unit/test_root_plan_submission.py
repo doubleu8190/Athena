@@ -78,6 +78,7 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
                 "plan_id": "report-plan",
                 "goal": "Prepare a report",
                 "max_parallelism": 2,
+                "edges": [["gather", "summarize"]],
                 "tasks": [
                     {
                         "task_id": "gather",
@@ -85,7 +86,13 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
                         "objective": "Collect local source data",
                         "allowed_tools": ["read_local_file", "disabled_tool"],
                         "timeout_seconds": 42,
-                    }
+                    },
+                    {
+                        "task_id": "summarize",
+                        "title": "Summarize data",
+                        "objective": "Summarize the collected source data",
+                        "allowed_tools": [],
+                    },
                 ],
             },
         }
@@ -104,6 +111,9 @@ async def test_root_submits_initial_plan_through_atomic_command_handler():
     assert tasks[0].task_id == "gather:run-42"
     assert tasks[0].allowed_tools == ("read_local_file",)
     assert tasks[0].timeout_seconds == 42
+    assert [(edge.from_task_id, edge.to_task_id) for edge in plan.edges] == [
+        ("gather:run-42", "summarize:run-42")
+    ]
     assert legal_tools == {"read_local_file"}
     assert scheduler.started == []
     assert result["plan"]["plan_id"] == plan.plan_id

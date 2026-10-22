@@ -20,6 +20,16 @@ class ReviewLLM:
         return {"content": self.response}
 
 
+class RepairingReviewLLM:
+    def __init__(self, responses: list[str]):
+        self.responses = iter(responses)
+        self.calls = []
+
+    async def invoke(self, messages):
+        self.calls.append(messages)
+        return {"content": next(self.responses)}
+
+
 def review_context() -> ReviewContext:
     return ReviewContext(
         original_goal="Prepare an evidence-backed report",
@@ -80,6 +90,23 @@ async def test_configured_root_agent_accepts_continue_and_finish(response: str):
     decision = await ConfiguredRootAgent(ReviewLLM(response)).review(review_context())
 
     assert decision.action in {ReviewAction.CONTINUE, ReviewAction.FINISH}
+
+
+@pytest.mark.asyncio
+async def test_configured_root_agent_repairs_review_missing_required_reason():
+    llm = RepairingReviewLLM(
+        [
+            '{"action":"FINISH","final_status":"completed"}',
+            '{"action":"FINISH","reason":"The requested goal is complete.","final_status":"completed"}',
+        ]
+    )
+
+    decision = await ConfiguredRootAgent(llm).review(review_context())
+
+    assert decision.action is ReviewAction.FINISH
+    assert decision.reason == "The requested goal is complete."
+    assert len(llm.calls) == 2
+    assert "non-empty reason" in llm.calls[1][0]["content"]
 
 
 @pytest.mark.asyncio

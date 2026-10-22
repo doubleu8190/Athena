@@ -101,6 +101,18 @@ def _plan_dict(plan: Any, tasks: list[Any] | None = None) -> dict[str, Any]:
     return json_value(value)
 
 
+def _coerce_plan_edge(value: Any) -> PlanEdge:
+    """Accept object and two-item array forms commonly emitted as JSON DAG edges."""
+    if isinstance(value, Mapping):
+        source = value.get("from_task_id") or value.get("from") or ""
+        target = value.get("to_task_id") or value.get("to") or ""
+    elif isinstance(value, (list, tuple)) and len(value) == 2:
+        source, target = value
+    else:
+        raise ValueError("plan edges must be objects or two-item arrays")
+    return PlanEdge(str(source), str(target))
+
+
 def _coerce_plan(
     value: Any, *, request: Mapping[str, Any], task: Mapping[str, Any]
 ) -> tuple[Plan, list[Task]]:
@@ -119,13 +131,7 @@ def _coerce_plan(
             task_ids = tuple(
                 str(item.get("task_id")) for item in raw_tasks if item.get("task_id")
             )
-        edges = tuple(
-            PlanEdge(
-                str(item.get("from_task_id") or item.get("from") or ""),
-                str(item.get("to_task_id") or item.get("to") or ""),
-            )
-            for item in payload.get("edges", [])
-        )
+        edges = tuple(_coerce_plan_edge(item) for item in payload.get("edges", []))
         plan = Plan(
             plan_id=str(payload.get("plan_id") or f"plan:{request.get('run_id', '')}"),
             goal=str(
@@ -178,15 +184,38 @@ def _coerce_plan(
     return plan, tasks
 
 
-def render_plan_results(results: Mapping[str, Any]) -> str:
+def _result_text(value: Any) -> str:
+    """Extract user-facing text from the Worker result envelope."""
+    if isinstance(value, Mapping):
+        for key in ("output", "content", "value"):
+            if key in value:
+                rendered = _result_text(value[key])
+                if rendered:
+                    return rendered
+        error = value.get("error")
+        if isinstance(error, Mapping):
+            return str(error.get("message") or error.get("code") or "")
+        return str(error or "")
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
+def render_plan_results(
+    results: Mapping[str, Any], tasks: list[Mapping[str, Any]] | None = None
+) -> str:
     if not results:
         return "计划已完成，但没有可展示的任务结果。"
+    titles = {
+        str(task.get("task_id")): str(task.get("title", ""))
+        for task in tasks or []
+        if isinstance(task, Mapping) and task.get("task_id")
+    }
     lines = []
     for task_id, value in results.items():
-        payload = value if isinstance(value, Mapping) else {"output": value}
-        lines.append(
-            f"[{task_id}] {payload.get('output', payload.get('error', payload))}"
-        )
+        label = titles.get(str(task_id)) or str(task_id)
+        text = _result_text(value)
+        lines.append(f"{label}：{text}" if text else f"{label}：未返回可展示的文本结果。")
     return "\n".join(lines)
 
 
@@ -648,7 +677,12 @@ class RootWorkflow(RootWorkflowPort):
     async def finalize_plan_stream(self, state: Mapping[str, Any]) -> dict[str, Any]:
         deps = self.dependencies
         if deps.finalizer is None:
-            response = {"content": render_plan_results(state.get("plan_results", {}))}
+            response = {
+                "content": render_plan_results(
+                    state.get("plan_results", {}),
+                    state.get("plan", {}).get("tasks", []),
+                )
+            }
         else:
             response = as_dict(
                 await call(

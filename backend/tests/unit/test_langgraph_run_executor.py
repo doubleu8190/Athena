@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,19 @@ class _BlockingGraph:
         await asyncio.Event().wait()
 
 
+class _InterruptedGraph:
+    async def invoke(self, **kwargs):
+        return {
+            "__interrupt__": [
+                SimpleNamespace(
+                    id="interrupt-1",
+                    value={"type": "round_wait", "run_id": "run-1"},
+                )
+            ],
+            "__root_checkpoint_id__": "checkpoint-1",
+        }
+
+
 @pytest.mark.asyncio
 async def test_cancel_interrupts_active_graph_invocation() -> None:
     graph = _BlockingGraph()
@@ -48,4 +62,15 @@ async def test_cancel_unknown_run_is_idempotent() -> None:
 
     await executor.cancel(None)
     await executor.cancel("missing")
+
+
+@pytest.mark.asyncio
+async def test_langgraph_interrupt_is_returned_as_waiting_execution() -> None:
+    executor = LangGraphRunExecutor(_InterruptedGraph())
+
+    outcome = await executor.execute(_command())
+
+    assert outcome.waiting is True
+    assert outcome.result["__root_checkpoint_id__"] == "checkpoint-1"
+    assert outcome.result["__interrupt__"][0].id == "interrupt-1"
 

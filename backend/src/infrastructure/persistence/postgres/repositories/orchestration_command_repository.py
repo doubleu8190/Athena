@@ -198,6 +198,9 @@ class PostgresOrchestrationCommandRepository:
                     updated_at=now.isoformat(),
                 )
                 session.add(plan_row)
+                # Bare ORM instances are not linked by relationships, so make
+                # the referenced Plan visible before inserting PlanVersion.
+                await session.flush()
                 session.add(
                     PlanVersionModel(
                         plan_id=plan.plan_id,
@@ -208,6 +211,10 @@ class PostgresOrchestrationCommandRepository:
                         created_at=now,
                     )
                 )
+                # Flush the composite FK target before the first Round row is
+                # queued; bare ORM objects here have no relationship mapping
+                # for the unit of work to order reliably.
+                await session.flush()
                 task_rows = {
                     task.task_id: AgentTaskModel(
                         task_id=task.task_id,

@@ -122,50 +122,56 @@ def _route_after_prepare(state: RootGraphState) -> str:
 
 
 def _route_after_wait(state: RootGraphState) -> str:
-    return "project_plan_result" if state.get("waiting") is False else END
+    return "wait_for_plan_completion" if state.get("waiting") else "project_plan_result"
 
 
 def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
     """Suspend Root until a durable Round completion resumes its checkpoint."""
 
     async def wait_for_plan_completion(state: RootGraphState) -> dict[str, Any]:
-        while True:
-            value = await call(workflow.wait_for_plan_completion, state)
-            result = dict(value) if isinstance(value, Mapping) else {}
-            if not result.get("waiting"):
-                return result
-            wait_context = result.get("root_wait")
-            request = state.get("request", {})
-            if (
-                not isinstance(wait_context, Mapping)
-                or any(
-                    not wait_context.get(name)
-                    for name in ("run_id", "plan_id", "round_id", "plan_version")
-                )
+        value = await call(workflow.wait_for_plan_completion, state)
+        result = dict(value) if isinstance(value, Mapping) else {}
+        if not result.get("waiting"):
+            return result
+        wait_context = result.get("root_wait")
+        request = state.get("request", {})
+        if (
+            not isinstance(wait_context, Mapping)
+            or any(
+                not wait_context.get(name)
+                for name in ("run_id", "plan_id", "round_id", "plan_version")
+            )
+        ):
+            raise RuntimeError("root_round_wait_identity_missing")
+        if wait_context.get("run_id") != request.get("run_id"):
+            raise RuntimeError("root_round_wait_run_mismatch")
+        resume_value = interrupt(dict(wait_context))
+        review_round = getattr(workflow, "review_completed_round", None)
+        if callable(review_round):
+            if not isinstance(resume_value, Mapping):
+                raise RuntimeError("root_round_resume_value_invalid")
+            if resume_value.get("type") != "round_completed":
+                raise RuntimeError("root_round_resume_type_invalid")
+            if any(
+                resume_value.get(name) != wait_context.get(name)
+                for name in ("run_id", "plan_id", "round_id", "plan_version")
             ):
-                raise RuntimeError("root_round_wait_identity_missing")
-            if wait_context.get("run_id") != request.get("run_id"):
-                raise RuntimeError("root_round_wait_run_mismatch")
-            resume_value = interrupt(dict(wait_context))
-            review_round = getattr(workflow, "review_completed_round", None)
-            if callable(review_round):
-                if not isinstance(resume_value, Mapping):
-                    raise RuntimeError("root_round_resume_value_invalid")
-                if resume_value.get("type") != "round_completed":
-                    raise RuntimeError("root_round_resume_type_invalid")
-                if any(
-                    resume_value.get(name) != wait_context.get(name)
-                    for name in ("run_id", "plan_id", "round_id", "plan_version")
-                ):
-                    raise RuntimeError("root_round_resume_identity_mismatch")
-                await call(
-                    review_round,
-                    {
-                        **state,
-                        "root_wait": dict(wait_context),
-                        "resume_value": dict(resume_value),
-                    },
-                )
+                raise RuntimeError("root_round_resume_identity_mismatch")
+            await call(
+                review_round,
+                {
+                    **state,
+                    "root_wait": dict(wait_context),
+                    "resume_value": dict(resume_value),
+                },
+            )
+            # A review can start another Round. Return its wait state so the
+            # graph re-enters this node as a new LangGraph task. Each Round
+            # then owns one interrupt index and cannot consume an older
+            # resume value from a previous loop iteration.
+            next_value = await call(workflow.wait_for_plan_completion, state)
+            return dict(next_value) if isinstance(next_value, Mapping) else {}
+        return result
 
     wait_for_plan_completion.__name__ = "wait_for_plan_completion"
     return wait_for_plan_completion
@@ -245,7 +251,10 @@ def build_root_graph(
     graph.add_conditional_edges(
         "wait_for_plan_completion",
         _route_after_wait,
-        {"project_plan_result": "project_plan_result", END: END},
+        {
+            "wait_for_plan_completion": "wait_for_plan_completion",
+            "project_plan_result": "project_plan_result",
+        },
     )
     graph.add_edge("project_plan_result", "finalize_plan_stream")
     graph.add_edge("finalize_plan_stream", "assemble_final_response")

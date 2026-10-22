@@ -25,7 +25,7 @@ class TaskUnderstandingService:
 
     def __init__(
         self,
-        structured_llm: LLMPort,
+        structured_llm: LLMPort | None = None,
         *,
         timeout_seconds: float = 15.0,
         prompt_root: Path | None = None,
@@ -83,6 +83,8 @@ class TaskUnderstandingService:
         knowledge_bases: list[dict[str, Any]],
     ) -> Any:
         """调用结构化 LLM 适配器。"""
+        if self._structured_llm is None:
+            raise RuntimeError("structured LLM is not configured")
         context = {
             "history": history[-8:],
             "attachments": attachments,
@@ -146,12 +148,34 @@ class TaskUnderstandingService:
                 attachment_ids=attachments,
                 confidence=1.0,
             )
+        lowered = text.lower()
+        requests_multi_agent_execution = any(
+            marker in lowered
+            for marker in (
+                "multi-agent",
+                "multi agent",
+                "多 agent",
+                "多agent",
+                "多智能体",
+                "多个代理",
+            )
+        ) and any(
+            marker in lowered
+            for marker in ("运行", "执行", "拆分", "分工", "并行")
+        )
+        if requests_multi_agent_execution:
+            return UserTaskSpec(
+                goal=text,
+                mode="plan",
+                attachment_ids=attachments,
+                confidence=1.0,
+            )
         if any(marker in text.lower() for marker in ("执行命令", "运行命令", "shell", "exec_shell")):
             command = text
-            lowered = command.lower()
+            lowered_command = command.lower()
             for marker in ("exec_shell", "shell", "执行命令", "运行命令"):
-                if marker in lowered:
-                    command = command[lowered.find(marker) + len(marker):].strip(" ：:`")
+                if marker in lowered_command:
+                    command = command[lowered_command.find(marker) + len(marker):].strip(" ：:`")
                     break
             return UserTaskSpec(
                 goal=text,
@@ -208,9 +232,14 @@ class TaskUnderstandingService:
         planning = any(
             marker in lowered
             for marker in (
+                "multi-agent",
+                "multi agent",
                 "multi-worker",
                 "multi worker",
                 "worker",
+                "多 agent",
+                "多agent",
+                "多智能体",
                 "多个 worker",
                 "多个代理",
                 "并行执行",

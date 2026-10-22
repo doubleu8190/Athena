@@ -145,6 +145,252 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks() -> None:
+    """Ten fixed Round members never exceed the persisted concurrency limit."""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    schema = f"worker_parallelism_{uuid4().hex}"
+    base_url = make_url(DATABASE_URL)
+    if base_url.drivername in {"postgres", "postgresql"}:
+        base_url = base_url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(base_url)
+    app_a_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    app_b_engine = create_async_engine(
+        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    )
+    schema_created = False
+    now = datetime.now(timezone.utc)
+    run_id = f"run-{uuid4().hex}"
+    plan_id = f"plan-{run_id}"
+    round_id = f"round-{run_id}"
+    task_ids = [f"task-{index}-{run_id}" for index in range(10)]
+    next_task_id = f"task-next-{run_id}"
+
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            schema_created = True
+
+        required_tables = [
+            AgentRunModel.__table__,
+            AgentPlanModel.__table__,
+            AgentTaskModel.__table__,
+            ApprovalRecordModel.__table__,
+            PlanVersionModel.__table__,
+            PlanRoundModel.__table__,
+            RoundTaskModel.__table__,
+            TaskExecutionModel.__table__,
+            WorkerJobModel.__table__,
+            OrchestrationOutboxModel.__table__,
+            OrchestrationInboxModel.__table__,
+            RootResumeJobModel.__table__,
+        ]
+        async with app_a_engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, tables=required_tables
+                )
+            )
+
+        app_a_sessions = async_sessionmaker(app_a_engine, expire_on_commit=False)
+        app_b_sessions = async_sessionmaker(app_b_engine, expire_on_commit=False)
+        async with app_a_sessions() as session, session.begin():
+            session.add(
+                AgentRunModel(
+                    run_id=run_id,
+                    session_id=f"session-{run_id}",
+                    status="running",
+                    root_thread_id=f"run:{run_id}",
+                    cancellation_epoch=0,
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+            session.add(
+                AgentPlanModel(
+                    plan_id=plan_id,
+                    run_id=run_id,
+                    session_id=f"session-{run_id}",
+                    status="running",
+                    user_goal="Run no more than three tasks in parallel",
+                    max_parallelism=3,
+                    plan_json="{}",
+                    current_version=1,
+                    active_round_id=round_id,
+                    cancellation_epoch=0,
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+            await session.flush()
+            session.add(
+                PlanVersionModel(
+                    plan_id=plan_id,
+                    version=1,
+                    dag_json={
+                        "nodes": [
+                            {"task_id": task_id}
+                            for task_id in [*task_ids, next_task_id]
+                        ],
+                        "edges": [{"from": task_ids[0], "to": next_task_id}],
+                    },
+                    created_at=now,
+                )
+            )
+            await session.flush()
+            session.add(
+                PlanRoundModel(
+                    round_id=round_id,
+                    plan_id=plan_id,
+                    plan_version=1,
+                    round_number=1,
+                    status="running",
+                    expected_task_count=len(task_ids),
+                    terminal_task_count=0,
+                    created_at=now,
+                )
+            )
+            await session.flush()
+
+            for index, task_id in enumerate(task_ids):
+                execution_id = f"execution-{index}-{run_id}"
+                thread_id = f"thread-{execution_id}"
+                session.add(
+                    AgentTaskModel(
+                        task_id=task_id,
+                        plan_id=plan_id,
+                        run_id=run_id,
+                        title=f"Task {index}",
+                        objective=f"Complete fixed Round member {index}",
+                        allowed_tools_json="[]",
+                        status="pending",
+                        execution_generation=1,
+                        active_execution_id=execution_id,
+                        worker_thread_id=thread_id,
+                        created_at=now.isoformat(),
+                        updated_at=now.isoformat(),
+                    )
+                )
+            await session.flush()
+            session.add(
+                AgentTaskModel(
+                    task_id=next_task_id,
+                    plan_id=plan_id,
+                    run_id=run_id,
+                    title="Next layer",
+                    objective="Wait until Root reviews the first fixed Round",
+                    allowed_tools_json="[]",
+                    status="pending",
+                    execution_generation=0,
+                    active_execution_id=None,
+                    worker_thread_id=None,
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+            await session.flush()
+            session.add_all(
+                [
+                    RoundTaskModel(
+                        round_id=round_id,
+                        task_id=task_id,
+                        status="pending",
+                        active_execution_id=f"execution-{index}-{run_id}",
+                    )
+                    for index, task_id in enumerate(task_ids)
+                ]
+            )
+            await session.flush()
+            session.add_all(
+                [
+                    TaskExecutionModel(
+                        execution_id=f"execution-{index}-{run_id}",
+                        round_id=round_id,
+                        task_id=task_id,
+                        attempt=1,
+                        worker_thread_id=f"thread-execution-{index}-{run_id}",
+                        status="queued",
+                        fencing_token=0,
+                        cancellation_epoch=0,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    for index, task_id in enumerate(task_ids)
+                ]
+            )
+            await session.flush()
+            session.add_all(
+                [
+                    WorkerJobModel(
+                        job_id=f"job-{index}-{run_id}",
+                        dedupe_key=f"execute:execution-{index}-{run_id}",
+                        job_type="execute",
+                        execution_id=f"execution-{index}-{run_id}",
+                        payload_json={},
+                        status="pending",
+                        attempt=0,
+                        available_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    for index in range(len(task_ids))
+                ]
+            )
+
+        repo_a = PostgresWorkerJobRepository(app_a_sessions, clock=lambda: now)
+        repo_b = PostgresWorkerJobRepository(app_b_sessions, clock=lambda: now)
+        race = await asyncio.gather(
+            repo_a.claim_next("app-a-worker-0", lease_seconds=60),
+            repo_b.claim_next("app-b-worker-0", lease_seconds=60),
+        )
+        leases = [lease for lease in race if lease is not None]
+        for index in range(10):
+            repository = repo_a if index % 2 == 0 else repo_b
+            lease = await repository.claim_next(
+                f"app-{index % 2}-worker-{index + 1}", lease_seconds=60
+            )
+            if lease is not None:
+                leases.append(lease)
+
+        assert len(leases) == 3
+        assert len({lease.task_id for lease in leases}) == 3
+        async with app_a_sessions() as session:
+            round_row = await session.get(PlanRoundModel, round_id)
+            tasks = (await session.execute(select(AgentTaskModel))).scalars().all()
+            executions = (
+                await session.execute(select(TaskExecutionModel))
+            ).scalars().all()
+            jobs = (await session.execute(select(WorkerJobModel))).scalars().all()
+            round_tasks = (
+                await session.execute(select(RoundTaskModel))
+            ).scalars().all()
+            next_task = await session.get(AgentTaskModel, next_task_id)
+
+        assert round_row is not None
+        assert round_row.expected_task_count == 10
+        assert {task.task_id for task in tasks} == {*task_ids, next_task_id}
+        assert sum(task.status == "running" for task in tasks) == 3
+        assert sum(execution.status == "running" for execution in executions) == 3
+        assert sum(job.status == "running" for job in jobs) == 3
+        assert sum(job.status == "pending" for job in jobs) == 7
+        assert {item.task_id for item in round_tasks} == set(task_ids)
+        assert {execution.task_id for execution in executions} == set(task_ids)
+        assert next_task is not None and next_task.status == "pending"
+        assert next_task.active_execution_id is None
+    finally:
+        await app_b_engine.dispose()
+        await app_a_engine.dispose()
+        if schema_created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_worker_terminal_commit_with_lost_receipt_is_deduplicated() -> None:
     """Worker 终态事务提交后丢失回执，重投只返回原回执、不重复推进。"""
     if not DATABASE_URL:

@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import DateTime, cast, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -32,6 +33,7 @@ from ..models import (
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
+    MemoryProcessingJobModel,
     OrchestrationOutboxModel,
     RoundTaskModel,
     RootResumeJobModel,
@@ -52,6 +54,19 @@ def _json(value: Any, default: Any) -> Any:
     return parsed
 
 
+def _final_answer_text(result: dict[str, object]) -> str:
+    """Extract the user-visible final answer from persisted Run output."""
+    content = result.get("content")
+    if isinstance(content, str):
+        return content
+    nested = result.get("result")
+    if isinstance(nested, dict):
+        content = nested.get("content")
+        if isinstance(content, str):
+            return content
+    return ""
+
+
 class PostgresRunRepository(
     CommandQueuePort,
     CommandStorePort,
@@ -61,6 +76,7 @@ class PostgresRunRepository(
     """Command queue, run projection and lifecycle in the target schema."""
 
     writes_cancellation_events_to_outbox = True
+    writes_completion_artifacts_to_outbox = True
 
     def __init__(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -724,7 +740,9 @@ class PostgresRunRepository(
         response: dict[str, object] | None = None,
         error: dict[str, object] | None = None,
     ) -> bool:
-        values: dict[str, Any] = {"status": status.value, "updated_at": _now()}
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        values: dict[str, Any] = {"status": status.value, "updated_at": now_iso}
         if response is not None:
             values["response_json"] = json.dumps(response, ensure_ascii=False)
         if error is not None:
@@ -762,10 +780,134 @@ class PostgresRunRepository(
                             ),
                             lease_owner=None,
                             lease_until=None,
-                            updated_at=_now(),
+                            updated_at=now_iso,
                         )
                     )
+                    if status == RunStatus.COMPLETED and response is not None:
+                        run = await session.get(AgentRunModel, run_id)
+                        if run is not None:
+                            request = _json(run.request_json, {})
+                            user_text = str(request.get("message", "")).strip()
+                            content = _final_answer_text(response)
+                            message_id = str(request.get("message_id", ""))
+                            if user_text:
+                                await session.execute(
+                                    pg_insert(MemoryProcessingJobModel)
+                                    .values(
+                                        job_id=f"memjob_{uuid4().hex}",
+                                        turn_id=run_id,
+                                        session_id=run.session_id,
+                                        user_text=user_text,
+                                        assistant_text=content,
+                                        status="queued",
+                                        attempt=0,
+                                        available_at=now_iso,
+                                        created_at=now_iso,
+                                        updated_at=now_iso,
+                                    )
+                                    .on_conflict_do_nothing(
+                                        index_elements=["turn_id"]
+                                    )
+                                )
+                            if message_id and content:
+                                stream_id = f"answer-{run_id}"
+                                self._add_completion_outbox(
+                                    session,
+                                    run=run,
+                                    message_id=f"run-final:{run_id}:answer-delta",
+                                    event_type="RunAnswerDelta",
+                                    dedupe_key=f"run:{run_id}:answer:delta",
+                                    payload_json={
+                                        "message_id": message_id,
+                                        "stream_id": stream_id,
+                                        "stream_type": "answer",
+                                        "chunk_id": 1,
+                                        "delta": content,
+                                        "is_complete": False,
+                                    },
+                                    now=now,
+                                )
+                                self._add_completion_outbox(
+                                    session,
+                                    run=run,
+                                    message_id=f"run-final:{run_id}:answer-completed",
+                                    event_type="RunAnswerCompleted",
+                                    dedupe_key=f"run:{run_id}:answer:completed",
+                                    payload_json={
+                                        "message_id": message_id,
+                                        "stream_id": stream_id,
+                                        "stream_type": "answer",
+                                        "is_complete": True,
+                                        "content": content,
+                                    },
+                                    now=now,
+                                )
+                            self._add_completion_outbox(
+                                session,
+                                run=run,
+                                message_id=f"run-final:{run_id}:completed",
+                                event_type="RunCompleted",
+                                dedupe_key=f"run:{run_id}:completed",
+                                payload_json={"summary": "运行已完成"},
+                                now=now,
+                            )
+                        await session.execute(
+                            update(AgentCommandModel)
+                            .where(
+                                AgentCommandModel.run_id == run_id,
+                                AgentCommandModel.status.in_(
+                                    (
+                                        CommandStatus.QUEUED.value,
+                                        CommandStatus.RUNNING.value,
+                                    )
+                                ),
+                                AgentCommandModel.command_type.in_(
+                                    (
+                                        CommandType.MESSAGE_SUBMIT.value,
+                                        CommandType.RUN_START.value,
+                                        CommandType.RUN_RESUME.value,
+                                    )
+                                ),
+                            )
+                            .values(
+                                status=CommandStatus.COMPLETED.value,
+                                result_json=json.dumps(response, ensure_ascii=False),
+                                error_json=None,
+                                completed_at=now_iso,
+                            )
+                        )
         return bool(result.rowcount)
+
+    @staticmethod
+    def _add_completion_outbox(
+        session: AsyncSession,
+        *,
+        run: AgentRunModel,
+        message_id: str,
+        event_type: str,
+        dedupe_key: str,
+        payload_json: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        session.add(
+            OrchestrationOutboxModel(
+                message_id=message_id,
+                dedupe_key=dedupe_key,
+                event_type=event_type,
+                correlation_id=run.run_id,
+                plan_id=None,
+                plan_version=None,
+                round_id=None,
+                task_id=None,
+                execution_id=None,
+                payload_json=payload_json,
+                schema_version=1,
+                status="pending",
+                attempt=0,
+                available_at=now,
+                occurred_at=now,
+            )
+        )
 
     @staticmethod
     def _result(row: AgentCommandModel, deduplicated: bool) -> CommandEnqueueResult:

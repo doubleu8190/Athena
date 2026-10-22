@@ -34,6 +34,9 @@ _EVENT_TYPES = {
     "PlanCancelled": (EventType.PLAN_CANCELLED, "cancelled", "plan"),
     "RunCancelling": (EventType.RUN_CANCELLING, "cancelling", "run"),
     "RunCancelled": (EventType.RUN_CANCELLED, "cancelled", "run"),
+    "RunAnswerDelta": (EventType.MESSAGE_DELTA, "running", "message"),
+    "RunAnswerCompleted": (EventType.MESSAGE_COMPLETED, "completed", "message"),
+    "RunCompleted": (EventType.RUN_COMPLETED, "completed", "run"),
 }
 
 
@@ -138,6 +141,8 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
         activity_identity = str(lease.payload.get("approval_id") or lease.message_id)
     elif activity_type == "task":
         activity_identity = str(lease.payload.get("task_id") or lease.message_id)
+    elif activity_type == "message":
+        activity_identity = str(lease.payload.get("message_id") or lease.message_id)
     else:
         activity_identity = lease.run_id
     if lease.event_type == "ApprovalResolved":
@@ -159,6 +164,7 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
             else "round" if activity_type == "round"
             else "tool_approval" if activity_type == "approval"
             else "task" if activity_type == "task"
+            else "message" if activity_type == "message"
             else "run"
         ),
         "plan_id": lease.plan_id,
@@ -167,13 +173,37 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
         "plan_version": lease.plan_version,
         "outbox_message_id": lease.message_id,
     })
-    if activity_type == "run":
+    if activity_type == "run" and lease.event_type in {
+        "RunCancelling",
+        "RunCancelled",
+    }:
         payload.setdefault("external_effect_status", "unknown")
     return ApplicationEvent(
         event_type=event_type,
         durability=EventDurability.DURABLE,
         session_id=lease.session_id,
         run_id=lease.run_id,
+        message_id=(
+            str(lease.payload.get("message_id"))
+            if lease.payload.get("message_id")
+            else None
+        ),
+        stream_id=(
+            str(lease.payload.get("stream_id"))
+            if lease.payload.get("stream_id")
+            else None
+        ),
+        stream_type=(
+            str(lease.payload.get("stream_type"))
+            if lease.payload.get("stream_type")
+            else None
+        ),
+        chunk_id=(
+            int(lease.payload["chunk_id"])
+            if lease.payload.get("chunk_id") is not None
+            else None
+        ),
+        is_complete=bool(lease.payload.get("is_complete", False)),
         transition_id=f"orchestration-outbox:{lease.message_id}",
         occurred_at=lease.occurred_at,
         payload=payload,

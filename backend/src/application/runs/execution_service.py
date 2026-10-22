@@ -170,9 +170,18 @@ class RunExecutionService:
             else {"result": outcome.result}
         )
         await self._lifecycle.complete(command.run_id, result)
-        await self._publish_result_message(command, result)
-        await self._enqueue_memory(command, result)
-        await self._publish(command, EventType.RUN_COMPLETED, payload=self._run_payload(command, "completed", summary="运行已完成"))
+        if not getattr(
+            self._lifecycle, "writes_completion_artifacts_to_outbox", False
+        ):
+            await self._publish_result_message(command, result)
+            await self._enqueue_memory(command, result)
+            await self._publish(
+                command,
+                EventType.RUN_COMPLETED,
+                payload=self._run_payload(
+                    command, "completed", summary="运行已完成"
+                ),
+            )
         self._run_started.pop(command.run_id, None)
         original_command_id = self._waiting_commands.pop(command.run_id, None)
         await self._commands.complete_command(

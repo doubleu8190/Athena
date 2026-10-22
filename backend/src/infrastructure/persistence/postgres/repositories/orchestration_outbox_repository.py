@@ -37,6 +37,9 @@ _USER_EVENT_TYPES = (
     "PlanCancelled",
     "RunCancelling",
     "RunCancelled",
+    "RunAnswerDelta",
+    "RunAnswerCompleted",
+    "RunCompleted",
 )
 
 

@@ -35,6 +35,7 @@ class WorkerJobDispatcher:
         lease_seconds: float,
         max_concurrency: int,
         approval_service: Any | None = None,
+        thread_lock: Any | None = None,
         poll_interval: float = 0.25,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -48,6 +49,7 @@ class WorkerJobDispatcher:
         self._worker = worker
         self._event_handler = event_handler
         self._approval_service = approval_service
+        self._thread_lock = thread_lock
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._max_concurrency = max_concurrency
@@ -246,6 +248,15 @@ class WorkerJobDispatcher:
         self, lease: WorkerJobLease, execution: TaskExecution
     ) -> TaskResult:
         """Recover a saved approval interrupt before starting a reclaimed Job."""
+        if self._thread_lock is not None:
+            async with self._thread_lock.hold(lease.worker_thread_id):
+                return await self._invoke_worker(lease, execution)
+        return await self._invoke_worker(lease, execution)
+
+    async def _invoke_worker(
+        self, lease: WorkerJobLease, execution: TaskExecution
+    ) -> TaskResult:
+        """Invoke the Worker only while its thread lock is held."""
         if lease.job_type == "resume_worker":
             return await self._worker.resume(execution, dict(lease.resume_value))
         recover = getattr(self._worker, "pending_interrupt", None)

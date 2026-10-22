@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pytest
 
-from domain.orchestration import Task, WorkerJobLease
+from domain.orchestration import Task, TaskExecution, TaskResult, TaskStatus, WorkerJobLease
 from workers.worker_job_dispatcher import WorkerJobDispatcher
 
 
@@ -86,3 +87,76 @@ async def test_dispatcher_stop_cancels_inflight_graph_without_waiting_for_task_t
 
     assert worker.cancelled.is_set()
     assert jobs.acknowledged is False
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_holds_thread_lock_for_graph_invocation():
+    class Lock:
+        active_thread = None
+
+        @asynccontextmanager
+        async def hold(self, thread_id):
+            assert self.active_thread is None
+            self.active_thread = thread_id
+            try:
+                yield
+            finally:
+                self.active_thread = None
+
+    class Worker:
+        async def execute(self, _execution):
+            assert lock.active_thread == lease.worker_thread_id
+            return TaskResult(task_id="task-1", status=TaskStatus.COMPLETED)
+
+        async def resume(self, _execution, _resume_value):
+            raise AssertionError("execute job must start the Worker graph")
+
+    class Jobs:
+        pass
+
+    class EventHandler:
+        pass
+
+    lease = WorkerJobLease(
+        job_id="job-locked",
+        worker_id="worker-1",
+        run_id="run-1",
+        plan_id="plan-1",
+        round_id="round-1",
+        plan_version=1,
+        task_id="task-1",
+        execution_id="execution-1",
+        session_id="session-1",
+        attempt=1,
+        worker_thread_id="task:task-1:exec:1",
+        fencing_token=1,
+        cancellation_epoch=0,
+        lease_until=datetime.now(timezone.utc),
+        task=Task("task-1", "locked task", "verify exclusive invocation"),
+    )
+    lock = Lock()
+    dispatcher = WorkerJobDispatcher(
+        Jobs(),
+        Worker(),
+        EventHandler(),
+        worker_id="worker-1",
+        lease_seconds=30,
+        max_concurrency=1,
+        thread_lock=lock,
+    )
+    execution = TaskExecution(
+        plan_id=lease.plan_id,
+        run_id=lease.run_id,
+        session_id=lease.session_id,
+        task=lease.task,
+        execution_generation=lease.attempt,
+        execution_id=lease.execution_id,
+        worker_thread_id=lease.worker_thread_id,
+        fencing_token=lease.fencing_token,
+        cancellation_epoch=lease.cancellation_epoch,
+    )
+
+    result = await dispatcher._run_worker(lease, execution)
+
+    assert result.status is TaskStatus.COMPLETED
+    assert lock.active_thread is None

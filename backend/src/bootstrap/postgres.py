@@ -98,6 +98,9 @@ from infrastructure.persistence.postgres.resource import (
     PostgresCheckpointer,
     PostgresEngine,
 )
+from infrastructure.persistence.postgres.graph_thread_lock import (
+    PostgresGraphThreadLock,
+)
 from infrastructure.persistence.postgres.options import PostgresOptions
 from infrastructure.persistence.postgres.adapters import (
     PostgresMCPAdapter,
@@ -193,6 +196,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         )
     )
     checkpointer = PostgresCheckpointer(settings.postgres_conn_string)
+    graph_thread_lock = PostgresGraphThreadLock(settings.postgres_conn_string)
     session_factory = postgres.session
     sessions = PostgresSessionRepository(session_factory)
     messages = PostgresMessageRepository(session_factory)
@@ -434,6 +438,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         lease_seconds=settings.worker_job_lease_seconds,
         max_concurrency=settings.worker_dispatch_max_concurrency,
         approval_service=worker_approval_service,
+        thread_lock=graph_thread_lock,
         poll_interval=settings.worker_job_poll_interval_seconds,
         id_factory=ids,
     )
@@ -456,6 +461,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         workflow=root_workflow,
         dependencies=dependencies,
         checkpointer=checkpointer,
+        thread_lock=graph_thread_lock,
     )
 
     root_run_executor = LangGraphRunExecutor(root_graph)

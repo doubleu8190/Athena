@@ -22,10 +22,12 @@ class LangGraphRootGraph(RootGraphPort):
         workflow: RootWorkflowPort,
         dependencies: RootWorkflowDependencies,
         checkpointer: Any = None,
+        thread_lock: Any | None = None,
     ) -> None:
         self._workflow = workflow
         self._dependencies = dependencies
         self._checkpointer = checkpointer
+        self._thread_lock = thread_lock
         self._graph: Any | None = None
 
     def _compiled_graph(self) -> Any:
@@ -53,16 +55,22 @@ class LangGraphRootGraph(RootGraphPort):
         resume_value: dict[str, object] | None = None,
         stop_signal: object | None = None,
     ) -> object:
-        return await invoke_root_graph(
-            self._compiled_graph(),
-            session_id=session_id,
-            run_id=run_id,
-            user_message=user_message,
-            message_id=message_id,
-            attachment_ids=attachment_ids,
-            resume_value=resume_value,
-            stop_signal=stop_signal,
-        )
+        async def invoke() -> object:
+            return await invoke_root_graph(
+                self._compiled_graph(),
+                session_id=session_id,
+                run_id=run_id,
+                user_message=user_message,
+                message_id=message_id,
+                attachment_ids=attachment_ids,
+                resume_value=resume_value,
+                stop_signal=stop_signal,
+            )
+
+        if self._thread_lock is None:
+            return await invoke()
+        async with self._thread_lock.hold(f"run:{run_id}"):
+            return await invoke()
 
     async def has_pending_round_wait(
         self,

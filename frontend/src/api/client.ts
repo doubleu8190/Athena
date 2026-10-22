@@ -12,6 +12,8 @@ import type {
   MemoryListResponse,
   SessionRunSummary,
   RunTimelineResponse,
+  RunOrchestrationSnapshot,
+  PlanVersionDetail,
   ProviderInfo,
   SettingsView,
   TestProviderResult,
@@ -171,6 +173,18 @@ class ApiClient {
     const params = new URLSearchParams({ after: String(after), limit: String(limit) })
     return this.request<RunTimelineResponse>(
       `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/timeline?${params.toString()}`,
+    )
+  }
+
+  async getRunOrchestration(runId: string): Promise<RunOrchestrationSnapshot> {
+    return this.request<RunOrchestrationSnapshot>(
+      `/api/runs/${encodeURIComponent(runId)}/orchestration`,
+    )
+  }
+
+  async getPlanVersion(planId: string, version: number): Promise<PlanVersionDetail> {
+    return this.request<PlanVersionDetail>(
+      `/api/plans/${encodeURIComponent(planId)}/versions/${version}`,
     )
   }
 

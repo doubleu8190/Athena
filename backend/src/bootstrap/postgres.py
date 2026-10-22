@@ -38,6 +38,7 @@ from application.orchestration import (
     WorkerToolExecutor,
     WorkerTaskEventHandler,
     WorkerWorkflow,
+    OrchestrationQueryService,
 )
 from application.runs.context import (
     ContextAcquisitionService,
@@ -498,6 +499,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             knowledge, documents, storage, adapters, jobs, id_factory=ids
         ),
         "orchestration_repository_factory": lambda: orchestration_repository,
+        "orchestration_query_factory": lambda: OrchestrationQueryService(
+            orchestration_repository
+        ),
         "orchestration_service_factory": lambda: OrchestrationService(orchestration_repository),
         "orchestration_command_handler_factory": lambda: orchestration_command_handler,
         "worker_task_event_handler_factory": lambda: worker_task_event_handler,

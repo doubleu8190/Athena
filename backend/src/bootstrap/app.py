@@ -22,6 +22,7 @@ from application.knowledge import KnowledgeBaseQueryService
 from application.tools import ToolQueryService
 from application.tools import ToolService, MCPService
 from application.approval import ApprovalService
+from application.orchestration import OrchestrationQueryService
 from application.memory import MemoryQueryService, MemoryService
 from application.retrieval import RetrievalQueryService
 from application.files import AttachmentService
@@ -29,6 +30,7 @@ from interfaces.http.controllers.files_controller import build_files_router
 from application.knowledge import KnowledgeBaseService
 from interfaces.http.controllers.knowledge_controller import build_knowledge_router
 from interfaces.http.controllers.runs_controller import build_runs_router
+from interfaces.http.controllers.orchestration_controller import build_orchestration_router
 from application.events import EventStreamService
 from interfaces.http.sse.events import build_events_router
 from interfaces.http.controllers.approval_controller import build_approval_router
@@ -48,6 +50,7 @@ def create_app(
     message_query_factory: Callable[[], SessionMessageQueryService] | None = None,
     run_query_factory: Callable[[], RunQueryService] | None = None,
     run_command_factory: Callable[[], RunCommandService] | None = None,
+    orchestration_query_factory: Callable[[], OrchestrationQueryService] | None = None,
     event_stream_factory: Callable[[], EventStreamService] | None = None,
     tool_query_factory: Callable[[], ToolQueryService] | None = None,
     tool_service_factory: Callable[[], ToolService] | None = None,
@@ -115,6 +118,9 @@ def create_app(
     message_query_factory = registered("message_query_factory", message_query_factory)
     run_query_factory = registered("run_query_factory", run_query_factory)
     run_command_factory = registered("run_command_factory", run_command_factory)
+    orchestration_query_factory = registered(
+        "orchestration_query_factory", orchestration_query_factory
+    )
     event_stream_factory = registered("event_stream_factory", event_stream_factory)
     tool_query_factory = registered("tool_query_factory", tool_query_factory)
     tool_service_factory = registered("tool_service_factory", tool_service_factory)
@@ -205,6 +211,10 @@ def create_app(
         app.include_router(build_mcp_router(mcp_service_factory), prefix="/api")
     if run_command_factory is not None:
         app.include_router(build_runs_router(run_command_factory), prefix="/api")
+    if orchestration_query_factory is not None:
+        app.include_router(
+            build_orchestration_router(orchestration_query_factory), prefix="/api"
+        )
     if event_stream_factory is not None:
         app.include_router(build_events_router(event_stream_factory), prefix="/api")
     for router in graph.routers:

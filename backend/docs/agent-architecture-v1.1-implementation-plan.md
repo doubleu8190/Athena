@@ -394,6 +394,8 @@ P1 就建立取消状态、Outbox、幂等身份和共享事务；P2 就建立 l
 
 截至 2026-10-22，Root Review、版本化 Round、持久 Worker Job、审批恢复、取消与超时控制，以及工具副作用账本已有运行时代码。P1–P4 的实现主干已进入联调，但阶段完成条件尚未全部满足，因此不将其标记为验收完成。
 
-P5 已切换审批决定路径：新增 `POST /api/approvals/{approval_id}/decision`，返回 202；待审批查询补充 `run_id`、`plan_id` 和 `task_id`；前端保留批次分组展示，但对每条审批分别提交决定。前端 TypeScript 检查和生产构建通过，仍需浏览器验收多审批、轮次状态、停止收敛和断线后恢复。P6 当前补充了两条 PostgreSQL 故障恢复验收：一条模拟 Worker 崩溃留下的过期租约，由两个独立数据库会话同时领取，验证只产生一个新租约、fencing token 从 7 增至 8、执行代际保持不变、Job 投递次数增加，且旧持有者无法续租；另一条在 PostgreSQL checkpointer 中持久化 Worker 审批 interrupt，关闭并重建 checkpointer 和 executor 后找回原 interrupt，获批后仅执行一次工具并完成原任务。两条测试都在随机临时 schema 内运行并于结束时删除。
+P5 已切换审批决定路径：新增 `POST /api/approvals/{approval_id}/decision`，返回 202；待审批查询补充 `run_id`、`plan_id` 和 `task_id`；前端保留批次分组展示，但对每条审批分别提交决定。新增 `GET /api/runs/{run_id}/orchestration`，从 PostgreSQL 汇总 Run 取消事实、Plan Version 摘要、固定 Round 成员、每个 Task 的 Execution 尝试和审批决定；新增 `GET /api/plans/{plan_id}/versions/{version}` 返回不可变 DAG 与修订原因。Run Chain 现在在加载历史运行时同时读取事件时间线和持久化快照，执行树可沿 Version → Round → Task → Execution → Approval 恢复，选择 Version 可查看对应 DAG。查询接口契约测试、PostgreSQL 快照集成测试和前端 TypeScript 检查通过；仍需浏览器验收多审批、轮次状态、停止收敛和断线后恢复。当前认证中间件只校验共享登录会话，尚未提供可映射到 `agent_runs.user_id` 的认证主体，因此不能将本次新增查询宣称为多用户资源授权完成。
+
+P6 当前补充了三条 PostgreSQL 验收：一条模拟 Worker 崩溃留下的过期租约，由两个独立数据库会话同时领取，验证只产生一个新租约、fencing token 从 7 增至 8、执行代际保持不变、Job 投递次数增加，且旧持有者无法续租；一条在 PostgreSQL checkpointer 中持久化 Worker 审批 interrupt，关闭并重建 checkpointer 和 executor 后找回原 interrupt，获批后仅执行一次工具并完成原任务；一条从 PostgreSQL 直接读取 Run 快照和不可变版本，核对取消状态、Round 成员、Execution fence、审批决定及 DAG。三条测试都在随机临时 schema 内运行并于结束时删除。
 
 P6 仍需覆盖更广的故障注入，完成浏览器端与真实 Provider 的闭环验收，并在这些证据成立后清理旧执行链。PostgreSQL 租约与 checkpoint 集成测试通过；全量后端测试存在既有失败，Ruff 当前环境未安装，均不能据此宣称整体验收完成。

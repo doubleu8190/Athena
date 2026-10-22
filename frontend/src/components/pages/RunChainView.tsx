@@ -24,9 +24,17 @@ import Toolbar from "../ui/Toolbar"
 import Badge from "../ui/Badge"
 import { apiClient } from "../../api/client"
 import { useChatStore } from "../../store/chatStore"
-import type { Message, RunTimelineEvent, SessionRunSummary } from "../../types"
+import type {
+  Message,
+  OrchestrationApprovalSnapshot,
+  OrchestrationExecutionSnapshot,
+  PlanVersionDetail,
+  RunOrchestrationSnapshot,
+  RunTimelineEvent,
+  SessionRunSummary,
+} from "../../types"
 
-type EventStatus = "completed" | "failed" | "retry" | "approved" | "waiting" | "running" | "cancelled" | "info"
+type EventStatus = "completed" | "failed" | "retry" | "approved" | "waiting" | "review" | "running" | "cancelled" | "info"
 type EventKind = "run" | "llm" | "retrieval" | "tool" | "plan" | "worker" | "response" | "system"
 
 interface RunEvent {
@@ -89,6 +97,7 @@ const statusMeta: Record<EventStatus, { label: string; tone: "success" | "warnin
   retry: { label: "已重试", tone: "warning" },
   approved: { label: "已审批", tone: "accent" },
   waiting: { label: "等待审批", tone: "warning" },
+  review: { label: "等待审查", tone: "warning" },
   running: { label: "运行中", tone: "accent" },
   cancelled: { label: "已取消", tone: "default" },
   info: { label: "信息", tone: "default" },
@@ -103,6 +112,8 @@ function RunChainView() {
   const [runs, setRuns] = useState<SessionRunSummary[]>([])
   const [messages, setMessages] = useState<Message[]>([])
   const [timeline, setTimeline] = useState<RunTimelineEvent[]>([])
+  const [orchestration, setOrchestration] = useState<RunOrchestrationSnapshot | null>(null)
+  const [selectedVersionDetail, setSelectedVersionDetail] = useState<PlanVersionDetail | null>(null)
   const [timelineCursor, setTimelineCursor] = useState(0)
   const [timelineHasMore, setTimelineHasMore] = useState(false)
   const [selectedRun, setSelectedRun] = useState<string | null>(demoMode ? demoRuns[0].id : null)
@@ -118,6 +129,7 @@ function RunChainView() {
       setRuns([])
       setMessages([])
       setTimeline([])
+      setOrchestration(null)
       setSelectedRun(demoMode ? demoRuns[0].id : null)
       return
     }
@@ -141,6 +153,7 @@ function RunChainView() {
   useEffect(() => {
     if (demoMode || !sessionId || !selectedRun) {
       setTimeline([])
+      setOrchestration(null)
       setTimelineCursor(0)
       setTimelineHasMore(false)
       return
@@ -148,17 +161,58 @@ function RunChainView() {
     let cancelled = false
     setLoading(true)
     setLoadError(null)
-    apiClient.getRunTimeline(sessionId, selectedRun)
-      .then((response) => {
+    Promise.all([
+      apiClient.getRunTimeline(sessionId, selectedRun),
+      apiClient.getRunOrchestration(selectedRun),
+    ])
+      .then(([timelineResponse, snapshot]) => {
         if (cancelled) return
-        setTimeline(response.events)
-        setTimelineCursor(response.next_after_seq)
-        setTimelineHasMore(response.has_more)
+        setTimeline(timelineResponse.events)
+        setTimelineCursor(timelineResponse.next_after_seq)
+        setTimelineHasMore(timelineResponse.has_more)
+        setOrchestration(snapshot)
       })
       .catch((error: unknown) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : "运行链路加载失败") })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [demoMode, sessionId, selectedRun])
+
+  useEffect(() => {
+    const plan = orchestration?.plan
+    if (!orchestration || !plan) return
+    setExpanded((current) => {
+      const next = new Set(current)
+      next.add(`snapshot:run:${orchestration.run.run_id}`)
+      next.add(`snapshot:plan:${plan.plan_id}`)
+      for (const version of plan.versions) {
+        if (version.version === plan.current_version) {
+          next.add(`snapshot:version:${plan.plan_id}:${version.version}`)
+        }
+      }
+      if (plan.active_round_id) next.add(`snapshot:round:${plan.active_round_id}`)
+      return next
+    })
+  }, [orchestration])
+
+  useEffect(() => {
+    const prefix = "snapshot:version:"
+    if (!selectedId.startsWith(prefix)) {
+      setSelectedVersionDetail(null)
+      return
+    }
+    const identity = selectedId.slice(prefix.length)
+    const separator = identity.lastIndexOf(":")
+    if (separator < 1) return
+    const planId = identity.slice(0, separator)
+    const version = Number(identity.slice(separator + 1))
+    if (!Number.isInteger(version) || version < 1) return
+    let cancelled = false
+    setSelectedVersionDetail(null)
+    apiClient.getPlanVersion(planId, version)
+      .then((value) => { if (!cancelled) setSelectedVersionDetail(value) })
+      .catch(() => { if (!cancelled) setSelectedVersionDetail(null) })
+    return () => { cancelled = true }
+  }, [selectedId])
 
   const loadMoreEvents = async () => {
     if (!sessionId || !selectedRun || loading || !timelineHasMore) return
@@ -197,9 +251,12 @@ function RunChainView() {
   const activeRun = runItems.find((run) => run.id === selectedRun) ?? runItems[0]
   const activities = demoMode
     ? demoEvents
-    : projectTimeline([
-        ...new Map([...timeline, ...liveEvents.filter((event) => event.run_id === selectedRun)].map((event) => [`${event.run_id}:${event.session_seq}`, event])).values(),
-      ])
+    : [
+        ...projectSnapshot(orchestration),
+        ...projectTimeline([
+          ...new Map([...timeline, ...liveEvents.filter((event) => event.run_id === selectedRun)].map((event) => [`${event.run_id}:${event.session_seq}`, event])).values(),
+        ]),
+      ]
   const selected = activities.find((event) => event.id === selectedId) ?? activities[0] ?? null
   const filteredEvents = useMemo(() => activities.filter((event) => {
     const matchesKind = filter === "all" || event.kind === filter
@@ -415,6 +472,7 @@ function RunChainView() {
                 {selected.error && <div className="rounded-md border border-athena-danger/30 bg-athena-danger/5 p-3"><div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-athena-danger"><CircleAlert className="h-3.5 w-3.5" />错误信息</div><code className="break-words text-[11px] leading-5 text-athena-text/80">{selected.error}</code></div>}
                 {selected.input && <DetailBlock title="输入" value={selected.input} />}
                 {selected.output && <DetailBlock title="输出" value={selected.output} />}
+                {selectedVersionDetail && selected?.id === `snapshot:version:${selectedVersionDetail.plan_id}:${selectedVersionDetail.version}` && <DetailBlock title="Plan DAG" value={JSON.stringify(selectedVersionDetail.dag_json, null, 2)} />}
                 {selected.status === "approved" && <div className="flex items-start gap-2 rounded-md border border-athena-accent/30 bg-athena-accent/5 p-3 text-xs"><ShieldCheck className="mt-0.5 h-4 w-4 flex-shrink-0 text-athena-accent" /><div><div className="font-medium">审批已通过</div><div className="mt-1 text-[11px] text-athena-muted">审批事件已关联至当前运行</div></div></div>}
               </div>
               : <div className="p-4 text-xs text-athena-muted">{loading ? "正在加载链路事件…" : loadError || (runItems.length ? "该运行暂无可展示的链路事件" : "选择运行记录查看详情")}</div>}
@@ -433,6 +491,155 @@ function DetailBlock({ title, value }: { title: string; value: string }) {
       <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-md border border-athena-border bg-athena-bg p-2.5 font-mono text-[10px] leading-5 text-athena-text/80">{value}</pre>
     </div>
   )
+}
+
+function projectSnapshot(snapshot: RunOrchestrationSnapshot | null): RunEvent[] {
+  if (!snapshot) return []
+  const runId = snapshot.run.run_id
+  const runNodeId = `snapshot:run:${runId}`
+  const events: RunEvent[] = [{
+    id: runNodeId,
+    kind: "run",
+    name: "Run 状态快照",
+    summary: `持久状态：${snapshot.run.status}`,
+    status: snapshotStatus(snapshot.run.status),
+    duration: "—",
+    time: formatTimestamp(snapshot.run.updated_at || snapshot.run.created_at),
+    detail: `取消 epoch ${snapshot.run.cancellation_epoch} · 外部副作用 ${snapshot.run.cancellation_external_effect_status}`,
+  }]
+  const taskNodes = new Map<string, string>()
+  const executionNodes = new Map<string, string>()
+
+  if (snapshot.plan) {
+    const plan = snapshot.plan
+    const planNodeId = `snapshot:plan:${plan.plan_id}`
+    events.push({
+      id: planNodeId,
+      parentId: runNodeId,
+      kind: "plan",
+      name: `Plan · ${plan.plan_id}`,
+      summary: `${plan.status} · 当前版本 v${plan.current_version}`,
+      status: snapshotStatus(plan.status),
+      duration: `${plan.max_parallelism} 并发`,
+      time: formatTimestamp(plan.versions[0]?.created_at ?? snapshot.run.created_at),
+      detail: `${plan.user_goal} · cancel epoch ${plan.cancellation_epoch}`,
+    })
+    const versionNodes = new Map<number, string>()
+    for (const version of plan.versions) {
+      const versionNodeId = `snapshot:version:${plan.plan_id}:${version.version}`
+      versionNodes.set(version.version, versionNodeId)
+      events.push({
+        id: versionNodeId,
+        parentId: planNodeId,
+        kind: "plan",
+        name: `Plan Version v${version.version}`,
+        summary: version.change_reason || (version.version === 1 ? "初始版本" : "未记录修订原因"),
+        status: version.version === plan.current_version ? snapshotStatus(plan.status) : "info",
+        duration: version.version === plan.current_version ? "当前" : "历史",
+        time: formatTimestamp(version.created_at),
+        detail: version.based_on_round_id
+          ? `基于 Round ${version.based_on_round_id} 修订；选择此节点可查看不可变 DAG。`
+          : "选择此节点可查看不可变 DAG。",
+      })
+    }
+    for (const round of plan.rounds) {
+      const roundNodeId = `snapshot:round:${round.round_id}`
+      events.push({
+        id: roundNodeId,
+        parentId: versionNodes.get(round.plan_version) ?? planNodeId,
+        kind: "plan",
+        name: `Round ${round.round_number}`,
+        summary: `${round.status} · ${round.terminal_task_count}/${round.expected_task_count} tasks`,
+        status: snapshotStatus(round.status),
+        duration: `v${round.plan_version}`,
+        time: formatTimestamp(round.created_at),
+        detail: `round_id=${round.round_id}${round.completed_at ? ` · 完成于 ${formatTimestamp(round.completed_at)}` : ""}`,
+      })
+      for (const task of round.tasks) {
+        const taskNodeId = `snapshot:task:${round.round_id}:${task.task_id}`
+        taskNodes.set(task.task_id, taskNodeId)
+        events.push({
+          id: taskNodeId,
+          parentId: roundNodeId,
+          kind: "worker",
+          name: task.title || task.task_id,
+          summary: task.status,
+          status: snapshotStatus(task.status),
+          duration: `${task.executions.length} 次尝试`,
+          time: formatTimestamp(task.terminal_at ?? round.created_at),
+          detail: `${task.objective} · task_id=${task.task_id}`,
+        })
+        for (const execution of task.executions) {
+          const executionNodeId = `snapshot:execution:${execution.execution_id}`
+          executionNodes.set(execution.execution_id, executionNodeId)
+          events.push(executionEvent(execution, taskNodeId, executionNodeId))
+        }
+      }
+    }
+  }
+
+  for (const approval of snapshot.approvals) {
+    events.push(approvalEvent(approval, executionNodes, taskNodes, runNodeId))
+  }
+  return events
+}
+
+function executionEvent(
+  execution: OrchestrationExecutionSnapshot,
+  parentId: string,
+  id: string,
+): RunEvent {
+  const error = execution.error?.message || execution.error?.code
+  return {
+    id,
+    parentId,
+    kind: "worker",
+    name: `Execution attempt ${execution.attempt}`,
+    summary: `${execution.status} · fence ${execution.fencing_token}`,
+    status: snapshotStatus(execution.status),
+    duration: "—",
+    time: formatTimestamp(execution.created_at),
+    detail: `execution_id=${execution.execution_id} · thread=${execution.worker_thread_id}${execution.result_ref ? ` · result_ref=${execution.result_ref}` : ""}`,
+    error: error ? String(error) : undefined,
+  }
+}
+
+function approvalEvent(
+  approval: OrchestrationApprovalSnapshot,
+  executionNodes: Map<string, string>,
+  taskNodes: Map<string, string>,
+  fallbackParent: string,
+): RunEvent {
+  const status = approval.status.toLowerCase()
+  const eventStatus: EventStatus = status === "approved" || status === "resolved" && approval.decision === "approve"
+    ? "approved"
+    : status === "pending" ? "waiting"
+      : status === "cancelled" ? "cancelled" : status === "expired" || status === "rejected" || status === "denied" ? "failed" : "info"
+  return {
+    id: `snapshot:approval:${approval.approval_id}`,
+    parentId: (approval.execution_id && executionNodes.get(approval.execution_id))
+      || (approval.task_id && taskNodes.get(approval.task_id))
+      || fallbackParent,
+    kind: "tool",
+    name: `审批 · ${approval.tool_name}`,
+    summary: `${approval.status}${approval.decision ? ` · ${approval.decision}` : ""} · ${approval.risk_level}`,
+    status: eventStatus,
+    duration: "—",
+    time: formatTimestamp(approval.created_at),
+    detail: `approval_id=${approval.approval_id}${approval.interrupt_id ? ` · interrupt_id=${approval.interrupt_id}` : ""}${approval.decided_at ? ` · 决定于 ${formatTimestamp(approval.decided_at)}` : ""}`,
+  }
+}
+
+function snapshotStatus(value: string): EventStatus {
+  const status = value.toLowerCase()
+  if (status.includes("fail") || status.includes("error") || status === "timed_out") return "failed"
+  if (status === "waiting_review") return "review"
+  if (status.includes("approv")) return "waiting"
+  if (status.includes("cancel")) return "cancelled"
+  if (status.includes("running") || status.includes("cancelling") || status.includes("queued")) return "running"
+  if (status.includes("pending") || status.includes("created") || status.includes("interrupted")) return "waiting"
+  if (status.includes("completed") || status === "done") return "completed"
+  return "info"
 }
 
 function projectTimeline(rawEvents: RunTimelineEvent[]): RunEvent[] {

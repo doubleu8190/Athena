@@ -235,6 +235,97 @@ export interface RunTimelineResponse {
   links: { retrieval_run_ids: string[]; plan_ids: string[]; task_ids: string[] }
 }
 
+export interface PlanVersionSummary {
+  version: number
+  change_reason?: string | null
+  based_on_round_id?: string | null
+  created_at: string
+}
+
+export interface OrchestrationExecutionSnapshot {
+  execution_id: string
+  attempt: number
+  worker_thread_id: string
+  status: string
+  fencing_token: number
+  cancellation_epoch: number
+  lease_until?: string | null
+  result_ref?: string | null
+  error?: { code?: string; message?: string; retryable?: boolean; stage?: string } | null
+  created_at: string
+  updated_at: string
+}
+
+export interface OrchestrationTaskSnapshot {
+  task_id: string
+  title: string
+  objective: string
+  status: string
+  active_execution_id?: string | null
+  terminal_at?: string | null
+  executions: OrchestrationExecutionSnapshot[]
+}
+
+export interface OrchestrationRoundSnapshot {
+  round_id: string
+  plan_version: number
+  round_number: number
+  status: string
+  expected_task_count: number
+  terminal_task_count: number
+  created_at: string
+  completed_at?: string | null
+  tasks: OrchestrationTaskSnapshot[]
+}
+
+export interface OrchestrationApprovalSnapshot {
+  approval_id: string
+  plan_id?: string | null
+  task_id?: string | null
+  execution_id?: string | null
+  interrupt_id?: string | null
+  tool_name: string
+  risk_level: string
+  status: string
+  decision?: string | null
+  created_at: string
+  decided_at?: string | null
+}
+
+export interface RunOrchestrationSnapshot {
+  run: {
+    run_id: string
+    session_id: string
+    status: string
+    root_thread_id: string
+    cancellation_epoch: number
+    cancellation_external_effect_status: string
+    created_at: string
+    updated_at: string
+  }
+  plan?: {
+    plan_id: string
+    status: string
+    user_goal: string
+    max_parallelism: number
+    current_version: number
+    active_round_id?: string | null
+    cancellation_epoch: number
+    versions: PlanVersionSummary[]
+    rounds: OrchestrationRoundSnapshot[]
+  } | null
+  approvals: OrchestrationApprovalSnapshot[]
+}
+
+export interface PlanVersionDetail extends PlanVersionSummary {
+  plan_id: string
+  dag_json: {
+    nodes: Array<Record<string, unknown>>
+    edges: Array<Record<string, unknown>>
+    [key: string]: unknown
+  }
+}
+
 // ─── 工具调用相关 ────────────────────────────────────────────────
 
 export type ToolCallStatus = "pending" | "running" | "paused" | "success" | "failed" | "denied" | "timeout"

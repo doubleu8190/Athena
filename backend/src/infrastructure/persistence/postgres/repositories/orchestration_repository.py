@@ -28,7 +28,9 @@ from domain.orchestration import (
 
 from ..models import (
     AgentPlanModel,
+    AgentRunModel,
     AgentTaskModel,
+    ApprovalRecordModel,
     OrchestrationOutboxModel,
     PlanRoundModel,
     PlanVersionModel,
@@ -94,6 +96,36 @@ def _review_task_result(
     }
 
 
+def _bounded_text(value: object | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _execution_snapshot(execution: TaskExecutionModel) -> dict[str, object]:
+    error: dict[str, object] | None = None
+    if isinstance(execution.error_json, Mapping):
+        error = {
+            key: _bounded_text(value, 240) if key == "message" else value
+            for key, value in execution.error_json.items()
+            if key in {"code", "message", "retryable", "stage"}
+        }
+    return {
+        "execution_id": execution.execution_id,
+        "attempt": execution.attempt,
+        "worker_thread_id": execution.worker_thread_id,
+        "status": execution.status,
+        "fencing_token": execution.fencing_token,
+        "cancellation_epoch": execution.cancellation_epoch,
+        "lease_until": execution.lease_until,
+        "result_ref": execution.result_ref,
+        "error": error,
+        "created_at": execution.created_at,
+        "updated_at": execution.updated_at,
+    }
+
+
 class PostgresOrchestrationRepository(PlanRepository, ReviewContextRepository):
     """Persist target Plan/Task entities and claim work atomically."""
 
@@ -116,6 +148,175 @@ class PostgresOrchestrationRepository(PlanRepository, ReviewContextRepository):
                 return None
             rows = (await session.execute(select(AgentTaskModel).where(AgentTaskModel.plan_id == plan_id).order_by(AgentTaskModel.task_id))).scalars().all()
         return self._plan(plan_row), [self._task(row) for row in rows]
+
+    async def get_run_orchestration_snapshot(
+        self, run_id: str
+    ) -> Mapping[str, object] | None:
+        """从同一 PostgreSQL 快照读取可刷新恢复的 Run 编排事实。"""
+        async with self._session_factory() as session:
+            await session.connection(
+                execution_options={"isolation_level": "REPEATABLE READ"}
+            )
+            run_row = await session.get(AgentRunModel, run_id)
+            if run_row is None:
+                return None
+
+            plan_row = (
+                await session.execute(
+                    select(AgentPlanModel).where(AgentPlanModel.run_id == run_id)
+                )
+            ).scalar_one_or_none()
+            approvals = (
+                await session.execute(
+                    select(ApprovalRecordModel)
+                    .where(ApprovalRecordModel.run_id == run_id)
+                    .order_by(ApprovalRecordModel.created_at, ApprovalRecordModel.approval_id)
+                )
+            ).scalars().all()
+
+            plan_document: dict[str, object] | None = None
+            if plan_row is not None:
+                round_rows = (
+                    await session.execute(
+                        select(PlanRoundModel)
+                        .where(PlanRoundModel.plan_id == plan_row.plan_id)
+                        .order_by(PlanRoundModel.round_number)
+                    )
+                ).scalars().all()
+                version_rows = (
+                    await session.execute(
+                        select(PlanVersionModel)
+                        .where(PlanVersionModel.plan_id == plan_row.plan_id)
+                        .order_by(PlanVersionModel.version)
+                    )
+                ).scalars().all()
+                round_ids = [row.round_id for row in round_rows]
+                members = (
+                    await session.execute(
+                        select(RoundTaskModel, AgentTaskModel)
+                        .join(
+                            AgentTaskModel,
+                            AgentTaskModel.task_id == RoundTaskModel.task_id,
+                        )
+                        .where(RoundTaskModel.round_id.in_(round_ids))
+                        .order_by(RoundTaskModel.round_id, RoundTaskModel.task_id)
+                    )
+                ).all() if round_ids else []
+                executions = (
+                    await session.execute(
+                        select(TaskExecutionModel)
+                        .where(TaskExecutionModel.round_id.in_(round_ids))
+                        .order_by(
+                            TaskExecutionModel.round_id,
+                            TaskExecutionModel.task_id,
+                            TaskExecutionModel.attempt,
+                        )
+                    )
+                ).scalars().all() if round_ids else []
+
+                executions_by_member: dict[tuple[str, str], list[TaskExecutionModel]] = {}
+                for execution in executions:
+                    executions_by_member.setdefault(
+                        (execution.round_id, execution.task_id), []
+                    ).append(execution)
+                tasks_by_round: dict[str, list[dict[str, object]]] = {}
+                for member, task_row in members:
+                    tasks_by_round.setdefault(member.round_id, []).append(
+                        {
+                            "task_id": member.task_id,
+                            "title": _bounded_text(task_row.title, 240),
+                            "objective": _bounded_text(task_row.objective, 2000),
+                            "status": member.status,
+                            "active_execution_id": member.active_execution_id,
+                            "terminal_at": member.terminal_at,
+                            "executions": [
+                                _execution_snapshot(execution)
+                                for execution in executions_by_member.get(
+                                    (member.round_id, member.task_id), []
+                                )
+                            ],
+                        }
+                    )
+
+                plan_document = {
+                    "plan_id": plan_row.plan_id,
+                    "status": plan_row.status,
+                    "user_goal": _bounded_text(plan_row.user_goal, 4000),
+                    "max_parallelism": plan_row.max_parallelism,
+                    "current_version": plan_row.current_version,
+                    "active_round_id": plan_row.active_round_id,
+                    "cancellation_epoch": plan_row.cancellation_epoch,
+                    "versions": [
+                        {
+                            "version": version.version,
+                            "change_reason": _bounded_text(version.change_reason, 500),
+                            "based_on_round_id": version.based_on_round_id,
+                            "created_at": version.created_at,
+                        }
+                        for version in version_rows
+                    ],
+                    "rounds": [
+                        {
+                            "round_id": round_row.round_id,
+                            "plan_version": round_row.plan_version,
+                            "round_number": round_row.round_number,
+                            "status": round_row.status,
+                            "expected_task_count": round_row.expected_task_count,
+                            "terminal_task_count": round_row.terminal_task_count,
+                            "created_at": round_row.created_at,
+                            "completed_at": round_row.completed_at,
+                            "tasks": tasks_by_round.get(round_row.round_id, []),
+                        }
+                        for round_row in round_rows
+                    ],
+                }
+
+        return {
+            "run": {
+                "run_id": run_row.run_id,
+                "session_id": run_row.session_id,
+                "status": run_row.status,
+                "root_thread_id": run_row.root_thread_id,
+                "cancellation_epoch": run_row.cancellation_epoch,
+                "cancellation_external_effect_status": run_row.cancellation_external_effect_status,
+                "created_at": run_row.created_at,
+                "updated_at": run_row.updated_at,
+            },
+            "plan": plan_document,
+            "approvals": [
+                {
+                    "approval_id": approval.approval_id,
+                    "plan_id": approval.plan_id,
+                    "task_id": approval.task_id,
+                    "execution_id": approval.execution_id,
+                    "interrupt_id": approval.interrupt_id,
+                    "tool_name": approval.tool_name,
+                    "risk_level": approval.risk_level,
+                    "status": approval.status,
+                    "decision": approval.decision,
+                    "created_at": approval.created_at,
+                    "decided_at": approval.decided_at,
+                }
+                for approval in approvals
+            ],
+        }
+
+    async def get_plan_version(
+        self, plan_id: str, version: int
+    ) -> Mapping[str, object] | None:
+        """按复合身份读取不可变 DAG 版本和修订说明。"""
+        async with self._session_factory() as session:
+            row = await session.get(PlanVersionModel, (plan_id, version))
+        if row is None:
+            return None
+        return {
+            "plan_id": row.plan_id,
+            "version": row.version,
+            "dag_json": row.dag_json,
+            "change_reason": row.change_reason,
+            "based_on_round_id": row.based_on_round_id,
+            "created_at": row.created_at,
+        }
 
     async def load_review_context(self, round_id: str) -> ReviewContext:
         """按指定 Round 和不可变版本读取 Root Review 所需业务事实。

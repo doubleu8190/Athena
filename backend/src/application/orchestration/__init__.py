@@ -10,6 +10,7 @@ from .worker_workflow import WorkerWorkflow
 from .worker_tools import WorkerToolExecutor
 from .worker_approval import WorkerApprovalService
 from .protocols import RootWorkflowPort, WorkerWorkflowPort
+from .query_service import OrchestrationQueryService
 
 __all__ = [
     "OrchestrationService",
@@ -23,6 +24,7 @@ __all__ = [
     "WorkerWorkflow",
     "WorkerToolExecutor",
     "WorkerApprovalService",
+    "OrchestrationQueryService",
     "RootWorkflowPort",
     "WorkerWorkflowPort",
 ]

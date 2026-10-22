@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .models import Base
 from .options import PostgresOptions
+from .schema_migrations import apply_schema_migrations
 
 
 class PostgresEngine:
@@ -40,6 +41,7 @@ class PostgresEngine:
                 except Exception:
                     await connection.rollback()
                 await connection.run_sync(Base.metadata.create_all)
+                await connection.run_sync(apply_schema_migrations)
 
     async def stop(self) -> None:
         if self.engine is not None:

@@ -2,7 +2,7 @@
 
 BEGIN;
 
-CREATE TABLE task_execution_results (
+CREATE TABLE IF NOT EXISTS task_execution_results (
     result_ref VARCHAR PRIMARY KEY,
     execution_id VARCHAR NOT NULL UNIQUE
         REFERENCES task_executions(execution_id) ON DELETE CASCADE,

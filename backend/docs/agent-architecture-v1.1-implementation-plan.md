@@ -420,6 +420,8 @@ P6 本轮新增真实 Provider、浏览器、PostgreSQL、正常审批与 Docker
 
 新增 A11 联合故障注入用例 `test_approved_worker_effect_resumes_once_after_full_app_restart`：真实 PostgreSQL 先保存 Worker checkpoint interrupt 和审批请求，再原子提交批准及 Resume Job；模拟 app 重启后由新 Worker Job repository 领取同一 execution/thread，使用新 checkpointer 找回 interrupt、从 PostgreSQL 恢复决定，并通过持久 ToolOperation ledger 恰执行一次获批工具，最终 Task、Execution、Job 与 Operation 全部终结。
 
+A12 在该联合测试中增加账本提交后、Worker checkpoint 更新前的进程取消：确认外部工具只执行一次、ToolOperation 已完成、Resume Job 尚运行且 checkpoint interrupt 仍待处理；过期 lease 被第二次重启接管后从账本重放结果并提交 Task 终态。该复现暴露 LangGraph 同一 superstep 同时写入 Worker `execution` 的冲突，Resume 现在把新 lease 快照作为 interrupt 决策的一部分，由审批完成节点合并并写入 checkpoint。Root checkpoint 写入前后与外部效果核对的独立故障注入仍待补齐。
+
 ### A01–A20 覆盖盘点（2026-10-22）
 
 状态口径：**已覆盖**表示当前有与矩阵触发条件相符的专门测试/验收；**部分覆盖**表示只验证了其中的协议或相邻路径；**缺口**表示还没有足以支撑该条结论的专门证据。单用户产品不验证“其他用户”身份隔离，但仍需验证跨 Run 的业务身份关联。
@@ -437,7 +439,7 @@ P6 本轮新增真实 Provider、浏览器、PostgreSQL、正常审批与 Docker
 | A09 | 已覆盖 | `test_worker_restart_reclaims_failed_attempt_without_closing_round` 重建 app engine 后从 PostgreSQL 接管过期 attempt，拒绝旧 Worker 迟到结果；新 Worker 的可重试失败原子创建 attempt 2，Task/Round 继续 pending/running，终态计数不增加且重启后可领取新 Job。 |
 | A10 | 已覆盖 | `test_blocked_continue_returns_explicit_error_then_finish_cancels_pending_tasks` 验证失败依赖使 Continue 返回 `BLOCKED_DEPENDENCIES`，事务不创建空 Round、不取消 Review 可见的 pending task；随后 FINISH failed 写出 PlanFailed 并以 `plan_finished` 取消剩余任务。Root 单测验证只复审一次：可改为 Replan；重复 Continue 或仍被阻断的 Replan 都收敛到 FINISH failed。非法/循环 DAG 仍由 DAG validator 拒绝。 |
 | A11 | 已覆盖 | `test_approved_worker_effect_resumes_once_after_full_app_restart` 在同一 PG schema 中先运行 Worker 至审批 interrupt，原子提交批准与 Resume Job 后重建 checkpointer、Worker Job repository、工具执行器和 operation ledger；新 Worker 从 PostgreSQL 领取同 execution/thread 的恢复 Job，从 checkpoint 找回 interrupt，执行工具一次并提交终态。测试核对 Approval、Worker Job、ToolOperation 与 TaskExecution 最终状态。 |
-| A12 | 部分覆盖 | ToolOperation 的 completed 结果跨 attempt 重放、executing 未知结果拒绝重发，以及终态提交后丢回执已有 PG 验收；Root checkpoint 写入和外部效果对账的崩溃窗口还缺独立故障注入。 |
+| A12 | 部分覆盖 | `test_approved_worker_effect_resumes_once_after_full_app_restart` 注入工具副作用与 ToolOperation 已提交、Worker checkpoint 尚未前进时崩溃，确认 interrupt 仍挂起、Resume Job lease 可接管并从账本重放结果，工具不重发。ToolOperation 的 executing 未知结果拒绝重发和终态提交后丢回执另有 PG 验收；Root checkpoint 写入与 Root 决策外部效果核对仍缺独立故障注入。 |
 | A13 | 已覆盖 | `test_resolving_one_worker_approval_only_unblocks_its_execution` 验证 Worker 审批与 Stop 竞争；`test_stop_racing_last_worker_terminal_event_leaves_no_root_resume` 验证终态事件与 Stop 竞争；`test_stop_racing_continue_or_revise_cancels_all_worker_jobs` 分别验证 Continue/Revise 与 Stop。各顺序都以 Run 行事务锁裁决：Stop 获胜时命令被拒绝，Review 获胜时 Stop 随后取消新任务和 Job；不遗留活动审批、可领取 Worker Job 或 Root Resume。 |
 | A14 | 部分覆盖 | 已有规划前停止和活跃 Worker 停止的真实浏览器验收及活跃租约 PG 收敛；规划中、审批中、Review 中、Finalize 中的阶段矩阵尚未覆盖。 |
 | A15 | 已覆盖 | `test_stop_preserves_completed_and_failed_run_without_duplicate_events` 在 PG 对 completed/failed Run 各重复 Stop 两次，确认原状态、取消 epoch 和外部效果状态不变且不产生 Outbox 事件；`test_run_cancellation_converges_after_expired_worker_lease` 另验证 cancelled 终态重复 Stop 不增加取消事件或推进 epoch。 |

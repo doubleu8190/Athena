@@ -140,6 +140,38 @@ class WorkerWorkflow:
             raise RuntimeError("worker_approval_resume_payload_invalid")
         execution = state.get("execution", {})
         execution = execution if isinstance(execution, Mapping) else {}
+        execution_update = decision.get("__worker_execution_update")
+        if isinstance(execution_update, Mapping):
+            updated_execution = dict(execution_update)
+            for field in (
+                "run_id",
+                "plan_id",
+                "session_id",
+                "execution_id",
+                "worker_thread_id",
+                "execution_generation",
+            ):
+                if (
+                    execution.get(field) is not None
+                    and updated_execution.get(field) != execution.get(field)
+                ):
+                    raise RuntimeError("worker_approval_execution_identity_mismatch")
+            previous_task = execution.get("task", {})
+            updated_task = updated_execution.get("task", {})
+            if (
+                isinstance(previous_task, Mapping)
+                and previous_task.get("task_id") is not None
+                and (
+                    not isinstance(updated_task, Mapping)
+                    or updated_task.get("task_id") != previous_task.get("task_id")
+                )
+            ):
+                raise RuntimeError("worker_approval_execution_identity_mismatch")
+            for key in ("tool_results", "_worker_result_refs"):
+                if key in execution:
+                    updated_execution[key] = execution[key]
+            execution = updated_execution
+            state = {**state, "execution": updated_execution}
         expected = {
             "approval_id": approval.get("approval_id"),
             "execution_id": approval.get("execution_id"),

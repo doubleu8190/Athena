@@ -131,12 +131,11 @@ async def invoke_worker_graph(
         for key in ("tool_results", "_worker_result_refs"):
             if key in saved_execution:
                 merged_execution[key] = saved_execution[key]
+        resume_payload = dict(resume_value)
+        resume_payload["__worker_execution_update"] = merged_execution
         return await call(
             graph.ainvoke,
-            Command(
-                resume=dict(resume_value),
-                update={"execution": merged_execution},
-            ),
+            Command(resume=resume_payload),
             config=config,
         )
     return await call(graph.ainvoke, state, config=config)

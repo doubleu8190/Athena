@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from langgraph.errors import NodeCancelledError
 from psycopg.conninfo import make_conninfo
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
@@ -504,11 +506,30 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             fencing_token=resumed_lease.fencing_token,
             cancellation_epoch=resumed_lease.cancellation_epoch,
         )
+        class CrashAfterOperationCommit:
+            """模拟账本已提交、Worker checkpoint 尚未前进时进程崩溃。"""
+
+            def __init__(self) -> None:
+                self.repository = PostgresWorkerToolOperationRepository(
+                    session_factory, clock=lambda: now
+                )
+                self.crash_once = True
+
+            async def claim(self, request, *, args_hash):
+                return await self.repository.claim(request, args_hash=args_hash)
+
+            async def complete(self, request, *, args_hash, result):
+                saved = await self.repository.complete(
+                    request, args_hash=args_hash, result=result
+                )
+                if saved and self.crash_once:
+                    self.crash_once = False
+                    raise asyncio.CancelledError
+                return saved
+
         restarted_tool_executor = WorkerToolExecutor(
             _ApprovalToolService(external_effects),
-            operation_ledger=PostgresWorkerToolOperationRepository(
-                session_factory, clock=lambda: now
-            ),
+            operation_ledger=CrashAfterOperationCommit(),
         )
         restarted_agent = _WorkerAgent()
         restarted_executor = LangGraphWorkerExecutor(
@@ -527,13 +548,80 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             "interrupt_id"
         ]
 
-        result = await restarted_executor.resume(
-            resumed_execution, dict(resumed_lease.resume_value)
+        with pytest.raises(NodeCancelledError):
+            await restarted_executor.resume(
+                resumed_execution, dict(resumed_lease.resume_value)
+            )
+        assert len(external_effects) == 1
+        pending_after_crash = await restarted_executor.pending_interrupt(
+            resumed_execution
+        )
+        assert pending_after_crash is not None
+        assert pending_after_crash["approval_id"] == approval_id
+        async with session_factory() as session:
+            committed_operation = await session.get(
+                WorkerToolOperationModel,
+                external_effects[0].operation_key,
+            )
+            interrupted_job = await session.get(
+                WorkerJobModel, resumed_lease.job_id
+            )
+        assert committed_operation is not None
+        assert committed_operation.status == "completed"
+        assert interrupted_job is not None and interrupted_job.status == "running"
+        await restarted_checkpointer.stop()
+
+        # Job lease 已过期但 checkpoint 仍在 interrupt；新进程接管并重放账本结果。
+        final_checkpointer = PostgresCheckpointer(checkpoint_connection_string)
+        checkpointers.append(final_checkpointer)
+        await final_checkpointer.start()
+        recovery_time = now + timedelta(seconds=61)
+        final_jobs = PostgresWorkerJobRepository(
+            session_factory, clock=lambda: recovery_time
+        )
+        final_lease = await final_jobs.claim_next(
+            "worker-after-effect-crash", lease_seconds=60
+        )
+        assert final_lease is not None
+        assert final_lease.job_type == "resume_worker"
+        assert final_lease.execution_id == first_lease.execution_id
+        assert final_lease.worker_thread_id == first_lease.worker_thread_id
+        assert final_lease.fencing_token > resumed_lease.fencing_token
+        final_execution = TaskExecution(
+            plan_id=plan_id,
+            run_id=run_id,
+            session_id=session_id,
+            task=final_lease.task,
+            execution_generation=final_lease.attempt,
+            execution_id=final_lease.execution_id,
+            worker_thread_id=final_lease.worker_thread_id,
+            fencing_token=final_lease.fencing_token,
+            cancellation_epoch=final_lease.cancellation_epoch,
+        )
+        final_agent = _WorkerAgent()
+        final_tool_executor = WorkerToolExecutor(
+            _ApprovalToolService(external_effects),
+            operation_ledger=PostgresWorkerToolOperationRepository(
+                session_factory, clock=lambda: recovery_time
+            ),
+        )
+        final_executor = LangGraphWorkerExecutor(
+            workflow_factory=lambda: WorkerWorkflow(
+                execute=final_agent,
+                execute_tool=final_tool_executor,
+            ),
+            checkpointer=final_checkpointer,
+        )
+        still_pending = await final_executor.pending_interrupt(final_execution)
+        assert still_pending is not None
+        assert still_pending["approval_id"] == approval_id
+        result = await final_executor.resume(
+            final_execution, dict(final_lease.resume_value)
         )
         assert result.status is TaskStatus.DONE
         assert result.output == {"confirmed": True}
-        assert restarted_agent.calls == 1
-        assert len(restarted_agent.observed_tool_results) == 1
+        assert final_agent.calls == 1
+        assert len(final_agent.observed_tool_results) == 1
         assert len(external_effects) == 1
         assert external_effects[0].approval_decision == "approved"
         assert external_effects[0].arguments == {
@@ -547,15 +635,15 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             WorkerTaskTerminalEvent(
                 message_id=f"terminal:{run_id}",
                 occurred_at=now,
-                worker_id=resumed_lease.worker_id,
+                worker_id=final_lease.worker_id,
                 run_id=run_id,
                 plan_id=plan_id,
-                plan_version=resumed_lease.plan_version,
+                plan_version=final_lease.plan_version,
                 round_id=submitted.round_id,
                 task_id=task_id,
-                execution_id=resumed_lease.execution_id,
-                fencing_token=resumed_lease.fencing_token,
-                cancellation_epoch=resumed_lease.cancellation_epoch,
+                execution_id=final_lease.execution_id,
+                fencing_token=final_lease.fencing_token,
+                cancellation_epoch=final_lease.cancellation_epoch,
                 status=TaskStatus.COMPLETED,
                 result={
                     "output": dict(result.output),
@@ -570,7 +658,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
         async with session_factory() as session:
             approval_row = await session.get(ApprovalRecordModel, approval_id)
             execution_row = await session.get(
-                TaskExecutionModel, resumed_lease.execution_id
+                TaskExecutionModel, final_lease.execution_id
             )
             job_rows = (
                 await session.execute(

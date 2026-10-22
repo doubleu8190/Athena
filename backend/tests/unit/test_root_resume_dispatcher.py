@@ -239,6 +239,115 @@ async def test_root_resume_dispatcher_retries_until_matching_interrupt_exists():
 
 
 @pytest.mark.asyncio
+async def test_root_resume_recovers_checkpoint_identity_before_dispatch():
+    """Run 行登记缺失时从 checkpoint 找回身份并继续恢复 Root。
+
+    参数：无。
+    返回：无。
+    异常：断言失败时由 pytest 将测试标记为失败。
+    """
+    class Jobs:
+        def __init__(self):
+            """初始化完成与重试记录；本构造函数不接收参数。"""
+            self.completed = []
+            self.retries = []
+
+        async def retry(self, lease, *, delay_seconds):
+            """记录待重试的 Root Resume lease。"""
+            self.retries.append((lease, delay_seconds))
+
+        async def complete(self, lease):
+            """记录已完成的 Root Resume lease。"""
+            self.completed.append(lease)
+
+        async def renew(self, lease, *, lease_seconds):
+            """返回当前 lease，模拟成功续租。"""
+            return lease
+
+    class Graph:
+        async def find_pending_round_wait(self, **identity):
+            """返回匹配 checkpoint 中的中断身份。"""
+            assert identity["round_id"] == "round-1"
+            return "interrupt-recovered", "checkpoint-recovered"
+
+        async def has_pending_round_wait(self, **identity):
+            """确认恢复出的中断和 checkpoint 与图状态一致。"""
+            return identity == {
+                "run_id": "run-1",
+                "plan_id": "plan-1",
+                "round_id": "round-1",
+                "plan_version": 1,
+                "interrupt_id": "interrupt-recovered",
+                "checkpoint_id": "checkpoint-recovered",
+            }
+
+    class Execution:
+        def __init__(self):
+            """初始化命令记录；本构造函数不接收参数。"""
+            self.command = None
+
+        async def execute(self, command):
+            """记录 Root 恢复命令并模拟执行成功。"""
+            self.command = command
+
+    class Runs:
+        def __init__(self):
+            """初始化 Root wait 登记记录；本构造函数不接收参数。"""
+            self.armed = []
+
+        async def arm_root_wait(self, run_id, **identity):
+            """记录从 checkpoint 修复的 Run wait 身份。"""
+            self.armed.append((run_id, identity))
+            return True
+
+        async def get(self, _run_id):
+            """返回已完成的 Run 状态。"""
+            return SimpleNamespace(status="completed")
+
+    jobs, execution, runs = Jobs(), Execution(), Runs()
+    dispatcher = RootResumeDispatcher(
+        jobs,
+        Graph(),
+        execution,
+        runs,
+        worker_id="root-resumer-1",
+    )
+    lease = SimpleNamespace(
+        job_id="resume-unarmed",
+        run_id="run-1",
+        session_id="session-1",
+        plan_id="plan-1",
+        round_id="round-1",
+        plan_version=1,
+        root_wait_generation=3,
+        interrupt_id=None,
+        checkpoint_id=None,
+        worker_id="root-resumer-1",
+        lease_until=datetime.now(timezone.utc),
+    )
+
+    await dispatcher._resume(lease)
+
+    assert runs.armed == [
+        (
+            "run-1",
+            {
+                "plan_id": "plan-1",
+                "round_id": "round-1",
+                "plan_version": 1,
+                "interrupt_id": "interrupt-recovered",
+                "checkpoint_id": "checkpoint-recovered",
+            },
+        )
+    ]
+    assert execution.command.payload["resume_value"]["interrupt_id"] == (
+        "interrupt-recovered"
+    )
+    assert jobs.completed == [lease]
+    assert jobs.retries == []
+
+
+@pytest.mark.asyncio
 async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
     class Jobs:
         def __init__(self):

@@ -89,17 +89,53 @@ class RootResumeDispatcher:
                     pass
 
     async def _resume(self, lease: Any) -> None:
-        if not lease.interrupt_id or not lease.checkpoint_id:
-            await self._jobs.retry(lease, delay_seconds=self._retry_delay)
-            return
+        interrupt_id = lease.interrupt_id
+        checkpoint_id = lease.checkpoint_id
+        if not interrupt_id or not checkpoint_id:
+            # Root checkpoint 与 Run 行登记分属两个持久化动作。进程若在两者
+            # 之间退出，Resume Job 可从 checkpoint 找回中断身份并补登记。
+            find_pending = getattr(self._graph, "find_pending_round_wait", None)
+            arm_root_wait = getattr(self._runs, "arm_root_wait", None)
+            if not callable(find_pending) or not callable(arm_root_wait):
+                await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+                return
+            try:
+                recovered = await find_pending(
+                    run_id=lease.run_id,
+                    plan_id=lease.plan_id,
+                    round_id=lease.round_id,
+                    plan_version=lease.plan_version,
+                )
+            except Exception:
+                logger.exception("Root checkpoint recovery failed: %s", lease.job_id)
+                await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+                return
+            if (
+                not isinstance(recovered, tuple)
+                or len(recovered) != 2
+                or not all(isinstance(value, str) and value for value in recovered)
+            ):
+                await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+                return
+            interrupt_id, checkpoint_id = recovered
+            if not await arm_root_wait(
+                lease.run_id,
+                plan_id=lease.plan_id,
+                round_id=lease.round_id,
+                plan_version=lease.plan_version,
+                interrupt_id=interrupt_id,
+                checkpoint_id=checkpoint_id,
+            ):
+                await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+                return
         try:
             has_pending = await self._graph.has_pending_round_wait(
                 run_id=lease.run_id,
                 plan_id=lease.plan_id,
                 round_id=lease.round_id,
                 plan_version=lease.plan_version,
-                interrupt_id=lease.interrupt_id,
-                checkpoint_id=lease.checkpoint_id,
+                interrupt_id=interrupt_id,
+                checkpoint_id=checkpoint_id,
             )
         except Exception:
             logger.exception("Root checkpoint inspection failed: %s", lease.job_id)
@@ -124,7 +160,7 @@ class RootResumeDispatcher:
                     "round_id": lease.round_id,
                     "plan_version": lease.plan_version,
                     "root_wait_generation": lease.root_wait_generation,
-                    "interrupt_id": lease.interrupt_id,
+                    "interrupt_id": interrupt_id,
                 },
             },
             issued_at=datetime.now(timezone.utc),

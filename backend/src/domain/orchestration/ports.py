@@ -161,6 +161,17 @@ class RootGraphPort(Protocol):
         checkpoint_id: str,
     ) -> bool: ...
 
+    async def find_pending_round_wait(
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+    ) -> tuple[str, str] | None:
+        """按 Run 和 Round 查找中断 ID 与 checkpoint ID。"""
+        ...
+
 
 __all__ = [
     "OrchestrationCommandRepository",

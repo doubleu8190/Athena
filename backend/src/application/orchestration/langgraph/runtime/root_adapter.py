@@ -83,6 +83,28 @@ class LangGraphRootGraph(RootGraphPort):
         checkpoint_id: str,
     ) -> bool:
         """检查当前 checkpoint 是否正等待指定版本和轮次的中断。"""
+        pending = await self.find_pending_round_wait(
+            run_id=run_id,
+            plan_id=plan_id,
+            round_id=round_id,
+            plan_version=plan_version,
+        )
+        return pending == (interrupt_id, checkpoint_id)
+
+    async def find_pending_round_wait(
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        round_id: str,
+        plan_version: int,
+    ) -> tuple[str, str] | None:
+        """从持久 checkpoint 找回尚未登记到 Run 行的 Round 中断。
+
+        参数：run_id、plan_id、round_id 和 plan_version 标识待恢复的轮次。
+        返回：匹配时返回 (interrupt_id, checkpoint_id)，否则返回 None。
+        异常：checkpointer 读取失败时透传底层异常。
+        """
         snapshot = await self._compiled_graph().aget_state(
             {"configurable": {"thread_id": f"run:{run_id}"}}
         )
@@ -92,25 +114,26 @@ class LangGraphRootGraph(RootGraphPort):
             if isinstance(snapshot_config, Mapping)
             else {}
         )
-        if (
-            not isinstance(configurable, Mapping)
-            or configurable.get("checkpoint_id") != checkpoint_id
-        ):
-            return False
+        if not isinstance(configurable, Mapping):
+            return None
+        checkpoint_id = configurable.get("checkpoint_id")
+        if not isinstance(checkpoint_id, str) or not checkpoint_id:
+            return None
         for task in getattr(snapshot, "tasks", ()):
             for pending in getattr(task, "interrupts", ()):
                 value = getattr(pending, "value", None)
                 if (
-                    getattr(pending, "id", None) == interrupt_id
-                    and isinstance(value, Mapping)
+                    isinstance(value, Mapping)
                     and value.get("type") == "round_wait"
                     and value.get("run_id") == run_id
                     and value.get("plan_id") == plan_id
                     and value.get("round_id") == round_id
                     and value.get("plan_version") == plan_version
                 ):
-                    return True
-        return False
+                    interrupt_id = getattr(pending, "id", None)
+                    if isinstance(interrupt_id, str) and interrupt_id:
+                        return interrupt_id, checkpoint_id
+        return None
 
 
 __all__ = ["LangGraphRootGraph"]

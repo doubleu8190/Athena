@@ -16,6 +16,12 @@ from application.common.responses import RunTimelineResponse as ApplicationRunTi
 from interfaces.http.dto.sessions import RunSummaryResponse
 
 
+class RunListResponse(BaseModel):
+    items: list[RunSummaryResponse]
+    total: int
+    has_more: bool
+
+
 class SubmitRunRequest(BaseModel):
     message: str = ""
     command_id: str = Field(min_length=1)
@@ -99,15 +105,7 @@ class RunTimelineResponse(BaseModel):
     @classmethod
     def from_application(cls, value: ApplicationRunTimelineResponse) -> "RunTimelineResponse":
         return cls(
-            run=RunSummaryResponse(
-                run_id=value.run.run_id,
-                session_id=value.run.session_id,
-                status=value.run.status,
-                root_thread_id=value.run.root_thread_id,
-                error=value.run.error,
-                created_at=value.run.created_at,
-                updated_at=value.run.updated_at,
-            ),
+            run=RunSummaryResponse.from_application(value.run),
             events=[RunTimelineEventResponse(
                 session_seq=event.session_seq,
                 event_type=event.event_type,

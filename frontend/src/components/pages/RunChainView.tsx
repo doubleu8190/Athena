@@ -1,5 +1,4 @@
-import { useMemo, useState } from "react"
-import { useEffect } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity,
   Bot,
@@ -11,7 +10,7 @@ import {
   Code2,
   Database,
   GitBranch,
-  ListFilter,
+  RefreshCw,
   Network,
   Search,
   ShieldCheck,
@@ -25,7 +24,6 @@ import Badge from "../ui/Badge"
 import { apiClient } from "../../api/client"
 import { useChatStore } from "../../store/chatStore"
 import type {
-  Message,
   OrchestrationApprovalSnapshot,
   OrchestrationExecutionSnapshot,
   PlanVersionDetail,
@@ -33,6 +31,7 @@ import type {
   RunTimelineEvent,
   SessionRunSummary,
 } from "../../types"
+import { formatDuration, getActivityDuration, getRunTiming } from "./runTiming"
 
 type EventStatus = "completed" | "failed" | "retry" | "approved" | "waiting" | "review" | "running" | "cancelled" | "info"
 type EventKind = "run" | "llm" | "retrieval" | "tool" | "plan" | "worker" | "response" | "system"
@@ -50,6 +49,7 @@ interface RunEvent {
   input?: string
   output?: string
   error?: string
+  startedAt?: string
 }
 
 const demoEvents: RunEvent[] = [
@@ -109,7 +109,14 @@ function RunChainView() {
   const liveEvents = useChatStore((state) => state.runTimelineEvents)
   const demoMode = new URLSearchParams(window.location.search).get("demo") === "execution"
   const [runs, setRuns] = useState<SessionRunSummary[]>([])
-  const [messages, setMessages] = useState<Message[]>([])
+  const [scope, setScope] = useState<"all" | "session">("all")
+  const [runPage, setRunPage] = useState(0)
+  const [runTotal, setRunTotal] = useState(0)
+  const [runsHasMore, setRunsHasMore] = useState(false)
+  const [runsLoading, setRunsLoading] = useState(false)
+  const [runsError, setRunsError] = useState<string | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [now, setNow] = useState(Date.now)
   const [timeline, setTimeline] = useState<RunTimelineEvent[]>([])
   const [orchestration, setOrchestration] = useState<RunOrchestrationSnapshot | null>(null)
   const [selectedVersionDetail, setSelectedVersionDetail] = useState<PlanVersionDetail | null>(null)
@@ -123,45 +130,73 @@ function RunChainView() {
   const [filter, setFilter] = useState<FilterKind>("all")
   const [query, setQuery] = useState("")
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root", "context-1", "decision-1", "decision-2", "plan", "worker-trend"]))
+  const scopedSessionId = scope === "session" ? sessionId : undefined
+  const selectedRunSummary = runs.find((run) => run.run_id === selectedRun)
+  const selectedSessionId = selectedRunSummary?.session_id
+  const selectedRunStatus = selectedRunSummary?.status
+  const hasActiveRuns = runs.some((run) => !["completed", "failed", "cancelled"].includes(run.status))
+  const timelineIdentity = `${selectedSessionId}:${selectedRun}`
+  const timelineIdentityRef = useRef(timelineIdentity)
+  timelineIdentityRef.current = timelineIdentity
+
   useEffect(() => {
-    if (demoMode || !sessionId) {
+    if (demoMode || (scope === "session" && !scopedSessionId)) {
       setRuns([])
-      setMessages([])
+      setRunTotal(0)
+      setRunsLoading(false)
+      setRunsHasMore(false)
       setTimeline([])
       setOrchestration(null)
       setSelectedRun(demoMode ? demoRuns[0].id : null)
       return
     }
     let cancelled = false
-    setLoading(true)
-    setLoadError(null)
-    Promise.all([apiClient.listSessionRuns(sessionId), apiClient.getMessages(sessionId)])
-      .then(([items, sessionMessages]) => {
+    let inFlight = false
+    const refresh = async () => {
+      if (inFlight) return
+      inFlight = true
+      setRunsLoading(true)
+      try {
+        const response = await apiClient.listRuns(50, runPage * 50, scopedSessionId ?? undefined)
         if (cancelled) return
-        setRuns(items)
-        setMessages(sessionMessages)
-        setSelectedRun((current) => items.some((item) => item.run_id === current) ? current : items[0]?.run_id ?? null)
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setLoadError(error instanceof Error ? error.message : "运行列表加载失败")
-      })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
-  }, [demoMode, sessionId])
+        setRuns(response.items)
+        setRunTotal(response.total)
+        setRunsHasMore(response.has_more)
+        setRunsError(null)
+        setSelectedRun((current) => response.items.some((item) => item.run_id === current) ? current : response.items[0]?.run_id ?? null)
+      } catch (error) {
+        if (!cancelled) setRunsError(error instanceof Error ? error.message : "运行列表加载失败")
+      } finally {
+        inFlight = false
+        if (!cancelled) setRunsLoading(false)
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => { if (!document.hidden) void refresh() }, 10000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [demoMode, scope, scopedSessionId, runPage, refreshKey])
 
   useEffect(() => {
-    if (demoMode || !sessionId || !selectedRun) {
-      setTimeline([])
-      setOrchestration(null)
-      setTimelineCursor(0)
-      setTimelineHasMore(false)
+    if (demoMode || !hasActiveRuns) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [demoMode, hasActiveRuns])
+
+  useEffect(() => {
+    setTimeline([])
+    setOrchestration(null)
+    setTimelineCursor(0)
+    setTimelineHasMore(false)
+    setLoading(false)
+    setLoadError(null)
+    if (demoMode || !selectedSessionId || !selectedRun) {
       return
     }
     let cancelled = false
     setLoading(true)
     setLoadError(null)
     Promise.all([
-      apiClient.getRunTimeline(sessionId, selectedRun),
+      apiClient.getRunTimeline(selectedSessionId, selectedRun),
       apiClient.getRunOrchestration(selectedRun),
     ])
       .then(([timelineResponse, snapshot]) => {
@@ -174,14 +209,43 @@ function RunChainView() {
       .catch((error: unknown) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : "运行链路加载失败") })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [demoMode, sessionId, selectedRun])
+  }, [demoMode, selectedSessionId, selectedRun, selectedRunStatus, refreshKey])
+
+  useEffect(() => {
+    if (demoMode || !selectedSessionId || !selectedRun || timelineHasMore || !selectedRunStatus || ["completed", "failed", "cancelled"].includes(selectedRunStatus)) return
+    let cancelled = false
+    let inFlight = false
+    const timer = window.setInterval(async () => {
+      if (document.hidden || inFlight) return
+      inFlight = true
+      try {
+        const [response, snapshot] = await Promise.all([
+          apiClient.getRunTimeline(selectedSessionId, selectedRun, timelineCursor),
+          apiClient.getRunOrchestration(selectedRun),
+        ])
+        if (cancelled) return
+        setTimeline((current) => [...new Map([...current, ...response.events].map((event) => [event.session_seq, event])).values()].sort((left, right) => left.session_seq - right.session_seq))
+        setTimelineCursor(response.next_after_seq)
+        setTimelineHasMore(response.has_more)
+        setOrchestration(snapshot)
+        setLoadError(null)
+      } catch (error) {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : "运行链路同步失败")
+      } finally {
+        inFlight = false
+      }
+    }, 10000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [demoMode, selectedSessionId, selectedRun, selectedRunStatus, timelineCursor, timelineHasMore])
 
   useEffect(() => {
     const plan = orchestration?.plan
-    if (!orchestration || !plan) return
+    if (!orchestration) return
     setExpanded((current) => {
       const next = new Set(current)
+      next.add(`run:${orchestration.run.run_id}`)
       next.add(`snapshot:run:${orchestration.run.run_id}`)
+      if (!plan) return next
       next.add(`snapshot:plan:${plan.plan_id}`)
       for (const version of plan.versions) {
         if (version.version === plan.current_version) {
@@ -214,11 +278,13 @@ function RunChainView() {
   }, [selectedId])
 
   const loadMoreEvents = async () => {
-    if (!sessionId || !selectedRun || loading || !timelineHasMore) return
+    if (!selectedSessionId || !selectedRun || loading || !timelineHasMore) return
+    const identity = timelineIdentity
     setLoading(true)
     setLoadError(null)
     try {
-      const response = await apiClient.getRunTimeline(sessionId, selectedRun, timelineCursor)
+      const response = await apiClient.getRunTimeline(selectedSessionId, selectedRun, timelineCursor)
+      if (identity !== timelineIdentityRef.current) return
       setTimeline((current) => {
         const bySeq = new Map(current.map((event) => [event.session_seq, event]))
         for (const event of response.events) bySeq.set(event.session_seq, event)
@@ -227,23 +293,21 @@ function RunChainView() {
       setTimelineCursor(response.next_after_seq)
       setTimelineHasMore(response.has_more)
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "更多链路事件加载失败")
+      if (identity === timelineIdentityRef.current) setLoadError(error instanceof Error ? error.message : "更多链路事件加载失败")
     } finally {
-      setLoading(false)
+      if (identity === timelineIdentityRef.current) setLoading(false)
     }
   }
 
   const runItems = demoMode ? demoRuns : runs.map((run) => {
-    const userMessage = messages.find((message) => message.run_id === run.run_id && message.role === "user")
     const created = run.created_at ? new Date(run.created_at) : null
-    const updated = run.updated_at ? new Date(run.updated_at) : null
-    const durationMs = created && updated ? Math.max(0, updated.getTime() - created.getTime()) : null
+    const timing = getRunTiming(run, [], now)
     return {
       id: run.run_id,
-      title: userMessage?.content.slice(0, 48) || `运行 ${run.run_id.slice(0, 12)}`,
-      status: run.status === "completed" ? "success" : run.status === "failed" ? "failed" : "running",
+      title: run.title || `运行 ${run.run_id.slice(0, 12)}`,
+      status: run.status === "completed" ? "success" : run.status,
       time: created ? created.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "2-digit", day: "2-digit" }) : "时间未知",
-      duration: durationMs == null ? "—" : `${(durationMs / 1000).toFixed(1)} s`,
+      duration: formatDuration(timing.executionMs),
       events: selectedRun === run.run_id ? timeline.length : 0,
     }
   })
@@ -254,12 +318,14 @@ function RunChainView() {
   )
   const timelineEvents = [...mergedTimeline.values()]
     .sort((left, right) => left.session_seq - right.session_seq)
+  const runTiming = selectedRunSummary ? getRunTiming(selectedRunSummary, timelineEvents, now) : null
+  const hasRunActivity = timelineEvents.some((event) => event.payload.activity_id === `run:${selectedRun}`)
   const activities = demoMode
     ? demoEvents
     : [
-        ...projectSnapshot(orchestration),
-        ...projectTimeline(timelineEvents),
-      ]
+        ...projectSnapshot(orchestration).filter((event) => event.id !== `snapshot:run:${selectedRun}` || !hasRunActivity),
+        ...projectTimeline(timelineEvents, selectedRunSummary, now),
+      ].map((event) => ({ ...event, parentId: event.parentId === `snapshot:run:${selectedRun}` && hasRunActivity ? `run:${selectedRun}` : event.parentId }))
   const selected = activities.find((event) => event.id === selectedId) ?? activities[0] ?? null
   const filteredEvents = useMemo(() => activities.filter((event) => {
     const matchesKind = filter === "all" || event.kind === filter
@@ -349,10 +415,16 @@ function RunChainView() {
           <div className="flex items-center justify-between border-b border-athena-border px-4 py-3">
             <div>
               <h2 className="text-sm font-semibold">运行记录</h2>
-              <p className="mt-0.5 text-[11px] text-athena-muted">{loading ? "正在加载…" : `${runItems.length} 次运行`}</p>
+              <p className="mt-0.5 text-[11px] text-athena-muted">{`${demoMode ? demoRuns.length : runTotal} 次运行`}{runsLoading ? " · 同步中" : ""}</p>
             </div>
-            <button type="button" title="筛选运行记录" aria-label="筛选运行记录" className="rounded-md p-2 text-athena-muted hover:bg-athena-bg hover:text-athena-text"><ListFilter className="h-4 w-4" /></button>
+            <button type="button" onClick={() => setRefreshKey((current) => current + 1)} disabled={runsLoading || loading} title="刷新运行记录" aria-label="刷新运行记录" className="rounded-md p-2 text-athena-muted hover:bg-athena-bg hover:text-athena-text"><RefreshCw className={`h-4 w-4 ${runsLoading ? "animate-spin" : ""}`} /></button>
           </div>
+          {!demoMode && <div className="border-b border-athena-border px-4 py-2">
+            <select aria-label="运行记录范围" value={scope} onChange={(event) => { setScope(event.target.value as "all" | "session"); setRunPage(0); setRuns([]); setSelectedRun(null) }} className="w-full rounded border border-athena-border bg-athena-surface px-2 py-1.5 text-xs">
+              <option value="all">全部会话</option>
+              <option value="session" disabled={!sessionId}>当前会话</option>
+            </select>
+          </div>}
           <div className="flex-1 overflow-y-auto">
             {runItems.map((run) => (
               <button
@@ -366,13 +438,19 @@ function RunChainView() {
                   <span className={`h-2 w-2 flex-shrink-0 rounded-full ${run.status === "success" ? "bg-athena-success" : run.status === "failed" ? "bg-athena-danger" : "bg-athena-accent"}`} />
                 </span>
                 <span className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-athena-muted">
-                  <span>{run.time}</span><span>{run.duration}</span>
+                  <span>{run.time}</span><span title="实际执行耗时，不含排队">执行 {run.duration}</span>
                 </span>
                 <span className="mt-1 block truncate font-mono text-[10px] text-athena-muted/80">{run.id}</span>
               </button>
             ))}
+            {!runsLoading && !runItems.length && <p className="px-4 py-6 text-xs text-athena-muted">暂无运行记录</p>}
           </div>
-          <div className="border-t border-athena-border px-4 py-3 text-[11px] text-athena-muted">{loadError ? <span className="text-athena-danger">{loadError}</span> : demoMode ? "静态演示数据" : sessionId ? "当前会话" : "请先选择会话"}</div>
+          {!demoMode && (runPage > 0 || runsHasMore) && <div className="flex items-center justify-between border-t border-athena-border px-4 py-2 text-xs">
+            <button type="button" disabled={!runPage || runsLoading} onClick={() => { setRuns([]); setSelectedRun(null); setRunPage((page) => page - 1) }} className="disabled:opacity-40">上一页</button>
+            <span>第 {runPage + 1} 页</span>
+            <button type="button" disabled={!runsHasMore || runsLoading} onClick={() => { setRuns([]); setSelectedRun(null); setRunPage((page) => page + 1) }} className="disabled:opacity-40">下一页</button>
+          </div>}
+          <div className="border-t border-athena-border px-4 py-3 text-[11px] text-athena-muted">{runsError ? <span className="text-athena-danger">{runsError}</span> : demoMode ? "静态演示数据" : scope === "all" ? "全部会话 · 按提交时间倒序" : "当前会话"}</div>
         </div>
       }
     >
@@ -388,7 +466,7 @@ function RunChainView() {
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <h2 className="text-sm font-semibold">{activeRun?.title || (loading ? "正在加载运行…" : "选择运行记录")}</h2>
-                  {activeRun && <Badge tone={activeRun.status === "success" ? "success" : activeRun.status === "failed" ? "danger" : "accent"}><Check className="h-3 w-3" />{activeRun.status === "success" ? "已完成" : activeRun.status === "failed" ? "失败" : "运行中"}</Badge>}
+                  {activeRun && <Badge tone={activeRun.status === "success" ? "success" : statusMeta[snapshotStatus(activeRun.status)].tone}><Check className="h-3 w-3" />{activeRun.status === "success" ? "已完成" : statusMeta[snapshotStatus(activeRun.status)].label}</Badge>}
                 </div>
                 {selectedRun && <div className="mt-1.5 break-all font-mono text-[11px] text-athena-muted">{selectedRun}</div>}
               </div>
@@ -396,7 +474,7 @@ function RunChainView() {
             </div>
             <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
               {[
-                { label: "总耗时", value: activeRun?.duration ?? "—", icon: Clock3, color: "text-sky-400" },
+                { label: "执行耗时", value: demoMode ? activeRun?.duration ?? "—" : formatDuration(runTiming?.executionMs ?? null), icon: Clock3, color: "text-sky-400" },
                 { label: "事件数", value: String(activities.length), icon: Activity, color: "text-violet-400" },
                 { label: "Token", value: demoMode ? "9,704" : "—", icon: Bot, color: "text-amber-400" },
                 { label: "重试 / 审批", value: `${activities.filter((event) => event.status === "retry").length} / ${activities.filter((event) => event.status === "approved").length}`, icon: ShieldCheck, color: "text-rose-400" },
@@ -407,6 +485,11 @@ function RunChainView() {
                 </div>
               ))}
             </div>
+            {!demoMode && <div className="mt-3 space-y-1 text-[11px] leading-5 text-athena-muted">
+              <p>等待耗时 {formatDuration(runTiming?.queueMs ?? null)} · 端到端耗时 {formatDuration(runTiming?.totalMs ?? null)}（等待 + 执行）</p>
+              <p>执行耗时从首次开始到结束，包含执行期间的审批、挂起及调度等待。父活动已包含子活动，且活动可能并行，各项耗时不能直接相加。</p>
+            </div>}
+            {loadError && <p className="mt-2 text-xs text-athena-danger">{loadError}</p>}
           </div>
 
           <div className="grid min-h-[560px] grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -470,7 +553,7 @@ function RunChainView() {
                   <div><div className="text-[10px] text-athena-muted">类型</div><div className="mt-1">{kindMeta[selected.kind].label}</div></div>
                   <div><div className="text-[10px] text-athena-muted">耗时</div><div className="mt-1 tabular-nums">{selected.duration}</div></div>
                   <div><div className="text-[10px] text-athena-muted">开始时间</div><div className="mt-1 font-mono text-[10px]">{selected.time}</div></div>
-                  <div><div className="text-[10px] text-athena-muted">事件 ID</div><div className="mt-1 truncate font-mono text-[10px]">evt_{selected.id}_a81f</div></div>
+                  <div><div className="text-[10px] text-athena-muted">活动 ID</div><div title={selected.id} className="mt-1 truncate font-mono text-[10px]">{selected.id}</div></div>
                 </div>
                 {selected.error && <div className="rounded-md border border-athena-danger/30 bg-athena-danger/5 p-3"><div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-athena-danger"><CircleAlert className="h-3.5 w-3.5" />错误信息</div><code className="break-words text-[11px] leading-5 text-athena-text/80">{selected.error}</code></div>}
                 {selected.input && <DetailBlock title="输入" value={selected.input} />}
@@ -651,7 +734,7 @@ function snapshotStatus(value: string): EventStatus {
   return "info"
 }
 
-function projectTimeline(rawEvents: RunTimelineEvent[]): RunEvent[] {
+function projectTimeline(rawEvents: RunTimelineEvent[], run?: SessionRunSummary, now = Date.now()): RunEvent[] {
   const activities = new Map<string, RunEvent>()
   for (const event of rawEvents) {
     const payload = event.payload
@@ -675,6 +758,10 @@ function projectTimeline(rawEvents: RunTimelineEvent[]): RunEvent[] {
                   : "system"
     const status = timelineStatus(String(payload.status || event.event_type), event.event_type)
     const existing = activities.get(id)
+    const startedAt = existing?.startedAt ?? (typeof payload.started_at === "string" ? payload.started_at
+      : event.event_type.endsWith(".started") || event.event_type === "message.delta" ? event.occurred_at : undefined)
+    const completedAt = typeof payload.completed_at === "string" ? payload.completed_at
+      : /\.(completed|failed|cancelled)$/.test(event.event_type) ? event.occurred_at : undefined
     const errorValue = payload.error
     const error = typeof errorValue === "object" && errorValue !== null
       ? String((errorValue as { message?: unknown }).message || (errorValue as { code?: unknown }).code || "")
@@ -686,7 +773,9 @@ function projectTimeline(rawEvents: RunTimelineEvent[]): RunEvent[] {
       name: eventName,
       summary: String(payload.summary || error || event.event_type),
       status,
-      duration: payload.duration_ms == null ? "—" : formatDuration(Number(payload.duration_ms)),
+      duration: kind === "run" && run ? formatDuration(getRunTiming(run, rawEvents, now).executionMs)
+        : getActivityDuration(startedAt, completedAt, payload.duration_ms),
+      startedAt,
       // 活动合并后保留首次服务端事件时间；历史分页缺少 started 事件时使用服务端 started_at。
       time: existing?.time ?? formatTimestamp(
         typeof payload.started_at === "string" ? payload.started_at : event.occurred_at,
@@ -709,11 +798,6 @@ function timelineStatus(status: string, eventType: string): EventStatus {
   if (status.includes("running") || status.includes("started") || status.includes("queued")) return "running"
   if (status.includes("cancel")) return "cancelled"
   return "completed"
-}
-
-function formatDuration(value: number): string {
-  if (!Number.isFinite(value)) return "—"
-  return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`
 }
 
 function formatTimestamp(value: string): string {

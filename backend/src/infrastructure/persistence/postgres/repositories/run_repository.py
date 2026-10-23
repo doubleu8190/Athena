@@ -32,6 +32,7 @@ from domain.runs.ports import CommandQueuePort, CommandStorePort, RunLifecyclePo
 
 from ..models import (
     AgentCommandModel,
+    AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
@@ -40,6 +41,7 @@ from ..models import (
     OrchestrationOutboxModel,
     RoundTaskModel,
     RootResumeJobModel,
+    SessionModel,
     TaskExecutionModel,
     WorkerJobModel,
 )
@@ -261,7 +263,70 @@ class PostgresRunRepository(
                 .scalars()
                 .all()
             )
-        return [self._run(row) for row in rows]
+            return await self._summaries(session, list(rows))
+
+    async def list_recent(
+        self, *, limit: int, offset: int, session_id: str | None = None,
+    ) -> tuple[list[RunSummary], int]:
+        """分页读取未删除会话的运行，按提交时间从新到旧排列。
+
+        Args:
+            limit: 本页最多返回的条数。
+            offset: 跳过的记录数。
+            session_id: 可选会话筛选条件。
+
+        Returns:
+            当前页摘要及符合筛选条件的总条数。
+
+        Raises:
+            无预期业务异常；数据库异常由调用方处理。
+        """
+        conditions = [SessionModel.deleted_time.is_(None)]
+        if session_id is not None:
+            conditions.append(AgentRunModel.session_id == session_id)
+        async with self._session_factory() as session:
+            total = int((await session.execute(
+                select(func.count()).select_from(AgentRunModel)
+                .join(SessionModel, SessionModel.id == AgentRunModel.session_id)
+                .where(*conditions)
+            )).scalar_one())
+            rows = (await session.execute(
+                select(AgentRunModel)
+                .join(SessionModel, SessionModel.id == AgentRunModel.session_id)
+                .where(*conditions)
+                .order_by(AgentRunModel.created_at.desc(), AgentRunModel.run_id.desc())
+                .limit(limit).offset(offset)
+            )).scalars().all()
+            return await self._summaries(session, list(rows)), total
+
+    async def _summaries(
+        self, session: AsyncSession, rows: list[AgentRunModel],
+    ) -> list[RunSummary]:
+        """批量补齐实际执行起点，避免将排队时间计入执行耗时。
+
+        Args:
+            session: 当前只读数据库会话。
+            rows: 当前页 Run 数据库记录。
+
+        Returns:
+            包含首次开始事件时间的运行摘要；无开始事件时保留空值。
+
+        Raises:
+            无预期业务异常；数据库异常由调用方处理。
+        """
+        if not rows:
+            return []
+        # Resume 不能重置执行起点；旧记录也直接从持久化事件恢复。
+        starts = (await session.execute(
+            select(AgentEventModel.run_id, func.min(cast(AgentEventModel.occurred_at, DateTime(timezone=True))))
+            .where(
+                AgentEventModel.run_id.in_([row.run_id for row in rows]),
+                AgentEventModel.event_type.in_(("run.started", "run.resumed")),
+            )
+            .group_by(AgentEventModel.run_id)
+        )).all()
+        run_id_to_started_at = {run_id: started_at for run_id, started_at in starts}
+        return [self._run(row, run_id_to_started_at.get(row.run_id)) for row in rows]
 
     async def get(self, run_id: str) -> RunSummary | None:
         async with self._session_factory() as session:
@@ -994,7 +1059,21 @@ class PostgresRunRepository(
         )
 
     @staticmethod
-    def _run(row: AgentRunModel) -> RunSummary:
+    def _run(row: AgentRunModel, started_at: datetime | None = None) -> RunSummary:
+        """将数据库行转为摘要，并提取用户任务标题。
+
+        Args:
+            row: Run 数据库行。
+            started_at: 首次执行的服务端事件时间，未记录时为空。
+
+        Returns:
+            只读运行摘要；任务标题限制为 120 字符。
+
+        Raises:
+            ValueError: 数据库时间字符串无法解析。
+        """
+        request = _json(row.request_json, {})
+        message = request.get("message", "") if isinstance(request, dict) else ""
         return RunSummary(
             row.run_id,
             row.session_id,
@@ -1003,6 +1082,8 @@ class PostgresRunRepository(
             _json(row.error_json, None),
             datetime.fromisoformat(row.created_at),
             datetime.fromisoformat(row.updated_at),
+            started_at=started_at,
+            title=message[:120] if isinstance(message, str) else "",
         )
 
 

@@ -204,6 +204,14 @@ export interface SessionRunSummary {
   error?: unknown
   created_at?: string | null
   updated_at?: string | null
+  started_at?: string | null
+  title?: string
+}
+
+export interface RunListResponse {
+  items: SessionRunSummary[]
+  total: number
+  has_more: boolean
 }
 
 export type RunTimelinePayload = Record<string, unknown> & {

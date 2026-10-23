@@ -4,21 +4,73 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from application.runs import (
     CommandNotFoundError,
     CommandRejectedError,
     RunNotFoundError,
     RunCommandService,
+    RunQueryService,
 )
 from application.sessions import SessionNotFoundError
 from interfaces.http.dto.runs import (
     CancelCommandResponse,
     CommandStatusResponse,
+    RunListResponse,
     SubmitRunRequest,
     SubmitRunResponse,
 )
+from interfaces.http.dto.sessions import RunSummaryResponse
+
+
+def build_run_query_router(
+    query_service_factory: Callable[[], RunQueryService],
+) -> APIRouter:
+    """创建运行历史路由。
+
+    Args:
+        query_service_factory: 返回运行查询用例的工厂。
+
+    Returns:
+        提供跨会话分页查询的路由。
+
+    Raises:
+        无预期业务异常。
+    """
+    router = APIRouter(tags=["runs"])
+
+    @router.get("/runs", response_model=RunListResponse)
+    async def list_runs(
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        session_id: str | None = None,
+        runs: RunQueryService = Depends(query_service_factory),
+    ) -> RunListResponse:
+        """返回运行历史。
+
+        Args:
+            limit: 每页条数，范围 1 到 200。
+            offset: 非负分页偏移。
+            session_id: 可选的会话 ID。
+            runs: 注入的运行查询用例。
+
+        Returns:
+            运行摘要、总条数及分页标记。
+
+        Raises:
+            HTTPException: 指定会话不存在时返回 404。
+        """
+        try:
+            value = await runs.list_recent(limit=limit, offset=offset, session_id=session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="session_not_found") from exc
+        return RunListResponse(
+            items=[RunSummaryResponse.from_application(item) for item in value.items],
+            total=value.total, has_more=value.has_more,
+        )
+
+    return router
 
 
 def build_runs_router(
@@ -108,4 +160,4 @@ def build_runs_router(
     return router
 
 
-__all__ = ["build_runs_router"]
+__all__ = ["build_runs_router", "build_run_query_router"]

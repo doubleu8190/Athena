@@ -113,7 +113,7 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     claimed = await runs.claim_next_command()
     assert claimed is not None and claimed.command_id == "c-1"
     await runs.complete_command("c-1", status=CommandStatus.COMPLETED, result={"ok": True})
-    run_row = SimpleNamespace(run_id="r-1", session_id="s-1", status="created", root_thread_id="t", error_json=None, created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+    run_row = SimpleNamespace(run_id="r-1", session_id="s-1", status="created", root_thread_id="t", request_json="{}", error_json=None, created_at=NOW.isoformat(), updated_at=NOW.isoformat())
     db.results = [Result(rows=[run_row])]
     assert (await runs.list_for_session("s-1"))[0].run_id == "r-1"
     db.get_values = [run_row]

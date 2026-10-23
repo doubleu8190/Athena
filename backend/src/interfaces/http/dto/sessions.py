@@ -109,6 +109,8 @@ class RunSummaryResponse(BaseModel):
     error: object = None
     created_at: datetime | str | None = None
     updated_at: datetime | str | None = None
+    started_at: datetime | str | None = None
+    title: str = ""
 
     @classmethod
     def from_application(cls, run: ApplicationRunSummaryResponse) -> "RunSummaryResponse":
@@ -120,4 +122,6 @@ class RunSummaryResponse(BaseModel):
             error=run.error,
             created_at=run.created_at,
             updated_at=run.updated_at,
+            started_at=run.started_at,
+            title=run.title,
         )

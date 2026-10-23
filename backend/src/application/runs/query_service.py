@@ -6,7 +6,7 @@ from domain.events import EventPort
 from domain.runs import RunQueryPort, RunStatus, RunSummary
 from domain.sessions import SessionRepository
 
-from application.common.responses import RunSummaryResponse, RunTimelineEventResponse, RunTimelineResponse
+from application.common.responses import RunListResponse, RunSummaryResponse, RunTimelineEventResponse, RunTimelineResponse
 
 from application.sessions import SessionNotFoundError
 from .command_service import RunNotFoundError
@@ -29,6 +29,34 @@ class RunQueryService:
         if await self._sessions.get(session_id) is None:
             raise SessionNotFoundError(session_id)
         return [_to_response(value) for value in await self._runs.list_for_session(session_id)]
+
+    async def list_recent(
+        self, *, limit: int = 50, offset: int = 0, session_id: str | None = None,
+    ) -> RunListResponse:
+        """分页查询运行历史，可按会话筛选。
+
+        Args:
+            limit: 每页条数，范围为 1 到 200。
+            offset: 已跳过的记录数，负数按零处理。
+            session_id: 可选会话 ID；为空时查询全部未删除会话。
+
+        Returns:
+            运行摘要、总条数及是否存在下一页。
+
+        Raises:
+            SessionNotFoundError: 指定会话不存在。
+        """
+        if session_id is not None and await self._sessions.get(session_id) is None:
+            raise SessionNotFoundError(session_id)
+        offset = max(0, offset)
+        values, total = await self._runs.list_recent(
+            limit=min(max(limit, 1), 200), offset=offset, session_id=session_id,
+        )
+        return RunListResponse(
+            items=tuple(_to_response(value) for value in values),
+            total=total,
+            has_more=offset + len(values) < total,
+        )
 
     async def get(self, run_id: str) -> RunSummaryResponse:
         value = await self._runs.get(run_id)
@@ -73,6 +101,8 @@ def _to_response(value: RunSummary) -> RunSummaryResponse:
         error=value.error,
         created_at=value.created_at,
         updated_at=value.updated_at,
+        started_at=value.started_at,
+        title=value.title,
     )
 
 
@@ -95,6 +125,8 @@ def _to_timeline_run_response(value: RunSummary) -> RunSummaryResponse:
         error=safe_error,
         created_at=response.created_at,
         updated_at=response.updated_at,
+        started_at=response.started_at,
+        title=response.title,
     )
 
 

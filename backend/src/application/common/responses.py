@@ -62,6 +62,15 @@ class RunSummaryResponse:
     error: Any = None
     created_at: datetime | str | None = None
     updated_at: datetime | str | None = None
+    started_at: datetime | str | None = None
+    title: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RunListResponse:
+    items: tuple[RunSummaryResponse, ...]
+    total: int
+    has_more: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +310,6 @@ __all__ = [
     "AuthSessionResponse", "CommandEnqueueResponse", "CommandStatusResponse",
     "EventResponse", "KnowledgeBaseResponse", "LoginResponse", "McpServerResponse",
     "MemoryPageResponse", "MemoryResponse", "MessageResponse", "ProviderResponse",
-    "RetrievalCandidateResponse", "RetrievalRunResponse", "RunSummaryResponse",
+    "RetrievalCandidateResponse", "RetrievalRunResponse", "RunSummaryResponse", "RunListResponse",
     "SessionResponse", "SettingsResponse", "ToolCallResponse", "ToolResponse",
 ]

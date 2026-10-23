@@ -86,8 +86,19 @@ class RunRepository:
                 root_thread_id="thread-1",
                 created_at="2026-01-01T00:00:00+00:00",
                 updated_at="2026-01-01T00:01:00+00:00",
+                started_at="2026-01-01T00:00:55+00:00",
+                title="hello",
             )
         ]
+
+    async def list_recent(self, *, limit, offset, session_id=None):
+        values = [
+            RunSummary("run-2", "session-2", RunStatus.CANCELLED, "thread-2", created_at="2026-01-02T00:00:00Z"),
+            *(await self.list_for_session("session-1")),
+        ]
+        if session_id is not None:
+            values = [value for value in values if value.session_id == session_id]
+        return values[offset:offset + limit], len(values)
 
 
 class EventHistory:
@@ -165,3 +176,28 @@ def test_run_timeline_is_scoped_and_filters_sensitive_payload_fields() -> None:
     assert "output" not in body["events"][0]["payload"]
 
     assert client.get("/api/sessions/session-2/runs/run-1/timeline").status_code == 404
+
+
+def test_run_history_includes_all_sessions_with_pagination_and_session_filter() -> None:
+    """全局查询不能受当前会话限制，分页和会话筛选应各自正确。"""
+    client = make_client()
+    first = client.get("/api/runs?limit=1").json()
+    assert first["total"] == 2
+    assert first["has_more"] is True
+    assert first["items"][0]["session_id"] == "session-2"
+    second = client.get("/api/runs?limit=1&offset=1").json()
+    assert second["has_more"] is False
+    assert second["items"][0]["run_id"] == "run-1"
+    scoped = client.get("/api/runs?session_id=session-1").json()
+    assert scoped["total"] == 1
+    assert scoped["items"][0]["started_at"] == "2026-01-01T00:00:55+00:00"
+    assert scoped["items"][0]["title"] == "hello"
+    assert client.get("/api/runs?session_id=missing").status_code == 404
+    assert client.get("/api/runs?limit=201").status_code == 422
+    assert client.get("/api/runs?offset=-1").status_code == 422
+
+
+def test_run_timeline_preserves_execution_start_in_summary() -> None:
+    """时间线分页也必须保留摘要起点，以便缺少开始事件时计算耗时。"""
+    body = make_client(EventHistory()).get("/api/sessions/session-1/runs/run-1/timeline").json()
+    assert body["run"]["started_at"] == "2026-01-01T00:00:55+00:00"

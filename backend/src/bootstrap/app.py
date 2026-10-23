@@ -29,7 +29,7 @@ from application.files import AttachmentService
 from interfaces.http.controllers.files_controller import build_files_router
 from application.knowledge import KnowledgeBaseService
 from interfaces.http.controllers.knowledge_controller import build_knowledge_router
-from interfaces.http.controllers.runs_controller import build_runs_router
+from interfaces.http.controllers.runs_controller import build_run_query_router, build_runs_router
 from interfaces.http.controllers.orchestration_controller import build_orchestration_router
 from application.events import EventStreamService
 from interfaces.http.sse.events import build_events_router
@@ -211,6 +211,8 @@ def create_app(
         app.include_router(build_mcp_router(mcp_service_factory), prefix="/api")
     if run_command_factory is not None:
         app.include_router(build_runs_router(run_command_factory), prefix="/api")
+    if run_query_factory is not None:
+        app.include_router(build_run_query_router(run_query_factory), prefix="/api")
     if orchestration_query_factory is not None:
         app.include_router(
             build_orchestration_router(orchestration_query_factory), prefix="/api"

@@ -183,3 +183,5 @@ class RunSummary:
     error: Any = None
     created_at: datetime | str | None = None
     updated_at: datetime | str | None = None
+    started_at: datetime | str | None = None
+    title: str = ""

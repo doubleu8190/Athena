@@ -11,6 +11,7 @@ import type {
   MemoryEntry,
   MemoryListResponse,
   SessionRunSummary,
+  RunListResponse,
   RunTimelineResponse,
   RunOrchestrationSnapshot,
   PlanVersionDetail,
@@ -167,6 +168,12 @@ class ApiClient {
 
   async listSessionRuns(sessionId: string): Promise<SessionRunSummary[]> {
     return this.request<SessionRunSummary[]>(`/api/sessions/${encodeURIComponent(sessionId)}/runs`)
+  }
+
+  async listRuns(limit = 50, offset = 0, sessionId?: string): Promise<RunListResponse> {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    if (sessionId) params.set("session_id", sessionId)
+    return this.request<RunListResponse>(`/api/runs?${params.toString()}`)
   }
 
   async getRunTimeline(sessionId: string, runId: string, after = 0, limit = 200): Promise<RunTimelineResponse> {

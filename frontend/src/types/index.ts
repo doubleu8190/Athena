@@ -429,14 +429,41 @@ export interface GetMessagesResponse {
   messages: Message[]
 }
 
-export type RetrievalScope = "memory" | "knowledge" | "file"
+export type RetrievalScope = "context" | "memory" | "knowledge" | "file"
 export type RetrievalRunStatus =
   | "running"
   | "succeeded"
   | "partial"
   | "failed"
   | "timeout"
+  | "skipped"
   | "cancelled"
+
+export interface RetrievalHit {
+  channel: string
+  rank: number
+  score: number | null
+}
+
+export interface RetrievalChannelSummary {
+  channel: string
+  status: string
+  hit_count: number
+  error_message?: string | null
+}
+
+export interface RetrievalProviderSummary {
+  provider: string
+  query?: string | null
+  resource_scope: Record<string, unknown>
+  effective_params: Record<string, unknown>
+  status: RetrievalRunStatus | string
+  duration_ms: number
+  error_message?: string | null
+  channels: RetrievalChannelSummary[]
+  candidate_count: number
+  selected_count: number
+}
 
 export interface RetrievalCandidate {
   candidate_id: string
@@ -451,9 +478,13 @@ export interface RetrievalCandidate {
   native_score?: number | null
   fused_rank?: number | null
   fused_score?: number | null
+  rerank_rank?: number | null
+  rerank_score?: number | null
   filter_reason?: string | null
   selected_for_result: boolean
-  injected_into_context: boolean
+  hits: RetrievalHit[]
+  context_selected: boolean | null
+  selection_stage?: string | null
   content_preview?: string | null
   source_title?: string | null
   locator?: Record<string, unknown>
@@ -469,18 +500,22 @@ export interface RetrievalRunSummary {
   query: string
   scope: RetrievalScope | string
   status: RetrievalRunStatus | string
+  trace_status: string
+  raw_hit_count: number | null
   candidate_count: number
   selected_count: number
-  injected_count: number
+  context_count: number | null
+  selection_status: string
+  providers: RetrievalProviderSummary[]
+  config: Record<string, unknown>
+  index_generation?: string | null
+  error_message?: string | null
   duration_ms?: number | null
   created_at: string
   completed_at?: string | null
 }
 
 export interface RetrievalRunDetail extends RetrievalRunSummary {
-  config: Record<string, unknown>
-  index_generation?: string | null
-  error_message?: string | null
   candidates: RetrievalCandidate[]
 }
 

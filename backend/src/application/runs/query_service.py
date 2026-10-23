@@ -134,8 +134,8 @@ _TIMELINE_FIELDS = {
     "activity_id", "activity_type", "name", "node", "status", "summary", "duration_ms",
     "started_at", "completed_at", "parent_activity_id", "parent_run_id", "plan_id", "task_id",
     "execution_generation", "worker_run_id", "tool_call_id", "call_id", "retrieval_run_id",
-    "provider", "model", "attempt", "input_tokens", "output_tokens", "candidate_count", "result_count", "selected_count", "injected_count", "retrieval_run_id",
-    "decision", "tool_name", "title", "stage", "retryable", "code", "error",
+    "provider", "model", "attempt", "input_tokens", "output_tokens", "raw_hit_count", "candidate_count", "result_count", "selected_count", "bundle_count", "context_count", "selection_status",
+    "decision", "tool_name", "title", "stage", "retryable", "code", "error", "trace_status",
     "approval_id", "risk_level",
 }
 

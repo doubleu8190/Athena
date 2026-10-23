@@ -1,34 +1,42 @@
 """PostgreSQL retrieval trace query and recording implementation."""
+
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, cast, func, or_, select, update
+from pydantic import ValidationError
+from sqlalchemy import cast, func, select
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
 from domain.retrieval.query_ports import RetrievalPort
-
-from ..models import (
-    RetrievalCandidateModel,
-    RetrievalRunModel,
+from domain.retrieval.trace_contracts import (
+    RetrievalCandidateSelection,
+    RetrievalCandidateTrace,
+    RetrievalProviderTrace,
+    RetrievalRunTrace,
 )
+
+from ..models import RetrievalCandidateModel, RetrievalRunModel
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _json(value: Any, default: Any) -> Any:
     if value is None:
         return default
     try:
-        parsed = json.loads(value) if isinstance(value, str) else value
+        return json.loads(value) if isinstance(value, str) else value
     except (TypeError, ValueError):
         return default
-    return parsed
+
 
 class PostgresRetrievalRepository(RetrievalPort):
     def __init__(
@@ -36,99 +44,321 @@ class PostgresRetrievalRepository(RetrievalPort):
     ) -> None:
         self._session_factory = session_factory
 
-    async def list_runs(self, **filters):
-        async with self._session_factory() as session:
-            query = (
-                select(RetrievalRunModel)
-                .order_by(RetrievalRunModel.created_at.desc())
-                .offset(filters.get("offset", 0))
-                .limit(filters.get("limit", 30))
+    async def list_runs(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        scope: str | None = None,
+        status: str | None = None,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        query: str | None = None,
+        provider: str | None = None,
+    ) -> tuple[list[dict[str, object]], int]:
+        conditions = []
+        if scope:
+            conditions.append(RetrievalRunModel.scope == scope)
+        if status:
+            conditions.append(RetrievalRunModel.status == status)
+        if session_id:
+            conditions.append(RetrievalRunModel.session_id == session_id)
+        if agent_run_id:
+            conditions.append(RetrievalRunModel.agent_run_id == agent_run_id)
+        if query:
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append(
+                RetrievalRunModel.query.ilike(f"%{escaped}%", escape="\\")
             )
-            if filters.get("scope"):
-                query = query.where(RetrievalRunModel.scope == filters["scope"])
-            if filters.get("status"):
-                query = query.where(RetrievalRunModel.status == filters["status"])
-            rows = (await session.execute(query)).scalars().all()
-            total = (
-                await session.scalar(
-                    select(func.count()).select_from(RetrievalRunModel)
-                )
-                or 0
-            )
-        return [self._row(row) for row in rows], int(total)
+        if provider:
+            providers_json = cast(RetrievalRunModel.config_json, JSONB)["providers"]
+            conditions.append(providers_json.contains([{"provider": provider}]))
 
-    async def get_run(self, run_id: str):
+        async with self._session_factory() as session:
+            filtered = select(RetrievalRunModel).where(*conditions)
+            rows = (
+                await session.execute(
+                    filtered
+                    .order_by(
+                        RetrievalRunModel.created_at.desc(),
+                        RetrievalRunModel.run_id.desc(),
+                    )
+                    .offset(offset)
+                    .limit(limit)
+                )
+            ).scalars().all()
+            total = await session.scalar(
+                select(func.count()).select_from(RetrievalRunModel).where(*conditions)
+            )
+        return [self._row(row) for row in rows], int(total or 0)
+
+    async def get_run(self, run_id: str) -> dict[str, object] | None:
         async with self._session_factory() as session:
             row = await session.get(RetrievalRunModel, run_id)
-            candidates = [] if row is None else (await session.execute(
-                select(RetrievalCandidateModel)
-                .where(RetrievalCandidateModel.run_id == run_id)
-                .order_by(RetrievalCandidateModel.fused_rank, RetrievalCandidateModel.created_at)
-            )).scalars().all()
-        if row is None:
-            return None
-        value = self._row(row)
-        value["candidates"] = [self._candidate_row(candidate) for candidate in candidates]
+            if row is None:
+                return None
+            candidates = (
+                await session.execute(
+                    select(RetrievalCandidateModel)
+                    .where(RetrievalCandidateModel.run_id == run_id)
+                    .order_by(
+                        RetrievalCandidateModel.provider,
+                        RetrievalCandidateModel.fused_rank.asc().nulls_last(),
+                        RetrievalCandidateModel.source_id,
+                    )
+                )
+            ).scalars().all()
+            value = self._row(row)
+            value["candidates"] = [
+                self._candidate_row(candidate) for candidate in candidates
+            ]
         return value
 
-    async def record_context(self, *, session_id: str, agent_run_id: str | None, query: str, provider_results: list[Any], items: list[Any]) -> str:
-        """记录一次上下文召回及最终注入条目。"""
-        import uuid
-        run_id = f"retrieval_{uuid.uuid4().hex}"
+    async def record_context(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        agent_run_id: str | None,
+        message_id: str | None,
+        query: str,
+        providers: tuple[RetrievalProviderTrace, ...],
+        candidates: tuple[RetrievalCandidateTrace, ...],
+        duration_ms: float,
+        status: str,
+        error_message: str | None,
+    ) -> str:
+        """同一事务写入召回父记录和全部模块候选。"""
         now = _now()
-        candidate_count = sum(int(getattr(item, "candidate_count", 0)) for item in provider_results)
+        raw_hit_count = sum(
+            channel.hit_count for provider in providers for channel in provider.channels
+        )
+        run_trace = RetrievalRunTrace(
+            raw_hit_count=raw_hit_count,
+            providers=providers,
+            selection_status="pending",
+            context_count=None,
+        )
+        run_values = {
+            "run_id": run_id,
+            "query": query,
+            "scope": "context",
+            "status": status,
+            "config_json": run_trace.model_dump_json(),
+            "session_id": session_id,
+            "agent_run_id": agent_run_id,
+            "message_id": message_id,
+            "candidate_count": len(candidates),
+            "selected_count": sum(provider.selected_count for provider in providers),
+            "injected_count": 0,
+            "duration_ms": duration_ms,
+            "error_message": error_message,
+            "created_at": now,
+            "completed_at": now,
+        }
+        candidate_rows = [
+            self._candidate_model(run_id, candidate, now) for candidate in candidates
+        ]
         async with self._session_factory() as session:
             async with session.begin():
-                session.add(RetrievalRunModel(
-                    run_id=run_id, query=query, scope="context", status="succeeded",
-                    config_json=json.dumps({"providers": [item.provider for item in provider_results]}),
-                    session_id=session_id, agent_run_id=agent_run_id,
-                    candidate_count=max(candidate_count, len(items)), selected_count=len(items),
-                    injected_count=len(items), duration_ms=None, created_at=now, completed_at=now,
-                ))
-                for rank, item in enumerate(items, 1):
-                    session.add(RetrievalCandidateModel(
-                        candidate_id=f"candidate_{uuid.uuid4().hex}", run_id=run_id,
-                        provider=item.provider, stage="context", source_type=item.provider,
-                        source_id=item.source_id or f"inline_{rank}", fused_rank=rank,
-                        fused_score=float(item.metadata.get("score", 0.0)),
-                        selected_for_result=1, injected_into_context=1,
-                        content_preview=item.content[:500], locator_json="{}",
-                        metadata_json=json.dumps(item.metadata, ensure_ascii=False), created_at=now,
-                    ))
+                inserted = await session.execute(
+                    insert(RetrievalRunModel)
+                    .values(**run_values)
+                    .on_conflict_do_nothing(index_elements=[RetrievalRunModel.run_id])
+                    .returning(RetrievalRunModel.run_id)
+                )
+                if inserted.scalar_one_or_none() is None:
+                    return run_id
+                # 先确保父记录已写入，候选的外键才会在同一事务中生效。
+                await session.flush()
+                session.add_all(candidate_rows)
+                await session.flush()
         return run_id
 
+    async def update_context_selection(
+        self,
+        *,
+        run_id: str,
+        selections: tuple[RetrievalCandidateSelection, ...],
+    ) -> bool:
+        """回写本次新候选在 Root 最终资料窗口中的选择结果。"""
+        selection_by_key = {
+            (selection.provider, selection.source_id): selection
+            for selection in selections
+        }
+        async with self._session_factory() as session:
+            async with session.begin():
+                run = await session.get(RetrievalRunModel, run_id)
+                if run is None:
+                    return False
+                candidates = (
+                    await session.execute(
+                        select(RetrievalCandidateModel).where(
+                            RetrievalCandidateModel.run_id == run_id
+                        )
+                    )
+                ).scalars().all()
+                for row in candidates:
+                    key = (row.provider, row.source_id)
+                    selection = selection_by_key.get(key)
+                    metadata = _json(row.metadata_json, {})
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    analysis = metadata.get("retrieval_analysis", {})
+                    if not isinstance(analysis, dict):
+                        analysis = {}
+                    context_selected = bool(
+                        selection and selection.context_selected
+                    )
+                    stage = analysis.get("selection_stage")
+                    reason = row.filter_reason
+                    if selection is not None and not context_selected:
+                        stage = "window"
+                        reason = reason or selection.filter_reason or "not_in_context_window"
+                    elif context_selected:
+                        stage = "window"
+                    elif row.selected_for_result and not reason:
+                        stage = "window"
+                        reason = "not_in_context_window"
+                    analysis.update(
+                        {
+                            "context_selected": context_selected,
+                            "selection_stage": stage,
+                        }
+                    )
+                    metadata["retrieval_analysis"] = analysis
+                    row.metadata_json = json.dumps(metadata, ensure_ascii=False)
+                    row.filter_reason = reason
+                    row.injected_into_context = 0
+
+                trace_data = _json(run.config_json, {})
+                trace = RetrievalRunTrace.model_validate(trace_data)
+                context_count = sum(
+                    selection.context_selected for selection in selections
+                )
+                run.config_json = trace.model_copy(
+                    update={
+                        "selection_status": "complete",
+                        "context_count": context_count,
+                    }
+                ).model_dump_json()
+                await session.flush()
+        return True
+
     @staticmethod
-    def _row(row):
+    def _candidate_model(
+        run_id: str,
+        candidate: RetrievalCandidateTrace,
+        created_at: str,
+    ) -> RetrievalCandidateModel:
+        candidate_data = candidate.model_dump(mode="json")
+        metadata = dict(candidate_data["metadata"])
+        metadata["retrieval_analysis"] = {
+            "hits": candidate_data["hits"],
+            "context_selected": candidate_data["context_selected"],
+            "selection_stage": candidate_data["selection_stage"],
+        }
+        return RetrievalCandidateModel(
+            candidate_id=f"candidate_{uuid.uuid4().hex}",
+            run_id=run_id,
+            provider=candidate.provider,
+            stage="context",
+            source_type=candidate.source_type,
+            source_id=candidate.source_id,
+            logical_source_id=candidate.logical_source_id,
+            revision_id=candidate.revision_id,
+            native_rank=candidate.native_rank,
+            native_score=candidate.native_score,
+            fused_rank=candidate.fused_rank,
+            fused_score=candidate.fused_score,
+            rerank_rank=candidate.rerank_rank,
+            rerank_score=candidate.rerank_score,
+            filter_reason=candidate.filter_reason,
+            selected_for_result=int(candidate.selected_for_result),
+            injected_into_context=0,
+            content_preview=candidate.content_preview,
+            source_title=candidate.source_title,
+            locator_json=json.dumps(candidate_data["locator"], ensure_ascii=False),
+            metadata_json=json.dumps(metadata, ensure_ascii=False),
+            created_at=created_at,
+        )
+
+    @staticmethod
+    def _row(row: RetrievalRunModel) -> dict[str, object]:
+        config = _json(row.config_json, {})
+        trace: RetrievalRunTrace | None = None
+        try:
+            trace = RetrievalRunTrace.model_validate(config)
+        except ValidationError:
+            # 开发环境中的旧记录没有本版 JSON 结构，直接标为资料不完整。
+            trace = None
         return {
             "run_id": row.run_id,
+            "session_id": row.session_id,
+            "agent_run_id": row.agent_run_id,
+            "message_id": row.message_id,
             "query": row.query,
             "scope": row.scope,
             "status": row.status,
-            "config": _json(row.config_json, {}),
+            "trace_status": (
+                "complete"
+                if trace is not None and trace.selection_status == "complete"
+                else "incomplete"
+            ),
+            "raw_hit_count": None if trace is None else trace.raw_hit_count,
             "candidate_count": row.candidate_count,
             "selected_count": row.selected_count,
-            "injected_count": row.injected_count,
+            "context_count": None if trace is None else trace.context_count,
+            "selection_status": (
+                "incomplete" if trace is None else trace.selection_status
+            ),
+            "providers": (
+                []
+                if trace is None
+                else [provider.model_dump(mode="json") for provider in trace.providers]
+            ),
+            "config": config if isinstance(config, dict) else {},
+            "index_generation": row.index_generation,
+            "duration_ms": row.duration_ms,
+            "error_message": row.error_message,
             "created_at": row.created_at,
             "completed_at": row.completed_at,
         }
 
     @staticmethod
-    def _candidate_row(row):
+    def _candidate_row(row: RetrievalCandidateModel) -> dict[str, object]:
+        metadata = _json(row.metadata_json, {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        analysis = metadata.get("retrieval_analysis", {})
+        if not isinstance(analysis, dict):
+            analysis = {}
         return {
             "candidate_id": row.candidate_id,
+            "run_id": row.run_id,
             "provider": row.provider,
             "stage": row.stage,
             "source_type": row.source_type,
             "source_id": row.source_id,
+            "logical_source_id": row.logical_source_id,
+            "revision_id": row.revision_id,
             "native_rank": row.native_rank,
             "native_score": row.native_score,
             "fused_rank": row.fused_rank,
             "fused_score": row.fused_score,
+            "rerank_rank": row.rerank_rank,
+            "rerank_score": row.rerank_score,
             "selected_for_result": bool(row.selected_for_result),
-            "injected_into_context": bool(row.injected_into_context),
+            "filter_reason": row.filter_reason,
             "content_preview": row.content_preview,
-            "metadata": _json(row.metadata_json, {}),
+            "source_title": row.source_title,
+            "locator": _json(row.locator_json, {}),
+            "hits": analysis.get("hits", []),
+            "context_selected": analysis.get("context_selected"),
+            "selection_stage": analysis.get("selection_stage"),
+            "metadata": metadata,
+            "created_at": row.created_at,
         }
+
 
 __all__ = ["PostgresRetrievalRepository"]

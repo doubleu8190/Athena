@@ -766,12 +766,19 @@ function projectTimeline(rawEvents: RunTimelineEvent[], run?: SessionRunSummary,
     const error = typeof errorValue === "object" && errorValue !== null
       ? String((errorValue as { message?: unknown }).message || (errorValue as { code?: unknown }).code || "")
       : typeof errorValue === "string" ? errorValue : ""
+    const retrievalSummary = event.event_type === "retrieval.completed"
+      ? `${String(payload.raw_hit_count ?? "未知")} 次命中 · ${String(payload.candidate_count ?? 0)} 个候选 · ${String(payload.bundle_count ?? 0)} 条进入资料窗口`
+      : event.event_type === "retrieval.selection.completed"
+        ? `本轮最终保留 ${String(payload.context_count ?? 0)} 条 · 记录${payload.trace_status === "complete" ? "完整" : "不完整"}`
+        : event.event_type.startsWith("retrieval.provider.")
+          ? `${String(payload.candidate_count ?? 0)} 个候选 · ${String(payload.result_count ?? 0)} 条模块输出${error ? ` · ${error}` : ""}`
+          : ""
     const next: RunEvent = {
       id,
       parentId: String(payload.parent_activity_id || payload.parent_run_id || "") || undefined,
       kind,
       name: eventName,
-      summary: String(payload.summary || error || event.event_type),
+      summary: String(payload.summary || error || retrievalSummary || event.event_type),
       status,
       duration: kind === "run" && run ? formatDuration(getRunTiming(run, rawEvents, now).executionMs)
         : getActivityDuration(startedAt, completedAt, payload.duration_ms),

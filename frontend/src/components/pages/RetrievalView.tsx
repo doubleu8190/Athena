@@ -4,7 +4,6 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleDot,
-  Clock3,
   Database,
   FileSearch,
   GitBranch,
@@ -25,9 +24,10 @@ import Badge from "../ui/Badge"
 import StatCard from "../ui/StatCard"
 
 const PAGE_SIZE = 20
-type CandidateFilter = "all" | "injected" | "selected" | "filtered"
+type CandidateFilter = "all" | "selected" | "retained" | "filtered"
 
 const SCOPE_LABELS: Record<string, string> = {
+  context: "上下文",
   memory: "记忆",
   knowledge: "知识库",
   file: "附件",
@@ -40,6 +40,7 @@ function statusLabel(status: string): string {
     partial: "部分成功",
     failed: "失败",
     timeout: "超时",
+    skipped: "跳过",
     cancelled: "已取消",
   }[status] ?? status
 }
@@ -63,16 +64,17 @@ function formatScore(value: number | null | undefined): string {
 }
 
 function candidateState(candidate: RetrievalCandidate): string {
-  if (candidate.injected_into_context) return "已注入"
-  if (candidate.selected_for_result) return "已选中"
-  if (candidate.filter_reason) return "已过滤"
+  if (candidate.context_selected === true) return "本轮保留"
+  if (candidate.context_selected === false) return "未保留"
+  if (candidate.selected_for_result) return "等待确认"
+  if (candidate.filter_reason) return "已淘汰"
   return "候选"
 }
 
 function candidateStateTone(candidate: RetrievalCandidate): "default" | "success" | "warning" | "danger" | "accent" {
-  if (candidate.injected_into_context) return "success"
+  if (candidate.context_selected === true) return "success"
+  if (candidate.context_selected === false || candidate.filter_reason) return "warning"
   if (candidate.selected_for_result) return "accent"
-  if (candidate.filter_reason) return "warning"
   return "default"
 }
 
@@ -104,9 +106,11 @@ function RunListItem({
             <Badge tone={statusTone(run.status)}>{statusLabel(run.status)}</Badge>
           </div>
           <div className="text-[11px] text-athena-muted mt-1.5 flex items-center gap-2">
+            <span>{run.raw_hit_count ?? "—"} 命中</span>
+            <span>·</span>
             <span>{run.candidate_count} 候选</span>
             <span>·</span>
-            <span>{run.injected_count} 注入</span>
+            <span>{run.context_count == null ? "待确认" : `${run.context_count} 保留`}</span>
             <span className="ml-auto">{formatDateTime(run.created_at)}</span>
           </div>
         </div>
@@ -127,7 +131,7 @@ function CandidateTable({ candidates }: { candidates: RetrievalCandidate[] }) {
               <th className="px-4 py-2.5 text-xs text-athena-muted">阶段</th>
               <th className="px-4 py-2.5 text-xs text-athena-muted">来源</th>
               <th className="px-4 py-2.5 text-xs text-athena-muted">候选</th>
-              <th className="px-4 py-2.5 text-xs text-athena-muted">Native</th>
+              <th className="px-4 py-2.5 text-xs text-athena-muted">通道命中</th>
               <th className="px-4 py-2.5 text-xs text-athena-muted">Fusion</th>
               <th className="px-4 py-2.5 text-xs text-athena-muted">状态</th>
             </tr>
@@ -152,7 +156,9 @@ function CandidateTable({ candidates }: { candidates: RetrievalCandidate[] }) {
                         </span>
                       </span>
                       <span className="px-4 py-2.5 text-xs text-athena-muted">
-                        {candidate.native_rank ?? "—"} / {formatScore(candidate.native_score)}
+                        {candidate.hits.length
+                          ? candidate.hits.map((hit) => `${hit.channel} ${hit.rank} / ${formatScore(hit.score)}`).join("；")
+                          : "—"}
                       </span>
                       <span className="px-4 py-2.5 text-xs text-athena-muted">
                         {candidate.fused_rank ?? "—"} / {formatScore(candidate.fused_score)}
@@ -169,6 +175,8 @@ function CandidateTable({ candidates }: { candidates: RetrievalCandidate[] }) {
                         <div className="flex flex-wrap gap-x-4 gap-y-1 text-athena-muted">
                           <span>source_id: {candidate.source_id}</span>
                           {candidate.revision_id ? <span>revision: {candidate.revision_id}</span> : null}
+                          {candidate.selection_stage ? <span>筛选阶段: {candidate.selection_stage}</span> : null}
+                          {candidate.context_selected == null ? <span>本轮保留状态: 等待确认</span> : null}
                           {candidate.filter_reason ? <span className="text-athena-warning">原因: {candidate.filter_reason}</span> : null}
                           {candidate.locator && Object.keys(candidate.locator).length > 0 ? (
                             <span>定位: {JSON.stringify(candidate.locator)}</span>
@@ -189,21 +197,49 @@ function CandidateTable({ candidates }: { candidates: RetrievalCandidate[] }) {
 
 function RetrievalDetail({ detail }: { detail: RetrievalRunDetail }) {
   const [filter, setFilter] = useState<CandidateFilter>("all")
+  useEffect(() => setFilter("all"), [detail.run_id])
   const filteredCandidates = useMemo(() => {
-    if (filter === "injected") return detail.candidates.filter((item) => item.injected_into_context)
-    if (filter === "selected") return detail.candidates.filter((item) => item.selected_for_result && !item.injected_into_context)
-    if (filter === "filtered") return detail.candidates.filter((item) => Boolean(item.filter_reason))
+    if (filter === "selected") return detail.candidates.filter((item) => item.selected_for_result)
+    if (filter === "retained") return detail.candidates.filter((item) => item.context_selected === true)
+    if (filter === "filtered") return detail.candidates.filter((item) => item.context_selected === false || Boolean(item.filter_reason))
     return detail.candidates
   }, [detail.candidates, filter])
 
   return (
     <>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard label="命中次数" value={detail.raw_hit_count ?? "—"} icon={Search} />
         <StatCard label="候选数" value={detail.candidate_count} icon={GitBranch} />
-        <StatCard label="选中数" value={detail.selected_count} icon={CheckCircle2} />
-        <StatCard label="注入数" value={detail.injected_count} icon={Database} />
-        <StatCard label="耗时" value={detail.duration_ms == null ? "—" : `${Math.round(detail.duration_ms)} ms`} icon={Clock3} />
+        <StatCard label="模块选中" value={detail.selected_count} icon={CheckCircle2} />
+        <StatCard label="本轮保留" value={detail.context_count ?? "待确认"} icon={Database} />
       </div>
+
+      {detail.providers.length > 0 ? (
+        <div className="card p-5 space-y-3">
+          <h2 className="text-sm font-semibold">检索模块</h2>
+          <div className="space-y-2">
+            {detail.providers.map((provider) => (
+              <div key={provider.provider} className="rounded-lg border border-athena-border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{provider.provider}</span>
+                  <Badge tone={statusTone(provider.status)}>{statusLabel(provider.status)}</Badge>
+                  <span className="text-xs text-athena-muted">{Math.round(provider.duration_ms)} ms</span>
+                  <span className="ml-auto text-xs text-athena-muted">{provider.candidate_count} 候选 · {provider.selected_count} 选中</span>
+                </div>
+                {provider.query ? <div className="mt-2 text-xs text-athena-muted break-words">查询：{provider.query}</div> : null}
+                {provider.channels.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-athena-muted">
+                    {provider.channels.map((channel) => (
+                      <span key={channel.channel}>{channel.channel}：{statusLabel(channel.status)}，{channel.hit_count} 命中</span>
+                    ))}
+                  </div>
+                ) : null}
+                {provider.error_message ? <div className="mt-2 text-xs text-athena-danger">{provider.error_message}</div> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <div className="card p-5 space-y-4">
         <div className="flex items-start justify-between gap-4">
@@ -218,6 +254,9 @@ function RetrievalDetail({ detail }: { detail: RetrievalRunDetail }) {
           <div><div className="text-athena-muted">索引版本</div><div className="mt-1 font-mono break-all">{detail.index_generation ?? "—"}</div></div>
           <div><div className="text-athena-muted">创建时间</div><div className="mt-1">{formatDateTime(detail.created_at)}</div></div>
           <div><div className="text-athena-muted">会话</div><div className="mt-1 font-mono break-all">{detail.session_id ?? "—"}</div></div>
+          <div><div className="text-athena-muted">分析记录</div><div className="mt-1">{detail.trace_status === "complete" ? "完整" : "不完整"}</div></div>
+          <div><div className="text-athena-muted">最终选择</div><div className="mt-1">{detail.selection_status === "complete" ? "已确认" : "待确认"}</div></div>
+          <div><div className="text-athena-muted">总耗时</div><div className="mt-1">{detail.duration_ms == null ? "—" : `${Math.round(detail.duration_ms)} ms`}</div></div>
         </div>
         {detail.error_message ? (
           <div className="rounded-lg bg-athena-danger/10 border border-athena-danger/30 px-3 py-2 text-xs text-athena-danger">
@@ -239,14 +278,14 @@ function RetrievalDetail({ detail }: { detail: RetrievalRunDetail }) {
             <p className="text-xs text-athena-muted mt-0.5">展开候选查看内容预览、定位和淘汰原因</p>
           </div>
           <div className="flex flex-wrap gap-1">
-            {(["all", "injected", "selected", "filtered"] as CandidateFilter[]).map((value) => (
+            {(["all", "selected", "retained", "filtered"] as CandidateFilter[]).map((value) => (
               <button
                 type="button"
                 key={value}
                 onClick={() => setFilter(value)}
                 className={`px-2.5 py-1 rounded-md text-xs transition-colors ${filter === value ? "bg-athena-accent/15 text-athena-accent" : "text-athena-muted hover:bg-athena-surface"}`}
               >
-                {{ all: "全部", injected: "已注入", selected: "已选中", filtered: "已过滤" }[value]}
+                {{ all: "全部", selected: "模块选中", retained: "本轮保留", filtered: "已淘汰" }[value]}
               </button>
             ))}
           </div>
@@ -264,6 +303,7 @@ function RetrievalView() {
   const [search, setSearch] = useState("")
   const [scope, setScope] = useState("")
   const [status, setStatus] = useState("")
+  const [provider, setProvider] = useState("")
   const [page, setPage] = useState(0)
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -278,6 +318,7 @@ function RetrievalView() {
         q: search.trim() || undefined,
         scope: scope || undefined,
         status: status || undefined,
+        provider: provider || undefined,
       })
       setData(result)
       setError(null)
@@ -292,7 +333,7 @@ function RetrievalView() {
     } finally {
       setLoading(false)
     }
-  }, [page, search, scope, status, selectedRunId])
+  }, [page, search, scope, status, provider, selectedRunId])
 
   useEffect(() => {
     void loadRuns()
@@ -300,11 +341,14 @@ function RetrievalView() {
 
   useEffect(() => {
     if (!selectedRunId) return
+    let active = true
+    setDetail(null)
     setDetailLoading(true)
     apiClient.getRetrievalRun(selectedRunId)
-      .then(setDetail)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setDetailLoading(false))
+      .then((value) => { if (active) setDetail(value) })
+      .catch((e) => { if (active) setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { if (active) setDetailLoading(false) })
+    return () => { active = false }
   }, [selectedRunId])
 
   const items = data?.items ?? []
@@ -326,6 +370,7 @@ function RetrievalView() {
           <div className="grid grid-cols-2 gap-2">
             <select value={scope} onChange={(event) => { setScope(event.target.value); setPage(0) }} className="input px-2 py-1.5 text-xs">
               <option value="">全部范围</option>
+              <option value="context">上下文</option>
               <option value="memory">记忆</option>
               <option value="knowledge">知识库</option>
               <option value="file">附件</option>
@@ -336,7 +381,16 @@ function RetrievalView() {
               <option value="partial">部分成功</option>
               <option value="failed">失败</option>
               <option value="timeout">超时</option>
+              <option value="skipped">跳过</option>
+              <option value="cancelled">已取消</option>
               <option value="running">运行中</option>
+            </select>
+            <select value={provider} onChange={(event) => { setProvider(event.target.value); setPage(0) }} className="input px-2 py-1.5 text-xs col-span-2">
+              <option value="">全部模块</option>
+              <option value="memory">记忆</option>
+              <option value="file">附件</option>
+              <option value="knowledge">知识库</option>
+              <option value="graph">图谱</option>
             </select>
           </div>
           <div className="space-y-1 overflow-y-auto max-h-[calc(100vh-250px)]">
@@ -358,13 +412,13 @@ function RetrievalView() {
         </div>
       }
     >
-      <Toolbar title="召回分析" subtitle="检查向量、关键词、融合和上下文注入结果" />
+      <Toolbar title="召回分析" subtitle="查看检索命中、候选筛选和本轮资料保留情况" />
       <div className="p-6 space-y-6">
         {error ? <div className="text-sm text-athena-danger">加载失败：{error}</div> : null}
         {detailLoading ? (
           <div className="py-20 text-center text-athena-muted"><Loader2 className="w-6 h-6 animate-spin inline-block" /></div>
         ) : detail ? (
-          <RetrievalDetail detail={detail} />
+          <RetrievalDetail key={detail.run_id} detail={detail} />
         ) : (
           <div className="py-20 text-center text-athena-muted">
             <CircleDot className="w-10 h-10 mx-auto mb-3 opacity-50" />

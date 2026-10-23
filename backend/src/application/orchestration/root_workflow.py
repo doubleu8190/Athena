@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -43,6 +44,11 @@ from application.runs.context.contracts import (
     ProviderResult,
 )
 from application.runs.context.planner import InvalidContextResource
+from domain.retrieval.trace_contracts import (
+    RetrievalCandidateSelection,
+    RetrievalCandidateTrace,
+    RetrievalChannelTrace,
+)
 from .plan_materialization import (
     coerce_plan,
     plan_dict,
@@ -371,15 +377,35 @@ def _context_bundle_from_state(value: Mapping[str, Any]) -> ContextBundle:
             for item in value.get("items", ())
             if isinstance(item, Mapping)
         ),
-        provider_results=tuple(
-            ProviderResult(**item)
+        provider_results=tuple(_provider_result_from_state(item)
             for item in value.get("provider_results", ())
-            if isinstance(item, Mapping)
-        ),
+            if isinstance(item, Mapping)),
         providers_succeeded=tuple(value.get("providers_succeeded", ())),
         providers_failed=tuple(value.get("providers_failed", ())),
         truncated=bool(value.get("truncated", False)),
+        retrieval_run_id=value.get("retrieval_run_id"),
+        context_selection=tuple(
+            RetrievalCandidateSelection.model_validate(item)
+            for item in value.get("context_selection", ())
+            if isinstance(item, Mapping)
+        ),
     )
+
+
+def _provider_result_from_state(value: Mapping[str, Any]) -> ProviderResult:
+    """恢复采集服务 checkpoint 中的模块摘要和候选类型。"""
+    values = dict(value)
+    values["candidates"] = tuple(
+        RetrievalCandidateTrace.model_validate(item)
+        for item in values.get("candidates", ())
+        if isinstance(item, Mapping)
+    )
+    values["channels"] = tuple(
+        RetrievalChannelTrace.model_validate(item)
+        for item in values.get("channels", ())
+        if isinstance(item, Mapping)
+    )
+    return ProviderResult(**values)
 
 
 def _merge_context_window(
@@ -394,32 +420,82 @@ def _merge_context_window(
     selected: list[ContextItem] = []
     seen_sources: set[tuple[str, str]] = set()
     seen_content: set[tuple[str, str]] = set()
+    selections: dict[tuple[str, str], RetrievalCandidateSelection] = {}
     tokens = 0
     truncated = current.truncated
-    for item in (*current.items, *previous.items):
+    all_items = (*current.items, *previous.items)
+    for index, item in enumerate(all_items):
+        key = _context_item_identity(item)
+        is_current = index < len(current.items)
         if item.source_id:
             identity = (item.provider, item.source_id)
             if identity in seen_sources:
+                if is_current and key not in selections:
+                    selections[key] = RetrievalCandidateSelection(
+                        provider=item.provider,
+                        source_id=_selection_source_id(item),
+                        context_selected=False,
+                        filter_reason="duplicate_in_context_window",
+                    )
                 continue
             seen_sources.add(identity)
         else:
             identity = (item.provider, item.content)
             if identity in seen_content:
+                if is_current and key not in selections:
+                    selections[key] = RetrievalCandidateSelection(
+                        provider=item.provider,
+                        source_id=_selection_source_id(item),
+                        context_selected=False,
+                        filter_reason="duplicate_in_context_window",
+                    )
                 continue
             seen_content.add(identity)
         item_tokens = token_counter(item.content)
         if len(selected) >= max_items or tokens + item_tokens > max_tokens:
             truncated = True
+            if is_current:
+                selections[key] = RetrievalCandidateSelection(
+                    provider=item.provider,
+                    source_id=_selection_source_id(item),
+                    context_selected=False,
+                    filter_reason=(
+                        "context_max_items"
+                        if len(selected) >= max_items
+                        else "context_token_budget"
+                    ),
+                )
             continue
         selected.append(item)
         tokens += item_tokens
+        if is_current:
+            selections[key] = RetrievalCandidateSelection(
+                provider=item.provider,
+                source_id=_selection_source_id(item),
+                context_selected=True,
+            )
     return ContextBundle(
         items=tuple(selected),
         provider_results=current.provider_results,
         providers_succeeded=current.providers_succeeded,
         providers_failed=current.providers_failed,
         truncated=truncated,
+        retrieval_run_id=current.retrieval_run_id,
+        context_selection=tuple(selections.values()),
     )
+
+
+def _context_item_identity(item: ContextItem) -> tuple[str, str]:
+    if item.source_id:
+        return item.provider, item.source_id
+    return item.provider, item.content
+
+
+def _selection_source_id(item: ContextItem) -> str:
+    if item.source_id:
+        return item.source_id
+    digest = sha256(item.content.encode("utf-8")).hexdigest()[:24]
+    return f"inline_{digest}"
 
 
 def _filter_context_queries(
@@ -511,6 +587,7 @@ async def _retrieve_context_batch(
     bundle = await deps.context_acquisition.retrieve_context(
         session_id=str(request["session_id"]),
         run_id=str(request["run_id"]),
+        message_id=(str(request["message_id"]) if request.get("message_id") else None),
         invocation_id=uuid4().hex,
         plan=plan,
     )
@@ -713,6 +790,12 @@ class RootWorkflow(RootWorkflowPort):
             max_items=max_items,
             max_tokens=max_tokens,
             token_counter=deps.context_planner.count_tokens,
+        )
+        await deps.context_acquisition.confirm_selection(
+            run_id=new_bundle.retrieval_run_id,
+            session_id=str(request["session_id"]),
+            agent_run_id=str(request["run_id"]),
+            selections=merged_bundle.context_selection,
         )
         previous_outcomes = tuple(
             ContextQueryOutcome.model_validate(item)

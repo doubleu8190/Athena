@@ -203,6 +203,7 @@ class ApiClient {
     status?: string
     session_id?: string
     agent_run_id?: string
+    provider?: string
     q?: string
   }): Promise<RetrievalRunListResponse> {
     const params = new URLSearchParams()
@@ -212,6 +213,7 @@ class ApiClient {
     if (opts?.status) params.set("status", opts.status)
     if (opts?.session_id) params.set("session_id", opts.session_id)
     if (opts?.agent_run_id) params.set("agent_run_id", opts.agent_run_id)
+    if (opts?.provider) params.set("provider", opts.provider)
     if (opts?.q) params.set("q", opts.q)
     const query = params.toString()
     return this.request<RetrievalRunListResponse>(
@@ -219,7 +221,7 @@ class ApiClient {
     )
   }
 
-  /** 读取一次召回运行的配置、阶段候选和上下文注入状态。 */
+  /** 读取一次召回运行的配置、完整候选和本轮资料保留状态。 */
   async getRetrievalRun(runId: string): Promise<RetrievalRunDetail> {
     return this.request<RetrievalRunDetail>(
       `/api/retrieval/runs/${encodeURIComponent(runId)}`,

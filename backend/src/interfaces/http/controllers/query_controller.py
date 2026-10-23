@@ -60,6 +60,64 @@ class SettingsResponse(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class RetrievalCandidateHttpResponse(BaseModel):
+    candidate_id: str
+    run_id: str
+    provider: str
+    stage: str
+    source_type: str
+    source_id: str
+    logical_source_id: str | None = None
+    revision_id: str | None = None
+    native_rank: int | None = None
+    native_score: float | None = None
+    fused_rank: int | None = None
+    fused_score: float | None = None
+    rerank_rank: int | None = None
+    rerank_score: float | None = None
+    selected_for_result: bool
+    filter_reason: str | None = None
+    content_preview: str | None = None
+    source_title: str | None = None
+    locator: dict[str, Any]
+    hits: list[dict[str, Any]]
+    context_selected: bool | None = None
+    selection_stage: str | None = None
+    metadata: dict[str, Any]
+    created_at: str
+
+
+class RetrievalRunHttpResponse(BaseModel):
+    run_id: str
+    session_id: str | None = None
+    agent_run_id: str | None = None
+    message_id: str | None = None
+    query: str
+    scope: str
+    status: str
+    trace_status: str
+    raw_hit_count: int | None = None
+    candidate_count: int
+    selected_count: int
+    context_count: int | None = None
+    selection_status: str
+    providers: list[dict[str, Any]]
+    config: dict[str, Any]
+    index_generation: str | None = None
+    duration_ms: float | None = None
+    error_message: str | None = None
+    created_at: str
+    completed_at: str | None = None
+    candidates: list[RetrievalCandidateHttpResponse]
+
+
+class RetrievalRunListHttpResponse(BaseModel):
+    items: list[RetrievalRunHttpResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 class KnowledgeBaseResponse(BaseModel):
     id: str
     name: str
@@ -227,7 +285,9 @@ def build_query_router(
             raise HTTPException(status_code=404, detail="memory_not_found")
         return [_memory_response(value) for value in values]
 
-    @router.get("/retrieval/runs")
+    @router.get(
+        "/retrieval/runs", response_model=RetrievalRunListHttpResponse
+    )
     async def list_retrieval_runs(
         limit: int = Query(default=30, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
@@ -236,6 +296,7 @@ def build_query_router(
         session_id: str | None = None,
         agent_run_id: str | None = None,
         q: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, Any]:
         if retrieval_factory is None:
             raise HTTPException(status_code=503, detail="retrieval_query_not_configured")
@@ -247,10 +308,13 @@ def build_query_router(
             session_id=session_id,
             agent_run_id=agent_run_id,
             query=q,
+            provider=provider,
         )
         return {"items": [asdict(item) for item in items], "total": total, "limit": limit, "offset": offset}
 
-    @router.get("/retrieval/runs/{run_id}")
+    @router.get(
+        "/retrieval/runs/{run_id}", response_model=RetrievalRunHttpResponse
+    )
     async def get_retrieval_run(run_id: str) -> dict[str, Any]:
         if retrieval_factory is None:
             raise HTTPException(status_code=503, detail="retrieval_query_not_configured")

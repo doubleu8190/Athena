@@ -241,11 +241,30 @@ class MemoryPageResponse:
 
 @dataclass(frozen=True, slots=True)
 class RetrievalCandidateResponse:
-    source_id: str
-    content: str
+    candidate_id: str
+    run_id: str
     provider: str
-    score: float
-    metadata: dict[str, Any]
+    stage: str
+    source_type: str
+    source_id: str
+    logical_source_id: str | None = None
+    revision_id: str | None = None
+    native_rank: int | None = None
+    native_score: float | None = None
+    fused_rank: int | None = None
+    fused_score: float | None = None
+    rerank_rank: int | None = None
+    rerank_score: float | None = None
+    selected_for_result: bool = False
+    filter_reason: str | None = None
+    content_preview: str | None = None
+    source_title: str | None = None
+    locator: dict[str, Any] = field(default_factory=dict)
+    hits: tuple[dict[str, Any], ...] = ()
+    context_selected: bool | None = None
+    selection_stage: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +273,22 @@ class RetrievalRunResponse:
     query: str
     scope: str
     status: str
+    session_id: str | None = None
+    agent_run_id: str | None = None
+    message_id: str | None = None
+    trace_status: str = "incomplete"
+    raw_hit_count: int | None = None
+    candidate_count: int = 0
+    selected_count: int = 0
+    context_count: int | None = None
+    selection_status: str = "incomplete"
+    providers: tuple[dict[str, Any], ...] = ()
+    config: dict[str, Any] = field(default_factory=dict)
+    index_generation: str | None = None
+    duration_ms: float | None = None
+    error_message: str | None = None
+    created_at: str = ""
+    completed_at: str | None = None
     candidates: tuple[RetrievalCandidateResponse, ...] = ()
 
 

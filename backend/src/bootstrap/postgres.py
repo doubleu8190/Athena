@@ -337,6 +337,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         providers=context_providers,
         trace_repository=retrieval,
         event_publisher=events,
+        memory_repository=memory,
         token_counter=llm_provider.count_text_tokens,
     )
 

@@ -5,6 +5,12 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from domain.retrieval.trace_contracts import (
+    RetrievalCandidateSelection,
+    RetrievalCandidateTrace,
+    RetrievalChannelTrace,
+)
+
 
 class MemoryQuery(BaseModel):
     """面向长期记忆的查询。"""
@@ -126,6 +132,11 @@ class ProviderResult:
     candidate_count: int = 0
     result_count: int = 0
     duration_ms: float = 0.0
+    candidates: tuple[RetrievalCandidateTrace, ...] = ()
+    query: str | None = None
+    resource_scope: dict[str, Any] = field(default_factory=dict)
+    effective_params: dict[str, Any] = field(default_factory=dict)
+    channels: tuple[RetrievalChannelTrace, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +146,8 @@ class ContextBundle:
     providers_succeeded: tuple[str, ...] = ()
     providers_failed: tuple[str, ...] = ()
     truncated: bool = False
+    retrieval_run_id: str | None = None
+    context_selection: tuple[RetrievalCandidateSelection, ...] = ()
 
 
 __all__ = [

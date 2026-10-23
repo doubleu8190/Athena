@@ -2,11 +2,14 @@
 
 import asyncio
 import time
+from typing import Any
 
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import RunnableLambda
+from pydantic import BaseModel
 
 from infrastructure.integrations.llm.llm_provider import ConfiguredLLMProvider
 from infrastructure.integrations.llm.options import (
@@ -79,6 +82,46 @@ async def test_configured_provider_retries_using_its_options() -> None:
 
     response = await provider.invoke([HumanMessage(content="hello")])
     assert response.content == "ok"
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_configured_provider_retries_structured_output() -> None:
+    class StructuredAnswer(BaseModel):
+        answer: str
+
+    class FlakyStructuredModel(_TestChatModel):
+        calls: int = 0
+
+        def with_structured_output(
+            self,
+            schema: type[Any] | dict[str, Any],
+            *,
+            include_raw: bool = False,
+            **kwargs: Any,
+        ) -> RunnableLambda[Any, Any]:
+            assert schema is StructuredAnswer
+            assert include_raw is False
+
+            async def invoke(_messages: list[Any]) -> StructuredAnswer:
+                self.calls += 1
+                if self.calls == 1:
+                    return StructuredAnswer.model_validate(
+                        {"unexpected": "shape"}
+                    )
+                return StructuredAnswer(answer="ok")
+
+            return RunnableLambda(func=lambda _messages: None, afunc=invoke)
+
+    model = FlakyStructuredModel()
+    provider = _configured_provider(model, attempts=2)
+
+    response = await provider.invoke_structured(
+        [HumanMessage(content="hello")],
+        StructuredAnswer,
+    )
+
+    assert response == StructuredAnswer(answer="ok")
     assert model.calls == 2
 
 

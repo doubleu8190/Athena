@@ -206,6 +206,24 @@ class PlanDraft(BaseModel):
         return normalized
 
 
+class RootDecisionStructuredOutput(BaseModel):
+    """保留扁平 action 契约的 LangChain 结构化输出 schema。
+
+    各 action 的必填字段由 ``ROOT_DECISION_ADAPTER`` 再按判别联合严格校验。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action: Literal["answer", "context", "plan"]
+    kind: Literal["final", "clarification"] | None = None
+    content: str | None = None
+    queries: tuple[ContextQuery, ...] | None = None
+    goal: str | None = None
+    tasks: tuple[PlanTaskDraft, ...] | None = None
+    edges: tuple[PlanEdgeDraft, ...] | None = None
+    max_parallelism: int | None = None
+
+
 RootDecision = Annotated[Answer | ContextRequest | PlanDraft, Field(discriminator="action")]
 ROOT_DECISION_ADAPTER = TypeAdapter(RootDecision)
 
@@ -216,6 +234,7 @@ __all__ = [
     "PlanDraft",
     "PlanEdgeDraft",
     "PlanTaskDraft",
+    "RootDecisionStructuredOutput",
     "ROOT_DECISION_ADAPTER",
     "RootAgentInput",
     "RootAttachment",

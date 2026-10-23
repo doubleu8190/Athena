@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.runnables import Runnable
 
-from domain.integrations import LLMPort
+from domain.integrations import LLMPort, StructuredOutputSchema
 from shared import get_logger
 
 from .options import LLMOptions, RetryOptions, coerce_llm_options
@@ -16,15 +18,16 @@ logger = get_logger(__name__)
 
 
 async def _invoke_with_retry(
-    model: BaseChatModel,
+    model: Runnable[Any, Any],
     policy: RetryOptions,
     messages: list[Any],
     **kwargs: Any,
 ) -> Any:
     """按统一策略重试模型调用。
 
-    参数：``model``（``Any``）是底层模型，``policy``（``RetryOptions``）控制
-    重试次数、超时和间隔，``messages``（``list[Any]``）是输入消息，
+    参数：``model``（``Runnable[Any, Any]``）是模型调用对象，
+    ``policy``（``RetryOptions``）控制重试次数、超时和间隔，
+    ``messages``（``list[Any]``）是输入消息，
     ``kwargs`` 是模型调用参数。
     返回：底层模型的响应。
     异常：重试耗尽时抛出 ``RuntimeError``；取消时继续抛出
@@ -121,6 +124,31 @@ class ConfiguredLLMProvider(LLMPort):
         异常：模型加载失败或重试耗尽时抛出异常。
         """
         return await _invoke_with_retry(self._model, self._policy, messages, **kwargs)
+
+    async def invoke_structured(
+        self,
+        messages: list[Any],
+        schema: StructuredOutputSchema,
+        **kwargs: Any,
+    ) -> Any:
+        """按统一重试策略调用 LangChain 结构化输出 Runnable。
+
+        参数：``messages``（``list[Any]``）是模型输入，``schema`` 是 Pydantic
+        模型或 JSON Schema，``kwargs`` 是结构化 Runnable 的调用参数。
+        返回：Pydantic schema 对应的模型实例，或 JSON Schema 对应的字典。
+        异常：重试耗尽时抛出 ``RuntimeError``；取消时继续抛出
+        ``asyncio.CancelledError``。
+        """
+        structured_model = self._model.with_structured_output(
+            dict(schema) if isinstance(schema, Mapping) else schema,
+            include_raw=False,
+        )
+        return await _invoke_with_retry(
+            structured_model,
+            self._policy,
+            messages,
+            **kwargs,
+        )
 
     async def complete(self, messages: list[Any], **kwargs: Any) -> Any:
         """通过 ``invoke`` 完成端口要求的调用。

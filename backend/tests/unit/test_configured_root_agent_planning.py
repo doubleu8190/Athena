@@ -6,7 +6,6 @@ import json
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 from application.orchestration.agents.root_agent import (
@@ -19,6 +18,7 @@ from application.orchestration.root_decision import (
     ContextRequest,
     PlanDraft,
     RootAgentInput,
+    RootDecisionStructuredOutput,
     RootMessage,
 )
 from application.runs.context import MemoryQuery
@@ -29,9 +29,19 @@ class _SequenceLLM:
     def __init__(self, values: list[object]) -> None:
         self.values = values
         self.messages: list[list[dict[str, Any]]] = []
+        self.schemas: list[object] = []
 
     async def invoke(self, messages: list[dict[str, Any]]) -> object:
         self.messages.append(messages)
+        return self.values[len(self.messages) - 1]
+
+    async def invoke_structured(
+        self,
+        messages: list[dict[str, Any]],
+        schema: object,
+    ) -> object:
+        self.messages.append(messages)
+        self.schemas.append(schema)
         return self.values[len(self.messages) - 1]
 
 
@@ -66,31 +76,32 @@ def _plan(*, explicit_version: bool = False) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_root_agent_decodes_langchain_message_as_plan_decision() -> None:
-    llm = _SequenceLLM([AIMessage(content=json.dumps(_plan()))])
+async def test_root_agent_uses_structured_output_for_plan_decision() -> None:
+    llm = _SequenceLLM([_plan()])
 
     result = await ConfiguredRootAgent(llm).decide(_inputs())
 
     assert isinstance(result, PlanDraft)
     assert result.tasks[0].task_id == "task-1"
     assert result.tasks[0].input == {"goal": "Complete one task"}
+    assert llm.schemas == [RootDecisionStructuredOutput]
 
 
 @pytest.mark.asyncio
-async def test_root_agent_repairs_invalid_json_once() -> None:
-    llm = _SequenceLLM(["not JSON", json.dumps(_plan())])
+async def test_root_agent_repairs_invalid_decision_once() -> None:
+    llm = _SequenceLLM([{"action": "answer"}, _plan()])
 
     result = await ConfiguredRootAgent(llm).decide(_inputs())
 
     assert isinstance(result, PlanDraft)
     assert len(llm.messages) == 2
     assert "Validation error" in llm.messages[1][-1]["content"]
-    assert "not JSON" in llm.messages[1][-2]["content"]
+    assert '"action": "answer"' in llm.messages[1][-2]["content"]
 
 
 @pytest.mark.asyncio
 async def test_root_agent_raises_after_one_invalid_repair() -> None:
-    llm = _SequenceLLM(["not JSON", "still not JSON"])
+    llm = _SequenceLLM([{"action": "answer"}, {"action": "answer"}])
 
     with pytest.raises(RootDecisionFormatError, match="root_decision_invalid_after_repair"):
         await ConfiguredRootAgent(llm).decide(_inputs())

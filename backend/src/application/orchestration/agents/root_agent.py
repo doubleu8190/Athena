@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import BaseMessage
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from application.runs.context.contracts import ContextItem
 from domain.events.ports import EventPort
@@ -19,9 +19,13 @@ from domain.orchestration import (
     ReviewContext,
     ReviewDecision,
 )
+from shared import get_logger
 
 from ..protocols import RootAgent
-from .llm_activity import invoke_llm_with_activity
+from .llm_activity import (
+    invoke_llm_with_activity,
+    invoke_structured_llm_with_activity,
+)
 from ..root_decision import (
     Answer,
     PlanDraft,
@@ -29,9 +33,11 @@ from ..root_decision import (
     ROOT_DECISION_ADAPTER,
     RootAgentInput,
     RootDecision,
+    RootDecisionStructuredOutput,
     RootWorkerTool,
 )
 
+logger = get_logger(__name__)
 
 class RootDecisionFormatError(ValueError):
     """Root 输出无法修复为有效决策时抛出。"""
@@ -75,7 +81,7 @@ class ConfiguredRootAgent(RootAgent):
             Exception: 模型调用失败时由图节点处理。
         """
         messages = self._messages(inputs)
-        raw_response = await self._invoke(
+        raw_response = await self._invoke_decision(
             messages,
             request={
                 "session_id": inputs.session_id,
@@ -87,9 +93,13 @@ class ConfiguredRootAgent(RootAgent):
         try:
             return self._decode_decision(response)
         except (ValueError, ValidationError) as error:
+            logger.error("root decision 失败，准备开始重试...")
             repair_messages = [
                 *messages,
-                {"role": "assistant", "content": str(response)},
+                {
+                    "role": "assistant",
+                    "content": self._decision_response_text(response),
+                },
                 {
                     "role": "user",
                     "content": (
@@ -99,7 +109,7 @@ class ConfiguredRootAgent(RootAgent):
                     ),
                 },
             ]
-            repaired = await self._invoke(
+            repaired = await self._invoke_decision(
                 repair_messages,
                 request={
                     "session_id": inputs.session_id,
@@ -110,6 +120,7 @@ class ConfiguredRootAgent(RootAgent):
             try:
                 return self._decode_decision(self._response_content(repaired))
             except (ValueError, ValidationError) as repair_error:
+                logger.error("重试root decision 依旧失败")
                 raise RootDecisionFormatError(
                     "root_decision_invalid_after_repair"
                 ) from repair_error
@@ -203,6 +214,31 @@ class ConfiguredRootAgent(RootAgent):
             raise ValueError("root_decision_response_invalid_shape")
         return ROOT_DECISION_ADAPTER.validate_python(payload)
 
+    @staticmethod
+    def _decision_response_text(value: Any) -> str:
+        """把结构化输出序列化为修复提示中的原始 JSON 内容。"""
+        if isinstance(value, Mapping):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    async def _invoke_decision(
+        self,
+        messages: list[Any],
+        *,
+        request: Mapping[str, Any],
+        parent_activity_id: str,
+    ) -> Any:
+        """使用结构化输出 schema 执行 Root 决策，并记录模型活动。"""
+        return await invoke_structured_llm_with_activity(
+            self._llm,
+            self._events,
+            messages,
+            RootDecisionStructuredOutput,
+            session_id=str(request["session_id"]),
+            run_id=str(request["run_id"]),
+            parent_activity_id=parent_activity_id,
+        )
+
     async def _invoke(
         self,
         messages: list[Any],
@@ -239,7 +275,11 @@ class ConfiguredRootAgent(RootAgent):
         Raises:
             不主动抛出业务异常。
         """
+        if isinstance(value, BaseModel):
+            return value.model_dump(mode="json", exclude_none=True)
         if isinstance(value, Mapping):
+            if "action" in value:
+                return value
             return value.get("content", value.get("result", value))
         if isinstance(value, BaseMessage):
             return value.content

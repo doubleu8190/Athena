@@ -94,6 +94,14 @@ async def test_root_decision_receives_retrieved_memory_as_reference_context() ->
                 )
             }
 
+        async def invoke_structured(self, messages, schema, **_kwargs):
+            self.messages = messages
+            return {
+                "action": "answer",
+                "kind": "final",
+                "content": "你最喜欢吃苹果。",
+            }
+
     llm = CapturingLLM()
     agent = ConfiguredRootAgent(llm)
     inputs = RootAgentInput(

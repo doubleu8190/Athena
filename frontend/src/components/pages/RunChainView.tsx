@@ -55,22 +55,21 @@ interface RunEvent {
 const demoEvents: RunEvent[] = [
   { id: "root", kind: "run", name: "用户请求", summary: "分析销售数据并生成季度摘要", status: "completed", duration: "12.4 s", time: "14:32:08.102", detail: "运行入口接收用户请求，创建 root run 并初始化执行上下文。", input: "分析 Q3 销售数据，找出主要变化并生成一份简短摘要。", output: "任务已完成，生成季度销售摘要。" },
   { id: "prepare", parentId: "root", kind: "system", name: "prepare_request", summary: "校验输入并整理请求上下文", status: "completed", duration: "42 ms", time: "14:32:08.109", detail: "规范化用户输入，绑定会话、用户与运行上下文。", input: "raw_message, session_id", output: "normalized_request, run_context" },
-  { id: "understand", parentId: "root", kind: "llm", name: "understand_task", summary: "识别目标、约束与所需数据", status: "completed", duration: "680 ms", time: "14:32:08.151", detail: "模型将请求解析为数据分析与摘要生成两个目标。", input: "用户问题 + 会话摘要", output: "目标：分析 Q3 销售数据；约束：输出简短摘要" },
-  { id: "context", parentId: "root", kind: "retrieval", name: "acquire_context", summary: "汇总记忆、知识库和文件上下文", status: "completed", duration: "1.8 s", time: "14:32:08.831", detail: "并行检索多个上下文来源，并按相关性去重合并。", input: "query=Q3 销售数据", output: "合并 12 条上下文，丢弃 3 条低相关结果" },
-  { id: "memory", parentId: "context", kind: "retrieval", name: "memory.search", summary: "找到 2 条用户偏好", status: "completed", duration: "420 ms", time: "14:32:08.904", detail: "记忆检索命中用户偏好：摘要使用中文、优先列出同比变化。", input: "top_k=5", output: "2 条记忆，最高相关度 0.91" },
-  { id: "knowledge", parentId: "context", kind: "retrieval", name: "knowledge.search", summary: "命中 8 个销售分析文档片段", status: "completed", duration: "790 ms", time: "14:32:08.917", detail: "知识库返回销售口径说明、区域映射与季度复盘文档。", input: "collection=sales-ops", output: "8 个片段，最高相关度 0.94" },
-  { id: "files", parentId: "context", kind: "retrieval", name: "file.search", summary: "扫描 4 个附件，过滤 1 个", status: "info", duration: "510 ms", time: "14:32:08.923", detail: "附件解析后按数据日期和字段完整度过滤；1 个过期文件未加入上下文。", input: "Q3_sales.csv, region_map.csv, ...", output: "3 个文件可用；1 个文件因日期早于 Q3 被过滤" },
-  { id: "answer-call", parentId: "root", kind: "llm", name: "llm.generate", summary: "生成分析方案与任务拆分", status: "completed", duration: "3.2 s", time: "14:32:10.631", detail: "模型生成分析计划，第一次调用超时后自动重试成功。", input: "上下文 12 条 + 用户目标", output: "创建 2 个并行分析任务和 1 个汇总任务" },
-  { id: "attempt-1", parentId: "answer-call", kind: "llm", name: "attempt 1", summary: "provider request timeout", status: "retry", duration: "2.0 s", time: "14:32:10.645", detail: "provider 在超时阈值内未返回响应，调度器按策略进行一次重试。", input: "model=reasoning-large, timeout=2000ms", output: "无响应", error: "TimeoutError: provider request exceeded 2000ms" },
-  { id: "attempt-2", parentId: "answer-call", kind: "llm", name: "attempt 2", summary: "重试成功，返回结构化计划", status: "completed", duration: "1.2 s", time: "14:32:12.672", detail: "重试使用相同模型与输入，成功返回结构化计划。", input: "retry=1", output: "plan_id=pln_7f23, task_count=3" },
-  { id: "plan", parentId: "root", kind: "plan", name: "plan.execute", summary: "并行执行 2 个 Worker，等待汇总", status: "completed", duration: "5.8 s", time: "14:32:13.840", detail: "计划包含区域分析、趋势分析与最终汇总三个任务。", input: "max_parallelism=2", output: "3/3 tasks completed" },
+  { id: "decision-1", parentId: "root", kind: "llm", name: "decide_root_action", summary: "Root 判断需要补充业务口径", status: "completed", duration: "680 ms", time: "14:32:08.151", detail: "统一决策根据用户目标和系统资源目录请求记忆、知识库及当前附件检索。", input: "完整对话 + 资源目录 + 工具目录", output: "action=context；查询 Q3 收入口径与区域映射" },
+  { id: "context-1", parentId: "root", kind: "retrieval", name: "acquire_context", summary: "执行 Root 请求的有界检索", status: "completed", duration: "1.8 s", time: "14:32:08.831", detail: "只读取 Root 选择的已装配通道，并按当前资源范围检索。", input: "memory + knowledge + file queries", output: "合并 12 条上下文，保留本轮结果摘要" },
+  { id: "memory", parentId: "context-1", kind: "retrieval", name: "memory.search", summary: "找到 2 条用户偏好", status: "completed", duration: "420 ms", time: "14:32:08.904", detail: "记忆检索命中用户偏好：摘要使用中文、优先列出同比变化。", input: "query=Q3 收入口径", output: "2 条记忆，最高相关度 0.91" },
+  { id: "knowledge", parentId: "context-1", kind: "retrieval", name: "knowledge.search", summary: "命中 8 个销售分析文档片段", status: "completed", duration: "790 ms", time: "14:32:08.917", detail: "知识库返回销售口径说明、区域映射与季度复盘文档。", input: "knowledge_base=sales-ops", output: "8 个片段，最高相关度 0.94" },
+  { id: "files", parentId: "context-1", kind: "retrieval", name: "file.search", summary: "检索当前请求中的 3 个附件", status: "info", duration: "510 ms", time: "14:32:08.923", detail: "附件检索限制在本次请求已验证的文件目录内。", input: "Q3_sales.csv, region_map.csv, ...", output: "3 个文件可用" },
+  { id: "decision-2", parentId: "root", kind: "llm", name: "decide_root_action", summary: "Root 依据资料生成 Worker 计划", status: "completed", duration: "1.2 s", time: "14:32:10.631", detail: "检索后重新决策，Root 选择 Worker 工具并把分析拆成可执行任务。", input: "本轮检索结果 + 用户完整目标 + 系统工具目录", output: "action=plan；创建 2 个分析任务和 1 个汇总任务" },
+  { id: "plan", parentId: "root", kind: "plan", name: "materialize_execution_plan", summary: "校验并提交计划，启动 Worker", status: "completed", duration: "5.8 s", time: "14:32:13.840", detail: "应用层校验 DAG 与系统工具范围，再通过原子提交命令创建任务。", input: "max_parallelism=2", output: "3/3 tasks completed" },
   { id: "worker-region", parentId: "plan", kind: "worker", name: "worker.region_analysis", summary: "对比各区域销售表现", status: "completed", duration: "2.7 s", time: "14:32:13.903", detail: "Worker 对比三个区域的订单数、收入与客单价。", input: "task_id=tsk_region", output: "华东收入增长 18%；华北持平；华南下降 6%" },
   { id: "worker-trend", parentId: "plan", kind: "worker", name: "worker.trend_analysis", summary: "检测季度趋势和异常值", status: "completed", duration: "3.4 s", time: "14:32:13.911", detail: "第一次工具执行遇到限流，退避后重试并完成计算。", input: "task_id=tsk_trend", output: "收入环比 +11%；8 月有明显峰值" },
   { id: "worker-retry", parentId: "worker-trend", kind: "tool", name: "analytics.query · retry 1", summary: "rate limit，退避 600 ms 后重试", status: "retry", duration: "820 ms", time: "14:32:14.208", detail: "分析工具返回 429。执行器按重试策略等待 600ms 后再次提交。", input: "query=quarterly_revenue", output: "重试后返回 3 条聚合记录", error: "HTTP 429: rate limit exceeded" },
   { id: "approval", parentId: "root", kind: "tool", name: "approval.request", summary: "高风险导出操作等待审批", status: "approved", duration: "1.1 s", time: "14:32:18.742", detail: "导出汇总文件前触发高风险操作审批，审批人确认后继续执行。", input: "action=export_report, risk=high", output: "approved_by=operator@athena.local" },
   { id: "tool", parentId: "root", kind: "tool", name: "report.export", summary: "生成季度分析报告", status: "completed", duration: "1.4 s", time: "14:32:19.876", detail: "工具读取已授权的聚合结果并生成 CSV 报告。", input: "format=csv, rows=12", output: "Q3_sales_summary.csv · 18 KB" },
   { id: "synthesis", parentId: "plan", kind: "llm", name: "plan.synthesis", summary: "合并 Worker 结果并检查一致性", status: "completed", duration: "1.6 s", time: "14:32:21.312", detail: "汇总区域与趋势分析结果，检查统计口径并生成自然语言摘要。", input: "worker outputs: 2", output: "摘要 3 条要点，引用 4 个数据来源" },
-  { id: "response", parentId: "root", kind: "response", name: "final_response", summary: "向用户返回分析结果和报告", status: "completed", duration: "86 ms", time: "14:32:22.958", detail: "最终响应包含销售趋势、区域变化和生成文件链接。", input: "synthesis + export artifact", output: "Q3 销售收入环比增长 11%，华东区域增长最明显……" },
+  { id: "review", parentId: "plan", kind: "llm", name: "round_review", summary: "Round 完成后判断计划是否结束", status: "completed", duration: "420 ms", time: "14:32:22.872", detail: "Root 根据固定 Round 结果和剩余任务选择 FINISH；若需新一轮会提交 Revision。", input: "完整 DAG + Worker 结果 + 原始目标", output: "action=FINISH；final_status=completed" },
+  { id: "response", parentId: "root", kind: "response", name: "final_response", summary: "向用户返回分析结果和报告", status: "completed", duration: "86 ms", time: "14:32:22.958", detail: "最终响应包含销售趋势、区域变化和生成文件链接。", input: "计划结果 + 生成文件引用", output: "Q3 销售收入环比增长 11%，华东区域增长最明显……" },
 ]
 
 const demoRuns = [
@@ -123,7 +122,7 @@ function RunChainView() {
   const [viewMode, setViewMode] = useState<"timeline" | "tree">("timeline")
   const [filter, setFilter] = useState<FilterKind>("all")
   const [query, setQuery] = useState("")
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root", "context", "answer-call", "plan", "worker-trend"]))
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root", "context-1", "decision-1", "decision-2", "plan", "worker-trend"]))
   useEffect(() => {
     if (demoMode || !sessionId) {
       setRuns([])
@@ -249,13 +248,17 @@ function RunChainView() {
     }
   })
   const activeRun = runItems.find((run) => run.id === selectedRun) ?? runItems[0]
+  const mergedTimeline = new Map(
+    [...timeline, ...liveEvents.filter((event) => event.run_id === selectedRun)]
+      .map((event) => [`${event.run_id}:${event.session_seq}`, event] as const),
+  )
+  const timelineEvents = [...mergedTimeline.values()]
+    .sort((left, right) => left.session_seq - right.session_seq)
   const activities = demoMode
     ? demoEvents
     : [
         ...projectSnapshot(orchestration),
-        ...projectTimeline([
-          ...new Map([...timeline, ...liveEvents.filter((event) => event.run_id === selectedRun)].map((event) => [`${event.run_id}:${event.session_seq}`, event])).values(),
-        ]),
+        ...projectTimeline(timelineEvents),
       ]
   const selected = activities.find((event) => event.id === selectedId) ?? activities[0] ?? null
   const filteredEvents = useMemo(() => activities.filter((event) => {
@@ -684,13 +687,17 @@ function projectTimeline(rawEvents: RunTimelineEvent[]): RunEvent[] {
       summary: String(payload.summary || error || event.event_type),
       status,
       duration: payload.duration_ms == null ? "—" : formatDuration(Number(payload.duration_ms)),
-      time: formatTimestamp(event.occurred_at),
+      // 活动合并后保留首次服务端事件时间；历史分页缺少 started 事件时使用服务端 started_at。
+      time: existing?.time ?? formatTimestamp(
+        typeof payload.started_at === "string" ? payload.started_at : event.occurred_at,
+      ),
       detail: error || String(payload.summary || `事件 ${event.event_type} 已记录。`),
       error: error || undefined,
     }
     activities.set(id, existing ? { ...existing, ...next, parentId: existing.parentId || next.parentId } : next)
   }
-  return [...activities.values()].sort((left, right) => left.time.localeCompare(right.time))
+  // 输入按持久化 session_seq 排序，Map 顺序能保留活动起始顺序且不受本地日期边界影响。
+  return [...activities.values()]
 }
 
 function timelineStatus(status: string, eventType: string): EventStatus {

@@ -9,7 +9,6 @@ import pytest
 
 from domain.retrieval.fusion import RetrievalRankFusion
 from application.runs.context import ContextAcquisitionService, ContextItem, ContextPlan, ProviderResult
-from application.runs.task_understanding import TaskUnderstandingService
 from domain.retrieval import RetrievalCandidate
 from domain.retrieval.evaluation import RetrievalEvaluationCase, evaluate_rankings
 from infrastructure.integrations.file_parsers.native import NativeFileAdapterRegistry
@@ -53,13 +52,16 @@ def _context_service(providers):
 
 
 @pytest.mark.asyncio
-async def test_target_context_and_task_understanding_are_bounded():
+async def test_target_context_acquisition_is_bounded():
     async def provider(**_kwargs):
         return ProviderResult("memory", "succeeded", (ContextItem("memory", "one two", "m1"), ContextItem("memory", "three", "m2")))
-    result = await _context_service({"memory": provider}).retrieve_context(session_id="s", task=object(), plan=ContextPlan(("memory",), max_items=1, max_tokens=2))
+    result = await _context_service({"memory": provider}).retrieve_context(
+        session_id="s",
+        run_id="r",
+        invocation_id="call-1",
+        plan=ContextPlan(("memory",), max_items=1, max_tokens=2),
+    )
     assert len(result.items) == 1 and result.truncated
-    understood = await TaskUnderstandingService().understand(user_message="查找这个", attachment_refs=[{"id": "a"}])
-    assert understood.source == "fast_path" and understood.task.attachment_ids == ("a",)
 
 
 def test_target_retrieval_evaluation_and_entrypoint(monkeypatch):
@@ -232,11 +234,10 @@ def test_target_shared_helpers_and_registry_reject_unknown():
 
 
 @pytest.mark.asyncio
-async def test_configured_embedding_is_lazy_and_unknown_llm_is_rejected():
+async def test_configured_providers_reject_unsupported_provider_names():
     settings = Settings(llm_providers=[LLMProviderConfig(provider="echo", api_key="")], embedding_provider="echo", embedding_dimension=2)
-    llm = ConfiguredLLMProvider(settings)
     with pytest.raises(ValueError, match="Unsupported"):
-        await llm.invoke(["hello"])
+        ConfiguredLLMProvider(settings)
     with pytest.raises(ValueError, match="Unsupported"):
         await ConfiguredEmbeddingProvider(settings).embed_query("x")
     embedding = EmbeddingProvider(_EchoEmbedder(2), dimension=2)
@@ -253,7 +254,7 @@ def test_configured_openai_llm_counts_tokens_with_model_tokenizer():
 @pytest.mark.asyncio
 async def test_configured_llm_retries_after_lazy_model_failure():
     settings = Settings(
-        llm_providers=[LLMProviderConfig(provider="echo", api_key="")],
+        llm_providers=[LLMProviderConfig(provider="ollama", api_key="")],
         llm_retry={"max_attempts": 2, "timeout_ms": 1000},
     )
     provider = ConfiguredLLMProvider(settings)
@@ -262,7 +263,7 @@ async def test_configured_llm_retries_after_lazy_model_failure():
         def __init__(self):
             self.calls = 0
 
-        async def invoke(self, messages, **kwargs):
+        async def ainvoke(self, messages, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("temporary")
@@ -275,13 +276,14 @@ async def test_configured_llm_retries_after_lazy_model_failure():
 
 
 @pytest.mark.asyncio
-async def test_context_unknown_and_task_understanding_fallback_paths():
-    result = await _context_service({}).retrieve_context(session_id="s", task=object(), plan=ContextPlan(("missing",), max_items=2, max_tokens=2))
+async def test_context_unknown_provider_is_skipped():
+    result = await _context_service({}).retrieve_context(
+        session_id="s",
+        run_id="r",
+        invocation_id="call-2",
+        plan=ContextPlan(("missing",), max_items=2, max_tokens=2),
+    )
     assert result.providers_failed == () and result.provider_results[0].status == "skipped"
-    class BadLLM:
-        async def invoke(self, *_args, **_kwargs): raise RuntimeError("bad")
-    understood = await TaskUnderstandingService(BadLLM()).understand(user_message="hello")
-    assert understood.source == "fallback"
 
 
 @pytest.mark.asyncio
@@ -328,7 +330,7 @@ async def test_native_tool_list_shell_unknown_and_failed_command(tmp_path: Path)
 async def test_configured_provider_remote_selection(monkeypatch):
     class Chat:
         def __init__(self, **kwargs): self.kwargs = kwargs
-        async def invoke(self, messages, **kwargs): return {"provider": self.kwargs.get("model")}
+        async def ainvoke(self, messages, **kwargs): return {"provider": self.kwargs.get("model")}
     class Embeds:
         def __init__(self, **kwargs): self.kwargs = kwargs
         def embed_documents(self, values): return [[1.0] for _ in values]

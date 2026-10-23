@@ -26,7 +26,7 @@ class LLMRetrySettings(BaseModel):
     min_delay_ms: int = Field(default=2000, ge=0)
     max_delay_ms: int = Field(default=30000, ge=0)
     jitter: float = Field(default=0.1, ge=0, le=1)
-    timeout_ms: int = Field(default=60000, ge=1)
+    timeout_ms: int = Field(default=120000, ge=1)
 
 
 class Settings(BaseSettings):
@@ -144,7 +144,7 @@ class Settings(BaseSettings):
     memory_max_tokens: int = 2000
     memory_retrieval_timeout_seconds: float = Field(default=60.0, ge=0.1, le=60.0)
 
-    task_understanding_timeout_seconds: float = Field(default=120.0, ge=0.1, le=120.0)
+    root_max_turns: int = Field(default=4, ge=1, le=12)
     knowledge_context_max_files: int = Field(default=5, ge=1, le=20)
     knowledge_context_limit_per_file: int = Field(default=5, ge=1, le=20)
     knowledge_context_max_items: int = Field(default=12, ge=1, le=50)

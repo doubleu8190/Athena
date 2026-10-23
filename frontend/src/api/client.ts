@@ -6,7 +6,7 @@ import type {
   Session,
   Message,
   ApprovalRequest,
-  ApprovalLog,
+  ApprovalHistoryEntry,
   ApprovalStats,
   MemoryEntry,
   MemoryListResponse,
@@ -480,13 +480,13 @@ class ApiClient {
     session_id?: string
     limit?: number
     offset?: number
-  }): Promise<ApprovalLog[]> {
+  }): Promise<ApprovalHistoryEntry[]> {
     const params = new URLSearchParams()
     if (opts?.session_id) params.set("session_id", opts.session_id)
     if (opts?.limit != null) params.set("limit", String(opts.limit))
     if (opts?.offset != null) params.set("offset", String(opts.offset))
     const qs = params.toString()
-    return this.request<ApprovalLog[]>(
+    return this.request<ApprovalHistoryEntry[]>(
       `/api/approvals/logs${qs ? `?${qs}` : ""}`,
     )
   }

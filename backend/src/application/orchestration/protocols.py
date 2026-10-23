@@ -21,6 +21,7 @@ from domain.orchestration import (
     TaskResult,
 )
 from domain.runs import RoundCompletedResumeValue
+from .root_decision import RootAgentInput, RootDecision, RootWorkerTool
 
 if TYPE_CHECKING:
     from application.orchestration.langgraph.graphs.state import RootGraphState
@@ -29,12 +30,14 @@ if TYPE_CHECKING:
 class RootAgent(Protocol):
     """Root 工作流所需的 Agent 能力。"""
 
-    async def __call__(
-        self, *, harness_input: Mapping[str, Any]
-    ) -> Mapping[str, Any]: ...
+    async def decide(self, inputs: RootAgentInput) -> RootDecision: ...
 
     async def review(
-        self, context: ReviewContext, *, request: Mapping[str, Any]
+        self,
+        context: ReviewContext,
+        *,
+        worker_tools: tuple[RootWorkerTool, ...],
+        request: Mapping[str, Any],
     ) -> ReviewDecision: ...
 
 
@@ -133,18 +136,8 @@ class RootPlanCommandPort(Protocol):
 
 class RootWorkflowPort(Protocol):
     async def prepare_request(self, state: RootGraphState) -> dict[str, Any]: ...
-    async def understand_task(self, state: RootGraphState) -> dict[str, Any]: ...
-    async def clarification_response(
-        self, state: RootGraphState
-    ) -> dict[str, Any]: ...
-    async def plan_context(self, state: RootGraphState) -> dict[str, Any]: ...
+    async def decide_root_action(self, state: RootGraphState) -> dict[str, Any]: ...
     async def acquire_context(self, state: RootGraphState) -> dict[str, Any]: ...
-    async def prepare_harness_input(
-        self, state: RootGraphState
-    ) -> dict[str, Any]: ...
-    async def run_root_execution_loop(
-        self, state: RootGraphState
-    ) -> dict[str, Any]: ...
     async def materialize_execution_plan(
         self, state: RootGraphState
     ) -> dict[str, Any]: ...

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
 from .contracts import ContextPlan, ProviderResult
 
@@ -14,9 +14,8 @@ class ContextProvider(Protocol):
         self,
         *,
         session_id: str,
-        task: Any,
+        run_id: str,
         plan: ContextPlan,
-        run_id: str | None = None,
     ) -> ProviderResult: ...
 
 

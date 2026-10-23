@@ -17,6 +17,10 @@
 
 `athena-target-implementation.md` 是之前留下的目标架构设计稿，描述范围大于当前已接入实现；它不是本套“当前系统功能”文档的依据。`optional-none-audit.md` 是代码审计记录，也不是产品功能定义。
 
+## 专项设计与实施记录
+
+- [Root 统一决策设计与实施方案（首期收敛版）](root-unified-decision-implementation-plan.md)：记录取消独立前置分类、统一 Root 决策、按需检索和复用既有执行协议的实施范围与验收结果。历史附件扩展、访问统计修正和初始命令重投后置。
+
 ## 阅读依赖图
 
 ```mermaid

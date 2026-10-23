@@ -29,28 +29,28 @@ Root graph 节点和顺序：
 
 ```text
 prepare_request
-  -> understand_task
-       ├─ clarification_response -> assemble_final_response -> END
-       └─ plan_context -> acquire_context -> prepare_harness_input
-            -> run_root_execution_loop
-                 ├─ direct answer -> assemble_final_response -> END
-                 └─ plan -> materialize_execution_plan -> wait_for_plan_completion
-                       ├─ incomplete -> wait_for_plan_completion
-                       └─ completed -> build_plan_response
-                            -> assemble_final_response -> END
+  -> decide_root_action
+       ├─ answer -> assemble_final_response -> END
+       ├─ context -> acquire_context -> decide_root_action
+       └─ plan -> materialize_execution_plan -> wait_for_plan_completion
+                    ├─ incomplete -> wait_for_plan_completion
+                    └─ completed -> build_plan_response
+                         -> assemble_final_response -> END
 ```
 
-SubmitPlan 与 Wait 保持为独立节点，恢复等待 checkpoint 时不会重跑计划提交。普通节点发布 `node.started/node.completed/node.failed` 事件；Wait 节点直接持有 LangGraph interrupt 边界。初始 request 至少包含 session_id、run_id、message_id、user_message、attachment_ids。图状态必须 JSON 安全；Python 连接、LLM、Event、stop signal 不写入 checkpoint。
+Root 一次决策只选择回答、按需检索或计划。检索后回到 Root，最多执行 `ROOT_MAX_TURNS` 次决策；最后一轮仍要求检索时以 `root_budget_exhausted` 结束。Root 输入包含当前历史、已验证附件、真实知识库目录、系统启用的 Worker 工具目录、当前资料窗口和轻量检索结果。工具名由系统提供，用户不负责指定。
 
-### 3.1 任务理解
+SubmitPlan 与 Wait 保持为独立节点，恢复等待 checkpoint 时不会重跑计划提交。普通节点发布 `node.started/node.completed/node.failed` 事件，每次执行使用独立 invocation id；Wait 节点直接持有 LangGraph interrupt 边界。初始 request 至少包含 session_id、run_id、message_id、user_message、attachment_ids。图状态必须 JSON 安全；Python 连接、LLM、Event、stop signal 不写入 checkpoint。
 
-`TaskUnderstandingService` 先尝试 fast path；无法命中时以最近 8 条历史、附件元数据和全局知识库元数据调用结构化 LLM，目标类型 `UserTaskSpec`。输出包含 `goal/domain/mode/confidence/context_requirements/query_hints`，可生成 `clarification_question`。失败时返回 fallback：`goal=user_message[:1000]`、`domain=general`、`mode=answer`、`confidence=0`、上下文仅 conversation。附件存在时强制增加 `file` requirement，并为未提供的 query hint 使用用户消息前 500 字符。
+### 3.1 统一决策
 
-### 3.2 上下文
+`RootAgentInput` 使用明确类型传递完整消息、附件和知识库元数据、工具目录、当前 ContextBundle、检索结果摘要与剩余轮数。Agent 返回 `Answer`、`ContextRequest` 或 `PlanDraft`；结构错误最多修复一次，仍无效则让节点失败，不把协议错误转成正常答复。
 
-上下文规划按 requirement 选择 conversation、memory、knowledge、file、graph provider。Provider 并发获取结果，必须返回来源 id、标题、内容、分数、定位/检索 run id 等 JSON 项；ContextAssembler 按 token budget 合并，超限先压缩或截断。外部文件/知识库内容视为不可信参考资料，不得改变系统提示词或任务目标。
+### 3.2 按需上下文
 
-### 3.3 执行循环
+Root 可按需查询 memory、当前请求附件、系统知识库或 graph。ContextPlanner 把每条查询绑定到当前有效资源范围，ContextAcquisitionService 并发执行已装配的 Provider。检索失败、超时、零结果和不可用通道以轻量摘要返回 Root，由 Root 决定是否换查询、直接回答或结束。多轮资料合并优先保留新结果，并遵守 ContextPlan 的条目数与 token 上限；不累计多份正文。
+
+### 3.3 Worker 执行循环
 
 执行状态分为 `recoverable` 和 `derived`。recoverable 保存 messages、pending_tool_calls、tool_results、approval_batch、approval_decisions、turn_count、retry_count、max_turns、max_retries、system_prompt、tool_names、answer stream cursor；derived 保存 running/waiting_approval/interrupted、重试原因和 route。
 

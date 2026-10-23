@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
 
 from domain.retrieval import GraphContextQueryPort
 
@@ -13,7 +12,7 @@ from application.runs.context.protocols import ContextProvider
 
 
 class GraphContextProvider(ContextProvider):
-    """通过图查询端口获取与任务相关的节点内容。"""
+    """通过图查询端口获取与当前检索请求相关的节点内容。"""
 
     name = "graph"
 
@@ -32,11 +31,10 @@ class GraphContextProvider(ContextProvider):
         self,
         *,
         session_id: str,
-        task: Any,
+        run_id: str,
         plan: ContextPlan,
-        run_id: str | None = None,
     ) -> ProviderResult:
-        query = plan.graph_query or getattr(task, "goal", "")
+        query = plan.graph_query
         if not query:
             return ProviderResult(self.name, "succeeded")
         started = time.perf_counter()

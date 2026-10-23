@@ -31,13 +31,6 @@ class _PreparedWorkerToolCall:
     result_identity: str
 
 
-async def list_worker_tools(tool_service: ToolService) -> tuple[str, ...]:
-    """Return registered native tools available to Worker planning."""
-    return tuple(
-        str(item["name"]) for item in await worker_tool_manifest(tool_service)
-    )
-
-
 async def worker_tool_manifest(
     tool_service: ToolService | None,
 ) -> tuple[dict[str, Any], ...]:
@@ -433,6 +426,5 @@ def _denied(code: str, *, name: str | None = None) -> dict[str, Any]:
     return result
 __all__ = [
     "WorkerToolExecutor",
-    "list_worker_tools",
     "worker_tool_manifest",
 ]

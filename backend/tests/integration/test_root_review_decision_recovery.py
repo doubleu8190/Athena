@@ -35,6 +35,13 @@ from infrastructure.persistence.postgres.repositories import (
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 
 
+class EmptyToolService:
+    """为 Review 提供空的当前 Worker 工具目录。"""
+
+    async def list_tools(self):
+        return []
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> None:
@@ -217,6 +224,7 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
                 review_context_repository=ReviewContexts(),
                 orchestration_command_handler=commands,
                 agent=agent,
+                tool_service=EmptyToolService(),
             )
         )
         state = {

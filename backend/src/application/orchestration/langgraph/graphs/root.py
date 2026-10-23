@@ -7,10 +7,12 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from langgraph.graph.state import CompiledStateGraph, RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
+from pydantic import ValidationError
 
 from application.orchestration.dependencies import RootWorkflowDependencies
 from application.orchestration.protocols import RootWorkflowPort
@@ -27,6 +29,7 @@ async def _publish(
     state: Mapping[str, Any],
     *,
     node_name: str,
+    invocation_id: str,
     started_at: datetime | None = None,
     duration_ms: int | None = None,
     error: str | None = None,
@@ -43,12 +46,16 @@ async def _publish(
                 run_id=request.get("run_id"),
                 message_id=request.get("message_id"),
                 payload={
-                    "activity_id": f"node:{request.get('run_id', '')}:{node_name}",
+                    "activity_id": f"node:{request.get('run_id', '')}:{invocation_id}",
+                    "invocation_id": invocation_id,
                     "activity_type": "node",
                     "parent_activity_id": f"run:{request.get('run_id', '')}",
                     "node": node_name,
                     "name": node_name,
-                    "status": "running" if event_type == "node.started" else "failed" if event_type == "node.failed" else "completed",
+                    "status": {
+                        "node.started": "running",
+                        "node.failed": "failed",
+                    }.get(event_type, "completed"),
                     **({"started_at": started_at.isoformat()} if started_at else {}),
                     **({"completed_at": datetime.now(timezone.utc).isoformat(), "duration_ms": duration_ms} if duration_ms is not None else {}),
                     **({"error": {"code": "node_failed", "message": error, "stage": node_name}} if error else {}),
@@ -65,13 +72,30 @@ def _node(
     dependencies: RootWorkflowDependencies,
 ):
     async def wrapped(state: RootGraphState) -> dict[str, Any]:
+        invocation_id = uuid4().hex
         started_at = datetime.now(timezone.utc)
         started_clock = perf_counter()
-        await _publish(dependencies, "node.started", state, node_name=name, started_at=started_at)
+        await _publish(
+            dependencies,
+            "node.started",
+            state,
+            node_name=name,
+            invocation_id=invocation_id,
+            started_at=started_at,
+        )
         try:
             value = await handler(state)
         except Exception as exc:
-            await _publish(dependencies, "node.failed", state, node_name=name, started_at=started_at, duration_ms=int((perf_counter() - started_clock) * 1000), error=type(exc).__name__)
+            await _publish(
+                dependencies,
+                "node.failed",
+                state,
+                node_name=name,
+                invocation_id=invocation_id,
+                started_at=started_at,
+                duration_ms=int((perf_counter() - started_clock) * 1000),
+                error=type(exc).__name__,
+            )
             return {
                 "status": "failed",
                 "error": {
@@ -80,37 +104,41 @@ def _node(
                     "message": str(exc) or type(exc).__name__,
                 },
             }
-        await _publish(dependencies, "node.completed", state, node_name=name, started_at=started_at, duration_ms=int((perf_counter() - started_clock) * 1000))
+        await _publish(
+            dependencies,
+            "node.completed",
+            state,
+            node_name=name,
+            invocation_id=invocation_id,
+            started_at=started_at,
+            duration_ms=int((perf_counter() - started_clock) * 1000),
+        )
         return value or {}
 
     wrapped.__name__ = name
     return wrapped
 
 
-def _route_after_understanding(state: RootGraphState) -> str:
-    understanding = state.get("understanding", {})
-    task_spec = understanding.get("task_spec", {})
-    return (
-        "clarification_response"
-        if (
-            understanding.get("clarification_question")
-            or understanding.get("requires_clarification")
-            or task_spec.get("clarification_question")
-            or task_spec.get("requires_clarification")
-        )
-        else "plan_context"
-    )
+def _route_after_request(state: RootGraphState) -> str:
+    """请求准备失败时直接终止；成功时进入统一 Root 决策。"""
+    return "assemble_final_response" if state.get("error") else "decide_root_action"
 
 
-def _route_after_agent(state: RootGraphState) -> str:
+def _route_after_context(state: RootGraphState) -> str:
+    """不可恢复的采集错误终止；可反馈给 Root 的 Provider 结果继续决策。"""
+    return "assemble_final_response" if state.get("error") else "decide_root_action"
+
+
+def _route_after_decision(state: RootGraphState) -> str:
+    """按合法 action 分流，不再根据 mode 或返回字典猜测意图。"""
     if state.get("error"):
         return "assemble_final_response"
-    route = state.get("next_route") or state.get("execution", {}).get("route")
-    return (
-        "materialize_execution_plan"
-        if route in {"materialize_execution_plan", "plan_requested", "plan"}
-        else "assemble_final_response"
-    )
+    action = state.get("root_decision", {}).get("action")
+    return {
+        "answer": "assemble_final_response",
+        "context": "acquire_context",
+        "plan": "materialize_execution_plan",
+    }.get(str(action), "assemble_final_response")
 
 
 def _route_after_wait(state: RootGraphState) -> str:
@@ -170,12 +198,8 @@ def build_root_graph(
     """Compile a graph whose nodes delegate business work to an application port."""
     handlers = {
         "prepare_request": workflow.prepare_request,
-        "understand_task": workflow.understand_task,
-        "clarification_response": workflow.clarification_response,
-        "plan_context": workflow.plan_context,
+        "decide_root_action": workflow.decide_root_action,
         "acquire_context": workflow.acquire_context,
-        "prepare_harness_input": workflow.prepare_harness_input,
-        "run_root_execution_loop": workflow.run_root_execution_loop,
         "materialize_execution_plan": workflow.materialize_execution_plan,
         "build_plan_response": workflow.build_plan_response,
         "assemble_final_response": workflow.assemble_final_response,
@@ -189,25 +213,29 @@ def build_root_graph(
         "wait_for_plan_completion", _wait_for_plan_completion_node(workflow)
     )
     graph.add_edge(START, "prepare_request")
-    graph.add_edge("prepare_request", "understand_task")
     graph.add_conditional_edges(
-        "understand_task",
-        _route_after_understanding,
+        "prepare_request",
+        _route_after_request,
         {
-            "clarification_response": "clarification_response",
-            "plan_context": "plan_context",
+            "decide_root_action": "decide_root_action",
+            "assemble_final_response": "assemble_final_response",
         },
     )
-    graph.add_edge("clarification_response", "assemble_final_response")
-    graph.add_edge("plan_context", "acquire_context")
-    graph.add_edge("acquire_context", "prepare_harness_input")
-    graph.add_edge("prepare_harness_input", "run_root_execution_loop")
     graph.add_conditional_edges(
-        "run_root_execution_loop",
-        _route_after_agent,
+        "decide_root_action",
+        _route_after_decision,
         {
             "assemble_final_response": "assemble_final_response",
+            "acquire_context": "acquire_context",
             "materialize_execution_plan": "materialize_execution_plan",
+        },
+    )
+    graph.add_conditional_edges(
+        "acquire_context",
+        _route_after_context,
+        {
+            "assemble_final_response": "assemble_final_response",
+            "decide_root_action": "decide_root_action",
         },
     )
     graph.add_conditional_edges(
@@ -245,9 +273,15 @@ async def invoke_root_graph(
     user_message: str = "",
     message_id: str = "",
     attachment_ids: list[str] | None = None,
-    resume_value: RoundCompletedResumeValue | None = None,
-    stop_signal: asyncio.Event| None = None,
+    resume_value: RoundCompletedResumeValue | Mapping[str, Any] | None = None,
+    stop_signal: asyncio.Event | None = None,
 ) -> Mapping | dict[str, str] | Any:
+    """启动 Root 图，或用已验证的 Round 身份恢复持久化 checkpoint。
+
+    参数：``resume_value`` 可为具体模型，或从命令存储读出的同构 JSON 对象。
+    返回：图执行状态；等待 Round 时包含 checkpoint 与 interrupt 信息。
+    异常：Run 身份缺失、恢复内容不符合当前契约或图执行失败时抛出。
+    """
     if not run_id:
         raise ValueError("run_id is required")
     state: RootGraphState = {
@@ -259,12 +293,22 @@ async def invoke_root_graph(
             "attachment_ids": list(attachment_ids or []),
         }
     }
-    config: RunnableConfig = {"configurable": {"thread_id": f"run:{run_id}"}}
+    config: RunnableConfig = {
+        "configurable": {"thread_id": f"run:{run_id}"},
+        "recursion_limit": 128,
+    }
 
     if stop_signal is not None:
         config["configurable"]["stop_signal"] = stop_signal
     # 恢复中断流程
     if resume_value is not None:
+        if isinstance(resume_value, Mapping):
+            try:
+                resume_value = RoundCompletedResumeValue.model_validate(resume_value)
+            except ValidationError as error:
+                raise RuntimeError("root_resume_value_type_invalid") from error
+        elif not isinstance(resume_value, RoundCompletedResumeValue):
+            raise RuntimeError("root_resume_value_type_invalid")
         if resume_value.type != "round_completed":
             raise RuntimeError("root_resume_value_type_invalid")
         logger.info(f"Resuming root graph for run {run_id} from round {resume_value.round_id}")

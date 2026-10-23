@@ -1,5 +1,7 @@
 # Athena 意图识别完整流程
 
+> 历史设计说明：生产执行链已由 Root 统一决策方案替代。当前流程见 [Athena 运行时与数据底座](athena-runtime.md) 和 [Root 统一决策实施方案](root-unified-decision-implementation-plan.md)；本文仅用于追溯旧实现。
+
 > 分析对象：当前工作区 `/Users/udouble/Documents/code/Athena`
 >
 > 相关实现：`athena/runtime/task_understanding/`、`athena/runtime/context/`、`athena/runtime/nodes/`、`athena/runtime/agent_graph.py`、`athena/runtime/langgraph_runtime.py`、`prompt/task_understanding.md`

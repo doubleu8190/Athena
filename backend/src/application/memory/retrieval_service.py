@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
 from typing import Any
 
-from domain.memory import MemoryRepositoryPort, MemorySearchRequest, MemoryVectorSearchPort
+from domain.memory import (
+    MemoryRepositoryPort,
+    MemorySearchRequest,
+    MemoryStatus,
+    MemoryVectorSearchPort,
+)
 from domain.retrieval.fusion import RetrievalRankFusion
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
@@ -44,16 +48,11 @@ class MemoryContextProvider(ContextProvider):
         self,
         *,
         session_id: str,
-        task: Any,
+        run_id: str,
         plan: ContextPlan,
-        run_id: str | None = None,
     ) -> ProviderResult:
         started = time.perf_counter()
-        query = plan.memory_query or (
-            str(task.get("goal", ""))
-            if isinstance(task, Mapping)
-            else str(getattr(task, "goal", ""))
-        )
+        query = plan.memory_query
         if not query:
             return ProviderResult(self.name, "succeeded")
         try:
@@ -78,8 +77,7 @@ class MemoryContextProvider(ContextProvider):
                     record.metadata,
                 )
                 for record in keyword
-                if not getattr(record, "status", None)
-                or str(record.status) == "active"
+                if record.status == MemoryStatus.ACTIVE
             ]
             vector_candidates = [
                 self._candidate(

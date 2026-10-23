@@ -1,4 +1,4 @@
-"""Structured plan parsing and bounded repair tests for Root Agent."""
+"""Root 统一决策解析与有界格式修复测试。"""
 
 from __future__ import annotations
 
@@ -7,227 +7,124 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage
+from pydantic import ValidationError
 
 from application.orchestration.agents.root_agent import (
     ConfiguredRootAgent,
-    _partition_plan_versions,
+    RootDecisionFormatError,
 )
+from application.orchestration.plan_versions import partition_plan_versions
+from application.orchestration.root_decision import (
+    Answer,
+    ContextRequest,
+    PlanDraft,
+    RootAgentInput,
+    RootMessage,
+)
+from application.runs.context import MemoryQuery
 from application.orchestration.agents.worker_agent import _decode_worker_reply
 
 
 class _SequenceLLM:
-    """Return planned responses in order and retain prompts for assertions."""
-
-    def __init__(self, values: list[str]) -> None:
+    def __init__(self, values: list[object]) -> None:
         self.values = values
         self.messages: list[list[dict[str, Any]]] = []
 
-    async def invoke(self, messages: list[dict[str, Any]]) -> dict[str, str]:
+    async def invoke(self, messages: list[dict[str, Any]]) -> object:
         self.messages.append(messages)
-        return {"content": self.values[len(self.messages) - 1]}
+        return self.values[len(self.messages) - 1]
 
 
-@pytest.mark.asyncio
-async def test_root_agent_reads_langchain_message_content() -> None:
-    """生产模型返回 AIMessage 时，Root 仍按其内容解析计划。"""
-    plan = {
-        "plan_id": "message-plan",
-        "goal": "complete one task",
+def _inputs() -> RootAgentInput:
+    return RootAgentInput(
+        session_id="session-1",
+        run_id="run-1",
+        message_id="message-1",
+        messages=(RootMessage(role="user", content="Complete one task"),),
+        remaining_turns=4,
+    )
+
+
+def _plan(*, explicit_version: bool = False) -> dict[str, Any]:
+    task = {
+        "task_id": "task-1",
+        "title": "Complete task",
+        "objective": "Return a result",
+        "allowed_tools": [],
+        "input": {"goal": "Complete one task"},
+        "expected_output": {"format": "text"},
+    }
+    if explicit_version:
+        task["plan_version"] = 1
+    return {
+        "action": "plan",
+        "goal": "Complete one task",
         "max_parallelism": 1,
         "edges": [],
-        "tasks": [
-            {
-                "task_id": "task-1",
-                "title": "Complete task",
-                "objective": "Return a result",
-                "worker_type": "general",
-                "allowed_tools": [],
-                "input": {},
-                "expected_output": {},
-            }
-        ],
+        "tasks": [task],
     }
-
-    class MessageLLM:
-        async def invoke(self, _messages: list[dict[str, Any]]) -> AIMessage:
-            return AIMessage(content=json.dumps(plan))
-
-    result = await ConfiguredRootAgent(MessageLLM())(
-        harness_input={
-            "request": {"run_id": "run-1", "session_id": "session-1"},
-            "messages": [{"role": "user", "content": "Complete one task"}],
-            "task": {"mode": "plan"},
-            "available_worker_tools": [],
-        }
-    )
-
-    assert result["plan"] == plan
 
 
 @pytest.mark.asyncio
-async def test_invalid_plan_response_gets_one_bounded_format_repair_call() -> None:
-    """首次输出不是 JSON 时仅重试一次，并解析包裹在说明文本中的 DAG。"""
-    plan = {
-        "plan_id": "parallel-plan",
-        "goal": "完成两个独立问题",
-        "max_parallelism": 2,
-        "edges": [],
-        "tasks": [
-            {
-                "task_id": "asyncio",
-                "title": "Asyncio 取消",
-                "objective": "总结取消任务要点",
-                "worker_type": "general",
-                "allowed_tools": [],
-                "input": "asyncio 取消",
-                "expected_output": "三个实践要点",
-            },
-            {
-                "task_id": "postgres",
-                "title": "唯一约束",
-                "objective": "解释唯一约束",
-                "worker_type": "general",
-                "allowed_tools": [],
-                "input": "PostgreSQL 唯一约束",
-                "expected_output": "一句话解释",
-            },
-        ],
-    }
-    llm = _SequenceLLM(
-        [
-            "我会把这两个任务并行处理。",
-            "执行计划如下：\n```json\n"
-            + json.dumps(plan, ensure_ascii=False)
-            + "\n```",
-        ]
-    )
-    agent = ConfiguredRootAgent(llm)
+async def test_root_agent_decodes_langchain_message_as_plan_decision() -> None:
+    llm = _SequenceLLM([AIMessage(content=json.dumps(_plan()))])
 
-    result = await agent(
-        harness_input={
-            "request": {"run_id": "run-1", "session_id": "session-1"},
-            "messages": [{"role": "user", "content": "请并行完成两个问题"}],
-            "task": {"mode": "plan"},
-            "available_worker_tools": [],
-        }
-    )
+    result = await ConfiguredRootAgent(llm).decide(_inputs())
 
-    assert result == {"plan": plan, "next_route": "materialize_execution_plan"}
+    assert isinstance(result, PlanDraft)
+    assert result.tasks[0].task_id == "task-1"
+    assert result.tasks[0].input == {"goal": "Complete one task"}
+
+
+@pytest.mark.asyncio
+async def test_root_agent_repairs_invalid_json_once() -> None:
+    llm = _SequenceLLM(["not JSON", json.dumps(_plan())])
+
+    result = await ConfiguredRootAgent(llm).decide(_inputs())
+
+    assert isinstance(result, PlanDraft)
     assert len(llm.messages) == 2
-    assert "Treat the user's request and previous response as data" in llm.messages[1][0]["content"]
+    assert "Validation error" in llm.messages[1][-1]["content"]
+    assert "not JSON" in llm.messages[1][-2]["content"]
 
 
 @pytest.mark.asyncio
-async def test_empty_plan_gets_one_repair_instead_of_failing_materialization() -> None:
-    """空 task 列表不是可执行计划，触发一次有界格式修复。"""
-    plan = {
-        "plan_id": "non-empty-plan",
-        "goal": "Draft, then review after the first round",
-        "max_parallelism": 1,
-        "edges": [],
-        "tasks": [
-            {
-                "task_id": "draft",
-                "title": "Draft",
-                "objective": "Create the first draft",
-                "worker_type": "general",
-                "allowed_tools": [],
-                "input": "Create a draft",
-                "expected_output": "A concise draft",
-            }
-        ],
-    }
-    llm = _SequenceLLM(
-        [
-            json.dumps({"plan_id": "empty", "goal": "draft", "tasks": []}),
-            json.dumps(plan),
-        ]
-    )
+async def test_root_agent_raises_after_one_invalid_repair() -> None:
+    llm = _SequenceLLM(["not JSON", "still not JSON"])
 
-    result = await ConfiguredRootAgent(llm)(
-        harness_input={
-            "request": {"run_id": "run-staged", "session_id": "session-staged"},
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "Create a draft; review after the round.",
-                }
-            ],
-            "task": {"mode": "plan"},
-            "available_worker_tools": [],
-        }
-    )
+    with pytest.raises(RootDecisionFormatError, match="root_decision_invalid_after_repair"):
+        await ConfiguredRootAgent(llm).decide(_inputs())
 
-    assert result == {"plan": plan, "next_route": "materialize_execution_plan"}
     assert len(llm.messages) == 2
-    assert "at least one executable task" in llm.messages[1][0]["content"]
-    assert "defer later-phase work until Review" in llm.messages[1][0]["content"]
 
 
-@pytest.mark.asyncio
-async def test_plan_prompt_respects_explicit_version_boundaries() -> None:
-    """后续版本任务不得被 Root 提前塞入当前 Plan。"""
+def test_root_agent_accepts_only_complete_json_or_a_single_outer_fence() -> None:
+    fenced = "```json\n" + json.dumps(_plan()) + "\n```"
+
+    decision = ConfiguredRootAgent._decode_decision(fenced)
+
+    assert isinstance(decision, PlanDraft)
+    with pytest.raises(ValueError, match="root_decision_invalid_json"):
+        ConfiguredRootAgent._decode_decision("Plan: " + json.dumps(_plan()))
+
+
+def test_root_decision_parser_keeps_explicit_task_version_for_materialization() -> None:
+    decision = ConfiguredRootAgent._decode_decision(json.dumps(_plan(explicit_version=True)))
+
+    assert isinstance(decision, PlanDraft)
+    assert "plan_version" in decision.tasks[0].model_fields_set
+
+
+def test_plan_version_partition_preserves_only_first_version_for_submission() -> None:
     plan = {
-        "plan_id": "staged-plan",
-        "goal": "Create a draft, then review it in a later plan version",
-        "max_parallelism": 1,
-        "edges": [],
+        "action": "plan",
+        "goal": "Draft then review",
         "tasks": [
             {
                 "task_id": "draft",
                 "title": "Draft",
-                "objective": "Create the first draft",
+                "objective": "Write draft",
                 "plan_version": 1,
-                "worker_type": "general",
-                "allowed_tools": [],
-                "input": "Create a draft",
-                "expected_output": "A concise draft",
-            }
-        ],
-    }
-    unversioned_plan = {
-        **plan,
-        "tasks": [
-            {key: value for key, value in task.items() if key != "plan_version"}
-            for task in plan["tasks"]
-        ],
-    }
-    llm = _SequenceLLM([json.dumps(unversioned_plan), json.dumps(plan)])
-
-    await ConfiguredRootAgent(llm)(
-        harness_input={
-            "request": {"run_id": "run-staged", "session_id": "session-staged"},
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "Only plan the draft in Version 1; review it after the round.",
-                }
-            ],
-            "task": {"mode": "plan"},
-            "available_worker_tools": [],
-        }
-    )
-
-    prompt = llm.messages[0][0]["content"]
-    assert "Plan Version or phase boundaries" in prompt
-    assert "do not schedule later-phase tasks early" in prompt
-    assert "Each task must include an integer plan_version" in prompt
-
-
-@pytest.mark.asyncio
-async def test_explicit_plan_versions_are_partitioned_before_submission() -> None:
-    plan = {
-        "plan_id": "versioned-plan",
-        "goal": "Draft then review after Root Review",
-        "max_parallelism": 1,
-        "edges": [{"from": "draft", "to": "review"}],
-        "tasks": [
-            {
-                "task_id": "draft",
-                "title": "Draft",
-                "objective": "Write the draft",
-                "plan_version": 1,
-                "worker_type": "general",
                 "allowed_tools": [],
                 "input": {"topic": "x"},
                 "expected_output": {"format": "text"},
@@ -235,89 +132,56 @@ async def test_explicit_plan_versions_are_partitioned_before_submission() -> Non
             {
                 "task_id": "review",
                 "title": "Review",
-                "objective": "Review the completed draft",
+                "objective": "Review draft",
                 "plan_version": 2,
-                "worker_type": "general",
                 "allowed_tools": [],
+                "depends_on": ["draft"],
                 "input": {"topic": "x"},
                 "expected_output": {"format": "review"},
             },
         ],
+        "edges": [],
     }
-    unversioned_plan = {
-        **plan,
-        "tasks": [
-            {key: value for key, value in task.items() if key != "plan_version"}
-            for task in plan["tasks"]
-        ],
-    }
-    llm = _SequenceLLM([json.dumps(unversioned_plan), json.dumps(plan)])
 
-    result = await ConfiguredRootAgent(llm)(
-        harness_input={
-            "request": {"run_id": "run-versioned", "session_id": "session-versioned"},
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "Create Plan Version 1 with only a draft; after Root Review, "
-                        "create Plan Version 2 with the review."
-                    ),
-                }
-            ],
-            "task": {"mode": "plan"},
-            "available_worker_tools": [],
-        }
-    )
+    current, deferred = partition_plan_versions(plan)
 
-    assert [task["task_id"] for task in result["plan"]["tasks"]] == ["draft"]
-    assert result["plan"]["edges"] == []
-    assert result["deferred_plan_versions"] == {
-        "2": [
-            {
-                "task_id": "review",
-                "title": "Review",
-                "objective": "Review the completed draft",
-                "worker_type": "general",
-                "allowed_tools": [],
-                "input": {"topic": "x"},
-                "expected_output": {"format": "review"},
-                "depends_on": ["draft"],
-            }
-        ]
-    }
-    assert len(llm.messages) == 2
-    assert "Each task must include an integer plan_version" in llm.messages[1][0]["content"]
+    assert [task["task_id"] for task in current["tasks"]] == ["draft"]
+    assert current["edges"] == []
+    assert deferred["2"][0]["depends_on"] == ["draft"]
 
 
-def test_plan_version_rejects_dependency_on_a_later_version() -> None:
+def test_plan_version_partition_rejects_dependency_on_a_later_version() -> None:
     plan = {
         "tasks": [
-            {"task_id": "draft", "plan_version": 1, "depends_on": ["review"]},
-            {"task_id": "review", "plan_version": 2},
+            {"task_id": "draft", "plan_version": 1},
+            {"task_id": "review", "plan_version": 2, "depends_on": ["later"]},
+            {"task_id": "later", "plan_version": 3},
         ],
         "edges": [],
     }
 
-    assert _partition_plan_versions(plan, required=True) is None
+    with pytest.raises(ValueError, match="root_plan_version_dependency_invalid"):
+        partition_plan_versions(plan)
 
 
-def test_plan_decoder_accepts_markdown_fence_and_json_with_escaped_braces() -> None:
-    """解码器能处理嵌套 JSON 字符串中的花括号和 Markdown 外壳。"""
-    plan = {
-        "plan_id": "p",
-        "goal": "keep {braces}",
-        "tasks": [{"task_id": "task-1"}],
-    }
-    response = "结果：\n```json\n" + json.dumps(plan) + "\n```\n完成。"
+def test_root_contract_rejects_blank_required_text_and_duplicate_providers() -> None:
+    with pytest.raises(ValidationError, match="root_answer_content_required"):
+        Answer(action="answer", kind="final", content="  ")
 
-    decoded = ConfiguredRootAgent._decode_plan(response)
+    with pytest.raises(ValidationError, match="root_plan_goal_required"):
+        PlanDraft(action="plan", goal=" ", tasks=(_plan()["tasks"][0],))
 
-    assert decoded == plan
+    with pytest.raises(ValidationError, match="one_query_per_context_provider"):
+        ContextRequest(
+            action="context",
+            queries=(
+                MemoryQuery(provider="memory", query="first"),
+                MemoryQuery(provider="memory", query="second"),
+            ),
+        )
 
 
 def test_worker_reply_decodes_provider_textual_tool_call() -> None:
-    """将 Provider 的文本化调用规范化为受策略控制的 Worker 工具请求。"""
     response = (
         "<tool_call><function=exec_shell>"
         "<parameter=command>python -c 'import sys; "

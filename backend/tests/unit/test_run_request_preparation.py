@@ -165,7 +165,7 @@ async def test_load_history_excludes_current_message() -> None:
     service, _, _ = make_service(messages=Messages(values))
 
     history = await service.load_history(
-        session_id="session-1", request={"message_id": "current"}
+        session_id="session-1", exclude_message_id="current"
     )
 
     assert [item["message_id"] for item in history] == ["old"]
@@ -178,7 +178,7 @@ async def test_loaders_return_attachment_and_knowledge_metadata() -> None:
     attachments = await service.load_attachments(
         session_id="session-1", attachment_ids=["attachment-1", "missing"]
     )
-    knowledge_bases = await service.load_knowledge_bases({})
+    knowledge_bases = await service.load_knowledge_bases()
 
     assert attachments == [
         {

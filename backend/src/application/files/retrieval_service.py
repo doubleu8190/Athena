@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
 
 from domain.retrieval.fusion import RetrievalRankFusion
 from domain.files import (
@@ -48,15 +47,18 @@ class FileContextProvider(ContextProvider):
         self,
         *,
         session_id: str,
-        task: Any,
+        run_id: str,
         plan: ContextPlan,
-        run_id: str | None = None,
     ) -> ProviderResult:
         started = time.perf_counter()
-        query = plan.file_query or getattr(task, "goal", "")
-        file_ids = tuple(plan.file_ids or getattr(task, "attachment_ids", ()))
-        if not query or not file_ids:
-            return ProviderResult(self.name, "succeeded")
+        query = plan.file_query
+        file_ids = plan.file_ids
+        if not file_ids:
+            return ProviderResult(
+                self.name,
+                "skipped",
+                error_message="no_valid_attachments",
+            )
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 groups = await asyncio.gather(
@@ -167,36 +169,45 @@ class KnowledgeContextProvider(FileContextProvider):
         chunks: FileChunkRepository,
         attachments: AttachmentRepository,
         vector_indexer: FileVectorSearchPort | None = None,
-        **kwargs: Any,
+        *,
+        limit: int = 5,
+        timeout_seconds: float = 5.0,
     ) -> None:
-        super().__init__(chunks, vector_indexer, **kwargs)
+        super().__init__(
+            chunks,
+            vector_indexer,
+            limit=limit,
+            timeout_seconds=timeout_seconds,
+        )
         self._attachments = attachments
 
     async def retrieve_context(
         self,
         *,
         session_id: str,
-        task: Any,
+        run_id: str,
         plan: ContextPlan,
-        run_id: str | None = None,
     ) -> ProviderResult:
-        knowledge_ids = tuple(
-            plan.knowledge_base_ids or getattr(task, "knowledge_base_ids", ())
-        )
+        knowledge_ids = plan.knowledge_base_ids
+        if not knowledge_ids:
+            return ProviderResult(
+                self.name,
+                "skipped",
+                error_message="no_knowledge_bases_available",
+            )
         documents = []
-        if knowledge_ids:
-            for knowledge_id in knowledge_ids:
-                documents.extend(
-                    await self._attachments.list_by_knowledge_base(knowledge_id)
-                )
-        else:
-            documents = await self._attachments.list_all_attachments()
+        for knowledge_id in knowledge_ids:
+            documents.extend(
+                await self._attachments.list_by_knowledge_base(knowledge_id)
+            )
         ready = [item.id for item in documents if item.status == AttachmentStatus.READY]
         knowledge_plan = plan.with_updates(
             file_ids=tuple(ready), file_query=plan.knowledge_query
         )
         result = await super().retrieve_context(
-            session_id=session_id, task=task, plan=knowledge_plan, run_id=run_id
+            session_id=session_id,
+            run_id=run_id,
+            plan=knowledge_plan,
         )
         return ProviderResult(
             self.name,

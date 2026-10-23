@@ -14,11 +14,13 @@ class RootGraphState(TypedDict, total=False):
     """
 
     request: dict[str, Any]
-    understanding: dict[str, Any]
-    context_plan: dict[str, Any]
+    root_decision: dict[str, Any]
+    root_turn_count: int
+    worker_tools: list[dict[str, Any]]
+    knowledge_bases: list[dict[str, Any]]
+    available_context_providers: list[str]
+    context_queries: list[dict[str, Any]]
     context_bundle: dict[str, Any]
-    harness_input: dict[str, Any]
-    execution: dict[str, Any]
     plan: dict[str, Any]
     deferred_plan_versions: dict[str, list[dict[str, Any]]]
     plan_results: dict[str, Any]
@@ -26,7 +28,6 @@ class RootGraphState(TypedDict, total=False):
     response: dict[str, Any]
     result: dict[str, Any]
     resume_value: dict[str, Any]
-    next_route: str
     status: str
     waiting: bool
     error: dict[str, Any]

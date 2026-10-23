@@ -383,6 +383,8 @@
 .chat-workspace-main .bg-athena-surface\/45 { background-color: var(--chat-surface); }
 .chat-workspace-main .bg-athena-bg\/40,
 .chat-workspace-main .bg-athena-bg\/50 { background-color: #ffffff; }
+.chat-workspace-main .hover\:bg-athena-bg:hover,
+.chat-workspace-main .hover\:bg-athena-bg\/70:hover { background-color: var(--chat-bg); }
 .chat-workspace-main .border-athena-border\/60,
 .chat-workspace-main .border-athena-border\/70 { border-color: #edf0f1; }
 .chat-workspace-main .border-athena-border { border-color: var(--chat-border); }

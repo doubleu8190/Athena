@@ -586,25 +586,27 @@ export interface MemoryListResponse {
 
 // ─── 审批日志 ────────────────────────────────────────────────────
 
-export type ApprovalDecision = "approved" | "denied" | "expired" | "cancelled"
-
-export interface ApprovalLog {
-  id: string
+export interface ApprovalHistoryEntry {
+  approval_id: string
   session_id: string
   tool_call_id: string
   tool_name: string
   arguments: Record<string, unknown>
   risk_level: "low" | "medium" | "high"
-  decision: ApprovalDecision
-  decision_time_ms: number
-  timestamp: string
+  created_at: string | null
+  expires_at: string | null
+  resolved: boolean
+  resolution: string
+  run_id: string
+  plan_id?: string | null
+  task_id?: string | null
 }
 
 export interface ApprovalStats {
-  today_total: number
-  today_approved: number
-  today_denied: number
-  approval_rate: number
+  pending: number
+  approved: number
+  denied: number
+  total: number
 }
 
 // ─── LLM 提供商 ──────────────────────────────────────────────────

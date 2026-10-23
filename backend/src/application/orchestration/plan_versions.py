@@ -5,12 +5,133 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from pydantic import ValidationError
+
 from domain.orchestration import (
     PlanRevision,
     ReviewAction,
     ReviewContext,
     ReviewDecision,
 )
+
+from .root_decision import PlanTaskDraft
+
+
+def partition_plan_versions(
+    plan: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    """首轮只提交 V1，将显式声明的后续版本留给对应 Review 提交。
+
+    版本号是执行边界：依赖只能指向相同或更早版本，后续版本必须等待
+    前一版本完成后再进入已有 Revision 流程。
+    """
+    raw_tasks = plan.get("tasks")
+    if not isinstance(raw_tasks, (list, tuple)) or not raw_tasks:
+        raise ValueError("root_plan_tasks_invalid")
+    has_explicit_versions = any(
+        isinstance(task, Mapping) and "plan_version" in task
+        for task in raw_tasks
+    )
+
+    versions: dict[str, int] = {}
+    tasks_by_version: dict[int, list[dict[str, Any]]] = {}
+    for raw_task in raw_tasks:
+        if not isinstance(raw_task, Mapping):
+            raise ValueError("root_plan_task_invalid")
+        task_id = raw_task.get("task_id")
+        version = raw_task.get("plan_version", 1)
+        if (
+            not isinstance(task_id, str)
+            or not task_id.strip()
+            or task_id in versions
+            or (has_explicit_versions and "plan_version" not in raw_task)
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+        ):
+            raise ValueError("root_plan_version_contract_invalid")
+        versions[task_id] = version
+        tasks_by_version.setdefault(version, []).append(dict(raw_task))
+
+    version_numbers = sorted(tasks_by_version)
+    if version_numbers != list(range(1, version_numbers[-1] + 1)):
+        raise ValueError("root_plan_versions_must_be_contiguous")
+
+    raw_edges = plan.get("edges", ())
+    if not isinstance(raw_edges, (list, tuple)):
+        raise ValueError("root_plan_edges_invalid")
+    incoming: dict[str, list[str]] = {task_id: [] for task_id in versions}
+    normalized_edges: list[tuple[str, str]] = []
+    for edge in raw_edges:
+        if not isinstance(edge, Mapping):
+            raise ValueError("root_plan_edge_invalid")
+        source = edge.get("from_task_id")
+        target = edge.get("to_task_id")
+        if (
+            not isinstance(source, str)
+            or not isinstance(target, str)
+            or source not in versions
+            or target not in versions
+            or versions[source] > versions[target]
+        ):
+            raise ValueError("root_plan_version_dependency_invalid")
+        incoming[target].append(source)
+        normalized_edges.append((source, target))
+
+    raw_tasks_by_id = {str(task["task_id"]): task for task in raw_tasks}
+    for task_id, raw_task in raw_tasks_by_id.items():
+        dependencies = raw_task.get("depends_on", ())
+        if not isinstance(dependencies, (list, tuple)) or any(
+            not isinstance(dependency, str) or dependency not in versions
+            for dependency in dependencies
+        ):
+            raise ValueError("root_plan_task_dependencies_invalid")
+        if any(
+            versions[dependency] > versions[task_id]
+            for dependency in dependencies
+        ):
+            raise ValueError("root_plan_version_dependency_invalid")
+        incoming[task_id].extend(dependencies)
+
+    current_ids = {
+        task_id for task_id, version in versions.items() if version == 1
+    }
+    current_tasks: list[dict[str, Any]] = []
+    deferred: dict[str, list[dict[str, Any]]] = {}
+    for version in version_numbers:
+        for raw_task in tasks_by_version[version]:
+            task_id = str(raw_task["task_id"])
+            task = {
+                key: value
+                for key, value in raw_task.items()
+                if key != "plan_version"
+            }
+            if version == 1:
+                task.pop("depends_on", None)
+                current_tasks.append(task)
+            else:
+                task["depends_on"] = list(dict.fromkeys(incoming[task_id]))
+                deferred.setdefault(str(version), []).append(task)
+
+    current_edges = {
+        (source, target)
+        for source, target in normalized_edges
+        if source in current_ids and target in current_ids
+    }
+    for task in current_tasks:
+        task_id = str(task["task_id"])
+        current_edges.update(
+            (source, task_id)
+            for source in raw_tasks_by_id[task_id].get("depends_on", ())
+            if source in current_ids
+        )
+    current_plan = dict(plan)
+    current_plan["tasks"] = current_tasks
+    current_plan["edges"] = [
+        {"from_task_id": source, "to_task_id": target}
+        for source, target in sorted(current_edges)
+    ]
+    return current_plan, deferred
 
 
 def deferred_version_review_decision(
@@ -137,23 +258,13 @@ def _scope_deferred_task(
     run_id: str,
 ) -> dict[str, Any] | None:
     """验证并规范化一个延期任务及其依赖。"""
-    if not isinstance(item, Mapping):
+    try:
+        task = PlanTaskDraft.model_validate(item)
+    except ValidationError:
         return None
-    task_id = item.get("task_id")
-    title = item.get("title")
-    objective = item.get("objective", item.get("instruction"))
-    dependencies = item.get("depends_on", ())
-    if (
-        not isinstance(task_id, str)
-        or not task_id.strip()
-        or not isinstance(title, str)
-        or not isinstance(objective, str)
-        or not isinstance(dependencies, (list, tuple))
-        or any(not isinstance(dependency, str) for dependency in dependencies)
-    ):
-        return None
+    task_id = task.task_id
     scoped_dependencies: list[str] = []
-    for dependency in dependencies:
+    for dependency in task.depends_on:
         scoped = f"{dependency}:{run_id}"
         if dependency in existing_id_set:
             scoped_dependencies.append(dependency)
@@ -167,26 +278,9 @@ def _scope_deferred_task(
             return None
         if scoped_dependencies[-1] == requested_to_scoped[task_id]:
             return None
-    input_value = item.get("input", {})
-    expected_output = item.get("expected_output", {})
-    tools = item.get("allowed_tools", ())
-    if not isinstance(input_value, Mapping):
-        input_value = {"value": input_value}
-    if not isinstance(expected_output, Mapping):
-        expected_output = {"value": expected_output}
-    if not isinstance(tools, (list, tuple)) or any(
-        not isinstance(tool, str) for tool in tools
-    ):
-        return None
     return {
-        "task_id": task_id,
-        "title": title,
-        "objective": objective,
-        "input": dict(input_value),
-        "expected_output": dict(expected_output),
-        "allowed_tools": list(tools),
-        "worker_type": str(item.get("worker_type") or "general"),
-        "timeout_seconds": item.get("timeout_seconds", 3600.0),
+        **task.model_dump(mode="json", exclude={"plan_version", "depends_on"}),
+        "task_id": requested_to_scoped[task_id],
         "depends_on": list(dict.fromkeys(scoped_dependencies)),
     }
-__all__ = ["deferred_version_review_decision"]
+__all__ = ["deferred_version_review_decision", "partition_plan_versions"]

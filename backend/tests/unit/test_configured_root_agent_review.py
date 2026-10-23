@@ -54,8 +54,11 @@ async def test_configured_root_agent_decodes_review_decision_and_sends_round_con
                         {
                             "task_id": "task-b",
                             "title": "Verify metric",
-                            "instruction": "Check the metric source",
+                            "objective": "Check the metric source",
                             "depends_on": ["task-a"],
+                            "allowed_tools": [],
+                            "input": {"source": "metric"},
+                            "expected_output": {"format": "verified metric"},
                         }
                     ],
                 },
@@ -65,7 +68,9 @@ async def test_configured_root_agent_decodes_review_decision_and_sends_round_con
     agent = ConfiguredRootAgent(llm)
 
     decision = await agent.review(
-        review_context(), request={"run_id": "run-1", "session_id": "session-1"}
+        review_context(),
+        worker_tools=(),
+        request={"run_id": "run-1", "session_id": "session-1"},
     )
 
     assert decision.action is ReviewAction.REPLAN
@@ -75,6 +80,7 @@ async def test_configured_root_agent_decodes_review_decision_and_sends_round_con
     assert user_payload["round_id"] == "round-7"
     assert user_payload["round_results"][0]["task_id"] == "task-a"
     assert "requested point to start another Plan Version" in llm.messages[0]["content"]
+    assert "Every decision requires a non-empty reason" in llm.messages[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -86,7 +92,11 @@ async def test_configured_root_agent_decodes_review_decision_and_sends_round_con
     ],
 )
 async def test_configured_root_agent_accepts_continue_and_finish(response: str):
-    decision = await ConfiguredRootAgent(ReviewLLM(response)).review(review_context())
+    decision = await ConfiguredRootAgent(ReviewLLM(response)).review(
+        review_context(),
+        worker_tools=(),
+        request={"run_id": "run-1", "session_id": "session-1"},
+    )
 
     assert decision.action in {ReviewAction.CONTINUE, ReviewAction.FINISH}
 
@@ -100,7 +110,11 @@ async def test_configured_root_agent_repairs_review_missing_required_reason():
         ]
     )
 
-    decision = await ConfiguredRootAgent(llm).review(review_context())
+    decision = await ConfiguredRootAgent(llm).review(
+        review_context(),
+        worker_tools=(),
+        request={"run_id": "run-1", "session_id": "session-1"},
+    )
 
     assert decision.action is ReviewAction.FINISH
     assert decision.reason == "The requested goal is complete."
@@ -124,10 +138,18 @@ async def test_configured_root_agent_rejects_revision_for_another_plan_version()
     )
 
     with pytest.raises(ValueError, match="review_revision_base_version_mismatch"):
-        await ConfiguredRootAgent(llm).review(review_context())
+        await ConfiguredRootAgent(llm).review(
+            review_context(),
+            worker_tools=(),
+            request={"run_id": "run-1", "session_id": "session-1"},
+        )
 
 
 @pytest.mark.asyncio
 async def test_configured_root_agent_rejects_malformed_review_json():
     with pytest.raises(ValueError, match="root_review_response_invalid_json"):
-        await ConfiguredRootAgent(ReviewLLM("not JSON")).review(review_context())
+        await ConfiguredRootAgent(ReviewLLM("not JSON")).review(
+            review_context(),
+            worker_tools=(),
+            request={"run_id": "run-1", "session_id": "session-1"},
+        )

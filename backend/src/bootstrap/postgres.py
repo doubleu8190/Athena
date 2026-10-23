@@ -38,7 +38,6 @@ from application.orchestration import (
 )
 from application.runs.context import (
     ContextAcquisitionService,
-    ContextPlan,
     ContextPlanner,
 )
 from application.files.retrieval_service import (
@@ -47,7 +46,6 @@ from application.files.retrieval_service import (
 )
 from application.memory.retrieval_service import MemoryContextProvider
 from application.retrieval.graph_service import GraphContextProvider
-from application.runs.task_understanding import TaskUnderstandingService
 from configuration import Settings
 from shared import monotonic_timestamp_id_factory
 from infrastructure.integrations.file_parsers.parser import (
@@ -304,9 +302,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         memory_resolver,
         memory_vectors,
     )
-    task_understanding = TaskUnderstandingService(
-        llm_provider, timeout_seconds=settings.task_understanding_timeout_seconds
-    )
     context_planner = ContextPlanner(
         max_files=settings.knowledge_context_max_files,
         limit_per_file=settings.knowledge_context_limit_per_file,
@@ -314,32 +309,35 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         max_tokens=settings.knowledge_context_max_tokens,
         recall_limit=settings.retrieval_candidate_k,
         rerank_limit=settings.retrieval_rerank_k,
+        token_counter=llm_provider.count_text_tokens,
     )
+    context_providers = {
+        "memory": MemoryContextProvider(
+            memory,
+            memory_vectors,
+            limit=settings.retrieval_context_k,
+            timeout_seconds=settings.memory_retrieval_timeout_seconds,
+        ),
+        "file": FileContextProvider(
+            chunks, file_vectors, limit=settings.knowledge_context_limit_per_file
+        ),
+        "knowledge": KnowledgeContextProvider(
+            chunks,
+            attachments,
+            file_vectors,
+            limit=settings.knowledge_context_limit_per_file,
+        ),
+        "graph": GraphContextProvider(
+            neo4j,
+            limit=settings.graph_path_limit,
+            timeout_seconds=settings.graph_timeout_seconds,
+        ),
+    }
     context_service = ContextAcquisitionService(
-        providers={
-            "memory": MemoryContextProvider(
-                memory,
-                memory_vectors,
-                limit=settings.retrieval_context_k,
-                timeout_seconds=settings.memory_retrieval_timeout_seconds,
-            ),
-            "file": FileContextProvider(
-                chunks, file_vectors, limit=settings.knowledge_context_limit_per_file
-            ),
-            "knowledge": KnowledgeContextProvider(
-                chunks,
-                attachments,
-                file_vectors,
-                limit=settings.knowledge_context_limit_per_file,
-            ),
-            "graph": GraphContextProvider(
-                neo4j,
-                limit=settings.graph_path_limit,
-                timeout_seconds=settings.graph_timeout_seconds,
-            ),
-        },
+        providers=context_providers,
         trace_repository=retrieval,
         event_publisher=events,
+        token_counter=llm_provider.count_text_tokens,
     )
 
     request_preparation = RunRequestPreparationService(
@@ -405,13 +403,14 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         id_factory=ids,
     )
     dependencies = RootWorkflowDependencies(
-        task_understanding=task_understanding,
         context_acquisition=context_service,
         context_planner=context_planner,
         request_preparation=request_preparation,
         plan_loader=PostgresPlanLoader(orchestration_repository),
         agent=ConfiguredRootAgent(llm_provider, events),
         tool_service=builtin_tool_service,
+        available_context_providers=tuple(context_providers),
+        root_max_turns=settings.root_max_turns,
         review_context_repository=orchestration_repository,
         orchestration_command_handler=orchestration_command_handler,
         event_publisher=events,
@@ -472,7 +471,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "embedding_provider": lambda: embedding,
         "sandbox": lambda: sandbox,
         "context_service_factory": lambda: context_service,
-        "task_understanding_factory": lambda: task_understanding,
     }
     resources: list[object] = [postgres, checkpointer, root_graph, neo4j]
     resources.append(sandbox)

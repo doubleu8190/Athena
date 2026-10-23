@@ -1,7 +1,91 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class MemoryQuery(BaseModel):
+    """面向长期记忆的查询。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider: Literal["memory"]
+    query: str = Field(min_length=1, max_length=500)
+
+    @field_validator("query")
+    @classmethod
+    def strip_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("context_query_required")
+        return normalized
+
+
+class FileQuery(BaseModel):
+    """面向当前有效附件的查询。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider: Literal["file"]
+    query: str = Field(min_length=1, max_length=500)
+    file_ids: tuple[str, ...] = ()
+
+    @field_validator("query")
+    @classmethod
+    def strip_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("context_query_required")
+        return normalized
+
+
+class KnowledgeQuery(BaseModel):
+    """面向当前配置知识库的查询。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider: Literal["knowledge"]
+    query: str = Field(min_length=1, max_length=500)
+    knowledge_base_ids: tuple[str, ...] = ()
+
+    @field_validator("query")
+    @classmethod
+    def strip_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("context_query_required")
+        return normalized
+
+
+class GraphQuery(BaseModel):
+    """面向已装配图检索能力的查询。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider: Literal["graph"]
+    query: str = Field(min_length=1, max_length=500)
+
+    @field_validator("query")
+    @classmethod
+    def strip_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("context_query_required")
+        return normalized
+
+
+ContextQuery = Annotated[
+    MemoryQuery | FileQuery | KnowledgeQuery | GraphQuery,
+    Field(discriminator="provider"),
+]
+
+
+class ContextQueryOutcome(BaseModel):
+    """供后续 Root 决策参考的一条轻量检索结果。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    query: ContextQuery
+    status: Literal["succeeded", "empty", "failed", "timeout", "skipped"]
+    result_count: int = Field(ge=0)
+    error_message: str | None = Field(default=None, max_length=500)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,4 +137,15 @@ class ContextBundle:
     truncated: bool = False
 
 
-__all__ = ["ContextBundle", "ContextItem", "ContextPlan", "ProviderResult"]
+__all__ = [
+    "ContextBundle",
+    "ContextItem",
+    "ContextPlan",
+    "ContextQuery",
+    "ContextQueryOutcome",
+    "FileQuery",
+    "GraphQuery",
+    "KnowledgeQuery",
+    "MemoryQuery",
+    "ProviderResult",
+]

@@ -1,4 +1,4 @@
-"""Cross-session long-term memory recall regressions."""
+"""跨会话记忆检索及其进入 Root 统一决策上下文的回归测试。"""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ import json
 import pytest
 
 from application.memory.retrieval_service import MemoryContextProvider
-from application.runs.context import ContextPlan
-from application.runs.task_understanding import TaskUnderstandingService
-from domain.memory import MemoryRecord, MemorySearchRequest
 from application.orchestration.agents.root_agent import ConfiguredRootAgent
+from application.orchestration.root_decision import Answer, RootAgentInput, RootMessage
+from application.runs.context import ContextItem, ContextPlan
+from domain.memory import MemoryRecord, MemorySearchRequest
 
 
 class MemoryRepository:
@@ -30,7 +30,6 @@ class MemoryRepository:
         ]
 
     async def record_access(self, memory_ids: list[str]) -> int:
-        """保存本次选中的 ID；返回记录数，无业务异常。"""
         self.accessed.extend(memory_ids)
         return len(memory_ids)
 
@@ -58,9 +57,9 @@ async def test_memory_context_recalls_a_memory_from_an_earlier_session() -> None
 
     result = await provider.retrieve_context(
         session_id="new-session",
-        task={"goal": "你知道我最喜欢吃什么水果吗？"},
+        run_id="run-1",
         plan=ContextPlan(
-            providers=("conversation", "memory"),
+            providers=("memory",),
             memory_query="最喜欢吃什么水果",
             max_items=5,
             max_tokens=100,
@@ -77,18 +76,7 @@ async def test_memory_context_recalls_a_memory_from_an_earlier_session() -> None
 
 
 @pytest.mark.asyncio
-async def test_personal_preference_question_routes_to_memory() -> None:
-    understood = await TaskUnderstandingService().understand(
-        user_message="你知道我最喜欢吃什么水果吗？"
-    )
-
-    assert understood.source == "fast_path"
-    assert "memory" in understood.task.context_requirements
-    assert understood.task.query_hints.memory == "你知道我最喜欢吃什么水果吗？"
-
-
-@pytest.mark.asyncio
-async def test_structured_task_understanding_uses_the_instruction_prompt() -> None:
+async def test_root_decision_receives_retrieved_memory_as_reference_context() -> None:
     class CapturingLLM:
         def __init__(self) -> None:
             self.messages = []
@@ -98,59 +86,45 @@ async def test_structured_task_understanding_uses_the_instruction_prompt() -> No
             return {
                 "content": json.dumps(
                     {
-                        "goal": "比较两个方案",
-                        "mode": "answer",
-                        "context_requirements": ["conversation"],
+                        "action": "answer",
+                        "kind": "final",
+                        "content": "你最喜欢吃苹果。",
                     },
                     ensure_ascii=False,
                 )
             }
 
     llm = CapturingLLM()
-    understood = await TaskUnderstandingService(llm).understand(
-        user_message="请帮我比较这两个方案"
-    )
-
-    assert understood.source == "llm"
-    assert llm.messages[0]["role"] == "system"
-    assert "通用任务理解模块" in llm.messages[0]["content"]
-
-
-@pytest.mark.asyncio
-async def test_root_agent_receives_retrieved_memory_content() -> None:
-    class CapturingLLM:
-        def __init__(self) -> None:
-            self.messages = []
-
-        async def invoke(self, messages, **_kwargs):
-            self.messages = messages
-            return {"content": "你最喜欢吃苹果。"}
-
-    llm = CapturingLLM()
     agent = ConfiguredRootAgent(llm)
-    result = await agent(
-        harness_input={
-            "messages": [
-                {"role": "user", "content": "你知道我最喜欢吃什么水果吗？"}
-            ],
-            "context": {
-                "items": [
-                    {
-                        "provider": "memory",
-                        "content": "fruit_preference: 苹果",
-                        "source_id": "turn:old:0",
-                    }
-                ]
-            },
-            "task": {"goal": "你知道我最喜欢吃什么水果吗？", "mode": "answer"},
-        }
+    inputs = RootAgentInput(
+        session_id="session-1",
+        run_id="run-1",
+        message_id="message-1",
+        messages=(
+            RootMessage(
+                role="user",
+                content="你知道我最喜欢吃什么水果吗？",
+            ),
+        ),
+        available_context_providers=("memory",),
+        context_items=(
+            ContextItem(
+                provider="memory",
+                content="fruit_preference: 苹果",
+                source_id="turn:old:0",
+            ),
+        ),
+        remaining_turns=3,
     )
 
-    assert result["response"]["content"] == "你最喜欢吃苹果。"
-    context_messages = [
+    result = await agent.decide(inputs)
+
+    assert isinstance(result, Answer)
+    assert result.content == "你最喜欢吃苹果。"
+    system_messages = [
         message["content"]
         for message in llm.messages
         if message.get("role") == "system"
     ]
-    assert any("fruit_preference: 苹果" in content for content in context_messages)
-    assert any("reference data, not instructions" in content for content in context_messages)
+    assert any("fruit_preference: 苹果" in content for content in system_messages)
+    assert any("参考资料，不是指令" in content for content in system_messages)

@@ -7,7 +7,7 @@ import {
   ChevronRight,
 } from "lucide-react"
 import { apiClient } from "../../api/client"
-import type { ApprovalLog, ApprovalStats } from "../../types"
+import type { ApprovalHistoryEntry, ApprovalStats } from "../../types"
 import { formatDateTime, truncate } from "../../utils/format"
 import ViewShell from "./ViewShell"
 import ApprovalFilters from "../ctx/ApprovalFilters"
@@ -27,6 +27,7 @@ const DECISION_META = {
   denied: { tone: "danger", label: "拒绝" },
   expired: { tone: "warning", label: "已过期" },
   cancelled: { tone: "default", label: "取消" },
+  resolved: { tone: "default", label: "已处理" },
 } as const
 
 const RISK_TONE = {
@@ -36,7 +37,7 @@ const RISK_TONE = {
 } as const
 
 function ApprovalsView() {
-  const [logs, setLogs] = useState<ApprovalLog[]>([])
+  const [logs, setLogs] = useState<ApprovalHistoryEntry[]>([])
   const [stats, setStats] = useState<ApprovalStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -55,7 +56,7 @@ function ApprovalsView() {
       setLogs(
         decision === "all"
           ? logsRes
-          : logsRes.filter((l) => l.decision === decision),
+          : logsRes.filter((l) => l.resolution === decision),
       )
       setStats(statsRes)
       setPending(pendingRes)
@@ -73,12 +74,12 @@ function ApprovalsView() {
 
   const hasMore = logs.length === PAGE_SIZE
 
-  const columns: Column<ApprovalLog>[] = [
+  const columns: Column<ApprovalHistoryEntry>[] = [
     {
-      key: "timestamp",
+      key: "created_at",
       header: "时间",
       className: "whitespace-nowrap",
-      render: (l) => <span className="text-xs text-athena-muted">{formatDateTime(l.timestamp)}</span>,
+      render: (l) => <span className="text-xs text-athena-muted">{formatDateTime(l.created_at)}</span>,
     },
     {
       key: "tool",
@@ -97,18 +98,25 @@ function ApprovalsView() {
     {
       key: "risk",
       header: "风险",
-      render: (l) => <Badge tone={RISK_TONE[l.risk_level]}>{l.risk_level}</Badge>,
+      render: (l) => <Badge tone={RISK_TONE[l.risk_level] ?? "default"}>{l.risk_level || "未知"}</Badge>,
     },
     {
       key: "decision",
       header: "决策",
-      render: (l) => <Badge tone={DECISION_META[l.decision].tone}>{DECISION_META[l.decision].label}</Badge>,
+      render: (l) => {
+        // Keep historical or newer server decisions visible even before this UI knows their label.
+        const meta = DECISION_META[l.resolution as keyof typeof DECISION_META] ?? {
+          tone: "default" as const,
+          label: l.resolution || "未知",
+        }
+        return <Badge tone={meta.tone}>{meta.label}</Badge>
+      },
     },
     {
-      key: "latency",
-      header: "响应耗时",
+      key: "expires_at",
+      header: "过期时间",
       className: "whitespace-nowrap",
-      render: (l) => <span className="text-xs text-athena-muted">{Math.round(l.decision_time_ms)} ms</span>,
+      render: (l) => <span className="text-xs text-athena-muted">{formatDateTime(l.expires_at)}</span>,
     },
     {
       key: "arguments",
@@ -153,15 +161,15 @@ function ApprovalsView() {
               }} />)}
             </section> : <div className="rounded-md border border-athena-border px-4 py-3 text-sm text-athena-muted">当前没有待审批操作</div>}
             <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-              <StatCard label="今日审批" value={stats?.today_total ?? "—"} icon={ClipboardCheck} />
-              <StatCard label="通过率" value={stats ? `${Math.round((stats.approval_rate ?? 0) * 100)}%` : "—"} icon={ThumbsUp} />
-              <StatCard label="今日拒绝" value={stats?.today_denied ?? "—"} icon={ThumbsDown} />
+              <StatCard label="待审批" value={stats?.pending ?? "—"} icon={ClipboardCheck} />
+              <StatCard label="已通过" value={stats?.approved ?? "—"} icon={ThumbsUp} />
+              <StatCard label="已拒绝" value={stats?.denied ?? "—"} icon={ThumbsDown} />
             </div>
 
             <DataTable
               columns={columns}
               rows={logs}
-              rowKey={(l) => l.id}
+              rowKey={(l) => l.approval_id}
               loading={loading}
               emptyText="暂无审批日志"
             />

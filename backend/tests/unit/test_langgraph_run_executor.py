@@ -133,13 +133,5 @@ async def test_resume_uses_only_checkpoint_resume_identity() -> None:
     assert graph.arguments["user_message"] == ""
     assert graph.arguments["message_id"] == ""
     assert graph.arguments["attachment_ids"] == []
-    assert graph.arguments["resume_value"] == {
-        "type": "round_completed",
-        "run_id": "run-1",
-        "plan_id": "plan-1",
-        "round_id": "round-1",
-        "plan_version": 1,
-        "root_wait_generation": 1,
-        "interrupt_id": "interrupt-1",
-    }
+    assert graph.arguments["resume_value"] == command.payload.resume_value
 

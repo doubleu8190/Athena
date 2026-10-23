@@ -35,7 +35,6 @@ class RunRequestPreparationService:
         self,
         *,
         request: Mapping[str, object],
-        **_kwargs: object,
     ) -> dict[str, object]:
         """校验附件并幂等持久化当前用户消息。
 
@@ -64,9 +63,9 @@ class RunRequestPreparationService:
             )
             if attachment is None:
                 raise ValueError(f"attachment_not_found: {attachment_id}")
-            status = getattr(attachment.status, "value", attachment.status)
-            if status != AttachmentStatus.READY.value:
+            if attachment.status != AttachmentStatus.READY:
                 raise ValueError(f"attachment_not_ready: {attachment_id}")
+            status = attachment.status.value
             attachment_values.append(attachment.to_attachment_reference())
             attachment_refs.append(
                 {
@@ -103,20 +102,18 @@ class RunRequestPreparationService:
         self,
         *,
         session_id: str,
-        request: Mapping[str, object],
-        **_kwargs: object,
+        exclude_message_id: str,
     ) -> list[dict[str, object]]:
         """加载当前消息之前的会话历史。
 
         参数：
             session_id: 要查询的会话标识。
-            request: 当前运行请求，用于排除当前消息。
+            exclude_message_id: 当前用户消息标识，避免历史中重复注入。
         返回值：
             list[dict[str, object]]: 可直接提供给模型的消息列表。
         异常：
             不主动抛出业务异常。
         """
-        current_message_id = str(request.get("message_id") or "")
         values = await self._messages.list_by_session(session_id, limit=100)
         return [
             {
@@ -126,7 +123,7 @@ class RunRequestPreparationService:
                 "timestamp": message.timestamp.isoformat(),
             }
             for message in values
-            if message.id != current_message_id
+            if message.id != exclude_message_id
         ]
 
     async def load_attachments(
@@ -134,7 +131,6 @@ class RunRequestPreparationService:
         *,
         session_id: str,
         attachment_ids: Sequence[str],
-        **_kwargs: object,
     ) -> list[dict[str, object]]:
         """加载属于当前会话的附件引用。
 
@@ -158,28 +154,19 @@ class RunRequestPreparationService:
                         "filename": attachment.filename,
                         "mime_type": attachment.mime_type,
                         "size_bytes": attachment.size_bytes,
-                        "status": getattr(
-                            attachment.status, "value", attachment.status
-                        ),
+                        "status": attachment.status.value,
                     }
                 )
         return values
 
-    async def load_knowledge_bases(
-        self,
-        request: Mapping[str, object] | None = None,
-        **_kwargs: object,
-    ) -> list[dict[str, object]]:
-        """加载意图识别使用的知识库元数据。
+    async def load_knowledge_bases(self) -> list[dict[str, object]]:
+        """加载 Root 决策使用的知识库元数据。
 
-        参数：
-            request: 可选运行请求；当前查询不依赖其内容。
         返回值：
             list[dict[str, object]]: 知识库统计信息列表。
         异常：
             不主动抛出业务异常。
         """
-        del request
         return [
             {
                 "id": item.id,

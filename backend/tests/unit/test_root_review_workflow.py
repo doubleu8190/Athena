@@ -76,6 +76,11 @@ class CommandHandler:
         )
 
 
+class ToolService:
+    async def list_tools(self):
+        return []
+
+
 @pytest.mark.asyncio
 async def test_root_review_reuses_persisted_decision_without_another_llm_call():
     decision = ReviewDecision(ReviewAction.CONTINUE, "Continue to the next task.")
@@ -123,7 +128,7 @@ async def test_root_review_calls_agent_once_then_applies_new_decision():
         def __init__(self):
             self.calls = []
 
-        async def review(self, value, *, request):
+        async def review(self, value, *, worker_tools, request):
             self.calls.append((value, request))
             return decision
 
@@ -134,6 +139,7 @@ async def test_root_review_calls_agent_once_then_applies_new_decision():
             review_context_repository=ContextRepository(),
             orchestration_command_handler=handler,
             agent=agent,
+            tool_service=ToolService(),
         )
     )
 
@@ -187,6 +193,9 @@ async def test_blocked_continue_gets_one_root_review_to_replan():
                     "title": "Independent verification",
                     "objective": "Verify the report independently",
                     "depends_on": [],
+                    "allowed_tools": [],
+                    "input": {"source": "report"},
+                    "expected_output": {"format": "verification"},
                 },
             ),
         ),
@@ -197,7 +206,7 @@ async def test_blocked_continue_gets_one_root_review_to_replan():
             """初始化 Review 调用记录。"""
             self.contexts = []
 
-        async def review(self, value, *, request):
+        async def review(self, value, *, worker_tools, request):
             """首次 Continue，收到阻断说明后改为 Replan。"""
             self.contexts.append((value, request))
             if len(self.contexts) == 1:
@@ -236,6 +245,7 @@ async def test_blocked_continue_gets_one_root_review_to_replan():
             review_context_repository=BlockedContextRepository(),
             orchestration_command_handler=handler,
             agent=agent,
+            tool_service=ToolService(),
         )
     )
 
@@ -296,6 +306,7 @@ async def test_repeated_blocked_continue_finishes_failed_within_review_budget():
             review_context_repository=ContextRepository(),
             orchestration_command_handler=handler,
             agent=agent,
+            tool_service=ToolService(),
         )
     )
 
@@ -337,6 +348,9 @@ async def test_replan_still_blocked_finishes_failed_without_another_review_loop(
                             "title": "Blocked replacement",
                             "objective": "Wait on the failed task",
                             "depends_on": ["task-2"],
+                            "allowed_tools": [],
+                            "input": {"source_task": "task-2"},
+                            "expected_output": {"format": "replacement"},
                         },
                     ),
                 ),
@@ -369,6 +383,7 @@ async def test_replan_still_blocked_finishes_failed_without_another_review_loop(
             review_context_repository=ContextRepository(),
             orchestration_command_handler=handler,
             agent=agent,
+            tool_service=ToolService(),
         )
     )
 

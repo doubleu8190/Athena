@@ -2,6 +2,8 @@
 
 方案编写日期：2026-10-21。实施状态更新至 2026-10-22：P1–P6 核心交付和 A01–A20 可靠性验收已完成；真实第三方 API 的取消联调范围见第 16 节。
 
+后续专项实施（2026-10-23）：[Root 统一决策设计与实施方案（首期收敛版）](root-unified-decision-implementation-plan.md)已完成代码切换及 D4 真实模型、工具、审批和浏览器验收。该专项仅替换前置分类与初始决策链，复用检索和既有执行协议；历史附件、访问统计和初始命令重投另行处理。下文已完成状态不重复统计这项专项改造。
+
 设计依据：用户提供的 `/Users/udouble/Downloads/Athena_Multi_Agent_Architecture_v1.1.md`，全文 770 行、含取消控制通道和验收要求。实现基线：本日当前工作区，包含未提交的目录迁移和代码修改；不以旧目录或历史方案代替当前源码。
 
 ## 1. 实施结论与范围
@@ -229,7 +231,7 @@ FinishPlan 与最终回答生成之间另有故障窗口：先记录 finishing/f
 Worker Graph：Initialize → Think → PrepareToolCall → Policy → Approval interrupt（如需）→ ExecutionGate → Execute → Observe → Think；达到完成条件后输出 TaskCompleted，不可恢复错误或预算耗尽输出 TaskFailed。
 
 - 不把完整 DAG、其他 Worker 对话和全部会话工具注入 Worker；只给任务、系统约束、所需上游 refs、有效工具集合。
-- 有效工具为任务申请、用户授权、全局启用、Worker 能力的交集。非法模型输出在入口拒绝并让模型有界修复；不能继续通过清空 allowed_tools 掩盖不合法计划。
+- 系统根据工具注册、全局启用状态和 Worker 能力提供可用目录；Root 从目录中为任务选择 allowed_tools，Worker 在该范围内自主选择具体调用。用户表达目标和业务限制，无需指定工具名或白名单；具体操作仍按审批策略执行。非法模型输出在入口拒绝并让模型有界修复，不能通过清空 allowed_tools 掩盖不合法计划。
 - 模型真正绑定可调用工具 schema；Built-in/MCP 经过同一执行网关，不能绕过审批或取消检查。
 - 保留各轮 messages/tool results/预算；普通工具错误返回模型观察，重试和不可恢复失败有明确分类。
 - 取消令牌在模型与工具边界检查；已知异步 Provider 保留异步执行，同步调用只在适配器中隔离。

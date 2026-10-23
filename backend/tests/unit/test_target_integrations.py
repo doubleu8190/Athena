@@ -55,8 +55,14 @@ def _configured_llm_for_test(
 @pytest.mark.asyncio
 async def test_target_llm_retries_and_counts_tokens():
     class Model:
+        custom_get_token_ids = None
+
         def __init__(self): self.calls = 0
-        async def invoke(self, messages, **kwargs):
+
+        def get_num_tokens(self, text):
+            return len(text.split())
+
+        async def ainvoke(self, messages, **kwargs):
             self.calls += 1
             if self.calls == 1: raise RuntimeError("temporary")
             return {"messages": messages}
@@ -77,7 +83,7 @@ async def test_target_llm_retries_and_counts_tokens():
 @pytest.mark.asyncio
 async def test_target_llm_timeout_and_failure_are_bounded():
     class Model:
-        async def invoke(self, *_args, **_kwargs):
+        async def ainvoke(self, *_args, **_kwargs):
             await asyncio.sleep(0.02)
     with pytest.raises(RuntimeError):
         await _configured_llm_for_test(
@@ -91,6 +97,9 @@ async def test_sync_llm_and_embedding_calls_do_not_block_the_event_loop():
         def invoke(self, messages, **kwargs):
             time.sleep(0.08)
             return {"messages": messages}
+
+        async def ainvoke(self, messages, **kwargs):
+            return await asyncio.to_thread(self.invoke, messages, **kwargs)
 
     model = SyncModel()
     provider = _configured_llm_for_test(model, attempts=1)

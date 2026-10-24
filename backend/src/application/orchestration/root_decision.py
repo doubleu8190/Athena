@@ -18,6 +18,7 @@ from application.runs.context.contracts import (
     ContextQuery,
     ContextQueryOutcome,
 )
+from application.runs.request_contracts import RootAttachment, RootKnowledgeBase
 
 
 class RootMessage(BaseModel):
@@ -27,30 +28,6 @@ class RootMessage(BaseModel):
 
     role: Literal["system", "user", "assistant", "tool"]
     content: str
-
-
-class RootAttachment(BaseModel):
-    """当前请求中已验证的附件元数据。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    id: str = Field(min_length=1)
-    filename: str
-    mime_type: str
-    size_bytes: int = Field(ge=0)
-    status: Literal["ready"]
-
-
-class RootKnowledgeBase(BaseModel):
-    """Root 可选择的知识库描述和可用文档数量。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    id: str = Field(min_length=1)
-    name: str
-    description: str = ""
-    document_count: int = Field(ge=0)
-    ready_document_count: int = Field(ge=0)
 
 
 class RootWorkerTool(BaseModel):
@@ -102,8 +79,8 @@ class RootAgentInput(BaseModel):
     run_id: str = Field(min_length=1)
     message_id: str = Field(min_length=1)
     messages: tuple[RootMessage, ...] = Field(min_length=1)
-    attachments: tuple[RootAttachment, ...] = ()
-    knowledge_bases: tuple[RootKnowledgeBase, ...] = ()
+    attachments: list[RootAttachment] = Field(default_factory=list)
+    knowledge_bases: list[RootKnowledgeBase] = Field(default_factory=list)
     worker_tools: tuple[RootWorkerTool, ...] = ()
     available_context_providers: tuple[
         Literal["memory", "file", "knowledge", "graph"], ...

@@ -15,8 +15,18 @@ from langgraph.types import Command, interrupt
 from pydantic import ValidationError
 
 from application.orchestration.dependencies import RootWorkflowDependencies
+from application.orchestration.graph_state import (
+    RootResumeIdentity,
+    RootWaitIdentity,
+)
 from application.orchestration.protocols import RootWorkflowPort
+from application.orchestration.root_decision import (
+    ROOT_DECISION_ADAPTER,
+    PlanDraft,
+    PlanningFeedback,
+)
 from domain.runs import RoundCompletedResumeValue
+from application.runs.request_contracts import RootRequestState
 from shared import get_logger
 
 from .state import RootGraphState
@@ -35,22 +45,22 @@ async def _publish(
     error: str | None = None,
     summary: str | None = None,
 ) -> None:
-    request = state.get("request", {})
     try:
+        request = RootRequestState.model_validate(state.get("request", {}))
         from domain.events import ApplicationEvent, EventDurability
 
         await dependencies.event_publisher.publish(
             ApplicationEvent(
                 event_type=event_type,
                 durability=EventDurability.DURABLE,
-                session_id=str(request.get("session_id", "")),
-                run_id=request.get("run_id"),
-                message_id=request.get("message_id"),
+                session_id=request.session_id,
+                run_id=request.run_id or None,
+                message_id=request.message_id or None,
                 payload={
-                    "activity_id": f"node:{request.get('run_id', '')}:{invocation_id}",
+                    "activity_id": f"node:{request.run_id}:{invocation_id}",
                     "invocation_id": invocation_id,
                     "activity_type": "node",
-                    "parent_activity_id": f"run:{request.get('run_id', '')}",
+                    "parent_activity_id": f"run:{request.run_id}",
                     "node": node_name,
                     "name": node_name,
                     "status": {
@@ -209,7 +219,12 @@ def _route_after_decision(state: RootGraphState) -> str:
     """按合法 action 分流，不再根据 mode 或返回字典猜测意图。"""
     if state.get("error"):
         return "assemble_final_response"
-    action = state.get("root_decision", {}).get("action")
+    try:
+        action = ROOT_DECISION_ADAPTER.validate_python(
+            state.get("root_decision", {})
+        ).action
+    except ValidationError:
+        return "assemble_final_response"
     return {
         "answer": "generate_answer",
         "context": "acquire_context",
@@ -220,18 +235,28 @@ def _route_after_decision(state: RootGraphState) -> str:
 def _route_after_redecision(state: RootGraphState) -> str:
     if state.get("error"):
         return "assemble_final_response"
-    return {
-        "answer": "generate_answer",
-        "plan": "generate_plan",
-    }.get(str(state.get("root_decision", {}).get("action")), "assemble_final_response")
+    try:
+        action = ROOT_DECISION_ADAPTER.validate_python(
+            state.get("root_decision", {})
+        ).action
+    except ValidationError:
+        return "assemble_final_response"
+    return {"answer": "generate_answer", "plan": "generate_plan"}.get(
+        action, "assemble_final_response"
+    )
 
 
 def _route_after_plan_generation(state: RootGraphState) -> str:
     if state.get("error"):
         return "assemble_final_response"
-    if state.get("planning_feedback"):
+    if state.get("planning_feedback") is not None:
+        PlanningFeedback.model_validate(state["planning_feedback"])
         return "decide_root_action"
-    return "materialize_execution_plan" if state.get("plan_draft") else "assemble_final_response"
+    plan_draft = state.get("plan_draft")
+    if plan_draft is None:
+        return "assemble_final_response"
+    PlanDraft.model_validate(plan_draft)
+    return "materialize_execution_plan"
 
 
 def _route_after_wait(state: RootGraphState) -> str:
@@ -246,32 +271,32 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
         if not result.get("waiting"):
             return result
         wait_context = result.get("root_wait")
-        request = state.get("request", {})
-        if (
-            not isinstance(wait_context, Mapping)
-            or any(
-                not wait_context.get(name)
-                for name in ("run_id", "plan_id", "round_id", "plan_version")
-            )
-        ):
+        request = RootRequestState.model_validate(state.get("request", {}))
+        if not isinstance(wait_context, Mapping):
             raise RuntimeError("root_round_wait_identity_missing")
-        if wait_context.get("run_id") != request.get("run_id"):
+        try:
+            wait_identity = RootWaitIdentity.model_validate(wait_context)
+        except ValidationError as error:
+            raise RuntimeError("root_round_wait_identity_missing") from error
+        if wait_identity.run_id != request.run_id:
             raise RuntimeError("root_round_wait_run_mismatch")
         resume_value = interrupt(dict(wait_context))
-        if not isinstance(resume_value, Mapping):
-            raise RuntimeError("root_round_resume_value_invalid")
-        if resume_value.get("type") != "round_completed":
-            raise RuntimeError("root_round_resume_type_invalid")
+        try:
+            resume_identity = RootResumeIdentity.model_validate(resume_value)
+        except ValidationError as error:
+            raise RuntimeError("root_round_resume_value_invalid") from error
         if any(
-            resume_value.get(name) != wait_context.get(name)
+            getattr(resume_identity, name) != getattr(wait_identity, name)
             for name in ("run_id", "plan_id", "round_id", "plan_version")
         ):
             raise RuntimeError("root_round_resume_identity_mismatch")
         await workflow.review_completed_round(
             {
                 **state,
-                "root_wait": dict(wait_context),
-                "resume_value": dict(resume_value),
+                "root_wait": wait_identity.model_dump(mode="json"),
+                "resume_value": resume_identity.model_dump(
+                    mode="json", exclude_none=True
+                ),
             }
         )
         # A review can start another Round. Return its wait state so the graph

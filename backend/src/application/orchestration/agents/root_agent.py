@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
-from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -19,7 +18,7 @@ from domain.orchestration import (
     ReviewContext,
     ReviewDecision,
 )
-from shared import get_logger
+from shared import get_logger, read_system_prompt
 
 from ..protocols import RootAgent
 from .llm_activity import (
@@ -82,17 +81,9 @@ class ConfiguredRootAgent(RootAgent):
         """保存模型依赖，并读取统一 Root 提示。"""
         self._llm = llm
         self._events = event_publisher
-        prompt_path = (
-            Path(__file__).resolve().parents[4] / "prompt" / "root_decision.md"
-        )
-        self._system_prompt = prompt_path.read_text(encoding="utf-8").strip()
-        prompt_root = prompt_path.parent
-        self._redecision_prompt = (
-            prompt_root / "root_redecision.md"
-        ).read_text(encoding="utf-8").strip()
-        self._plan_prompt = (
-            prompt_root / "root_plan.md"
-        ).read_text(encoding="utf-8").strip()
+        self._system_prompt = read_system_prompt("root_decision.md").strip()
+        self._redecision_prompt = read_system_prompt("root_redecision.md").strip()
+        self._plan_prompt = read_system_prompt("root_plan.md").strip()
 
     async def decide(self, inputs: RootAgentInput) -> RootDecision:
         """调用 Root 模型并把回复校验为一种明确决策。
@@ -117,7 +108,7 @@ class ConfiguredRootAgent(RootAgent):
         try:
             return self._decode_decision(response)
         except (ValueError, ValidationError) as error:
-            logger.error("root decision 失败，准备开始重试...")
+            logger.error("root decision 失败，失败原因：{error}，准备开始重试...", exc_info=True)
             repair_messages = [
                 *messages,
                 {
@@ -144,7 +135,7 @@ class ConfiguredRootAgent(RootAgent):
             try:
                 return self._decode_decision(self._response_content(repaired))
             except (ValueError, ValidationError) as repair_error:
-                logger.error("重试root decision 依旧失败")
+                logger.error("重试root decision 依旧失败，失败原因：{error}", exc_info=True)
                 raise RootDecisionFormatError(
                     "root_decision_invalid_after_repair"
                 ) from repair_error

@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 
+from application.runs.request_contracts import (
+    RootAttachment,
+    RootKnowledgeBase,
+    RootRequestState,
+)
 from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
 from application.sessions import SessionNotFoundError
 from domain.files import AttachmentRepository, AttachmentStatus
 from domain.knowledge import KnowledgeBaseRepository
 from domain.sessions import Message, MessageRepository, MessageRole, SessionRepository
+from shared import get_logger
 
+logger = get_logger(__name__)
 
 class RunRequestPreparationService:
     """准备运行请求并提供 Root Graph 所需的持久化查询。"""
@@ -37,30 +44,30 @@ class RunRequestPreparationService:
     async def prepare(
         self,
         *,
-        request: Mapping[str, object],
-    ) -> dict[str, object]:
+        request: RootRequestState,
+    ) -> RootRequestState:
         """校验附件并幂等持久化当前用户消息。
 
         参数：
             request: 包含会话、运行、消息和附件标识的运行请求。
         返回值：
-            dict[str, object]: 更新后的请求和附件引用。
+            RootRequestState: 更新后的请求和附件引用。
         异常：
             ValueError: 附件不存在、未完成处理或会话标识为空时抛出。
             SessionNotFoundError: 会话不存在时抛出。
         """
-        session_id = str(request.get("session_id", ""))
+        session_id = request.session_id or ""
         if not session_id:
             raise ValueError("session_id is required")
         if await self._sessions.get(session_id) is None:
             raise SessionNotFoundError(session_id)
 
-        message_id = str(request.get("message_id") or self._id_factory())
-        attachment_refs: list[dict[str, object]] = []
+        message_id = request.message_id or self._id_factory()
+        attachment_refs: list[RootAttachment] = []
         attachment_values = []
 
         # 运行只能使用当前会话中已完成处理的附件，并把同一份引用写入消息。
-        for attachment_id in request.get("attachment_ids", ()) or ():
+        for attachment_id in request.attachment_ids or ():
             attachment = await self._attachments.get(
                 str(attachment_id), session_id=session_id
             )
@@ -71,14 +78,17 @@ class RunRequestPreparationService:
             status = attachment.status.value
             attachment_values.append(attachment.to_attachment_reference())
             attachment_refs.append(
-                {
-                    "id": attachment.id,
-                    "filename": attachment.filename,
-                    "mime_type": attachment.mime_type,
-                    "size_bytes": attachment.size_bytes,
-                    "status": status,
-                }
+                RootAttachment(
+                    id=attachment.id,
+                    filename=attachment.filename,
+                    mime_type=attachment.mime_type,
+                    size_bytes=attachment.size_bytes,
+                    status=status,
+                )
             )
+        prepared_request = request.model_copy(
+            update={"message_id": message_id, "attachment_refs": attachment_refs}
+        )
 
         user_message = await self._messages.get(message_id)
         if user_message is None:
@@ -86,12 +96,13 @@ class RunRequestPreparationService:
                 id=message_id,
                 session_id=session_id,
                 role=MessageRole.USER,
-                content=str(request.get("user_message", "")),
+                content=request.user_message,
                 timestamp=self._clock(),
-                run_id=str(request.get("run_id") or "") or None,
+                run_id=request.run_id or None,
                 attachments=tuple(attachment_values),
             )
             await self._messages.save(user_message)
+            logger.info(f"用户消息{user_message.content}保存成功。")
         if self._events is not None:
             await self._events.publish(
                 ApplicationEvent(
@@ -108,14 +119,7 @@ class RunRequestPreparationService:
                     },
                 )
             )
-
-        return {
-            "request": {
-                **dict(request),
-                "message_id": message_id,
-                "attachment_refs": attachment_refs,
-            }
-        }
+        return prepared_request
 
     async def load_history(
         self,
@@ -179,22 +183,22 @@ class RunRequestPreparationService:
                 )
         return values
 
-    async def load_knowledge_bases(self) -> list[dict[str, object]]:
+    async def load_knowledge_bases(self) -> list[RootKnowledgeBase]:
         """加载 Root 决策使用的知识库元数据。
 
         返回值：
-            list[dict[str, object]]: 知识库统计信息列表。
+            list[RootKnowledgeBase]: 知识库统计信息列表。
         异常：
             不主动抛出业务异常。
         """
         return [
-            {
-                "id": item.id,
-                "name": item.name,
-                "description": item.description,
-                "document_count": item.document_count,
-                "ready_document_count": item.ready_document_count,
-            }
+            RootKnowledgeBase(
+                id=item.id,
+                name=item.name,
+                description=item.description,
+                document_count=item.document_count,
+                ready_document_count=item.ready_document_count,
+            )
             for item in await self._knowledge_bases.list_knowledge_bases()
         ]
 

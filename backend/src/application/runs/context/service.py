@@ -90,7 +90,10 @@ class ContextAcquisitionService:
         )
         # 阶段归因由程序统一覆盖，Provider 只负责它自己的检索事实。
         results = [
-            replace(result, effective_params={**result.effective_params, "retrieval_stage": stage})
+            replace(
+                result,
+                effective_params={**result.effective_params, "retrieval_stage": stage},
+            )
             for result in results
         ]
         bundle = self._build_bundle(results, plan)
@@ -257,8 +260,13 @@ class ContextAcquisitionService:
         ]
         for result in results:
             await self._publish_provider_results(
-                [result], session_id=session_id, run_id=run_id,
-                activity_id=activity_id, retrieval_run_id=None, stage=stage, plan=plan,
+                [result],
+                session_id=session_id,
+                run_id=run_id,
+                activity_id=activity_id,
+                retrieval_run_id=None,
+                stage=stage,
+                plan=plan,
             )
 
         queries = {
@@ -286,7 +294,11 @@ class ContextAcquisitionService:
                     "parent_activity_id": activity_id,
                     "status": "running",
                     **({"query": queries[name][:500]} if queries.get(name) else {}),
-                    **({"resource_scope": scope} if name in {"knowledge", "file"} else {}),
+                    **(
+                        {"resource_scope": scope}
+                        if name in {"knowledge", "file"}
+                        else {}
+                    ),
                 },
                 transition_id=f"{activity_id}:provider:{name}:started",
             )
@@ -314,12 +326,19 @@ class ContextAcquisitionService:
                     completed_results[task] = result
                     results.append(result)
                     await self._publish_provider_results(
-                        [result], session_id=session_id, run_id=run_id,
-                        activity_id=activity_id, retrieval_run_id=None, stage=stage, plan=plan,
+                        [result],
+                        session_id=session_id,
+                        run_id=run_id,
+                        activity_id=activity_id,
+                        retrieval_run_id=None,
+                        stage=stage,
+                        plan=plan,
                     )
             return results, False
         except asyncio.CancelledError:
+            logger.info("Context retrieval cancelled.")
             for task in tasks:
+                # 先取消还没有完成的任务
                 if not task.done():
                     task.cancel()
             settled = await asyncio.gather(*tasks, return_exceptions=True)
@@ -329,24 +348,45 @@ class ContextAcquisitionService:
                 if isinstance(value, ProviderResult):
                     results.append(value)
                     await self._publish_provider_results(
-                        [value], session_id=session_id, run_id=run_id,
-                        activity_id=activity_id, retrieval_run_id=None, stage=stage, plan=plan,
+                        [value],
+                        session_id=session_id,
+                        run_id=run_id,
+                        activity_id=activity_id,
+                        retrieval_run_id=None,
+                        stage=stage,
+                        plan=plan,
                     )
                 elif isinstance(value, BaseException) and not isinstance(
                     value, asyncio.CancelledError
                 ):
-                    result = ProviderResult(tasks[task], "failed", error_message=type(value).__name__)
+                    # 处理异常但是不是因为取消信号导致异常的任务
+                    result = ProviderResult(
+                        tasks[task], "failed", error_message=type(value).__name__
+                    )
                     results.append(result)
                     await self._publish_provider_results(
-                        [result], session_id=session_id, run_id=run_id,
-                        activity_id=activity_id, retrieval_run_id=None, stage=stage, plan=plan,
+                        [result],
+                        session_id=session_id,
+                        run_id=run_id,
+                        activity_id=activity_id,
+                        retrieval_run_id=None,
+                        stage=stage,
+                        plan=plan,
                     )
                 else:
-                    result = ProviderResult(tasks[task], "cancelled", error_message="retrieval cancelled")
+                    # 处理取消的任务
+                    result = ProviderResult(
+                        tasks[task], "cancelled", error_message="retrieval cancelled"
+                    )
                     results.append(result)
                     await self._publish_provider_results(
-                        [result], session_id=session_id, run_id=run_id,
-                        activity_id=activity_id, retrieval_run_id=None, stage=stage, plan=plan,
+                        [result],
+                        session_id=session_id,
+                        run_id=run_id,
+                        activity_id=activity_id,
+                        retrieval_run_id=None,
+                        stage=stage,
+                        plan=plan,
                     )
             return results, True
 
@@ -384,9 +424,7 @@ class ContextAcquisitionService:
             items=tuple(kept),
             provider_results=tuple(traced_results),
             providers_succeeded=tuple(
-                result.provider
-                for result in results
-                if result.status == "succeeded"
+                result.provider for result in results if result.status == "succeeded"
             ),
             providers_failed=tuple(
                 result.provider
@@ -487,15 +525,19 @@ class ContextAcquisitionService:
             resource_scope = (
                 {"knowledge_base_ids": list(plan.knowledge_base_ids)}
                 if result.provider == "knowledge"
-                else {"file_ids": list(plan.file_ids)}
-                if result.provider == "file"
-                else None
+                else (
+                    {"file_ids": list(plan.file_ids)}
+                    if result.provider == "file"
+                    else None
+                )
             )
             query = query_by_provider.get(result.provider)
             await self._publish_event(
-                "retrieval.provider.failed"
-                if failed
-                else "retrieval.provider.completed",
+                (
+                    "retrieval.provider.failed"
+                    if failed
+                    else "retrieval.provider.completed"
+                ),
                 session_id,
                 run_id,
                 {
@@ -535,9 +577,7 @@ class ContextAcquisitionService:
             resource_scope = (
                 {"knowledge_base_ids": list(query.knowledge_base_ids)}
                 if provider == "knowledge"
-                else {"file_ids": list(query.file_ids)}
-                if provider == "file"
-                else None
+                else {"file_ids": list(query.file_ids)} if provider == "file" else None
             )
             provider_activity_id = f"{activity_id}:provider:{provider}:{uuid4().hex}"
             await self._publish_event(
@@ -574,16 +614,24 @@ class ContextAcquisitionService:
     ) -> None:
         """结束活动并发布实际获得的召回数量。"""
         status = _run_status(results, cancelled=cancelled)
-        event_type = "retrieval.failed" if status in {"failed", "timeout", "cancelled"} else "retrieval.completed"
+        event_type = (
+            "retrieval.failed"
+            if status in {"failed", "timeout", "cancelled"}
+            else "retrieval.completed"
+        )
         await self._publish_event(
             event_type,
             session_id,
             run_id,
             {
-                **self._activity_payload(activity_id, run_id, stage=stage, status=status),
+                **self._activity_payload(
+                    activity_id, run_id, stage=stage, status=status
+                ),
                 "duration_ms": duration_ms,
                 "retrieval_run_id": retrieval_run_id,
-                "trace_status": "pending" if retrieval_run_id is not None else "incomplete",
+                "trace_status": (
+                    "pending" if retrieval_run_id is not None else "incomplete"
+                ),
                 "raw_hit_count": sum(
                     channel.hit_count
                     for result in results
@@ -736,7 +784,9 @@ def _provider_query(plan: ContextPlan, provider: str) -> str | None:
     }.get(provider)
 
 
-def _run_status(results: list[ProviderResult] | tuple[ProviderResult, ...], *, cancelled: bool) -> str:
+def _run_status(
+    results: list[ProviderResult] | tuple[ProviderResult, ...], *, cancelled: bool
+) -> str:
     if cancelled:
         return "cancelled"
     active = [result for result in results if result.status != "skipped"]
@@ -763,9 +813,7 @@ def _plan_query_summary(plan: ContextPlan) -> str:
         ("knowledge", plan.knowledge_query),
         ("graph", plan.graph_query),
     )
-    return "\n".join(
-        f"{provider}: {query}" for provider, query in queries if query
-    )
+    return "\n".join(f"{provider}: {query}" for provider, query in queries if query)
 
 
 __all__ = ["ContextAcquisitionService"]

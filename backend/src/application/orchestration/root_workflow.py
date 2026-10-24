@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from domain.orchestration import (
@@ -25,6 +25,12 @@ from domain.orchestration import (
 )
 
 from .dependencies import RootWorkflowDependencies
+from .graph_state import (
+    RootAnswerInputState,
+    RootPlanIdentity,
+    RootResumeIdentity,
+    RootWaitIdentity,
+)
 from .root_decision import (
     AnswerIntent,
     ContextRequest,
@@ -37,7 +43,6 @@ from .root_decision import (
     ROOT_DECISION_ADAPTER,
     RootAgentInput,
     RootMessage,
-    RootKnowledgeBase,
     RootWorkerTool,
 )
 from application.runs.context.contracts import (
@@ -52,6 +57,7 @@ from application.runs.context.contracts import (
     RetrievalStage,
 )
 from application.runs.context.planner import InvalidContextResource
+from application.runs.request_contracts import RootKnowledgeBase, RootRequestState
 from domain.retrieval.trace_contracts import (
     RetrievalCandidateSelection,
     RetrievalCandidateTrace,
@@ -227,40 +233,29 @@ def _review_identity(state: Mapping[str, Any]) -> _ReviewIdentity:
     Raises:
         RuntimeError: 恢复类型、身份字段或计划版本不合法时。
     """
-    resume_value = state.get("resume_value", {})
-    wait_context = state.get("root_wait", {})
-    if not isinstance(resume_value, Mapping) or not isinstance(wait_context, Mapping):
-        raise RuntimeError("root_review_resume_identity_missing")
-    if resume_value.get("type") != "round_completed":
-        raise RuntimeError("root_review_resume_type_invalid")
+    try:
+        resume_value = RootResumeIdentity.model_validate(state.get("resume_value", {}))
+        wait_context = RootWaitIdentity.model_validate(state.get("root_wait", {}))
+    except ValidationError as error:
+        raise RuntimeError("root_review_resume_identity_missing") from error
     identity_fields = ("run_id", "plan_id", "round_id", "plan_version")
     identities_match = all(
-        name in resume_value
-        and name in wait_context
-        and resume_value.get(name) == wait_context.get(name)
+        getattr(resume_value, name) == getattr(wait_context, name)
         for name in identity_fields
     )
     if not identities_match:
         raise RuntimeError("root_review_resume_identity_mismatch")
-    request = state.get("request", {})
-    if not isinstance(request, Mapping) or request.get("run_id") != resume_value.get(
-        "run_id"
-    ):
+    request = _request_state(state)
+    if request.run_id != resume_value.run_id:
         raise RuntimeError("root_review_run_identity_mismatch")
-    plan_version = resume_value["plan_version"]
-    if not isinstance(plan_version, int) or isinstance(plan_version, bool):
-        raise RuntimeError("root_review_plan_version_invalid")
-    round_id = str(resume_value["round_id"])
+    plan_version = resume_value.plan_version
+    round_id = resume_value.round_id
     return _ReviewIdentity(
-        run_id=str(resume_value["run_id"]),
-        plan_id=str(resume_value["plan_id"]),
+        run_id=resume_value.run_id,
+        plan_id=resume_value.plan_id,
         round_id=round_id,
         plan_version=plan_version,
-        interrupt_id=(
-            str(resume_value["interrupt_id"])
-            if resume_value.get("interrupt_id")
-            else None
-        ),
+        interrupt_id=resume_value.interrupt_id or None,
         idempotency_key=f"root-review:{round_id}",
     )
 
@@ -345,9 +340,7 @@ async def _apply_review_decision_with_fallback(
     return replacement, receipt
 
 
-def _validate_review_tools(
-    decision: ReviewDecision, available_tools: set[str]
-) -> None:
+def _validate_review_tools(decision: ReviewDecision, available_tools: set[str]) -> None:
     """拒绝 Review/Revision 中系统当前没有提供的 Worker 工具。"""
     if decision.action != ReviewAction.REPLAN or decision.revision is None:
         return
@@ -358,8 +351,7 @@ def _validate_review_tools(
     unavailable_tools = sorted(requested_tools - available_tools)
     if unavailable_tools:
         raise ValueError(
-            "root_review_requests_unavailable_tools: "
-            + ", ".join(unavailable_tools)
+            "root_review_requests_unavailable_tools: " + ", ".join(unavailable_tools)
         )
 
 
@@ -385,9 +377,11 @@ def _context_bundle_from_state(value: Mapping[str, Any]) -> ContextBundle:
             for item in value.get("items", ())
             if isinstance(item, Mapping)
         ),
-        provider_results=tuple(_provider_result_from_state(item)
+        provider_results=tuple(
+            _provider_result_from_state(item)
             for item in value.get("provider_results", ())
-            if isinstance(item, Mapping)),
+            if isinstance(item, Mapping)
+        ),
         providers_succeeded=tuple(value.get("providers_succeeded", ())),
         providers_failed=tuple(value.get("providers_failed", ())),
         truncated=bool(value.get("truncated", False)),
@@ -398,6 +392,11 @@ def _context_bundle_from_state(value: Mapping[str, Any]) -> ContextBundle:
             if isinstance(item, Mapping)
         ),
     )
+
+
+def _request_state(state: Mapping[str, Any]) -> RootRequestState:
+    """将 checkpoint 中的请求字典恢复为有类型的请求内容。"""
+    return RootRequestState.model_validate(state.get("request", {}))
 
 
 def _provider_result_from_state(value: Mapping[str, Any]) -> ProviderResult:
@@ -522,7 +521,7 @@ def _selection_source_id(item: ContextItem) -> str:
 
 def _filter_context_queries(
     queries: tuple[ContextQuery, ...],
-    available_providers: set[str],
+    available_providers: tuple[str, ...],
     stage: RetrievalStage,
 ) -> tuple[tuple[ContextQuery, ...], list[ContextQueryOutcome]]:
     """过滤未装配的通道，并为 Root 保留明确的跳过原因。"""
@@ -574,7 +573,10 @@ def _context_query_outcomes(
             ContextQueryOutcome(
                 stage=stage,
                 query=query,
-                status=status,
+                status=cast(
+                    Literal["succeeded", "empty", "failed", "timeout", "skipped"],
+                    status,
+                ),
                 result_count=result.result_count,
                 error_message=error_message,
             )
@@ -586,7 +588,7 @@ async def _retrieve_context_batch(
     deps: RootWorkflowDependencies,
     *,
     queries: tuple[ContextQuery, ...],
-    request: Mapping[str, Any],
+    request: RootRequestState,
     attachment_ids: tuple[str, ...],
     knowledge_base_ids: tuple[str, ...],
     stage: RetrievalStage,
@@ -617,9 +619,9 @@ async def _retrieve_context_batch(
             None,
         )
     bundle = await deps.context_acquisition.retrieve_context(
-        session_id=str(request["session_id"]),
-        run_id=str(request["run_id"]),
-        message_id=(str(request["message_id"]) if request.get("message_id") else None),
+        session_id=request.session_id,
+        run_id=request.run_id,
+        message_id=request.message_id,
         invocation_id=uuid4().hex,
         stage=stage,
         plan=plan,
@@ -637,40 +639,40 @@ class RootWorkflow(RootWorkflowPort):
     @staticmethod
     def _conversation_messages(state: Mapping[str, Any]) -> tuple[RootMessage, ...]:
         """从请求与历史构造 Root/计划/正文共同使用的对话。"""
-        request = state["request"]
-        current_message_id = str(request["message_id"])
+        request = _request_state(state)
+        current_message_id = request.message_id
         messages = [
-            RootMessage(role=item["role"], content=item["content"])
-            for item in request.get("history", [])
-            if isinstance(item, Mapping)
-            and item.get("message_id") != current_message_id
+            RootMessage(role=item.role, content=item.content)
+            for item in request.history
+            if item.message_id != current_message_id
         ]
-        messages.append(
-            RootMessage(role="user", content=str(request.get("user_message", "")))
-        )
+        messages.append(RootMessage(role="user", content=request.user_message))
         return tuple(messages)
 
-    @staticmethod
-    def _agent_input(
+    async def _agent_input(
+        self,
         state: RootGraphState,
         *,
         remaining_turns: int,
     ) -> RootAgentInput:
         """从当前 checkpoint 构造统一的 Root 决策输入。"""
-        request = state["request"]
+        request = _request_state(state)
         bundle = _context_bundle_from_state(state.get("context_bundle", {}))
         feedback_value = state.get("planning_feedback")
+        worker_tools = await worker_tool_manifest(self.dependencies.tool_service)
+        available_context_providers = cast(
+            tuple[Literal["memory", "file", "knowledge", "graph"], ...],
+            self.dependencies.available_context_providers,
+        )
         return RootAgentInput(
-            session_id=str(request["session_id"]),
-            run_id=str(request["run_id"]),
-            message_id=str(request["message_id"]),
+            session_id=request.session_id,
+            run_id=request.run_id,
+            message_id=request.message_id,
             messages=RootWorkflow._conversation_messages(state),
-            attachments=tuple(request.get("attachment_refs", ())),
-            knowledge_bases=tuple(state.get("knowledge_bases", ())),
-            worker_tools=tuple(state.get("worker_tools", ())),
-            available_context_providers=tuple(
-                state.get("available_context_providers", ())
-            ),
+            attachments=request.attachment_refs,
+            knowledge_bases=request.knowledge_bases,
+            worker_tools=worker_tools,
+            available_context_providers=available_context_providers,
             context_items=bundle.items,
             context_queries=tuple(
                 ContextQueryOutcome.model_validate(item)
@@ -679,68 +681,34 @@ class RootWorkflow(RootWorkflowPort):
             remaining_turns=remaining_turns,
             planning_feedback=(
                 PlanningFeedback.model_validate(feedback_value)
-                if isinstance(feedback_value, Mapping)
+                if feedback_value is not None
                 else None
             ),
-            planning_context_updated=bool(
-                state.get("planning_context_updated", False)
-            ),
+            planning_context_updated=bool(state.get("planning_context_updated", False)),
         )
 
     async def prepare_request(self, state: RootGraphState) -> dict[str, Any]:
         deps = self.dependencies
-        request = dict(state.get("request", {}))
-        request.setdefault("session_id", "")
-        request.setdefault("run_id", "")
-        request.setdefault("user_message", "")
-        request["attachment_ids"] = list(
-            dict.fromkeys(request.get("attachment_ids", []))
+        request_state = _request_state(state)
+        updated_request = await deps.request_preparation.prepare(request=request_state)
+
+        if not request_state.history:
+            history = await deps.request_preparation.load_history(
+                session_id=updated_request.session_id,
+                exclude_message_id=updated_request.message_id,
+            )
+            updated_request = RootRequestState.model_validate(
+                {
+                    **updated_request.model_dump(mode="python"),
+                    "history": history,
+                }
+            )
+        request_state.knowledge_bases = (
+            await self.dependencies.request_preparation.load_knowledge_bases()
         )
-        update = await deps.request_preparation.prepare(request=request)
-        extra: dict[str, Any] = {}
-        if isinstance(update, Mapping):
-            request.update(json_value(update.get("request", update)))
-            extra = {
-                key: json_value(value)
-                for key, value in update.items()
-                if key != "request"
-            }
-        if "history" not in request:
-            request["history"] = json_value(
-                await deps.request_preparation.load_history(
-                    session_id=request["session_id"],
-                    exclude_message_id=str(request["message_id"]),
-                )
-            )
-        if request["attachment_ids"] and "attachment_refs" not in request:
-            request["attachment_refs"] = json_value(
-                await deps.request_preparation.load_attachments(
-                    session_id=request["session_id"],
-                    attachment_ids=request["attachment_ids"],
-                )
-            )
-        knowledge_bases = await deps.request_preparation.load_knowledge_bases()
-        worker_tools = await worker_tool_manifest(deps.tool_service)
+
         return {
-            "request": json_value(request),
-            "knowledge_bases": json_value(knowledge_bases),
-            "worker_tools": json_value(worker_tools),
-            "available_context_providers": list(
-                deps.available_context_providers
-            ),
-            "root_turn_count": int(state.get("root_turn_count", 0)),
-            "context_bundle": json_value(
-                state.get(
-                    "context_bundle",
-                    {
-                        "items": [],
-                        "provider_results": [],
-                        "truncated": False,
-                    },
-                )
-            ),
-            "context_queries": list(state.get("context_queries", [])),
-            **extra,
+            "request": updated_request.model_dump(mode="json"),
         }
 
     async def prefetch_context(self, state: RootGraphState) -> dict[str, Any]:
@@ -750,40 +718,27 @@ class RootWorkflow(RootWorkflowPort):
         返回：dict，更新同一资料窗口和带阶段的查询摘要。
         异常：资源契约错误向上传播；取消时传播 CancelledError。
         """
-        query = str(state["request"].get("user_message", "")).strip()[:500]
+        request = _request_state(state)
+        query = request.user_message.strip()[:500]
         if not query:
             return {}
-        knowledge_bases = tuple(
-            RootKnowledgeBase.model_validate(item)
-            for item in state.get("knowledge_bases", ())
-        )
+
         ready_ids = tuple(
-            item.id for item in knowledge_bases if item.ready_document_count > 0
+            item.id for item in request.knowledge_bases if item.ready_document_count > 0
         )
         queries: list[ContextQuery] = [MemoryQuery(provider="memory", query=query)]
         knowledge_query = KnowledgeQuery(
             provider="knowledge", query=query, knowledge_base_ids=ready_ids
         )
-        skipped: tuple[ContextQueryOutcome, ...] = ()
         # 未装配通道由共用过滤逻辑记录；已装配但无就绪资料时禁止空范围回退。
-        if ready_ids or "knowledge" not in state.get("available_context_providers", ()):
+        if ready_ids:
             queries.append(knowledge_query)
-        else:
-            skipped = (
-                ContextQueryOutcome(
-                    stage="prefetch",
-                    query=knowledge_query,
-                    status="skipped",
-                    result_count=0,
-                    error_message="no_ready_knowledge_bases",
-                ),
-            )
+
         return await self._acquire_context_queries(
             state,
             queries=tuple(queries),
             stage="prefetch",
             provider_timeout_seconds=self.dependencies.context_prefetch_timeout_seconds,
-            skipped_outcomes=skipped,
         )
 
     async def decide_root_action(self, state: RootGraphState) -> dict[str, Any]:
@@ -797,13 +752,12 @@ class RootWorkflow(RootWorkflowPort):
             ValueError: Root 无法修复无效决策时。
         """
         deps = self.dependencies
-        request = state["request"]
         turn_count = state.get("root_turn_count", 0)
         remaining_turns = deps.root_max_turns - turn_count
         if remaining_turns < 1:
             return _root_budget_exhausted(turn_count)
 
-        inputs = self._agent_input(state, remaining_turns=remaining_turns)
+        inputs = await self._agent_input(state, remaining_turns=remaining_turns)
         decision = ROOT_DECISION_ADAPTER.validate_python(
             await deps.agent.decide(inputs)
         )
@@ -814,16 +768,20 @@ class RootWorkflow(RootWorkflowPort):
             "root_turn_count": next_turn_count,
         }
         if isinstance(decision, AnswerIntent):
-            update["answer_input"] = {
-                "source": "decision",
-                "kind": decision.kind,
-                "instructions": decision.instructions,
-            }
+            update["answer_input"] = RootAnswerInputState(
+                source="decision",
+                kind=decision.kind,
+                instructions=decision.instructions,
+            ).model_dump(mode="json")
             update.update(
                 planning_feedback=None,
                 planning_context_updated=False,
             )
-        elif isinstance(decision, PlanIntent) and inputs.planning_feedback and not inputs.planning_context_updated:
+        elif (
+            isinstance(decision, PlanIntent)
+            and inputs.planning_feedback
+            and not inputs.planning_context_updated
+        ):
             return {
                 **update,
                 "error": {
@@ -832,7 +790,10 @@ class RootWorkflow(RootWorkflowPort):
                 },
                 "status": "failed",
             }
-        elif isinstance(decision, ContextRequest) and next_turn_count >= deps.root_max_turns:
+        elif (
+            isinstance(decision, ContextRequest)
+            and next_turn_count >= deps.root_max_turns
+        ):
             update.update(_root_budget_exhausted(next_turn_count))
         return update
 
@@ -843,7 +804,7 @@ class RootWorkflow(RootWorkflowPort):
         remaining_turns = deps.root_max_turns - turn_count
         if remaining_turns < 1:
             return _root_budget_exhausted(turn_count)
-        inputs = self._agent_input(state, remaining_turns=remaining_turns)
+        inputs = await self._agent_input(state, remaining_turns=remaining_turns)
         decision = await deps.agent.redecide(inputs)
         from .root_decision import ROOT_REDECISION_ADAPTER
 
@@ -854,11 +815,11 @@ class RootWorkflow(RootWorkflowPort):
             "root_turn_count": next_turn_count,
         }
         if isinstance(decision, AnswerIntent):
-            update["answer_input"] = {
-                "source": "decision",
-                "kind": decision.kind,
-                "instructions": decision.instructions,
-            }
+            update["answer_input"] = RootAnswerInputState(
+                source="decision",
+                kind=decision.kind,
+                instructions=decision.instructions,
+            ).model_dump(mode="json")
             update.update(
                 planning_feedback=None,
                 planning_context_updated=False,
@@ -898,7 +859,6 @@ class RootWorkflow(RootWorkflowPort):
         queries: tuple[ContextQuery, ...],
         stage: RetrievalStage,
         provider_timeout_seconds: float | None = None,
-        skipped_outcomes: tuple[ContextQueryOutcome, ...] = (),
     ) -> dict[str, Any]:
         """共用两阶段的范围校验、采集、窗口合并与选择确认。
 
@@ -908,49 +868,38 @@ class RootWorkflow(RootWorkflowPort):
         异常：取消时传播 CancelledError；损坏的状态契约向上传播。
         """
         deps = self.dependencies
-        request = state["request"]
+        request_state = _request_state(state)
 
-        attachment_ids = tuple(
-            str(item["id"])
-            for item in request.get("attachment_refs", ())
-            if isinstance(item, Mapping) and item.get("id")
-        )
-        knowledge_base_ids = tuple(
-            str(item["id"])
-            for item in state.get("knowledge_bases", ())
-            if isinstance(item, Mapping) and item.get("id")
-        )
-        available_queries, outcomes = _filter_context_queries(
+        attachment_ids = tuple(item.id for item in request_state.attachment_refs)
+        knowledge_base_ids = tuple(item.id for item in request_state.knowledge_bases)
+        available_queries, skipped = _filter_context_queries(
             queries,
-            set(state.get("available_context_providers", ())),
+            self.dependencies.available_context_providers,
             stage,
         )
-        outcomes.extend(skipped_outcomes)
         new_bundle = ContextBundle(items=(), provider_results=())
         if available_queries:
             new_bundle, query_outcomes, context_plan = await _retrieve_context_batch(
                 deps,
                 queries=available_queries,
-                request=request,
+                request=request_state,
                 attachment_ids=attachment_ids,
                 knowledge_base_ids=knowledge_base_ids,
                 stage=stage,
                 provider_timeout_seconds=provider_timeout_seconds,
-                skipped_outcomes=tuple(outcomes),
+                skipped_outcomes=tuple(skipped),
             )
-            outcomes.extend(query_outcomes)
+            skipped.extend(query_outcomes)
         else:
             context_plan = None
             await deps.context_acquisition.publish_skipped_provider_outcomes(
-                tuple(outcomes),
-                session_id=str(request["session_id"]),
-                run_id=str(request["run_id"]),
+                tuple(skipped),
+                session_id=request_state.session_id,
+                run_id=request_state.run_id,
                 stage=stage,
             )
 
-        previous_bundle = _context_bundle_from_state(
-            state.get("context_bundle", {})
-        )
+        previous_bundle = _context_bundle_from_state(state.get("context_bundle", {}))
         max_items = (
             context_plan.max_items
             if context_plan is not None
@@ -971,8 +920,8 @@ class RootWorkflow(RootWorkflowPort):
         context_progress = _has_context_progress(previous_bundle, merged_bundle)
         await deps.context_acquisition.confirm_selection(
             run_id=new_bundle.retrieval_run_id,
-            session_id=str(request["session_id"]),
-            agent_run_id=str(request["run_id"]),
+            session_id=request_state.session_id,
+            agent_run_id=request_state.run_id,
             selections=merged_bundle.context_selection,
             stage=stage,
         )
@@ -988,25 +937,25 @@ class RootWorkflow(RootWorkflowPort):
             ),
             "context_queries": [
                 outcome.model_dump(mode="json")
-                for outcome in (*previous_outcomes, *outcomes)
+                for outcome in (*previous_outcomes, *skipped)
             ],
         }
 
     async def generate_plan(self, state: RootGraphState) -> dict[str, Any]:
         """根据轻量计划意图生成草稿或返回必要信息缺口。"""
         deps = self.dependencies
-        request = state["request"]
+        request_state = _request_state(state)
         decision = ROOT_DECISION_ADAPTER.validate_python(state.get("root_decision", {}))
         if not isinstance(decision, PlanIntent):
             return {"error": {"code": "root_plan_intent_missing"}, "status": "failed"}
         messages = self._conversation_messages(state)
         bundle = _context_bundle_from_state(state.get("context_bundle", {}))
         plan_input = RootPlanInput(
-            session_id=str(request["session_id"]),
-            run_id=str(request["run_id"]),
-            message_id=str(request["message_id"]),
+            session_id=request_state.session_id,
+            run_id=request_state.run_id,
+            message_id=request_state.message_id,
             messages=messages,
-            attachments=tuple(request.get("attachment_refs", ())),
+            attachments=request_state.attachment_refs,
             knowledge_bases=tuple(state.get("knowledge_bases", ())),
             worker_tools=tuple(state.get("worker_tools", ())),
             context_items=bundle.items,
@@ -1039,7 +988,8 @@ class RootWorkflow(RootWorkflowPort):
         异常：草稿、资源范围或计划命令无效时向图节点传播异常。
         """
         deps = self.dependencies
-        request = state.get("request", {})
+        request_state = _request_state(state)
+        request = request_state.model_dump(mode="python")
         draft_value = state.get("plan_draft")
         if not isinstance(draft_value, Mapping):
             raise ValueError("root_plan_draft_missing")
@@ -1050,7 +1000,7 @@ class RootWorkflow(RootWorkflowPort):
         )
         current_draft = PlanDraft.model_validate(current_values)
         plan, tasks = coerce_plan(current_draft, request=request)
-        run_id = str(request.get("run_id") or "").strip()
+        run_id = request_state.run_id.strip()
         worker_tools = {
             str(item["name"])
             for item in state.get("worker_tools", [])
@@ -1092,18 +1042,19 @@ class RootWorkflow(RootWorkflowPort):
 
     async def wait_for_plan_completion(self, state: RootGraphState) -> dict[str, Any]:
         deps = self.dependencies
-        plan = state.get("plan", {})
+        request_state = _request_state(state)
+        plan = RootPlanIdentity.model_validate(state.get("plan", {}))
         if deps.plan_loader is None:
             return {
                 "waiting": True,
                 "status": "waiting_for_plan",
                 "root_wait": {
                     "type": "round_wait",
-                    "run_id": str(state.get("request", {}).get("run_id", "")),
-                    "plan_id": str(plan.get("plan_id", "")),
+                    "run_id": request_state.run_id,
+                    "plan_id": plan.plan_id,
                 },
             }
-        loaded = await deps.plan_loader(plan_id=plan.get("plan_id"))
+        loaded = await deps.plan_loader(plan_id=plan.plan_id)
         if isinstance(loaded, Mapping) and loaded.get("completed"):
             return {
                 "waiting": False,
@@ -1116,10 +1067,8 @@ class RootWorkflow(RootWorkflowPort):
             else {}
         )
         wait_context.setdefault("type", "round_wait")
-        wait_context.setdefault(
-            "run_id", str(state.get("request", {}).get("run_id", ""))
-        )
-        wait_context.setdefault("plan_id", str(plan.get("plan_id", "")))
+        wait_context.setdefault("run_id", request_state.run_id)
+        wait_context.setdefault("plan_id", plan.plan_id)
         return {
             "waiting": True,
             "status": "waiting_for_plan",
@@ -1141,7 +1090,7 @@ class RootWorkflow(RootWorkflowPort):
         handler = deps.orchestration_command_handler
         if handler is None:
             raise RuntimeError("root_review_command_handler_not_configured")
-        request = state.get("request", {})
+        request = _request_state(state).model_dump(mode="python")
         decision, context, worker_tools = await _load_or_create_review_decision(
             deps, identity, request, state
         )
@@ -1156,12 +1105,13 @@ class RootWorkflow(RootWorkflowPort):
 
     async def build_plan_response(self, state: RootGraphState) -> dict[str, Any]:
         """把完成计划的任务结果整理为统一正文生成输入。"""
+        answer_input = RootAnswerInputState(
+            source="plan_summary",
+            kind="final",
+            instructions="根据用户原始目标总结已完成的任务结果，准确保留失败项、不确定性和未执行事实。",
+        )
         return {
-            "answer_input": {
-                "source": "plan_summary",
-                "kind": "final",
-                "instructions": "根据用户原始目标总结已完成的任务结果，准确保留失败项、不确定性和未执行事实。",
-            },
+            "answer_input": answer_input.model_dump(mode="json"),
             "waiting": False,
         }
 
@@ -1170,28 +1120,30 @@ class RootWorkflow(RootWorkflowPort):
         from .answer_generation import AnswerGenerationInput
 
         deps = self.dependencies
-        request = state["request"]
-        answer_input = state.get("answer_input")
-        if not isinstance(answer_input, Mapping):
+        request = _request_state(state)
+        answer_input_value = state.get("answer_input")
+        if isinstance(answer_input_value, Mapping):
+            answer_input = RootAnswerInputState.model_validate(answer_input_value)
+        else:
             decision = ROOT_DECISION_ADAPTER.validate_python(
                 state.get("root_decision", {})
             )
             if not isinstance(decision, AnswerIntent):
                 raise ValueError("root_answer_intent_missing")
-            answer_input = {
-                "source": "decision",
-                "kind": decision.kind,
-                "instructions": decision.instructions,
-            }
+            answer_input = RootAnswerInputState(
+                source="decision",
+                kind=decision.kind,
+                instructions=decision.instructions,
+            )
         messages = self._conversation_messages(state)
         bundle = _context_bundle_from_state(state.get("context_bundle", {}))
         result = await deps.answer_generation.generate(
             AnswerGenerationInput(
-                session_id=str(request["session_id"]),
-                run_id=str(request["run_id"]),
-                message_id=str(request["message_id"]),
-                kind=str(answer_input.get("kind", "final")),
-                instructions=str(answer_input.get("instructions", "")),
+                session_id=request.session_id,
+                run_id=request.run_id,
+                message_id=request.message_id,
+                kind=answer_input.kind,
+                instructions=answer_input.instructions,
                 messages=tuple(messages),
                 context_items=bundle.items,
                 context_queries=tuple(
@@ -1200,18 +1152,14 @@ class RootWorkflow(RootWorkflowPort):
                 ),
                 plan_results=(
                     dict(state["plan_results"])
-                    if answer_input.get("source") == "plan_summary"
+                    if answer_input.source == "plan_summary"
                     and isinstance(state.get("plan_results"), Mapping)
                     else None
                 ),
             )
         )
         return {
-            "response": {
-                "content": result.content,
-                "kind": result.kind,
-                "answer_stream": result.answer_stream.model_dump(mode="json"),
-            },
+            "response": result.model_dump(mode="json"),
             "status": "completed",
         }
 

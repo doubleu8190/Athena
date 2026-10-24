@@ -4,9 +4,20 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
+from application.orchestration.graph_state import (
+    RootAnswerInputState,
+    RootPlanIdentity,
+    RootResumeIdentity,
+    RootWaitIdentity,
+)
+from application.runs.request_contracts import RootRequestState
+
 
 class RootGraphState(TypedDict, total=False):
     """Recoverable Root state.
+
+    Structured values are stored as JSON dictionaries and parsed into their
+    concrete models when workflow nodes consume them.
 
     Runtime objects such as an LLM, database session, event bus or stop signal
     are deliberately kept out of this mapping.  They are supplied through
@@ -52,4 +63,12 @@ class WorkerGraphState(TypedDict, total=False):
     pending_approval: dict[str, Any] | None
 
 
-__all__ = ["RootGraphState", "WorkerGraphState"]
+__all__ = [
+    "RootAnswerInputState",
+    "RootPlanIdentity",
+    "RootGraphState",
+    "RootRequestState",
+    "RootResumeIdentity",
+    "RootWaitIdentity",
+    "WorkerGraphState",
+]

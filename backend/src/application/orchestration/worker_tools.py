@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
-from typing import Any
+from typing import Any, Literal, cast
 
 from application.common.responses import ToolResponse
 from application.tools.service import ToolService
 
+from backend.src.application.orchestration.root_decision import RootWorkerTool
 from domain.tools import (
     ToolExecutionRequest,
     ToolExecutionResult,
@@ -36,25 +37,21 @@ class _PreparedWorkerToolCall:
 
 async def worker_tool_manifest(
     tool_service: ToolService | None,
-) -> tuple[dict[str, Any], ...]:
+) -> tuple[RootWorkerTool, ...]:
     """Return enabled native tools with their deterministic approval policy."""
     if tool_service is None:
         return ()
     configured = await tool_service.list_tools()
     return tuple(
-        {
-            "name": name,
-            "description": tool.description,
-            "parameters": dict(tool.parameters),
-            "risk_level": _risk_level(tool),
-            "requires_approval": _requires_approval(tool),
-        }
+        RootWorkerTool(
+            name=name,
+            description=tool.description,
+            parameters=dict(tool.parameters),
+            risk_level=cast(Literal["low", "medium", "high"], _risk_level(tool)),
+            requires_approval=_requires_approval(tool),
+        )
         for name, tool in sorted(
-            (
-                (tool.name, tool)
-                for tool in configured
-                if _is_worker_tool(tool)
-            ),
+            ((tool.name, tool) for tool in configured if _is_worker_tool(tool)),
             key=lambda item: item[0],
         )
     )
@@ -168,9 +165,7 @@ class WorkerToolExecutor:
         name = str(tool_call.get("name", "")).strip()
         task = execution.get("task", {})
         task = task if isinstance(task, Mapping) else {}
-        allowed_tools = {
-            str(value) for value in task.get("allowed_tools", ())
-        }
+        allowed_tools = {str(value) for value in task.get("allowed_tools", ())}
         if not name or name not in allowed_tools:
             return _denied("tool_not_allowed_for_task", name=name)
         config = await self._tool_service.get(name)
@@ -185,9 +180,7 @@ class WorkerToolExecutor:
         generation = int(execution.get("execution_generation", 0))
         if not run_id or not session_id or not task_id or generation < 1:
             return _denied("worker_execution_identity_missing", name=name)
-        tool_call_id = (
-            f"worker:{task_id}:{generation}:{tool_round}:{call_index}"
-        )
+        tool_call_id = f"worker:{task_id}:{generation}:{tool_round}:{call_index}"
         # 同一调用在审批恢复和执行重试时必须得到相同参数哈希与幂等键。
         arguments_json = _strict_json(dict(arguments))
         args_hash = hashlib.sha256(arguments_json.encode("utf-8")).hexdigest()
@@ -209,8 +202,7 @@ class WorkerToolExecutor:
         if _requires_approval(config) and approval_decision != "approved":
             execution_id = str(execution.get("execution_id", ""))
             worker_thread_id = str(
-                execution.get("worker_thread_id")
-                or f"task:{task_id}:exec:{generation}"
+                execution.get("worker_thread_id") or f"task:{task_id}:exec:{generation}"
             )
             if not execution_id:
                 return _denied("worker_execution_identity_missing", name=name)
@@ -268,9 +260,12 @@ class WorkerToolExecutor:
         call_index: int,
     ) -> dict[str, Any]:
         """构造绑定当前执行代次和参数哈希的审批请求。"""
-        approval_id = "approval:" + hashlib.sha256(
-            f"{worker_thread_id}:{operation_key}".encode("utf-8")
-        ).hexdigest()[:32]
+        approval_id = (
+            "approval:"
+            + hashlib.sha256(
+                f"{worker_thread_id}:{operation_key}".encode("utf-8")
+            ).hexdigest()[:32]
+        )
         return {
             "status": "approval_required",
             "approval_request": {
@@ -629,11 +624,24 @@ def _safe_argument_summary(arguments: Any) -> dict[str, str]:
     """Expose only a small allowlist of user-recognizable tool inputs."""
     if not isinstance(arguments, Mapping):
         return {}
-    allowed = {"query", "filename", "file_name", "path", "file_path", "title", "url", "command"}
+    allowed = {
+        "query",
+        "filename",
+        "file_name",
+        "path",
+        "file_path",
+        "title",
+        "url",
+        "command",
+    }
     summary: dict[str, str] = {}
     for key, value in arguments.items():
         normalized_key = str(key).lower()
-        if normalized_key not in allowed or not isinstance(value, str) or not value.strip():
+        if (
+            normalized_key not in allowed
+            or not isinstance(value, str)
+            or not value.strip()
+        ):
             continue
         safe_value = _safe_output_preview(value)
         if safe_value:
@@ -649,7 +657,7 @@ def _safe_output_preview(output: Any) -> str | None:
     if not preview:
         return None
     preview = re.sub(
-        r'''(?i)(["']?(?:api[_-]?key|(?:access|refresh|id|api)?[_-]?token|authorization|password|secret|credential)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}&]+)''',
+        r"""(?i)(["']?(?:api[_-]?key|(?:access|refresh|id|api)?[_-]?token|authorization|password|secret|credential)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}&]+)""",
         r'\1"[已隐藏]"',
         preview,
     )
@@ -689,6 +697,8 @@ def _generation_from_tool_call_id(tool_call_id: str) -> int:
         return int(parts[2])
     except (IndexError, ValueError):
         return 0
+
+
 __all__ = [
     "WorkerToolExecutor",
     "worker_tool_manifest",

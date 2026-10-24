@@ -43,7 +43,7 @@ class RunLifecyclePort(Protocol):
     """运行状态转换端口。"""
 
     writes_cancellation_events_to_outbox: bool
-    writes_completion_artifacts_to_outbox: bool
+    writes_terminal_artifacts_to_outbox: bool
 
     async def update_status(self, run_id: str, status: RunStatus | str) -> bool: ...
 

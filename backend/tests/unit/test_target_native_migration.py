@@ -59,6 +59,7 @@ async def test_target_context_acquisition_is_bounded():
         session_id="s",
         run_id="r",
         invocation_id="call-1",
+        stage="directed",
         plan=ContextPlan(("memory",), max_items=1, max_tokens=2),
     )
     assert len(result.items) == 1 and result.truncated
@@ -281,6 +282,7 @@ async def test_context_unknown_provider_is_skipped():
         session_id="s",
         run_id="r",
         invocation_id="call-2",
+        stage="directed",
         plan=ContextPlan(("missing",), max_items=2, max_tokens=2),
     )
     assert result.providers_failed == () and result.provider_results[0].status == "skipped"

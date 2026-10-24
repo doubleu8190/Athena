@@ -1,0 +1,501 @@
+[
+  {
+    "label": "browser-cold",
+    "run_id": "2026.10.24.07.40.54.136",
+    "session_id": "2026.10.24.07.40.49.675",
+    "answer": "根据我已记录的信息，你喜欢吃苹果。这是从之前的历史记录中了解到的。",
+    "first_decision": {
+      "action": "context",
+      "queries": [
+        {
+          "provider": "memory",
+          "query": "用户喜欢吃的水果、饮食偏好"
+        }
+      ]
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "knowledge_base_ids": []
+          },
+          "status": "skipped",
+          "result_count": 0,
+          "error_message": "no_ready_knowledge_bases"
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？"
+          },
+          "status": "timeout",
+          "result_count": 0,
+          "error_message": "context_provider_timeout"
+        }
+      ],
+      "context_items": []
+    },
+    "retrievals": [
+      {
+        "query": "memory: 用户喜欢吃的水果、饮食偏好",
+        "status": "succeeded",
+        "duration_ms": 9976.405875000637,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "用户喜欢吃的水果、饮食偏好",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "directed"
+            },
+            "status": "succeeded",
+            "duration_ms": 9970.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 1
+      },
+      {
+        "query": "memory: 你知道我喜欢吃什么水果吗？",
+        "status": "timeout",
+        "duration_ms": 3006.93712499924,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "resource_scope": {},
+            "effective_params": {
+              "retrieval_stage": "prefetch"
+            },
+            "status": "timeout",
+            "duration_ms": 3000.6362500134856,
+            "error_message": "context_provider_timeout",
+            "channels": [],
+            "candidate_count": 0,
+            "selected_count": 0
+          }
+        ],
+        "context_count": 0
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "acquire_context",
+      "redecide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 1
+  },
+  {
+    "label": "warm-1",
+    "run_id": "2026.10.24.07.42.55.034",
+    "session_id": "2026.10.24.07.42.55.018",
+    "answer": "你喜欢吃苹果。",
+    "first_decision": {
+      "action": "answer",
+      "kind": "final",
+      "instructions": "直接根据记忆回答：你喜欢吃苹果。注意不要升级为“最喜欢”。"
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "knowledge_base_ids": []
+          },
+          "status": "skipped",
+          "result_count": 0,
+          "error_message": "no_ready_knowledge_bases"
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？"
+          },
+          "status": "succeeded",
+          "result_count": 1,
+          "error_message": null
+        }
+      ],
+      "context_items": [
+        {
+          "provider": "memory",
+          "content": "food_preference: 喜欢吃苹果",
+          "source_id": "turn:2026.10.24.07.37.14.819:0",
+          "metadata": {
+            "fused_score": 0.01639344262295082
+          }
+        }
+      ]
+    },
+    "retrievals": [
+      {
+        "query": "memory: 你知道我喜欢吃什么水果吗？",
+        "status": "succeeded",
+        "duration_ms": 200.83958300529048,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 192.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 1
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 1
+  },
+  {
+    "label": "warm-2",
+    "run_id": "2026.10.24.07.42.55.032",
+    "session_id": "2026.10.24.07.42.55.019",
+    "answer": "知道，你喜欢吃苹果。",
+    "first_decision": {
+      "action": "answer",
+      "kind": "final",
+      "instructions": "直接根据已记录的偏好回答：你喜欢吃苹果。注意只说“喜欢”，不要升级为“最喜欢”。}"
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "knowledge_base_ids": []
+          },
+          "status": "skipped",
+          "result_count": 0,
+          "error_message": "no_ready_knowledge_bases"
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？"
+          },
+          "status": "succeeded",
+          "result_count": 1,
+          "error_message": null
+        }
+      ],
+      "context_items": [
+        {
+          "provider": "memory",
+          "content": "food_preference: 喜欢吃苹果",
+          "source_id": "turn:2026.10.24.07.37.14.819:0",
+          "metadata": {
+            "fused_score": 0.01639344262295082
+          }
+        }
+      ]
+    },
+    "retrievals": [
+      {
+        "query": "memory: 你知道我喜欢吃什么水果吗？",
+        "status": "succeeded",
+        "duration_ms": 211.95574998273514,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 202.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 1
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 1
+  },
+  {
+    "label": "warm-3",
+    "run_id": "2026.10.24.07.42.55.036",
+    "session_id": "2026.10.24.07.42.55.016",
+    "answer": "喜欢吃苹果。",
+    "first_decision": {
+      "action": "answer",
+      "kind": "final",
+      "instructions": "直接根据记忆回答：你喜欢吃苹果。保持简短，不要添加未记录的推断（如"
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "knowledge_base_ids": []
+          },
+          "status": "skipped",
+          "result_count": 0,
+          "error_message": "no_ready_knowledge_bases"
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？"
+          },
+          "status": "succeeded",
+          "result_count": 1,
+          "error_message": null
+        }
+      ],
+      "context_items": [
+        {
+          "provider": "memory",
+          "content": "food_preference: 喜欢吃苹果",
+          "source_id": "turn:2026.10.24.07.37.14.819:0",
+          "metadata": {
+            "fused_score": 0.01639344262295082
+          }
+        }
+      ]
+    },
+    "retrievals": [
+      {
+        "query": "memory: 你知道我喜欢吃什么水果吗？",
+        "status": "succeeded",
+        "duration_ms": 193.45708301989362,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 185.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 1
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 1
+  },
+  {
+    "label": "warm-4",
+    "run_id": "2026.10.24.07.42.55.030",
+    "session_id": "2026.10.24.07.42.55.017",
+    "answer": "你喜欢吃苹果。",
+    "first_decision": {
+      "action": "answer",
+      "kind": "final",
+      "instructions": "直接根据已检索到的记忆回答：你喜欢吃苹果。不要扩展为“最喜欢”或其他水果。"
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "knowledge_base_ids": []
+          },
+          "status": "skipped",
+          "result_count": 0,
+          "error_message": "no_ready_knowledge_bases"
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？"
+          },
+          "status": "succeeded",
+          "result_count": 1,
+          "error_message": null
+        }
+      ],
+      "context_items": [
+        {
+          "provider": "memory",
+          "content": "food_preference: 喜欢吃苹果",
+          "source_id": "turn:2026.10.24.07.37.14.819:0",
+          "metadata": {
+            "fused_score": 0.01639344262295082
+          }
+        }
+      ]
+    },
+    "retrievals": [
+      {
+        "query": "memory: 你知道我喜欢吃什么水果吗？",
+        "status": "succeeded",
+        "duration_ms": 218.27229199698195,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么水果吗？",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 211.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 1
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 1
+  }
+]

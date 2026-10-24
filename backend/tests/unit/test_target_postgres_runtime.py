@@ -175,7 +175,13 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     assert await memory.flush_access_stats() == 0
 
     retrieval = PostgresRetrievalRepository(factory(db))
-    retrieval_row = SimpleNamespace(run_id="rr", query="q", scope="session", status="done", config_json="{}", candidate_count=1, selected_count=1, injected_count=0, created_at=NOW.isoformat(), completed_at=None)
+    retrieval_row = SimpleNamespace(
+        run_id="rr", session_id="s-1", agent_run_id="r-1", message_id="m-1",
+        query="q", scope="session", status="done", config_json="{}",
+        candidate_count=1, selected_count=1, injected_count=0,
+        index_generation=None, duration_ms=0.0, error_message=None,
+        created_at=NOW.isoformat(), completed_at=None,
+    )
     db.results = [Result(rows=[retrieval_row])]
     db.scalar_values = [1]
     assert (await retrieval.list_runs(scope="session"))[0][0]["run_id"] == "rr"

@@ -49,7 +49,7 @@ def _plan_state(*, run_id="run-42", tasks=None, edges=None, tools=None):
             {"name": "read_local_file"},
             {"name": "exec_shell"},
         ],
-        "root_decision": {
+        "plan_draft": {
             "action": "plan",
             "goal": "Prepare a report",
             "max_parallelism": 2,

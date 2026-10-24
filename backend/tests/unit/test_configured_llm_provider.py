@@ -45,6 +45,17 @@ def _chat_result(content: str) -> ChatResult:
     )
 
 
+def test_stream_disables_retries_on_the_actual_sdk_clients() -> None:
+    """无网络构造真实 SDK，验证流式客户端关闭重试且不修改普通调用。"""
+    provider = ConfiguredLLMProvider(LLMOptions(providers=(
+        LLMProviderOptions(api_key="unit-test-key", base_url="http://127.0.0.1:1/v1"),
+    )))
+    assert provider._stream_model.root_client.max_retries == 0
+    assert provider._stream_model.root_async_client.max_retries == 0
+    assert provider._model.root_client.max_retries == 2
+    assert provider._stream_model.root_client is not provider._model.root_client
+
+
 class _TestChatModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:

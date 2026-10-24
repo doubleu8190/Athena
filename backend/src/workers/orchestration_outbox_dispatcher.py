@@ -35,9 +35,9 @@ _EVENT_TYPES = {
     "PlanCancelled": (EventType.PLAN_CANCELLED, "cancelled", "plan"),
     "RunCancelling": (EventType.RUN_CANCELLING, "cancelling", "run"),
     "RunCancelled": (EventType.RUN_CANCELLED, "cancelled", "run"),
-    "RunAnswerDelta": (EventType.MESSAGE_DELTA, "running", "message"),
     "RunAnswerCompleted": (EventType.MESSAGE_COMPLETED, "completed", "message"),
     "RunCompleted": (EventType.RUN_COMPLETED, "completed", "run"),
+    "RunFailed": (EventType.RUN_FAILED, "failed", "run"),
 }
 
 
@@ -201,8 +201,8 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
             else None
         ),
         chunk_id=(
-            int(lease.payload["chunk_id"])
-            if lease.payload.get("chunk_id") is not None
+            int(lease.payload.get("last_chunk_id", lease.payload.get("chunk_id")))
+            if lease.payload.get("last_chunk_id", lease.payload.get("chunk_id")) is not None
             else None
         ),
         is_complete=bool(lease.payload.get("is_complete", False)),

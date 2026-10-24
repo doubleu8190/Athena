@@ -14,14 +14,18 @@ from application.orchestration.agents.root_agent import (
 )
 from application.orchestration.plan_versions import partition_plan_versions
 from application.orchestration.root_decision import (
-    Answer,
+    AnswerIntent,
     ContextRequest,
     PlanDraft,
+    PlanIntent,
+    RootPlanInput,
+    ROOT_PLAN_ADAPTER,
     RootAgentInput,
     RootDecisionStructuredOutput,
+    RootPlanStructuredOutput,
     RootMessage,
 )
-from application.runs.context import MemoryQuery
+from application.runs.context import ContextItem, ContextQueryOutcome, MemoryQuery
 from application.orchestration.agents.worker_agent import _decode_worker_reply
 
 
@@ -75,25 +79,72 @@ def _plan(*, explicit_version: bool = False) -> dict[str, Any]:
     }
 
 
+def _plan_intent() -> dict[str, str]:
+    return {
+        "action": "plan",
+        "goal": "Complete one task",
+        "instructions": "Create a plan to complete one task.",
+    }
+
+
+def _plan_inputs() -> RootPlanInput:
+    inputs = _inputs()
+    return RootPlanInput(
+        session_id=inputs.session_id,
+        run_id=inputs.run_id,
+        message_id=inputs.message_id,
+        messages=inputs.messages,
+        goal="Complete one task",
+        instructions="Create a plan to complete one task.",
+    )
+
+
 @pytest.mark.asyncio
-async def test_root_agent_uses_structured_output_for_plan_decision() -> None:
-    llm = _SequenceLLM([_plan()])
+async def test_root_agent_uses_separate_structured_calls_for_plan_intent_and_draft() -> None:
+    llm = _SequenceLLM([_plan_intent(), _plan()])
+    agent = ConfiguredRootAgent(llm)
 
-    result = await ConfiguredRootAgent(llm).decide(_inputs())
+    intent = await agent.decide(_inputs())
+    result = await agent.plan(_plan_inputs())
 
+    assert isinstance(intent, PlanIntent)
     assert isinstance(result, PlanDraft)
     assert result.tasks[0].task_id == "task-1"
     assert result.tasks[0].input == {"goal": "Complete one task"}
-    assert llm.schemas == [RootDecisionStructuredOutput]
+    assert llm.schemas == [RootDecisionStructuredOutput, RootPlanStructuredOutput]
+
+
+@pytest.mark.asyncio
+async def test_plan_serializes_retrieved_dataclass_material_and_query_outcomes() -> None:
+    """非空检索资料进入真实计划消息构造，不因 dataclass 序列化而失败。
+
+    参数：无。返回：无。异常：序列化错误或内容丢失使断言失败。
+    """
+    llm = _SequenceLLM([_plan()])
+    inputs = _plan_inputs().model_copy(update={
+        "context_items": (ContextItem("memory", "报告使用中文", "preference", {"category": "preference"}),),
+        "context_queries": (ContextQueryOutcome(
+            stage="prefetch", query=MemoryQuery(provider="memory", query="报告"),
+            status="succeeded", result_count=1,
+        ),),
+    })
+    result = await ConfiguredRootAgent(llm).plan(inputs)
+    assert isinstance(result, PlanDraft)
+    payload = json.loads(llm.messages[0][1]["content"])
+    assert payload["context_items"][0] == {
+        "provider": "memory", "content": "报告使用中文", "source_id": "preference",
+        "metadata": {"category": "preference"},
+    }
+    assert payload["context_queries"][0]["stage"] == "prefetch"
 
 
 @pytest.mark.asyncio
 async def test_root_agent_repairs_invalid_decision_once() -> None:
-    llm = _SequenceLLM([{"action": "answer"}, _plan()])
+    llm = _SequenceLLM([{"action": "answer"}, _plan_intent()])
 
     result = await ConfiguredRootAgent(llm).decide(_inputs())
 
-    assert isinstance(result, PlanDraft)
+    assert isinstance(result, PlanIntent)
     assert len(llm.messages) == 2
     assert "Validation error" in llm.messages[1][-1]["content"]
     assert '"action": "answer"' in llm.messages[1][-2]["content"]
@@ -110,17 +161,17 @@ async def test_root_agent_raises_after_one_invalid_repair() -> None:
 
 
 def test_root_agent_accepts_only_complete_json_or_a_single_outer_fence() -> None:
-    fenced = "```json\n" + json.dumps(_plan()) + "\n```"
+    fenced = "```json\n" + json.dumps(_plan_intent()) + "\n```"
 
     decision = ConfiguredRootAgent._decode_decision(fenced)
 
-    assert isinstance(decision, PlanDraft)
+    assert isinstance(decision, PlanIntent)
     with pytest.raises(ValueError, match="root_decision_invalid_json"):
-        ConfiguredRootAgent._decode_decision("Plan: " + json.dumps(_plan()))
+        ConfiguredRootAgent._decode_decision("Plan: " + json.dumps(_plan_intent()))
 
 
 def test_root_decision_parser_keeps_explicit_task_version_for_materialization() -> None:
-    decision = ConfiguredRootAgent._decode_decision(json.dumps(_plan(explicit_version=True)))
+    decision = ROOT_PLAN_ADAPTER.validate_python(_plan(explicit_version=True))
 
     assert isinstance(decision, PlanDraft)
     assert "plan_version" in decision.tasks[0].model_fields_set
@@ -176,8 +227,8 @@ def test_plan_version_partition_rejects_dependency_on_a_later_version() -> None:
 
 
 def test_root_contract_rejects_blank_required_text_and_duplicate_providers() -> None:
-    with pytest.raises(ValidationError, match="root_answer_content_required"):
-        Answer(action="answer", kind="final", content="  ")
+    with pytest.raises(ValidationError, match="root_answer_instructions_required"):
+        AnswerIntent(action="answer", kind="final", instructions="  ")
 
     with pytest.raises(ValidationError, match="root_plan_goal_required"):
         PlanDraft(action="plan", goal=" ", tasks=(_plan()["tasks"][0],))

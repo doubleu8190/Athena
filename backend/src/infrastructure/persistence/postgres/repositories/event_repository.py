@@ -19,7 +19,10 @@ from domain.events import (
 
 from ..models import (
     AgentEventModel,
+    AgentRunModel,
 )
+
+_SUBSCRIBER_QUEUE_SIZE = 256
 
 
 def _json(value: Any, default: Any) -> Any:
@@ -54,6 +57,7 @@ def _event_model(value: ApplicationEvent) -> AgentEventModel:
 
 def _event_from_model(row: AgentEventModel) -> ApplicationEvent:
     """还原已持久化事件，供幂等重放和 SSE 广播共用。"""
+    payload = _json(row.payload_json, {})
     return ApplicationEvent(
         row.event_type,
         row.durability,
@@ -64,12 +68,16 @@ def _event_from_model(row: AgentEventModel) -> ApplicationEvent:
         row.attachment_id,
         row.stream_id,
         row.stream_type,
-        None,
+        (
+            payload.get("chunk_id", payload.get("last_chunk_id"))
+            if isinstance(payload, dict)
+            else None
+        ),
         bool(row.is_complete),
         row.parent_run_id,
         row.transition_id,
         datetime.fromisoformat(row.occurred_at),
-        _json(row.payload_json, {}),
+        payload,
     )
 
 
@@ -81,6 +89,11 @@ def _ensure_same_transition(
         str(existing.event_type) != str(requested.event_type)
         or str(existing.durability) != str(requested.durability)
         or existing.run_id != requested.run_id
+        or existing.message_id != requested.message_id
+        or existing.stream_id != requested.stream_id
+        or existing.stream_type != requested.stream_type
+        or existing.chunk_id != requested.chunk_id
+        or existing.is_complete != requested.is_complete
         or existing.payload != requested.payload
     ):
         raise ValueError("transition_id_reused_with_different_event")
@@ -104,6 +117,21 @@ class PostgresEventRepository(
                         value = _event_from_model(existing)
                         _ensure_same_transition(value, event)
                     else:
+                        if str(event.event_type) in {
+                            "message.started",
+                            "message.delta",
+                        }:
+                            run = await session.scalar(
+                                select(AgentRunModel)
+                                .where(AgentRunModel.run_id == event.run_id)
+                                .with_for_update()
+                            )
+                            if (
+                                run is None
+                                or run.session_id != event.session_id
+                                or run.status != "running"
+                            ):
+                                raise ValueError("answer_stream_run_not_running")
                         # MAX(session_seq) + 1 必须按会话串行化；否则并发发布
                         # 会同时读取相同最大值，并争用同一个主键。
                         await session.scalar(
@@ -151,7 +179,12 @@ class PostgresEventRepository(
             value = _event_from_model(existing)
             _ensure_same_transition(value, event)
         for queue in self._subscribers.get(event.session_id, []):
-            queue.put_nowait(value)
+            try:
+                queue.put_nowait(value)
+            except asyncio.QueueFull:
+                # Durable 事件已在数据库中，SSE 由任意唤醒或心跳补读；
+                # realtime 事件允许在拥塞时丢弃，避免无界堆积。
+                continue
         return value
 
     async def _get_transition_event(
@@ -170,26 +203,49 @@ class PostgresEventRepository(
 
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
         for queue in self._subscribers.get(event.session_id, []):
-            queue.put_nowait(event)
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                continue
         return event
 
-    async def open_subscription(self, session_id: str):
-        queue: asyncio.Queue[ApplicationEvent] = asyncio.Queue()
+    async def open_subscription(
+        self, session_id: str
+    ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
+        """注册实时唤醒队列并读取注册期间的持久事件水位。
+
+        参数：``session_id`` 是事件所属会话。
+        返回：订阅队列和注册时的最大会话序号。
+        异常：读取水位失败或任务取消时移除临时订阅后继续抛出。
+        """
+        queue: asyncio.Queue[ApplicationEvent] = asyncio.Queue(
+            maxsize=_SUBSCRIBER_QUEUE_SIZE
+        )
         self._subscribers.setdefault(session_id, []).append(queue)
-        async with self._session_factory() as session:
-            watermark = (
-                await session.scalar(
-                    select(func.max(AgentEventModel.session_seq)).where(
-                        AgentEventModel.session_id == session_id
+        try:
+            async with self._session_factory() as session:
+                watermark = (
+                    await session.scalar(
+                        select(func.max(AgentEventModel.session_seq)).where(
+                            AgentEventModel.session_id == session_id
+                        )
                     )
+                    or 0
                 )
-                or 0
-            )
+        except BaseException:
+            subscribers = self._subscribers.get(session_id)
+            if subscribers is not None and queue in subscribers:
+                subscribers.remove(queue)
+                if not subscribers:
+                    self._subscribers.pop(session_id, None)
+            raise
         return queue, int(watermark)
 
     async def list_events_between(
-        self, session_id: str, after: int = 0, upto: int | None = None
+        self, session_id: str, after: int = 0, upto: int | None = None,
+        limit: int = 256,
     ):
+        bounded_limit = min(max(limit, 1), 500)
         async with self._session_factory() as session:
             query = (
                 select(AgentEventModel)
@@ -201,27 +257,9 @@ class PostgresEventRepository(
             )
             if upto is not None:
                 query = query.where(AgentEventModel.session_seq <= upto)
+            query = query.limit(bounded_limit)
             rows = (await session.execute(query)).scalars().all()
-        return [
-            ApplicationEvent(
-                row.event_type,
-                row.durability,
-                row.session_id,
-                row.session_seq,
-                row.run_id,
-                row.message_id,
-                row.attachment_id,
-                row.stream_id,
-                row.stream_type,
-                None,
-                bool(row.is_complete),
-                row.parent_run_id,
-                row.transition_id,
-                datetime.fromisoformat(row.occurred_at),
-                _json(row.payload_json, {}),
-            )
-            for row in rows
-        ]
+        return [_event_from_model(row) for row in rows]
 
     async def list_events_for_run(
         self,
@@ -247,26 +285,7 @@ class PostgresEventRepository(
             rows = (await session.execute(query)).scalars().all()
         has_more = len(rows) > bounded_limit
         rows = rows[:bounded_limit]
-        return [
-            ApplicationEvent(
-                row.event_type,
-                row.durability,
-                row.session_id,
-                row.session_seq,
-                row.run_id,
-                row.message_id,
-                row.attachment_id,
-                row.stream_id,
-                row.stream_type,
-                None,
-                bool(row.is_complete),
-                row.parent_run_id,
-                row.transition_id,
-                datetime.fromisoformat(row.occurred_at),
-                _json(row.payload_json, {}),
-            )
-            for row in rows
-        ], has_more
+        return [_event_from_model(row) for row in rows], has_more
 
     async def close_subscription(
         self, session_id: str, queue: asyncio.Queue[ApplicationEvent]

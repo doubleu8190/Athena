@@ -181,7 +181,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
         for (const live of current) {
           const persisted = mergedById.get(live.id)
           if (persisted) {
-            mergedById.set(live.id, persisted.content.length > live.content.length ? persisted : live)
+            mergedById.set(live.id, persisted)
             continue
           }
           const sameRun = live.role === "assistant" && live.run_id
@@ -189,7 +189,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
             : []
           if (sameRun.length === 1) {
             const stored = sameRun[0]
-            mergedById.set(stored.id, live.content.length > stored.content.length ? { ...stored, ...live, id: stored.id } : stored)
+            mergedById.set(stored.id, stored)
           } else {
             mergedById.set(live.id, live)
           }
@@ -629,7 +629,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
                       </div>
                     )}
                     {item.kind === "message"
-                      ? <MessageBubble message={item.message} />
+                      ? <MessageBubble message={item.message} isStreaming={item.message.stream_status === "streaming"} />
                       : <ExecutionTimeline entries={[item.entry]} compact />}
                   </div>
                 )

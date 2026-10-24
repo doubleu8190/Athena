@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, Protocol
+
+from .llm_stream import LLMStreamEvent
 
 StructuredOutputSchema = type[Any] | Mapping[str, Any]
 
@@ -17,6 +19,9 @@ class LLMPort(Protocol):
         schema: StructuredOutputSchema,
         **kwargs: Any,
     ) -> Any: ...
+    def stream(
+        self, messages: list[Any], **kwargs: Any
+    ) -> AsyncIterator[LLMStreamEvent]: ...
     def count_text_tokens(self, text: str) -> int: ...
 
 

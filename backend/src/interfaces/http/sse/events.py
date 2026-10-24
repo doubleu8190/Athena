@@ -74,11 +74,17 @@ def build_events_router(
         async def stream() -> AsyncIterator[str]:
             cursor = after
             try:
-                for event in await events.replay(session_id, after, watermark):
-                    if event.session_seq is None or event.session_seq <= cursor:
-                        continue
-                    cursor = event.session_seq
-                    yield _format_event(event)
+                while cursor < watermark:
+                    page = await events.replay(session_id, cursor, watermark, limit=256)
+                    if not page:
+                        break
+                    for event in page:
+                        if event.session_seq is None or event.session_seq <= cursor:
+                            continue
+                        cursor = event.session_seq
+                        yield _format_event(event)
+                    if len(page) < 256:
+                        break
 
                 while True:
                     if await request.is_disconnected():
@@ -86,15 +92,33 @@ def build_events_router(
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=15)
                     except asyncio.TimeoutError:
+                        while True:
+                            page = await events.replay(session_id, cursor, None, limit=256)
+                            if not page:
+                                break
+                            for value in page:
+                                if value.session_seq is not None and value.session_seq > cursor:
+                                    cursor = value.session_seq
+                                    yield _format_event(value)
+                            if len(page) < 256:
+                                break
                         yield ": heartbeat\n\n"
                         continue
                     if event.session_seq is None:
-                        yield _format_event(event)
+                        yield _format_event(events.response(event))
                         continue
-                    if event.session_seq <= cursor:
-                        continue
-                    cursor = event.session_seq
-                    yield _format_event(event)
+                    # Durable notification is only a wake-up. The database log
+                    # supplies the ordered events and closes concurrent publish gaps.
+                    while True:
+                        page = await events.replay(session_id, cursor, None, limit=256)
+                        if not page:
+                            break
+                        for value in page:
+                            if value.session_seq is not None and value.session_seq > cursor:
+                                cursor = value.session_seq
+                                yield _format_event(value)
+                        if len(page) < 256:
+                            break
             finally:
                 await events.close(session_id, queue)
 

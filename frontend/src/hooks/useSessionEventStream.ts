@@ -10,9 +10,12 @@ interface StreamProjection {
   nextChunkId: number
   finalChunkId: number | null
   content: string
-  status: "created" | "streaming" | "completed" | "failed"
+  status: "created" | "streaming" | "completed" | "paused" | "failed" | "cancelled"
   pending: Map<number, string>
   snapshotVersion: number
+  startedSeq?: number
+  startedAt?: string
+  repairAttempts: number
 }
 
 function applyPendingChunks(stream: StreamProjection) {
@@ -42,6 +45,8 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
   } = useChatStore()
 
   useEffect(() => {
+    const finalConfirmations = new Map<string, { controller: AbortController; timer: ReturnType<typeof setTimeout> }>()
+    const confirmationAttempts = new Set<string>()
     sourceRef.current?.close()
     sourceRef.current = null
     lastSeqRef.current = 0
@@ -61,8 +66,12 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     }
 
     const url = `${apiBase.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/events`
-    const source = new EventSource(url, { withCredentials: true })
-    sourceRef.current = source
+    let currentSource = new EventSource(url, { withCredentials: true })
+    sourceRef.current = currentSource
+    let connectionGeneration = 0
+    let recoveryTarget: string | null = null
+    let recoveryUntil = 0
+    let repairStream: (streamId: string, stream: StreamProjection, runId: string) => void = () => {}
     setConnectionStatus("connecting")
     const syncPendingApprovals = () => {
       void apiClient.listPendingApprovals(sessionId)
@@ -79,11 +88,11 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           // API 暂时不可用时保留已有事件状态，等待下一次重连同步。
         })
     }
-    source.onopen = () => {
+    currentSource.onopen = () => {
       setConnectionStatus("connected")
       syncPendingApprovals()
     }
-    source.onerror = () => setConnectionStatus("error")
+    currentSource.onerror = () => setConnectionStatus("error")
     syncPendingApprovals()
 
     const upsertAssistant = (
@@ -92,6 +101,8 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       occurredAt: string,
       streamId?: string,
       messageId?: string,
+      streamStatus?: Message["stream_status"],
+      lastChunkId?: number,
     ) => {
       if (!runId) return
       const state = useChatStore.getState()
@@ -103,24 +114,78 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         removeMessage(existingByRun.id)
       }
       if (existing) {
+        // 持久历史是成功正文；started/delta 重放不能清空或覆盖它。
+        if (!existing.stream_status && streamStatus !== "completed") return
         // Replayed events can repair a timestamp previously set to receipt time.
         // Later chunks must not move the message's original event time forward.
         const timestamp = Date.parse(occurredAt) < Date.parse(existing.timestamp)
           ? occurredAt : existing.timestamp
-        if (existing.id !== canonicalId || existing.content !== content || existing.timestamp !== timestamp) {
-          updateMessage(existing.id, { id: canonicalId, content, timestamp })
+        if (existing.id !== canonicalId || existing.content !== content || existing.timestamp !== timestamp || existing.stream_status !== streamStatus || existing.last_chunk_id !== lastChunkId) {
+          updateMessage(existing.id, { id: canonicalId, content, timestamp, stream_status: streamStatus, stream_id: streamId, last_chunk_id: lastChunkId })
         }
         return
       }
       addMessage({
         id: canonicalId, role: "assistant", content,
         timestamp: occurredAt, session_id: sessionId, run_id: runId,
+        stream_status: streamStatus,
+        stream_id: streamId,
+        last_chunk_id: lastChunkId,
         ...(streamId ? { type: `stream:${streamId}` } : {}),
       } as Message)
     }
 
-    const parse = (event: MessageEvent) => {
+    const confirmFinalMessage = (runId: string) => {
+      const messageId = `assistant:${runId}`
+      if (confirmationAttempts.has(messageId)) return
+      const existing = useChatStore.getState().messages.find((item) => item.id === messageId || item.run_id === runId && item.role === "assistant")
+      if (existing?.stream_status === "completed" || (existing && !existing.stream_status)) return
+      confirmationAttempts.add(messageId)
+      if (existing) updateMessage(existing.id, { stream_status: "finalizing" })
+      const controller = new AbortController()
+      const timer = setTimeout(() => {
+        controller.abort()
+        finalConfirmations.delete(messageId)
+        const current = useChatStore.getState().messages.find((item) => item.id === messageId)
+        if (current?.stream_status === "finalizing") updateMessage(current.id, { stream_status: "unconfirmed" })
+      }, 10_000)
+      finalConfirmations.set(messageId, { controller, timer })
+      void apiClient.getMessages(sessionId, undefined, controller.signal).then((history) => {
+        const currentConfirmation = finalConfirmations.get(messageId)
+        if (currentConfirmation?.controller !== controller || controller.signal.aborted) return
+        const message = history.find((item) => item.id === messageId)
+        if (message) {
+          clearTimeout(timer)
+          finalConfirmations.delete(messageId)
+          const current = useChatStore.getState().messages.find((item) => item.id === messageId)
+          if (current?.stream_status === "completed") return
+          upsertAssistant(runId, message.content, message.timestamp, current?.stream_id, messageId, "completed", current?.last_chunk_id)
+        } else {
+          clearTimeout(timer)
+          finalConfirmations.delete(messageId)
+          const current = useChatStore.getState().messages.find((item) => item.id === messageId)
+          if (current?.stream_status === "finalizing") updateMessage(current.id, { stream_status: "unconfirmed" })
+        }
+      }).catch(() => {
+        if (controller.signal.aborted) return
+        clearTimeout(timer)
+        finalConfirmations.delete(messageId)
+        const current = useChatStore.getState().messages.find((item) => item.id === messageId)
+        if (current?.stream_status === "finalizing") updateMessage(current.id, { stream_status: "unconfirmed" })
+      })
+    }
+    const closeRunStreams = (runId: string, status: "paused" | "failed" | "cancelled") => {
+      for (const [streamId, stream] of streamsRef.current) {
+        const message = useChatStore.getState().messages.find((item) => item.stream_id === streamId || item.run_id === runId && item.role === "assistant")
+        if (!message || message.run_id !== runId || message.stream_status === "completed") continue
+        stream.status = status
+        updateMessage(message.id, { stream_status: status, last_chunk_id: stream.nextChunkId - 1 })
+      }
+    }
+
+    const parse = (event: MessageEvent, generation = connectionGeneration) => {
       try {
+        if (generation !== connectionGeneration) return
         const envelope = JSON.parse(event.data) as ApplicationEventEnvelope
         const type = envelope.event_type || event.type
         const data: Record<string, unknown> = envelope.payload ?? (envelope as Record<string, unknown>)
@@ -142,6 +207,14 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           })
         }
         const streamId = envelope.stream_id || String(data.stream_id || (runId ? `answer-${runId}` : ""))
+        if (recoveryTarget && typeof sequence === "number" && sequence <= recoveryUntil) {
+          const isTargetStreamEvent = type.startsWith("message.") && streamId === recoveryTarget
+          if (!isTargetStreamEvent) {
+            if (sequence >= recoveryUntil) recoveryTarget = null
+            return
+          }
+          if (sequence >= recoveryUntil) recoveryTarget = null
+        }
         const timelineEntry = projectTimelineEvent({
           type,
           data,
@@ -174,7 +247,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           }
           const stream = streamsRef.current.get(streamId) || {
             nextChunkId: 1, finalChunkId: null, content: "", status: "created",
-            pending: new Map<number, string>(), snapshotVersion: 0,
+            pending: new Map<number, string>(), snapshotVersion: 0, repairAttempts: 0,
           }
           if (version >= stream.snapshotVersion) {
             stream.content = String(data.content || "")
@@ -191,20 +264,32 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         if (type === "message.started") {
           const stream = streamsRef.current.get(streamId) || {
             nextChunkId: 1, finalChunkId: null, content: "", status: "created",
-            pending: new Map<number, string>(), snapshotVersion: 0,
+            pending: new Map<number, string>(), snapshotVersion: 0, repairAttempts: 0,
           }
+          stream.startedSeq = sequence
+          stream.startedAt = String(data.started_at || occurredAt)
           streamsRef.current.set(streamId, stream)
-          upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined)
+          upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined, "streaming", 0)
         } else if (type === "message.delta") {
           const stream = streamsRef.current.get(streamId) || {
             nextChunkId: 1, finalChunkId: null, content: "", status: "created",
-            pending: new Map<number, string>(), snapshotVersion: 0,
+            pending: new Map<number, string>(), snapshotVersion: 0, repairAttempts: 0,
           }
           const delta = String(data.delta || data.token || "")
           const chunkId = envelope.chunk_id ?? Number(data.chunk_id || 0)
           if (!delta) return
           if (chunkId > 0) {
             if (chunkId < stream.nextChunkId) return
+            if (chunkId > stream.nextChunkId) {
+              if (stream.repairAttempts < 1) {
+                repairStream(streamId, stream, runId)
+              } else {
+                setError("回答片段恢复失败，保留目前已恢复的正文。")
+                const current = useChatStore.getState().messages.find((item) => item.run_id === runId && item.role === "assistant")
+                if (current) updateMessage(current.id, { stream_status: "unconfirmed" })
+              }
+              return
+            }
             stream.pending.set(chunkId, delta)
             applyPendingChunks(stream)
           } else {
@@ -216,13 +301,18 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             stream.status = "completed"
           }
           streamsRef.current.set(streamId, stream)
-          upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined)
+          upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined, stream.status === "completed" ? "completed" : "streaming", stream.nextChunkId - 1)
         } else if (type === "message.completed") {
           const stream = streamsRef.current.get(streamId)
-          if (stream) {
-            stream.status = "completed"
-            upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined)
-          }
+          if (stream) stream.status = "completed"
+          const finalContent = typeof data.content === "string" ? data.content : stream?.content || ""
+          const finalChunkId = Number(
+            data.last_chunk_id ?? envelope.chunk_id ?? (stream ? stream.nextChunkId - 1 : 0)
+          )
+          const messageId = envelope.message_id || String(data.message_id || `assistant:${runId}`)
+          upsertAssistant(runId, finalContent, String(data.started_at || occurredAt), streamId, messageId, "completed", finalChunkId)
+          const pending = finalConfirmations.get(messageId)
+          if (pending) { clearTimeout(pending.timer); pending.controller.abort(); finalConfirmations.delete(messageId) }
         } else if (type === "thinking.started" || type === "thinking.summary") {
           setThinking({ active: true, content: String(data.content || ""), messageId: streamId || null })
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("thinking")
@@ -352,6 +442,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
           updateSession(sessionId, { status: "running" })
         } else if (type === "run.paused") {
+          closeRunStreams(runId, "paused")
           // A run-level terminal/control event must also close any child
           // activity that did not get its own completion event. Otherwise the
           // progress panel keeps spinning after pause.
@@ -374,6 +465,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           setAgentStatus("cancelling")
           clearThinking()
         } else if (type === "run.cancelled") {
+          closeRunStreams(runId, "cancelled")
           const completedAt = occurredAt
           for (const entry of useChatStore.getState().executionTimeline) {
             if (entry.run_id !== runId || !["running", "waiting"].includes(entry.status)) continue
@@ -420,11 +512,18 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           updateSession(sessionId, { status: "running" })
         }
         else if (type === "run.failed" || type === "run.budget_exceeded") {
+          closeRunStreams(runId, "failed")
           setAgentStatus("error")
           setErrorDetail(errorDetail || null)
           updateSession(sessionId, { status: "interrupted" })
           clearThinking()
-          const errorMessage = text(errorDetail?.message)
+          const phase = text(errorDetail?.phase) || text((data.error as Record<string, unknown> | undefined)?.phase)
+          const hasCompletedPlan = useChatStore.getState().orchestrationPlans.some((plan) => plan.run_id === runId && plan.status === "completed")
+          const errorMessage = phase === "answer_generation" && hasCompletedPlan
+            ? "任务执行已完成，但总结生成失败"
+            : phase === "answer_generation"
+              ? "回答生成失败"
+              : text(errorDetail?.message)
             || text((data.error as Record<string, unknown> | undefined)?.message)
             || text(data.message)
             || (type === "run.budget_exceeded" ? "运行已达到限制" : "任务未能完成")
@@ -434,11 +533,12 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           setAgentStatus("idle")
           updateSession(sessionId, { status: "completed" })
           clearThinking()
+          if (runId) confirmFinalMessage(runId)
         }
       } catch { /* 单条事件格式错误不应中断 EventSource。 */ }
     }
 
-    ;[
+    const eventNames = [
       "run.started", "run.resumed", "run.paused", "run.cancelling", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded", "run.root_suspended",
       "node.started", "node.completed", "node.failed",
       "llm.started", "llm.completed", "tool.started", "tool.completed",
@@ -451,8 +551,54 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "synthesis.started", "synthesis.completed",
       "agent.waiting_for_files", "attachment_updated",
       "file_processing_started", "file_processing_completed", "file_processing_failed",
-    ].forEach((name) => source.addEventListener(name, parse))
-    return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
+    ]
+    const attachListeners = (target: EventSource, generation: number) => {
+      eventNames.forEach((name) => target.addEventListener(name, (event) => parse(event as MessageEvent, generation)))
+    }
+    const connect = (after?: number, targetStream?: string) => {
+      currentSource.close()
+      connectionGeneration += 1
+      const generation = connectionGeneration
+      recoveryTarget = targetStream || null
+      const targetUrl = after == null ? url : `${url}?after=${after}`
+      currentSource = new EventSource(targetUrl, { withCredentials: true })
+      sourceRef.current = currentSource
+      currentSource.onopen = () => {
+        if (generation !== connectionGeneration) return
+        setConnectionStatus("connected")
+        syncPendingApprovals()
+      }
+      currentSource.onerror = () => {
+        if (generation === connectionGeneration) setConnectionStatus("error")
+      }
+      attachListeners(currentSource, generation)
+    }
+    repairStream = (streamId, stream, runId) => {
+      if (stream.repairAttempts >= 1) return
+      const priorCursor = lastSeqRef.current
+      const replayFrom = Math.max(0, (stream.startedSeq ?? 1) - 1)
+      stream.repairAttempts += 1
+      stream.content = ""
+      stream.nextChunkId = 1
+      stream.finalChunkId = null
+      stream.pending.clear()
+      stream.status = "streaming"
+      streamsRef.current.set(streamId, stream)
+      lastSeqRef.current = replayFrom
+      upsertAssistant(runId, "", stream.startedAt || new Date().toISOString(), streamId, `assistant:${runId}`, "streaming", 0)
+      recoveryUntil = priorCursor
+      connect(replayFrom, streamId)
+    }
+    attachListeners(currentSource, connectionGeneration)
+    return () => {
+      currentSource.close()
+      for (const pending of finalConfirmations.values()) {
+        clearTimeout(pending.timer)
+        pending.controller.abort()
+      }
+      finalConfirmations.clear()
+      if (sourceRef.current === currentSource) sourceRef.current = null
+    }
   }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
 
   return sourceRef

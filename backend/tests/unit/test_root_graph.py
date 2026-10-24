@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from datetime import datetime, timezone
 
 import pytest
 
 from application.orchestration import RootWorkflow, RootWorkflowDependencies
-from application.orchestration.root_workflow import _merge_context_window
+from application.orchestration.root_workflow import (
+    _merge_context_window,
+    render_plan_results,
+)
 from application.orchestration.root_decision import (
-    Answer,
+    AnswerIntent,
     ContextRequest,
-    PlanDraft,
-    PlanTaskDraft,
+    PlanIntent,
+    PlanningFeedback,
+)
+from application.orchestration.answer_generation import (
+    AnswerGenerationResult,
+    AnswerStreamMetadata,
 )
 from application.runs.context import (
     ContextAcquisitionService,
@@ -29,6 +36,14 @@ class _Agent:
         self.inputs = []
 
     async def decide(self, inputs):
+        self.inputs.append(inputs)
+        return self.decisions.pop(0)
+
+    async def redecide(self, inputs):
+        self.inputs.append(inputs)
+        return self.decisions.pop(0)
+
+    async def plan(self, inputs):
         self.inputs.append(inputs)
         return self.decisions.pop(0)
 
@@ -64,9 +79,35 @@ class _Events:
         return None
 
 
+class _AnswerGeneration:
+    def __init__(self):
+        self.inputs = []
+
+    async def generate(self, inputs, *, stop_signal=None):
+        self.inputs.append(inputs)
+        content = (
+            render_plan_results(inputs.plan_results)
+            if inputs.plan_results is not None
+            else inputs.instructions
+        )
+        return AnswerGenerationResult(
+            content=content,
+            kind=inputs.kind,
+            answer_stream=AnswerStreamMetadata(
+                message_id=f"assistant:{inputs.run_id}",
+                stream_id=f"answer-{inputs.run_id}",
+                started_at=datetime.now(timezone.utc),
+                last_chunk_id=1,
+            ),
+        )
+
+
 class _TraceRepository:
     async def record_context(self, **_kwargs):
         return "retrieval-1"
+
+    async def update_context_selection(self, **_kwargs):
+        return True
 
 
 class _Tools:
@@ -87,6 +128,7 @@ def _dependencies(agent, *, provider=None, root_max_turns=4, events=None):
         request_preparation=_RequestPreparation(),
         agent=agent,
         event_publisher=events,
+        answer_generation=_AnswerGeneration(),
         tool_service=_Tools(),
         available_context_providers=tuple(providers),
         root_max_turns=root_max_turns,
@@ -118,7 +160,9 @@ async def test_root_decides_to_retrieve_then_uses_memory_before_answering() -> N
                 action="context",
                 queries=(MemoryQuery(provider="memory", query="最喜欢的水果"),),
             ),
-            Answer(action="answer", kind="final", content="你最喜欢吃苹果。"),
+            AnswerIntent(
+                action="answer", kind="final", instructions="你最喜欢吃苹果。"
+            ),
         ]
     )
     dependencies = _dependencies(agent, provider=retrieve)
@@ -135,7 +179,10 @@ async def test_root_decides_to_retrieve_then_uses_memory_before_answering() -> N
     assert observed["plan"].providers == ("memory",)
     assert len(agent.inputs) == 2
     assert agent.inputs[1].context_items[0].content == "fruit_preference: 苹果"
-    assert agent.inputs[1].context_queries[0].status == "succeeded"
+    assert agent.inputs[0].context_items[0].content == "fruit_preference: 苹果"
+    assert all(outcome.stage == "prefetch" for outcome in agent.inputs[0].context_queries)
+    assert agent.inputs[1].context_queries[-1].status == "succeeded"
+    assert agent.inputs[1].context_queries[-1].stage == "directed"
 
 
 @pytest.mark.asyncio
@@ -151,8 +198,20 @@ async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -
     agent = _Agent(
         [
             request_context,
+            PlanIntent(
+                action="plan",
+                goal="检索政策并判断是否需要更新",
+                instructions="需要时生成计划。",
+            ),
+            PlanningFeedback(
+                action="needs_information",
+                missing_information=("最新政策内容",),
+                reason="尚未取得所需的政策资料。",
+            ),
             request_context,
-            Answer(action="answer", kind="final", content="No matching policy found."),
+            AnswerIntent(
+                action="answer", kind="final", instructions="No matching policy found."
+            ),
         ]
     )
     dependencies = _dependencies(agent, provider=retrieve, events=events)
@@ -166,7 +225,13 @@ async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -
     )
 
     assert result["status"] == "completed"
-    expected_invocations = {"decide_root_action": 3, "acquire_context": 2}
+    expected_invocations = {
+        "prefetch_context": 1,
+        "decide_root_action": 2,
+        "redecide_root_action": 2,
+        "generate_plan": 1,
+        "acquire_context": 2,
+    }
     for node_name, expected_count in expected_invocations.items():
         started = {
             event.payload["activity_id"]: event
@@ -194,10 +259,13 @@ async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -
 
 
 def test_root_graph_has_no_removed_understanding_or_harness_nodes() -> None:
-    dependencies = _dependencies(_Agent([Answer(action="answer", kind="final", content="ok")]))
+    dependencies = _dependencies(
+        _Agent([AnswerIntent(action="answer", kind="final", instructions="ok")])
+    )
     node_names = set(_build_graph(dependencies).get_graph().nodes)
 
     assert "decide_root_action" in node_names
+    assert "prefetch_context" in node_names
     assert "acquire_context" in node_names
     assert "wait_for_plan_completion" in node_names
     assert "build_plan_response" in node_names
@@ -223,7 +291,12 @@ async def test_root_workflow_loads_plan_results_once_and_renders_response() -> N
     dependencies.plan_loader = load_plan
     workflow = RootWorkflow(dependencies)
     state = {
-        "request": {"run_id": "run-1"},
+        "request": {
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "message_id": "message-1",
+            "user_message": "Summarize the plan results",
+        },
         "plan": {
             "plan_id": "plan-1",
             "tasks": [{"task_id": "task-1", "title": "Task one"}],
@@ -232,15 +305,27 @@ async def test_root_workflow_loads_plan_results_once_and_renders_response() -> N
 
     wait_result = await workflow.wait_for_plan_completion(state)
     response_result = await workflow.build_plan_response({**state, **wait_result})
-    final_result = await workflow.assemble_final_response({**state, **response_result})
 
     assert load_calls == 1
     assert response_result == {
-        "response": {"content": "Task one：done"},
+        "answer_input": {
+            "source": "plan_summary",
+            "kind": "final",
+            "instructions": "根据用户原始目标总结已完成的任务结果，准确保留失败项、不确定性和未执行事实。",
+        },
         "waiting": False,
     }
+    answer_state = {**state, **wait_result, **response_result}
+    answer_result = await workflow.generate_answer(answer_state)
+    final_result = await workflow.assemble_final_response(
+        {**answer_state, **answer_result}
+    )
     assert final_result == {
-        "result": {"content": "Task one：done"},
+        "result": {
+            "content": "task-1：done",
+            "kind": "final",
+            "answer_stream": answer_result["response"]["answer_stream"],
+        },
         "status": "completed",
         "waiting": False,
     }
@@ -264,7 +349,13 @@ async def test_root_workflow_assembles_node_error_as_failed_result() -> None:
 @pytest.mark.asyncio
 async def test_root_graph_routes_clarification_from_unified_answer_decision() -> None:
     agent = _Agent(
-        [Answer(action="answer", kind="clarification", content="请选择目标文件。")]
+        [
+            AnswerIntent(
+                action="answer",
+                kind="clarification",
+                instructions="请用户选择目标文件。",
+            )
+        ]
     )
     dependencies = _dependencies(agent)
 
@@ -276,27 +367,25 @@ async def test_root_graph_routes_clarification_from_unified_answer_decision() ->
         user_message="处理文件",
     )
 
-    assert result["result"] == {
-        "content": "请选择目标文件。",
-        "kind": "clarification",
-    }
+    assert result["result"]["content"] == "请用户选择目标文件。"
+    assert result["result"]["kind"] == "clarification"
 
 
 @pytest.mark.asyncio
-async def test_root_budget_stops_after_last_context_decision_without_extra_retrieval() -> None:
+async def test_root_budget_reserves_a_turn_before_context_retrieval() -> None:
     provider_calls = 0
 
     async def retrieve(*, session_id, run_id, plan):
         nonlocal provider_calls
         provider_calls += 1
-        return ProviderResult("memory", "empty")
+        return ProviderResult("memory", "succeeded", result_count=0)
 
     request_context = ContextRequest(
         action="context",
         queries=(MemoryQuery(provider="memory", query="same query"),),
     )
-    agent = _Agent([request_context, request_context])
-    dependencies = _dependencies(agent, provider=retrieve, root_max_turns=2)
+    agent = _Agent([request_context])
+    dependencies = _dependencies(agent, provider=retrieve, root_max_turns=1)
 
     result = await invoke_root_graph(
         _build_graph(dependencies),
@@ -308,27 +397,18 @@ async def test_root_budget_stops_after_last_context_decision_without_extra_retri
 
     assert result["status"] == "failed"
     assert result["error"]["code"] == "root_budget_exhausted"
-    assert provider_calls == 1
-    assert len(agent.inputs) == 2
+    assert provider_calls == 1  # 只执行入口预检索，最后一轮不能发起定向检索。
+    assert len(agent.inputs) == 1
 
 
 @pytest.mark.asyncio
 async def test_root_allows_plan_on_last_decision_turn() -> None:
     agent = _Agent(
         [
-            PlanDraft(
+            PlanIntent(
                 action="plan",
                 goal="列出目录文件",
-                tasks=(
-                    PlanTaskDraft(
-                        task_id="list-files",
-                        title="列出文件",
-                        objective="列出指定目录中的文件名",
-                        allowed_tools=(),
-                        input={"directory": "/tmp"},
-                        expected_output={"format": "file names"},
-                    ),
-                ),
+                instructions="使用可用工具列出指定目录中的文件名。",
             )
         ]
     )
@@ -422,7 +502,11 @@ async def test_unavailable_provider_result_is_returned_to_root_for_next_decision
                 action="context",
                 queries=(MemoryQuery(provider="memory", query="old memory"),),
             ),
-            Answer(action="answer", kind="final", content="I cannot access memory now."),
+            AnswerIntent(
+                action="answer",
+                kind="final",
+                instructions="I cannot access memory now.",
+            ),
         ]
     )
     dependencies = _dependencies(agent)
@@ -436,8 +520,9 @@ async def test_unavailable_provider_result_is_returned_to_root_for_next_decision
     )
 
     assert result["status"] == "completed"
-    assert agent.inputs[1].context_queries[0].status == "skipped"
-    assert agent.inputs[1].context_queries[0].error_message == "context_provider_unavailable"
+    assert agent.inputs[1].context_queries[-1].status == "skipped"
+    assert agent.inputs[1].context_queries[-1].stage == "directed"
+    assert agent.inputs[1].context_queries[-1].error_message == "context_provider_unavailable"
 
 
 @pytest.mark.asyncio

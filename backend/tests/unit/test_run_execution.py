@@ -53,7 +53,7 @@ def command(command_type=CommandType.RUN_START, run_id="run-1"):
 
 class Lifecycle:
     writes_cancellation_events_to_outbox = False
-    writes_completion_artifacts_to_outbox = False
+    writes_terminal_artifacts_to_outbox = False
 
     def __init__(self):
         self.calls = []
@@ -122,6 +122,15 @@ class Events:
     async def publish_realtime(self, event):
         self.values.append(event)
         return event
+
+
+def answer_stream_metadata(stream_id="stream-1"):
+    return {
+        "message_id": "assistant:run-1",
+        "stream_id": stream_id,
+        "started_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+        "last_chunk_id": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -232,9 +241,14 @@ async def test_stale_run_start_is_not_executed_after_cancellation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execution_service_projects_completed_content_into_chat_stream() -> None:
+async def test_execution_service_projects_final_answer_completion() -> None:
     lifecycle, queue, executor, events = Lifecycle(), Queue(), Executor(
-        outcome=CommandExecutionResult(result={"content": "ATHENA_EXEC_REAL"})
+        outcome=CommandExecutionResult(
+            result={
+                "content": "ATHENA_EXEC_REAL",
+                "answer_stream": answer_stream_metadata(),
+            }
+        )
     ), Events()
     value = command()
     value = RunCommand(
@@ -253,16 +267,15 @@ async def test_execution_service_projects_completed_content_into_chat_stream() -
 
     assert [event.event_type for event in events.values] == [
         "run.started",
-        "message.delta",
         "message.completed",
         "run.completed",
     ]
-    assert events.values[1].payload == {"delta": "ATHENA_EXEC_REAL"}
-    assert events.values[2].payload == {}
+    assert events.values[1].payload["content"] == "ATHENA_EXEC_REAL"
+    assert events.values[1].payload["reply_to_message_id"] == "message-1"
 
 
 @pytest.mark.asyncio
-async def test_resumed_run_projects_answer_with_original_user_message_id() -> None:
+async def test_resumed_run_completes_answer_for_original_user_message() -> None:
     class WaitingThenCompletingExecutor(Executor):
         def __init__(self) -> None:
             self.outcomes = [
@@ -276,7 +289,12 @@ async def test_resumed_run_projects_answer_with_original_user_message_id() -> No
                         checkpoint_id="checkpoint-1",
                     )
                 ),
-                CommandExecutionResult(result={"content": "resumed answer"}),
+                CommandExecutionResult(
+                    result={
+                        "content": "resumed answer",
+                        "answer_stream": answer_stream_metadata("stream-resumed"),
+                    }
+                ),
             ]
 
         async def execute(self, _command: RunCommand) -> CommandExecutionResult:
@@ -298,10 +316,9 @@ async def test_resumed_run_projects_answer_with_original_user_message_id() -> No
         for event in events.values
         if event.event_type in {"message.delta", "message.completed"}
     ]
-    assert [event.message_id for event in answer_events] == [
-        "message-1",
-        "message-1",
-    ]
+    assert [event.event_type for event in answer_events] == ["message.completed"]
+    assert answer_events[0].message_id == "assistant:run-1"
+    assert answer_events[0].payload["reply_to_message_id"] == "message-1"
 
 
 @pytest.mark.asyncio

@@ -161,9 +161,9 @@ class ApiClient {
   }
 
   /** 查询会话消息，可选限制返回条数。 */
-  async getMessages(sessionId: string, limit?: number): Promise<Message[]> {
+  async getMessages(sessionId: string, limit?: number, signal?: AbortSignal): Promise<Message[]> {
     const params = limit ? `?limit=${limit}` : ""
-    return this.request<Message[]>(`/api/sessions/${sessionId}/messages${params}`)
+    return this.request<Message[]>(`/api/sessions/${sessionId}/messages${params}`, { signal })
   }
 
   async listSessionRuns(sessionId: string): Promise<SessionRunSummary[]> {

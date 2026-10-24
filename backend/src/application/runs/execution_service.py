@@ -20,6 +20,7 @@ from domain.runs import (
     RunCancelPayload,
     RunCancellationResult,
     RunLifecyclePort,
+    RunQueryPort,
     RunStartPayload,
     RootWaitCheckpoint,
     RunStatus,
@@ -37,12 +38,14 @@ class RunExecutionService:
         executor: RunExecutorPort,
         events: EventPort,
         memory_jobs: MemoryJobPort | None = None,
+        run_query: RunQueryPort | None = None,
     ) -> None:
         self._lifecycle = lifecycle
         self._commands = commands
         self._executor = executor
         self._events = events
         self._memory_jobs = memory_jobs
+        self._run_query = run_query
         # Approval resumes are internal commands. Keep the original queued
         # command so its status can converge when the resumed execution ends.
         self._waiting_commands: dict[str, str] = {}
@@ -190,8 +193,30 @@ class RunExecutionService:
             return None
 
         result = outcome.result or {}
-        await self._lifecycle.complete(run_id, result)
-        if not self._lifecycle.writes_completion_artifacts_to_outbox:
+        completed = await self._lifecycle.complete(run_id, result)
+        if not completed:
+            current = await self._run_query.get(run_id) if self._run_query else None
+            status = current.status if current is not None else "unknown"
+            command_status = (
+                CommandStatus.CANCELLED
+                if status in {RunStatus.CANCELLED.value, RunStatus.CANCELLING.value}
+                else CommandStatus.COMPLETED
+                if status == RunStatus.COMPLETED.value
+                else CommandStatus.FAILED
+            )
+            terminal_result = {"status": status}
+            await self._commands.complete_command(
+                command.command_id,
+                status=command_status,
+                result=terminal_result,
+                error=(
+                    {"code": "run_completion_transition_rejected"}
+                    if command_status == CommandStatus.FAILED
+                    else None
+                ),
+            )
+            return terminal_result
+        if not self._lifecycle.writes_terminal_artifacts_to_outbox:
             # 将结果通过事件发送给用户
             await self._publish_result_message(command, result)
             # 入队一个记忆提取任务
@@ -247,8 +272,9 @@ class RunExecutionService:
 
     async def fail(self, command: RunCommand, error: dict[str, object]) -> None:
         if command.run_id:
-            await self._lifecycle.fail(command.run_id, error)
-            await self._publish(command, EventType.RUN_FAILED, payload=self._run_payload(command, "failed", error=error))
+            changed = await self._lifecycle.fail(command.run_id, error)
+            if changed and not self._lifecycle.writes_terminal_artifacts_to_outbox:
+                await self._publish(command, EventType.RUN_FAILED, payload=self._run_payload(command, "failed", error=error))
             self._run_started.pop(command.run_id, None)
             self._user_message_ids_by_run_id.pop(command.run_id, None)
         await self._commands.complete_command(
@@ -363,24 +389,14 @@ class RunExecutionService:
             content = nested.get("content") if isinstance(nested, dict) else None
         if not isinstance(content, str) or not content:
             return
-        stream_id = f"answer-{command.run_id}"
+        answer_stream = result.get("answer_stream")
+        if not isinstance(answer_stream, dict):
+            nested = result.get("result")
+            answer_stream = nested.get("answer_stream") if isinstance(nested, dict) else None
+        if not isinstance(answer_stream, dict):
+            raise ValueError("answer_stream_metadata_missing")
+        stream_id = str(answer_stream["stream_id"])
         assistant_message_id = f"assistant:{command.run_id}"
-        await self._events.publish(
-            ApplicationEvent(
-                event_type=EventType.MESSAGE_DELTA,
-                durability=EventDurability.DURABLE,
-                session_id=command.session_id,
-                run_id=command.run_id,
-                message_id=assistant_message_id,
-                stream_id=stream_id,
-                stream_type="answer",
-                chunk_id=1,
-                payload={
-                    "delta": content,
-                    "reply_to_message_id": reply_to_message_id,
-                },
-            )
-        )
         await self._events.publish(
             ApplicationEvent(
                 event_type=EventType.MESSAGE_COMPLETED,
@@ -390,8 +406,17 @@ class RunExecutionService:
                 message_id=assistant_message_id,
                 stream_id=stream_id,
                 stream_type="answer",
+                chunk_id=int(answer_stream["last_chunk_id"]),
                 is_complete=True,
-                payload={},
+                transition_id=f"answer:{stream_id}:completed",
+                payload={
+                    "content": content,
+                    "last_chunk_id": int(answer_stream["last_chunk_id"]),
+                    "reply_to_message_id": reply_to_message_id,
+                    "kind": result.get("kind", "final"),
+                    "started_at": answer_stream["started_at"],
+                    "status": "completed",
+                },
             )
         )
 

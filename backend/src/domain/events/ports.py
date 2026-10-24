@@ -18,7 +18,8 @@ class EventPort(Protocol):
         ...
 
     async def list_events_between(
-        self, session_id: str, after: int = 0, upto: int | None = None
+        self, session_id: str, after: int = 0, upto: int | None = None,
+        limit: int = 256,
     ) -> list[ApplicationEvent]:
         """按会话序号读取历史事件。"""
         ...

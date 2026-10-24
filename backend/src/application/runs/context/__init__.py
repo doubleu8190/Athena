@@ -10,6 +10,7 @@ from .contracts import (
     KnowledgeQuery,
     MemoryQuery,
     ProviderResult,
+    RetrievalStage,
 )
 from .service import ContextAcquisitionService
 from .planner import ContextPlanner
@@ -26,4 +27,5 @@ __all__ = [
     "KnowledgeQuery",
     "MemoryQuery",
     "ProviderResult",
+    "RetrievalStage",
 ]

@@ -20,7 +20,7 @@
 
 `update_validity()` 修改事实有效性和 valid_until；invalid 记忆保留历史但不参与检索。`valid_until` 必须为 ISO-8601。`add_memory_relation()` 写 supports/contradicts 等关系。过期清理由后台定时任务执行：软删 expired，删除 vector 和 graph，失败恢复 PostgreSQL 状态。
 
-访问统计在关键词与向量融合选中结果后直接提交 PostgreSQL，按 ID 去重，以原子加一更新 access_count 和 last_accessed_at；管理页 search/get/list 不增加访问热度。flush_access_stats 没有待刷新数据，返回 0。
+访问统计在本批资料合并进入 Root 窗口后，由 confirm_selection 提交 PostgreSQL，按 ID 去重，以原子加一更新 access_count 和 last_accessed_at；仅召回但未选入窗口、管理页 search/get/list 不增加访问热度。第二批沿用旧窗口条目时不重复计数；同一记忆在两个独立批次分别召回并选中时仍分别计数。flush_access_stats 没有待刷新数据，返回 0。
 
 last_observed_at 是创建或修订时观察事实的时间，last_accessed_at 是召回使用时间，两者独立。expires_at 是记忆 TTL，valid_until 是事实有效截止时间；任一期限到达均不再参与关键词或向量召回。空值表示该期限不受限，访问不会延长这两个期限。修订保留旧记录的期限。
 
@@ -42,6 +42,16 @@ last_observed_at 是创建或修订时观察事实的时间，last_accessed_at �
 `MemoryRetrievalService.get_context()` 在 token budget 内选择结果；超出数量或 token 时保留高分项，并返回可注入的引用与 retrieval_run_id。异常时允许返回空上下文并把 trace 标记 partial/failed，不能伪造有结果。
 
 ## 5. Graph context
+
+### 5.1 Root 两阶段上下文采集
+
+首次 Root 决策前，prefetch_context 用原始 query（去首尾空白后最多 500 字符）并发查询 memory 与有就绪文档的 knowledge。预检索不调用 LLM，不占决策轮数；每通道完整调用受 `CONTEXT_PREFETCH_TIMEOUT_SECONDS` 限制，默认 3 秒，快通道资料不会因为另一个超时而丢失。
+
+资料不足时，由第一次决策生成定向 query，走 acquire_context 查询 memory / knowledge / graph / 当前 file。之后 redecide_root_action 只选择回答、澄清或计划。两阶段共用 ContextBundle、去重和窗口预算，补充检索优先保留新资料，空批次保留已有材料。
+
+ContextQueryOutcome 必须包含程序填写的 stage=prefetch/directed，并分别表达 succeeded/empty/failed/timeout/skipped。摘要进入决策、规划与正文模型；失败或未命中不证明事实不存在，也不能用于推断异步记忆写入失败。retrieval.* 事件携带 stage，持久轨迹的 providers.effective_params.retrieval_stage 保存同一阶段归因，不新增表列。详细设计见 [两阶段检索方案](root-context-prefetch-design.md)。
+
+### 5.2 图查询
 
 知识库文档在处理完成后由 GraphDocumentIndexer 用副 LLM 抽取实体和关系写入 Neo4j；记忆写入也创建 memory 节点。Graph provider 按 query 查最多 `GRAPH_ENTITY_LIMIT=8` 个实体、`GRAPH_PATH_LIMIT=12` 条路径，最多 2 hops，最低置信度 0.65，单次超时默认 5 秒。图失败不阻断文件向量检索，context item 标记错误和 trace 状态。
 

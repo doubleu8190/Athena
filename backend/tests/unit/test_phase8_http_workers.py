@@ -216,7 +216,7 @@ async def test_sse_heartbeat_and_untagged_event_paths() -> None:
         async def get(self, key): return Session.create(session_id=key, title="s", now=NOW)
     class Events:
         async def open_subscription(self, key): return asyncio.Queue(), 0
-        async def replay(self, *args): return []
+        async def replay(self, *args, limit=256): return []
         async def close(self, *args): self.closed = True
     events = Events(); service = SimpleNamespace(open_subscription=events.open_subscription, replay=events.replay, close=events.close)
     router = build_events_router(lambda: service)

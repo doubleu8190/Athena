@@ -36,6 +36,10 @@ from application.orchestration import (
     WorkerWorkflow,
     OrchestrationQueryService,
 )
+from application.orchestration.answer_generation import (
+    AnswerGenerationService,
+    AnswerStreamingOptions,
+)
 from application.runs.context import (
     ContextAcquisitionService,
     ContextPlanner,
@@ -419,9 +423,23 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         request_preparation=request_preparation,
         plan_loader=PostgresPlanLoader(orchestration_repository),
         agent=ConfiguredRootAgent(llm_provider, events),
+        answer_generation=AnswerGenerationService(
+            llm_provider,
+            events,
+            input_budget_tokens=settings.primary_llm.input_budget_tokens,
+            options=AnswerStreamingOptions(
+                flush_interval_ms=settings.answer_streaming.flush_interval_ms,
+                max_chunk_chars=settings.answer_streaming.max_chunk_chars,
+                first_text_timeout_ms=settings.answer_streaming.first_text_timeout_ms,
+                idle_timeout_ms=settings.answer_streaming.idle_timeout_ms,
+                total_timeout_ms=settings.answer_streaming.total_timeout_ms,
+            ),
+            prompt=(Path(__file__).resolve().parents[2] / "prompt" / "answer_generation.md").read_text(encoding="utf-8"),
+        ),
         tool_service=builtin_tool_service,
         available_context_providers=tuple(context_providers),
         root_max_turns=settings.root_max_turns,
+        context_prefetch_timeout_seconds=settings.context_prefetch_timeout_seconds,
         review_context_repository=orchestration_repository,
         orchestration_command_handler=orchestration_command_handler,
         event_publisher=events,
@@ -492,6 +510,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             root_run_executor,
             events,
             memory_jobs,
+            runs,
         )
         command_worker = CommandConsumer(runs, command_execution)
         root_resume_dispatcher = RootResumeDispatcher(

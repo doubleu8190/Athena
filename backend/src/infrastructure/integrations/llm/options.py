@@ -13,6 +13,7 @@ class LLMProviderOptions:
     base_url: str = ""
     temperature: float = -1
     max_tokens: int = -1
+    input_budget_tokens: int = 8192
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,7 @@ def coerce_llm_options(value: LLMOptions | Any) -> LLMOptions:
                 base_url=item.base_url,
                 temperature=item.temperature,
                 max_tokens=item.max_tokens,
+                input_budget_tokens=item.input_budget_tokens,
             )
             for item in value.llm_providers
         ),

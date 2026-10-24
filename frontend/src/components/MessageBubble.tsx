@@ -23,7 +23,8 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
   // 无内容且无工具调用的消息不渲染（空气泡）；
   // 纯工具调用回合（content 为空但 tool_calls 有值）需要展示工具卡片。
-  if (!isUser && !isTool && !isSystem && !hasText && !hasToolCalls) {
+  const streamIsActive = message.stream_status === "streaming" || message.stream_status === "finalizing"
+  if (!isUser && !isTool && !isSystem && !hasText && !hasToolCalls && !streamIsActive) {
     return null
   }
 
@@ -112,7 +113,7 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         )}
 
         {/* 消息气泡：助手纯工具回合无文本时不渲染空气泡 */}
-        {(isUser || isSystem || (!isTool && hasText)) && (
+        {(isUser || isSystem || (!isTool && (hasText || streamIsActive))) && (
           <div
           className={`chat-message-bubble rounded-2xl px-4 py-3 ${
               isUser
@@ -125,9 +126,18 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 isStreaming ? "typing-cursor" : ""
               }`}
             >
-              <MarkdownContent content={message.content} />
+              {hasText ? <MarkdownContent content={message.content} /> : <span className="text-athena-muted">{message.stream_status === "finalizing" ? "正在确认最终答复…" : "正在生成…"}</span>}
             </div>
           </div>
+        )}
+        {!isUser && message.stream_status === "failed" && (
+          <span className="text-xs text-amber-500">回答未完成，以上为已生成内容。</span>
+        )}
+        {!isUser && message.stream_status === "unconfirmed" && (
+          <span className="text-xs text-amber-500">运行已完成，最终回答暂未确认。</span>
+        )}
+        {!isUser && message.stream_status === "cancelled" && (
+          <span className="text-xs text-athena-muted">已停止，保留已生成内容。</span>
         )}
 
         {/* 时间戳 */}

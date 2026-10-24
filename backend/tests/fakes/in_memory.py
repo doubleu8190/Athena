@@ -142,7 +142,7 @@ class InMemoryRunStore(
     RunQueryPort,
 ):
     writes_cancellation_events_to_outbox = False
-    writes_completion_artifacts_to_outbox = False
+    writes_terminal_artifacts_to_outbox = False
 
     def __init__(self) -> None:
         self.commands: dict[str, RunCommand] = {}
@@ -453,9 +453,15 @@ class InMemoryEventStore(EventPort):
         queue: asyncio.Queue[ApplicationEvent] = asyncio.Queue(); self.subscribers.setdefault(session_id, []).append(queue)
         return queue, len(self.items.get(session_id, []))
     async def list_events_between(
-        self, session_id: str, after: int = 0, upto: int | None = None
+        self, session_id: str, after: int = 0, upto: int | None = None,
+        limit: int = 256,
     ) -> list[ApplicationEvent]:
-        values = self.items.get(session_id, []); return values[after:upto]
+        values = [
+            event for event in self.items.get(session_id, [])
+            if (event.session_seq or 0) > after
+            and (upto is None or (event.session_seq or 0) <= upto)
+        ]
+        return values[:limit]
     async def list_events_for_run(
         self,
         session_id: str,
@@ -474,9 +480,9 @@ class InMemoryEventPublisher(EventPort):
     def __init__(self, store: InMemoryEventStore) -> None: self.store = store
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish(event)
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish_realtime(event)
-    async def list_events_between(self, session_id: str, after: int = 0, upto: int | None = None) -> list[ApplicationEvent]:
+    async def list_events_between(self, session_id: str, after: int = 0, upto: int | None = None, limit: int = 256) -> list[ApplicationEvent]:
         """把历史查询转交给共享的内存事件库。"""
-        return await self.store.list_events_between(session_id, after, upto)
+        return await self.store.list_events_between(session_id, after, upto, limit)
 
     async def list_events_for_run(
         self,

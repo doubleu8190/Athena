@@ -34,7 +34,7 @@ class Messages:
         self.saved.append(message)
         return message.id
 
-    async def list_by_session(self, session_id: str, *, limit: int | None = None):
+    async def list_recent_conversation(self, session_id: str, *, limit: int | None = None):
         values = [value for value in self.values.values() if value.session_id == session_id]
         return values[:limit] if limit is not None else values
 

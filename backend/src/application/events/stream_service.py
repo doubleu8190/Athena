@@ -23,7 +23,6 @@ class EventStreamService:
     ) -> None:
         self._sessions = sessions
         self._events = events
-        self._event_pumps: dict[asyncio.Queue[EventResponse], tuple[asyncio.Queue[ApplicationEvent], asyncio.Task[None]]] = {}
 
     async def ensure_session(self, session_id: str) -> None:
         if await self._sessions.get(session_id) is None:
@@ -31,34 +30,28 @@ class EventStreamService:
 
     async def open_subscription(
         self, session_id: str
-    ) -> tuple[asyncio.Queue[EventResponse], int]:
+    ) -> tuple[asyncio.Queue[ApplicationEvent], int]:
         await self.ensure_session(session_id)
-        queue, watermark = await self._events.open_subscription(session_id)
-        output: asyncio.Queue[EventResponse] = asyncio.Queue()
-        async def pump() -> None:
-            while True:
-                await output.put(_event_response(await queue.get()))
-        # Keep the transport-owned queue contract intact while exposing only
-        # application response values to the HTTP layer.
-        self._event_pumps[output] = (queue, asyncio.create_task(pump()))
-        return output, watermark
+        return await self._events.open_subscription(session_id)
 
     async def replay(
-        self, session_id: str, after: int, upto: int
+        self, session_id: str, after: int, upto: int | None, limit: int = 256
     ) -> list[EventResponse]:
         return [
             _event_response(value)
-            for value in await self._events.list_events_between(session_id, after, upto)
+            for value in await self._events.list_events_between(
+                session_id, after, upto, limit=limit
+            )
         ]
 
+    @staticmethod
+    def response(value: ApplicationEvent) -> EventResponse:
+        return _event_response(value)
+
     async def close(
-        self, session_id: str, queue: asyncio.Queue[EventResponse]
+        self, session_id: str, queue: asyncio.Queue[ApplicationEvent]
     ) -> None:
-        original, pump = self._event_pumps.pop(queue, (None, None))
-        if pump is not None:
-            pump.cancel()
-        if original is not None:
-            await self._events.close_subscription(session_id, original)
+        await self._events.close_subscription(session_id, queue)
 
 def _event_response(value: ApplicationEvent) -> EventResponse:
     """将事件信封转换为 SSE 使用的应用响应。"""

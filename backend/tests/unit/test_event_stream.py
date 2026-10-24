@@ -54,9 +54,10 @@ class Events(EventPort):
         return event
 
     async def list_events_between(
-        self, session_id: str, after: int = 0, upto: int | None = None
+        self, session_id: str, after: int = 0, upto: int | None = None,
+        limit: int = 256,
     ) -> list[ApplicationEvent]:
-        return [event for event in self.replayed if event.session_seq > after]
+        return [event for event in self.replayed if event.session_seq > after][:limit]
 
     async def list_events_for_run(
         self,
@@ -86,10 +87,12 @@ def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
 
     events = Events()
     replayed_event = events.replayed[0]
-    events.queue.put_nowait(replayed_event)
-    events.queue.put_nowait(
-        replace(replayed_event, session_seq=6, event_type=EventType.RUN_COMPLETED)
+    completed_event = replace(
+        replayed_event, session_seq=6, event_type=EventType.RUN_COMPLETED
     )
+    events.replayed.append(completed_event)
+    events.queue.put_nowait(replayed_event)
+    events.queue.put_nowait(completed_event)
     service = EventStreamService(Sessions(), events)
     app = __import__("fastapi").FastAPI()
     router = build_events_router(lambda: service)

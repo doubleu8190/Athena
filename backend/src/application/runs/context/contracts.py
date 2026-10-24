@@ -83,11 +83,14 @@ ContextQuery = Annotated[
     Field(discriminator="provider"),
 ]
 
+RetrievalStage = Literal["prefetch", "directed"]
+
 
 class ContextQueryOutcome(BaseModel):
     """供后续 Root 决策参考的一条轻量检索结果。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+    stage: RetrievalStage
     query: ContextQuery
     status: Literal["succeeded", "empty", "failed", "timeout", "skipped"]
     result_count: int = Field(ge=0)
@@ -109,6 +112,7 @@ class ContextPlan:
     max_tokens: int = 4000
     recall_limit: int = 30
     rerank_limit: int = 10
+    provider_timeout_seconds: float | None = None
 
     def with_updates(self, **changes: Any) -> "ContextPlan":
         """Return a plan with selected provider-specific values replaced."""
@@ -161,4 +165,5 @@ __all__ = [
     "KnowledgeQuery",
     "MemoryQuery",
     "ProviderResult",
+    "RetrievalStage",
 ]

@@ -17,7 +17,7 @@ from domain.retrieval.trace_contracts import (
     RetrievalProviderTrace,
 )
 
-from .contracts import ContextBundle, ContextItem, ContextPlan, ProviderResult
+from .contracts import ContextBundle, ContextItem, ContextPlan, ProviderResult, RetrievalStage
 from .protocols import ContextProvider
 
 logger = logging.getLogger(__name__)
@@ -47,22 +47,34 @@ class ContextAcquisitionService:
         run_id: str,
         plan: ContextPlan,
         invocation_id: str,
+        stage: RetrievalStage,
         message_id: str | None = None,
     ) -> ContextBundle:
-        """执行计划中的检索，保存候选后返回当前资料窗口。"""
+        """执行同一阶段的检索并保存候选。
+
+        参数：session_id/run_id/message_id 关联请求；plan 限定查询和规模；
+        invocation_id 标识本批调用；stage 由工作流指定预检索或定向检索。
+        返回：ContextBundle，包含已裁剪资料和通道摘要。
+        异常：外部取消时传播 CancelledError；普通通道故障写入结果。
+        """
         started_clock = perf_counter()
         activity_id = f"retrieval:{invocation_id}"
         await self._publish_event(
             "retrieval.started",
             session_id,
             run_id,
-            self._activity_payload(activity_id, run_id, status="running"),
+            self._activity_payload(activity_id, run_id, stage=stage, status="running"),
         )
         results, cancelled = await self._collect_provider_results(
             session_id=session_id,
             run_id=run_id,
             plan=plan,
         )
+        # 阶段归因由程序统一覆盖，Provider 只负责它自己的检索事实。
+        results = [
+            replace(result, effective_params={**result.effective_params, "retrieval_stage": stage})
+            for result in results
+        ]
         bundle = self._build_bundle(results, plan)
         duration_ms = (perf_counter() - started_clock) * 1000
         retrieval_run_id = await self._record_trace(
@@ -89,6 +101,7 @@ class ContextAcquisitionService:
             run_id=run_id,
             activity_id=activity_id,
             retrieval_run_id=retrieval_run_id,
+            stage=stage,
         )
         await self._publish_completion(
             results,
@@ -99,6 +112,7 @@ class ContextAcquisitionService:
             duration_ms=int(duration_ms),
             bundle=bundle,
             cancelled=cancelled,
+            stage=stage,
         )
         if cancelled:
             raise asyncio.CancelledError
@@ -111,6 +125,7 @@ class ContextAcquisitionService:
         session_id: str,
         agent_run_id: str,
         selections: tuple[RetrievalCandidateSelection, ...],
+        stage: RetrievalStage,
     ) -> None:
         """记录 Root 最终窗口选择，并只为本轮保留的记忆计数。"""
         memory_ids = list(
@@ -138,6 +153,7 @@ class ContextAcquisitionService:
                 run_id=None,
                 selections=selections,
                 persisted=False,
+                stage=stage,
             )
             return
         persisted = False
@@ -162,6 +178,7 @@ class ContextAcquisitionService:
             run_id=run_id,
             selections=selections,
             persisted=persisted,
+            stage=stage,
         )
 
     async def _publish_selection_event(
@@ -172,6 +189,7 @@ class ContextAcquisitionService:
         run_id: str | None,
         selections: tuple[RetrievalCandidateSelection, ...],
         persisted: bool,
+        stage: RetrievalStage,
     ) -> None:
         invocation_id = (
             run_id.removeprefix("retrieval_") if run_id is not None else "unknown"
@@ -186,6 +204,7 @@ class ContextAcquisitionService:
                 "name": "context_window_selection",
                 "parent_activity_id": f"retrieval:{invocation_id}",
                 "retrieval_run_id": run_id,
+                "stage": stage,
                 "trace_status": "complete" if persisted else "incomplete",
                 "selection_status": "complete" if persisted else "pending",
                 "context_count": sum(
@@ -358,6 +377,7 @@ class ContextAcquisitionService:
         run_id: str,
         activity_id: str,
         retrieval_run_id: str | None,
+        stage: RetrievalStage,
     ) -> None:
         """为本次调用的每个检索模块发布结果活动。"""
         for result in results:
@@ -373,6 +393,7 @@ class ContextAcquisitionService:
                     "activity_type": "retrieval_provider",
                     "name": result.provider,
                     "provider": result.provider,
+                    "stage": stage,
                     "parent_activity_id": activity_id,
                     "retrieval_run_id": retrieval_run_id,
                     "status": result.status,
@@ -394,6 +415,7 @@ class ContextAcquisitionService:
         duration_ms: int,
         bundle: ContextBundle,
         cancelled: bool,
+        stage: RetrievalStage,
     ) -> None:
         """结束活动并发布实际获得的召回数量。"""
         status = _run_status(results, cancelled=cancelled)
@@ -403,7 +425,7 @@ class ContextAcquisitionService:
             session_id,
             run_id,
             {
-                **self._activity_payload(activity_id, run_id, status=status),
+                **self._activity_payload(activity_id, run_id, stage=stage, status=status),
                 "duration_ms": duration_ms,
                 "retrieval_run_id": retrieval_run_id,
                 "trace_status": "pending" if retrieval_run_id is not None else "incomplete",
@@ -421,13 +443,14 @@ class ContextAcquisitionService:
 
     @staticmethod
     def _activity_payload(
-        activity_id: str, run_id: str, *, status: str
+        activity_id: str, run_id: str, *, stage: RetrievalStage, status: str
     ) -> dict[str, str]:
         """构造 Root 检索活动的关联字段。"""
         return {
             "activity_id": activity_id,
             "activity_type": "retrieval",
-            "name": "acquire_context",
+            "name": "prefetch_context" if stage == "prefetch" else "acquire_context",
+            "stage": stage,
             "parent_activity_id": f"run:{run_id or ''}",
             "status": status,
         }
@@ -441,14 +464,21 @@ class ContextAcquisitionService:
         run_id: str,
         plan: ContextPlan,
     ) -> ProviderResult:
-        """执行一个检索模块，并把普通故障记为模块结果。"""
+        """执行整个通道调用，保持快通道结果并限制预检索等待。
+
+        参数：name/provider 是通道及其实现；session_id/run_id 关联请求；
+        plan 的可选上限覆盖枚举文档、关键词和向量查询。
+        返回：ProviderResult，超时和普通异常分别标记。
+        异常：外部 CancelledError 原样传播。
+        """
         started = perf_counter()
         try:
-            value = await provider.retrieve_context(
-                session_id=session_id,
-                run_id=run_id,
-                plan=plan,
-            )
+            async with asyncio.timeout(plan.provider_timeout_seconds):
+                value = await provider.retrieve_context(
+                    session_id=session_id,
+                    run_id=run_id,
+                    plan=plan,
+                )
             if not isinstance(value, ProviderResult):
                 return ProviderResult(
                     name,
@@ -460,6 +490,13 @@ class ContextAcquisitionService:
                 value,
                 provider=value.provider or name,
                 duration_ms=value.duration_ms or (perf_counter() - started) * 1000,
+            )
+        except TimeoutError:
+            return ProviderResult(
+                name,
+                "timeout",
+                error_message="context_provider_timeout",
+                duration_ms=(perf_counter() - started) * 1000,
             )
         except Exception as exc:
             return ProviderResult(

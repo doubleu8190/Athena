@@ -148,7 +148,7 @@ class Jobs:
 
 class Lifecycle:
     writes_cancellation_events_to_outbox = False
-    writes_completion_artifacts_to_outbox = False
+    writes_terminal_artifacts_to_outbox = False
 
     async def update_status(self, *args):
         return True
@@ -179,7 +179,13 @@ class Events:
 class Executor:
     async def execute(self, command):
         return CommandExecutionResult(
-            result={"content": "苹果很受欢迎"},
+            result={
+                "content": "苹果很受欢迎",
+                "answer_stream": {
+                    "message_id": "assistant:run-1", "stream_id": "answer-test",
+                    "started_at": datetime.now(timezone.utc).isoformat(), "last_chunk_id": 1,
+                },
+            },
         )
 
     async def cancel(self, _run_id):

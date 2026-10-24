@@ -99,9 +99,14 @@ def _node(
             return {
                 "status": "failed",
                 "error": {
-                    "code": "node_failed",
+                    "code": str(getattr(exc, "code", "node_failed")),
                     "node": name,
                     "message": str(exc) or type(exc).__name__,
+                    **(
+                        {"phase": str(getattr(exc, "phase"))}
+                        if getattr(exc, "phase", None)
+                        else {}
+                    ),
                 },
             }
         await _publish(
@@ -120,13 +125,22 @@ def _node(
 
 
 def _route_after_request(state: RootGraphState) -> str:
-    """请求准备失败时直接终止；成功时进入统一 Root 决策。"""
+    """请求准备失败时终止；成功时先用原始问题预检索。"""
+    return "assemble_final_response" if state.get("error") else "prefetch_context"
+
+
+def _route_after_prefetch(state: RootGraphState) -> str:
+    """预检索可恢复结果进入首次决策；不可恢复错误直接终止。
+
+    参数：state 是预检索后的图状态。返回：下一个节点名。
+    异常：不主动抛出业务异常。
+    """
     return "assemble_final_response" if state.get("error") else "decide_root_action"
 
 
 def _route_after_context(state: RootGraphState) -> str:
-    """不可恢复的采集错误终止；可反馈给 Root 的 Provider 结果继续决策。"""
-    return "assemble_final_response" if state.get("error") else "decide_root_action"
+    """不可恢复的采集错误终止；其余结果进入专用再决策节点。"""
+    return "assemble_final_response" if state.get("error") else "redecide_root_action"
 
 
 def _route_after_decision(state: RootGraphState) -> str:
@@ -135,10 +149,27 @@ def _route_after_decision(state: RootGraphState) -> str:
         return "assemble_final_response"
     action = state.get("root_decision", {}).get("action")
     return {
-        "answer": "assemble_final_response",
+        "answer": "generate_answer",
         "context": "acquire_context",
-        "plan": "materialize_execution_plan",
+        "plan": "generate_plan",
     }.get(str(action), "assemble_final_response")
+
+
+def _route_after_redecision(state: RootGraphState) -> str:
+    if state.get("error"):
+        return "assemble_final_response"
+    return {
+        "answer": "generate_answer",
+        "plan": "generate_plan",
+    }.get(str(state.get("root_decision", {}).get("action")), "assemble_final_response")
+
+
+def _route_after_plan_generation(state: RootGraphState) -> str:
+    if state.get("error"):
+        return "assemble_final_response"
+    if state.get("planning_feedback"):
+        return "decide_root_action"
+    return "materialize_execution_plan" if state.get("plan_draft") else "assemble_final_response"
 
 
 def _route_after_wait(state: RootGraphState) -> str:
@@ -198,8 +229,12 @@ def build_root_graph(
     """Compile a graph whose nodes delegate business work to an application port."""
     handlers = {
         "prepare_request": workflow.prepare_request,
+        "prefetch_context": workflow.prefetch_context,
         "decide_root_action": workflow.decide_root_action,
+        "redecide_root_action": workflow.redecide_root_action,
         "acquire_context": workflow.acquire_context,
+        "generate_plan": workflow.generate_plan,
+        "generate_answer": workflow.generate_answer,
         "materialize_execution_plan": workflow.materialize_execution_plan,
         "build_plan_response": workflow.build_plan_response,
         "assemble_final_response": workflow.assemble_final_response,
@@ -217,6 +252,14 @@ def build_root_graph(
         "prepare_request",
         _route_after_request,
         {
+            "prefetch_context": "prefetch_context",
+            "assemble_final_response": "assemble_final_response",
+        },
+    )
+    graph.add_conditional_edges(
+        "prefetch_context",
+        _route_after_prefetch,
+        {
             "decide_root_action": "decide_root_action",
             "assemble_final_response": "assemble_final_response",
         },
@@ -226,8 +269,9 @@ def build_root_graph(
         _route_after_decision,
         {
             "assemble_final_response": "assemble_final_response",
+            "generate_answer": "generate_answer",
             "acquire_context": "acquire_context",
-            "materialize_execution_plan": "materialize_execution_plan",
+            "generate_plan": "generate_plan",
         },
     )
     graph.add_conditional_edges(
@@ -235,9 +279,28 @@ def build_root_graph(
         _route_after_context,
         {
             "assemble_final_response": "assemble_final_response",
-            "decide_root_action": "decide_root_action",
+            "redecide_root_action": "redecide_root_action",
         },
     )
+    graph.add_conditional_edges(
+        "redecide_root_action",
+        _route_after_redecision,
+        {
+            "assemble_final_response": "assemble_final_response",
+            "generate_answer": "generate_answer",
+            "generate_plan": "generate_plan",
+        },
+    )
+    graph.add_conditional_edges(
+        "generate_plan",
+        _route_after_plan_generation,
+        {
+            "assemble_final_response": "assemble_final_response",
+            "decide_root_action": "decide_root_action",
+            "materialize_execution_plan": "materialize_execution_plan",
+        },
+    )
+    graph.add_edge("generate_answer", "assemble_final_response")
     graph.add_conditional_edges(
         "materialize_execution_plan",
         lambda state: (
@@ -260,7 +323,7 @@ def build_root_graph(
             "build_plan_response": "build_plan_response",
         },
     )
-    graph.add_edge("build_plan_response", "assemble_final_response")
+    graph.add_edge("build_plan_response", "generate_answer")
     graph.add_edge("assemble_final_response", END)
     return graph.compile(checkpointer=checkpointer)
 

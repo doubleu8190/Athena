@@ -57,6 +57,7 @@ class EventType(StrEnum):
     TASK_QUEUED = "task.queued"
     TASK_RETRIED = "task.retrying"
     TASK_CANCELLED = "task.cancelled"
+    MESSAGE_STARTED = "message.started"
     SYNTHESIS_STARTED = "synthesis.started"
     SYNTHESIS_COMPLETED = "synthesis.completed"
     BUDGET_EXCEEDED = "run.budget_exceeded"

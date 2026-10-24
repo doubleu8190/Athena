@@ -74,7 +74,7 @@ async def test_run_command_service_validation_bool_and_cancel_paths() -> None:
 async def test_run_execution_cancel_missing_id_and_error_result_paths() -> None:
     class Lifecycle:
         writes_cancellation_events_to_outbox = False
-        writes_completion_artifacts_to_outbox = False
+        writes_terminal_artifacts_to_outbox = False
         async def update_status(self, *a): pass
         async def complete(self, *a): pass
         async def fail(self, *a): pass

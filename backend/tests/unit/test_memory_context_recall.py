@@ -8,7 +8,7 @@ import pytest
 
 from application.memory.retrieval_service import MemoryContextProvider
 from application.orchestration.agents.root_agent import ConfiguredRootAgent
-from application.orchestration.root_decision import Answer, RootAgentInput, RootMessage
+from application.orchestration.root_decision import AnswerIntent, RootAgentInput, RootMessage
 from application.runs.context import ContextItem, ContextPlan
 from domain.memory import MemoryRecord, MemorySearchRequest
 
@@ -69,7 +69,8 @@ async def test_memory_context_recalls_a_memory_from_an_earlier_session() -> None
 
     assert result.status == "succeeded"
     assert [item.content for item in result.items] == ["fruit_preference: 苹果"]
-    assert repository.accessed == ["turn:old:0"]
+    # 召回本身不增加访问量，只有最终选入 Root 窗口后才由采集服务确认。
+    assert repository.accessed == []
     assert repository.request is not None
     assert not repository.request.filters
     assert "session_id" not in vectors.kwargs
@@ -88,7 +89,7 @@ async def test_root_decision_receives_retrieved_memory_as_reference_context() ->
                     {
                         "action": "answer",
                         "kind": "final",
-                        "content": "你最喜欢吃苹果。",
+                        "instructions": "根据记忆资料回答用户最喜欢吃什么水果。",
                     },
                     ensure_ascii=False,
                 )
@@ -99,7 +100,7 @@ async def test_root_decision_receives_retrieved_memory_as_reference_context() ->
             return {
                 "action": "answer",
                 "kind": "final",
-                "content": "你最喜欢吃苹果。",
+                "instructions": "根据记忆资料回答用户最喜欢吃什么水果。",
             }
 
     llm = CapturingLLM()
@@ -127,8 +128,8 @@ async def test_root_decision_receives_retrieved_memory_as_reference_context() ->
 
     result = await agent.decide(inputs)
 
-    assert isinstance(result, Answer)
-    assert result.content == "你最喜欢吃苹果。"
+    assert isinstance(result, AnswerIntent)
+    assert result.instructions == "根据记忆资料回答用户最喜欢吃什么水果。"
     system_messages = [
         message["content"]
         for message in llm.messages

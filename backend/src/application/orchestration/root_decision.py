@@ -65,6 +65,34 @@ class RootWorkerTool(BaseModel):
     requires_approval: bool
 
 
+class PlanningFeedback(BaseModel):
+    """计划生成发现的必要信息缺口。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action: Literal["needs_information"]
+    missing_information: tuple[str, ...] = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+    @field_validator("missing_information")
+    @classmethod
+    def non_empty_missing_information(
+        cls, values: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        normalized = tuple(value.strip() for value in values)
+        if any(not value for value in normalized):
+            raise ValueError("root_planning_feedback_item_required")
+        return normalized
+
+    @field_validator("reason")
+    @classmethod
+    def non_empty_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("root_planning_feedback_reason_required")
+        return normalized
+
+
 class RootAgentInput(BaseModel):
     """供一次 Root 决策使用的消息、资源和当前循环状态。"""
 
@@ -83,25 +111,64 @@ class RootAgentInput(BaseModel):
     context_items: tuple[ContextItem, ...] = ()
     context_queries: tuple[ContextQueryOutcome, ...] = ()
     remaining_turns: int = Field(ge=1)
+    planning_feedback: PlanningFeedback | None = None
+    planning_context_updated: bool = False
 
 
-class Answer(BaseModel):
-    """Root 对用户的最终答复或澄清问题。"""
+class AnswerIntent(BaseModel):
+    """Root 选择的回答类型及正文生成要求。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     action: Literal["answer"]
     kind: Literal["final", "clarification"]
-    content: str = Field(min_length=1)
+    instructions: str = Field(min_length=1, max_length=2000)
 
-    @field_validator("content")
+    @field_validator("instructions")
     @classmethod
-    def non_empty_content(cls, value: str) -> str:
-        """去掉首尾空白并拒绝空答复。"""
+    def non_empty_instructions(cls, value: str) -> str:
+        """去掉生成要求的首尾空白并拒绝空内容。"""
         normalized = value.strip()
         if not normalized:
-            raise ValueError("root_answer_content_required")
+            raise ValueError("root_answer_instructions_required")
         return normalized
+
+
+class PlanIntent(BaseModel):
+    """Root 选择计划生成并提供目标与简短约束。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action: Literal["plan"]
+    goal: str = Field(min_length=1)
+    instructions: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("goal", "instructions")
+    @classmethod
+    def non_empty_plan_text(cls, value: str) -> str:
+        """去掉计划文字首尾空白并拒绝空值。"""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("root_plan_intent_text_required")
+        return normalized
+
+
+class RootPlanInput(BaseModel):
+    """独立计划生成所需的请求、资料和执行能力。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    session_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    message_id: str = Field(min_length=1)
+    messages: tuple[RootMessage, ...] = Field(min_length=1)
+    attachments: tuple[RootAttachment, ...] = ()
+    knowledge_bases: tuple[RootKnowledgeBase, ...] = ()
+    worker_tools: tuple[RootWorkerTool, ...] = ()
+    context_items: tuple[ContextItem, ...] = ()
+    context_queries: tuple[ContextQueryOutcome, ...] = ()
+    goal: str = Field(min_length=1)
+    instructions: str = Field(min_length=1, max_length=2000)
 
 
 class ContextRequest(BaseModel):
@@ -216,29 +283,65 @@ class RootDecisionStructuredOutput(BaseModel):
 
     action: Literal["answer", "context", "plan"]
     kind: Literal["final", "clarification"] | None = None
-    content: str | None = None
+    instructions: str | None = None
     queries: tuple[ContextQuery, ...] | None = None
+    goal: str | None = None
+
+class RootReDecisionStructuredOutput(BaseModel):
+    """检索后的三结果再决策 schema。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action: Literal["answer", "plan"]
+    kind: Literal["final", "clarification"] | None = None
+    instructions: str | None = None
+    goal: str | None = None
+
+
+class RootPlanStructuredOutput(BaseModel):
+    """完整计划或规划信息缺口的扁平结构化 schema。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action: Literal["plan", "needs_information"]
     goal: str | None = None
     tasks: tuple[PlanTaskDraft, ...] | None = None
     edges: tuple[PlanEdgeDraft, ...] | None = None
     max_parallelism: int | None = None
+    missing_information: tuple[str, ...] | None = None
+    reason: str | None = None
 
 
-RootDecision = Annotated[Answer | ContextRequest | PlanDraft, Field(discriminator="action")]
+RootDecision = Annotated[
+    AnswerIntent | ContextRequest | PlanIntent, Field(discriminator="action")
+]
 ROOT_DECISION_ADAPTER = TypeAdapter(RootDecision)
+RootReDecision = Annotated[AnswerIntent | PlanIntent, Field(discriminator="action")]
+ROOT_REDECISION_ADAPTER = TypeAdapter(RootReDecision)
+RootPlanResult = Annotated[PlanDraft | PlanningFeedback, Field(discriminator="action")]
+ROOT_PLAN_ADAPTER = TypeAdapter(RootPlanResult)
 
 
 __all__ = [
-    "Answer",
+    "AnswerIntent",
     "ContextRequest",
     "PlanDraft",
     "PlanEdgeDraft",
+    "PlanIntent",
     "PlanTaskDraft",
+    "PlanningFeedback",
     "RootDecisionStructuredOutput",
+    "RootReDecisionStructuredOutput",
+    "RootPlanStructuredOutput",
     "ROOT_DECISION_ADAPTER",
+    "ROOT_REDECISION_ADAPTER",
+    "ROOT_PLAN_ADAPTER",
     "RootAgentInput",
     "RootAttachment",
     "RootDecision",
+    "RootReDecision",
+    "RootPlanInput",
+    "RootPlanResult",
     "RootKnowledgeBase",
     "RootMessage",
     "RootWorkerTool",

@@ -16,6 +16,10 @@ class RootGraphState(TypedDict, total=False):
     request: dict[str, Any]
     root_decision: dict[str, Any]
     root_turn_count: int
+    planning_feedback: dict[str, Any] | None
+    planning_context_updated: bool
+    plan_draft: dict[str, Any] | None
+    answer_input: dict[str, Any] | None
     worker_tools: list[dict[str, Any]]
     knowledge_bases: list[dict[str, Any]]
     available_context_providers: list[str]

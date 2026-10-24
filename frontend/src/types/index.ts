@@ -77,6 +77,9 @@ export interface Message {
   tool_call_id?: string
   /** 所属运行 ID（一次用户请求 ≈ 一个 run），Activity 面板按此归组 */
   run_id?: string
+  stream_id?: string
+  stream_status?: "streaming" | "finalizing" | "unconfirmed" | "completed" | "paused" | "failed" | "cancelled"
+  last_chunk_id?: number
   /** 可评价的检索事件关联；仅 assistant 消息会使用此字段。 */
   retrieval_events?: RetrievalReference[]
   /** 助手回合发起或已落库的工具调用，来源于后端 Message.tool_calls。 */

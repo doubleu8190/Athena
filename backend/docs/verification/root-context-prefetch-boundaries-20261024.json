@@ -1,0 +1,671 @@
+[
+  {
+    "label": "把那个文件发给他。",
+    "run_id": "2026.10.24.07.48.08.594",
+    "session_id": "2026.10.24.07.48.08.574",
+    "answer": "要完成这个操作，还缺少几项必要信息：\n\n1. **哪个文件**：请提供文件名或文件链接。目前我这边没有可以确认的具体文件。\n2. **\"他\"是谁**：请提供收件人姓名、账号或联系方式。\n3. **发送渠道**：当前没有可用的发送渠道，请说明希望通过哪种方式发送（例如邮件、聊天工具等）。\n\n补充以上信息后，我才能帮你处理。",
+    "first_decision": {
+      "action": "answer",
+      "kind": "clarification",
+      "instructions": "说明缺少必要信息：未指定是哪个文件、'他'指谁，且当前没有可用的发送渠道，请用户提供这些信息。"
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "把那个文件发给他。"
+          },
+          "status": "succeeded",
+          "result_count": 2,
+          "error_message": null
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "把那个文件发给他。",
+            "knowledge_base_ids": [
+              "prefetch-fixture-kb"
+            ]
+          },
+          "status": "succeeded",
+          "result_count": 1,
+          "error_message": null
+        }
+      ],
+      "context_items": [
+        {
+          "provider": "memory",
+          "content": "food_preference: 喜欢吃苹果",
+          "source_id": "turn:2026.10.24.07.37.14.819:0",
+          "metadata": {
+            "fused_score": 0.01639344262295082
+          }
+        },
+        {
+          "provider": "memory",
+          "content": "favorite_fruit: 苹果",
+          "source_id": "turn:2026.10.24.07.42.55.032:0",
+          "metadata": {
+            "fused_score": 0.016129032258064516
+          }
+        },
+        {
+          "provider": "knowledge",
+          "content": "PF验收项目的代号是蓝鲸。这是知识库中的验收事实。",
+          "source_id": "prefetch-fixture-chunk",
+          "metadata": {
+            "attachment_id": "prefetch-fixture-doc",
+            "locator": {},
+            "source_metadata": {},
+            "knowledge_base_ids": [
+              "prefetch-fixture-kb"
+            ]
+          }
+        }
+      ]
+    },
+    "retrievals": [
+      {
+        "query": "memory: 把那个文件发给他。\nknowledge: 把那个文件发给他。",
+        "status": "succeeded",
+        "duration_ms": 1771.0730840044562,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "把那个文件发给他。",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 1729.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 2,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 2,
+            "selected_count": 2
+          },
+          {
+            "provider": "knowledge",
+            "query": "把那个文件发给他。",
+            "resource_scope": {
+              "knowledge_base_ids": [
+                "prefetch-fixture-kb"
+              ],
+              "ready_attachment_ids": [
+                "prefetch-fixture-doc"
+              ]
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 1739.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 3
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 3,
+    "run_status": "completed"
+  },
+  {
+    "label": "你知道我喜欢吃什么蔬菜吗？",
+    "run_id": "2026.10.24.07.48.08.592",
+    "session_id": "2026.10.24.07.48.08.576",
+    "answer": "我目前不知道你喜欢吃什么蔬菜。\n\n我这边记录到的饮食偏好只有一条：你喜欢吃苹果（水果），但没有关于蔬菜的记录。\n\n你不妨直接告诉我，我记下来，下次你问起的时候我就能答上来了。你喜欢吃什么蔬菜？",
+    "first_decision": {
+      "action": "context",
+      "queries": [
+        {
+          "provider": "memory",
+          "query": "用户喜欢吃的蔬菜 偏好 蔬菜选择"
+        }
+      ]
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么蔬菜吗？"
+          },
+          "status": "succeeded",
+          "result_count": 2,
+          "error_message": null
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "你知道我喜欢吃什么蔬菜吗？",
+            "knowledge_base_ids": [
+              "prefetch-fixture-kb"
+            ]
+          },
+          "status": "succeeded",
+          "result_count": 1,
+          "error_message": null
+        }
+      ],
+      "context_items": [
+        {
+          "provider": "memory",
+          "content": "food_preference: 喜欢吃苹果",
+          "source_id": "turn:2026.10.24.07.37.14.819:0",
+          "metadata": {
+            "fused_score": 0.01639344262295082
+          }
+        },
+        {
+          "provider": "memory",
+          "content": "favorite_fruit: 苹果",
+          "source_id": "turn:2026.10.24.07.42.55.032:0",
+          "metadata": {
+            "fused_score": 0.016129032258064516
+          }
+        },
+        {
+          "provider": "knowledge",
+          "content": "PF验收项目的代号是蓝鲸。这是知识库中的验收事实。",
+          "source_id": "prefetch-fixture-chunk",
+          "metadata": {
+            "attachment_id": "prefetch-fixture-doc",
+            "locator": {},
+            "source_metadata": {},
+            "knowledge_base_ids": [
+              "prefetch-fixture-kb"
+            ]
+          }
+        }
+      ]
+    },
+    "retrievals": [
+      {
+        "query": "memory: 用户喜欢吃的蔬菜 偏好 蔬菜选择",
+        "status": "succeeded",
+        "duration_ms": 120.01408301875927,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "用户喜欢吃的蔬菜 偏好 蔬菜选择",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "directed"
+            },
+            "status": "succeeded",
+            "duration_ms": 117.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 2,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 2,
+            "selected_count": 2
+          }
+        ],
+        "context_count": 2
+      },
+      {
+        "query": "memory: 你知道我喜欢吃什么蔬菜吗？\nknowledge: 你知道我喜欢吃什么蔬菜吗？",
+        "status": "succeeded",
+        "duration_ms": 1767.8747080208268,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "你知道我喜欢吃什么蔬菜吗？",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 1751.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 2,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 2,
+            "selected_count": 2
+          },
+          {
+            "provider": "knowledge",
+            "query": "你知道我喜欢吃什么蔬菜吗？",
+            "resource_scope": {
+              "knowledge_base_ids": [
+                "prefetch-fixture-kb"
+              ],
+              "ready_attachment_ids": [
+                "prefetch-fixture-doc"
+              ]
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 1732.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 3
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "acquire_context",
+      "redecide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 2,
+    "run_status": "completed"
+  },
+  {
+    "label": "我喜欢吃苹果，请记住这个偏好。",
+    "run_id": "2026.10.24.07.48.08.590",
+    "session_id": "2026.10.24.07.48.08.575",
+    "answer": "好的，已记住你喜欢吃苹果这个偏好。",
+    "first_decision": {
+      "action": "answer",
+      "kind": "final",
+      "instructions": "确认已记录用户喜欢吃苹果的偏好，简短回应，不添加额外建议。"
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "我喜欢吃苹果，请记住这个偏好。"
+          },
+          "status": "succeeded",
+          "result_count": 2,
+          "error_message": null
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "我喜欢吃苹果，请记住这个偏好。",
+            "knowledge_base_ids": [
+              "prefetch-fixture-kb"
+            ]
+          },
+          "status": "succeeded",
+          "result_count": 1,
+          "error_message": null
+        }
+      ],
+      "context_items": [
+        {
+          "provider": "memory",
+          "content": "food_preference: 喜欢吃苹果",
+          "source_id": "turn:2026.10.24.07.37.14.819:0",
+          "metadata": {
+            "fused_score": 0.01639344262295082
+          }
+        },
+        {
+          "provider": "memory",
+          "content": "favorite_fruit: 苹果",
+          "source_id": "turn:2026.10.24.07.42.55.032:0",
+          "metadata": {
+            "fused_score": 0.016129032258064516
+          }
+        },
+        {
+          "provider": "knowledge",
+          "content": "PF验收项目的代号是蓝鲸。这是知识库中的验收事实。",
+          "source_id": "prefetch-fixture-chunk",
+          "metadata": {
+            "attachment_id": "prefetch-fixture-doc",
+            "locator": {},
+            "source_metadata": {},
+            "knowledge_base_ids": [
+              "prefetch-fixture-kb"
+            ]
+          }
+        }
+      ]
+    },
+    "retrievals": [
+      {
+        "query": "memory: 我喜欢吃苹果，请记住这个偏好。\nknowledge: 我喜欢吃苹果，请记住这个偏好。",
+        "status": "succeeded",
+        "duration_ms": 1804.2649169801734,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "我喜欢吃苹果，请记住这个偏好。",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 1792.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 2,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 2,
+            "selected_count": 2
+          },
+          {
+            "provider": "knowledge",
+            "query": "我喜欢吃苹果，请记住这个偏好。",
+            "resource_scope": {
+              "knowledge_base_ids": [
+                "prefetch-fixture-kb"
+              ],
+              "ready_attachment_ids": [
+                "prefetch-fixture-doc"
+              ]
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 1790.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 3
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 1,
+    "run_status": "completed"
+  },
+  {
+    "label": "PF验收项目的代号是什么？",
+    "run_id": "2026.10.24.07.48.08.588",
+    "session_id": "2026.10.24.07.48.08.573",
+    "answer": "根据知识库中的验收记录，PF 验收项目的代号是**蓝鲸**。",
+    "first_decision": {
+      "action": "answer",
+      "kind": "final",
+      "instructions": "直接告知 PF 验收项目的代号是蓝鲸，说明该事实来自知识库中的验收记录。"
+    },
+    "before_first_decision": {
+      "history": [],
+      "context_queries": [
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "memory",
+            "query": "PF验收项目的代号是什么？"
+          },
+          "status": "succeeded",
+          "result_count": 2,
+          "error_message": null
+        },
+        {
+          "stage": "prefetch",
+          "query": {
+            "provider": "knowledge",
+            "query": "PF验收项目的代号是什么？",
+            "knowledge_base_ids": [
+              "prefetch-fixture-kb"
+            ]
+          },
+          "status": "succeeded",
+          "result_count": 1,
+          "error_message": null
+        }
+      ],
+      "context_items": [
+        {
+          "provider": "memory",
+          "content": "favorite_fruit: 苹果",
+          "source_id": "turn:2026.10.24.07.42.55.032:0",
+          "metadata": {
+            "fused_score": 0.01639344262295082
+          }
+        },
+        {
+          "provider": "memory",
+          "content": "food_preference: 喜欢吃苹果",
+          "source_id": "turn:2026.10.24.07.37.14.819:0",
+          "metadata": {
+            "fused_score": 0.016129032258064516
+          }
+        },
+        {
+          "provider": "knowledge",
+          "content": "PF验收项目的代号是蓝鲸。这是知识库中的验收事实。",
+          "source_id": "prefetch-fixture-chunk",
+          "metadata": {
+            "attachment_id": "prefetch-fixture-doc",
+            "locator": {},
+            "source_metadata": {},
+            "knowledge_base_ids": [
+              "prefetch-fixture-kb"
+            ]
+          }
+        }
+      ]
+    },
+    "retrievals": [
+      {
+        "query": "memory: PF验收项目的代号是什么？\nknowledge: PF验收项目的代号是什么？",
+        "status": "succeeded",
+        "duration_ms": 1796.780792006757,
+        "providers": [
+          {
+            "provider": "memory",
+            "query": "PF验收项目的代号是什么？",
+            "resource_scope": {
+              "memory_status": "active"
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 1788.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 2,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 2,
+            "selected_count": 2
+          },
+          {
+            "provider": "knowledge",
+            "query": "PF验收项目的代号是什么？",
+            "resource_scope": {
+              "knowledge_base_ids": [
+                "prefetch-fixture-kb"
+              ],
+              "ready_attachment_ids": [
+                "prefetch-fixture-doc"
+              ]
+            },
+            "effective_params": {
+              "recall_limit": 30,
+              "result_limit": 5,
+              "retrieval_stage": "prefetch"
+            },
+            "status": "succeeded",
+            "duration_ms": 1774.0,
+            "error_message": null,
+            "channels": [
+              {
+                "channel": "keyword",
+                "status": "succeeded",
+                "hit_count": 1,
+                "error_message": null
+              },
+              {
+                "channel": "vector",
+                "status": "succeeded",
+                "hit_count": 0,
+                "error_message": null
+              }
+            ],
+            "candidate_count": 1,
+            "selected_count": 1
+          }
+        ],
+        "context_count": 3
+      }
+    ],
+    "nodes": [
+      "prepare_request",
+      "prefetch_context",
+      "decide_root_action",
+      "generate_answer",
+      "assemble_final_response"
+    ],
+    "answer_delta_count": 1,
+    "run_status": "completed"
+  }
+]

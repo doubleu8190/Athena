@@ -75,6 +75,33 @@ def _final_answer_text(result: dict[str, object]) -> str:
     return ""
 
 
+def _answer_stream_metadata(result: dict[str, object]) -> dict[str, Any]:
+    """读取已校验正文结果中的流身份和最后片段序号。"""
+    value = result.get("answer_stream")
+    if not isinstance(value, dict):
+        nested = result.get("result")
+        value = nested.get("answer_stream") if isinstance(nested, dict) else None
+    if not isinstance(value, dict):
+        raise ValueError("answer_stream_metadata_missing")
+    message_id = value.get("message_id")
+    stream_id = value.get("stream_id")
+    started_at = value.get("started_at")
+    last_chunk_id = value.get("last_chunk_id")
+    if (
+        not isinstance(message_id, str)
+        or not message_id
+        or not isinstance(stream_id, str)
+        or not stream_id
+        or not isinstance(started_at, str)
+        or not isinstance(last_chunk_id, int)
+        or isinstance(last_chunk_id, bool)
+        or last_chunk_id < 1
+    ):
+        raise ValueError("answer_stream_metadata_invalid")
+    datetime.fromisoformat(started_at)
+    return value
+
+
 def _message_id(payload: RunCommandPayload) -> str | None:
     """Return the user message identity only for a new run."""
     if isinstance(payload, RunStartPayload):
@@ -105,7 +132,7 @@ class PostgresRunRepository(
     """Command queue, run projection and lifecycle in the target schema."""
 
     writes_cancellation_events_to_outbox = True
-    writes_completion_artifacts_to_outbox = True
+    writes_terminal_artifacts_to_outbox = True
 
     def __init__(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -936,6 +963,10 @@ class PostgresRunRepository(
                                 )
                             if user_message_id and content:
                                 assistant_message_id = f"assistant:{run_id}"
+                                stream = _answer_stream_metadata(response)
+                                if stream["message_id"] != assistant_message_id:
+                                    raise ValueError("answer_stream_message_id_mismatch")
+                                started_at = str(stream["started_at"])
                                 await session.execute(
                                     pg_insert(MessageModel)
                                     .values(
@@ -945,28 +976,9 @@ class PostgresRunRepository(
                                         content=content,
                                         tool_calls_json="[]",
                                         run_id=run_id,
-                                        timestamp=now_iso,
+                                        timestamp=started_at,
                                     )
                                     .on_conflict_do_nothing(index_elements=["id"])
-                                )
-                                stream_id = f"answer-{run_id}"
-                                self._add_completion_outbox(
-                                    session,
-                                    run=run,
-                                    message_id=f"run-final:{run_id}:answer-delta",
-                                    event_type="RunAnswerDelta",
-                                    dedupe_key=f"run:{run_id}:answer:delta",
-                                    payload_json={
-                                        "message_id": assistant_message_id,
-                                        "reply_to_message_id": user_message_id,
-                                        "timestamp": now_iso,
-                                        "stream_id": stream_id,
-                                        "stream_type": "answer",
-                                        "chunk_id": 1,
-                                        "delta": content,
-                                        "is_complete": False,
-                                    },
-                                    now=now,
                                 )
                                 self._add_completion_outbox(
                                     session,
@@ -977,10 +989,14 @@ class PostgresRunRepository(
                                     payload_json={
                                         "message_id": assistant_message_id,
                                         "reply_to_message_id": user_message_id,
-                                        "timestamp": now_iso,
-                                        "stream_id": stream_id,
+                                        "timestamp": started_at,
+                                        "stream_id": stream["stream_id"],
                                         "stream_type": "answer",
+                                        "content": content,
+                                        "kind": response.get("kind", "final"),
+                                        "last_chunk_id": stream["last_chunk_id"],
                                         "is_complete": True,
+                                        "status": "completed",
                                     },
                                     now=now,
                                 )
@@ -1015,6 +1031,35 @@ class PostgresRunRepository(
                                 status=CommandStatus.COMPLETED.value,
                                 result_json=json.dumps(response, ensure_ascii=False),
                                 error_json=None,
+                                completed_at=now_iso,
+                            )
+                        )
+                    elif status == RunStatus.FAILED:
+                        run = await session.get(AgentRunModel, run_id)
+                        if run is not None:
+                            self._add_completion_outbox(
+                                session,
+                                run=run,
+                                message_id=f"run-final:{run_id}:failed",
+                                event_type="RunFailed",
+                                dedupe_key=f"run:{run_id}:failed",
+                                payload_json={"error": error or {"code": "run_failed"}},
+                                now=now,
+                            )
+                        await session.execute(
+                            update(AgentCommandModel)
+                            .where(
+                                AgentCommandModel.run_id == run_id,
+                                AgentCommandModel.status.in_(
+                                    (
+                                        CommandStatus.QUEUED.value,
+                                        CommandStatus.RUNNING.value,
+                                    )
+                                ),
+                            )
+                            .values(
+                                status=CommandStatus.FAILED.value,
+                                error_json=json.dumps(error or {"code": "run_failed"}, ensure_ascii=False),
                                 completed_at=now_iso,
                             )
                         )

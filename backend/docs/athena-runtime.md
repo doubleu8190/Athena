@@ -29,26 +29,33 @@ Root graph 节点和顺序：
 
 ```text
 prepare_request
+  -> prefetch_context（原始 query 查询记忆与就绪知识库）
   -> decide_root_action
-       ├─ answer -> assemble_final_response -> END
-       ├─ context -> acquire_context -> decide_root_action
-       └─ plan -> materialize_execution_plan -> wait_for_plan_completion
+       ├─ answer -> generate_answer -> assemble_final_response -> END
+       ├─ context -> acquire_context -> redecide_root_action
+       │                              ├─ answer -> generate_answer
+       │                              └─ plan -> generate_plan
+       └─ plan -> generate_plan
+
+generate_plan
+  ├─ needs_information -> decide_root_action
+  └─ plan_draft -> materialize_execution_plan -> wait_for_plan_completion
                     ├─ incomplete -> wait_for_plan_completion
                     └─ completed -> build_plan_response
-                         -> assemble_final_response -> END
+                         -> generate_answer -> assemble_final_response -> END
 ```
 
-Root 一次决策只选择回答、按需检索或计划。检索后回到 Root，最多执行 `ROOT_MAX_TURNS` 次决策；最后一轮仍要求检索时以 `root_budget_exhausted` 结束。Root 输入包含当前历史、已验证附件、真实知识库目录、系统启用的 Worker 工具目录、当前资料窗口和轻量检索结果。工具名由系统提供，用户不负责指定。
+Root 一次决策只选择回答意图、按需检索或计划意图。第一次决策前以原文去空白后的前 500 字符预检索 memory / knowledge，未装配通道与无就绪知识库明确跳过。`CONTEXT_PREFETCH_TIMEOUT_SECONDS` 默认 3 秒，覆盖各通道完整调用；预检索不占模型轮数。定向检索后进入专用再决策，只选择回答、澄清或计划，不继续检索。规划反馈可回到初次决策，仍受 `ROOT_MAX_TURNS` 限制；最后一轮要求检索时以 `root_budget_exhausted` 结束。Root 输入包含当前历史、已验证附件、真实知识库目录、系统启用的 Worker 工具目录、当前资料窗口和带 prefetch/directed 阶段的轻量检索结果。工具名由系统提供，用户不负责指定。
 
 SubmitPlan 与 Wait 保持为独立节点，恢复等待 checkpoint 时不会重跑计划提交。普通节点发布 `node.started/node.completed/node.failed` 事件，每次执行使用独立 invocation id；Wait 节点直接持有 LangGraph interrupt 边界。初始 request 至少包含 session_id、run_id、message_id、user_message、attachment_ids。图状态必须 JSON 安全；Python 连接、LLM、Event、stop signal 不写入 checkpoint。
 
 ### 3.1 统一决策
 
-`RootAgentInput` 使用明确类型传递完整消息、附件和知识库元数据、工具目录、当前 ContextBundle、检索结果摘要与剩余轮数。Agent 返回 `Answer`、`ContextRequest` 或 `PlanDraft`；结构错误最多修复一次，仍无效则让节点失败，不把协议错误转成正常答复。
+`RootAgentInput` 使用明确类型传递完整消息、附件和知识库元数据、工具目录、当前 ContextBundle、检索结果摘要与剩余轮数。入口返回 `AnswerIntent`、`ContextRequest` 或 `PlanIntent`；独立计划步骤生成 `PlanDraft` 或 `PlanningFeedback`，独立正文步骤生成流式答案。结构错误最多修复一次，仍无效则让节点失败，不把协议错误转成正常答复。
 
 ### 3.2 按需上下文
 
-Root 可按需查询 memory、当前请求附件、系统知识库或 graph。ContextPlanner 把每条查询绑定到当前有效资源范围，ContextAcquisitionService 并发执行已装配的 Provider。检索失败、超时、零结果和不可用通道以轻量摘要返回 Root，由 Root 决定是否换查询、直接回答或结束。多轮资料合并优先保留新结果，并遵守 ContextPlan 的条目数与 token 上限；不累计多份正文。
+Root 可按需查询 memory、当前请求附件、系统知识库或 graph。ContextPlanner 把每条查询绑定到当前有效资源范围，ContextAcquisitionService 并发执行已装配的 Provider。预检索失败、超时、零结果和不可用通道以轻量摘要进入首次决策，可改写 query 补充检索；定向检索后的再决策只选择回答、澄清或计划。多批资料合并优先保留新结果，并遵守 ContextPlan 的条目数与 token 上限；不累计多份正文。
 
 ### 3.3 Worker 执行循环
 

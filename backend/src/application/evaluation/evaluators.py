@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from application.evaluation.ports import MetricEvaluator
 from domain.evaluation import EvalCase, ExecutionArtifact, MetricValue
 from domain.evaluation.metrics import evaluate_answer_rules, evaluate_retrieval_case
 
 
-class RetrievalMetricsEvaluator:
+class RetrievalMetricsEvaluator(MetricEvaluator):
     name = "retrieval_metrics"
     version = "1"
 
@@ -16,7 +17,7 @@ class RetrievalMetricsEvaluator:
         return evaluate_retrieval_case(case, artifact, run_id=run_id)
 
 
-class AnswerRulesEvaluator:
+class AnswerRulesEvaluator(MetricEvaluator):
     name = "answer_rules"
     version = "1"
 
@@ -24,7 +25,7 @@ class AnswerRulesEvaluator:
         return evaluate_answer_rules(case, artifact, run_id=run_id)
 
 
-class AgentRulesEvaluator:
+class AgentRulesEvaluator(MetricEvaluator):
     name = "agent_rules"
     version = "1"
 

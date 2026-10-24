@@ -110,6 +110,20 @@ class InMemoryMessageRepository(MessageRepository):
         values.sort(key=lambda item: item.timestamp)
         return values if limit is None else values[:limit]
 
+    async def list_recent_conversation(
+        self, session_id: str, *, limit: int
+    ) -> list[Message]:
+        values = [
+            item
+            for item in self.items.values()
+            if item.session_id == session_id
+            and item.role.value in {"user", "assistant"}
+        ]
+        values.sort(key=lambda item: (item.timestamp, item.id), reverse=True)
+        values = values[:limit]
+        values.reverse()
+        return values
+
     async def list_after(self, session_id: str, after_id: str) -> list[Message]:
         values = await self.list_by_session(session_id)
         return [item for item in values if item.id > after_id]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Any
@@ -17,6 +18,7 @@ from domain.tools import (
     ToolOperationClaimStatus,
     WorkerToolOperationLedger,
 )
+from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
 
 from .worker_results import WorkerResultStore
 
@@ -66,10 +68,12 @@ class WorkerToolExecutor:
         *,
         result_store: WorkerResultStore | None = None,
         operation_ledger: WorkerToolOperationLedger | None = None,
+        events: EventPort | None = None,
     ) -> None:
         self._tool_service = tool_service
         self._result_store = result_store
         self._operation_ledger = operation_ledger
+        self._events = events
 
     async def __call__(
         self,
@@ -94,13 +98,34 @@ class WorkerToolExecutor:
         """
         if not isinstance(tool_call, Mapping):
             return _denied("invalid_tool_call")
-        if str(tool_call.get("name", "")).strip() == "read_worker_result":
+        name = str(tool_call.get("name", "")).strip()
+        stable_call_id = _tool_call_id(execution, tool_round, call_index)
+        if name == "read_worker_result":
             if self._result_store is None:
-                return _denied(
+                result = _denied(
                     "worker_result_storage_unavailable",
                     name="read_worker_result",
                 )
-            return await self._result_store.read(tool_call, execution)
+                result.update({"id": stable_call_id, "name": name})
+                return result
+            await self._publish_tool_started(
+                execution=execution,
+                tool_call_id=stable_call_id,
+                tool_name=name,
+                operation_key=None,
+            )
+            result = await self._result_store.read(tool_call, execution)
+            result.setdefault("id", stable_call_id)
+            result.setdefault("name", name)
+            await self._publish_tool_completed(
+                execution=execution,
+                tool_call_id=stable_call_id,
+                tool_name=name,
+                operation_key=None,
+                status=str(result.get("status", "failed")),
+                error=result.get("error"),
+            )
+            return result
         prepared = await self._prepare_tool_call(
             tool_call,
             execution,
@@ -108,9 +133,14 @@ class WorkerToolExecutor:
             call_index=call_index,
         )
         if isinstance(prepared, dict):
+            prepared.setdefault("id", stable_call_id)
+            prepared.setdefault("name", name)
             return prepared
         result = await self._execute_prepared_call(prepared)
         if isinstance(result, dict):
+            result.setdefault("id", stable_call_id)
+            result.setdefault("name", name)
+            result.setdefault("operation_key", prepared.request.operation_key)
             return result
         return await self._format_result(prepared, result)
 
@@ -310,13 +340,43 @@ class WorkerToolExecutor:
                 if ledger_claim.result is None:
                     raise RuntimeError("worker_tool_operation_result_missing")
                 result = ledger_claim.result
+                await self._publish_tool_completed(
+                    execution=_execution_from_request(prepared.request),
+                    tool_call_id=prepared.tool_call_id,
+                    tool_name=prepared.request.tool_name,
+                    operation_key=prepared.request.operation_key,
+                    status=result.status,
+                    error=result.error,
+                )
             elif ledger_claim.status == ToolOperationClaimStatus.ACQUIRED:
+                await self._publish_tool_started(
+                    execution=_execution_from_request(prepared.request),
+                    tool_call_id=prepared.tool_call_id,
+                    tool_name=prepared.request.tool_name,
+                    operation_key=prepared.request.operation_key,
+                )
                 result = await self._tool_service.execute(prepared.request)
                 if not await self._operation_ledger.complete(
                     prepared.request, args_hash=prepared.args_hash, result=result
                 ):
                     raise RuntimeError("worker_tool_operation_result_not_persisted")
+                await self._publish_tool_completed(
+                    execution=_execution_from_request(prepared.request),
+                    tool_call_id=prepared.tool_call_id,
+                    tool_name=prepared.request.tool_name,
+                    operation_key=prepared.request.operation_key,
+                    status=result.status,
+                    error=result.error,
+                )
             elif ledger_claim.status == ToolOperationClaimStatus.IN_PROGRESS:
+                await self._publish_tool_completed(
+                    execution=_execution_from_request(prepared.request),
+                    tool_call_id=prepared.tool_call_id,
+                    tool_name=prepared.request.tool_name,
+                    operation_key=prepared.request.operation_key,
+                    status="failed",
+                    error={"code": "worker_tool_operation_outcome_unknown"},
+                )
                 return {
                     "id": prepared.tool_call_id,
                     "name": prepared.request.tool_name,
@@ -334,8 +394,106 @@ class WorkerToolExecutor:
                     name=prepared.request.tool_name,
                 )
         else:
+            await self._publish_tool_started(
+                execution=_execution_from_request(prepared.request),
+                tool_call_id=prepared.tool_call_id,
+                tool_name=prepared.request.tool_name,
+                operation_key=prepared.request.operation_key,
+            )
             result = await self._tool_service.execute(prepared.request)
+            await self._publish_tool_completed(
+                execution=_execution_from_request(prepared.request),
+                tool_call_id=prepared.tool_call_id,
+                tool_name=prepared.request.tool_name,
+                operation_key=prepared.request.operation_key,
+                status=result.status,
+                error=result.error,
+            )
         return result
+
+    async def _publish_tool_started(
+        self,
+        *,
+        execution: Mapping[str, Any],
+        tool_call_id: str,
+        tool_name: str,
+        operation_key: str | None,
+    ) -> None:
+        """Publish the durable start fact immediately before a tool operation."""
+        await self._publish_tool_lifecycle(
+            EventType.TOOL_STARTED,
+            execution=execution,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            operation_key=operation_key,
+            status="running",
+            error=None,
+        )
+
+    async def _publish_tool_completed(
+        self,
+        *,
+        execution: Mapping[str, Any],
+        tool_call_id: str,
+        tool_name: str,
+        operation_key: str | None,
+        status: str,
+        error: Any,
+    ) -> None:
+        """Publish a safe, idempotent tool completion fact."""
+        error_code = error.get("code") if isinstance(error, Mapping) else None
+        await self._publish_tool_lifecycle(
+            EventType.TOOL_COMPLETED,
+            execution=execution,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            operation_key=operation_key,
+            status=status,
+            error=str(error_code) if error_code else None,
+        )
+
+    async def _publish_tool_lifecycle(
+        self,
+        event_type: EventType,
+        *,
+        execution: Mapping[str, Any],
+        tool_call_id: str,
+        tool_name: str,
+        operation_key: str | None,
+        status: str,
+        error: str | None,
+    ) -> None:
+        """Store each lifecycle boundary under its own stable transition key."""
+        if self._events is None:
+            return
+        task = execution.get("task", {})
+        task = task if isinstance(task, Mapping) else {}
+        task_id = str(task.get("task_id", ""))
+        generation = int(execution.get("execution_generation", 0))
+        phase = "started" if event_type == EventType.TOOL_STARTED else "completed"
+        payload: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "task_id": task_id,
+            "execution_id": str(execution.get("execution_id", "")),
+            "execution_generation": generation,
+            "status": status,
+        }
+        if operation_key:
+            payload["operation_key"] = operation_key
+        if error:
+            payload["error"] = {"code": error}
+        await self._events.publish(
+            ApplicationEvent(
+                event_type=event_type,
+                durability=EventDurability.DURABLE,
+                session_id=str(execution.get("session_id", "")),
+                run_id=str(execution.get("run_id", "")) or None,
+                transition_id=f"worker-tool:{tool_call_id}:{phase}",
+                occurred_at=datetime.now(timezone.utc),
+                payload=payload,
+            )
+        )
 
     async def _format_result(
         self,
@@ -350,6 +508,7 @@ class WorkerToolExecutor:
             "output": result.output,
             "error": result.error,
             "duration_ms": result.duration_ms,
+            "operation_key": prepared.request.operation_key,
         }
         if self._result_store is not None and isinstance(result.output, str):
             stored = await self._result_store.store(
@@ -424,6 +583,40 @@ def _denied(code: str, *, name: str | None = None) -> dict[str, Any]:
     if name:
         result["name"] = name
     return result
+
+
+def _tool_call_id(
+    execution: Mapping[str, Any], tool_round: int, call_index: int
+) -> str:
+    """Match the ID stored with the Worker assistant tool-call message."""
+    task = execution.get("task", {})
+    task = task if isinstance(task, Mapping) else {}
+    return (
+        f"worker:{str(task.get('task_id', ''))}:"
+        f"{int(execution.get('execution_generation', 0))}:"
+        f"{tool_round}:{call_index}"
+    )
+
+
+def _execution_from_request(request: ToolExecutionRequest) -> dict[str, Any]:
+    """Recover the minimal public execution identity carried by a tool request."""
+    return {
+        "session_id": request.session_id,
+        "run_id": request.run_id,
+        "plan_id": request.plan_id,
+        "execution_id": request.execution_id,
+        "execution_generation": _generation_from_tool_call_id(request.tool_call_id),
+        "task": {"task_id": request.task_id},
+    }
+
+
+def _generation_from_tool_call_id(tool_call_id: str) -> int:
+    """Extract generation from the stable Worker tool-call identity."""
+    parts = tool_call_id.split(":")
+    try:
+        return int(parts[2])
+    except (IndexError, ValueError):
+        return 0
 __all__ = [
     "WorkerToolExecutor",
     "worker_tool_manifest",

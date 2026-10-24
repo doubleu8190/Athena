@@ -29,6 +29,9 @@ from .orchestration_event_repository import (
 )
 from .worker_job_repository import PostgresWorkerJobRepository
 from .worker_tool_operation_repository import PostgresWorkerToolOperationRepository
+from .worker_execution_message_repository import (
+    PostgresWorkerExecutionMessageRepository,
+)
 from .root_resume_job_repository import PostgresRootResumeJobRepository
 from .orchestration_outbox_repository import (
     PostgresOrchestrationOutboxRepository,
@@ -62,6 +65,7 @@ __all__ = [
     "TaskEventConflict",
     "PostgresWorkerJobRepository",
     "PostgresWorkerToolOperationRepository",
+    "PostgresWorkerExecutionMessageRepository",
     "PostgresRootResumeJobRepository",
     "PostgresOrchestrationOutboxRepository",
     "PostgresEvaluationRepository",

@@ -63,6 +63,8 @@ export interface Message {
   role: MessageRole
   content: string
   timestamp: string
+  /** Event sequence when available; used only to break equal-time display ties. */
+  session_seq?: number
   session_id?: string
   /** 关联的步骤 ID（assistant 指向 llm_call 步骤，tool 指向工具步骤） */
   step_id?: string

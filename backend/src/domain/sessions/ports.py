@@ -52,6 +52,12 @@ class MessageRepository(Protocol):
         """按时间顺序返回会话消息。"""
         ...
 
+    async def list_recent_conversation(
+        self, session_id: str, *, limit: int
+    ) -> list[Message]:
+        """返回最近的用户/助手对话消息，并按时间升序排列。"""
+        ...
+
     async def list_after(self, session_id: str, after_id: str) -> list[Message]:
         """返回指定消息之后的消息。"""
         ...

@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 from domain.tools import ToolExecutionPort, ToolExecutionRequest, ToolExecutionResult
 from domain.integrations import SandboxPort

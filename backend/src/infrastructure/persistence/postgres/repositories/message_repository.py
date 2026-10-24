@@ -63,7 +63,7 @@ class PostgresMessageRepository(MessageRepository):
                     MessageModel.session_id == session_id,
                     MessageModel.deleted_time.is_(None),
                 )
-                .order_by(MessageModel.timestamp.asc())
+                .order_by(MessageModel.timestamp.asc(), MessageModel.id.asc())
             )
             if limit is not None:
                 statement = statement.limit(limit)
@@ -84,6 +84,27 @@ class PostgresMessageRepository(MessageRepository):
                 .order_by(MessageModel.id.asc())
             )
             rows = result.scalars().all()
+        return await self._convert_rows(rows)
+
+    async def list_recent_conversation(
+        self, session_id: str, *, limit: int
+    ) -> list[Message]:
+        """先按角色筛选，再取最近 N 条并恢复成时间升序。"""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(MessageModel)
+                .where(
+                    MessageModel.session_id == session_id,
+                    MessageModel.deleted_time.is_(None),
+                    MessageModel.role.in_(("user", "assistant")),
+                )
+                .order_by(MessageModel.timestamp.desc(), MessageModel.id.desc())
+                .limit(limit)
+            )
+            rows = list(result.scalars().all())
+        rows.reverse()
         return await self._convert_rows(rows)
 
     async def _convert_rows(self, rows) -> list[Message]:

@@ -50,6 +50,7 @@ from .orchestration_models import (
     WorkerJobModel,
 )
 from .tool_operation_models import WorkerToolOperationModel
+from .worker_execution_message_models import WorkerExecutionMessageModel
 
 __all__ = [
     "AttachmentModel",
@@ -89,6 +90,7 @@ __all__ = [
     "TaskExecutionResultModel",
     "WorkerJobModel",
     "WorkerToolOperationModel",
+    "WorkerExecutionMessageModel",
     "EvalCaseAttemptModel",
     "EvalCaseModel",
     "EvalDatasetModel",

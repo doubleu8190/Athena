@@ -32,7 +32,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
   const lastSeqRef = useRef(0)
   const streamsRef = useRef(new Map<string, StreamProjection>())
   const {
-    setConnectionStatus, setAgentStatus, addMessage, updateMessage, setAttachments,
+    setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, setAttachments,
     addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval,
     updateSession,
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
@@ -86,22 +86,34 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     source.onerror = () => setConnectionStatus("error")
     syncPendingApprovals()
 
-    const upsertAssistant = (runId: string, content: string, occurredAt: string, streamId?: string) => {
+    const upsertAssistant = (
+      runId: string,
+      content: string,
+      occurredAt: string,
+      streamId?: string,
+      messageId?: string,
+    ) => {
       if (!runId) return
       const state = useChatStore.getState()
-      const existing = state.messages.find((m) => m.run_id === runId && m.role === "assistant")
+      const canonicalId = messageId || `assistant:${runId}`
+      const existingById = state.messages.find((m) => m.id === canonicalId)
+      const existingByRun = state.messages.find((m) => m.run_id === runId && m.role === "assistant")
+      const existing = existingById || existingByRun
+      if (existingById && existingByRun && existingById.id !== existingByRun.id) {
+        removeMessage(existingByRun.id)
+      }
       if (existing) {
         // Replayed events can repair a timestamp previously set to receipt time.
         // Later chunks must not move the message's original event time forward.
         const timestamp = Date.parse(occurredAt) < Date.parse(existing.timestamp)
           ? occurredAt : existing.timestamp
-        if (existing.content !== content || existing.timestamp !== timestamp) {
-          updateMessage(existing.id, { content, timestamp })
+        if (existing.id !== canonicalId || existing.content !== content || existing.timestamp !== timestamp) {
+          updateMessage(existing.id, { id: canonicalId, content, timestamp })
         }
         return
       }
       addMessage({
-        id: crypto.randomUUID(), role: "assistant", content,
+        id: canonicalId, role: "assistant", content,
         timestamp: occurredAt, session_id: sessionId, run_id: runId,
         ...(streamId ? { type: `stream:${streamId}` } : {}),
       } as Message)
@@ -138,10 +150,20 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           timestamp: occurredAt,
         })
         if (timelineEntry) upsertExecutionTimelineEntry(timelineEntry)
-        if (type === "message.persisted" && Array.isArray(data.attachment_ids) && data.attachment_ids.length > 0) {
-          void apiClient.listAttachments(sessionId).then((items) => {
-            if (useChatStore.getState().activeSessionId === sessionId) setAttachments(items)
-          }).catch(() => {})
+        if (type === "message.persisted") {
+          const persistedMessageId = String(data.message_id || envelope.message_id || "")
+          if (persistedMessageId && data.role === "user") {
+            const persistedTimestamp = String(data.timestamp || occurredAt)
+            const existing = useChatStore.getState().messages.find((item) => item.id === persistedMessageId)
+            if (existing && existing.timestamp !== persistedTimestamp) {
+              updateMessage(persistedMessageId, { timestamp: persistedTimestamp })
+            }
+          }
+          if (Array.isArray(data.attachment_ids) && data.attachment_ids.length > 0) {
+            void apiClient.listAttachments(sessionId).then((items) => {
+              if (useChatStore.getState().activeSessionId === sessionId) setAttachments(items)
+            }).catch(() => {})
+          }
         }
 
         if (type === "stream.snapshot") {
@@ -161,7 +183,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             stream.pending.clear()
             stream.nextChunkId = Number(data.last_chunk_id || 0) + 1
             streamsRef.current.set(streamId, stream)
-            upsertAssistant(runId, stream.content, occurredAt, streamId)
+            upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined)
           }
           return
         }
@@ -172,7 +194,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             pending: new Map<number, string>(), snapshotVersion: 0,
           }
           streamsRef.current.set(streamId, stream)
-          upsertAssistant(runId, stream.content, occurredAt, streamId)
+          upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined)
         } else if (type === "message.delta") {
           const stream = streamsRef.current.get(streamId) || {
             nextChunkId: 1, finalChunkId: null, content: "", status: "created",
@@ -194,12 +216,12 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             stream.status = "completed"
           }
           streamsRef.current.set(streamId, stream)
-          upsertAssistant(runId, stream.content, occurredAt, streamId)
+          upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined)
         } else if (type === "message.completed") {
           const stream = streamsRef.current.get(streamId)
           if (stream) {
             stream.status = "completed"
-            upsertAssistant(runId, stream.content, occurredAt, streamId)
+            upsertAssistant(runId, stream.content, occurredAt, streamId, envelope.message_id || undefined)
           }
         } else if (type === "thinking.started" || type === "thinking.summary") {
           setThinking({ active: true, content: String(data.content || ""), messageId: streamId || null })
@@ -431,7 +453,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "file_processing_started", "file_processing_completed", "file_processing_failed",
     ].forEach((name) => source.addEventListener(name, parse))
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
 
   return sourceRef
 }
@@ -474,9 +496,9 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
   if (type === "tool.started") {
     const toolName = text(data.tool_name)
     return base({
-      id: `tool:${text(data.tool_call_id)}`,
+      id: `tool:${text(data.tool_call_id)}:started`,
       label: toolActionLabel(toolName, "started"),
-      status: "running",
+      status: "info",
       metadata: { ...(toolName ? { tool_name: toolName } : {}), ...(data.arguments ? { arguments: data.arguments } : {}) },
     })
   }
@@ -484,7 +506,7 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
     const toolName = text(data.tool_name)
     const failed = Boolean(error) || data.status === "failed"
     return base({
-      id: `tool:${text(data.tool_call_id)}`,
+      id: `tool:${text(data.tool_call_id)}:completed`,
       label: toolActionLabel(toolName, failed ? "failed" : "completed"),
       detail: error || undefined,
       status: failed ? "failed" : "completed",

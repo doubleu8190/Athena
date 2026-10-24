@@ -38,6 +38,7 @@ from ..models import (
     AgentTaskModel,
     ApprovalRecordModel,
     MemoryProcessingJobModel,
+    MessageModel,
     OrchestrationOutboxModel,
     RoundTaskModel,
     RootResumeJobModel,
@@ -915,7 +916,7 @@ class PostgresRunRepository(
                             request = _run_start_payload_or_none(run.request_json)
                             user_text = request.message.strip() if request else ""
                             content = _final_answer_text(response)
-                            message_id = request.message_id if request else ""
+                            user_message_id = request.message_id if request else ""
                             if user_text:
                                 await session.execute(
                                     pg_insert(MemoryProcessingJobModel)
@@ -933,7 +934,21 @@ class PostgresRunRepository(
                                     )
                                     .on_conflict_do_nothing(index_elements=["turn_id"])
                                 )
-                            if message_id and content:
+                            if user_message_id and content:
+                                assistant_message_id = f"assistant:{run_id}"
+                                await session.execute(
+                                    pg_insert(MessageModel)
+                                    .values(
+                                        id=assistant_message_id,
+                                        session_id=run.session_id,
+                                        role="assistant",
+                                        content=content,
+                                        tool_calls_json="[]",
+                                        run_id=run_id,
+                                        timestamp=now_iso,
+                                    )
+                                    .on_conflict_do_nothing(index_elements=["id"])
+                                )
                                 stream_id = f"answer-{run_id}"
                                 self._add_completion_outbox(
                                     session,
@@ -942,7 +957,9 @@ class PostgresRunRepository(
                                     event_type="RunAnswerDelta",
                                     dedupe_key=f"run:{run_id}:answer:delta",
                                     payload_json={
-                                        "message_id": message_id,
+                                        "message_id": assistant_message_id,
+                                        "reply_to_message_id": user_message_id,
+                                        "timestamp": now_iso,
                                         "stream_id": stream_id,
                                         "stream_type": "answer",
                                         "chunk_id": 1,
@@ -958,7 +975,9 @@ class PostgresRunRepository(
                                     event_type="RunAnswerCompleted",
                                     dedupe_key=f"run:{run_id}:answer:completed",
                                     payload_json={
-                                        "message_id": message_id,
+                                        "message_id": assistant_message_id,
+                                        "reply_to_message_id": user_message_id,
+                                        "timestamp": now_iso,
                                         "stream_id": stream_id,
                                         "stream_type": "answer",
                                         "is_complete": True,

@@ -39,6 +39,16 @@ from .ports import (
     ReviewContextRepository,
     TaskEventRepository,
     WorkerJobRepository,
+    WorkerExecutionMessageRepository,
+)
+from .worker_execution_messages import (
+    WorkerExecutionEntryType,
+    WorkerExecutionMessage,
+    WorkerExecutionMessageAppend,
+    WorkerExecutionMessageContent,
+    WorkerLLMRole,
+    WorkerToolCallContent,
+    WorkerToolResultContent,
 )
 
 __all__ = [
@@ -77,5 +87,13 @@ __all__ = [
     "TaskEventRepository",
     "WorkerJobLease",
     "WorkerJobRepository",
+    "WorkerExecutionEntryType",
+    "WorkerExecutionMessage",
+    "WorkerExecutionMessageAppend",
+    "WorkerExecutionMessageContent",
+    "WorkerExecutionMessageRepository",
+    "WorkerLLMRole",
+    "WorkerToolCallContent",
+    "WorkerToolResultContent",
     "WorkerTaskTerminalEvent",
 ]

@@ -36,6 +36,7 @@ class MessageModel(Base):
     __table_args__ = (
         Index("idx_messages_session", "session_id"),
         Index("idx_messages_timestamp", "timestamp"),
+        Index("idx_messages_session_timestamp_id", "session_id", "timestamp", "id"),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)

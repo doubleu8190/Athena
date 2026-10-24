@@ -76,7 +76,7 @@ from infrastructure.integrations.pgvector.indexers import (
 )
 from infrastructure.integrations.sandbox.docker import DockerSandbox
 from infrastructure.integrations.sandbox.options import SandboxOptions
-from infrastructure.tools.executor import BuiltinToolExecutor
+from infrastructure.tools import BuiltinToolExecutor
 from infrastructure.integrations.storage.storage import LocalFileStorage
 from application.orchestration.langgraph import (
     LangGraphRootGraph,
@@ -121,6 +121,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationEventRepository,
     PostgresWorkerJobRepository,
     PostgresWorkerToolOperationRepository,
+    PostgresWorkerExecutionMessageRepository,
     PostgresRootResumeJobRepository,
     PostgresOrchestrationOutboxRepository,
     PostgresPlanLoader,
@@ -184,6 +185,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
     worker_job_repository = PostgresWorkerJobRepository(session_factory)
     worker_tool_operation_repository = PostgresWorkerToolOperationRepository(
+        session_factory
+    )
+    worker_execution_message_repository = PostgresWorkerExecutionMessageRepository(
         session_factory
     )
     root_resume_job_repository = PostgresRootResumeJobRepository(session_factory)
@@ -347,6 +351,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         attachments,
         knowledge,
         id_factory=ids,
+        events=events,
     )
 
     builtin_tool_service = ToolService(
@@ -373,14 +378,19 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         builtin_tool_service,
         result_store=worker_result_store,
         operation_ledger=worker_tool_operation_repository,
+        events=events,
     )
     worker_agent = ConfiguredWorkerAgent(
-        llm_provider, events, tool_service=builtin_tool_service
+        llm_provider,
+        events,
+        tool_service=builtin_tool_service,
+        execution_messages=worker_execution_message_repository,
     )
     worker_executor = LangGraphWorkerExecutor(
         workflow_factory=lambda: WorkerWorkflow(
             execute=worker_agent,
             execute_tool=worker_tool_executor,
+            execution_messages=worker_execution_message_repository,
             max_tool_rounds=settings.worker_max_tool_rounds,
             max_tool_calls_per_round=settings.worker_max_tool_calls_per_round,
         ),

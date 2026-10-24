@@ -188,6 +188,7 @@ function AppContent() {
         if (type === ClientEventType.USER_COMMAND) {
           await apiClient.submitRun(activeSessionId, {
             message: String(data.message || ""),
+            ...(data.message_id ? { message_id: String(data.message_id) } : {}),
             attachment_ids: Array.isArray(data.attachment_ids)
               ? data.attachment_ids.map(String)
               : [],

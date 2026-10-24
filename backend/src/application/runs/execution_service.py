@@ -350,12 +350,12 @@ class RunExecutionService:
         if not command.run_id:
             return
         if isinstance(command.payload, RunStartPayload):
-            message_id = command.payload.message_id
+            reply_to_message_id = command.payload.message_id
         elif command.command_type == CommandType.RUN_RESUME:
-            message_id = self._user_message_ids_by_run_id.get(command.run_id)
+            reply_to_message_id = self._user_message_ids_by_run_id.get(command.run_id)
         else:
             return
-        if not message_id:
+        if not reply_to_message_id:
             return
         content = result.get("content")
         if not isinstance(content, str):
@@ -364,17 +364,21 @@ class RunExecutionService:
         if not isinstance(content, str) or not content:
             return
         stream_id = f"answer-{command.run_id}"
+        assistant_message_id = f"assistant:{command.run_id}"
         await self._events.publish(
             ApplicationEvent(
                 event_type=EventType.MESSAGE_DELTA,
                 durability=EventDurability.DURABLE,
                 session_id=command.session_id,
                 run_id=command.run_id,
-                message_id=message_id,
+                message_id=assistant_message_id,
                 stream_id=stream_id,
                 stream_type="answer",
                 chunk_id=1,
-                payload={"delta": content},
+                payload={
+                    "delta": content,
+                    "reply_to_message_id": reply_to_message_id,
+                },
             )
         )
         await self._events.publish(
@@ -383,7 +387,7 @@ class RunExecutionService:
                 durability=EventDurability.DURABLE,
                 session_id=command.session_id,
                 run_id=command.run_id,
-                message_id=message_id,
+                message_id=assistant_message_id,
                 stream_id=stream_id,
                 stream_type="answer",
                 is_complete=True,

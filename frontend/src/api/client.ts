@@ -259,12 +259,13 @@ class ApiClient {
    * @returns Promise 包含命令 ID、运行 ID及排队状态。
    * @throws Error 当会话不存在、命令冲突或会话不可并行运行时抛出。
    */
-  async submitRun(sessionId: string, payload: { message: string; attachment_ids?: string[]; command_id?: string }): Promise<{ command_id: string; run_id?: string; message_id: string; attachment_ids: string[]; status: string; deduplicated?: boolean }> {
+  async submitRun(sessionId: string, payload: { message: string; message_id?: string; attachment_ids?: string[]; command_id?: string }): Promise<{ command_id: string; run_id?: string; message_id: string; attachment_ids: string[]; status: string; deduplicated?: boolean }> {
     const commandId = payload.command_id || `cmd_${crypto.randomUUID()}`
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/runs`, {
       method: "POST",
       body: JSON.stringify({
         message: payload.message,
+        message_id: payload.message_id,
         command_id: commandId,
         attachment_ids: payload.attachment_ids ?? [],
       }),

@@ -15,6 +15,10 @@ from .contracts import (
     WorkerJobLease,
     WorkerTaskTerminalEvent,
 )
+from .worker_execution_messages import (
+    WorkerExecutionMessage,
+    WorkerExecutionMessageAppend,
+)
 from .entities import Plan, Task
 
 
@@ -69,6 +73,18 @@ class WorkerJobRepository(Protocol):
     async def reconcile_cancellations(self) -> list[RunCancellationReceipt]: ...
 
 
+class WorkerExecutionMessageRepository(Protocol):
+    """Worker 模型交互和工具结果的有序持久化能力。"""
+
+    async def append(
+        self, message: WorkerExecutionMessageAppend
+    ) -> WorkerExecutionMessage: ...
+
+    async def list_by_execution(
+        self, task_id: str, execution_generation: int
+    ) -> list[WorkerExecutionMessage]: ...
+
+
 class OrchestrationOutboxRepository(Protocol):
     """用户可见编排事件的可靠领取和至少一次投递状态。"""
 
@@ -95,4 +111,5 @@ __all__ = [
     "ReviewContextRepository",
     "TaskEventRepository",
     "WorkerJobRepository",
+    "WorkerExecutionMessageRepository",
 ]

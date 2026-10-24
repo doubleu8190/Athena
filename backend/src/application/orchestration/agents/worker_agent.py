@@ -17,6 +17,14 @@ from application.tools.service import ToolService
 
 from domain.events.ports import EventPort
 from domain.integrations import LLMPort
+from domain.orchestration import (
+    WorkerExecutionEntryType,
+    WorkerExecutionMessageAppend,
+    WorkerExecutionMessageContent,
+    WorkerExecutionMessageRepository,
+    WorkerLLMRole,
+    WorkerToolCallContent,
+)
 from shared.logging import get_logger
 
 logger = get_logger(__name__)
@@ -30,13 +38,19 @@ class ConfiguredWorkerAgent:
         llm: LLMPort,
         event_publisher: EventPort | None = None,
         tool_service: ToolService | None = None,
+        execution_messages: WorkerExecutionMessageRepository | None = None,
     ) -> None:
         self._llm = llm
         self._events = event_publisher
         self._tool_service = tool_service
+        self._execution_messages = execution_messages
 
     async def __call__(
-        self, *, execution: Mapping[str, Any], **_kwargs: Any
+        self,
+        *,
+        execution: Mapping[str, Any],
+        state: Mapping[str, Any] | None = None,
+        **_kwargs: Any,
     ) -> dict[str, Any]:
         task = execution.get("task", {})
         task = task if isinstance(task, Mapping) else {}
@@ -81,8 +95,89 @@ class ConfiguredWorkerAgent:
             allowed_tools=allowed_tools,
             tool_specs=tool_specs,
         )
+        tool_round = int(state.get("tool_round", 0)) if isinstance(state, Mapping) else 0
+        invocation_id = _invocation_id(execution, tool_round)
+        await self._persist_llm_messages(
+            execution=execution,
+            invocation_id=invocation_id,
+            messages=messages,
+        )
         value = await self._invoke(messages, execution)
-        return _worker_result(value)
+        result = _worker_result(value)
+        task_id = _task_id(execution)
+        generation = int(execution.get("execution_generation", 0))
+        tool_calls = result.get("tool_calls", [])
+        for index, call in enumerate(tool_calls):
+            call["id"] = f"worker:{task_id}:{generation}:{tool_round}:{index}"
+        await self._persist_assistant_message(
+            execution=execution,
+            invocation_id=invocation_id,
+            tool_calls=tool_calls,
+            value=value,
+        )
+        return result
+
+    async def _persist_llm_messages(
+        self,
+        *,
+        execution: Mapping[str, Any],
+        invocation_id: str,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Record the exact system/user values sent to the configured provider."""
+        if self._execution_messages is None:
+            return
+        for index, message in enumerate(messages):
+            role = WorkerLLMRole(str(message["role"]))
+            await self._execution_messages.append(
+                _transcript_message(
+                    execution=execution,
+                    message_id=f"{invocation_id}:input:{index}",
+                    invocation_id=invocation_id,
+                    entry_type=WorkerExecutionEntryType.LLM_MESSAGE,
+                    role=role,
+                    content=WorkerExecutionMessageContent(
+                        content=message.get("content")
+                    ),
+                )
+            )
+
+    async def _persist_assistant_message(
+        self,
+        *,
+        execution: Mapping[str, Any],
+        invocation_id: str,
+        tool_calls: list[dict[str, Any]],
+        value: Any,
+    ) -> None:
+        """Record the actual assistant payload and its normalized tool calls."""
+        if self._execution_messages is None:
+            return
+        normalized_calls = tuple(
+            WorkerToolCallContent(
+                id=str(call.get("id", "")),
+                name=str(call.get("name", "")),
+                arguments=(
+                    dict(call["arguments"])
+                    if isinstance(call.get("arguments"), Mapping)
+                    else {}
+                ),
+            )
+            for call in tool_calls
+        )
+        await self._execution_messages.append(
+            _transcript_message(
+                execution=execution,
+                message_id=f"{invocation_id}:assistant",
+                invocation_id=invocation_id,
+                entry_type=WorkerExecutionEntryType.LLM_MESSAGE,
+                role=WorkerLLMRole.ASSISTANT,
+                content=WorkerExecutionMessageContent(
+                    content=_assistant_content(value),
+                    tool_calls=normalized_calls,
+                ),
+            )
+        )
 
     async def _invoke(self, messages: list[Any], execution: Mapping[str, Any]) -> Any:
         task = execution.get("task", {})
@@ -97,6 +192,55 @@ class ConfiguredWorkerAgent:
             run_id=str(execution.get("run_id", "")),
             parent_activity_id=parent_id,
         )
+
+
+def _task_id(execution: Mapping[str, Any]) -> str:
+    """Read the stable Task identity from an execution snapshot."""
+    task = execution.get("task", {})
+    return str(task.get("task_id", "")) if isinstance(task, Mapping) else ""
+
+
+def _invocation_id(execution: Mapping[str, Any], tool_round: int) -> str:
+    """Build an idempotent identity for one model invocation in a generation."""
+    task_id = _task_id(execution)
+    generation = int(execution.get("execution_generation", 0))
+    if not task_id or generation < 1 or tool_round < 0:
+        raise ValueError("worker_model_invocation_identity_missing")
+    return f"worker:{task_id}:{generation}:llm:{tool_round}"
+
+
+def _transcript_message(
+    *,
+    execution: Mapping[str, Any],
+    message_id: str,
+    invocation_id: str,
+    entry_type: WorkerExecutionEntryType,
+    role: WorkerLLMRole,
+    content: WorkerExecutionMessageContent,
+) -> WorkerExecutionMessageAppend:
+    """Construct one validated execution-scoped transcript append."""
+    return WorkerExecutionMessageAppend(
+        message_id=message_id,
+        session_id=str(execution.get("session_id", "")),
+        run_id=str(execution.get("run_id", "")),
+        plan_id=str(execution.get("plan_id", "")),
+        task_id=_task_id(execution),
+        execution_id=str(execution.get("execution_id", "")),
+        execution_generation=int(execution.get("execution_generation", 0)),
+        invocation_id=invocation_id,
+        entry_type=entry_type,
+        role=role,
+        content=content,
+    )
+
+
+def _assistant_content(value: Any) -> Any:
+    """Return the provider-visible assistant content without LangChain wrappers."""
+    if isinstance(value, BaseMessage):
+        return value.content
+    if isinstance(value, Mapping) and "content" in value:
+        return value.get("content")
+    return value
 
 
 def _worker_messages(

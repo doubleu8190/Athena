@@ -5,6 +5,14 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+from domain.orchestration import (
+    WorkerExecutionEntryType,
+    WorkerExecutionMessageAppend,
+    WorkerExecutionMessageContent,
+    WorkerExecutionMessageRepository,
+    WorkerToolResultContent,
+)
+
 from .serialization import as_dict, json_value
 
 
@@ -16,6 +24,7 @@ class WorkerWorkflow:
         *,
         execute_tool: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
         execute: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
+        execution_messages: WorkerExecutionMessageRepository | None = None,
         max_tool_rounds: int = 4,
         max_tool_calls_per_round: int = 8,
     ) -> None:
@@ -23,6 +32,7 @@ class WorkerWorkflow:
             raise ValueError("worker tool budgets are invalid")
         self.execute_tool = execute_tool
         self.execute = execute
+        self.execution_messages = execution_messages
         self.max_tool_rounds = max_tool_rounds
         self.max_tool_calls_per_round = max_tool_calls_per_round
 
@@ -109,7 +119,7 @@ class WorkerWorkflow:
             if result.get("status") == "approval_required":
                 approval = result.get("approval_request", {})
                 pending = (
-                    self._append_tool_results(
+                    await self._append_tool_results(
                         state,
                         tool_results,
                         tool_round=tool_round,
@@ -125,8 +135,13 @@ class WorkerWorkflow:
                     "result": {"status": "waiting_approval"},
                     "waiting": True,
                 }
+            await self._persist_tool_results(
+                execution=state.get("execution", {}),
+                tool_results=[result],
+                tool_round=tool_round,
+            )
             tool_results.append(result)
-        return self._append_tool_results(
+        return await self._append_tool_results(
             state,
             tool_results,
             tool_round=tool_round,
@@ -159,7 +174,12 @@ class WorkerWorkflow:
         result = await self._resolve_approval(approval, decision, execution, state)
         if result.get("status") == "approval_required":
             raise RuntimeError("worker_tool_reapproval_required")
-        return self._append_tool_results(
+        await self._persist_tool_results(
+            execution=execution,
+            tool_results=[result],
+            tool_round=int(approval.get("tool_round", 0)),
+        )
+        return await self._append_tool_results(
             state,
             [result],
             tool_round=int(approval.get("tool_round", 0)),
@@ -273,10 +293,11 @@ class WorkerWorkflow:
         else:
             raise RuntimeError("worker_approval_decision_invalid")
 
+        result.setdefault("operation_key", approval.get("operation_key"))
         return result
 
-    @staticmethod
-    def _append_tool_results(
+    async def _append_tool_results(
+        self,
         state: Mapping[str, Any],
         tool_results: list[dict[str, Any]],
         *,
@@ -317,6 +338,78 @@ class WorkerWorkflow:
             "tool_round": tool_round + 1,
             "pending_approval": None,
         }
+
+    async def _persist_tool_results(
+        self,
+        *,
+        execution: Mapping[str, Any],
+        tool_results: list[dict[str, Any]],
+        tool_round: int,
+    ) -> None:
+        """Persist results only after the workflow has a determined tool outcome."""
+        if self.execution_messages is None:
+            return
+        task = execution.get("task", {})
+        task = task if isinstance(task, Mapping) else {}
+        task_id = str(task.get("task_id", ""))
+        generation = int(execution.get("execution_generation", 0))
+        session_id = str(execution.get("session_id", ""))
+        run_id = str(execution.get("run_id", ""))
+        plan_id = str(execution.get("plan_id", ""))
+        execution_id = str(execution.get("execution_id", ""))
+        invocation_id = f"worker:{task_id}:{generation}:llm:{tool_round}"
+        for result in tool_results:
+            tool_call_id = str(result.get("id", ""))
+            if not tool_call_id:
+                raise ValueError("worker_tool_result_identity_missing")
+            status = str(result.get("status", "failed"))
+            error = result.get("error")
+            error_value = dict(error) if isinstance(error, Mapping) else None
+            projected = WorkerToolResultContent(
+                status=status,
+                output=result.get("output"),
+                error=error_value,
+                duration_ms=(
+                    int(result["duration_ms"])
+                    if isinstance(result.get("duration_ms"), (int, float))
+                    else None
+                ),
+                result_ref=(
+                    str(result["result_ref"])
+                    if result.get("result_ref") is not None
+                    else None
+                ),
+                truncated=(
+                    bool(result["truncated"])
+                    if result.get("truncated") is not None
+                    else None
+                ),
+            )
+            await self.execution_messages.append(
+                WorkerExecutionMessageAppend(
+                    message_id=(
+                        f"worker:{task_id}:{generation}:tool-result:{tool_call_id}"
+                    ),
+                    session_id=session_id,
+                    run_id=run_id,
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    execution_id=execution_id,
+                    execution_generation=generation,
+                    invocation_id=invocation_id,
+                    entry_type=WorkerExecutionEntryType.TOOL_RESULT,
+                    role=None,
+                    content=WorkerExecutionMessageContent(tool_result=projected),
+                    tool_call_id=tool_call_id,
+                    tool_name=str(result.get("name", "")) or None,
+                    operation_key=(
+                        str(result["operation_key"])
+                        if result.get("operation_key") is not None
+                        else None
+                    ),
+                    result_ref=projected.result_ref,
+                )
+            )
 
     async def finalize(self, state: Mapping[str, Any]) -> dict[str, Any]:
         result = dict(state.get("result", {}))

@@ -4,18 +4,20 @@ import { MessageBubble } from "./MessageBubble"
 import { ApprovalCard } from "./ApprovalDialog"
 import { ExecutionContextPanel } from "./ExecutionContextPanel"
 import { ExecutionTimeline } from "./ExecutionTimeline"
-import { OrchestrationSummary } from "./OrchestrationSummary"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { ApprovalRequest, Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTypes, ToolCallInvocation } from "../types"
-import { deriveOrchestrationView } from "../utils/orchestrationProjection"
+import type { ApprovalRequest, Attachment, ExecutionTimelineEntry, Message, SupportedAttachmentTypes } from "../types"
 
 interface ChatProps {
   sendEvent: (type: string, data?: Record<string, unknown>) => boolean
   onOpenSessions?: () => void
   demoMode?: boolean
 }
+
+type ChatFeedItem =
+  | { kind: "message"; id: string; timestamp: string; message: Message; sessionSeq?: number }
+  | { kind: "event"; id: string; timestamp: string; entry: ExecutionTimelineEntry; sessionSeq?: number }
 
 function isSupportedAttachment(file: File, supportedTypes: SupportedAttachmentTypes): boolean {
   const filename = file.name.toLowerCase()
@@ -26,7 +28,6 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
   const {
     messages,
     steps,
-    toolCalls,
     orchestrationTasks,
     orchestrationPlans,
     activeSessionId,
@@ -253,8 +254,9 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
       size_bytes: item.size_bytes,
       status: item.status,
     }))
+    const messageId = crypto.randomUUID()
     const userMsg = {
-      id: crypto.randomUUID(),
+      id: messageId,
       role: "user" as const,
       content: text || "Please process the attached files.",
       timestamp: new Date().toISOString(),
@@ -268,6 +270,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
 
     const sent = sendEvent(ClientEventType.USER_COMMAND, {
       message: text || "Please process the attached files.",
+      message_id: messageId,
       session_id: activeSessionId,
       attachment_ids: selectedAttachmentIds,
     })
@@ -476,11 +479,16 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
   // 会话完成总结（原 EXECUTION TRACE 的聚合信息）
   const failedStepCount = steps.filter((s) => s.status === "failed").length
 
+  const orderedMessages = [...messages].sort((left, right) => {
+    const delta = Date.parse(left.timestamp) - Date.parse(right.timestamp)
+    return Number.isNaN(delta) || delta === 0 ? left.id.localeCompare(right.id) : delta
+  })
+
   // 计算当前消息集合覆盖的会话时间范围。
   const conversationTime = (() => {
-    if (messages.length === 0) return null
-    const first = messages[0]
-    const last = messages[messages.length - 1]
+    if (orderedMessages.length === 0) return null
+    const first = orderedMessages[0]
+    const last = orderedMessages[orderedMessages.length - 1]
     const start = formatTime(first.timestamp)
     if (isConversationCompleted && first.timestamp !== last.timestamp) {
       const end = formatTime(last.timestamp)
@@ -492,87 +500,29 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
     return { start, end: null, duration: null }
   })()
 
-  // 将消息分为用户请求、Agent 处理和最终响应三个阶段。
-  // assistant 消息是否属于"处理中"不再只看 role —— 模型会在工具调用中途输出文本
-  // （如「我来帮你完成…」）并发起纯工具调用回合（content 为空但 tool_calls 有值），
-  // 这些都应归入 AGENT PROCESSING；只有真正的最终答复才标为 AGENT RESPONSE。
-  type Phase = "request" | "processing" | "response"
-  interface PhaseGroup {
-    phase: Phase
-    messages: Message[]
-  }
-
-  const phaseGroups: PhaseGroup[] = []
-  let currentPhase: Phase | null = null
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]
-    let msgPhase: Phase
-    if (msg.role === "user") {
-      msgPhase = "request"
-    } else if (msg.role === "tool") {
-      msgPhase = "processing"
-    } else if (msg.role === "assistant") {
-      const hasContent = !!msg.content.trim()
-      const hasToolCalls = (msg.tool_calls?.length ?? 0) > 0
-      if (!hasContent && hasToolCalls && allToolResultsArrived(msg.tool_calls ?? [], messages)) {
-        continue
-      }
-      const nextIsTool = messages[i + 1]?.role === "tool"
-      // 携带工具调用 / 紧随其后的消息是工具结果 → 处理中；真正的最终答复 → response
-      if (hasToolCalls || nextIsTool) {
-        msgPhase = "processing"
-      } else if (hasContent) {
-        msgPhase = "response"
-      } else {
-        continue // 无内容且无工具调用，跳过空气泡
-      }
-    } else {
-      // system 及其它
-      msgPhase = "response"
+  const timelineFeed: ChatFeedItem[] = [
+    ...orderedMessages.map((message) => ({
+      kind: "message" as const,
+      id: `message:${message.id}`,
+      timestamp: message.timestamp,
+      message,
+      sessionSeq: message.session_seq,
+    })),
+    ...executionTimeline.map((entry) => ({
+      kind: "event" as const,
+      id: `event:${entry.id}`,
+      timestamp: entry.timestamp,
+      entry,
+      sessionSeq: entry.session_seq,
+    })),
+  ].sort((left, right) => {
+    const delta = Date.parse(left.timestamp) - Date.parse(right.timestamp)
+    if (!Number.isNaN(delta) && delta !== 0) return delta
+    if (left.sessionSeq !== undefined && right.sessionSeq !== undefined && left.sessionSeq !== right.sessionSeq) {
+      return left.sessionSeq - right.sessionSeq
     }
-    if (msgPhase !== currentPhase) {
-      phaseGroups.push({ phase: msgPhase, messages: [msg] })
-      currentPhase = msgPhase
-    } else {
-      phaseGroups[phaseGroups.length - 1].messages.push(msg)
-    }
-  }
-
-  // Keep the current request's progress visible while the previous response
-  // remains in the transcript. During this window there is no new assistant
-  // message yet, so the timeline cannot be attached to a response group.
-  const latestRequestGroup = [...phaseGroups].reverse().find((group) => group.phase === "request")
-  const latestRequestGroupIndex = latestRequestGroup ? phaseGroups.lastIndexOf(latestRequestGroup) : -1
-  const latestResponseGroupIndex = phaseGroups.reduce(
-    (lastIndex, group, index) => (group.phase === "response" ? index : lastIndex),
-    -1,
-  )
-  const latestRunLifecycleEntry = [...executionTimeline].reverse().find((entry) => entry.event_type.startsWith("run."))
-  const activeRunId = [...executionTimeline]
-    .reverse()
-    .find((entry) => entry.event_type === "run.started" && entry.status === "running")
-    ?.run_id
-  const currentRunId = activeRunId || latestRunLifecycleEntry?.run_id
-  // A response group after the latest request is authoritative even when a
-  // replayed/legacy message has no run_id (or a mismatched one). Without this
-  // fallback the same timeline is rendered once below the request and again
-  // above the response while the run is still marked active.
-  const latestRequestHasResponse = latestRequestGroupIndex >= 0 && latestResponseGroupIndex > latestRequestGroupIndex
-  const activeRunHasResponse = latestRequestHasResponse || (activeRunId
-    ? phaseGroups.some((group) => group.phase === "response" && group.messages.some((message) => message.run_id === activeRunId))
-    : false)
-  const activeRunPaused = agentStatus === "paused"
-  const latestRunLifecycle = latestRunLifecycleEntry?.event_type
-  const showRunOutcome = latestRunLifecycle === "run.paused" || latestRunLifecycle === "run.cancelled" || latestRunLifecycle === "run.failed" || latestRunLifecycle === "run.budget_exceeded"
-  const activeTimelineEntries = latestRequestGroup && (isAgentActive || activeRunPaused || showRunOutcome) && !activeRunHasResponse
-    ? (currentRunId
-      ? executionTimeline.filter((entry) => entry.run_id === currentRunId)
-      : executionTimeline)
-    : []
-  const activePlan = [...orchestrationPlans]
-    .reverse()
-    .find((plan) => !currentRunId || plan.run_id === currentRunId)
-  const orchestrationView = deriveOrchestrationView(activePlan, orchestrationTasks)
+    return left.id.localeCompare(right.id)
+  })
 
   return (
     <div ref={rootRef} className="chat-workspace-chat flex-1 flex flex-row min-w-0 min-h-0">
@@ -614,7 +564,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
           )}
 
           {/* 空会话状态 */}
-          {!isLoadingHistory && messages.length === 0 && !thinking && !isAgentActive && (
+          {!isLoadingHistory && messages.length === 0 && executionTimeline.length === 0 && !thinking && !isAgentActive && (
             <div className="text-center py-16 text-athena-muted">
               <Sparkles className="w-12 h-12 mx-auto mb-4 text-athena-accent" />
               <p className="text-lg font-medium mb-2">How can Athena help you?</p>
@@ -625,7 +575,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
           )}
 
           {/* 错误状态 */}
-          {!isLoadingHistory && messages.length === 0 && error && !thinking && !isAgentActive && (
+          {!isLoadingHistory && messages.length === 0 && executionTimeline.length === 0 && error && !thinking && !isAgentActive && (
             <div className="text-center py-16">
               <p className="text-sm text-athena-danger mb-2">{error}</p>
               <p className="text-xs text-athena-muted">
@@ -662,101 +612,39 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
             </div>
           )}
 
-          {/* 分阶段消息组 */}
-          {!isLoadingHistory && messages.length > 0 && (
+          {/* 消息与执行事件进入同一时间排序的聊天流。 */}
+          {!isLoadingHistory && (messages.length > 0 || executionTimeline.length > 0) && (
             <>
-              {orchestrationView && (
-                <OrchestrationSummary view={orchestrationView} steps={steps} toolCalls={toolCalls} />
-              )}
-              {phaseGroups.map((group, gi) => {
-                const isFirstGroup = gi === 0
-                const isLastGroup = gi === phaseGroups.length - 1
-
-                // 跨天判断：本组首条消息与上组末条消息比较日期键。
-                // 首组恒显示日期，让会话起始的日期可见。
-                const prevLast =
-                  gi > 0
-                    ? phaseGroups[gi - 1].messages[
-                        phaseGroups[gi - 1].messages.length - 1
-                      ]
-                    : null
-                const showDateDivider =
-                  isFirstGroup ||
-                  (prevLast !== null &&
-                    dateKey(group.messages[0].timestamp) !==
-                      dateKey(prevLast.timestamp))
-
+              {timelineFeed.map((item, index) => {
+                const previous = timelineFeed[index - 1]
+                const showDateDivider = !previous
+                  || dateKey(item.timestamp) !== dateKey(previous.timestamp)
                 return (
-                  <div key={gi}>
-                    {/* 跨天日期分隔条（今天/昨天/具体日期） */}
+                  <div key={item.id}>
                     {showDateDivider && (
                       <div className="flex justify-center py-1">
                         <span className="inline-flex items-center px-3 py-1 rounded-full bg-white border border-athena-border text-xs text-black">
-                          {formatDateLabel(group.messages[0].timestamp)}
+                          {formatDateLabel(item.timestamp)}
                         </span>
                       </div>
                     )}
-                    {/* 请求和最终响应保留阶段分隔；执行过程由 EXECUTION PROGRESS 时间线统一呈现。 */}
-                    {group.phase !== "processing" && (
-                      <div className="phase-divider">
-                        <span className={`phase-label phase-${group.phase === "request" ? "request" : "response"}`}>
-                          <span className="dot"></span>
-                          {group.phase === "request" ? "用户请求" : "Athena 回复"}
-                        </span>
-                        {group.messages[0] && (
-                          <span className="text-xs text-athena-muted font-mono">
-                            {formatTime(group.messages[0].timestamp)}
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* 用户请求阶段 */}
-                    {group.phase === "request" && (
-                      <div className={isFirstGroup ? "animate-fade-in" : ""}>
-                        {group.messages.map((message) => (
-                          <MessageBubble key={message.id} message={message} />
-                        ))}
-                        {group === latestRequestGroup && (isAgentActive || activeRunPaused || showRunOutcome) && !activeRunHasResponse && (
-                          activeTimelineEntries.length > 0
-                            ? <ExecutionTimeline entries={activeTimelineEntries} defaultExpanded />
-                            : <div className="processing-group py-3">
-                                <div className="timeline-node thinking-node">
-                                  <div className="flex items-center gap-3 text-sm text-athena-muted">
-                                    {activeRunPaused
-                                      ? <Clock className="h-4 w-4 text-athena-muted" />
-                                      : <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />}
-                                    {activeRunPaused ? "已暂停" : "正在处理你的请求"}
-                                  </div>
-                                </div>
-                              </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* 工具调用和工具结果已统一投影到 EXECUTION PROGRESS，避免重复渲染。 */}
-
-                    {/* Agent 响应阶段 */}
-                    {group.phase === "response" && (
-                      <div className={isLastGroup && !isAgentActive ? "animate-fade-in" : ""}>
-                        <ExecutionTimeline
-                          entries={timelineEntriesForGroup(executionTimeline, group.messages)}
-                          defaultExpanded={timelineEntriesForGroup(executionTimeline, group.messages).some((entry) => entry.status === "running" || entry.status === "waiting" || entry.status === "paused")}
-                        />
-                        {group.messages.map((message) => (
-                          <MessageBubble key={message.id} message={message} />
-                        ))}
-                      </div>
-                    )}
+                    {item.kind === "message"
+                      ? <MessageBubble message={item.message} />
+                      : <ExecutionTimeline entries={[item.entry]} compact />}
                   </div>
                 )
               })}
-
-              {phaseGroups.length === 0 && executionTimeline.length > 0 && (
-                <ExecutionTimeline
-                  entries={executionTimeline}
-                  defaultExpanded={executionTimeline.some((entry) => entry.status === "running" || entry.status === "waiting" || entry.status === "paused")}
-                />
+              {isAgentActive && (
+                <div className="processing-group py-3">
+                  <div className="timeline-node thinking-node">
+                    <div className="flex items-center gap-3 text-sm text-athena-muted">
+                      {agentStatus === "cancelling"
+                        ? <Clock className="h-4 w-4 text-athena-muted" />
+                        : <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />}
+                      {agentStatus === "cancelling" ? "正在停止任务" : "正在处理你的请求"}
+                    </div>
+                  </div>
+                </div>
               )}
 
               {/* 会话完成总结 — 原 EXECUTION TRACE 列表移入右侧 Activity 面板，
@@ -1009,22 +897,4 @@ function formatDuration(ms: number): string {
 function formatTotalDuration(steps: { duration_ms: number }[]): string {
   const total = steps.reduce((sum, s) => sum + (s.duration_ms || 0), 0)
   return formatDuration(total)
-}
-
-function allToolResultsArrived(invocations: ToolCallInvocation[], messages: Message[]): boolean {
-  return invocations.every((invocation) =>
-    messages.some((message) => (
-      message.role === "tool" &&
-      (message.tool_call_id === invocation.id || message.tool_call_record_id === invocation.id)
-    )),
-  )
-}
-
-function timelineEntriesForGroup(
-  entries: ExecutionTimelineEntry[],
-  messages: Message[],
-): ExecutionTimelineEntry[] {
-  const runIds = new Set(messages.map((message) => message.run_id).filter(Boolean))
-  if (runIds.size === 0) return []
-  return entries.filter((entry) => Boolean(entry.run_id) && runIds.has(entry.run_id))
 }

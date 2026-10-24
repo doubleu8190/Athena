@@ -93,6 +93,7 @@ def build_runs_router(
                 session_id,
                 command_id=request.command_id,
                 message=request.message,
+                message_id=request.message_id,
                 attachment_ids=request.attachment_ids,
             )
         except SessionNotFoundError as exc:

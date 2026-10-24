@@ -25,6 +25,7 @@ class RunListResponse(BaseModel):
 class SubmitRunRequest(BaseModel):
     message: str = ""
     command_id: str = Field(min_length=1)
+    message_id: str | None = Field(default=None, min_length=1)
     attachment_ids: list[str] = Field(default_factory=list)
 
 

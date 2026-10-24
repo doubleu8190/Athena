@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 
+from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
 from application.sessions import SessionNotFoundError
 from domain.files import AttachmentRepository, AttachmentStatus
 from domain.knowledge import KnowledgeBaseRepository
@@ -23,6 +24,7 @@ class RunRequestPreparationService:
         *,
         id_factory: Callable[[], str],
         clock: Callable[[], datetime] | None = None,
+        events: EventPort | None = None,
     ) -> None:
         self._sessions = sessions
         self._messages = messages
@@ -30,6 +32,7 @@ class RunRequestPreparationService:
         self._knowledge_bases = knowledge_bases
         self._id_factory = id_factory
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._events = events
 
     async def prepare(
         self,
@@ -77,16 +80,32 @@ class RunRequestPreparationService:
                 }
             )
 
-        if await self._messages.get(message_id) is None:
-            await self._messages.save(
-                Message(
-                    id=message_id,
+        user_message = await self._messages.get(message_id)
+        if user_message is None:
+            user_message = Message(
+                id=message_id,
+                session_id=session_id,
+                role=MessageRole.USER,
+                content=str(request.get("user_message", "")),
+                timestamp=self._clock(),
+                run_id=str(request.get("run_id") or "") or None,
+                attachments=tuple(attachment_values),
+            )
+            await self._messages.save(user_message)
+        if self._events is not None:
+            await self._events.publish(
+                ApplicationEvent(
+                    event_type=EventType.MESSAGE_PERSISTED,
+                    durability=EventDurability.DURABLE,
                     session_id=session_id,
-                    role=MessageRole.USER,
-                    content=str(request.get("user_message", "")),
-                    timestamp=self._clock(),
-                    run_id=str(request.get("run_id") or "") or None,
-                    attachments=tuple(attachment_values),
+                    run_id=user_message.run_id,
+                    message_id=user_message.id,
+                    transition_id=f"message:{user_message.id}:persisted",
+                    occurred_at=user_message.timestamp,
+                    payload={
+                        "role": user_message.role.value,
+                        "timestamp": user_message.timestamp.isoformat(),
+                    },
                 )
             )
 
@@ -114,7 +133,7 @@ class RunRequestPreparationService:
         异常：
             不主动抛出业务异常。
         """
-        values = await self._messages.list_by_session(session_id, limit=100)
+        values = await self._messages.list_recent_conversation(session_id, limit=100)
         return [
             {
                 "role": message.role.value,
@@ -124,6 +143,7 @@ class RunRequestPreparationService:
             }
             for message in values
             if message.id != exclude_message_id
+            and message.role in {MessageRole.USER, MessageRole.ASSISTANT}
         ]
 
     async def load_attachments(

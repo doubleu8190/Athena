@@ -18,10 +18,10 @@ import { localizedStatus } from "../utils/executionCopy"
 interface ExecutionTimelineProps {
   entries: ExecutionTimelineEntry[]
   defaultExpanded?: boolean
+  compact?: boolean
 }
 
-export function ExecutionTimeline({ entries, defaultExpanded = false }: ExecutionTimelineProps) {
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+export function ExecutionTimeline({ entries, defaultExpanded = false, compact = false }: ExecutionTimelineProps) {
   const [isOpen, setIsOpen] = useState(defaultExpanded)
 
   // 当前请求完成后自动收起；历史请求初始保持收起状态。
@@ -31,13 +31,8 @@ export function ExecutionTimeline({ entries, defaultExpanded = false }: Executio
 
   if (entries.length === 0) return null
 
-  const toggle = (id: string) => {
-    setExpanded((current) => {
-      const next = new Set(current)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+  if (compact) {
+    return <div className="processing-group py-1">{entries.map((entry) => <TimelineEntryRow key={entry.id} entry={entry} compact />)}</div>
   }
 
   return (
@@ -57,52 +52,57 @@ export function ExecutionTimeline({ entries, defaultExpanded = false }: Executio
         </span>
       </button>
       {isOpen && <div className="processing-group py-2">
-        {entries.map((entry) => {
-          const hasDetails = Boolean(entry.detail || entry.metadata)
-          const isExpanded = expanded.has(entry.id)
-          return (
-            <div key={entry.id} className="timeline-node thinking-node">
-              <div className="flex gap-3">
-                <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-athena-border bg-athena-surface">
-                  <EntryIcon entry={entry} />
-                </div>
-                <div className="min-w-0 flex-1 border-b border-athena-border/60 pb-3">
-                  <button
-                    type="button"
-                    disabled={!hasDetails}
-                    onClick={() => toggle(entry.id)}
-                    className="flex w-full items-start gap-2 text-left disabled:cursor-default"
-                  >
-                    <span className="min-w-0 flex-1 text-sm font-medium text-athena-text">{entry.label}</span>
-                    <StatusLabel status={entry.status} />
-                    {hasDetails && (
-                      <ChevronDown className={`mt-0.5 h-4 w-4 shrink-0 text-athena-muted transition-transform ${isExpanded ? "rotate-180" : ""}`} />
-                    )}
-                  </button>
-                  <div className="mt-1 flex items-center gap-1 text-xs text-athena-muted">
-                    <Clock className="h-3 w-3" />
-                    {formatTime(entry.timestamp)}
-                  </div>
-                  {isExpanded && entry.detail && (
-                    <div className="mt-2 whitespace-pre-wrap break-words rounded-md bg-athena-bg px-3 py-2 text-xs text-athena-text/80">
-                      {entry.detail}
-                    </div>
-                  )}
-                  {isExpanded && entry.metadata && Object.keys(entry.metadata).length > 0 && (
-                    <details className="mt-2 rounded-md bg-athena-bg px-3 py-2">
-                      <summary className="cursor-pointer text-xs text-athena-muted">查看技术详情</summary>
-                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-xs text-athena-muted">
-                        {JSON.stringify(entry.metadata, null, 2)}
-                      </pre>
-                    </details>
-                  )}
-                </div>
-              </div>
-            </div>
-          )
-        })}
+        {entries.map((entry) => <TimelineEntryRow key={entry.id} entry={entry} />)}
       </div>}
     </section>
+  )
+}
+
+function TimelineEntryRow({ entry, compact = false }: { entry: ExecutionTimelineEntry; compact?: boolean }) {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const hasDetails = Boolean(entry.detail || entry.metadata)
+  return (
+    <div className={`timeline-node thinking-node ${compact ? "my-2" : ""}`}>
+      <div className="flex gap-3">
+        {!compact && (
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-athena-border bg-athena-surface">
+            <EntryIcon entry={entry} />
+          </div>
+        )}
+        <div className="min-w-0 flex-1 border-b border-athena-border/60 pb-3">
+          <button
+            type="button"
+            disabled={!hasDetails}
+            onClick={() => setIsExpanded((value) => !value)}
+            className="flex w-full items-start gap-2 text-left disabled:cursor-default"
+          >
+            {compact && <EntryIcon entry={entry} />}
+            <span className="min-w-0 flex-1 text-sm font-medium text-athena-text">{entry.label}</span>
+            <StatusLabel status={entry.status} />
+            {hasDetails && (
+              <ChevronDown className={`mt-0.5 h-4 w-4 shrink-0 text-athena-muted transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+            )}
+          </button>
+          <div className="mt-1 flex items-center gap-1 text-xs text-athena-muted">
+            <Clock className="h-3 w-3" />
+            {formatTime(entry.timestamp)}
+          </div>
+          {isExpanded && entry.detail && (
+            <div className="mt-2 whitespace-pre-wrap break-words rounded-md bg-athena-bg px-3 py-2 text-xs text-athena-text/80">
+              {entry.detail}
+            </div>
+          )}
+          {isExpanded && entry.metadata && Object.keys(entry.metadata).length > 0 && (
+            <details className="mt-2 rounded-md bg-athena-bg px-3 py-2">
+              <summary className="cursor-pointer text-xs text-athena-muted">查看技术详情</summary>
+              <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-xs text-athena-muted">
+                {JSON.stringify(entry.metadata, null, 2)}
+              </pre>
+            </details>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 

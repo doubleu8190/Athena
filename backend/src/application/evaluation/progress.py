@@ -7,8 +7,10 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 from typing import Any
 
+from application.evaluation.ports import EvaluationEventSink
 
-class EvaluationProgressHub:
+
+class EvaluationProgressHub(EvaluationEventSink):
     def __init__(self) -> None:
         self._queues: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._history: dict[str, list[dict[str, Any]]] = defaultdict(list)

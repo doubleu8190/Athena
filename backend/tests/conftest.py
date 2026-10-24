@@ -1,4 +1,4 @@
-"""让迁移区测试优先导入独立的 backend 包。"""
+"""让测试优先导入独立的 backend 包。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""迁移期 PostgreSQL ORM 模型导出。"""
+"""PostgreSQL ORM 模型导出。"""
 
 from .base import Base
 from .file_models import (

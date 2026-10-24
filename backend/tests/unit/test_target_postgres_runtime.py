@@ -493,7 +493,7 @@ async def test_postgres_resource_schema_and_session_context(monkeypatch):
             return False
 
     engine = Engine()
-    migration_calls = []
+    schema_calls = []
     monkeypatch.setattr(
         "infrastructure.persistence.postgres.engine.create_async_engine",
         lambda *args, **kwargs: engine,
@@ -502,14 +502,13 @@ async def test_postgres_resource_schema_and_session_context(monkeypatch):
         "infrastructure.persistence.postgres.engine.async_sessionmaker",
         lambda *args, **kwargs: lambda: Session(),
     )
-    monkeypatch.setattr("infrastructure.persistence.postgres.engine.Base.metadata.create_all", lambda _connection: None)
     monkeypatch.setattr(
-        "infrastructure.persistence.postgres.engine.apply_schema_migrations",
-        lambda _connection: migration_calls.append("applied"),
+        "infrastructure.persistence.postgres.engine.Base.metadata.create_all",
+        lambda _connection: schema_calls.append("created"),
     )
     resource = PostgresEngine(PostgresOptions(Settings().postgres_url, create_schema=True))
     await resource.start()
-    assert migration_calls == ["applied"]
+    assert schema_calls == ["created"]
     async with resource.session() as value:
         assert isinstance(value, Session)
     await resource.stop()

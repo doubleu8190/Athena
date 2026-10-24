@@ -1,4 +1,4 @@
-"""迁移期 PostgreSQL ORM 基类。"""
+"""PostgreSQL ORM 基类。"""
 
 from __future__ import annotations
 

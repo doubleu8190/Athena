@@ -1,4 +1,4 @@
-"""Focused branch tests for the final migration boundary."""
+"""Focused branch tests for the final runtime boundaries."""
 
 from __future__ import annotations
 

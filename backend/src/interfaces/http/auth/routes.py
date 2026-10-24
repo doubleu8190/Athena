@@ -32,7 +32,7 @@ def _service_from_options(options: AuthOptions) -> AuthenticationService:
 
 
 def _resolve_options(value: AuthOptions | Any | None = None) -> AuthOptions:
-    """兼容迁移期 Settings 工厂，将其转换为 AuthOptions。"""
+    """将 Settings 工厂的认证配置转换为 AuthOptions。"""
     if isinstance(value, AuthOptions):
         return value
     return AuthOptions.from_settings(value or get_settings())

@@ -223,7 +223,7 @@ materialize_execution_plan 按“验证草稿 → 规范化身份和工具 → �
 
 工具链还需删除 _explicit_allowed_tools、UserTaskSpec 中的工具白名单字段、user_allowed_tools 提示及物化分支。工具文本仅按普通用户内容理解，不能变成权限配置。
 
-保留既有 Round interrupt/resume、Review 决议复用、图执行锁和 Submit 幂等。切换前结束受影响的活动测试 Run，按 thread 清理旧测试 checkpoint；不增加旧节点别名、状态迁移或新旧桥接层。
+保留既有 Round interrupt/resume、Review 决议复用、图执行锁和 Submit 幂等。切换前结束受影响的活动测试 Run，按 thread 清理旧测试 checkpoint；不增加旧节点别名或新旧桥接层。
 
 **完成结果：** 生产路径只剩新入口，同名循环活动可区分；本期不承诺初始规划阶段宕机自动恢复。
 

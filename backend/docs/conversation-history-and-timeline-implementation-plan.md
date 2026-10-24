@@ -1,6 +1,6 @@
 # 对话历史与时间线改造实施方案
 
-**状态：** 核心代码已实施；静态校验通过；数据库迁移、运行路径验证和历史助手消息回填待执行
+**状态：** 核心代码已实施；静态校验通过；数据库结构与当前 ORM 模型保持一致；运行路径验证待执行
 
 **日期：** 2026-10-23
 
@@ -94,16 +94,9 @@ Run 的答案增量/完成事件使用同一个助手消息 ID；另带 `reply_t
 
 新增“取最近 N 条”查询：数据库先筛选 `USER`/`ASSISTANT`，再按 `timestamp DESC, id DESC` 取最近 100 条，最后反转成升序并排除当前 `message_id`。为该查询添加 `(session_id, timestamp, id)` 组合索引；现有全量历史展示接口仍可继续使用升序查询。
 
-### 4.2 旧 Run 助手答复回填
+### 4.2 历史 Run 助手答复
 
-通过 `backend/scripts/backfill_assistant_messages.py` 对已完成的历史 Run 执行可重复回填。脚本默认只做预检；只有传入 `--apply` 才写入，并会在同一事务锁住 `messages` 表以防与新 Run 的助手写入竞态。出现正文来源或目标行冲突时脚本拒绝写入：
-
-1. 以 `agent_runs.response_json` 中的最终 `content` 为优先来源；格式不支持或没有正文时，使用关联 `memory_processing_jobs.assistant_text` 作为回退。
-2. 只处理 `status=completed` 且可解析出非空最终正文的 Run；使用 `assistant:{run_id}` 作为稳定消息 ID，`session_id`/`run_id` 取 Run 记录，消息时间取 `agent_runs.updated_at`（回填前确认其为完成时间）。
-3. 已存在该稳定 ID 的行跳过；若发现同一 Run 有不同 ID 的既存助手行或两个来源正文不一致，记录审计清单并停止覆盖，按明确冲突规则处理。
-4. 回填前统计可恢复、缺正文、来源冲突和目标行冲突数量；回填后核对总数。无法从两种持久来源恢复的旧答复不伪造，也不从记忆摘要反推。
-
-新增 schema migration 放在 `backend/sql/migrations/`，并同步维护 `backend/sql/schema.sql`。Worker 表 migration 必须允许重复部署/迁移检查安全执行。
+历史消息按当前持久化记录读取。当前开发阶段不执行旧 Run 消息回填；已完成 Run 的历史答复不会通过后台脚本补造。
 
 ## 5. 实施顺序
 
@@ -113,11 +106,11 @@ Run 的答案增量/完成事件使用同一个助手消息 ID；另带 `reply_t
 - 修改 `RunRequestPreparationService.load_history`，只组装用户和助手对话，排除当前用户消息。
 - 扩展 Run 完成事务，将最终助手答复与 Run 状态、记忆任务、完成 outbox、命令终态一并幂等写入。
 - 统一答案 stream 事件上的助手 `message_id`，并为用户消息持久化确认提供稳定 ID 与服务端时间。
-- 已加入助手历史回填脚本、预检报告和重复执行保护；尚未对数据库执行回填。
+- 当前数据库表结构以 ORM 模型定义为准；新开发库通过 `Base.metadata.create_all` 创建缺失对象。
 
 ### 阶段 B：Worker 消息轨迹（已实施）
 
-- 新增 `worker_execution_messages` ORM、仓储、索引和 SQL migration，覆盖 system/user/assistant 消息及独立的工具结果回执类型。
+- 新增 `worker_execution_messages` ORM、仓储和索引，覆盖 system/user/assistant 消息及独立的工具结果回执类型。
 - 在每次 LLM 调用前保存其 system/user 输入，返回后保存 assistant 回复；工具账本确定结果后保存对应 `tool_result` 轨迹项。
 - 为同一 assistant 回复中的多工具调用保留结构化数组及各自稳定 `tool_call_id`；按 execution sequence 追加输入、输出和结果。
 - 将消息轨迹用于审计和恢复对账；模型上下文仍由 Task 状态、上游结果、工具账本及结果引用重建，不把历史消息盲目重复拼入 prompt。
@@ -151,5 +144,5 @@ Run 的答案增量/完成事件使用同一个助手消息 ID；另带 `reply_t
 - 回填前需审计 `agent_runs.updated_at`、`response_json` 与 `memory_processing_jobs` 的实际保留/清理策略，以及历史记录中的内容冲突。回填只覆盖可确认的一对一 Run 答复。
 - Worker 外部副作用与数据库事务无法做到原子提交；必须依靠现有 `worker_tool_operations` 幂等账本、稳定调用标识和恢复对账来避免重复副作用。完整 LLM 输入可能包含任务数据，需沿用 Worker 执行数据的访问控制和保留策略。
 - 时间戳是跨消息表与事件表的主排序依据；同一时间戳时用事件序号和稳定规则打破平局。若后续要求跨表严格单调全序，应另行把消息确认纳入会话统一序列，而不是假设两个表的本地顺序天然一致。
-- 实现已新增 schema migration、独立 Worker transcript 仓储和只读默认的回填脚本。历史回填需要先查看脚本预检报告，再显式执行 `--apply`；本次没有连接数据库或执行回填。
+- 实现已新增独立 Worker transcript 仓储。历史 Run 助手答复不做回填。
 - 本轮通过 `python3 -m compileall` 和前端 TypeScript 类型检查；未运行测试或数据库集成验证。当前可用 Python 环境未安装 SQLAlchemy，后端数据库仓储无法在本地做运行时导入检查。

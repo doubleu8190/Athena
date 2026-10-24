@@ -111,7 +111,7 @@ run
 
 ### 5.1 不新增 trace 表，扩展现有事件 payload
 
-继续使用 `ApplicationEvent` 和 `AgentEventModel`。除非后续性能证明需要，否则不新增 `trace_spans` 表。所有链路关联信息先放在受控 payload 中，减少 ORM 和迁移范围。
+继续使用 `ApplicationEvent` 和 `AgentEventModel`。除非后续性能证明需要，否则不新增 `trace_spans` 表。所有链路关联信息先放在受控 payload 中，保持 ORM 改动范围精简。
 
 每个可展示活动的 payload 使用以下约定：
 
@@ -254,7 +254,7 @@ async def list_run_events(
 - 确认 `agent_events(session_id, session_seq)` 主键和 `idx_agent_events_run(run_id)` 能满足查询；必要时增加复合索引 `(session_id, run_id, session_seq)`。
 - 不新增 trace 表，不新增外部服务字段，不修改 `ApplicationEvent` 顶层 envelope。
 - 若后续证明 payload 查询成为瓶颈，再考虑将 `activity_id`、`activity_type`、`status` 提升为列；第一版先通过事件 payload 完成验证。
-- 不依赖 `Base.metadata.create_all` 自动完成已有数据库索引升级；索引变更必须提供 SQL migration。
+- 索引定义与 ORM 模型一起维护；`Base.metadata.create_all` 只创建缺失的索引，不改动已有数据库对象。
 
 ## 7. 前端实现
 
@@ -375,7 +375,7 @@ interface RunTimelineEvent {
 - 扩展 Event History/Run Query port 和 PostgreSQL repository，按 session/run/sequence 分页。
 - 增加 `GET /api/sessions/{session_id}/runs/{run_id}/timeline` Controller、DTO 和权限校验。
 - 更新 `backend/docs/athena-api.md`，增加响应结构、分页和错误码。
-- 为复合索引提供 SQL migration（若现有索引测试证明不够）。
+- 在 ORM 模型中定义复合索引（若现有索引测试证明不够）。
 
 **验收**：接口能读取新旧 run；跨 session 查询被拒绝；分页无重复、无遗漏；空 run 和不存在 run 有稳定响应。
 

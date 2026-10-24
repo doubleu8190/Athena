@@ -237,7 +237,7 @@ eval_gates
 
 索引：`eval_runs(status, created_at)`、`eval_runs(version_id)`、`eval_case_attempts(run_id, case_id)`、`eval_metric_values(run_id, metric_name)`、`eval_metric_values(case_id)`。case 删除采用冻结版本约束；已被 run 引用的版本不能物理删除。
 
-将模型加入 `backend/src/infrastructure/persistence/postgres/models/__init__.py` 后，现有 `Base.metadata.create_all` 会在开发环境建表。生产环境当前没有独立 migration runner，P2 先提供 `create_schema` 兼容升级；正式发布前增加一次显式 schema migration，禁止依赖 `create_all` 修改已有列。
+将模型加入 `backend/src/infrastructure/persistence/postgres/models/__init__.py` 后，`Base.metadata.create_all` 会创建开发数据库中缺失的表和索引。它不会修改已有表字段，数据库结构以当前 ORM 模型为准。
 
 ### 5.2 Repository
 

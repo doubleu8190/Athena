@@ -379,7 +379,7 @@ items 和 total 使用同一组筛选条件，先筛选后分页；provider 匹�
 
 1. 在现有测试中补字段映射、完整候选、状态和窗口确认用例。可集中增加 test_retrieval_analysis.py，不按每个设计概念强制新建文件。
 2. 增加真实 PostgreSQL 集成测试，使用 ATHENA_TEST_DATABASE_URL 的独立测试 schema。必须覆盖外键、原子撤销、相同 run_id 重复提交、JSON 读写和最终选择更新。
-3. 更新 test_query_controller.py、test_root_context_contracts.py、test_root_graph.py、test_memory_context_recall.py、test_target_native_migration.py 中受影响的断言。移动记忆计数后，不能继续断言模块返回就发生访问。
+3. 更新 test_query_controller.py、test_root_context_contracts.py、test_root_graph.py、test_memory_context_recall.py、test_target_native_features.py 中受影响的断言。移动记忆计数后，不能继续断言模块返回就发生访问。
 4. 在 frontend 运行 npm run typecheck、npm run build，并执行 git diff --check。
 5. 浏览器实际打开列表和候选展开，至少验证真实 memory 命中、同文件多片段，以及已配置 knowledge/graph 的真实返回和失败说明。按请求 ID 核对数据库、接口和最终资料窗口。
 

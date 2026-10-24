@@ -4,7 +4,7 @@
 
 后续专项实施（2026-10-23）：[Root 统一决策设计与实施方案（首期收敛版）](root-unified-decision-implementation-plan.md)已完成代码切换及 D4 真实模型、工具、审批和浏览器验收。该专项仅替换前置分类与初始决策链，复用检索和既有执行协议；历史附件、访问统计和初始命令重投另行处理。下文已完成状态不重复统计这项专项改造。
 
-设计依据：用户提供的 `/Users/udouble/Downloads/Athena_Multi_Agent_Architecture_v1.1.md`，全文 770 行、含取消控制通道和验收要求。实现基线：本日当前工作区，包含未提交的目录迁移和代码修改；不以旧目录或历史方案代替当前源码。
+设计依据：用户提供的 `/Users/udouble/Downloads/Athena_Multi_Agent_Architecture_v1.1.md`，全文 770 行、含取消控制通道和验收要求。实现基线：本日当前工作区，包含未提交的代码修改；不以旧目录或历史方案代替当前源码。
 
 ## 1. 实施结论与范围
 
@@ -58,7 +58,7 @@
 6. **第一版不引入无限期通用 BLOCKED。** 非审批缺输入先作为结构化 `FAILED(code=needs_input)` 进入轮次 Review，由 Root 澄清、修订或结束。未来可另加带期限和恢复契约的阻塞状态。
 7. **普通对话和澄清可直接回答。** 需要实际执行工具的工作进入 Plan；单任务也生成一节点 DAG，避免继续维护 Root 执行工具的第二条路径。这是建议的产品范围口径。
 8. **审批过期按拒绝处理。** EXPIRED 决定与恢复 Job 同事务，Worker 收到 ToolDenied 后可尝试替代方案；Task 总时限和模型预算仍生效，绝不自动批准。
-9. **业务成功状态统一为 `completed`。** 领域枚举名可用 COMPLETED；迁移把旧 Task `done` 映射为 completed、`timed_out` 映射 failed 并保留错误码。历史展示通过只读映射处理。
+9. **业务成功状态统一为 `completed`。** 领域枚举名可用 COMPLETED；旧 Task 状态 `done` 映射为 completed、`timed_out` 映射 failed 并保留错误码。历史展示通过只读映射处理。
 10. **有限规划预算。** 限制总轮次、重规划次数、Root/Worker 模型 turn、任务数和执行时限，全部来自 Settings。无意义重复 Review、非法模型输出要有有界修复和明确失败路径。
 
 建议状态集合：Plan=`created/running/waiting_review/cancelling/completed/failed/cancelled`；Round=`running/completed/cancelled`；Task=`pending/running/waiting_approval/cancelling/completed/failed/cancelled`。待退避重试用 Task pending + Execution/Job 的 available_at 表达；Execution 单独记录 queued/running/interrupted/completed/failed/cancel_requested/cancelled。Run 在轮次和审批等待时保持 running，额外增加 cancelling，不把 Graph 的 suspended 当成 Run 终态。
@@ -116,7 +116,7 @@ backend/src/
 
 跨边界模型显式定义 schema_version；领域保持 dataclass/enum，不依赖 SQLAlchemy/Pydantic/LangGraph。HTTP DTO 和模型输出在入口校验；JSONB 在仓储边界编码，不使用任意 dict 贯穿所有层。
 
-## 5. PostgreSQL 数据模型与迁移
+## 5. PostgreSQL 数据模型
 
 物理表优先复用 `agent_*` 和 `approvals`，不用为了对齐文档示例而整体改名。
 
@@ -142,7 +142,7 @@ backend/src/
 
 结果引用优先指向持久 Task 结果和现有文件 artifact，包含摘要、证据定位、类型和大小；大输出不塞入事件或 Root checkpoint。TaskResult 中的 evidence、uncertainties、metrics 需实际落库，不在转换中丢弃。
 
-新表时间使用 TIMESTAMPTZ/UTC；对现有字符串时间字段分步骤迁移或保留边界转换，避免本次顺带重写全库。
+新表时间使用 TIMESTAMPTZ/UTC；现有字符串时间字段保留边界转换，避免本次顺带重写全库。
 
 关键数据库约束：
 
@@ -152,7 +152,7 @@ backend/src/
 - Run 活跃唯一索引及 `get_active_for_session` 把 cancelling 纳入活跃范围；Root 等轮次期间 Run 仍 running。
 - 调度队列为 status/available_at/lease_until 建索引；待审批不按活跃执行租约过期重试。
 
-迁移使用 `backend/sql/migrations/` 中可版本化脚本。`PostgresEngine` 在 `create_schema=true` 时先用 ORM 创建缺失对象，再通过 `athena_schema_migrations` 按文件名顺序执行尚未应用的 SQL，并记录 SHA-256；已应用脚本被修改时启动失败，要求新增迁移而不是改写历史。`metadata.create_all()` 不会补齐既有表字段，不能代替迁移。
+当前 PostgreSQL schema 以 SQLAlchemy ORM 模型为准。`PostgresEngine` 在 `create_schema=true` 时调用 `Base.metadata.create_all` 创建缺失的表和索引；该调用不会修改已存在表的字段。开发库结构需要与当前 ORM 模型一致。
 
 ## 6. 核心事务与严格 Round 算法
 
@@ -306,7 +306,7 @@ Athena 按单用户产品实施，不增加多租户隔离或 `user_id` actor �
 
 | 阶段 | 主要交付 | 完成条件 |
 |---|---|---|
-| P0 契约与基线 | 当前脏树快照清单、状态/命令/事件/Review 类型、迁移策略、验收矩阵、预算配置 | 明确替换清单和默认口径；记录现有测试结果与已有失败 |
+| P0 契约与基线 | 当前脏树快照清单、状态/命令/事件/Review 类型、验收矩阵、预算配置 | 明确替换清单和默认口径；记录现有测试结果与已有失败 |
 | P1 数据与事务内核 | Version/Round/Execution、共享 UoW、五类命令处理、Outbox/Inbox、取消 epoch 基础 | 真实 PG 下冻结集合、命令去重、版本 CAS、并发终态屏障成立 |
 | P2 独立 Worker Runtime | 持久 execute Job、claim/lease/fence、通用 Graph、Agent Loop、工具读路径和结果引用 | 两 Worker 并行；重启不丢 Job；旧结果拒绝；本轮重试不提前完成 Round |
 | P3 Root Review 与 Revision | 真 interrupt/resume、Inbox 就绪握手、三态决策、版本修订、幂等 Finalize | 不轮询、不常驻等待；早到事件可靠；Review 后才启动下一轮 |
@@ -358,24 +358,12 @@ P1 就建立取消状态、Outbox、幂等身份和共享事务；P2 就建立 l
 
 后端测试从 `backend` 目录，使用项目根 `.venv/bin/python`（即 `../.venv/bin/python`）并设置 `PYTHONPATH=src:.`；PG 集成测试显式要求隔离测试库配置，跳过不计通过。不要使用生产库做故障注入。
 
-## 13. 切换、旧数据和回退
-
-1. 先记录当前未提交工作及测试基线，基于当前分层完成新增模块。文档与源码行号会变化，以提交基线重新核对。
-2. 做兼容历史读取的增量迁移，备份业务库和 checkpoint；升级程序启动前校验迁移版本。
-3. 停止接受新 Run，让旧 Run 自然结束。遗留审批/运行需明确关闭或通过受控停机流程处理，不能给旧运行凭空补 Round 后由新 Scheduler 接管。
-4. 对遗留 checkpoint 记录 graph_schema_version；旧 checkpoint 不自动加载到新图。旧终态数据只读展示；不臆造历史 Review/Version 事实。
-5. 一次切换 bootstrap、API/DTO 和前端到新执行链，然后验证一条完整真实闭环。
-6. 删除旧自动补派、Scheduler Synthesizer、Root 轮询、dict 路由恢复、审批直接回调 Root、内存等待命令事实，以及无实现的 Worker cancel。
-7. 更新 `backend/docs/architecture.md` 等仍引用旧 `athena/runtime` 的文档，使实现方案与当前入口一致。
-
-回退只对已排空新活跃 Run 的环境进行，保留迁移增加的数据；若新任务已经发生外部副作用，先对账再决定恢复，不能用降级程序或恢复数据库备份宣称撤销了外部动作。历史数据读取兼容不意味着保留两个运行调度器。
-
 ## 14. 第一批实际编码任务
 
 第一批只实施 P0/P1，形成能够用真实 PostgreSQL 验证的确定性内核：
 
 1. 新增 Round、PlanVersion、Execution、命令/事件、Review 类型；固定统一状态值和 schema_version。
-2. 建立共享事务端口，新增迁移与索引，并修正 cancelling 的活跃 Run 约束。
+2. 建立共享事务端口，在 ORM 模型中定义索引，并修正 cancelling 的活跃 Run 约束。
 3. 实现 Submit/Continue/Revise/Finish/Cancel 命令、固定 Round 与唯一命令回执。
 4. 实现 WorkerEvent ingestion、attempt 与 Task 分离、轮次终态屏障和 Outbox/Inbox。
 5. 通过 A01/A02/A07/A08/A09/A10/A13 的数据库协议测试，再接入 Worker 和 Root 图。
@@ -398,7 +386,7 @@ P1 就建立取消状态、Outbox、幂等身份和共享事务；P2 就建立 l
 
 P5 已切换审批决定路径：新增 `POST /api/approvals/{approval_id}/decision`，返回 202；待审批查询补充 `run_id`、`plan_id` 和 `task_id`；前端保留批次分组展示，但对每条审批分别提交决定。新增 `GET /api/runs/{run_id}/orchestration`，从 PostgreSQL 汇总 Run 取消事实、Plan Version 摘要、固定 Round 成员、每个 Task 的 Execution 尝试和审批决定；新增 `GET /api/plans/{plan_id}/versions/{version}` 返回不可变 DAG 与修订原因。Run Chain 现在在加载历史运行时同时读取事件时间线和持久化快照，执行树可沿 Version → Round → Task → Execution → Approval 恢复，选择 Version 可查看对应 DAG。查询接口契约测试、PostgreSQL 快照集成测试和前端 TypeScript 检查通过。本轮用临时 PostgreSQL 记录完成真实本地浏览器验收：同批次两条审批各自提供允许/拒绝选择，选择第一条时提交仍禁用、第二条选择后提交启用；Run Chain 展示两个 Plan Version、已完成和进行中的 Round、对应 Task/Execution 与两条待审批节点；刷新后这些持久状态恢复，重新选择 Version 2 可再次读取其 DAG。验收记录随后从测试库删除，没有提交审批决定。当前共享登录认证符合 Athena 的单用户产品定位，不要求将登录用户映射到 `agent_runs.user_id`；查询与命令通过持久化身份关联校验 Run、Plan、Version、Task 和审批关系。
 
-P6 早期已有七条 PostgreSQL 验收：一条模拟 Worker 崩溃留下的过期租约，由两个独立数据库会话同时领取，验证只产生一个新租约、fencing token 从 7 增至 8、执行代际保持不变、Job 投递次数增加，且旧持有者无法续租；一条在 PostgreSQL checkpointer 中持久化 Worker 审批 interrupt，关闭并重建 checkpointer 和 executor 后找回原 interrupt，获批后仅执行一次工具并完成原任务；一条从 PostgreSQL 直接读取 Run 快照和不可变版本，核对取消状态、Round 成员、Execution fence、审批决定及 DAG；一条在临时 schema 验证 12 个迁移版本首次应用、重复启动和 checksum 校验；一条从活跃 Worker 和待审批状态开始取消 Run，验证重复取消不重复写 Outbox，过期租约回收后 Run/Plan/Round/Task/Execution/Job 收敛到 cancelled，旧 lease 不能确认退出，终态重复取消不追加事件，同时保留 `external_effect_status=unknown`；一条模拟 SSE 事件已持久化、Dispatcher 在确认 Outbox 前崩溃，验证租约过期后新 Dispatcher 可重投，事件 transition ID 去重且 Outbox 最终确认发布；一条模拟 Worker 在工具操作账本写入 executing 后崩溃，下一执行代际面对未知结果时拒绝重发工具调用，同时保留已完成操作跨代际复用结果的验证。上述验收均在随机临时 schema 内运行并于结束时删除。当前测试数据库已经补齐旧表字段，后端重启后同一审批接口由 500 恢复为 200。浏览器端现已覆盖多审批选择、版本 DAG、Round/Execution 投影及刷新恢复。
+P6 早期已有 PostgreSQL 验收：一条模拟 Worker 崩溃留下的过期租约，由两个独立数据库会话同时领取，验证只产生一个新租约、fencing token 从 7 增至 8、执行代际保持不变、Job 投递次数增加，且旧持有者无法续租；一条在 PostgreSQL checkpointer 中持久化 Worker 审批 interrupt，关闭并重建 checkpointer 和 executor 后找回原 interrupt，获批后仅执行一次工具并完成原任务；一条从 PostgreSQL 直接读取 Run 快照和不可变版本，核对取消状态、Round 成员、Execution fence、审批决定及 DAG；一条从活跃 Worker 和待审批状态开始取消 Run，验证重复取消不重复写 Outbox，过期租约回收后 Run/Plan/Round/Task/Execution/Job 收敛到 cancelled，旧 lease 不能确认退出，终态重复取消不追加事件，同时保留 `external_effect_status=unknown`；一条模拟 SSE 事件已持久化、Dispatcher 在确认 Outbox 前崩溃，验证租约过期后新 Dispatcher 可重投，事件 transition ID 去重且 Outbox 最终确认发布；一条模拟 Worker 在工具操作账本写入 executing 后崩溃，下一执行代际面对未知结果时拒绝重发工具调用，同时保留已完成操作跨代际复用结果的验证。上述验收均在随机临时 schema 内运行并于结束时删除。当前测试数据库结构与 ORM 模型一致，后端重启后同一审批接口由 500 恢复为 200。浏览器端现已覆盖多审批选择、版本 DAG、Round/Execution 投影及刷新恢复。
 
 P6 的真实 Provider 闭环现已增加一条浏览器验收：真实聊天请求生成包含两个并行 Task 和一个合并 Task 的 Plan；Root 将 Round 1 挂起到 PostgreSQL checkpoint，两个 Worker 完成后恢复 Root、执行 Review 并启动合并 Round；最终 Run、Plan、两轮 Round 和三个 Task 全部完成，浏览器显示 3/3 并收到可读中文总结。Run ID 为 `2026.10.22.02.09.19.200`。另一次浏览器验收在 Run 执行中点击停止，Run 收敛至 `cancelled`、`cancellation_epoch=1`；刷新页面后仍恢复原请求和“任务已取消”事件。该次停止发生在 Plan 创建前，不替代活跃 Worker 的取消验证。验收中发现并修复了 Root 将 LangGraph interrupt 当成最终结果、同一节点循环挂起多轮导致 resume 身份错配、Review 响应遗漏必填 reason，以及默认结果投影把 Worker 内部 envelope 渲染为 Python 字典的问题；计划解析也兼容对象边和二元组边，初始 Plan/Version 写入顺序通过显式 flush 满足外键约束。对应的受影响单元测试与全部 11 条 PostgreSQL 集成测试合计 48 条通过。用于验收的 12 个合成会话已软删除，用户原有会话未改动。
 

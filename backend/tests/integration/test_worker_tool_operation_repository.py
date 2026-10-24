@@ -1,4 +1,4 @@
-"""PostgreSQL acceptance for operation-key migration and retry replay."""
+"""PostgreSQL acceptance for operation replay across Worker attempts."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import json
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -40,10 +39,6 @@ from infrastructure.persistence.postgres.repositories.worker_tool_operation_repo
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
-MIGRATION_DIR = BACKEND_ROOT / "sql" / "migrations"
-
-
 class _UncertaintyToolService:
     """确保未知副作用被拒绝时不会触达外部工具。"""
 
@@ -84,8 +79,8 @@ class _UncertaintyToolService:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_postgres_migration_backfills_and_replays_across_attempts() -> None:
-    """Backfill old ledger rows and replay a completed effect on retry."""
+async def test_postgres_replays_completed_effect_across_attempts() -> None:
+    """A completed logical operation is replayed on a later attempt."""
     if not DATABASE_URL:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
@@ -118,7 +113,8 @@ async def test_postgres_migration_backfills_and_replays_across_attempts() -> Non
         async with test_engine.begin() as connection:
             await connection.run_sync(
                 lambda sync_connection: Base.metadata.create_all(
-                    sync_connection, tables=core_tables
+                    sync_connection,
+                    tables=[*core_tables, WorkerToolOperationModel.__table__],
                 )
             )
 
@@ -230,54 +226,29 @@ async def test_postgres_migration_backfills_and_replays_across_attempts() -> Non
                 ]
             )
 
-        old_ledger_sql = (
-            MIGRATION_DIR / "20261022_worker_tool_operation_ledger.sql"
-        ).read_text()
-        async with test_engine.begin() as connection:
-            for statement in old_ledger_sql.split(";"):
-                if statement.strip():
-                    await connection.exec_driver_sql(statement)
-            await connection.execute(
-                text("""
-                    INSERT INTO worker_tool_operations (
-                        operation_key, run_id, plan_id, task_id, execution_id,
-                        tool_name, tool_call_id, args_hash, status, result_json,
-                        created_at, completed_at
-                    ) VALUES (
-                        'athena:run-1:task-1:1:0:0', 'run-1', 'plan-1',
-                        'task-1', 'execution-1', 'write_file',
-                        'worker:task-1:1:0:0', 'args-hash', 'completed',
-                        CAST(:result_json AS JSONB), :created_at, :completed_at
-                    )
-                """),
-                {
-                    "result_json": json.dumps(
-                        {
-                            "status": "success",
-                            "output": "created",
-                            "error": None,
-                            "duration_ms": 12,
-                        }
-                    ),
-                    "created_at": now - timedelta(minutes=1),
-                    "completed_at": now - timedelta(minutes=1),
-                },
-            )
-
-            logical_key_migration = (
-                MIGRATION_DIR
-                / "20261022_worker_tool_logical_operation_keys.sql"
-            ).read_text()
-            for statement in logical_key_migration.split(";"):
-                if statement.strip():
-                    await connection.exec_driver_sql(statement)
-            backfilled = await connection.scalar(
-                text(
-                    "SELECT logical_operation_key FROM worker_tool_operations "
-                    "WHERE operation_key = 'athena:run-1:task-1:1:0:0'"
+        async with session_factory() as session, session.begin():
+            session.add(
+                WorkerToolOperationModel(
+                    operation_key="athena:run-1:task-1:1:0:0",
+                    logical_operation_key="athena:run-1:task-1:logical:0:0",
+                    run_id="run-1",
+                    plan_id="plan-1",
+                    task_id="task-1",
+                    execution_id="execution-1",
+                    tool_name="write_file",
+                    tool_call_id="worker:task-1:1:0:0",
+                    args_hash="args-hash",
+                    status="completed",
+                    result_json={
+                        "status": "success",
+                        "output": "created",
+                        "error": None,
+                        "duration_ms": 12,
+                    },
+                    created_at=now - timedelta(minutes=1),
+                    completed_at=now - timedelta(minutes=1),
                 )
             )
-            assert backfilled == "athena:run-1:task-1:logical:0:0"
 
         repository = PostgresWorkerToolOperationRepository(session_factory)
         retry_request = ToolExecutionRequest(

@@ -1,4 +1,4 @@
-"""迁移期 PostgreSQL Unit of Work。"""
+"""PostgreSQL Unit of Work。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""迁移期 FastAPI 应用工厂。"""
+"""FastAPI 应用工厂。"""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def create_app(
     auth_options: AuthOptions | None = None,
     auth_service: AuthenticationService | None = None,
 ) -> FastAPI:
-    """创建无外部副作用的迁移期应用。
+    """创建无外部副作用的 Athena 应用。
 
     参数：
         session_service_factory: 可选的会话服务工厂。提供后才注册会话路由，
@@ -148,7 +148,7 @@ def create_app(
 
     @app.get("/health", tags=["health"])
     async def health() -> dict[str, Any]:
-        """返回迁移期应用的进程健康状态。"""
+        """返回应用的进程健康状态。"""
         return {"status": "ok", "architecture": "restructured"}
 
     @app.get("/api/health", tags=["health"])

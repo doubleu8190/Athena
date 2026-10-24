@@ -157,7 +157,7 @@ class ToolResponse:
     last_called_at: str | None = None
 
     def __eq__(self, other: object) -> bool:
-        """允许迁移期测试将响应与旧工具实体按展示字段比较。"""
+        """允许测试将响应与工具实体按展示字段比较。"""
         if isinstance(other, ToolResponse):
             return tuple(self.__dict__.values()) == tuple(other.__dict__.values()) if hasattr(self, "__dict__") else (
                 self.name, self.description, self.risk_level, self.execution_mode, self.require_approval, self.enabled, self.parameters
@@ -180,7 +180,7 @@ class McpServerResponse:
     status: str | None = None
 
     def __getitem__(self, key: str) -> Any:
-        """兼容迁移期调用方按字典读取公开字段。"""
+        """允许调用方按字典方式读取公开字段。"""
         if key == "name":
             return self.name
         if key == "config":

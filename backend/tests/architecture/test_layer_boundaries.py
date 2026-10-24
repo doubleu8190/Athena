@@ -1,6 +1,6 @@
 """目标结构的静态依赖边界测试。
 
-测试只扫描 backend/src，不导入旧 athena 包，方便迁移期间独立运行。
+测试只扫描 backend/src，不导入旧 athena 包。
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ def test_outer_layers_do_not_depend_on_bootstrap_configuration() -> None:
 
 
 def test_restructured_tree_does_not_import_outer_athena_package() -> None:
-    """整个迁移目标包必须能脱离旧 athena 源码被导入。"""
+    """后端源码必须能脱离旧 athena 源码被导入。"""
     imports = set().union(*(_imports(path) for path in ROOT.rglob("*.py")))
     assert not any(
         module == "athena" or module.startswith("athena.")
@@ -131,8 +131,8 @@ def test_postgres_bootstrap_only_assembles_dependencies() -> None:
     assert not nested_functions
 
 
-def test_removed_migration_aliases_do_not_return() -> None:
-    """生产源码不能重新注册已删除的迁移别名或隐藏路由。"""
+def test_removed_legacy_aliases_do_not_return() -> None:
+    """生产源码不能重新注册已删除的旧别名或隐藏路由。"""
     source = "\n".join(
         path.read_text(encoding="utf-8")
         for path in ROOT.rglob("*.py")

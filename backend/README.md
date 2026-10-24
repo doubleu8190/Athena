@@ -1,4 +1,4 @@
-# Athena 重构迁移区
+# Athena Backend
 
 这是 Athena 的唯一生产实现，采用 Domain、Application、Infrastructure、Interfaces 和 Bootstrap 分层。
 
@@ -29,9 +29,7 @@ bootstrap -> interfaces + application + infrastructure
 - `src/shared`：跨域且无业务含义的基础工具。
 - `tests`：新结构的单元、集成和架构边界测试。
 
-迁移顺序和每阶段验收标准见 [`MIGRATION_PLAN.md`](MIGRATION_PLAN.md)，依赖约束见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
-
-阶段 0 基线见 [`BASELINE.md`](BASELINE.md)。最小启动检查：
+分层依赖约束见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。最小启动检查：
 
 ```bash
 .venv/bin/python -m backend.src.bootstrap.check

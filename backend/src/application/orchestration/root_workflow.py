@@ -73,7 +73,8 @@ from .plan_versions import (
     partition_plan_versions,
 )
 from .protocols import RootWorkflowPort
-from .serialization import as_dict, json_value
+from .serialization import as_dict
+from shared.serialization import json_value
 from .worker_tools import worker_tool_manifest
 
 if TYPE_CHECKING:

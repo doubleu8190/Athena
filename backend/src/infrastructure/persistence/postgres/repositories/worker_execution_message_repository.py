@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from application.orchestration.serialization import json_value
+from shared.serialization import json_value
 from domain.orchestration import (
     WorkerExecutionEntryType,
     WorkerExecutionMessage,

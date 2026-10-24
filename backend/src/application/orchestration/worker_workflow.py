@@ -13,7 +13,8 @@ from domain.orchestration import (
     WorkerToolResultContent,
 )
 
-from .serialization import as_dict, json_value
+from .serialization import as_dict
+from shared.serialization import json_value
 
 
 class WorkerWorkflow:

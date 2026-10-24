@@ -8,7 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from application.orchestration.protocols import WorkerWorkflowPort
-from application.orchestration.serialization import json_value
+from shared.serialization import json_value
 
 from .state import WorkerGraphState
 

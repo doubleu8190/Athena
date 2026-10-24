@@ -154,7 +154,7 @@ class Settings(BaseSettings):
     memory_retrieval_timeout_seconds: float = Field(default=60.0, ge=0.1, le=60.0)
 
     root_max_turns: int = Field(default=4, ge=1, le=12)
-    context_prefetch_timeout_seconds: float = Field(default=3.0, gt=0, allow_inf_nan=False)
+    context_prefetch_timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     answer_streaming: AnswerStreamingSettings = Field(default_factory=AnswerStreamingSettings)
     knowledge_context_max_files: int = Field(default=5, ge=1, le=20)
     knowledge_context_limit_per_file: int = Field(default=5, ge=1, le=20)

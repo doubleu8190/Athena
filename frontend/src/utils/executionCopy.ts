@@ -9,6 +9,9 @@ const TOOL_ACTIONS: Record<string, { object: string; verb: "create" | "update" |
   delete_issue: { verb: "delete", object: "项目事项" },
   search_files: { verb: "search", object: "文件" },
   read_file: { verb: "read", object: "文件" },
+  exec_shell: { verb: "execute", object: "命令" },
+  shell: { verb: "execute", object: "命令" },
+  read_worker_result: { verb: "read", object: "Worker 结果" },
 }
 
 const VERBS: Record<string, string> = {
@@ -39,8 +42,11 @@ function argumentText(value: unknown): string | null {
 export function toolActionLabel(toolName: string, phase: "started" | "completed" | "failed"): string {
   const action = actionFor(toolName)
   if (!action) {
-    if (phase === "started") return "正在准备执行一项操作"
-    return phase === "failed" ? "操作未能完成" : "操作已完成"
+    const readableName = toolName.trim().replace(/[._-]+/g, " ")
+    if (phase === "started") return readableName ? `正在执行 ${readableName}` : "正在执行工具操作"
+    return phase === "failed"
+      ? readableName ? `${readableName}未能完成` : "操作未能完成"
+      : readableName ? `${readableName}已完成` : "操作已完成"
   }
   const phrase = `${action.verb}${action.object}`
   if (phase === "started") return `正在准备${phrase}`

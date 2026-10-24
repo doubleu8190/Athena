@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Send, Square, Loader2, Sparkles, Clock, CheckCircle, PanelRight, PanelLeft, Paperclip, Files, X, Trash2 } from "lucide-react"
+import { Send, Square, Loader2, Sparkles, Clock, PanelRight, PanelLeft, Paperclip, Files, X, Trash2, ChevronDown, ChevronRight } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ApprovalCard } from "./ApprovalDialog"
 import { ExecutionContextPanel } from "./ExecutionContextPanel"
@@ -18,6 +18,7 @@ interface ChatProps {
 type ChatFeedItem =
   | { kind: "message"; id: string; timestamp: string; message: Message; sessionSeq?: number }
   | { kind: "event"; id: string; timestamp: string; entry: ExecutionTimelineEntry; sessionSeq?: number }
+  | { kind: "run_header"; id: string; timestamp: string; runId: string; sessionSeq?: number }
 
 function isSupportedAttachment(file: File, supportedTypes: SupportedAttachmentTypes): boolean {
   const filename = file.name.toLowerCase()
@@ -27,7 +28,6 @@ function isSupportedAttachment(file: File, supportedTypes: SupportedAttachmentTy
 function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
   const {
     messages,
-    steps,
     orchestrationTasks,
     orchestrationPlans,
     activeSessionId,
@@ -46,6 +46,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
     clearOrchestrationPlans,
     clearApprovals,
     executionTimeline,
+    runTimelineEvents,
     setAgentStatus,
     clearThinking,
     setError,
@@ -60,6 +61,8 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
   const [isSending, setIsSending] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [showActivity, setShowActivity] = useState(false)
+  const [collapsedRunIds, setCollapsedRunIds] = useState<Set<string>>(() => new Set())
+  const [activityNow, setActivityNow] = useState(Date.now())
   const [showFiles, setShowFiles] = useState(false)
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([])
   const [isUploading, setIsUploading] = useState(false)
@@ -466,39 +469,49 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
     agentStatus === "cancelling" ||
     agentStatus === "waiting_approval"
 
-  // 只有存在助手答复且 Agent 已回到空闲状态时，才认为本次会话已完成。
-  const isConversationCompleted =
-    agentStatus !== "paused" &&
-    !["run.paused", "run.cancelled", "run.failed", "run.budget_exceeded"].includes(
-      [...executionTimeline].reverse().find((entry) => entry.event_type.startsWith("run."))?.event_type || "",
-    ) &&
-    !isAgentActive &&
-    !thinking?.active &&
-    messages.some((m) => m.role === "assistant")
-
-  // 会话完成总结（原 EXECUTION TRACE 的聚合信息）
-  const failedStepCount = steps.filter((s) => s.status === "failed").length
+  useEffect(() => {
+    if (!isAgentActive) return
+    const timer = window.setInterval(() => setActivityNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [isAgentActive])
 
   const orderedMessages = [...messages].sort((left, right) => {
     const delta = Date.parse(left.timestamp) - Date.parse(right.timestamp)
     return Number.isNaN(delta) || delta === 0 ? left.id.localeCompare(right.id) : delta
   })
 
-  // 计算当前消息集合覆盖的会话时间范围。
-  const conversationTime = (() => {
-    if (orderedMessages.length === 0) return null
-    const first = orderedMessages[0]
-    const last = orderedMessages[orderedMessages.length - 1]
-    const start = formatTime(first.timestamp)
-    if (isConversationCompleted && first.timestamp !== last.timestamp) {
-      const end = formatTime(last.timestamp)
-      const startMs = new Date(first.timestamp).getTime()
-      const endMs = new Date(last.timestamp).getTime()
-      const diffMin = Math.round((endMs - startMs) / 60000)
-      return { start, end, duration: diffMin > 0 ? `${diffMin} min` : null }
+  const runStartById = new Map<string, { timestamp: string; sessionSeq?: number }>()
+  const runTerminalById = new Map<string, { eventType: string; timestamp: string }>()
+  for (const event of runTimelineEvents) {
+    if (!event.run_id) continue
+    if (event.event_type === "run.started" || event.event_type === "run.resumed") {
+      if (!runStartById.has(event.run_id) || event.event_type === "run.started") {
+        runStartById.set(event.run_id, { timestamp: typeof event.payload.started_at === "string" ? event.payload.started_at : event.occurred_at, sessionSeq: event.session_seq })
+      }
+      if (event.event_type === "run.resumed") runTerminalById.delete(event.run_id)
     }
-    return { start, end: null, duration: null }
-  })()
+    if (["run.completed", "run.failed", "run.cancelled", "run.paused", "run.budget_exceeded"].includes(event.event_type)) {
+      runTerminalById.set(event.run_id, { eventType: event.event_type, timestamp: event.occurred_at })
+    }
+  }
+  const activeRunId = [...runTimelineEvents].reverse().find((event) =>
+    event.run_id !== null
+    && (event.event_type === "run.started" || event.event_type === "run.resumed")
+    && !runTerminalById.has(event.run_id),
+  )?.run_id
+  const activeExecutionEntry = activeRunId
+    ? [...executionTimeline].reverse().find((entry) => entry.status === "running" && entry.run_id === activeRunId)
+    : undefined
+  const runIds = new Set([
+    ...runStartById.keys(),
+    ...orderedMessages.map((message) => message.run_id).filter((runId): runId is string => Boolean(runId)),
+    ...executionTimeline.map((entry) => entry.run_id).filter((runId): runId is string => Boolean(runId)),
+  ])
+  const runHeaders: ChatFeedItem[] = [...runIds].flatMap((runId) => {
+    const started = runStartById.get(runId)
+    if (!started) return []
+    return [{ kind: "run_header", id: `run-header:${runId}`, timestamp: started.timestamp, runId, sessionSeq: started.sessionSeq }]
+  })
 
   const timelineFeed: ChatFeedItem[] = [
     ...orderedMessages.map((message) => ({
@@ -515,6 +528,7 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
       entry,
       sessionSeq: entry.session_seq,
     })),
+    ...runHeaders,
   ].sort((left, right) => {
     const delta = Date.parse(left.timestamp) - Date.parse(right.timestamp)
     if (!Number.isNaN(delta) && delta !== 0) return delta
@@ -584,39 +598,11 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
             </div>
           )}
 
-          {/* 会话摘要标题 */}
-          {!isLoadingHistory && messages.length > 0 && conversationTime && (
-            <div className="flex justify-center py-1 mb-4">
-              <div className="conversation-header-pill bg-white text-black border border-athena-border">
-                {isConversationCompleted ? (
-                  <CheckCircle className="w-3 h-3 text-athena-success" />
-                ) : (
-                  <Clock className="w-3 h-3 text-athena-accent" />
-                )}
-                <span>
-                  {isConversationCompleted ? "对话已完成" : "对话进行中"}
-                </span>
-                <span>·</span>
-                <span>
-                  {conversationTime.end
-                    ? `${conversationTime.start} — ${conversationTime.end}`
-                    : conversationTime.start}
-                </span>
-                {conversationTime.duration && (
-                  <>
-                    <span>·</span>
-                    <span>{conversationTime.duration}</span>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-
           {/* 消息与执行事件进入同一时间排序的聊天流。 */}
           {!isLoadingHistory && (messages.length > 0 || executionTimeline.length > 0) && (
             <>
-              {timelineFeed.map((item, index) => {
-                const previous = timelineFeed[index - 1]
+              {timelineFeed.filter((item) => item.kind !== "event" || !item.entry.run_id || !collapsedRunIds.has(item.entry.run_id)).map((item, index, visibleFeed) => {
+                const previous = visibleFeed[index - 1]
                 const showDateDivider = !previous
                   || dateKey(item.timestamp) !== dateKey(previous.timestamp)
                 return (
@@ -630,35 +616,40 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
                     )}
                     {item.kind === "message"
                       ? <MessageBubble message={item.message} isStreaming={item.message.stream_status === "streaming"} />
-                      : <ExecutionTimeline entries={[item.entry]} compact />}
+                      : item.kind === "event"
+                        ? <ExecutionTimeline entries={[item.entry]} compact />
+                        : <RunActivityHeader
+                            runId={item.runId}
+                            startedAt={item.timestamp}
+                            endedAt={runTerminalById.get(item.runId)?.timestamp}
+                            active={isAgentActive && activeRunId === item.runId}
+                            activeLabel={executionTimeline.find((entry) => entry.run_id === item.runId && entry.status === "running")?.label}
+                            failed={runTerminalById.get(item.runId)?.eventType === "run.failed" || runTerminalById.get(item.runId)?.eventType === "run.budget_exceeded"}
+                            collapsed={collapsedRunIds.has(item.runId)}
+                            onToggle={() => setCollapsedRunIds((current) => {
+                              const next = new Set(current)
+                              if (next.has(item.runId)) next.delete(item.runId)
+                              else next.add(item.runId)
+                              return next
+                            })}
+                            now={activityNow}
+                          />}
                   </div>
                 )
               })}
-              {isAgentActive && (
+              {isAgentActive && !activeExecutionEntry && (
                 <div className="processing-group py-3">
                   <div className="timeline-node thinking-node">
                     <div className="flex items-center gap-3 text-sm text-athena-muted">
                       {agentStatus === "cancelling"
                         ? <Clock className="h-4 w-4 text-athena-muted" />
                         : <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />}
-                      {agentStatus === "cancelling" ? "正在停止任务" : "正在处理你的请求"}
+                      {agentStatus === "cancelling" ? "正在停止任务" : agentStatus === "waiting_approval" ? "等待你的确认" : "正在准备下一步操作"}
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* 会话完成总结 — 原 EXECUTION TRACE 列表移入右侧 Activity 面板，
-                  聊天流仅保留一行聚合信息，避免随任务增长而冗长 */}
-              {isConversationCompleted && steps.length > 0 && (
-                <div className="flex justify-center pt-3">
-                  <span className="text-xs text-athena-muted flex items-center gap-1.5">
-                    <CheckCircle className="w-3.5 h-3.5 text-athena-success" />
-                    对话已完成 · 共 {steps.length} 个步骤
-                    · 用时 {formatTotalDuration(steps)}
-                    {failedStepCount > 0 && <> · {failedStepCount} 项未成功</>}
-                  </span>
-                </div>
-              )}
             </>
           )}
 
@@ -852,16 +843,41 @@ function Chat({ sendEvent, onOpenSessions, demoMode = false }: ChatProps) {
 
 export default Chat
 
-function formatTime(isoString: string): string {
-  try {
-    const date = new Date(isoString)
-    return date.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    })
-  } catch {
-    return ""
-  }
+function RunActivityHeader({
+  startedAt,
+  endedAt,
+  active,
+  activeLabel,
+  failed,
+  collapsed,
+  onToggle,
+  now,
+}: {
+  runId: string
+  startedAt: string
+  endedAt?: string
+  active: boolean
+  activeLabel?: string
+  failed: boolean
+  collapsed: boolean
+  onToggle: () => void
+  now: number
+}) {
+  const start = Date.parse(startedAt)
+  const end = endedAt ? Date.parse(endedAt) : now
+  const duration = Number.isFinite(start) && Number.isFinite(end) ? formatRunDuration(Math.max(0, end - start)) : ""
+  const label = active
+    ? `${activeLabel || "正在处理请求"}${duration ? ` · 已用 ${duration}` : ""}`
+    : `${failed ? "任务未能完成" : "用时"}${duration ? ` ${duration}` : ""}`
+  return (
+    <div className="my-3 border-y border-athena-border/70 py-2">
+      <button type="button" onClick={onToggle} aria-expanded={!collapsed} className="flex w-full items-center gap-2 text-left text-sm font-medium text-athena-muted">
+        {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        <span className="flex-1">{label}</span>
+        {active && <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />}
+      </button>
+    </div>
+  )
 }
 
 /** 日期键（用于跨天判断），形如 "2026-8-12". */
@@ -889,12 +905,10 @@ function formatDateLabel(isoString: string): string {
   }
 }
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  return `${(ms / 1000).toFixed(1)}s`
-}
-
-function formatTotalDuration(steps: { duration_ms: number }[]): string {
-  const total = steps.reduce((sum, s) => sum + (s.duration_ms || 0), 0)
-  return formatDuration(total)
+function formatRunDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes === 0) return `${seconds} 秒`
+  return `${minutes} 分钟 ${seconds} 秒`
 }

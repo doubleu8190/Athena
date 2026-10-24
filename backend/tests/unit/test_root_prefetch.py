@@ -51,7 +51,7 @@ async def test_prefetch_hit_reaches_first_decision_and_answer_without_directed_l
     assert result["status"] == "completed"
     assert len(calls) == len(agent.inputs) == 1
     assert calls[0].memory_query == "你知道我喜欢吃什么水果吗？"
-    assert calls[0].provider_timeout_seconds == 3.0
+    assert calls[0].provider_timeout_seconds == 10.0
     assert agent.inputs[0].remaining_turns == 1
     assert agent.inputs[0].context_items[0].source_id == "old-memory"
     assert deps.answer_generation.inputs[0].context_items == agent.inputs[0].context_items
@@ -78,7 +78,7 @@ async def test_prefetch_miss_allows_rewritten_lookup_and_retains_both_stages() -
     result = await invoke_root_graph(_build_graph(deps), session_id="new-session", run_id="two-stages",
                                      message_id="question", user_message="你知道我喜欢吃什么水果吗？")
     assert result["status"] == "completed"
-    assert [plan.provider_timeout_seconds for plan in calls] == [3.0, None]
+    assert [plan.provider_timeout_seconds for plan in calls] == [10.0, None]
     outcomes = [outcome for outcome in agent.inputs[1].context_queries if outcome.query.provider == "memory"]
     assert [(outcome.stage, outcome.status) for outcome in outcomes] == [("prefetch", "empty"), ("directed", "succeeded")]
     assert agent.inputs[1].context_items[0].content == "喜欢吃苹果"

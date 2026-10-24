@@ -228,8 +228,8 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (persistedMessageId && data.role === "user") {
             const persistedTimestamp = String(data.timestamp || occurredAt)
             const existing = useChatStore.getState().messages.find((item) => item.id === persistedMessageId)
-            if (existing && existing.timestamp !== persistedTimestamp) {
-              updateMessage(persistedMessageId, { timestamp: persistedTimestamp })
+            if (existing && (existing.timestamp !== persistedTimestamp || existing.run_id !== runId || existing.session_seq !== sequence)) {
+              updateMessage(persistedMessageId, { timestamp: persistedTimestamp, run_id: runId || undefined, session_seq: sequence })
             }
           }
           if (Array.isArray(data.attachment_ids) && data.attachment_ids.length > 0) {
@@ -541,6 +541,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     const eventNames = [
       "run.started", "run.resumed", "run.paused", "run.cancelling", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded", "run.root_suspended",
       "node.started", "node.completed", "node.failed",
+      "retrieval.started", "retrieval.completed", "retrieval.failed",
+      "retrieval.provider.started", "retrieval.provider.completed", "retrieval.provider.failed",
+      "retrieval.selection.completed",
       "llm.started", "llm.completed", "tool.started", "tool.completed",
       "approval.required", "approval.resolved",
       "message.started", "message.persisted", "message.completed", "message.delta", "stream.snapshot",
@@ -614,7 +617,11 @@ interface TimelineEventInput {
 
 function projectTimelineEvent({ type, data, envelope, runId, timestamp }: TimelineEventInput): ExecutionTimelineEntry | null {
   const id = (suffix: string) => envelope.transition_id || `${suffix}:${envelope.session_seq ?? crypto.randomUUID()}`
-  const error = text(data.error) || text((data.error_detail as Record<string, unknown> | undefined)?.message)
+  const errorValue = data.error
+  const error = text(errorValue)
+    || text((errorValue as Record<string, unknown> | undefined)?.message)
+    || text((errorValue as Record<string, unknown> | undefined)?.code)
+    || text((data.error_detail as Record<string, unknown> | undefined)?.message)
   const detail = error || undefined
   const base = (entry: Omit<ExecutionTimelineEntry, "id" | "timestamp" | "run_id" | "event_type" | "session_seq"> & { id?: string }): ExecutionTimelineEntry => ({
     id: entry.id || id(type),
@@ -625,9 +632,85 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
     ...entry,
   })
 
-  // Internal model/node lifecycle events have no user-actionable detail.
-  // Showing each one as a timeline row produces repetitive, misleading steps.
-  if (type.startsWith("thinking.") || type.startsWith("node.")) return null
+  if (type.startsWith("thinking.")) return null
+
+  if (type.startsWith("node.")) {
+    const node = text(data.node || data.name)
+    const label = nodeProgressLabel(node)
+    if (!label) return null
+    const status = type === "node.started" ? "running" : type === "node.failed" ? "failed" : "completed"
+    const method = nodeProgressDetail(node)
+    const nodeSummary = text(data.summary)
+    const nodeDetail = status === "running"
+      ? method
+      : [method, status === "failed" ? error : nodeSummary ? `实际结果：${nodeSummary}` : ""].filter(Boolean).join("\n")
+    return base({
+      id: `progress:${text(data.activity_id) || `${runId}:${node}`}`,
+      label: status === "running" ? label : status === "failed" ? `${label}未能完成` : `${label.replace(/^正在/, "")}已完成`,
+      detail: nodeDetail || undefined,
+      status,
+      metadata: { node, duration_ms: number(data.duration_ms) },
+    })
+  }
+
+  if (type === "retrieval.started" || type === "retrieval.completed" || type === "retrieval.failed") {
+    const stage = text(data.stage)
+    const status = type === "retrieval.started" ? "running" : type === "retrieval.failed" ? "failed" : "completed"
+    const label = stage === "prefetch" ? "预检索相关资料" : "按需检索相关资料"
+    const detail = status === "running"
+      ? "正在查询本次请求可用的记忆、知识库或附件。"
+      : status === "failed"
+        ? error || "资料检索未能完成。"
+        : `检索结束：${number(data.candidate_count) ?? 0} 个候选，${number(data.bundle_count) ?? 0} 条资料进入上下文。`
+    return base({ id: `retrieval:${text(data.activity_id) || runId}`, label: status === "running" ? `正在${label}` : status === "failed" ? `${label}失败` : `${label}完成`, detail, status, metadata: { stage, provider: text(data.provider), candidate_count: number(data.candidate_count), bundle_count: number(data.bundle_count) } })
+  }
+
+  if (type.startsWith("retrieval.provider.")) {
+    const provider = text(data.provider || data.name)
+    const providerName = retrievalProviderLabel(provider)
+    const statusValue = text(data.status)
+    const status = type.endsWith(".started") || statusValue === "running"
+      ? "running"
+      : statusValue === "failed" || statusValue === "timeout" || type.endsWith(".failed")
+        ? "failed"
+        : statusValue === "skipped" || statusValue === "empty"
+          ? "info"
+          : "completed"
+    const query = text(data.query)
+    const sourceTitles = stringArray(data.source_titles) || []
+    const detail = status === "running"
+      ? [query ? `查询：${query}` : "正在执行检索。", data.resource_scope ? `范围：${JSON.stringify(data.resource_scope)}` : ""].filter(Boolean).join("\n")
+      : status === "failed"
+        ? [
+            query ? `查询：${query}` : "",
+            data.resource_scope ? `范围：${JSON.stringify(data.resource_scope)}` : "",
+            error || (statusValue === "timeout" ? "检索超时。" : "检索未能完成。"),
+          ].filter(Boolean).join("\n")
+        : statusValue === "skipped"
+          ? [
+              query ? `原定查询：${query}` : "",
+              error === "no_knowledge_bases_available" || error === "no_ready_knowledge_bases"
+                ? "当前没有已就绪的知识库，因此跳过检索。"
+                : error === "context_provider_unavailable" || error === "provider unavailable"
+                  ? "当前环境未启用此检索通道，因此跳过检索。"
+                  : error ? `检索已跳过：${error}` : "本轮未调用此检索通道。",
+            ].filter(Boolean).join("\n")
+          : statusValue === "empty"
+            ? "没有找到相关结果。"
+            : [query ? `查询：${query}` : "", `返回 ${number(data.result_count) ?? 0} 条结果，耗时 ${number(data.duration_ms) ?? 0} ms。`, sourceTitles.length ? `命中资料：${sourceTitles.join("、")}` : ""].filter(Boolean).join("\n")
+    return base({
+      id: `retrieval-provider:${text(data.activity_id) || `${runId}:${provider}`}`,
+      label: status === "running" ? `正在查找${providerName}` : status === "failed" ? `${providerName}检索失败` : statusValue === "skipped" ? `未查询${providerName}` : `${providerName}检索完成`,
+      detail,
+      status,
+      metadata: { provider, stage: text(data.stage), query: query || undefined, resource_scope: data.resource_scope, result_count: number(data.result_count), candidate_count: number(data.candidate_count), duration_ms: number(data.duration_ms), source_titles: sourceTitles },
+    })
+  }
+
+  if (type === "retrieval.selection.completed") {
+    const count = number(data.context_count) ?? 0
+    return base({ id: `retrieval-selection:${text(data.activity_id) || runId}`, label: `已选择 ${count} 条资料用于回答`, detail: text(data.trace_status) === "complete" ? "资料选择记录已保存。" : "资料选择记录尚未完整保存。", status: text(data.trace_status) === "complete" ? "completed" : "info", metadata: { stage: text(data.stage), context_count: count } })
+  }
 
   if (type === "run.started" || type === "run.resumed") return null
   if (type === "run.completed") return null
@@ -641,22 +724,25 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
 
   if (type === "tool.started") {
     const toolName = text(data.tool_name)
+    const argsSummary = (data.arguments_summary as Record<string, unknown> | undefined) || {}
+    const subject = text(argsSummary.filename || argsSummary.file_name || argsSummary.path || argsSummary.file_path || argsSummary.title || argsSummary.query || argsSummary.url || argsSummary.command)
     return base({
       id: `tool:${text(data.tool_call_id)}:started`,
-      label: toolActionLabel(toolName, "started"),
+      label: subject ? `${toolActionLabel(toolName, "started")}：${subject}` : toolActionLabel(toolName, "started"),
+      detail: Object.entries(argsSummary).map(([key, value]) => `${key}：${String(value)}`).join("\n") || undefined,
       status: "info",
-      metadata: { ...(toolName ? { tool_name: toolName } : {}), ...(data.arguments ? { arguments: data.arguments } : {}) },
+      metadata: { ...(toolName ? { tool_name: toolName } : {}), ...(Object.keys(argsSummary).length ? { arguments_summary: argsSummary } : {}) },
     })
   }
   if (type === "tool.completed") {
     const toolName = text(data.tool_name)
-    const failed = Boolean(error) || data.status === "failed"
+    const failed = Boolean(error) || ["failed", "denied", "timeout", "cancelled"].includes(text(data.status))
     return base({
       id: `tool:${text(data.tool_call_id)}:completed`,
       label: toolActionLabel(toolName, failed ? "failed" : "completed"),
-      detail: error || undefined,
+      detail: error || `工具已返回结果${number(data.duration_ms) != null ? `，耗时 ${number(data.duration_ms)} ms` : ""}${number(data.output_length) != null ? `，结果约 ${number(data.output_length)} 个字符` : ""}。`,
       status: failed ? "failed" : "completed",
-      metadata: { ...(toolName ? { tool_name: toolName } : {}), ...(data.output != null ? { output: data.output } : {}) },
+      metadata: { ...(toolName ? { tool_name: toolName } : {}), ...(number(data.duration_ms) != null ? { duration_ms: number(data.duration_ms) } : {}), ...(number(data.output_length) != null ? { output_length: number(data.output_length) } : {}), ...(text(data.output_preview) ? { output_preview: text(data.output_preview) } : {}) },
     })
   }
 
@@ -702,7 +788,34 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
       },
     })
   }
-  if (type.startsWith("task.")) return null
+  if (type.startsWith("task.")) {
+    const taskId = text(data.task_id)
+    if (!taskId) return null
+    const title = text(data.title || data.objective) || "执行任务"
+    const status = type === "task.started" ? "running"
+      : type === "task.waiting_approval" ? "waiting"
+        : type === "task.failed" ? "failed"
+          : type === "task.cancelled" ? "cancelled"
+            : type === "task.completed" ? "completed" : "info"
+    const statusCopy: Record<string, string> = {
+      "task.queued": "已加入执行计划",
+      "task.started": `正在执行：${title}`,
+      "task.retrying": `准备重试：${title}`,
+      "task.waiting_approval": `等待确认：${title}`,
+      "task.completed": `已完成：${title}`,
+      "task.failed": `未能完成：${title}`,
+      "task.cancelled": `已取消：${title}`,
+    }
+    const result = summarizeResult(data.result ?? data.output)
+    const taskError = text(data.error) || text((data.error as Record<string, unknown> | undefined)?.message)
+    return base({
+      id: `task:${text(data.plan_id)}:${taskId}`,
+      label: statusCopy[type] || title,
+      detail: taskError || result || text(data.objective) || undefined,
+      status,
+      metadata: { task_id: taskId, plan_id: text(data.plan_id), worker_type: text(data.worker_type), attempt: number(data.attempt) },
+    })
+  }
   if (type.startsWith("synthesis.")) return base({ id: `synthesis:${text(data.plan_id)}`, label: type === "synthesis.started" ? "正在汇总处理结果" : "处理结果已汇总", status: type === "synthesis.started" ? "running" : "completed" })
 
   if (type === "agent.waiting_for_files") return base({ id: `files:${runId}`, label: "等待文件处理完成后继续", status: "waiting" })
@@ -725,6 +838,49 @@ function number(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value)
   return undefined
+}
+
+function nodeProgressLabel(node: string): string | null {
+  const labels: Record<string, string> = {
+    prepare_request: "正在整理请求",
+    prefetch_context: "正在预检索相关资料",
+    decide_root_action: "正在判断处理方式",
+    acquire_context: "正在查找相关资料",
+    redecide_root_action: "正在依据资料确认处理方式",
+    generate_plan: "正在制定执行计划",
+    materialize_execution_plan: "正在安排执行任务",
+    build_plan_response: "正在整理任务结果",
+    generate_answer: "正在组织回答",
+    assemble_final_response: "正在完成本次请求",
+  }
+  return labels[node] || null
+}
+
+function nodeProgressDetail(node: string): string {
+  const details: Record<string, string> = {
+    prepare_request: "核对本轮消息、关联附件和可用资源。",
+    prefetch_context: "用原始问题并行查询长期记忆与已就绪知识库。",
+    decide_root_action: "根据用户目标、现有资料和可用工具选择处理路径。",
+    acquire_context: "按 Root 提交的查询和资源范围获取资料。",
+    redecide_root_action: "结合刚获取的资料重新判断下一步处理方式。",
+    generate_plan: "根据目标与资料生成可执行的任务草稿。",
+    materialize_execution_plan: "校验任务依赖和工具范围，再提交执行计划。",
+    build_plan_response: "整理已完成任务的结果，准备生成最终答复。",
+    generate_answer: "根据本轮资料和执行结果生成最终答复。",
+    assemble_final_response: "核对本轮最终状态并完成响应。",
+  }
+  return details[node] || "正在执行当前处理阶段。"
+}
+
+function retrievalProviderLabel(provider: string): string {
+  const labels: Record<string, string> = {
+    memory: "长期记忆",
+    knowledge: "知识库",
+    file: "当前附件",
+    graph: "关联资料",
+    conversation: "对话历史",
+  }
+  return labels[provider] || provider || "资料"
 }
 
 function stringArray(value: unknown): string[] | undefined {

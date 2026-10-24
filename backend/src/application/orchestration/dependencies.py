@@ -28,7 +28,7 @@ class RootWorkflowDependencies:
     tool_service: ToolService
     available_context_providers: tuple[str, ...] = ()
     root_max_turns: int = 4
-    context_prefetch_timeout_seconds: float = 3.0
+    context_prefetch_timeout_seconds: float = 10.0
     review_context_repository: ReviewContextRepository | None = None
     orchestration_command_handler: RootPlanCommandPort | None = None
     plan_loader: PlanLoader | None = None

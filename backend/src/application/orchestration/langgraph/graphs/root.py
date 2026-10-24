@@ -33,6 +33,7 @@ async def _publish(
     started_at: datetime | None = None,
     duration_ms: int | None = None,
     error: str | None = None,
+    summary: str | None = None,
 ) -> None:
     request = state.get("request", {})
     try:
@@ -59,6 +60,7 @@ async def _publish(
                     **({"started_at": started_at.isoformat()} if started_at else {}),
                     **({"completed_at": datetime.now(timezone.utc).isoformat(), "duration_ms": duration_ms} if duration_ms is not None else {}),
                     **({"error": {"code": "node_failed", "message": error, "stage": node_name}} if error else {}),
+                    **({"summary": summary[:500]} if summary else {}),
                 },
             ),
         )
@@ -117,11 +119,71 @@ def _node(
             invocation_id=invocation_id,
             started_at=started_at,
             duration_ms=int((perf_counter() - started_clock) * 1000),
+            summary=_node_result_summary(name, value),
         )
         return value or {}
 
     wrapped.__name__ = name
     return wrapped
+
+
+def _node_result_summary(node_name: str, value: Any) -> str | None:
+    """从节点返回值中提取适合展示的结果概述，不包含原文或模型推理。"""
+    if not isinstance(value, Mapping):
+        return None
+
+    if node_name == "prepare_request":
+        request = value.get("request", {})
+        attachments = request.get("attachment_ids", []) if isinstance(request, Mapping) else []
+        knowledge_bases = value.get("knowledge_bases", [])
+        return (
+            f"请求上下文已准备；附件 {len(attachments) if isinstance(attachments, list) else 0} 个，"
+            f"可用知识库 {len(knowledge_bases) if isinstance(knowledge_bases, list) else 0} 个。"
+        )
+
+    if node_name in {"prefetch_context", "acquire_context"}:
+        bundle = value.get("context_bundle", {})
+        items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
+        outcomes = value.get("context_queries", [])
+        count = len(items) if isinstance(items, list) else 0
+        outcome_count = len(outcomes) if isinstance(outcomes, list) else 0
+        return f"资料窗口包含 {count} 条资料；记录了 {outcome_count} 项查询结果。"
+
+    if node_name in {"decide_root_action", "redecide_root_action"}:
+        decision = value.get("root_decision", {})
+        action = decision.get("action") if isinstance(decision, Mapping) else None
+        action_labels = {"answer": "直接回答", "context": "继续查询资料", "plan": "制定执行计划"}
+        if action in action_labels:
+            return f"处理方式已确定：{action_labels[action]}。"
+        return "本阶段结束，流程将按当前状态继续。"
+
+    if node_name == "generate_plan":
+        draft = value.get("plan_draft")
+        if isinstance(draft, Mapping):
+            tasks = draft.get("tasks", [])
+            if isinstance(tasks, list):
+                return f"已生成计划草稿，包含 {len(tasks)} 项任务。"
+        feedback = value.get("planning_feedback")
+        if isinstance(feedback, Mapping):
+            missing = feedback.get("missing_information", [])
+            count = len(missing) if isinstance(missing, list) else 0
+            return f"计划需要补充信息，共 {count} 项。"
+        return None
+
+    if node_name == "materialize_execution_plan":
+        plan = value.get("plan", {})
+        tasks = plan.get("tasks", []) if isinstance(plan, Mapping) else []
+        count = len(tasks) if isinstance(tasks, list) else 0
+        return f"执行计划已提交，包含 {count} 项任务。"
+
+    if node_name == "generate_answer":
+        return "最终回答已生成，正文见下方消息。"
+
+    if node_name == "assemble_final_response":
+        status = value.get("status")
+        return "请求处理完成。" if status == "completed" else "请求处理未完成。"
+
+    return None
 
 
 def _route_after_request(state: RootGraphState) -> str:

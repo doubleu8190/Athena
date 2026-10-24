@@ -1,4 +1,4 @@
-import { Bot, User, Wrench, Clock, Paperclip } from "lucide-react"
+import { Clock, Paperclip } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import type { Message, ToolCallInvocation } from "../types"
 import { ToolResultCard } from "./ToolResultCard"
@@ -21,10 +21,8 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const hasText = !!message.content.trim()
   const hasToolCalls = (message.tool_calls?.length ?? 0) > 0
 
-  // 无内容且无工具调用的消息不渲染（空气泡）；
-  // 纯工具调用回合（content 为空但 tool_calls 有值）需要展示工具卡片。
-  const streamIsActive = message.stream_status === "streaming" || message.stream_status === "finalizing"
-  if (!isUser && !isTool && !isSystem && !hasText && !hasToolCalls && !streamIsActive) {
+  // 纯工具调用回合没有正文时只展示工具记录，不创建空助手气泡。
+  if (!isUser && !isTool && !isSystem && !hasText && !hasToolCalls) {
     return null
   }
 
@@ -51,33 +49,9 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   }
 
   return (
-    <div
-      className={`chat-message flex gap-3 ${
-        isUser ? "flex-row-reverse" : "flex-row"
-      } animate-fade-in`}
-    >
-      {/* 角色图标 */}
+    <div className={`chat-message flex animate-fade-in ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-          isUser
-            ? "bg-athena-accent text-white"
-            : isTool
-              ? "bg-yellow-500/20 text-yellow-400"
-              : "bg-athena-surface text-athena-accent border border-athena-border"
-        }`}
-      >
-        {isUser ? (
-          <User className="w-4 h-4" />
-        ) : isTool ? (
-          <Wrench className="w-4 h-4" />
-        ) : (
-          <Bot className="w-4 h-4" />
-        )}
-      </div>
-
-      {/* 消息内容 */}
-      <div
-        className={`flex flex-col gap-2 max-w-[85%] ${
+        className={`flex flex-col gap-2 max-w-[88%] ${
           isUser ? "items-end" : "items-start"
         }`}
       >
@@ -113,12 +87,12 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         )}
 
         {/* 消息气泡：助手纯工具回合无文本时不渲染空气泡 */}
-        {(isUser || isSystem || (!isTool && (hasText || streamIsActive))) && (
+        {(isUser || isSystem || (!isTool && hasText)) && (
           <div
           className={`chat-message-bubble rounded-2xl px-4 py-3 ${
               isUser
                 ? "bg-athena-accent text-white rounded-tr-sm"
-                : "bg-athena-surface border border-athena-border rounded-tl-sm"
+                : "bg-transparent px-0 py-1"
             }`}
           >
             <div
@@ -126,7 +100,7 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 isStreaming ? "typing-cursor" : ""
               }`}
             >
-              {hasText ? <MarkdownContent content={message.content} /> : <span className="text-athena-muted">{message.stream_status === "finalizing" ? "正在确认最终答复…" : "正在生成…"}</span>}
+              <MarkdownContent content={message.content} />
             </div>
           </div>
         )}

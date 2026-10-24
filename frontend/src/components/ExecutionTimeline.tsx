@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Clock,
   FileText,
+  Database,
   Loader2,
   MessageSquareText,
   ShieldCheck,
@@ -87,9 +88,24 @@ function TimelineEntryRow({ entry, compact = false }: { entry: ExecutionTimeline
             <Clock className="h-3 w-3" />
             {formatTime(entry.timestamp)}
           </div>
-          {isExpanded && entry.detail && (
-            <div className="mt-2 whitespace-pre-wrap break-words rounded-md bg-athena-bg px-3 py-2 text-xs text-athena-text/80">
+          {(compact || isExpanded) && entry.detail && (
+            <div className="mt-2 whitespace-pre-wrap break-words rounded-md bg-athena-bg px-3 py-2 text-xs text-athena-text">
               {entry.detail}
+            </div>
+          )}
+          {compact && !isExpanded && typeof entry.metadata?.output_preview === "string" && (
+            <pre className="mt-2 line-clamp-3 whitespace-pre-wrap break-words rounded-md bg-athena-bg px-3 py-2 text-xs text-athena-muted">{entry.metadata.output_preview}</pre>
+          )}
+          {isExpanded && typeof entry.metadata?.output_preview === "string" && (
+            <div className="mt-2 rounded-md border border-athena-border/60 bg-athena-bg px-3 py-2 text-xs text-athena-text/80">
+              <div className="mb-1 font-medium text-athena-muted">实际返回</div>
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-sans">{entry.metadata.output_preview}</pre>
+            </div>
+          )}
+          {isExpanded && typeof entry.metadata?.arguments_summary === "object" && entry.metadata.arguments_summary !== null && (
+            <div className="mt-2 rounded-md bg-athena-bg px-3 py-2 text-xs text-athena-muted">
+              <span className="font-medium">操作参数：</span>
+              {Object.entries(entry.metadata.arguments_summary as Record<string, unknown>).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}
             </div>
           )}
           {isExpanded && entry.metadata && Object.keys(entry.metadata).length > 0 && (
@@ -113,6 +129,7 @@ function EntryIcon({ entry }: { entry: ExecutionTimelineEntry }) {
   if (entry.status === "completed") return <CheckCircle className="h-4 w-4 text-athena-success" />
   if (entry.status === "paused") return <Clock className="h-4 w-4 text-athena-muted" />
   if (entry.event_type.startsWith("tool.")) return <Wrench className="h-4 w-4 text-yellow-400" />
+  if (entry.event_type.startsWith("retrieval.")) return <Database className="h-4 w-4 text-amber-400" />
   if (entry.event_type.startsWith("approval.")) return <ShieldCheck className="h-4 w-4 text-athena-warning" />
   if (entry.event_type.includes("file") || entry.event_type.includes("attachment")) return <FileText className="h-4 w-4 text-athena-accent" />
   if (entry.event_type.startsWith("subagent") || entry.event_type.startsWith("task.")) return <Bot className="h-4 w-4 text-athena-accent" />

@@ -591,6 +591,7 @@ async def _retrieve_context_batch(
     knowledge_base_ids: tuple[str, ...],
     stage: RetrievalStage,
     provider_timeout_seconds: float | None,
+    skipped_outcomes: tuple[ContextQueryOutcome, ...] = (),
 ) -> tuple[ContextBundle, list[ContextQueryOutcome], ContextPlan | None]:
     """校验资源范围并执行一批已筛选的上下文查询。"""
     try:
@@ -622,6 +623,7 @@ async def _retrieve_context_batch(
         invocation_id=uuid4().hex,
         stage=stage,
         plan=plan,
+        skipped_outcomes=skipped_outcomes,
     )
     return bundle, _context_query_outcomes(queries, bundle, stage), plan
 
@@ -934,10 +936,17 @@ class RootWorkflow(RootWorkflowPort):
                 knowledge_base_ids=knowledge_base_ids,
                 stage=stage,
                 provider_timeout_seconds=provider_timeout_seconds,
+                skipped_outcomes=tuple(outcomes),
             )
             outcomes.extend(query_outcomes)
         else:
             context_plan = None
+            await deps.context_acquisition.publish_skipped_provider_outcomes(
+                tuple(outcomes),
+                session_id=str(request["session_id"]),
+                run_id=str(request["run_id"]),
+                stage=stage,
+            )
 
         previous_bundle = _context_bundle_from_state(
             state.get("context_bundle", {})

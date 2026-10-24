@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 from typing import Any
 
 from application.common.responses import ToolResponse
@@ -113,6 +114,7 @@ class WorkerToolExecutor:
                 tool_call_id=stable_call_id,
                 tool_name=name,
                 operation_key=None,
+                arguments=tool_call.get("arguments", {}),
             )
             result = await self._result_store.read(tool_call, execution)
             result.setdefault("id", stable_call_id)
@@ -124,6 +126,8 @@ class WorkerToolExecutor:
                 operation_key=None,
                 status=str(result.get("status", "failed")),
                 error=result.get("error"),
+                output_length=len(str(result.get("output") or "")),
+                output_preview=_safe_output_preview(result.get("output")),
             )
             return result
         prepared = await self._prepare_tool_call(
@@ -347,6 +351,9 @@ class WorkerToolExecutor:
                     operation_key=prepared.request.operation_key,
                     status=result.status,
                     error=result.error,
+                    duration_ms=result.duration_ms,
+                    output_length=len(result.output or ""),
+                    output_preview=_safe_output_preview(result.output),
                 )
             elif ledger_claim.status == ToolOperationClaimStatus.ACQUIRED:
                 await self._publish_tool_started(
@@ -354,6 +361,7 @@ class WorkerToolExecutor:
                     tool_call_id=prepared.tool_call_id,
                     tool_name=prepared.request.tool_name,
                     operation_key=prepared.request.operation_key,
+                    arguments=prepared.request.arguments,
                 )
                 result = await self._tool_service.execute(prepared.request)
                 if not await self._operation_ledger.complete(
@@ -367,6 +375,9 @@ class WorkerToolExecutor:
                     operation_key=prepared.request.operation_key,
                     status=result.status,
                     error=result.error,
+                    duration_ms=result.duration_ms,
+                    output_length=len(result.output or ""),
+                    output_preview=_safe_output_preview(result.output),
                 )
             elif ledger_claim.status == ToolOperationClaimStatus.IN_PROGRESS:
                 await self._publish_tool_completed(
@@ -399,6 +410,7 @@ class WorkerToolExecutor:
                 tool_call_id=prepared.tool_call_id,
                 tool_name=prepared.request.tool_name,
                 operation_key=prepared.request.operation_key,
+                arguments=prepared.request.arguments,
             )
             result = await self._tool_service.execute(prepared.request)
             await self._publish_tool_completed(
@@ -408,6 +420,9 @@ class WorkerToolExecutor:
                 operation_key=prepared.request.operation_key,
                 status=result.status,
                 error=result.error,
+                duration_ms=result.duration_ms,
+                output_length=len(result.output or ""),
+                output_preview=_safe_output_preview(result.output),
             )
         return result
 
@@ -418,6 +433,7 @@ class WorkerToolExecutor:
         tool_call_id: str,
         tool_name: str,
         operation_key: str | None,
+        arguments: Any = None,
     ) -> None:
         """Publish the durable start fact immediately before a tool operation."""
         await self._publish_tool_lifecycle(
@@ -428,6 +444,7 @@ class WorkerToolExecutor:
             operation_key=operation_key,
             status="running",
             error=None,
+            arguments=arguments,
         )
 
     async def _publish_tool_completed(
@@ -439,9 +456,17 @@ class WorkerToolExecutor:
         operation_key: str | None,
         status: str,
         error: Any,
+        duration_ms: float | None = None,
+        output_length: int | None = None,
+        output_preview: str | None = None,
     ) -> None:
         """Publish a safe, idempotent tool completion fact."""
-        error_code = error.get("code") if isinstance(error, Mapping) else None
+        error_detail = (
+            error.get("code") or error.get("message")
+            if isinstance(error, Mapping)
+            else error if isinstance(error, str) else None
+        )
+        safe_error = _safe_output_preview(error_detail)
         await self._publish_tool_lifecycle(
             EventType.TOOL_COMPLETED,
             execution=execution,
@@ -449,7 +474,10 @@ class WorkerToolExecutor:
             tool_name=tool_name,
             operation_key=operation_key,
             status=status,
-            error=str(error_code) if error_code else None,
+            error=safe_error[:240] if safe_error else None,
+            duration_ms=duration_ms,
+            output_length=output_length,
+            output_preview=output_preview,
         )
 
     async def _publish_tool_lifecycle(
@@ -462,6 +490,10 @@ class WorkerToolExecutor:
         operation_key: str | None,
         status: str,
         error: str | None,
+        arguments: Any = None,
+        duration_ms: float | None = None,
+        output_length: int | None = None,
+        output_preview: str | None = None,
     ) -> None:
         """Store each lifecycle boundary under its own stable transition key."""
         if self._events is None:
@@ -481,6 +513,14 @@ class WorkerToolExecutor:
         }
         if operation_key:
             payload["operation_key"] = operation_key
+        if event_type == EventType.TOOL_STARTED:
+            payload["arguments_summary"] = _safe_argument_summary(arguments)
+        if duration_ms is not None:
+            payload["duration_ms"] = int(duration_ms)
+        if output_length is not None:
+            payload["output_length"] = output_length
+        if output_preview:
+            payload["output_preview"] = output_preview
         if error:
             payload["error"] = {"code": error}
         await self._events.publish(
@@ -583,6 +623,38 @@ def _denied(code: str, *, name: str | None = None) -> dict[str, Any]:
     if name:
         result["name"] = name
     return result
+
+
+def _safe_argument_summary(arguments: Any) -> dict[str, str]:
+    """Expose only a small allowlist of user-recognizable tool inputs."""
+    if not isinstance(arguments, Mapping):
+        return {}
+    allowed = {"query", "filename", "file_name", "path", "file_path", "title", "url", "command"}
+    summary: dict[str, str] = {}
+    for key, value in arguments.items():
+        normalized_key = str(key).lower()
+        if normalized_key not in allowed or not isinstance(value, str) or not value.strip():
+            continue
+        safe_value = _safe_output_preview(value)
+        if safe_value:
+            summary[normalized_key] = safe_value[:240]
+    return summary
+
+
+def _safe_output_preview(output: Any) -> str | None:
+    """Return a short, expandable preview with common credential values masked."""
+    if output is None:
+        return None
+    preview = str(output).strip()[:500]
+    if not preview:
+        return None
+    preview = re.sub(
+        r'''(?i)(["']?(?:api[_-]?key|(?:access|refresh|id|api)?[_-]?token|authorization|password|secret|credential)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}&]+)''',
+        r'\1"[已隐藏]"',
+        preview,
+    )
+    preview = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/-]+", "Bearer [已隐藏]", preview)
+    return preview
 
 
 def _tool_call_id(

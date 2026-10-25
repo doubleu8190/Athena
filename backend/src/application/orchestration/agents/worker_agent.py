@@ -60,14 +60,22 @@ class ConfiguredWorkerAgent:
         manifest = await worker_tool_manifest(self._tool_service)
         allowed_tool_set = set(allowed_tools)
         tool_specs = [
-            item for item in manifest if item["name"] in allowed_tool_set
+            {
+                "name": item.name,
+                "description": item.description,
+                "parameters": item.parameters,
+                "risk_level": item.risk_level,
+                "requires_approval": item.requires_approval,
+            }
+            for item in manifest
+            if item.name in allowed_tool_set
         ]
         logger.debug(
             "worker_tool_capability_snapshot",
             run_id=execution.get("run_id", ""),
             task_id=task.get("task_id", ""),
             allowed_tools=allowed_tools,
-            available_tools=tuple(item["name"] for item in manifest),
+            available_tools=tuple(item.name for item in manifest),
             selected_tools=tuple(item["name"] for item in tool_specs),
         )
         if execution.get("_worker_result_refs"):

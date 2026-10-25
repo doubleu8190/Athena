@@ -27,6 +27,7 @@ from application.runs.context import (
     MemoryQuery,
     ProviderResult,
 )
+from application.runs.request_contracts import RootRequestState
 from application.orchestration.langgraph import build_root_graph, invoke_root_graph
 
 
@@ -49,8 +50,10 @@ class _Agent:
 
 
 class _RequestPreparation:
-    async def prepare(self, *, request):
-        return {"request": {**request, "message_id": request["message_id"] or "message-1"}}
+    async def prepare(self, *, request: RootRequestState) -> RootRequestState:
+        return request.model_copy(
+            update={"message_id": request.message_id or "message-1"}
+        )
 
     async def load_history(self, *, session_id, exclude_message_id):
         return []

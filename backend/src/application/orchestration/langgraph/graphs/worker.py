@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from application.orchestration.protocols import WorkerWorkflowPort
+from domain.orchestration.entities import TaskExecution
 from shared.serialization import json_value
 
 from .state import WorkerGraphState
@@ -82,7 +83,7 @@ async def invoke_worker_graph(
     *,
     task_id: str,
     execution_generation: int,
-    execution: Mapping[str, Any],
+    execution: TaskExecution,
     resume_value: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not task_id:

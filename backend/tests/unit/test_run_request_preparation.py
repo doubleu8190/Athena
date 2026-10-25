@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from application.runs import RunRequestPreparationService
+from application.runs.request_contracts import RootKnowledgeBase, RootRequestState
 from application.sessions import SessionNotFoundError
 from domain.files import Attachment, AttachmentStatus, FileMetadata
 from domain.knowledge import KnowledgeBase
@@ -14,6 +15,10 @@ from domain.sessions import Message, MessageRole, Session
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def request_state(**values: object) -> RootRequestState:
+    return RootRequestState.model_validate(values)
 
 
 class Sessions:
@@ -110,12 +115,12 @@ async def test_prepare_rejects_non_ready_attachment() -> None:
 
     with pytest.raises(ValueError, match="attachment_not_ready"):
         await service.prepare(
-            request={
-                "session_id": "session-1",
-                "run_id": "run-1",
-                "user_message": "use file",
-                "attachment_ids": ["attachment-1"],
-            }
+            request=request_state(
+                session_id="session-1",
+                run_id="run-1",
+                user_message="use file",
+                attachment_ids=["attachment-1"],
+            )
         )
 
 
@@ -127,25 +132,25 @@ async def test_prepare_rejects_attachment_from_another_session() -> None:
 
     with pytest.raises(ValueError, match="attachment_not_found"):
         await service.prepare(
-            request={
-                "session_id": "session-1",
-                "run_id": "run-1",
-                "user_message": "use file",
-                "attachment_ids": ["attachment-1"],
-            }
+            request=request_state(
+                session_id="session-1",
+                run_id="run-1",
+                user_message="use file",
+                attachment_ids=["attachment-1"],
+            )
         )
 
 
 @pytest.mark.asyncio
 async def test_prepare_persists_message_idempotently_and_loads_references() -> None:
     service, messages, _ = make_service()
-    request = {
-        "session_id": "session-1",
-        "run_id": "run-1",
-        "message_id": "message-1",
-        "user_message": "summarize",
-        "attachment_ids": ["attachment-1"],
-    }
+    request = request_state(
+        session_id="session-1",
+        run_id="run-1",
+        message_id="message-1",
+        user_message="summarize",
+        attachment_ids=["attachment-1"],
+    )
 
     first = await service.prepare(request=request)
     second = await service.prepare(request=request)
@@ -153,7 +158,7 @@ async def test_prepare_persists_message_idempotently_and_loads_references() -> N
     assert first == second
     assert len(messages.saved) == 1
     assert messages.saved[0].role is MessageRole.USER
-    assert first["request"]["attachment_refs"][0]["status"] == "ready"
+    assert first.attachment_refs[0].status == "ready"
 
 
 @pytest.mark.asyncio
@@ -190,13 +195,13 @@ async def test_loaders_return_attachment_and_knowledge_metadata() -> None:
         }
     ]
     assert knowledge_bases == [
-        {
-            "id": "kb-1",
-            "name": "Docs",
-            "description": "reference",
-            "document_count": 4,
-            "ready_document_count": 3,
-        }
+        RootKnowledgeBase(
+            id="kb-1",
+            name="Docs",
+            description="reference",
+            document_count=4,
+            ready_document_count=3,
+        )
     ]
 
 
@@ -206,5 +211,5 @@ async def test_prepare_rejects_unknown_session() -> None:
 
     with pytest.raises(SessionNotFoundError):
         await service.prepare(
-            request={"session_id": "missing", "user_message": "hello"}
+            request=request_state(session_id="missing", user_message="hello")
         )

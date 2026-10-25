@@ -15,9 +15,10 @@ from domain.orchestration import (
     ReviewDecision,
     Task,
 )
+from .protocols import RootPlanCommandPort
 
 
-class OrchestrationCommandHandler:
+class OrchestrationCommandHandler(RootPlanCommandPort):
     """提供经过 DAG 校验的 SubmitPlan 用例。"""
 
     def __init__(

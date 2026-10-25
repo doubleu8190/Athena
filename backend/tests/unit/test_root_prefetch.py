@@ -27,9 +27,8 @@ def _request_state(message: str) -> dict:
     return {
         "request": {"session_id": "new-session", "run_id": "prefetch-run",
                     "message_id": "question", "user_message": message,
-                    "history": [], "attachment_refs": []},
+                    "history": [], "attachment_refs": [], "knowledge_bases": []},
         "available_context_providers": ["memory", "knowledge", "graph", "file"],
-        "knowledge_bases": [],
         "root_turn_count": 0,
     }
 
@@ -99,9 +98,10 @@ async def test_prefetch_only_reads_ready_knowledge_bases_and_never_graph_or_file
     deps.context_acquisition = ContextAcquisitionService(
         {"knowledge": _Provider(retrieve)}, _TraceRepository(), _Events()
     )
+    deps.available_context_providers = ("knowledge",)
     state = _request_state("项目说明是什么？")
     state["available_context_providers"] = ["knowledge", "graph", "file"]
-    state["knowledge_bases"] = [
+    state["request"]["knowledge_bases"] = [
         {"id": "ready", "name": "就绪", "document_count": 1, "ready_document_count": 1},
         {"id": "processing", "name": "处理中", "document_count": 1, "ready_document_count": 0},
     ]

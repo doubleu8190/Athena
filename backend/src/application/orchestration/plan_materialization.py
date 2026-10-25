@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from typing import Any
 
+from application.runs.request_contracts import RootRequestState
 from domain.orchestration import Plan, PlanEdge, Task
 from application.orchestration.root_decision import PlanDraft
 
@@ -27,7 +28,7 @@ def plan_dict(plan: Plan, tasks: list[Task]) -> dict[str, Any]:
 
 
 def coerce_plan(
-    draft: PlanDraft, *, request: Mapping[str, Any]
+    draft: PlanDraft, *, request: RootRequestState
 ) -> tuple[Plan, list[Task]]:
     """将契约已验证的草稿转换为领域 Plan 和 Task。
     Args:
@@ -38,23 +39,22 @@ def coerce_plan(
     Raises:
         ValueError: 当前 Run 身份或草稿中的重复任务 ID 无效。
     """
-    run_id = str(request.get("run_id") or "").strip()
+    run_id = request.run_id
     if not run_id:
         raise ValueError("run_id is required for plan materialization")
     task_ids = tuple(task.task_id for task in draft.tasks)
     if len(task_ids) != len(set(task_ids)):
         raise ValueError("root_plan_task_ids_must_be_unique")
-    original_goal = str(request.get("user_message") or "").strip()
     plan = Plan(
         plan_id=f"plan:{run_id}",
-        goal=original_goal or draft.goal,
+        goal=request.user_message or draft.goal,
         task_ids=task_ids,
         edges=tuple(
             PlanEdge(edge.from_task_id, edge.to_task_id)
             for edge in draft.edges
         ),
         max_parallelism=draft.max_parallelism,
-        session_id=str(request.get("session_id") or "") or None,
+        session_id=request.session_id,
         run_id=run_id,
     )
     tasks = [

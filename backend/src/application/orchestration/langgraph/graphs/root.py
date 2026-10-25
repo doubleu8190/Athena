@@ -33,6 +33,7 @@ from .state import RootGraphState
 
 logger = get_logger(__name__)
 
+
 async def _publish(
     dependencies: RootWorkflowDependencies,
     event_type: str,
@@ -68,8 +69,25 @@ async def _publish(
                         "node.failed": "failed",
                     }.get(event_type, "completed"),
                     **({"started_at": started_at.isoformat()} if started_at else {}),
-                    **({"completed_at": datetime.now(timezone.utc).isoformat(), "duration_ms": duration_ms} if duration_ms is not None else {}),
-                    **({"error": {"code": "node_failed", "message": error, "stage": node_name}} if error else {}),
+                    **(
+                        {
+                            "completed_at": datetime.now(timezone.utc).isoformat(),
+                            "duration_ms": duration_ms,
+                        }
+                        if duration_ms is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "error": {
+                                "code": "node_failed",
+                                "message": error,
+                                "stage": node_name,
+                            }
+                        }
+                        if error
+                        else {}
+                    ),
                     **({"summary": summary[:500]} if summary else {}),
                 },
             ),
@@ -144,7 +162,9 @@ def _node_result_summary(node_name: str, value: Any) -> str | None:
 
     if node_name == "prepare_request":
         request = value.get("request", {})
-        attachments = request.get("attachment_ids", []) if isinstance(request, Mapping) else []
+        attachments = (
+            request.get("attachment_ids", []) if isinstance(request, Mapping) else []
+        )
         knowledge_bases = value.get("knowledge_bases", [])
         return (
             f"请求上下文已准备；附件 {len(attachments) if isinstance(attachments, list) else 0} 个，"
@@ -162,7 +182,11 @@ def _node_result_summary(node_name: str, value: Any) -> str | None:
     if node_name in {"decide_root_action", "redecide_root_action"}:
         decision = value.get("root_decision", {})
         action = decision.get("action") if isinstance(decision, Mapping) else None
-        action_labels = {"answer": "直接回答", "context": "继续查询资料", "plan": "制定执行计划"}
+        action_labels = {
+            "answer": "直接回答",
+            "context": "继续查询资料",
+            "plan": "制定执行计划",
+        }
         if action in action_labels:
             return f"处理方式已确定：{action_labels[action]}。"
         return "本阶段结束，流程将按当前状态继续。"
@@ -250,7 +274,7 @@ def _route_after_plan_generation(state: RootGraphState) -> str:
     if state.get("error"):
         return "assemble_final_response"
     if state.get("planning_feedback") is not None:
-        PlanningFeedback.model_validate(state["planning_feedback"])
+        PlanningFeedback.model_validate(state.get("planning_feedback"))
         return "decide_root_action"
     plan_draft = state.get("plan_draft")
     if plan_draft is None:
@@ -331,9 +355,7 @@ def build_root_graph(
         graph.add_node(name, _node(name, handler, dependencies))
     # This node owns LangGraph's interrupt boundary and must not be wrapped by
     # _node, which would catch and turn the interrupt into an application error.
-    graph.add_node(
-        "wait_for_plan_completion", _wait_for_plan_completion_node(workflow)
-    )
+    graph.add_node("wait_for_plan_completion", _wait_for_plan_completion_node(workflow))
     graph.add_edge(START, "prepare_request")
     graph.add_conditional_edges(
         "prepare_request",
@@ -461,7 +483,9 @@ async def invoke_root_graph(
             raise RuntimeError("root_resume_value_type_invalid")
         if resume_value.type != "round_completed":
             raise RuntimeError("root_resume_value_type_invalid")
-        logger.info(f"Resuming root graph for run {run_id} from round {resume_value.round_id}")
+        logger.info(
+            f"Resuming root graph for run {run_id} from round {resume_value.round_id}"
+        )
         result = await graph.ainvoke(
             Command(resume=dict(resume_value.model_dump(mode="json"))),
             config=config,

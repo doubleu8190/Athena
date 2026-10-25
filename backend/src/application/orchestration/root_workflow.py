@@ -14,6 +14,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
+from shared.logging import get_logger
 from domain.orchestration import (
     CommandReceipt,
     OrchestrationCommand,
@@ -32,6 +33,7 @@ from .graph_state import (
     RootWaitIdentity,
 )
 from .root_decision import (
+    ROOT_REDECISION_ADAPTER,
     AnswerIntent,
     ContextRequest,
     PlanDraft,
@@ -79,6 +81,8 @@ from .worker_tools import worker_tool_manifest
 
 if TYPE_CHECKING:
     from .langgraph.graphs.state import RootGraphState
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -693,7 +697,7 @@ class RootWorkflow(RootWorkflowPort):
         request_state = _request_state(state)
         updated_request = await deps.request_preparation.prepare(request=request_state)
 
-        if not request_state.history:
+        if not updated_request.history:
             history = await deps.request_preparation.load_history(
                 session_id=updated_request.session_id,
                 exclude_message_id=updated_request.message_id,
@@ -704,8 +708,12 @@ class RootWorkflow(RootWorkflowPort):
                     "history": history,
                 }
             )
-        request_state.knowledge_bases = (
-            await self.dependencies.request_preparation.load_knowledge_bases()
+        updated_request = updated_request.model_copy(
+            update={
+                "knowledge_bases": (
+                    await deps.request_preparation.load_knowledge_bases()
+                )
+            }
         )
 
         return {
@@ -732,14 +740,26 @@ class RootWorkflow(RootWorkflowPort):
             provider="knowledge", query=query, knowledge_base_ids=ready_ids
         )
         # 未装配通道由共用过滤逻辑记录；已装配但无就绪资料时禁止空范围回退。
+        pre_skipped_outcomes: tuple[ContextQueryOutcome, ...] = ()
         if ready_ids:
             queries.append(knowledge_query)
+        else:
+            pre_skipped_outcomes = (
+                ContextQueryOutcome(
+                    stage="prefetch",
+                    query=knowledge_query,
+                    status="skipped",
+                    result_count=0,
+                    error_message="no_ready_knowledge_bases",
+                ),
+            )
 
         return await self._acquire_context_queries(
             state,
             queries=tuple(queries),
             stage="prefetch",
             provider_timeout_seconds=self.dependencies.context_prefetch_timeout_seconds,
+            pre_skipped_outcomes=pre_skipped_outcomes,
         )
 
     async def decide_root_action(self, state: RootGraphState) -> dict[str, Any]:
@@ -756,7 +776,9 @@ class RootWorkflow(RootWorkflowPort):
         turn_count = state.get("root_turn_count", 0)
         remaining_turns = deps.root_max_turns - turn_count
         if remaining_turns < 1:
+            logger.warning(f"Root 已用完允许的 {deps.root_max_turns} 次决策轮数。")
             return _root_budget_exhausted(turn_count)
+        logger.info(f"Root 决策轮数 {turn_count}，剩余 {remaining_turns} 轮。")
 
         inputs = await self._agent_input(state, remaining_turns=remaining_turns)
         decision = ROOT_DECISION_ADAPTER.validate_python(
@@ -804,12 +826,14 @@ class RootWorkflow(RootWorkflowPort):
         turn_count = int(state.get("root_turn_count", 0))
         remaining_turns = deps.root_max_turns - turn_count
         if remaining_turns < 1:
+            logger.warning(f"Root 已用完允许的 {deps.root_max_turns} 次重新决策轮数。")
             return _root_budget_exhausted(turn_count)
+        logger.info(f"Root 重新决策轮数 {turn_count}，剩余 {remaining_turns} 轮。")
         inputs = await self._agent_input(state, remaining_turns=remaining_turns)
-        decision = await deps.agent.redecide(inputs)
-        from .root_decision import ROOT_REDECISION_ADAPTER
 
-        decision = ROOT_REDECISION_ADAPTER.validate_python(decision)
+        decision = ROOT_REDECISION_ADAPTER.validate_python(
+            await deps.agent.redecide(inputs)
+        )
         next_turn_count = turn_count + 1
         update: dict[str, Any] = {
             "root_decision": as_dict(decision),
@@ -846,7 +870,9 @@ class RootWorkflow(RootWorkflowPort):
             CancelledError: Run 被取消时由采集服务传播。
             ValueError: 图状态中的决策不再是有效 ContextRequest 时。
         """
-        decision = ROOT_DECISION_ADAPTER.validate_python(state.get("root_decision", {}))
+        decision = ROOT_DECISION_ADAPTER.validate_python(
+            state.get("root_decision", {})
+        )
         if not isinstance(decision, ContextRequest):
             raise ValueError("root_context_request_missing")
         return await self._acquire_context_queries(
@@ -860,11 +886,12 @@ class RootWorkflow(RootWorkflowPort):
         queries: tuple[ContextQuery, ...],
         stage: RetrievalStage,
         provider_timeout_seconds: float | None = None,
+        pre_skipped_outcomes: tuple[ContextQueryOutcome, ...] = (),
     ) -> dict[str, Any]:
         """共用两阶段的范围校验、采集、窗口合并与选择确认。
 
         参数：state 提供请求与旧窗口；queries 为具体查询；stage 由程序指定；
-        provider_timeout_seconds 仅在预检索设置；skipped_outcomes 记录已跳过的范围。
+        provider_timeout_seconds 仅在预检索设置；pre_skipped_outcomes 记录无须调用提供方的查询。
         返回：dict，包含新的窗口、累积摘要和规划进展。
         异常：取消时传播 CancelledError；损坏的状态契约向上传播。
         """
@@ -873,11 +900,12 @@ class RootWorkflow(RootWorkflowPort):
 
         attachment_ids = tuple(item.id for item in request_state.attachment_refs)
         knowledge_base_ids = tuple(item.id for item in request_state.knowledge_bases)
-        available_queries, skipped = _filter_context_queries(
+        available_queries, unavailable_outcomes = _filter_context_queries(
             queries,
             self.dependencies.available_context_providers,
             stage,
         )
+        skipped = [*pre_skipped_outcomes, *unavailable_outcomes]
         new_bundle = ContextBundle(items=(), provider_results=())
         if available_queries:
             new_bundle, query_outcomes, context_plan = await _retrieve_context_batch(
@@ -946,19 +974,23 @@ class RootWorkflow(RootWorkflowPort):
         """根据轻量计划意图生成草稿或返回必要信息缺口。"""
         deps = self.dependencies
         request_state = _request_state(state)
-        decision = ROOT_DECISION_ADAPTER.validate_python(state.get("root_decision", {}))
+        decision = ROOT_DECISION_ADAPTER.validate_python(
+            state.get("root_decision", {})
+        )
         if not isinstance(decision, PlanIntent):
             return {"error": {"code": "root_plan_intent_missing"}, "status": "failed"}
         messages = self._conversation_messages(state)
         bundle = _context_bundle_from_state(state.get("context_bundle", {}))
+        worker_tools = await worker_tool_manifest(self.dependencies.tool_service)
+
         plan_input = RootPlanInput(
             session_id=request_state.session_id,
             run_id=request_state.run_id,
             message_id=request_state.message_id,
             messages=messages,
             attachments=request_state.attachment_refs,
-            knowledge_bases=tuple(state.get("knowledge_bases", ())),
-            worker_tools=tuple(state.get("worker_tools", ())),
+            knowledge_bases=request_state.knowledge_bases,
+            worker_tools=worker_tools,
             context_items=bundle.items,
             context_queries=tuple(
                 ContextQueryOutcome.model_validate(item)
@@ -979,6 +1011,9 @@ class RootWorkflow(RootWorkflowPort):
             "plan_draft": result.model_dump(mode="json"),
             "planning_feedback": None,
             "planning_context_updated": False,
+            "worker_tools": [
+                tool.model_dump(mode="json") for tool in worker_tools
+            ],
         }
 
     async def materialize_execution_plan(self, state: RootGraphState) -> dict[str, Any]:
@@ -990,7 +1025,6 @@ class RootWorkflow(RootWorkflowPort):
         """
         deps = self.dependencies
         request_state = _request_state(state)
-        request = request_state.model_dump(mode="python")
         draft_value = state.get("plan_draft")
         if not isinstance(draft_value, Mapping):
             raise ValueError("root_plan_draft_missing")
@@ -1000,8 +1034,8 @@ class RootWorkflow(RootWorkflowPort):
             decision.model_dump(mode="json", exclude_unset=True)
         )
         current_draft = PlanDraft.model_validate(current_values)
-        plan, tasks = coerce_plan(current_draft, request=request)
-        run_id = request_state.run_id.strip()
+        plan, tasks = coerce_plan(current_draft, request=request_state)
+        run_id = request_state.run_id
         worker_tools = {
             str(item["name"])
             for item in state.get("worker_tools", [])

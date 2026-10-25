@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from application.orchestration.root_workflow import RootWorkflow
+from application.runs.request_contracts import RootRequestState
 from domain.orchestration import (
     CommandReceipt,
     OrchestrationCommandType,
@@ -145,7 +146,10 @@ async def test_root_review_calls_agent_once_then_applies_new_decision():
 
     await workflow.review_completed_round(state())
 
-    assert agent.calls == [(context(), state()["request"])]
+    expected_request = RootRequestState.model_validate(
+        state()["request"]
+    ).model_dump(mode="python")
+    assert agent.calls == [(context(), expected_request)]
     command, applied = handler.applied
     assert applied == decision
     assert command.command_type is OrchestrationCommandType.FINISH_PLAN

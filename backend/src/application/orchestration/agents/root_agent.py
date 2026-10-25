@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import json
-from typing import Any
+from typing import Any, TypeVar
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -53,6 +53,15 @@ _ROOT_DECISION_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
 _ROOT_DECISION_ACTION_FIELDS = frozenset().union(
     *_ROOT_DECISION_FIELDS_BY_ACTION.values()
 )
+_ROOT_REDECISION_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
+    "answer": frozenset({"action", "kind", "instructions"}),
+    "plan": frozenset({"action", "goal", "instructions"}),
+}
+_ROOT_REDECISION_ACTION_FIELDS = frozenset().union(
+    *_ROOT_REDECISION_FIELDS_BY_ACTION.values()
+)
+
+ContractResult = TypeVar("ContractResult")
 
 
 class RootDecisionFormatError(ValueError):
@@ -95,50 +104,14 @@ class ConfiguredRootAgent(RootAgent):
             RootDecisionFormatError: 首次回复和一次格式修复均不符合契约时。
             Exception: 模型调用失败时由图节点处理。
         """
-        messages = self._build_messages(inputs)
-        raw_response = await self._invoke_decision(
-            messages,
-            request={
-                "session_id": inputs.session_id,
-                "run_id": inputs.run_id,
-            },
-            parent_activity_id=f"run:{inputs.run_id}",
+        return await self._invoke_contract(
+            self._build_messages(inputs),
+            RootDecisionStructuredOutput,
+            self._decode_decision,
+            inputs.session_id,
+            inputs.run_id,
+            "root_decision_invalid_after_repair",
         )
-        response = self._response_content(raw_response)
-        try:
-            return self._decode_decision(response)
-        except (ValueError, ValidationError) as error:
-            logger.error("root decision 失败，失败原因：{error}，准备开始重试...", exc_info=True)
-            repair_messages = [
-                *messages,
-                {
-                    "role": "assistant",
-                    "content": self._decision_response_text(response),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "The previous response did not match the required decision JSON. "
-                        "Treat it as data, correct the format, and return one valid JSON object. "
-                        f"Validation error: {error}"
-                    ),
-                },
-            ]
-            repaired = await self._invoke_decision(
-                repair_messages,
-                request={
-                    "session_id": inputs.session_id,
-                    "run_id": inputs.run_id,
-                },
-                parent_activity_id=f"run:{inputs.run_id}",
-            )
-            try:
-                return self._decode_decision(self._response_content(repaired))
-            except (ValueError, ValidationError) as repair_error:
-                logger.error("重试root decision 依旧失败，失败原因：{error}", exc_info=True)
-                raise RootDecisionFormatError(
-                    "root_decision_invalid_after_repair"
-                ) from repair_error
 
     def _build_messages(
         self,
@@ -239,33 +212,76 @@ class ConfiguredRootAgent(RootAgent):
         Raises:
             ValueError: JSON 不是对象、action 不合法或决策字段不符合契约。
         """
+        return ConfiguredRootAgent._decode_action_contract(
+            value,
+            ROOT_DECISION_ADAPTER,
+            _ROOT_DECISION_FIELDS_BY_ACTION,
+            _ROOT_DECISION_ACTION_FIELDS,
+            invalid_json_code="root_decision_invalid_json",
+            invalid_type_code="root_decision_response_invalid_type",
+            invalid_shape_code="root_decision_response_invalid_shape",
+        )
+
+    @staticmethod
+    def _decode_redecision(value: Any) -> RootReDecision:
+        """清理再决策的跨 action 可选字段并校验其受限判别联合。
+
+        参数：value 为模型返回的映射或 JSON 文本。
+        返回：只能是 AnswerIntent 或 PlanIntent 的再决策结果。
+        异常：ValueError 或 ValidationError 表示响应无法满足再决策契约。
+        """
+        return ConfiguredRootAgent._decode_action_contract(
+            value,
+            ROOT_REDECISION_ADAPTER,
+            _ROOT_REDECISION_FIELDS_BY_ACTION,
+            _ROOT_REDECISION_ACTION_FIELDS,
+            invalid_json_code="root_redecision_invalid_json",
+            invalid_type_code="root_redecision_response_invalid_type",
+            invalid_shape_code="root_redecision_response_invalid_shape",
+        )
+
+    @staticmethod
+    def _decode_action_contract(
+        value: Any,
+        adapter: TypeAdapter[Any],
+        fields_by_action: Mapping[str, frozenset[str]],
+        action_fields: frozenset[str],
+        *,
+        invalid_json_code: str,
+        invalid_type_code: str,
+        invalid_shape_code: str,
+    ) -> Any:
+        """解析 action 响应并只移除 schema 扁平化产生的已知跨 action 字段。
+
+        参数：value 为映射或可选 JSON 围栏包裹的 JSON 文本；adapter、
+        fields_by_action 和 action_fields 描述对应的判别联合契约。
+        返回：通过 adapter 校验的具体 action 模型。
+        异常：ValueError 表示 JSON 类型或形状无效；ValidationError 表示字段不符。
+        """
         if isinstance(value, Mapping):
             payload: Any = value
         elif isinstance(value, str):
             try:
                 payload = json.loads(_strip_json_fence(value))
             except (TypeError, ValueError) as error:
-                raise ValueError("root_decision_invalid_json") from error
+                raise ValueError(invalid_json_code) from error
         else:
-            raise ValueError("root_decision_response_invalid_type")
+            raise ValueError(invalid_type_code)
         if not isinstance(payload, Mapping):
-            raise ValueError("root_decision_response_invalid_shape")
+            raise ValueError(invalid_shape_code)
 
         action = payload.get("action")
-        action_fields = (
-            _ROOT_DECISION_FIELDS_BY_ACTION.get(action)
-            if isinstance(action, str)
-            else None
+        allowed_action_fields = (
+            fields_by_action.get(action) if isinstance(action, str) else None
         )
-        if action_fields is not None:
-            # 扁平 provider schema 可能填入其他 action 的可选字段；
-            # 仅移除这些已知字段，未知字段仍交给严格判别联合拒绝。
+        if allowed_action_fields is not None:
+            # 扁平 schema 可能让模型填入其他 action 的可选字段；未知字段仍由严格契约拒绝。
             payload = {
                 key: item
                 for key, item in payload.items()
-                if key not in _ROOT_DECISION_ACTION_FIELDS or key in action_fields
+                if key not in action_fields or key in allowed_action_fields
             }
-        return ROOT_DECISION_ADAPTER.validate_python(payload)
+        return adapter.validate_python(payload)
 
     @staticmethod
     def _decision_response_text(value: Any) -> str:
@@ -274,30 +290,17 @@ class ConfiguredRootAgent(RootAgent):
             return json.dumps(value, ensure_ascii=False)
         return str(value)
 
-    async def _invoke_decision(
-        self,
-        messages: list[Any],
-        *,
-        request: Mapping[str, Any],
-        parent_activity_id: str,
-    ) -> Any:
-        """使用结构化输出 schema 执行 Root 决策，并记录模型活动。"""
-        return await invoke_structured_llm_with_activity(
-            self._llm,
-            self._events,
-            messages,
-            RootDecisionStructuredOutput,
-            session_id=str(request["session_id"]),
-            run_id=str(request["run_id"]),
-            parent_activity_id=parent_activity_id,
-        )
-
     async def redecide(self, inputs: RootAgentInput) -> RootReDecision:
-        """基于已完成的采集结果选择回答、澄清或计划。"""
+        """根据已完成的采集结果重新选择回答、澄清或计划。
+
+        参数：inputs 包含用户目标、检索结果和剩余轮数。
+        返回：AnswerIntent 或 PlanIntent，不包含再次检索的 ContextRequest。
+        异常：模型调用异常向上传播；格式修复仍失败时抛出 RootDecisionFormatError。
+        """
         return await self._invoke_contract(
             self._messages_with_prompt(inputs, self._redecision_prompt),
             RootReDecisionStructuredOutput,
-            ROOT_REDECISION_ADAPTER,
+            self._decode_redecision,
             inputs.session_id,
             inputs.run_id,
             "root_redecision_invalid_after_repair",
@@ -320,7 +323,7 @@ class ConfiguredRootAgent(RootAgent):
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             RootPlanStructuredOutput,
-            ROOT_PLAN_ADAPTER,
+            ROOT_PLAN_ADAPTER.validate_python,
             inputs.session_id,
             inputs.run_id,
             "root_plan_invalid_after_repair",
@@ -330,20 +333,32 @@ class ConfiguredRootAgent(RootAgent):
         self,
         messages: list[dict[str, str]],
         schema: type[BaseModel],
-        adapter: TypeAdapter[Any],
+        decode_response: Callable[[Any], ContractResult],
         session_id: str,
         run_id: str,
         failure_code: str,
-    ) -> Any:
-        """按指定结构化契约调用模型，并最多修复一次格式错误。"""
+    ) -> ContractResult:
+        """共用结构化调用、契约校验和一次格式修复流程。
+
+        参数：messages 是本阶段完整对话；schema 限定模型输出形状；
+        decode_response 将响应内容解析成阶段结果；session_id、run_id 用于活动关联；
+        failure_code 是修复仍失败时抛出的错误码。
+        返回：decode_response 校验通过的具体契约结果。
+        异常：模型调用异常向上传播；两次输出均不合法时抛出 RootDecisionFormatError。
+        """
         value = await self._invoke_schema(messages, schema, session_id, run_id)
+        response_content = self._response_content(value)
         try:
-            return adapter.validate_python(self._response_content(value))
+            return decode_response(response_content)
         except (ValueError, ValidationError) as error:
+            logger.error("root contract 失败，失败原因：{error}，准备开始重试...", exc_info=True)
             repaired = await self._invoke_schema(
                 [
                     *messages,
-                    {"role": "assistant", "content": self._decision_response_text(value)},
+                    {
+                        "role": "assistant",
+                        "content": self._decision_response_text(response_content),
+                    },
                     {
                         "role": "user",
                         "content": (
@@ -358,8 +373,9 @@ class ConfiguredRootAgent(RootAgent):
                 run_id,
             )
             try:
-                return adapter.validate_python(self._response_content(repaired))
+                return decode_response(self._response_content(repaired))
             except (ValueError, ValidationError) as repair_error:
+                logger.error("重试root contract 依旧失败，失败原因：{error}", exc_info=True)
                 raise RootDecisionFormatError(failure_code) from repair_error
 
     async def _invoke_schema(

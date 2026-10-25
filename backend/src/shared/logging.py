@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 import structlog
 from structlog import stdlib
+
+# structlog delegates emission to stdlib logging. Install a root stream handler
+# so application records are visible even when Uvicorn has not configured its
+# own loggers yet; start.sh redirects stderr into logs/backend.log.
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 structlog.configure(

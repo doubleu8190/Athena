@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+from backend.src.application.orchestration.protocols import WorkerWorkflowPort
 from domain.orchestration import (
     WorkerExecutionEntryType,
     WorkerExecutionMessageAppend,
@@ -17,7 +18,7 @@ from .serialization import as_dict
 from shared.serialization import json_value
 
 
-class WorkerWorkflow:
+class WorkerWorkflow(WorkerWorkflowPort):
     """Run, pause, resume and finalize one persisted task."""
 
     def __init__(

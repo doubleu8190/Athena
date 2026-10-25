@@ -496,7 +496,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "sandbox": lambda: sandbox,
         "context_service_factory": lambda: context_service,
     }
-    resources: list[object] = [postgres, checkpointer, root_graph, neo4j]
+    resources: list[object] = [postgres, checkpointer, root_graph, neo4j, embedding]
     resources.append(sandbox)
     if settings.workers_enabled:
         command_execution = RunExecutionService(

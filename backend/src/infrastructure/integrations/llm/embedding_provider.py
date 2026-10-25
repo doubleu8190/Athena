@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 import asyncio
 import inspect
+import threading
 from typing import Any
 
 from shared.logging import get_logger
@@ -47,7 +48,17 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
         self._options = coerce_embedding_options(options)
         self._loaded = False
         self._model: Any = None
+        self._load_lock = threading.Lock()
         super().__init__(self._embed, dimension=self._options.dimension)
+
+    async def start(self) -> None:
+        """在应用启动阶段加载模型。
+
+        参数：无。
+        返回值：无；模型加载完成后 Provider 可供请求使用。
+        异常：模型或远程客户端加载失败时原样抛出，使应用启动失败。
+        """
+        await asyncio.to_thread(self._ensure_loaded)
 
     def _load(self) -> Any:
         """根据实例配置加载 embedding 模型或远程客户端。
@@ -92,9 +103,7 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
         raise ValueError(f"Unsupported embedding provider: {config.provider}")
 
     def _embed(self, values: Sequence[str]) -> Any:
-        if not self._loaded:
-            self._model = self._load()
-            self._loaded = True
+        self._ensure_loaded()
         if hasattr(self._model, "encode"):
             encoded = self._model.encode(
                 list(values), convert_to_numpy=True, normalize_embeddings=False
@@ -103,6 +112,20 @@ class ConfiguredEmbeddingProvider(EmbeddingProvider):
         if callable(self._model) and not hasattr(self._model, "embed_documents"):
             return self._model(values)
         return self._model.embed_documents(list(values))
+
+    def _ensure_loaded(self) -> None:
+        """确保模型只加载一次。
+
+        参数：无。
+        返回值：无；模型加载后保存到当前 Provider。
+        异常：底层模型或客户端初始化失败时原样抛出。
+        """
+        if self._loaded:
+            return
+        with self._load_lock:
+            if not self._loaded:
+                self._model = self._load()
+                self._loaded = True
 
 
 __all__ = ["ConfiguredEmbeddingProvider", "EmbeddingProvider"]

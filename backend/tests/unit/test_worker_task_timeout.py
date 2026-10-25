@@ -22,7 +22,7 @@ from tests.fakes.worker_runtime import (
 @pytest.mark.asyncio
 async def test_worker_timeout_cancels_graph_and_reports_retryable_timeout():
     class Jobs:
-        async def renew_lease(self, lease):
+        async def renew_lease(self, lease, *, lease_seconds):
             return lease
 
     class Worker:

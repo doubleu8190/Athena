@@ -29,7 +29,6 @@ from application.orchestration import (
     OrchestrationCommandHandler,
     RootWorkflow,
     RootWorkflowDependencies,
-    WorkerJobService,
     WorkerApprovalService,
     WorkerToolExecutor,
     WorkerResultStore,
@@ -200,10 +199,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
     orchestration_command_handler = OrchestrationCommandHandler(
         orchestration_command_repository
-    )
-    worker_job_service = WorkerJobService(
-        worker_job_repository,
-        lease_seconds=settings.worker_job_lease_seconds,
     )
     llm_options = LLMOptions(
         providers=tuple(
@@ -406,7 +401,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         timeout_seconds=settings.worker_approval_timeout_seconds,
     )
     worker_dispatcher = WorkerJobDispatcher(
-        worker_job_service,
+        worker_job_repository,
         worker_executor,
         orchestration_event_repository,
         worker_id=f"worker-dispatcher:{ids()}",
@@ -491,7 +486,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         ),
         "orchestration_command_handler_factory": lambda: orchestration_command_handler,
         "worker_task_event_handler_factory": lambda: worker_task_event_handler,
-        "worker_job_service_factory": lambda: worker_job_service,
+        "worker_job_repository_factory": lambda: worker_job_repository,
         "worker_job_dispatcher_factory": lambda: worker_dispatcher,
         "root_graph_factory": lambda: root_graph,
         "run_executor_factory": lambda: root_run_executor,

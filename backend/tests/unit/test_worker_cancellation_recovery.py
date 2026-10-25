@@ -394,7 +394,7 @@ async def test_dispatcher_acknowledges_cancellation_after_lease_fence_fails():
         def __init__(self):
             self.acknowledged = []
 
-        async def renew_lease(self, _lease):
+        async def renew_lease(self, _lease, *, lease_seconds):
             return None
 
         async def acknowledge_cancelled(self, lease):

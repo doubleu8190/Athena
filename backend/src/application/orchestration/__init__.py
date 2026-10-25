@@ -2,7 +2,6 @@
 
 from .command_handler import OrchestrationCommandHandler
 from .dependencies import RootWorkflowDependencies
-from .worker_job_service import WorkerJobService
 from .root_workflow import RootWorkflow
 from .worker_workflow import WorkerWorkflow
 from .worker_tools import WorkerToolExecutor
@@ -13,7 +12,6 @@ from .worker_results import WorkerResultStore
 
 __all__ = [
     "OrchestrationCommandHandler",
-    "WorkerJobService",
     "RootWorkflow",
     "RootWorkflowDependencies",
     "WorkerWorkflow",

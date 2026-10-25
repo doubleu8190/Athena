@@ -523,7 +523,7 @@ async def test_worker_executor_recovers_checkpointed_interrupt_after_process_res
 @pytest.mark.asyncio
 async def test_reclaimed_worker_job_registers_checkpointed_approval_without_reinvoking_agent():
     class Jobs:
-        async def renew_lease(self, lease):
+        async def renew_lease(self, lease, *, lease_seconds):
             return lease
 
     class Worker:
@@ -600,7 +600,7 @@ async def test_reclaimed_worker_job_registers_checkpointed_approval_without_rein
 @pytest.mark.asyncio
 async def test_resume_worker_job_resumes_same_checkpoint_and_reports_task_terminal():
     class Jobs:
-        async def renew_lease(self, lease):
+        async def renew_lease(self, lease, *, lease_seconds):
             return lease
 
     class Worker:

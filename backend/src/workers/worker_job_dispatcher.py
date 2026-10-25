@@ -10,13 +10,13 @@ from uuid import uuid4
 
 from application.orchestration import WorkerApprovalService
 from application.orchestration.protocols import GraphThreadLock, WorkerExecutor
-from application.orchestration.worker_job_service import WorkerJobService
 from domain.orchestration import (
     TaskExecution,
     TaskResult,
     TaskStatus,
     TaskEventRepository,
     WorkerJobLease,
+    WorkerJobRepository,
     WorkerTaskTerminalEvent,
 )
 from shared.logging import get_logger
@@ -29,7 +29,7 @@ class WorkerJobDispatcher:
 
     def __init__(
         self,
-        jobs: WorkerJobService,
+        jobs: WorkerJobRepository,
         worker: WorkerExecutor,
         task_events: TaskEventRepository,
         *,
@@ -93,7 +93,9 @@ class WorkerJobDispatcher:
                     not self._stop.is_set()
                     and len(self._inflight) < self._max_concurrency
                 ):
-                    lease = await self._jobs.claim_next(self._worker_id)
+                    lease = await self._jobs.claim_next(
+                        self._worker_id, lease_seconds=self._lease_seconds
+                    )
                     if lease is None:
                         break
                     task = asyncio.create_task(
@@ -334,7 +336,9 @@ class WorkerJobDispatcher:
         while not worker_task.done():
             await asyncio.sleep(interval)
             try:
-                renewed = await self._jobs.renew_lease(current)
+                renewed = await self._jobs.renew_lease(
+                    current, lease_seconds=self._lease_seconds
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -24,13 +24,13 @@ async def test_dispatcher_stop_cancels_inflight_graph_without_waiting_for_task_t
         async def reconcile_cancellations(self):
             return []
 
-        async def claim_next(self, _worker_id):
+        async def claim_next(self, _worker_id, *, lease_seconds):
             if self.claimed:
                 return None
             self.claimed = True
             return lease
 
-        async def renew_lease(self, current_lease):
+        async def renew_lease(self, current_lease, *, lease_seconds):
             return current_lease
 
         async def acknowledge_cancelled(self, _lease):

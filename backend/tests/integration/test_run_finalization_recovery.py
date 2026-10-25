@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from application.runs import RunExecutionService
 from domain.runs import CommandExecutionResult, CommandType, RunCommand, RunStartPayload
+from domain.memory import ClaimedMemoryJob
 from infrastructure.persistence.postgres.models import (
     AgentCommandModel,
     AgentEventModel,
@@ -204,11 +205,13 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
 
         first_memory_attempt = await memory_jobs.claim_next_job()
         assert first_memory_attempt is not None
-        assert first_memory_attempt["attempt"] == 1
+        assert isinstance(first_memory_attempt, ClaimedMemoryJob)
+        assert first_memory_attempt.attempt == 1
         await memory_jobs.recover()
         recovered_memory_attempt = await memory_jobs.claim_next_job()
         assert recovered_memory_attempt is not None
-        assert recovered_memory_attempt["attempt"] == 2
+        assert isinstance(recovered_memory_attempt, ClaimedMemoryJob)
+        assert recovered_memory_attempt.attempt == 2
         await memory_jobs.mark_succeeded(run_id)
 
         assert await repository.complete(

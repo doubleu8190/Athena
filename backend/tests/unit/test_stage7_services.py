@@ -13,6 +13,7 @@ from workers import MemoryWorker
 from application.tools import MCPService, ToolService
 from domain.approval import ApprovalDecision
 from domain.memory import (
+    ClaimedMemoryJob,
     CompletedTurn,
     MemoryCandidate,
     MemoryResolution,
@@ -67,7 +68,7 @@ async def test_memory_workflow_writes_resolved_candidates() -> None:
 
 class Jobs:
     def __init__(self):
-        self.values = [{"turn_id": "t-1", "session_id": "s-1", "user_text": "remember"}]
+        self.values = [ClaimedMemoryJob(CompletedTurn("t-1", "s-1", "remember"), 1)]
         self.done = []
 
     async def recover(self):

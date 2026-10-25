@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from .entities import ClaimedMemoryJob
+
 
 class MemoryJobPort(Protocol):
     """记忆任务入队能力，供运行终态使用。"""
@@ -22,7 +24,7 @@ class MemoryJobQueue(Protocol):
     """记忆 worker 使用的任务领取和完成能力。"""
 
     async def recover(self) -> None: ...
-    async def claim_next_job(self) -> dict[str, object] | None: ...
+    async def claim_next_job(self) -> ClaimedMemoryJob | None: ...
     async def mark_succeeded(self, turn_id: str) -> None: ...
     async def mark_failed(self, turn_id: str, error: str, *, retry: bool) -> None: ...
 

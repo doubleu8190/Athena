@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from application.memory.workflow import MemoryWriteWorkflow
-from domain.memory import CompletedTurn, MemoryJobQueue
+from domain.memory import MemoryJobQueue
 
 
 class MemoryWorker:
@@ -36,20 +36,14 @@ class MemoryWorker:
                 except asyncio.TimeoutError:
                     continue
                 continue
-            turn = CompletedTurn(
-                turn_id=str(job["turn_id"]),
-                session_id=str(job.get("session_id", "")),
-                user_text=str(job.get("user_text", "")),
-                assistant_text=str(job.get("assistant_text", "")),
-            )
+            turn = job.turn
             try:
                 await self._workflow.process_completed_turn(turn)
             except Exception as exc:
-                attempt = int(job.get("attempt", 1))
                 await self._jobs.mark_failed(
                     turn.turn_id,
                     str(exc),
-                    retry=attempt < self._max_attempts,
+                    retry=job.attempt < self._max_attempts,
                 )
             else:
                 await self._jobs.mark_succeeded(turn.turn_id)

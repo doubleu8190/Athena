@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from domain.retrieval.fusion import RetrievalRankFusion
+from domain.memory import ClaimedMemoryJob, CompletedTurn
 from application.runs.context import ContextAcquisitionService, ContextItem, ContextPlan, ProviderResult
 from domain.retrieval import RetrievalCandidate
 from domain.retrieval.evaluation import RetrievalEvaluationCase, evaluate_rankings
@@ -303,7 +304,7 @@ async def test_neo4j_resource_lifecycle(monkeypatch):
 @pytest.mark.asyncio
 async def test_durable_memory_worker_success_and_failure():
     class Jobs:
-        def __init__(self): self.values = [{"turn_id": "t"}]; self.calls=[]
+        def __init__(self): self.values = [ClaimedMemoryJob(CompletedTurn("t", "", ""), 1)]; self.calls=[]
         async def recover(self): self.calls.append("recover")
         async def claim_next_job(self): return self.values.pop(0) if self.values else None
         async def mark_succeeded(self, key): self.calls.append(("ok", key))

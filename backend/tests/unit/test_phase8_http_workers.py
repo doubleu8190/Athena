@@ -24,7 +24,7 @@ from application.approval.responses import ApprovalResponse
 from bootstrap import create_app
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.files import Attachment, AttachmentStatus, FileChunk, FileLocator, FileMetadata, ParsedDocument
-from domain.memory import CompletedTurn, MemoryCandidate, MemoryResolution, ResolutionAction
+from domain.memory import ClaimedMemoryJob, CompletedTurn, MemoryCandidate, MemoryResolution, ResolutionAction
 from domain.sessions import Session
 from domain.approval import ApprovalDecision, ApprovalRequest
 from domain.runs import CommandEnqueueResult, CommandStatus, CommandStatusRecord, CommandType, RunSummary
@@ -90,7 +90,7 @@ async def test_document_worker_and_memory_worker_success_failure_paths() -> None
     assert queue.calls[0][0] == "fail" and queue.calls[0][2]["retry"] is False
 
     class Jobs:
-        def __init__(self): self.items = [{"turn_id": "t", "session_id": "s"}]; self.calls=[]
+        def __init__(self): self.items = [ClaimedMemoryJob(CompletedTurn("t", "s", "", ""), 1)]; self.calls=[]
         async def recover(self): self.calls.append("recover")
         async def claim_next_job(self):
             if self.items: return self.items.pop(0)

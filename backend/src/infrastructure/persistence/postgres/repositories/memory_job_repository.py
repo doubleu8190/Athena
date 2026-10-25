@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.memory import MemoryJobPort, MemoryJobQueue
+from domain.memory import ClaimedMemoryJob, CompletedTurn, MemoryJobPort, MemoryJobQueue
 
 from ..models import MemoryProcessingJobModel
 
@@ -85,7 +85,7 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue):
             )
             await session.commit()
 
-    async def claim_next_job(self) -> dict[str, object] | None:
+    async def claim_next_job(self) -> ClaimedMemoryJob | None:
         now = _now()
         async with self._session_factory() as session:
             row = (
@@ -106,13 +106,15 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue):
             row.attempt += 1
             row.updated_at = now
             await session.commit()
-            return {
-                "turn_id": row.turn_id,
-                "session_id": row.session_id,
-                "user_text": row.user_text,
-                "assistant_text": row.assistant_text,
-                "attempt": row.attempt,
-            }
+            return ClaimedMemoryJob(
+                turn=CompletedTurn(
+                    turn_id=row.turn_id,
+                    session_id=row.session_id,
+                    user_text=row.user_text,
+                    assistant_text=row.assistant_text,
+                ),
+                attempt=row.attempt,
+            )
 
     async def mark_succeeded(self, turn_id: str) -> None:
         async with self._session_factory() as session:

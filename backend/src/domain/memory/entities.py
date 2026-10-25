@@ -112,6 +112,14 @@ class CompletedTurn:
 
 
 @dataclass(frozen=True, slots=True)
+class ClaimedMemoryJob:
+    """A memory-processing job atomically claimed by a worker."""
+
+    turn: CompletedTurn
+    attempt: int
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryCandidate:
     """事实提取器产生的候选记忆。"""
 
@@ -151,6 +159,7 @@ __all__ = [
     "MemoryValidity",
     "MemoryWriteCommand",
     "CompletedTurn",
+    "ClaimedMemoryJob",
     "MemoryCandidate",
     "MemoryResolution",
     "ResolutionAction",

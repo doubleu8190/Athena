@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -29,6 +30,7 @@ from application.runs.context import (
 )
 from application.runs.request_contracts import RootRequestState
 from application.orchestration.langgraph import build_root_graph, invoke_root_graph
+from domain.memory import MemoryRecord
 
 
 class _Agent:
@@ -66,11 +68,41 @@ class _RequestPreparation:
 
 
 class _Provider:
-    def __init__(self, handler):
+    def __init__(self, handler, memory_repository=None):
         self.handler = handler
+        self.memory_repository = memory_repository
 
     async def retrieve_context(self, *, session_id, run_id, plan):
-        return await self.handler(session_id=session_id, run_id=run_id, plan=plan)
+        result = await self.handler(session_id=session_id, run_id=run_id, plan=plan)
+        if result.provider != "memory" or self.memory_repository is None:
+            return result
+        items = []
+        for item in result.items:
+            if item.source_id is None:
+                items.append(item)
+                continue
+            metadata = {"category": "preference", **item.metadata}
+            self.memory_repository.items[item.source_id] = MemoryRecord(
+                item.source_id, item.content, metadata
+            )
+            items.append(replace(item, metadata=metadata))
+        return replace(result, items=tuple(items))
+
+
+class _MemoryValidationRepository:
+    """为 Root 流程测试提供可复核的合成记忆来源。"""
+
+    def __init__(self):
+        self.items = {}
+
+    async def get(self, memory_id):
+        return self.items.get(memory_id)
+
+    async def list_fact_group_by_identity(self, _identity):
+        return []
+
+    async def record_access(self, memory_ids):
+        return len(memory_ids)
 
 
 class _Events:
@@ -120,12 +152,14 @@ class _Tools:
 
 def _dependencies(agent, *, provider=None, root_max_turns=4, events=None):
     events = events or _Events()
-    providers = {"memory": _Provider(provider)} if provider else {}
+    memory_repository = _MemoryValidationRepository()
+    providers = {"memory": _Provider(provider, memory_repository)} if provider else {}
     return RootWorkflowDependencies(
         context_acquisition=ContextAcquisitionService(
             providers,
             trace_repository=_TraceRepository(),
             event_publisher=events,
+            memory_repository=memory_repository,
         ),
         context_planner=ContextPlanner(),
         request_preparation=_RequestPreparation(),

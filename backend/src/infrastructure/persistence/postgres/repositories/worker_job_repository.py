@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.orchestration import (
@@ -21,20 +22,24 @@ from domain.orchestration import (
     WorkerJobLease,
     WorkerJobRepository,
 )
+from domain.runs import RunStartPayload
 from ..models import (
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
+    MemoryProcessingJobModel,
     OrchestrationOutboxModel,
     PlanRoundModel,
     PlanVersionModel,
     RoundTaskModel,
     RootResumeJobModel,
+    SessionMemorySettingsModel,
     TaskExecutionModel,
     WorkerJobModel,
 )
 from .task_execution_results import load_task_execution_outputs
+from .memory_suppression import ensure_writable_run_scope
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,6 +625,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         plan.updated_at = now.isoformat()
         run.status = "cancelled"
         run.updated_at = now.isoformat()
+        await self._enqueue_cancelled_run_memory_job(session, run=run, now=now)
         await session.execute(
             update(RootResumeJobModel)
             .where(
@@ -657,6 +663,52 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             plan_id=plan.plan_id,
             cancellation_epoch=run.cancellation_epoch,
             external_effect_status=run.cancellation_external_effect_status,
+        )
+
+    async def _enqueue_cancelled_run_memory_job(
+        self,
+        session: AsyncSession,
+        *,
+        run: AgentRunModel,
+        now: datetime,
+    ) -> None:
+        """在取消终态事务内提交回顾作业和冻结的项目绑定。"""
+        try:
+            request = RunStartPayload.model_validate_json(
+                getattr(run, "request_json", "{}")
+            )
+        except (TypeError, ValueError):
+            return
+        user_text = request.message.strip()
+        if not user_text:
+            return
+        memory_settings = await session.get(SessionMemorySettingsModel, run.session_id)
+        if memory_settings is not None and not memory_settings.generate_memories:
+            return
+        now_iso = now.isoformat()
+        writable, project_id = await ensure_writable_run_scope(
+            session,
+            session_id=run.session_id,
+            turn_id=run.run_id,
+            now=now_iso,
+        )
+        if not writable:
+            return
+        await session.execute(
+            pg_insert(MemoryProcessingJobModel)
+            .values(
+                job_id=f"memjob_{uuid4().hex}",
+                turn_id=run.run_id,
+                session_id=run.session_id,
+                user_text=user_text,
+                assistant_text="",
+                status="queued",
+                attempt=0,
+                available_at=now_iso,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+            .on_conflict_do_nothing(index_elements=["turn_id"])
         )
 
     def _cancellation_outbox(

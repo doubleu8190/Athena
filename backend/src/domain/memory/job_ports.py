@@ -4,7 +4,19 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .entities import ClaimedMemoryJob
+from .entities import ClaimedMemoryJob, MemoryJobStatus
+
+
+class MemoryJobStatusPort(Protocol):
+    """Read-only management view of durable memory job progress."""
+
+    async def list_recent(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        session_id: str | None = None,
+    ) -> tuple[list[MemoryJobStatus], int]: ...
 
 
 class MemoryJobPort(Protocol):
@@ -29,4 +41,4 @@ class MemoryJobQueue(Protocol):
     async def mark_failed(self, turn_id: str, error: str, *, retry: bool) -> None: ...
 
 
-__all__ = ["MemoryJobPort", "MemoryJobQueue"]
+__all__ = ["MemoryJobPort", "MemoryJobQueue", "MemoryJobStatusPort"]

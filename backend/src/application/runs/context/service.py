@@ -5,12 +5,19 @@ from hashlib import sha256
 import logging
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
 from domain.events import EventPort
-from domain.memory import MemoryRepositoryPort
+from domain.memory import (
+    MemoryEpisodeRepositoryPort,
+    MemoryFactIdentity,
+    MemoryRepositoryPort,
+    MemorySourceReference,
+    MemoryStatus,
+)
 from domain.retrieval.query_ports import RetrievalPort
 from domain.retrieval.trace_contracts import (
     RetrievalCandidateSelection,
@@ -27,8 +34,108 @@ from .contracts import (
     RetrievalStage,
 )
 from .protocols import ContextProvider
+from application.memory.fact_groups import build_fact_context_group, record_fact
+from application.memory.fact_policy import cardinality_for
+from application.memory.index_views import build_memory_index_item
 
 logger = logging.getLogger(__name__)
+_EPISODE_SOURCE_MARKER = "\n\n按需展开的来源证据（可能截断）："
+
+
+def _strip_episode_sources(item: ContextItem) -> ContextItem:
+    """从恢复中的 Root 窗口删除未经本轮复核的原始来源片段。"""
+    summary = item.content.split(_EPISODE_SOURCE_MARKER, 1)[0]
+    return replace(
+        item,
+        content=summary,
+        metadata={
+            **item.metadata,
+            "expanded_source_count": 0,
+            "source_expansion_revalidated": False,
+            "source_ref_ids": [],
+        },
+    )
+
+
+def _render_episode_sources(
+    item: ContextItem, source_refs: tuple[MemorySourceReference, ...]
+) -> ContextItem:
+    """用本次重新验证的来源替换旧 checkpoint 中的展开文本。"""
+    summary = item.content.split(_EPISODE_SOURCE_MARKER, 1)[0]
+    source_content = "\n".join(
+        f"[{reference.source_type} | {reference.observed_at}] "
+        f"{reference.excerpt[:1600]}"
+        for reference in source_refs
+    )
+    content = (
+        f"{summary}{_EPISODE_SOURCE_MARKER}\n{source_content}"
+        if source_content
+        else summary
+    )
+    return replace(
+        item,
+        content=content[:12000],
+        metadata={
+            **item.metadata,
+            "expanded_source_count": len(source_refs),
+            "source_expansion_revalidated": True,
+            "source_ref_ids": [reference.source_id for reference in source_refs],
+        },
+    )
+
+
+def _memory_record_is_current(record: Any) -> bool:
+    """Fail closed on inactive, uncertain, expired, or future-effective memory."""
+    if record.status != MemoryStatus.ACTIVE or record.validity_status != "valid":
+        return False
+    now = datetime.now(timezone.utc)
+    for value in (record.expires_at, record.valid_until):
+        if value is None:
+            continue
+        try:
+            deadline = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return False
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        if deadline <= now:
+            return False
+    fact = record_fact(record)
+    if fact is not None and fact.valid_from is not None:
+        try:
+            valid_from = datetime.fromisoformat(fact.valid_from)
+        except (TypeError, ValueError):
+            return False
+        if valid_from.tzinfo is None:
+            valid_from = valid_from.replace(tzinfo=timezone.utc)
+        if valid_from > now:
+            return False
+    return True
+
+
+def _without_unvalidated_memory(bundle: ContextBundle) -> ContextBundle:
+    """Remove unverified memory and record why selected candidates were dropped."""
+    selections = tuple(
+        selection.model_copy(
+            update={
+                "context_selected": False,
+                "source_ids": (),
+                "filter_reason": "memory_final_validation_failed",
+            }
+        )
+        if selection.provider in {"memory", "memory_index"} and selection.context_selected
+        else selection
+        for selection in bundle.context_selection
+    )
+    return replace(
+        bundle,
+        items=tuple(
+            _strip_episode_sources(item)
+            for item in bundle.items
+            if item.provider not in {"memory", "memory_index"}
+        ),
+        context_selection=selections,
+    )
 
 
 class ContextAcquisitionService:
@@ -40,13 +147,311 @@ class ContextAcquisitionService:
         trace_repository: RetrievalPort,
         event_publisher: EventPort,
         memory_repository: MemoryRepositoryPort | None = None,
+        episode_repository: MemoryEpisodeRepositoryPort | None = None,
         token_counter: Callable[[str], int] | None = None,
     ) -> None:
         self._providers = dict(providers)
         self._token_counter = token_counter or (lambda value: len(value.split()))
         self._trace_repository = trace_repository
         self._memory_repository = memory_repository
+        self._episode_repository = episode_repository
         self._events = event_publisher
+
+    async def validate_memory_context(
+        self, bundle: ContextBundle, *, timeout_seconds: float = 1.0
+    ) -> ContextBundle:
+        """在选择落库和模型调用前，重新确认记忆仍然有效且冲突组完整。"""
+        memory_items = [item for item in bundle.items if item.provider == "memory"]
+        index_items = [item for item in bundle.items if item.provider == "memory_index"]
+        episode_items = [
+            item
+            for item in bundle.items
+            if item.provider == "episode"
+            and item.metadata.get("source_expansion_requested") is True
+        ]
+        if not memory_items and not index_items and not episode_items:
+            return bundle
+        repository = self._memory_repository
+        validated_by_alias: dict[str, ContextItem] = {}
+        if repository is None and (memory_items or index_items):
+            logger.warning("Memory context cannot be revalidated because the repository is unavailable")
+            return _without_unvalidated_memory(bundle)
+        episode_repository = self._episode_repository
+
+        async def validate_one(item: ContextItem) -> ContextItem | None:
+            try:
+                return await self._validate_memory_item(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to revalidate memory context before model use; memory_id=%s",
+                    item.source_id,
+                )
+                return None
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def bounded_validate(item: ContextItem) -> ContextItem | None:
+            async with semaphore:
+                return await validate_one(item)
+
+        async def bounded_validate_index(item: ContextItem) -> ContextItem | None:
+            async with semaphore:
+                try:
+                    session_id = item.metadata.get("session_id")
+                    project_id = item.metadata.get("project_id")
+                    if not isinstance(session_id, str) or not session_id:
+                        return None
+                    if project_id is not None and not isinstance(project_id, str):
+                        return None
+                    records = await repository.list_scope_index(
+                        session_id=session_id,
+                        project_id=project_id,
+                        limit=80,
+                    )
+                    return await build_memory_index_item(
+                        repository,
+                        records,
+                        session_id=session_id,
+                        project_id=project_id,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Failed to revalidate memory index before model use; source_id=%s",
+                        item.source_id,
+                    )
+                    return None
+
+        async def bounded_revalidate_episode(item: ContextItem) -> ContextItem:
+            async with semaphore:
+                return await self._revalidate_episode_sources(
+                    item, episode_repository
+                )
+
+        try:
+            async with asyncio.timeout(max(0.01, timeout_seconds)):
+                validated = await asyncio.gather(
+                    *(bounded_validate(item) for item in memory_items)
+                )
+                validated_indexes = await asyncio.gather(
+                    *(bounded_validate_index(item) for item in index_items)
+                )
+                validated_episodes = await asyncio.gather(
+                    *(bounded_revalidate_episode(item) for item in episode_items)
+                )
+        except TimeoutError:
+            logger.warning("Memory context revalidation timed out; dropping memory context")
+            return _without_unvalidated_memory(bundle)
+
+        validated_episode_by_id = {
+            original.source_id: current
+            for original, current in zip(episode_items, validated_episodes, strict=True)
+            if current is not None and original.source_id is not None
+        }
+
+        validated_index_by_id = {
+            original.source_id: current
+            for original, current in zip(index_items, validated_indexes, strict=True)
+            if current is not None and original.source_id is not None
+        }
+
+        for original, current in zip(memory_items, validated, strict=True):
+            if current is None:
+                continue
+            aliases = {
+                original.source_id,
+                *(
+                    str(value)
+                    for value in original.metadata.get("memory_member_ids", ())
+                    if isinstance(value, str)
+                ),
+            }
+            for alias in aliases:
+                if alias:
+                    validated_by_alias[alias] = current
+
+        validated_items: list[ContextItem] = []
+        memory_index = 0
+        for item in bundle.items:
+            if (
+                item.provider == "episode"
+                and item.metadata.get("source_expansion_requested") is True
+            ):
+                validated_items.append(
+                    validated_episode_by_id.get(item.source_id, _strip_episode_sources(item))
+                )
+                continue
+            if item.provider == "memory_index":
+                current_index = validated_index_by_id.get(item.source_id)
+                if current_index is not None:
+                    validated_items.append(current_index)
+                continue
+            if item.provider != "memory":
+                validated_items.append(item)
+                continue
+            current = validated[memory_index]
+            memory_index += 1
+            if current is not None:
+                validated_items.append(current)
+
+        selections: list[RetrievalCandidateSelection] = []
+        for selection in bundle.context_selection:
+            if selection.provider == "memory_index" and selection.context_selected:
+                current_index = validated_index_by_id.get(selection.source_id)
+                if current_index is None:
+                    selections.append(
+                        selection.model_copy(
+                            update={
+                                "context_selected": False,
+                                "source_ids": (),
+                                "filter_reason": "memory_final_validation_failed",
+                            }
+                        )
+                    )
+                else:
+                    selections.append(selection)
+                continue
+            if selection.provider != "memory" or not selection.context_selected:
+                selections.append(selection)
+                continue
+            current = next(
+                (
+                    validated_by_alias[memory_id]
+                    for memory_id in (selection.source_ids or (selection.source_id,))
+                    if memory_id in validated_by_alias
+                ),
+                None,
+            )
+            if current is None:
+                selections.append(
+                    selection.model_copy(
+                        update={
+                            "context_selected": False,
+                            "source_ids": (),
+                            "filter_reason": "memory_final_validation_failed",
+                        }
+                    )
+                )
+                continue
+            current_ids = current.metadata.get("memory_member_ids", ())
+            selections.append(
+                selection.model_copy(
+                    update={
+                        "source_id": current.source_id or selection.source_id,
+                        "source_ids": tuple(current_ids)
+                        if current_ids
+                        else ((current.source_id,) if current.source_id else ()),
+                        "context_selected": True,
+                        "filter_reason": None,
+                    }
+                )
+            )
+        return replace(
+            bundle,
+            items=tuple(validated_items),
+            context_selection=tuple(selections),
+        )
+
+    async def _revalidate_episode_sources(
+        self,
+        item: ContextItem,
+        repository: MemoryEpisodeRepositoryPort | None,
+    ) -> ContextItem:
+        """在每次模型调用前重新读取已展开的有限回顾来源。"""
+        if repository is None or item.source_id is None:
+            return _strip_episode_sources(item)
+        session_id = item.metadata.get("session_id")
+        project_id = item.metadata.get("project_id")
+        if not isinstance(session_id, str) or not session_id:
+            return _strip_episode_sources(item)
+        if project_id is not None and not isinstance(project_id, str):
+            return _strip_episode_sources(item)
+        try:
+            source_refs = await repository.expand_sources(
+                item.source_id,
+                session_id=session_id,
+                project_id=project_id,
+                limit=4,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to revalidate episode sources before model use; episode_id=%s",
+                item.source_id,
+            )
+            return _strip_episode_sources(item)
+        return _render_episode_sources(item, source_refs)
+
+    async def _validate_memory_item(self, item: ContextItem) -> ContextItem | None:
+        repository = self._memory_repository
+        if repository is None:
+            return None
+        identity_value = item.metadata.get("memory_fact_identity")
+        identity: MemoryFactIdentity | None = None
+        if identity_value is not None:
+            try:
+                identity = MemoryFactIdentity.model_validate(identity_value)
+            except (TypeError, ValueError):
+                identity = None
+
+        seed = None
+        if identity is None and item.source_id:
+            seed = await repository.get(item.source_id)
+            fact = record_fact(seed) if seed is not None else None
+            if fact is not None:
+                identity = MemoryFactIdentity(
+                    scope_kind=fact.scope_kind,
+                    scope_id=fact.scope_id,
+                    subject_key=fact.subject_key,
+                    fact_key=fact.fact_key,
+                )
+        if identity is None:
+            if seed is None or not _memory_record_is_current(seed):
+                return None
+            return replace(item, content=seed.content, source_id=seed.id)
+
+        related = await repository.list_fact_group_by_identity(identity)
+        related = [record for record in related if _memory_record_is_current(record)]
+        member_value = item.metadata.get("memory_group_member_value")
+        cardinality = str(item.metadata.get("fact_cardinality") or "")
+        if not cardinality:
+            cardinality = cardinality_for(identity.fact_key).value
+        if cardinality == "set" and isinstance(member_value, str):
+            related = [
+                record
+                for record in related
+                if (fact := record_fact(record)) is not None
+                and fact.fact_value == member_value
+            ]
+        if not related:
+            return None
+        seed = next((record for record in related if record.id == item.source_id), None)
+        if seed is None:
+            seed = related[0]
+        group = build_fact_context_group(seed, related)
+        if group is None:
+            return None
+        metadata = {
+            **item.metadata,
+            "memory_group_key": group.group_key,
+            "memory_member_ids": list(group.member_ids),
+            "memory_conflict": group.conflicted,
+            "memory_total_count": group.total_member_count,
+            "memory_complete": group.complete,
+            "fact_cardinality": group.cardinality.value,
+            "memory_fact_identity": group.identity.model_dump(mode="json"),
+            "memory_group_member_value": group.member_value,
+        }
+        return replace(
+            item,
+            content=group.content,
+            source_id=group.anchor_id,
+            metadata=metadata,
+        )
 
     async def retrieve_context(
         self,
@@ -160,9 +565,10 @@ class ContextAcquisitionService:
         """记录 Root 最终窗口选择，并只为本轮保留的记忆计数。"""
         memory_ids = list(
             dict.fromkeys(
-                selection.source_id
+                memory_id
                 for selection in selections
                 if selection.provider == "memory" and selection.context_selected
+                for memory_id in (selection.source_ids or (selection.source_id,))
             )
         )
         if memory_ids and self._memory_repository is not None:
@@ -210,6 +616,26 @@ class ContextAcquisitionService:
             persisted=persisted,
             stage=stage,
         )
+
+    async def persist_revalidated_selection(self, bundle: ContextBundle) -> None:
+        """同步最终模型调用前的筛选结果，不重复增加记忆访问次数。"""
+        if bundle.retrieval_run_id is None or not bundle.context_selection:
+            return
+        try:
+            persisted = await self._trace_repository.update_context_selection(
+                run_id=bundle.retrieval_run_id,
+                selections=bundle.context_selection,
+            )
+            if not persisted:
+                logger.warning(
+                    "Retrieval run was not found while persisting revalidated context selection; retrieval_run_id=%s",
+                    bundle.retrieval_run_id,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to persist revalidated context selection; retrieval_run_id=%s",
+                bundle.retrieval_run_id,
+            )
 
     async def _publish_selection_event(
         self,
@@ -271,6 +697,7 @@ class ContextAcquisitionService:
 
         queries = {
             "memory": plan.memory_query,
+            "episode": plan.episode_query,
             "knowledge": plan.knowledge_query,
             "file": plan.file_query,
             "graph": plan.graph_query,
@@ -402,18 +829,25 @@ class ContextAcquisitionService:
             _item_key(item): "bundle_max_items" for item in limit_rejected
         }
         tokens = 0
+        memory_tokens = 0
         token_stopped = False
         for item in selected:
             if token_stopped:
                 reasons[_item_key(item)] = "token_budget_stop"
                 continue
             count = self._token_counter(item.content)
+            is_memory = item.provider in {"memory", "memory_index", "episode"}
+            if is_memory and memory_tokens + count > plan.memory_token_budget:
+                reasons[_item_key(item)] = "memory_token_budget"
+                continue
             if tokens + count > plan.max_tokens:
                 reasons[_item_key(item)] = "bundle_token_budget"
                 token_stopped = True
                 continue
             kept.append(item)
             tokens += count
+            if is_memory:
+                memory_tokens += count
 
         kept_keys = {_item_key(item) for item in kept}
         traced_results = [
@@ -518,6 +952,7 @@ class ContextAcquisitionService:
             ][:5]
             query_by_provider = {
                 "memory": plan.memory_query,
+                "episode": plan.episode_query,
                 "knowledge": plan.knowledge_query,
                 "file": plan.file_query,
                 "graph": plan.graph_query,
@@ -575,7 +1010,13 @@ class ContextAcquisitionService:
             query = outcome.query
             provider = query.provider
             resource_scope = (
-                {"knowledge_base_ids": list(query.knowledge_base_ids)}
+                {
+                    "knowledge_base_ids": (
+                        list(query.knowledge_base_ids)
+                        if query.knowledge_base_ids is not None
+                        else None
+                    )
+                }
                 if provider == "knowledge"
                 else {"file_ids": list(query.file_ids)} if provider == "file" else None
             )
@@ -744,7 +1185,12 @@ class ContextAcquisitionService:
 def _item_key(item: ContextItem) -> tuple[str, str]:
     """为资料窗口和候选记录生成相同的模块来源键。"""
     digest = sha256(item.content.encode("utf-8")).hexdigest()[:24]
-    source_id = item.source_id or f"inline_{digest}"
+    group_key = item.metadata.get("memory_group_key")
+    source_id = (
+        group_key
+        if item.provider == "memory" and isinstance(group_key, str) and group_key
+        else item.source_id or f"inline_{digest}"
+    )
     return item.provider, source_id
 
 
@@ -756,9 +1202,14 @@ def _mark_bundle_selection(
     candidates: list[RetrievalCandidateTrace] = []
     for candidate in result.candidates:
         key = (candidate.provider, candidate.source_id)
+        group_key = candidate.metadata.get("memory_group_key")
+        group_selected = (
+            isinstance(group_key, str)
+            and (candidate.provider, group_key) in kept_keys
+        )
         if not candidate.selected_for_result:
             candidates.append(candidate)
-        elif key in kept_keys:
+        elif key in kept_keys or group_selected:
             candidates.append(
                 candidate.model_copy(update={"selection_stage": "bundle"})
             )
@@ -778,6 +1229,7 @@ def _mark_bundle_selection(
 def _provider_query(plan: ContextPlan, provider: str) -> str | None:
     return {
         "memory": plan.memory_query,
+        "episode": plan.episode_query,
         "file": plan.file_query,
         "knowledge": plan.knowledge_query,
         "graph": plan.graph_query,
@@ -809,6 +1261,7 @@ def _plan_query_summary(plan: ContextPlan) -> str:
     """从各检索模块的实际查询构造召回摘要。"""
     queries = (
         ("memory", plan.memory_query),
+        ("episode", plan.episode_query),
         ("file", plan.file_query),
         ("knowledge", plan.knowledge_query),
         ("graph", plan.graph_query),

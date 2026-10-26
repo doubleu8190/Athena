@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 import pytest
 
 from application.runs import RunRequestPreparationService
-from application.runs.request_contracts import RootKnowledgeBase, RootRequestState
+from application.runs.request_contracts import (
+    RootKnowledgeBase,
+    RootRequestHistoryMessage,
+    RootRequestState,
+)
 from application.sessions import SessionNotFoundError
 from domain.files import Attachment, AttachmentStatus, FileMetadata
 from domain.knowledge import KnowledgeBase
@@ -173,7 +177,14 @@ async def test_load_history_excludes_current_message() -> None:
         session_id="session-1", exclude_message_id="current"
     )
 
-    assert [item["message_id"] for item in history] == ["old"]
+    assert history == [
+        RootRequestHistoryMessage(
+            role="user",
+            content="old",
+            message_id="old",
+            timestamp=NOW.isoformat(),
+        )
+    ]
 
 
 @pytest.mark.asyncio

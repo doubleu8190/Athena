@@ -83,7 +83,7 @@ class RootAgentInput(BaseModel):
     knowledge_bases: list[RootKnowledgeBase] = Field(default_factory=list)
     worker_tools: tuple[RootWorkerTool, ...] = ()
     available_context_providers: tuple[
-        Literal["memory", "file", "knowledge", "graph"], ...
+        Literal["memory", "episode", "file", "knowledge", "graph"], ...
     ] = ()
     context_items: tuple[ContextItem, ...] = ()
     context_queries: tuple[ContextQueryOutcome, ...] = ()

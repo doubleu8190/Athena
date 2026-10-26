@@ -159,7 +159,7 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
 
     memory = PostgresMemoryRepository(factory(db))
     mem_row = SimpleNamespace(id="m-1", content="hello memory", metadata_json='{"x":1}', source_kind="chat", status="active", created_at=NOW.isoformat(), expires_at=None, last_accessed_at=None, access_count=0, last_observed_at=NOW.isoformat(), valid_until=None, validity_status="valid")
-    db.results = [Result(rows=[mem_row])]
+    db.results = [Result(rows=[(mem_row, 1.0)])]
     assert (await memory.search(MemorySearchRequest("hello")))[0].id == "m-1"
     db.results = [Result(rows=[mem_row])]
     db.scalar_values = [1]
@@ -376,14 +376,14 @@ async def test_target_file_parser_and_document_job_queue():
 def test_postgres_dependency_graph_is_explicit(monkeypatch):
     monkeypatch.setenv("ATHENA_DATABASE_BACKEND", "postgres")
     graph = build_default_dependencies()
-    assert len(graph.resources) == 5
+    assert len(graph.resources) == 6
     app = create_app(dependencies=graph)
     assert "/api/sessions" in app.openapi()["paths"]
     assert graph.provider("memory_service_factory") is not None
     assert graph.provider("orchestration_repository_factory") is not None
     monkeypatch.setenv("ATHENA_WORKERS_ENABLED", "true")
     worker_graph = build_default_dependencies()
-    assert len(worker_graph.resources) == 6
+    assert len(worker_graph.resources) == 7
     monkeypatch.delenv("ATHENA_WORKERS_ENABLED")
     monkeypatch.delenv("ATHENA_DATABASE_BACKEND")
     assert Settings().database_backend == "postgres"
@@ -543,7 +543,11 @@ async def test_memory_access_is_atomic_and_management_reads_do_not_write():
     await repository.search(MemorySearchRequest("fact"))
     await repository.list_memories(MemoryListRequest(expired_only=True))
     assert all(statement.is_select for statement in db.statements)
-    search_sql = str(db.statements[0].compile(dialect=postgresql.dialect()))
+    search_sql = " ".join(
+        str(statement.compile(dialect=postgresql.dialect()))
+        for statement in db.statements[:2]
+    )
     assert "memories.expires_at" in search_sql and "memories.valid_until" in search_sql
-    list_sql = str(db.statements[1].compile(dialect=postgresql.dialect()))
-    assert "<= now()" in list_sql
+    list_sql = str(db.statements[2].compile(dialect=postgresql.dialect()))
+    assert "expires_at" in list_sql and "valid_until" in list_sql
+    assert "now()" in list_sql and "<=" in list_sql

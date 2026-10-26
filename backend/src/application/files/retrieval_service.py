@@ -313,9 +313,12 @@ class KnowledgeContextProvider(FileContextProvider):
             return ProviderResult(
                 self.name,
                 "skipped",
-                error_message="no_knowledge_bases_available",
+                error_message="no_ready_knowledge_bases",
                 query=plan.knowledge_query,
-                resource_scope={"knowledge_base_ids": []},
+                resource_scope={
+                    "knowledge_base_ids": [],
+                    "ready_attachment_ids": [],
+                },
             )
         documents = []
         for knowledge_id in knowledge_ids:
@@ -325,6 +328,17 @@ class KnowledgeContextProvider(FileContextProvider):
         ready_ids = tuple(
             item.id for item in documents if item.status == AttachmentStatus.READY
         )
+        if not ready_ids:
+            return ProviderResult(
+                self.name,
+                "skipped",
+                error_message="no_ready_knowledge_bases",
+                query=plan.knowledge_query,
+                resource_scope={
+                    "knowledge_base_ids": list(knowledge_ids),
+                    "ready_attachment_ids": [],
+                },
+            )
         knowledge_plan = plan.with_updates(
             file_ids=ready_ids, file_query=plan.knowledge_query
         )

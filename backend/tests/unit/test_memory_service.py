@@ -33,6 +33,9 @@ class FakeMemoryPort:
     async def revisions(self, memory_id: str) -> list[MemoryRecord]:
         return [MemoryRecord(memory_id, "value")]
 
+    async def related_entries(self, memory_id: str):
+        return []
+
     async def create_memory(self, command: MemoryWriteCommand) -> str:
         self.commands.append(command)
         return "m-1"
@@ -43,8 +46,8 @@ class FakeMemoryPort:
     async def update_validity(self, *args, **kwargs) -> bool:
         return True
 
-    async def delete(self, memory_id: str) -> None:
-        return None
+    async def delete(self, memory_id: str) -> bool:
+        return True
 
     async def flush_access_stats(self) -> int:
         return 1

@@ -22,20 +22,24 @@
 特殊规则：
 - 对话未结束 → 只提取明确陈述的事实，跳过未决决策
 - 用户采纳助手方案 → 提取被采纳的方案，confidence 上限 0.9（因为是间接陈述）
-- 新信息更新已有记忆 → value 中标注旧值，如 "Rust (was Python)"
+- 新信息明确更正已有记忆 → 只输出新值，并令 `claim_intent=correct`；不要把旧值拼入新 value
+- 用户撤回已有记忆且没有替代值 → value 为 `null`，令 `claim_intent=retract`
 
 ## 已有记忆与去重
 
 下面提供的是与当前对话相关的已有记忆，仅用于语义比较，不是新的对话事实：
 - 已有记忆中语义等价的信息不要重复提取。
-- 若新信息是对已有记忆的更新或修正，仍然提取候选，并在 value 中标注变化。
+- 若用户明确更正已有值，提取新值并令 `claim_intent` 为 `correct`；不要把旧值拼入新 value。
 - 不要因为已有记忆存在就输出空列表；只有当前对话没有新的长期信息时才输出空列表。
 
 ## 生命周期边界
 
-- 你只负责提取候选，不决定 CREATE、UPDATE、SUPERSEDE 或 IGNORE。
+- 你只负责提取候选，不决定 CREATE、REVISE、IGNORE 或 DEFER。
 - 不要直接假设候选已经写入数据库。
 - `key` 和 `value` 必须只描述当前对话中有证据支持的信息。
+- 普通陈述使用 `claim_intent=assert`；明确更正使用 `correct`；明确撤回且不提供替代值时使用 `retract`。
+- 否定事实使用 `polarity=negated`。不要把“不确定”转换为肯定事实。
+- scope 和 subject 由程序根据类别及会话绑定决定；不要输出或猜测项目 ID。
 
 ## Key 命名
 
@@ -55,6 +59,8 @@
 - unresolved — 未解决的问题或待办
 - other — 其他
 
+集合型属性使用稳定的复数 key，每个成员单独输出，例如 `liked_fruit: 苹果` 和 `liked_fruit: 梨` 可以同时成立。不要把 `liked_fruit` 改写成单值的 `favorite_fruit`；“最喜欢”才使用单值 key。只使用当前对话表达的语义，不因旧记忆 key 相似而合并。
+
 ## 置信度
 
 - 1.0 — 用户明确陈述
@@ -64,10 +70,11 @@
 
 ## 格式约束
 
-最多 20 条；key ≤ 30 字符；value ≤ 100 字符。
+最多 20 条；key 使用小写 snake_case、≤30 字符；value ≤ 500 字符；confidence 为 0.6 到 1.0。
 
 输出纯 JSON（无 markdown 围栏）:
-{{"atomic_facts": [{{"key": "...", "value": "...", "category": "...", "confidence": 0.8}}]}}
+{{"atomic_facts": [{{"key": "...", "value": "...", "category": "...", "confidence": 0.8, "polarity": "affirmed", "claim_intent": "assert"}}]}}
+撤回示例字段：`{{"key":"preferred_language","value":null,"retracts_value":"Rust","category":"preference","confidence":1.0,"polarity":"affirmed","claim_intent":"retract"}}`。`retracts_value` 必须明确指向用户当前撤回的值；不确定目标时不输出撤回候选。
 
 ## 示例
 
@@ -75,7 +82,7 @@
 已有记忆: (无已有记忆)
 对话: [用户] 我把新项目从 Python 换成了 Rust。[助手] 好选择！[用户] 目标 2026 Q3 发布。
 
-输出: {{"atomic_facts": [{{"key": "preferred_language", "value": "Rust (was Python)", "category": "preference", "confidence": 1.0}}, {{"key": "release_date", "value": "2026 Q3", "category": "project", "confidence": 1.0}}]}}
+输出: {{"atomic_facts": [{{"key": "preferred_language", "value": "Rust", "category": "preference", "confidence": 1.0, "claim_intent": "correct"}}, {{"key": "release_date", "value": "2026 Q3", "category": "project", "confidence": 1.0}}]}}
 
 输入:
 已有记忆: - preferred_language: Python (category: preference)
@@ -87,7 +94,7 @@
 已有记忆: - language: Rust (category: preference)
 对话: [用户] Rust 编译太慢了，还是换回 Python 吧。[助手] 好的。
 
-输出: {{"atomic_facts": [{{"key": "preferred_language", "value": "Python (was Rust)", "category": "preference", "confidence": 1.0}}]}}
+输出: {{"atomic_facts": [{{"key": "preferred_language", "value": "Python", "category": "preference", "confidence": 1.0, "claim_intent": "correct"}}]}}
 
 ---
 

@@ -19,10 +19,11 @@
 
 ## 专项设计与实施记录
 
-- [记忆系统分层重设计](memory-system-redesign.md)：结合 Codex 记忆组织方式，覆盖个人/项目/经验记忆、后台提炼、分层读取、来源追溯、用户控制、实施阶段与验收；尚未实施。
-- [长期记忆冲突处理改造方案](memory-conflict-resolution-design.md)：设计稿；定义结构化事实、创建/修订/忽略/暂缓决策、版本与矛盾关系、幂等和并发保护、冲突感知检索、管理界面、存量升级及验收标准，尚未实施。
-- [Agent 文件访问与执行环境设计](agent-file-access-design.md)：可选本地/Docker 执行、目录内免审/目录外审批、shell 默认审批及文件限制，尚未实现。
-- [Agent 文件访问改造方案](agent-file-access-implementation-plan.md)：统一审批、单次授权、单一执行锁、恢复和资源限制，以及实施顺序和验收，待实施。
+- [项目化聊天管理与首轮自动命名改造方案](project-chat-management-design.md)：统一项目与会话归属、项目侧栏、草稿创建、首轮后台命名、接口和验收；设计完成，尚未实施。
+- [记忆系统分层重设计](memory-system-redesign.md)：结合 Codex 记忆组织方式；P1 可信事实写入实施中，P3 已接入冲突事实组读取基础，项目绑定、任务经验和分层目录待后续实施。
+- [长期记忆冲突处理改造方案](memory-conflict-resolution-design.md)：定义结构化事实、决策、版本关系与验收；P1 事实组锁和冲突读取基础已接入，真实 PostgreSQL 并发验收、管理界面和存量处理待实施。
+- [Agent 文件访问与执行环境设计](agent-file-access-design.md)：默认本地执行、可选 Docker、目录免审开关和全部审批规则；大目录处理建议待确认，尚未实现。
+- [Agent 文件访问改造方案](agent-file-access-implementation-plan.md)：统一审批、固定路径映射、本地共用模块、单锁与恢复，以及实施顺序和验收，待实施。
 - [Root 统一决策设计与实施方案（首期收敛版）](root-unified-decision-implementation-plan.md)：记录取消独立前置分类、统一 Root 决策、按需检索和复用既有执行协议的实施范围与验收结果。历史附件扩展、访问统计修正和初始命令重投后置。
 - [Root 首次决策前预检索与两阶段检索方案](root-context-prefetch-design.md)：已接通原始 query 预检索、LLM 定向补充检索、阶段摘要和超时；实际验证结果与边界见 [验收记录](verification/root-context-prefetch-20261024.md)。
 

@@ -42,10 +42,12 @@ from ..models import (
     OrchestrationOutboxModel,
     RoundTaskModel,
     RootResumeJobModel,
+    SessionMemorySettingsModel,
     SessionModel,
     TaskExecutionModel,
     WorkerJobModel,
 )
+from .memory_suppression import ensure_writable_run_scope
 
 
 def _now() -> str:
@@ -166,6 +168,13 @@ class PostgresRunRepository(
                     command.run_id
                     and await session.get(AgentRunModel, command.run_id) is None
                 ):
+                    if isinstance(command.payload, RunStartPayload):
+                        await ensure_writable_run_scope(
+                            session,
+                            session_id=command.session_id,
+                            turn_id=command.run_id,
+                            now=now,
+                        )
                     session.add(
                         AgentRunModel(
                             run_id=command.run_id,
@@ -539,6 +548,9 @@ class PostgresRunRepository(
         run.cancellation_epoch = int(run.cancellation_epoch or 0) + 1
         run.cancellation_external_effect_status = external_effect_status
         run.updated_at = now_iso
+        await self._enqueue_memory_job(
+            session, run, assistant_text="", now_iso=now_iso
+        )
         await self._cancel_root_resume_jobs(session, run_id, now)
         await self._cancel_pending_approvals(session, run_id=run_id, plan=None, now=now)
         await session.execute(
@@ -888,6 +900,47 @@ class PostgresRunRepository(
             )
         )
 
+    async def _enqueue_memory_job(
+        self,
+        session: AsyncSession,
+        run: AgentRunModel,
+        *,
+        assistant_text: str,
+        now_iso: str,
+    ) -> None:
+        """在 Run 终态事务内排队记忆作业并冻结当时的项目绑定。"""
+        request = _run_start_payload_or_none(getattr(run, "request_json", "{}"))
+        user_text = request.message.strip() if request is not None else ""
+        if not user_text:
+            return
+        memory_settings = await session.get(SessionMemorySettingsModel, run.session_id)
+        if memory_settings is not None and not memory_settings.generate_memories:
+            return
+        writable, project_id = await ensure_writable_run_scope(
+            session,
+            session_id=run.session_id,
+            turn_id=run.run_id,
+            now=now_iso,
+        )
+        if not writable:
+            return
+        await session.execute(
+            pg_insert(MemoryProcessingJobModel)
+            .values(
+                job_id=f"memjob_{uuid4().hex}",
+                turn_id=run.run_id,
+                session_id=run.session_id,
+                user_text=user_text,
+                assistant_text=assistant_text,
+                status="queued",
+                attempt=0,
+                available_at=now_iso,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+            .on_conflict_do_nothing(index_elements=["turn_id"])
+        )
+
     async def _finish(
         self,
         run_id: str,
@@ -941,26 +994,14 @@ class PostgresRunRepository(
                         run = await session.get(AgentRunModel, run_id)
                         if run is not None:
                             request = _run_start_payload_or_none(run.request_json)
-                            user_text = request.message.strip() if request else ""
                             content = _final_answer_text(response)
                             user_message_id = request.message_id if request else ""
-                            if user_text:
-                                await session.execute(
-                                    pg_insert(MemoryProcessingJobModel)
-                                    .values(
-                                        job_id=f"memjob_{uuid4().hex}",
-                                        turn_id=run_id,
-                                        session_id=run.session_id,
-                                        user_text=user_text,
-                                        assistant_text=content,
-                                        status="queued",
-                                        attempt=0,
-                                        available_at=now_iso,
-                                        created_at=now_iso,
-                                        updated_at=now_iso,
-                                    )
-                                    .on_conflict_do_nothing(index_elements=["turn_id"])
-                                )
+                            await self._enqueue_memory_job(
+                                session,
+                                run,
+                                assistant_text=content,
+                                now_iso=now_iso,
+                            )
                             if user_message_id and content:
                                 assistant_message_id = f"assistant:{run_id}"
                                 stream = _answer_stream_metadata(response)
@@ -1037,6 +1078,12 @@ class PostgresRunRepository(
                     elif status == RunStatus.FAILED:
                         run = await session.get(AgentRunModel, run_id)
                         if run is not None:
+                            await self._enqueue_memory_job(
+                                session,
+                                run,
+                                assistant_text="",
+                                now_iso=now_iso,
+                            )
                             self._add_completion_outbox(
                                 session,
                                 run=run,

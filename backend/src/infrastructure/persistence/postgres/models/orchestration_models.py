@@ -100,7 +100,6 @@ class TaskExecutionModel(Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
     cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)
-    checkpoint_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     error_json: Mapped[dict[str, Any] | None] = mapped_column(_JSON_DOCUMENT, nullable=True)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(_JSON_DOCUMENT, nullable=True)

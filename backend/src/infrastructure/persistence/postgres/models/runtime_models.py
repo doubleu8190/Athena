@@ -32,16 +32,11 @@ class AgentRunModel(Base):
     )
     run_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(String)
-    user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="created")
     request_json: Mapped[str] = mapped_column(Text, default="{}")
     response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     root_thread_id: Mapped[str] = mapped_column(String)
-    root_llm_turn_count: Mapped[int] = mapped_column(Integer, default=0)
-    worker_llm_turn_count: Mapped[int] = mapped_column(Integer, default=0)
-    total_worker_llm_turn_count: Mapped[int] = mapped_column(Integer, default=0)
-    tool_call_count: Mapped[int] = mapped_column(Integer, default=0)
     root_wait_generation: Mapped[int] = mapped_column(Integer, default=0)
     root_wait_checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     root_wait_armed_at: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -261,32 +256,6 @@ class KnowledgeDocumentJobModel(Base):
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
-
-
-class CodeSymbolModel(Base):
-    __tablename__ = "code_symbols"
-    __table_args__ = (Index("idx_code_symbols_attachment", "attachment_id"), Index("idx_code_symbols_name", "name"))
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
-    path: Mapped[str] = mapped_column(String)
-    language: Mapped[str] = mapped_column(String)
-    name: Mapped[str] = mapped_column(String)
-    qualified_name: Mapped[str] = mapped_column(String)
-    kind: Mapped[str] = mapped_column(String)
-    start_line: Mapped[int] = mapped_column(Integer)
-    end_line: Mapped[int] = mapped_column(Integer)
-    signature: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-
-class CodeDependencyModel(Base):
-    __tablename__ = "code_dependencies"
-    __table_args__ = (Index("idx_code_deps_attachment", "attachment_id"),)
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
-    source: Mapped[str] = mapped_column(String)
-    target: Mapped[str] = mapped_column(String)
-    kind: Mapped[str] = mapped_column(String, default="reference")
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class RetrievalRunModel(Base):

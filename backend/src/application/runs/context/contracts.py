@@ -28,6 +28,23 @@ class MemoryQuery(BaseModel):
         return normalized
 
 
+class EpisodeQuery(BaseModel):
+    """面向当前会话任务回顾的查询。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider: Literal["episode"]
+    query: str = Field(min_length=1, max_length=500)
+    include_sources: bool = False
+
+    @field_validator("query")
+    @classmethod
+    def strip_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("context_query_required")
+        return normalized
+
+
 class FileQuery(BaseModel):
     """面向当前有效附件的查询。"""
 
@@ -46,12 +63,15 @@ class FileQuery(BaseModel):
 
 
 class KnowledgeQuery(BaseModel):
-    """面向当前配置知识库的查询。"""
+    """面向当前配置知识库的查询。
+
+    knowledge_base_ids 为 None 时使用全部可用知识库，空元组表示明确的空范围。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     provider: Literal["knowledge"]
     query: str = Field(min_length=1, max_length=500)
-    knowledge_base_ids: tuple[str, ...] = ()
+    knowledge_base_ids: tuple[str, ...] | None = None
 
     @field_validator("query")
     @classmethod
@@ -79,7 +99,7 @@ class GraphQuery(BaseModel):
 
 
 ContextQuery = Annotated[
-    MemoryQuery | FileQuery | KnowledgeQuery | GraphQuery,
+    MemoryQuery | EpisodeQuery | FileQuery | KnowledgeQuery | GraphQuery,
     Field(discriminator="provider"),
 ]
 
@@ -101,6 +121,8 @@ class ContextQueryOutcome(BaseModel):
 class ContextPlan:
     providers: tuple[str, ...] = ("conversation",)
     memory_query: str = ""
+    episode_query: str = ""
+    episode_include_sources: bool = False
     knowledge_query: str = ""
     graph_query: str = ""
     file_query: str = ""
@@ -110,6 +132,7 @@ class ContextPlan:
     limit_per_file: int = 5
     max_items: int = 20
     max_tokens: int = 4000
+    memory_token_budget: int = 2000
     recall_limit: int = 30
     rerank_limit: int = 10
     provider_timeout_seconds: float | None = None
@@ -160,6 +183,7 @@ __all__ = [
     "ContextPlan",
     "ContextQuery",
     "ContextQueryOutcome",
+    "EpisodeQuery",
     "FileQuery",
     "GraphQuery",
     "KnowledgeQuery",

@@ -104,6 +104,9 @@ class TargetMemoryPort:
     async def revisions(self, memory_id):
         return [MemoryRecord(memory_id, "hello")]
 
+    async def related_entries(self, memory_id):
+        return []
+
     async def create_memory(self, command):
         return "target-memory"
 
@@ -114,7 +117,7 @@ class TargetMemoryPort:
         return True
 
     async def delete(self, memory_id):
-        return None
+        return True
 
     async def flush_access_stats(self):
         return 0

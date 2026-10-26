@@ -5,6 +5,7 @@ from collections.abc import Callable
 from application.runs.context.contracts import (
     ContextPlan,
     ContextQuery,
+    EpisodeQuery,
     FileQuery,
     GraphQuery,
     KnowledgeQuery,
@@ -26,6 +27,7 @@ class ContextPlanner:
         limit_per_file: int = 5,
         max_items: int = 12,
         max_tokens: int = 4000,
+        memory_token_budget: int = 2000,
         recall_limit: int = 30,
         rerank_limit: int = 10,
         token_counter: Callable[[str], int] | None = None,
@@ -40,6 +42,7 @@ class ContextPlanner:
         self._limit_per_file = limit_per_file
         self._max_items = max_items
         self._max_tokens = max_tokens
+        self._memory_token_budget = memory_token_budget
         self._recall_limit = recall_limit
         self._rerank_limit = rerank_limit
         self._token_counter = token_counter or (lambda text: len(text.split()))
@@ -64,6 +67,8 @@ class ContextPlanner:
         available_attachments = set(attachment_ids)
         available_knowledge_bases = set(knowledge_base_ids)
         memory_query = ""
+        episode_query = ""
+        episode_include_sources = False
         file_query = ""
         file_ids: tuple[str, ...] = ()
         knowledge_query = ""
@@ -72,6 +77,9 @@ class ContextPlanner:
         for query in queries:
             if isinstance(query, MemoryQuery):
                 memory_query = query.query
+            elif isinstance(query, EpisodeQuery):
+                episode_query = query.query
+                episode_include_sources = query.include_sources
             elif isinstance(query, FileQuery):
                 requested_ids = query.file_ids or attachment_ids
                 if not set(requested_ids).issubset(available_attachments):
@@ -79,7 +87,11 @@ class ContextPlanner:
                 file_query = query.query
                 file_ids = requested_ids
             elif isinstance(query, KnowledgeQuery):
-                requested_ids = query.knowledge_base_ids or knowledge_base_ids
+                requested_ids = (
+                    knowledge_base_ids
+                    if query.knowledge_base_ids is None
+                    else query.knowledge_base_ids
+                )
                 if not set(requested_ids).issubset(available_knowledge_bases):
                     raise InvalidContextResource("context_knowledge_base_unavailable")
                 knowledge_query = query.query
@@ -89,6 +101,8 @@ class ContextPlanner:
         return ContextPlan(
             providers=tuple(query.provider for query in queries),
             memory_query=memory_query,
+            episode_query=episode_query,
+            episode_include_sources=episode_include_sources,
             file_query=file_query,
             file_ids=file_ids,
             knowledge_query=knowledge_query,
@@ -98,6 +112,7 @@ class ContextPlanner:
             limit_per_file=self._limit_per_file,
             max_items=self._max_items,
             max_tokens=self._max_tokens,
+            memory_token_budget=self._memory_token_budget,
             recall_limit=self._recall_limit,
             rerank_limit=self._rerank_limit,
         )
@@ -111,6 +126,11 @@ class ContextPlanner:
     def max_tokens(self) -> int:
         """当前 ContextBundle 可保留的 token 上限。"""
         return self._max_tokens
+
+    @property
+    def memory_token_budget(self) -> int:
+        """长期记忆、派生目录和任务回顾共享的窗口预算。"""
+        return self._memory_token_budget
 
     def count_tokens(self, text: str) -> int:
         """使用装配时提供的计数器统计一段资料正文。

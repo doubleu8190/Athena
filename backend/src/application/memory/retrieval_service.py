@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from domain.memory import (
     MemoryRepositoryPort,
+    MemoryFact,
+    MemoryRecord,
     MemorySearchRequest,
     MemoryStatus,
     MemoryVectorSearchPort,
+    SessionMemorySettingsPort,
 )
 from domain.retrieval import RetrievalCandidate, RetrievalRankFusion
 from domain.retrieval.trace_contracts import (
@@ -21,6 +26,11 @@ from domain.retrieval.trace_contracts import (
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
 from application.runs.context.protocols import ContextProvider
+from application.memory.fact_groups import build_fact_context_group, record_fact
+from application.memory.index_views import build_memory_index_item
+from application.memory.query_terms import extract_memory_query_terms
+
+logger = logging.getLogger(__name__)
 
 
 def _keyword_score(content: str, query: str) -> float:
@@ -43,11 +53,13 @@ class MemoryContextProvider(ContextProvider):
         *,
         limit: int = 8,
         timeout_seconds: float = 3.0,
+        settings: SessionMemorySettingsPort | None = None,
     ) -> None:
         self._repository = repository
         self._vector_indexer = vector_indexer
         self._limit = limit
         self._timeout_seconds = timeout_seconds
+        self._settings = settings
 
     async def retrieve_context(
         self,
@@ -60,7 +72,23 @@ class MemoryContextProvider(ContextProvider):
         query = plan.memory_query
         if not query:
             return ProviderResult(self.name, "succeeded", query=query)
+        settings = (
+            await self._settings.get(session_id)
+            if self._settings is not None
+            else None
+        )
+        if settings is not None and not settings.use_memories:
+            return ProviderResult(
+                self.name,
+                "skipped",
+                query=query,
+                resource_scope={
+                    "memory_suppressed": True,
+                    "reason": "session_memory_read_disabled",
+                },
+            )
 
+        project_id = None if settings is None else settings.project_id
         limit = max(self._limit, plan.recall_limit)
         keyword_rows = []
         vector_rows: list[dict[str, Any]] = []
@@ -68,16 +96,31 @@ class MemoryContextProvider(ContextProvider):
         vector_status = "skipped"
         processing_stage = "keyword"
         vector_completed = False
+        directory_item: ContextItem | None = None
+        directory_status = "skipped"
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 keyword_rows = await self._repository.search(
-                    MemorySearchRequest(query=query, limit=limit)
+                    MemorySearchRequest(
+                        query=query,
+                        limit=limit,
+                        terms=extract_memory_query_terms(query),
+                        filters={
+                            "memory_scope": {
+                                "session_id": session_id,
+                                "project_id": project_id,
+                            }
+                        },
+                    )
                 )
                 keyword_status = "succeeded"
                 active_keyword = [
                     (rank, record)
                     for rank, record in enumerate(keyword_rows, 1)
-                    if record.status == MemoryStatus.ACTIVE
+                    if _is_active_record(record)
+                    and _is_in_scope(
+                        record, session_id=session_id, project_id=project_id
+                    )
                 ]
                 keyword_candidates = [
                     self._candidate(
@@ -101,10 +144,37 @@ class MemoryContextProvider(ContextProvider):
                     vector_completed = True
                 vector_candidates = self._vector_candidates(vector_rows)
 
+            try:
+                async with asyncio.timeout(
+                    _remaining_timeout(started, self._timeout_seconds)
+                ):
+                    directory_records = await self._repository.list_scope_index(
+                        session_id=session_id,
+                        project_id=project_id,
+                        limit=80,
+                    )
+                    directory_item = await build_memory_index_item(
+                        self._repository,
+                        directory_records,
+                        session_id=session_id,
+                        project_id=project_id,
+                    )
+                directory_status = "succeeded" if directory_item else "skipped"
+            except TimeoutError:
+                directory_status = "timeout"
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Memory topic directory retrieval failed; session_id=%s",
+                    session_id,
+                )
+                directory_status = "failed"
+
             inactive_ids = {
                 record.id
                 for record in keyword_rows
-                if record.status != MemoryStatus.ACTIVE
+                if not _is_active_record(record)
             }
             vector_candidates = [
                 candidate
@@ -116,10 +186,235 @@ class MemoryContextProvider(ContextProvider):
                 vector_candidates,
                 limit=None,
             )
-            selected_limit = min(max(0, self._limit), max(0, plan.max_items))
-            selected_ids = {candidate.source_id for candidate in fused[:selected_limit]}
+            scoped_keyword_ids = {record.id for record in keyword_rows}
+            record_by_id = {
+                record.id: record for _, record in active_keyword
+            }
+            missing_records = [
+                candidate.source_id
+                for candidate in fused
+                if candidate.source_id not in record_by_id
+            ]
+            if missing_records:
+                record_query_limit = asyncio.Semaphore(4)
+
+                async def fetch_record(memory_id: str) -> MemoryRecord | None:
+                    async with record_query_limit:
+                        return await self._repository.get(memory_id)
+
+                async with asyncio.timeout(
+                    _remaining_timeout(started, self._timeout_seconds)
+                ):
+                    fetched = await asyncio.gather(
+                        *(fetch_record(memory_id) for memory_id in missing_records)
+                    )
+                record_by_id.update(
+                    (record.id, record)
+                    for record in fetched
+                    if record is not None
+                    and _is_active_record(record)
+                    and _is_in_scope(
+                        record, session_id=session_id, project_id=project_id
+                    )
+                )
+            stale_candidates = [
+                candidate
+                for candidate in fused
+                if candidate.source_id in scoped_keyword_ids
+                and candidate.source_id not in record_by_id
+            ]
+            fused = [
+                candidate
+                for candidate in fused
+                if candidate.source_id in record_by_id
+            ]
+
+            fact_group_cache: dict[tuple[str, str, str, str], list[MemoryRecord]] = {}
+            facts_by_candidate: dict[str, MemoryFact] = {}
+            fact_requests: dict[
+                tuple[str, str, str, str], tuple[MemoryFact, str]
+            ] = {}
+            for candidate in fused:
+                record = record_by_id[candidate.source_id]
+                fact = record_fact(record)
+                if fact is None:
+                    continue
+                identity = (
+                    fact.scope_kind,
+                    fact.scope_id,
+                    fact.subject_key,
+                    fact.fact_key,
+                )
+                facts_by_candidate[candidate.source_id] = fact
+                fact_requests.setdefault(
+                    identity,
+                    (fact, str(record.metadata.get("session_id") or session_id)),
+                )
+            if fact_requests:
+                fact_identities = tuple(fact_requests)
+                group_query_limit = asyncio.Semaphore(4)
+
+                async def fetch_fact_group(
+                    identity: tuple[str, str, str, str]
+                ) -> list[MemoryRecord]:
+                    fact, source_session_id = fact_requests[identity]
+                    async with group_query_limit:
+                        return await self._repository.list_fact_group(
+                            fact,
+                            session_id=source_session_id,
+                        )
+
+                async with asyncio.timeout(
+                    _remaining_timeout(started, self._timeout_seconds)
+                ):
+                    related_groups = await asyncio.gather(
+                        *(fetch_fact_group(identity) for identity in fact_identities)
+                    )
+                fact_group_cache = dict(
+                    zip(fact_identities, related_groups, strict=True)
+                )
+
+            groups_by_candidate = {
+                memory_id: group
+                for memory_id, fact in facts_by_candidate.items()
+                if (
+                    group := build_fact_context_group(
+                        record_by_id[memory_id],
+                        fact_group_cache[(
+                            fact.scope_kind,
+                            fact.scope_id,
+                            fact.subject_key,
+                            fact.fact_key,
+                        )],
+                    )
+                ) is not None
+            }
+            canonical_groups: dict[str, Any] = {}
+            for memory_id, group in tuple(groups_by_candidate.items()):
+                groups_by_candidate[memory_id] = canonical_groups.setdefault(
+                    group.group_key, group
+                )
+
+            all_items: list[ContextItem] = (
+                [directory_item] if directory_item is not None else []
+            )
+            seen_group_keys: set[str] = set()
+            group_records: dict[str, MemoryRecord] = {}
+            for candidate in fused:
+                record = record_by_id[candidate.source_id]
+                group = groups_by_candidate.get(candidate.source_id)
+                if group is None:
+                    scope_metadata = {
+                        key: record.metadata[key]
+                        for key in ("category", "type", "session_id", "project_id")
+                        if key in record.metadata
+                    }
+                    all_items.append(
+                        ContextItem(
+                            self.name,
+                            candidate.content,
+                            candidate.source_id,
+                            {"fused_score": candidate.score, **scope_metadata},
+                        )
+                    )
+                    continue
+                for member in fact_group_cache[
+                    (
+                        facts_by_candidate[candidate.source_id].scope_kind,
+                        facts_by_candidate[candidate.source_id].scope_id,
+                        facts_by_candidate[candidate.source_id].subject_key,
+                        facts_by_candidate[candidate.source_id].fact_key,
+                    )
+                ]:
+                    group_records[member.id] = member
+                if group.group_key in seen_group_keys:
+                    continue
+                seen_group_keys.add(group.group_key)
+                all_items.append(
+                    ContextItem(
+                        self.name,
+                        group.content,
+                        group.anchor_id,
+                        {
+                            "fused_score": candidate.score,
+                            "memory_group_key": group.group_key,
+                            "memory_member_ids": list(group.member_ids),
+                            "memory_conflict": group.conflicted,
+                            "memory_total_count": group.total_member_count,
+                            "memory_complete": group.complete,
+                            "fact_cardinality": group.cardinality.value,
+                            "memory_fact_identity": group.identity.model_dump(mode="json"),
+                            "memory_group_member_value": group.member_value,
+                        },
+                    )
+                )
+
+            selected_limit = min(
+                max(0, self._limit) + (1 if directory_item is not None else 0),
+                max(0, plan.max_items),
+            )
+            selected_items = all_items[:selected_limit]
+            selected_group_keys = {
+                str(item.metadata["memory_group_key"])
+                for item in selected_items
+                if item.metadata.get("memory_group_key")
+            }
+            selected_group_members = {
+                str(item.metadata["memory_group_key"]): set(
+                    item.metadata.get("memory_member_ids", ())
+                )
+                for item in selected_items
+                if item.metadata.get("memory_group_key")
+            }
+            selected_plain_ids = {
+                item.source_id
+                for item in selected_items
+                if item.source_id and not item.metadata.get("memory_group_key")
+            }
             trace_by_id: dict[str, RetrievalCandidateTrace] = {}
             for rank, candidate in enumerate(fused, 1):
+                record = record_by_id[candidate.source_id]
+                group = groups_by_candidate.get(candidate.source_id)
+                metadata = {
+                    **record.metadata,
+                    **{
+                        key: value
+                        for key, value in candidate.metadata.items()
+                        if key not in {"hits", "rrf_score", "fused_rank"}
+                    },
+                }
+                if group is not None:
+                    metadata.update(
+                        {
+                            "memory_group_key": group.group_key,
+                            "memory_member_ids": list(group.member_ids),
+                            "memory_conflict": group.conflicted,
+                            "memory_total_count": group.total_member_count,
+                            "memory_complete": group.complete,
+                        }
+                    )
+                if group is None:
+                    selected_for_result = candidate.source_id in selected_plain_ids
+                    group_filter_reason = None
+                else:
+                    rendered_members = selected_group_members.get(
+                        group.group_key, set()
+                    )
+                    selected_for_result = (
+                        group.group_key in selected_group_keys
+                        and candidate.source_id in rendered_members
+                    )
+                    group_filter_reason = (
+                        "fact_group_limit"
+                        if group.conflicted
+                        and candidate.source_id not in group.member_ids
+                        else (
+                            "duplicate_equivalent_fact"
+                            if not group.conflicted
+                            and candidate.source_id not in group.member_ids
+                            else None
+                        )
+                    )
                 hits = tuple(
                     RetrievalHitTrace.model_validate(hit)
                     for hit in candidate.metadata.get("hits", [])
@@ -129,34 +424,105 @@ class MemoryContextProvider(ContextProvider):
                     provider=self.name,
                     source_type="memory",
                     source_id=candidate.source_id,
-                    revision_id=_optional_text(candidate.metadata.get("revision_id")),
+                    revision_id=_optional_text(metadata.get("revision_id")),
                     native_rank=single_hit.rank if single_hit else None,
                     native_score=single_hit.score if single_hit else None,
                     fused_rank=rank,
                     fused_score=candidate.score,
-                    selected_for_result=candidate.source_id in selected_ids,
+                    selected_for_result=selected_for_result,
                     filter_reason=(
                         None
-                        if candidate.source_id in selected_ids
-                        else "provider_top_k"
+                        if selected_for_result
+                        else group_filter_reason or "provider_top_k"
                     ),
                     content_preview=candidate.content[:500],
-                    source_title=_optional_text(candidate.metadata.get("title")),
+                    source_title=_optional_text(metadata.get("title")),
                     metadata={
                         key: value
-                        for key, value in candidate.metadata.items()
-                        if key not in {"channel_rank", "channel_score", "hits", "rrf_score", "fused_rank"}
+                        for key, value in metadata.items()
+                        if key not in {"channel_rank", "channel_score"}
                     },
                     hits=hits,
                     selection_stage=(
                         None
-                        if candidate.source_id in selected_ids
+                        if selected_for_result
                         else "provider"
                     ),
                 )
 
+            for rank, candidate in enumerate(stale_candidates, 1):
+                if candidate.source_id in trace_by_id:
+                    continue
+                hits = tuple(
+                    RetrievalHitTrace.model_validate(hit)
+                    for hit in candidate.metadata.get("hits", [])
+                )
+                trace_by_id[candidate.source_id] = RetrievalCandidateTrace(
+                    provider=self.name,
+                    source_type="memory",
+                    source_id=candidate.source_id,
+                    native_rank=hits[0].rank if len(hits) == 1 else None,
+                    native_score=hits[0].score if len(hits) == 1 else None,
+                    fused_rank=rank,
+                    fused_score=candidate.score,
+                    selected_for_result=False,
+                    filter_reason="inactive_memory",
+                    content_preview=candidate.content[:500],
+                    metadata=candidate.metadata,
+                    hits=hits,
+                    selection_stage="provider",
+                )
+
+            for memory_id, record in group_records.items():
+                if memory_id in trace_by_id:
+                    continue
+                group = next(
+                    (
+                        group
+                        for group in groups_by_candidate.values()
+                        if memory_id in group.all_member_ids
+                    ),
+                    None,
+                )
+                if group is None:
+                    continue
+                selected_for_result = (
+                    group.group_key in selected_group_keys
+                    and memory_id
+                    in selected_group_members.get(group.group_key, set())
+                )
+                filter_reason = (
+                    None
+                    if selected_for_result
+                    else (
+                        "fact_group_limit"
+                        if group.conflicted and memory_id not in group.member_ids
+                        else "provider_top_k"
+                    )
+                )
+                trace_by_id[memory_id] = RetrievalCandidateTrace(
+                    provider=self.name,
+                    source_type="memory",
+                    source_id=memory_id,
+                    revision_id=_optional_text(record.metadata.get("revision_id")),
+                    selected_for_result=selected_for_result,
+                    filter_reason=filter_reason,
+                    content_preview=record.content[:500],
+                    source_title=_optional_text(record.metadata.get("title")),
+                    metadata={
+                        **record.metadata,
+                        "memory_group_key": group.group_key,
+                        "memory_member_ids": list(group.member_ids),
+                        "memory_conflict": group.conflicted,
+                        "memory_total_count": group.total_member_count,
+                        "memory_complete": group.complete,
+                        "expanded_for_conflict": group.conflicted,
+                    },
+                    selection_stage=None if selected_for_result else "provider",
+                )
+
             for rank, record in enumerate(keyword_rows, 1):
-                if record.status == MemoryStatus.ACTIVE or record.id in trace_by_id:
+                if _is_active_record(record) or record.id in trace_by_id:
                     continue
                 vector_hit = next(
                     (
@@ -217,16 +583,30 @@ class MemoryContextProvider(ContextProvider):
                     selection_stage="provider",
                 )
 
-            selected = fused[:selected_limit]
-            items = tuple(
-                ContextItem(
-                    self.name,
-                    candidate.content,
-                    candidate.source_id,
-                    {"fused_score": candidate.score},
+            if directory_item is not None:
+                directory_selected = any(
+                    item.provider == directory_item.provider
+                    and item.source_id == directory_item.source_id
+                    for item in selected_items
                 )
-                for candidate in selected
-            )
+                trace_by_id[directory_item.source_id or "memory-index"] = (
+                    RetrievalCandidateTrace(
+                        provider="memory_index",
+                        source_type="memory_view",
+                        source_id=directory_item.source_id or "memory-index",
+                        native_rank=1,
+                        fused_rank=1,
+                        fused_score=1.0,
+                        selected_for_result=directory_selected,
+                        filter_reason=None if directory_selected else "provider_top_k",
+                        content_preview=directory_item.content[:500],
+                        source_title="记忆概览与主题目录",
+                        metadata=directory_item.metadata,
+                        selection_stage=None if directory_selected else "provider",
+                    )
+                )
+
+            items = tuple(selected_items)
             channels = (
                 RetrievalChannelTrace(
                     channel="keyword",
@@ -238,20 +618,41 @@ class MemoryContextProvider(ContextProvider):
                     status=vector_status,
                     hit_count=len(vector_rows),
                 ),
+                RetrievalChannelTrace(
+                    channel="memory_directory",
+                    status=directory_status,
+                    hit_count=(
+                        int(directory_item.metadata.get("memory_index_source_count", 0))
+                        if directory_item is not None
+                        else 0
+                    ),
+                ),
             )
             return ProviderResult(
                 self.name,
                 "succeeded",
                 items,
                 candidate_count=len(trace_by_id),
-                result_count=len(items),
+                result_count=sum(item.provider == "memory" for item in items),
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 candidates=tuple(trace_by_id.values()),
                 query=query,
-                resource_scope={"memory_status": "active"},
+                resource_scope={
+                    "memory_status": "active",
+                    "fact_group_count": len(seen_group_keys),
+                    "conflict_group_count": sum(
+                        bool(item.metadata.get("memory_conflict")) for item in items
+                    ),
+                    "directory_status": directory_status,
+                },
                 effective_params={
                     "recall_limit": limit,
                     "result_limit": selected_limit,
+                    "memory_token_budget": plan.memory_token_budget,
+                    "fact_group_count": len(seen_group_keys),
+                    "conflict_group_count": sum(
+                        bool(item.metadata.get("memory_conflict")) for item in items
+                    ),
                 },
                 channels=channels,
             )
@@ -452,6 +853,64 @@ def _score(value: Any) -> float | None:
 def _optional_text(value: Any) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
+
+
+def _remaining_timeout(started: float, timeout_seconds: float) -> float:
+    """保持全文检索、向量检索和事实组展开共享一个总时限。"""
+    return max(0.0, timeout_seconds - (time.perf_counter() - started))
+
+
+def _is_active_record(record: MemoryRecord) -> bool:
+    """只允许当前有效且未到期的事实进入读取上下文。"""
+    if record.status != MemoryStatus.ACTIVE or record.validity_status != "valid":
+        return False
+    now = datetime.now(timezone.utc)
+    for value in (record.expires_at, record.valid_until):
+        if value is None:
+            continue
+        try:
+            deadline = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return False
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        if deadline <= now:
+            return False
+    fact = record_fact(record)
+    if fact is not None and fact.valid_from is not None:
+        try:
+            valid_from = datetime.fromisoformat(fact.valid_from)
+        except (TypeError, ValueError):
+            return False
+        if valid_from.tzinfo is None:
+            valid_from = valid_from.replace(tzinfo=timezone.utc)
+        if valid_from > now:
+            return False
+    return True
+
+
+def _is_in_scope(
+    record: MemoryRecord, *, session_id: str, project_id: str | None
+) -> bool:
+    """只允许全局、当前会话或明确绑定项目的记忆参与召回。"""
+    fact = record_fact(record)
+    if fact is not None:
+        if fact.scope_kind == "global":
+            return fact.scope_id == "global"
+        if fact.scope_kind == "session":
+            return fact.scope_id == session_id
+        return project_id is not None and fact.scope_id == project_id
+    category = record.metadata.get("category", record.metadata.get("type"))
+    if category in {"preference", "profile"}:
+        return True
+    scope_kind = record.metadata.get("scope_kind")
+    scope_id = record.metadata.get("scope_id")
+    return (
+        record.metadata.get("session_id") == session_id
+        or (scope_kind == "global" and scope_id == "global")
+        or (scope_kind == "session" and scope_id == session_id)
+        or (project_id is not None and scope_kind == "project" and scope_id == project_id)
+    )
 
 
 __all__ = ["MemoryContextProvider"]

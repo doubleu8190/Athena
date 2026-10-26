@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from application.sessions.responses import (
     MessageResponse as ApplicationMessageResponse,
@@ -19,6 +19,21 @@ class CreateSessionRequest(BaseModel):
 
 class UpdateSessionRequest(BaseModel):
     title: str
+
+
+class SessionMemorySettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    use_memories: bool
+    generate_memories: bool
+    project_id: str | None
+
+
+class SessionMemorySettingsResponse(BaseModel):
+    session_id: str
+    use_memories: bool
+    generate_memories: bool
+    project_id: str | None
 
 
 class SessionResponse(BaseModel):

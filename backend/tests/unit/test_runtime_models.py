@@ -8,7 +8,7 @@ EXPECTED_TABLES = {
     "agent_events", "approvals", "sessions", "messages", "steps", "tool_calls",
     "memories", "mcp_servers", "tools", "knowledge_bases", "attachments",
     "knowledge_document_jobs", "file_chunks", "file_artifacts", "adapter_registry",
-    "code_symbols", "code_dependencies", "retrieval_runs", "retrieval_candidates",
+    "retrieval_runs", "retrieval_candidates",
 }
 
 

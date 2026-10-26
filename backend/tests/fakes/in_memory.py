@@ -34,12 +34,21 @@ from domain.events import (
 )
 import asyncio
 import hashlib
+import json
 from domain.memory import (
+    MemoryEpisode,
+    MemoryEpisodeRepositoryPort,
+    MemoryEpisodeSearchRequest,
+    MemoryFact,
+    MemoryFactIdentity,
     MemoryListRequest,
     MemoryPage,
     MemoryRepositoryPort,
     MemoryRecord,
+    MemoryRelationRecord,
+    MemorySourceReference,
     MemorySearchRequest,
+    MemorySuppressedError,
     MemoryStatus,
     MemoryWriteCommand,
 )
@@ -298,33 +307,360 @@ class InMemoryMCPPort(MCPPort):
 class InMemoryMemoryPort(MemoryRepositoryPort):
     def __init__(self) -> None:
         self.items: dict[str, MemoryRecord] = {}
+        self.relations: list[tuple[str, str, str, str]] = []
+        self.suppressed_sources: set[tuple[str, str]] = set()
 
     async def initialize(self) -> None: pass
     async def search(self, request: MemorySearchRequest) -> list[MemoryRecord]:
         query = request.query.lower()
-        return [replace(value, score=1.0) for value in self.items.values() if query in value.content.lower()][:request.limit]
+        values = [
+            value
+            for value in self.items.values()
+            if query in value.content.lower()
+        ]
+        scope = (request.filters or {}).get("memory_scope")
+        if isinstance(scope, dict):
+            session_id = scope.get("session_id")
+            project_id = scope.get("project_id")
+            scoped: list[MemoryRecord] = []
+            for value in values:
+                raw_fact = value.metadata.get("fact")
+                fact = (
+                    raw_fact
+                    if isinstance(raw_fact, MemoryFact)
+                    else MemoryFact.model_validate(raw_fact)
+                    if raw_fact is not None
+                    else None
+                )
+                if fact is not None:
+                    allowed = (
+                        fact.scope_kind == "global" and fact.scope_id == "global"
+                    ) or (
+                        fact.scope_kind == "session" and fact.scope_id == session_id
+                    ) or (
+                        project_id is not None
+                        and fact.scope_kind == "project"
+                        and fact.scope_id == project_id
+                    )
+                else:
+                    category = value.metadata.get(
+                        "category", value.metadata.get("type")
+                    )
+                    allowed = (
+                        category in {"preference", "profile"}
+                        or value.metadata.get("session_id") == session_id
+                    )
+                if allowed:
+                    scoped.append(value)
+            values = scoped
+        return [replace(value, score=1.0) for value in values][:request.limit]
+
+    async def list_scope_index(
+        self,
+        *,
+        session_id: str,
+        project_id: str | None,
+        limit: int = 80,
+    ) -> list[MemoryRecord]:
+        """返回测试数据中当前作用域的目录来源，不增加访问计数。"""
+        values: list[MemoryRecord] = []
+        for record in self.items.values():
+            if record.status is not MemoryStatus.ACTIVE or record.validity_status != "valid":
+                continue
+            raw_fact = record.metadata.get("fact")
+            fact = (
+                raw_fact
+                if isinstance(raw_fact, MemoryFact)
+                else MemoryFact.model_validate(raw_fact)
+                if raw_fact is not None
+                else None
+            )
+            if fact is not None:
+                allowed = (
+                    (fact.scope_kind == "global" and fact.scope_id == "global")
+                    or (fact.scope_kind == "session" and fact.scope_id == session_id)
+                    or (
+                        project_id is not None
+                        and fact.scope_kind == "project"
+                        and fact.scope_id == project_id
+                    )
+                )
+            else:
+                category = record.metadata.get(
+                    "category", record.metadata.get("type")
+                )
+                allowed = (
+                    category in {"preference", "profile"}
+                    or record.metadata.get("session_id") == session_id
+                )
+            if allowed:
+                values.append(record)
+        values.sort(key=lambda record: record.created_at, reverse=True)
+        return values[: min(120, max(1, limit))]
+
     async def list_memories(self, request: MemoryListRequest) -> MemoryPage:
         values = list(self.items.values())[request.offset:request.offset + request.limit]
         return MemoryPage(tuple(values), len(self.items), {"total": len(self.items), "expired": 0, "recent": len(self.items)})
+    async def list_fact_group(self, fact: MemoryFact, *, session_id: str) -> list[MemoryRecord]:
+        identity = (fact.scope_kind, fact.scope_id, fact.subject_key, fact.fact_key)
+        now = datetime.now(timezone.utc)
+        matches = []
+        for record in self.items.values():
+            if record.status is not MemoryStatus.ACTIVE or record.validity_status != "valid":
+                continue
+            expired = False
+            for value in (record.expires_at, record.valid_until):
+                if value is None:
+                    continue
+                try:
+                    deadline = datetime.fromisoformat(value)
+                except (TypeError, ValueError):
+                    expired = True
+                    break
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                if deadline <= now:
+                    expired = True
+                    break
+            if expired:
+                continue
+            raw_fact = record.metadata.get("fact")
+            if raw_fact is None:
+                continue
+            stored = raw_fact if isinstance(raw_fact, MemoryFact) else MemoryFact.model_validate(raw_fact)
+            if stored.valid_from is not None:
+                try:
+                    valid_from = datetime.fromisoformat(stored.valid_from)
+                except (TypeError, ValueError):
+                    continue
+                if valid_from.tzinfo is None:
+                    valid_from = valid_from.replace(tzinfo=timezone.utc)
+                if valid_from > now:
+                    continue
+            if (stored.scope_kind, stored.scope_id, stored.subject_key, stored.fact_key) != identity:
+                continue
+            if fact.claim_intent == "retract" and stored.fact_value != fact.retracts_value:
+                continue
+            matches.append(record)
+        return sorted(matches, key=lambda item: item.id)
+    async def list_fact_group_by_identity(self, identity: MemoryFactIdentity) -> list[MemoryRecord]:
+        now = datetime.now(timezone.utc).isoformat()
+        seed = MemoryFact(
+            scope_kind=identity.scope_kind,
+            scope_id=identity.scope_id,
+            subject_key=identity.subject_key,
+            fact_key=identity.fact_key,
+            fact_value="validation-seed",
+            confidence=1.0,
+            asserted_at=now,
+            source_refs=(MemorySourceReference(
+                source_type="turn",
+                source_id="validation-seed",
+                excerpt="validation-seed",
+                observed_at=now,
+            ),),
+        )
+        return await self.list_fact_group(seed, session_id=identity.scope_id)
     async def get(self, memory_id: str) -> MemoryRecord | None: return self.items.get(memory_id)
     async def revisions(self, memory_id: str) -> list[MemoryRecord]:
         value = self.items.get(memory_id)
         return [] if value is None else [value]
+    async def related_entries(self, memory_id: str) -> list[MemoryRelationRecord]:
+        related: list[MemoryRelationRecord] = []
+        for source_id, target_id, kind, operation_id in self.relations:
+            if source_id == memory_id:
+                other_id = target_id
+            elif target_id == memory_id:
+                other_id = source_id
+            else:
+                continue
+            record = self.items.get(other_id)
+            if record is not None:
+                related.append(MemoryRelationRecord(operation_id, kind, other_id, record.content, record.status.value, record.created_at))
+        return related
     async def create_memory(self, command: MemoryWriteCommand) -> str:
         key = command.operation_key or f"memory-{len(self.items) + 1}"
+        metadata = dict(command.metadata)
+        fingerprint = _fake_memory_suppression_fingerprint(metadata, command.content)
+        source_ids = _fake_memory_source_ids(metadata)
+        if any((source_id, fingerprint) in self.suppressed_sources for source_id in source_ids):
+            raise MemorySuppressedError("memory_source_forgotten")
+        existing = self.items.get(key)
+        if existing is not None and existing.status is MemoryStatus.DELETED:
+            raise MemorySuppressedError("memory_source_forgotten")
         self.items[key] = MemoryRecord(key, command.content, dict(command.metadata))
         return key
-    async def revise(self, memory_id: str, content: str, *, metadata: dict[str, object] | None = None, operation_key: str | None = None) -> str | None:
+    async def revise(
+        self,
+        memory_id: str,
+        content: str,
+        *,
+        metadata: dict[str, object] | None = None,
+        operation_key: str | None = None,
+        expected_memory_ids: tuple[str, ...] | None = None,
+    ) -> str | None:
         if memory_id not in self.items: return None
         self.items[memory_id] = replace(self.items[memory_id], content=content, metadata=metadata or self.items[memory_id].metadata)
         return memory_id
+    async def add_relation(self, source_memory_id: str, target_memory_id: str, kind: str, *, operation_id: str) -> None:
+        relation = (source_memory_id, target_memory_id, kind, operation_id)
+        if relation not in self.relations: self.relations.append(relation)
     async def update_validity(self, memory_id: str, validity_status: str, *, valid_until: str | None = None) -> bool: return memory_id in self.items
-    async def delete(self, memory_id: str) -> None:
-        if memory_id in self.items: self.items[memory_id] = replace(self.items[memory_id], status=MemoryStatus.DELETED)
+    async def delete(self, memory_id: str) -> bool:
+        if memory_id not in self.items:
+            return False
+        record = self.items[memory_id]
+        fingerprint = _fake_memory_suppression_fingerprint(record.metadata, record.content)
+        self.suppressed_sources.update(
+            (source_id, fingerprint)
+            for source_id in _fake_memory_source_ids(record.metadata)
+        )
+        self.items[memory_id] = replace(record, status=MemoryStatus.DELETED)
+        return True
     async def record_access(self, memory_ids: list[str]) -> int:
         """测试端口无需统计，返回 0，无业务异常。"""
         return 0
     async def flush_access_stats(self) -> int: return 0
+
+
+def _fake_memory_source_ids(metadata: dict[str, Any]) -> tuple[str, ...]:
+    source_ids = set()
+    source_turn_id = metadata.get("source_turn_id")
+    if isinstance(source_turn_id, str) and source_turn_id:
+        source_ids.add(source_turn_id)
+    raw_fact = metadata.get("fact")
+    if raw_fact is not None:
+        fact = raw_fact if isinstance(raw_fact, MemoryFact) else MemoryFact.model_validate(raw_fact)
+        source_ids.update(
+            item.source_id for item in fact.source_refs if item.source_type == "turn"
+        )
+    return tuple(sorted(source_ids))
+
+
+def _fake_memory_suppression_fingerprint(
+    metadata: dict[str, Any], content: str
+) -> str:
+    raw_fact = metadata.get("fact")
+    fact = None if raw_fact is None else (
+        raw_fact if isinstance(raw_fact, MemoryFact) else MemoryFact.model_validate(raw_fact)
+    )
+    identity = (
+        ("fact", fact.scope_kind, fact.scope_id, fact.subject_key, fact.fact_key)
+        if fact is not None
+        else (
+            "text",
+            str(metadata.get("type", metadata.get("category", ""))),
+            " ".join(content.casefold().split()),
+        )
+    )
+    return hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+class InMemoryMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
+    """测试用的按来源轮次幂等 episode 仓储。"""
+
+    def __init__(self) -> None:
+        """初始化空的回顾记录表。"""
+        self.items: dict[str, MemoryEpisode] = {}
+        self.suppressed_turns: set[str] = set()
+
+    async def get_by_turn(self, turn_id: str) -> MemoryEpisode | None:
+        """按来源轮次读取回顾。
+
+        参数：turn_id 是已完成 Run 的稳定 ID。
+        返回：已有回顾；不存在时返回 None。
+        异常：不主动抛出业务异常。
+        """
+        return self.items.get(turn_id)
+
+    async def create_if_absent(self, episode: MemoryEpisode) -> MemoryEpisode | None:
+        """保存首次回顾并返回同轮次胜出的记录。
+
+        参数：episode 是已完成来源校验的任务回顾。
+        返回：已保存或此前保存的同轮回顾。
+        异常：不主动抛出业务异常。
+        """
+        if episode.turn_id in self.suppressed_turns:
+            return None
+        return self.items.setdefault(episode.turn_id, episode)
+
+    async def list_recent(
+        self, *, limit: int, offset: int, session_id: str | None = None
+    ) -> tuple[list[MemoryEpisode], int]:
+        visible = [
+            episode
+            for episode in self.items.values()
+            if episode.turn_id not in self.suppressed_turns
+            and (session_id is None or episode.session_id == session_id)
+        ]
+        visible.sort(key=lambda episode: episode.created_at, reverse=True)
+        return visible[offset:offset + limit], len(visible)
+
+    async def forget(self, episode_id: str) -> bool:
+        episode = next(
+            (item for item in self.items.values() if item.episode_id == episode_id),
+            None,
+        )
+        if episode is None:
+            return False
+        self.suppressed_turns.add(episode.turn_id)
+        self.items.pop(episode.turn_id, None)
+        return True
+
+    async def search(
+        self, session_id: str, request: MemoryEpisodeSearchRequest
+    ) -> list[MemoryEpisode]:
+        """在测试记录中按会话和词项匹配并应用有界限制。
+
+        参数：session_id 是唯一搜索范围；request 提供查询词和候选上限。
+        返回：按创建时间倒序排列的匹配任务回顾。
+        异常：不主动抛出业务异常。
+        """
+        terms = tuple(term.casefold() for term in request.terms)
+        matches = [
+            episode
+            for episode in self.items.values()
+            if episode.turn_id not in self.suppressed_turns
+            and (
+                (
+                    episode.session_id == session_id
+                    and episode.project_id is None
+                )
+                or (
+                    request.project_id is not None
+                    and episode.project_id == request.project_id
+                )
+            )
+            and any(term in episode.content.casefold() for term in terms)
+        ]
+        matches.sort(key=lambda episode: episode.created_at, reverse=True)
+        return matches[: request.limit]
+
+    async def expand_sources(
+        self,
+        episode_id: str,
+        *,
+        session_id: str,
+        project_id: str | None,
+        limit: int,
+    ) -> tuple[MemorySourceReference, ...]:
+        """在测试仓储中按同一范围返回冻结来源片段。"""
+        episode = next(
+            (
+                value
+                for value in self.items.values()
+                if value.turn_id not in self.suppressed_turns
+                and value.episode_id == episode_id
+                and (
+                    (value.session_id == session_id and value.project_id is None)
+                    or (project_id is not None and value.project_id == project_id)
+                )
+            ),
+            None,
+        )
+        return () if episode is None else episode.source_refs[: min(4, max(0, limit))]
 
 
 class InMemoryApprovalRepository(ApprovalRepository):

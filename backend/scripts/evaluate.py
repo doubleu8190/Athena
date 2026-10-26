@@ -66,6 +66,11 @@ async def _run(args: argparse.Namespace) -> int:
     if args.command == "run":
         dataset_path = args.dataset or Path("tests/retrieval_eval/chinese_cases.jsonl")
         manifest = load_dataset(dataset_path)
+        if any(case.task_type == "memory_acceptance" for case in manifest.cases):
+            raise ValueError(
+                "memory_acceptance datasets require a memory replay target and "
+                "acceptance evaluator; the retrieval CLI cannot score them"
+            )
         config = _config(args.config, manifest.version_id)
         if config.mode != EvaluationMode.RETRIEVAL:
             raise ValueError("CLI MVP currently supports mode=retrieval")

@@ -24,9 +24,15 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    MemoryJobScopeSnapshotModel,
     MemoryProcessingJobModel,
+    MemoryProjectSpaceModel,
+    MemoryRunEvidenceSnapshotModel,
+    MemorySourceSuppressionModel,
     MessageModel,
     SessionModel,
+    SessionMemoryProjectBindingModel,
+    SessionMemorySettingsModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
     OrchestrationOutboxModel,
@@ -101,6 +107,12 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             WorkerJobModel.__table__,
             AgentEventModel.__table__,
             MemoryProcessingJobModel.__table__,
+            MemoryJobScopeSnapshotModel.__table__,
+            MemoryProjectSpaceModel.__table__,
+            MemoryRunEvidenceSnapshotModel.__table__,
+            MemorySourceSuppressionModel.__table__,
+            SessionMemoryProjectBindingModel.__table__,
+            SessionMemorySettingsModel.__table__,
         ]
         async with test_engine.begin() as connection:
             await connection.run_sync(

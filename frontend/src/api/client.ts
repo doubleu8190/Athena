@@ -4,11 +4,16 @@
 import type {
   CreateSessionResponse,
   Session,
+  SessionMemorySettings,
+  MemoryProjectSpace,
   Message,
   ApprovalRequest,
   ApprovalHistoryEntry,
   ApprovalStats,
   MemoryEntry,
+  MemoryRelationEntry,
+  MemoryEpisodeListResponse,
+  MemoryJobListResponse,
   MemoryListResponse,
   SessionRunSummary,
   RunListResponse,
@@ -151,6 +156,39 @@ class ApiClient {
   /** 按 ID 查询会话详情。 */
   async getSession(sessionId: string): Promise<Session> {
     return this.request<Session>(`/api/sessions/${sessionId}`)
+  }
+
+  async getSessionMemorySettings(sessionId: string): Promise<SessionMemorySettings> {
+    return this.request<SessionMemorySettings>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/memory-settings`,
+    )
+  }
+
+  async updateSessionMemorySettings(
+    sessionId: string,
+    settings: Pick<SessionMemorySettings, "use_memories" | "generate_memories" | "project_id">,
+  ): Promise<SessionMemorySettings> {
+    return this.request<SessionMemorySettings>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/memory-settings`,
+      { method: "PUT", body: JSON.stringify(settings) },
+    )
+  }
+
+  async listMemoryProjectSpaces(): Promise<MemoryProjectSpace[]> {
+    return this.request<MemoryProjectSpace[]>("/api/memory-projects")
+  }
+
+  async createMemoryProjectSpace(name: string): Promise<MemoryProjectSpace> {
+    return this.request<MemoryProjectSpace>("/api/memory-projects", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    })
+  }
+
+  async deleteMemoryProjectSpace(projectId: string): Promise<void> {
+    await this.request<void>(`/api/memory-projects/${encodeURIComponent(projectId)}`, {
+      method: "DELETE",
+    })
   }
 
   /** 删除会话及其关联资源。 */
@@ -474,6 +512,45 @@ class ApiClient {
 
   async getMemoryRevisions(memoryId: string): Promise<MemoryEntry[]> {
     return this.request<MemoryEntry[]>(`/api/memory/${encodeURIComponent(memoryId)}/revisions`)
+  }
+
+  async getMemoryRelations(memoryId: string): Promise<MemoryRelationEntry[]> {
+    return this.request<MemoryRelationEntry[]>(`/api/memory/${encodeURIComponent(memoryId)}/relations`)
+  }
+
+  /** 遗忘一条记忆并抑制相同来源重建。 */
+  async deleteMemory(memoryId: string): Promise<void> {
+    await this.request<void>(`/api/memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })
+  }
+
+  async listMemoryEpisodes(opts?: {
+    limit?: number
+    offset?: number
+    session_id?: string
+  }): Promise<MemoryEpisodeListResponse> {
+    const params = new URLSearchParams()
+    if (opts?.limit != null) params.set("limit", String(opts.limit))
+    if (opts?.offset != null) params.set("offset", String(opts.offset))
+    if (opts?.session_id) params.set("session_id", opts.session_id)
+    const qs = params.toString()
+    return this.request<MemoryEpisodeListResponse>(`/api/memory/episodes${qs ? `?${qs}` : ""}`)
+  }
+
+  async listMemoryJobs(opts?: {
+    limit?: number
+    offset?: number
+    session_id?: string
+  }): Promise<MemoryJobListResponse> {
+    const params = new URLSearchParams()
+    if (opts?.limit != null) params.set("limit", String(opts.limit))
+    if (opts?.offset != null) params.set("offset", String(opts.offset))
+    if (opts?.session_id) params.set("session_id", opts.session_id)
+    const query = params.toString()
+    return this.request<MemoryJobListResponse>(`/api/memory/jobs${query ? `?${query}` : ""}`)
+  }
+
+  async deleteMemoryEpisode(episodeId: string): Promise<void> {
+    await this.request<void>(`/api/memory/episodes/${encodeURIComponent(episodeId)}`, { method: "DELETE" })
   }
 
   async searchMemory(query: string, nResults = 5): Promise<MemoryEntry[]> {

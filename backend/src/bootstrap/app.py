@@ -23,7 +23,14 @@ from application.tools import ToolQueryService
 from application.tools import ToolService, MCPService
 from application.approval import ApprovalService
 from application.orchestration import OrchestrationQueryService
-from application.memory import MemoryQueryService, MemoryService
+from application.memory import (
+    MemoryEpisodeManagementService,
+    MemoryJobManagementService,
+    MemoryQueryService,
+    MemoryService,
+    MemoryProjectSpaceService,
+    SessionMemorySettingsService,
+)
 from application.retrieval import RetrievalQueryService
 from application.files import AttachmentService
 from interfaces.http.controllers.files_controller import build_files_router
@@ -47,6 +54,8 @@ def create_app(
     *,
     dependencies: ApplicationDependencies | None = None,
     session_service_factory: Callable[[], SessionService] | None = None,
+    session_memory_settings_factory: Callable[[], SessionMemorySettingsService] | None = None,
+    memory_project_factory: Callable[[], MemoryProjectSpaceService] | None = None,
     message_query_factory: Callable[[], SessionMessageQueryService] | None = None,
     run_query_factory: Callable[[], RunQueryService] | None = None,
     run_command_factory: Callable[[], RunCommandService] | None = None,
@@ -60,6 +69,8 @@ def create_app(
     settings_query_factory: Callable[[], SettingsQueryService] | None = None,
     memory_query_factory: Callable[[], MemoryQueryService] | None = None,
     memory_service_factory: Callable[[], MemoryService] | None = None,
+    memory_episode_service_factory: Callable[[], MemoryEpisodeManagementService] | None = None,
+    memory_job_service_factory: Callable[[], MemoryJobManagementService] | None = None,
     retrieval_query_factory: Callable[[], RetrievalQueryService] | None = None,
     knowledge_query_factory: Callable[[], KnowledgeBaseQueryService] | None = None,
     attachment_service_factory: Callable[[], AttachmentService] | None = None,
@@ -115,6 +126,10 @@ def create_app(
         return explicit if explicit is not None else graph.provider(name)
 
     session_service_factory = registered("session_service_factory", session_service_factory)
+    session_memory_settings_factory = registered(
+        "session_memory_settings_factory", session_memory_settings_factory
+    )
+    memory_project_factory = registered("memory_project_factory", memory_project_factory)
     message_query_factory = registered("message_query_factory", message_query_factory)
     run_query_factory = registered("run_query_factory", run_query_factory)
     run_command_factory = registered("run_command_factory", run_command_factory)
@@ -130,6 +145,12 @@ def create_app(
     settings_query_factory = registered("settings_query_factory", settings_query_factory)
     memory_query_factory = registered("memory_query_factory", memory_query_factory)
     memory_service_factory = registered("memory_service_factory", memory_service_factory)
+    memory_episode_service_factory = registered(
+        "memory_episode_service_factory", memory_episode_service_factory
+    )
+    memory_job_service_factory = registered(
+        "memory_job_service_factory", memory_job_service_factory
+    )
     retrieval_query_factory = registered("retrieval_query_factory", retrieval_query_factory)
     knowledge_query_factory = registered("knowledge_query_factory", knowledge_query_factory)
     attachment_service_factory = registered("attachment_service_factory", attachment_service_factory)
@@ -161,6 +182,7 @@ def create_app(
         app.include_router(
             build_sessions_router(
                 session_service_factory,
+                memory_settings_factory=session_memory_settings_factory,
                 message_query_factory=message_query_factory,
                 run_query_factory=run_query_factory,
             ),
@@ -174,8 +196,11 @@ def create_app(
             settings_query_factory,
             memory_query_factory,
             memory_service_factory,
+            memory_episode_service_factory,
+            memory_job_service_factory,
             retrieval_query_factory,
             knowledge_query_factory,
+            memory_project_factory,
         )
     ):
         app.include_router(
@@ -185,6 +210,9 @@ def create_app(
                 settings_factory=settings_query_factory,
                 memory_factory=memory_query_factory,
                 memory_service_factory=memory_service_factory,
+                memory_episode_service_factory=memory_episode_service_factory,
+                memory_job_service_factory=memory_job_service_factory,
+                memory_project_factory=memory_project_factory,
                 retrieval_factory=retrieval_query_factory,
                 knowledge_factory=knowledge_query_factory,
                 include_tools=tool_service_factory is None,

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from application.runs.request_contracts import (
     RootAttachment,
     RootKnowledgeBase,
+    RootRequestHistoryMessage,
     RootRequestState,
 )
 from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
@@ -18,6 +19,7 @@ from domain.sessions import Message, MessageRepository, MessageRole, SessionRepo
 from shared import get_logger
 
 logger = get_logger(__name__)
+
 
 class RunRequestPreparationService:
     """准备运行请求并提供 Root Graph 所需的持久化查询。"""
@@ -56,7 +58,7 @@ class RunRequestPreparationService:
             ValueError: 附件不存在、未完成处理或会话标识为空时抛出。
             SessionNotFoundError: 会话不存在时抛出。
         """
-        session_id = request.session_id or ""
+        session_id = request.session_id
         if not session_id:
             raise ValueError("session_id is required")
         if await self._sessions.get(session_id) is None:
@@ -102,7 +104,7 @@ class RunRequestPreparationService:
                 attachments=tuple(attachment_values),
             )
             await self._messages.save(user_message)
-            logger.info(f"用户消息{user_message.content}保存成功。")
+            logger.info(f"用户消息保存成功。", user_message=user_message.content)
         if self._events is not None:
             await self._events.publish(
                 ApplicationEvent(

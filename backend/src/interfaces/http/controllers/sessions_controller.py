@@ -16,11 +16,14 @@ from application.sessions import (
     SessionNotFoundError,
     SessionService,
 )
+from application.memory import SessionMemorySettingsService
 from interfaces.http.dto.sessions import (
     CreateSessionRequest,
     SessionDeletionResponse,
     SessionResponse,
     UpdateSessionRequest,
+    SessionMemorySettingsRequest,
+    SessionMemorySettingsResponse,
     MessageResponse,
     RunSummaryResponse,
 )
@@ -32,6 +35,7 @@ def build_sessions_router(
     *,
     message_query_factory: Callable[[], SessionMessageQueryService] | None = None,
     run_query_factory: Callable[[], RunQueryService] | None = None,
+    memory_settings_factory: Callable[[], SessionMemorySettingsService] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -47,6 +51,11 @@ def build_sessions_router(
         if run_query_factory is None:
             raise RuntimeError("run query service is not configured")
         return run_query_factory()
+
+    def memory_settings() -> SessionMemorySettingsService:
+        if memory_settings_factory is None:
+            raise RuntimeError("session memory settings service is not configured")
+        return memory_settings_factory()
 
     @router.post("", response_model=SessionResponse)
     async def create_session(
@@ -97,6 +106,54 @@ def build_sessions_router(
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return SessionDeletionResponse(status="deleted", session_id=session_id)
+
+    if memory_settings_factory is not None:
+        @router.get(
+            "/{session_id}/memory-settings",
+            response_model=SessionMemorySettingsResponse,
+        )
+        async def get_session_memory_settings(
+            session_id: str,
+            settings: SessionMemorySettingsService = Depends(memory_settings),
+        ) -> SessionMemorySettingsResponse:
+            try:
+                value = await settings.get(session_id)
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail="session_not_found") from exc
+            return SessionMemorySettingsResponse(
+                session_id=value.session_id,
+                use_memories=value.use_memories,
+                generate_memories=value.generate_memories,
+                project_id=value.project_id,
+            )
+
+        @router.put(
+            "/{session_id}/memory-settings",
+            response_model=SessionMemorySettingsResponse,
+        )
+        async def update_session_memory_settings(
+            session_id: str,
+            request: SessionMemorySettingsRequest,
+            settings: SessionMemorySettingsService = Depends(memory_settings),
+        ) -> SessionMemorySettingsResponse:
+            try:
+                value = await settings.update(
+                    session_id,
+                    use_memories=request.use_memories,
+                    generate_memories=request.generate_memories,
+                    project_id=request.project_id,
+                )
+            except LookupError as exc:
+                detail = str(exc)
+                if detail not in {"session_not_found", "memory_project_not_found"}:
+                    detail = "session_not_found"
+                raise HTTPException(status_code=404, detail=detail) from exc
+            return SessionMemorySettingsResponse(
+                session_id=value.session_id,
+                use_memories=value.use_memories,
+                generate_memories=value.generate_memories,
+                project_id=value.project_id,
+            )
 
     @router.get("/{session_id}/messages", response_model=list[MessageResponse])
     async def list_session_messages(

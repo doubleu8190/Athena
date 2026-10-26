@@ -79,6 +79,7 @@ class RetrievalCandidateSelection(BaseModel):
 
     provider: str = Field(min_length=1)
     source_id: str = Field(min_length=1)
+    source_ids: tuple[str, ...] = ()
     context_selected: bool
     filter_reason: str | None = None
 

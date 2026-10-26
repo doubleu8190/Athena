@@ -12,8 +12,12 @@ from application.knowledge import KnowledgeBaseQueryService, KnowledgeBaseServic
 from application.memory import (
     DefaultMemoryWriteTrigger,
     LLMFactExtractor,
+    LLMMemoryEpisodeSummarizer,
     LLMMemoryResolver,
+    MemoryEpisodeManagementService,
+    MemoryProjectSpaceService,
     MemoryService,
+    SessionMemorySettingsService,
     MemoryWriteWorkflow,
 )
 from application.retrieval import RetrievalQueryService
@@ -48,6 +52,8 @@ from application.files.retrieval_service import (
     KnowledgeContextProvider,
 )
 from application.memory.retrieval_service import MemoryContextProvider
+from application.memory.episode_retrieval_service import MemoryEpisodeContextProvider
+from application.memory.job_service import MemoryJobManagementService
 from application.retrieval.graph_service import GraphContextProvider
 from configuration import Settings
 from shared import monotonic_timestamp_id_factory
@@ -112,11 +118,15 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresKnowledgeDocumentRepository,
     PostgresMCPServerRepository,
     PostgresMemoryJobRepository,
+    PostgresMemoryOperationsRepository,
+    PostgresMemoryEpisodeRepository,
+    PostgresMemoryProjectSpaceRepository,
     PostgresMemoryRepository,
     PostgresMessageRepository,
     PostgresRetrievalRepository,
     PostgresRunRepository,
     PostgresSessionRepository,
+    PostgresSessionMemorySettingsRepository,
     PostgresToolConfigRepository,
     PostgresFileChunkRepository,
     PostgresOrchestrationRepository,
@@ -167,12 +177,16 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     graph_thread_lock = PostgresGraphThreadLock(settings.postgres_conn_string)
     session_factory = postgres.session
     sessions = PostgresSessionRepository(session_factory)
+    session_memory_settings = PostgresSessionMemorySettingsRepository(session_factory)
+    memory_project_spaces = PostgresMemoryProjectSpaceRepository(session_factory)
     messages = PostgresMessageRepository(session_factory)
     runs = PostgresRunRepository(session_factory)
     events = PostgresEventRepository(session_factory)
     approvals = PostgresApprovalRepository(session_factory)
     memory = PostgresMemoryRepository(session_factory)
     memory_jobs = PostgresMemoryJobRepository(session_factory)
+    memory_operations = PostgresMemoryOperationsRepository(session_factory)
+    memory_episodes = PostgresMemoryEpisodeRepository(session_factory)
     retrieval = PostgresRetrievalRepository(session_factory)
     evaluation_repository = PostgresEvaluationRepository(session_factory)
     evaluation_progress = EvaluationProgressHub()
@@ -296,7 +310,12 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
     ids = monotonic_timestamp_id_factory()
     llm_provider = ConfiguredLLMProvider(llm_options)
-    memory_extractor = LLMFactExtractor(llm_provider, memory)
+    memory_extractor = LLMFactExtractor(
+        llm_provider,
+        memory,
+        operations=memory_operations,
+        settings=session_memory_settings,
+    )
     memory_resolver = LLMMemoryResolver(llm_provider, memory)
     memory_workflow = MemoryWriteWorkflow(
         memory,
@@ -304,6 +323,10 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         memory_extractor,
         memory_resolver,
         memory_vectors,
+        operations=memory_operations,
+        settings=session_memory_settings,
+        episode_summarizer=LLMMemoryEpisodeSummarizer(llm_provider),
+        episodes=memory_episodes,
     )
     context_planner = ContextPlanner(
         max_files=settings.knowledge_context_max_files,
@@ -320,6 +343,13 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             memory_vectors,
             limit=settings.retrieval_context_k,
             timeout_seconds=settings.memory_retrieval_timeout_seconds,
+            settings=session_memory_settings,
+        ),
+        "episode": MemoryEpisodeContextProvider(
+            memory_episodes,
+            limit=settings.retrieval_context_k,
+            timeout_seconds=settings.memory_retrieval_timeout_seconds,
+            settings=session_memory_settings,
         ),
         "file": FileContextProvider(
             chunks, file_vectors, limit=settings.knowledge_context_limit_per_file
@@ -341,6 +371,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         trace_repository=retrieval,
         event_publisher=events,
         memory_repository=memory,
+        episode_repository=memory_episodes,
         token_counter=llm_provider.count_text_tokens,
     )
 
@@ -417,6 +448,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         context_planner=context_planner,
         request_preparation=request_preparation,
         plan_loader=PostgresPlanLoader(orchestration_repository),
+        memory_settings=session_memory_settings,
         agent=ConfiguredRootAgent(llm_provider, events),
         answer_generation=AnswerGenerationService(
             llm_provider,
@@ -450,6 +482,13 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     root_run_executor = LangGraphRunExecutor(root_graph)
     providers: dict[str, Provider] = {
         "session_service_factory": lambda: SessionService(sessions, id_factory=ids),
+        "session_memory_settings_factory": lambda: SessionMemorySettingsService(
+            sessions, session_memory_settings
+        ),
+        "memory_project_factory": lambda: MemoryProjectSpaceService(
+            memory_project_spaces,
+            id_factory=ids,
+        ),
         "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
         "run_query_factory": lambda: RunQueryService(sessions, runs, events),
         "run_command_factory": lambda: RunCommandService(
@@ -463,6 +502,10 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         "provider_query_factory": lambda: ProviderQueryService(settings_queries),
         "settings_query_factory": lambda: SettingsQueryService(settings_queries),
         "memory_service_factory": lambda: MemoryService(memory),
+        "memory_episode_service_factory": lambda: MemoryEpisodeManagementService(
+            memory_episodes
+        ),
+        "memory_job_service_factory": lambda: MemoryJobManagementService(memory_jobs),
         "retrieval_query_factory": lambda: RetrievalQueryService(retrieval),
         "evaluation_repository_factory": lambda: evaluation_repository,
         "evaluation_target_factory": lambda manifest: EmbeddingRetrievalTarget(

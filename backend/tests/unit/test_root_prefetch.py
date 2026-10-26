@@ -7,6 +7,7 @@ import json
 
 import pytest
 from pydantic import ValidationError
+from domain.memory import MemoryRecord
 
 from application.orchestration import RootWorkflow
 from application.orchestration.answer_generation import AnswerGenerationInput, AnswerGenerationService
@@ -133,11 +134,36 @@ async def test_prefetch_query_truncation_preserves_original_message(message: str
 
 
 @pytest.mark.asyncio
-async def test_prefetch_empty_knowledge_scope_is_skipped_without_reading_provider() -> None:
-    """无就绪知识库时不发生全库回退；无参数，异常即测试失败。"""
+async def test_prefetch_passes_empty_knowledge_scope_to_provider() -> None:
+    """无就绪知识库时由提供方处理空范围，且不回退到全库。"""
+    calls = []
+
+    async def retrieve(*, session_id, run_id, plan):
+        calls.append(plan)
+        return ProviderResult(
+            "knowledge", "skipped", error_message="no_ready_knowledge_bases"
+        )
+
     deps = _dependencies(_Agent([]))
-    update = await RootWorkflow(deps).prefetch_context(_request_state("查资料"))
+    deps.context_acquisition = ContextAcquisitionService(
+        {"knowledge": _Provider(retrieve)}, _TraceRepository(), _Events()
+    )
+    deps.available_context_providers = ("knowledge",)
+    state = _request_state("查资料")
+    state["request"]["knowledge_bases"] = [
+        {
+            "id": "processing",
+            "name": "处理中",
+            "document_count": 1,
+            "ready_document_count": 0,
+        }
+    ]
+
+    update = await RootWorkflow(deps).prefetch_context(state)
     outcomes = {item["query"]["provider"]: item for item in update["context_queries"]}
+    assert len(calls) == 1
+    assert calls[0].providers == ("knowledge",)
+    assert calls[0].knowledge_base_ids == ()
     assert outcomes["knowledge"]["status"] == "skipped"
     assert outcomes["knowledge"]["error_message"] == "no_ready_knowledge_bases"
 
@@ -148,6 +174,16 @@ async def test_failed_directed_lookup_retains_prefetch_material_without_double_a
     accessed = []
 
     class MemoryAccess:
+        async def get(self, memory_id):
+            if memory_id == "fruit":
+                return MemoryRecord(
+                    "fruit", "苹果", {"category": "preference"}
+                )
+            return None
+
+        async def list_fact_group_by_identity(self, _identity):
+            return []
+
         async def record_access(self, ids):
             """记录本批真正选中的记忆 ID。"""
             accessed.extend(ids)
@@ -155,7 +191,19 @@ async def test_failed_directed_lookup_retains_prefetch_material_without_double_a
     async def retrieve(*, session_id, run_id, plan):
         """原 query 命中；定向 query 故障。"""
         if plan.memory_query == "查偏好":
-            return ProviderResult("memory", "succeeded", (ContextItem("memory", "苹果", "fruit"),), result_count=1)
+            return ProviderResult(
+                "memory",
+                "succeeded",
+                (
+                    ContextItem(
+                        "memory",
+                        "苹果",
+                        "fruit",
+                        {"category": "preference"},
+                    ),
+                ),
+                result_count=1,
+            )
         raise RuntimeError("lookup unavailable")
 
     deps = _dependencies(_Agent([]), provider=retrieve)

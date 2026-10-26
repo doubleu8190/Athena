@@ -10,6 +10,7 @@ from application.runs.request_preparation import RunRequestPreparationService
 from application.tools.service import ToolService
 from .answer_generation import AnswerGenerationService
 from domain.events.ports import EventPort
+from domain.memory import SessionMemorySettingsPort
 from domain.orchestration.ports import ReviewContextRepository
 
 from .protocols import PlanLoader, RootAgent, RootPlanCommandPort
@@ -32,6 +33,7 @@ class RootWorkflowDependencies:
     review_context_repository: ReviewContextRepository | None = None
     orchestration_command_handler: RootPlanCommandPort | None = None
     plan_loader: PlanLoader | None = None
+    memory_settings: SessionMemorySettingsPort | None = None
 
 
 __all__ = ["RootWorkflowDependencies"]

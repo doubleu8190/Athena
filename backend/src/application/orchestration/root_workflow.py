@@ -52,6 +52,7 @@ from application.runs.context.contracts import (
     ContextItem,
     ContextPlan,
     ContextQuery,
+    EpisodeQuery,
     ContextQueryOutcome,
     KnowledgeQuery,
     MemoryQuery,
@@ -426,26 +427,34 @@ def _merge_context_window(
     *,
     max_items: int,
     max_tokens: int,
+    memory_token_budget: int | None = None,
     token_counter: Callable[[str], int],
 ) -> ContextBundle:
     """优先保留新资料，再用配置模型的 tokenizer 限制窗口大小。"""
+    if memory_token_budget is None:
+        memory_token_budget = max_tokens
     selected: list[ContextItem] = []
     seen_sources: set[tuple[str, str]] = set()
     seen_content: set[tuple[str, str]] = set()
     selections: dict[tuple[str, str], RetrievalCandidateSelection] = {}
     tokens = 0
+    memory_tokens = 0
     truncated = current.truncated
     all_items = (*current.items, *previous.items)
     for index, item in enumerate(all_items):
         key = _context_item_identity(item)
         is_current = index < len(current.items)
-        if item.source_id:
-            identity = (item.provider, item.source_id)
+        has_group_identity = item.provider == "memory" and isinstance(
+            item.metadata.get("memory_group_key"), str
+        )
+        if item.source_id or has_group_identity:
+            identity = _context_item_identity(item)
             if identity in seen_sources:
                 if is_current and key not in selections:
                     selections[key] = RetrievalCandidateSelection(
                         provider=item.provider,
                         source_id=_selection_source_id(item),
+                        source_ids=_selection_source_ids(item),
                         context_selected=False,
                         filter_reason="duplicate_in_context_window",
                     )
@@ -458,32 +467,49 @@ def _merge_context_window(
                     selections[key] = RetrievalCandidateSelection(
                         provider=item.provider,
                         source_id=_selection_source_id(item),
+                        source_ids=_selection_source_ids(item),
                         context_selected=False,
                         filter_reason="duplicate_in_context_window",
                     )
                 continue
             seen_content.add(identity)
         item_tokens = token_counter(item.content)
-        if len(selected) >= max_items or tokens + item_tokens > max_tokens:
+        is_memory = item.provider in {"memory", "memory_index", "episode"}
+        exceeds_memory_budget = (
+            is_memory and memory_tokens + item_tokens > memory_token_budget
+        )
+        if (
+            len(selected) >= max_items
+            or tokens + item_tokens > max_tokens
+            or exceeds_memory_budget
+        ):
             truncated = True
             if is_current:
                 selections[key] = RetrievalCandidateSelection(
                     provider=item.provider,
                     source_id=_selection_source_id(item),
+                    source_ids=_selection_source_ids(item),
                     context_selected=False,
                     filter_reason=(
                         "context_max_items"
                         if len(selected) >= max_items
-                        else "context_token_budget"
+                        else (
+                            "memory_token_budget"
+                            if exceeds_memory_budget
+                            else "context_token_budget"
+                        )
                     ),
                 )
             continue
         selected.append(item)
         tokens += item_tokens
+        if is_memory:
+            memory_tokens += item_tokens
         if is_current:
             selections[key] = RetrievalCandidateSelection(
                 provider=item.provider,
                 source_id=_selection_source_id(item),
+                source_ids=_selection_source_ids(item),
                 context_selected=True,
             )
     return ContextBundle(
@@ -497,10 +523,155 @@ def _merge_context_window(
     )
 
 
+def _enforce_context_window_budget(
+    bundle: ContextBundle,
+    *,
+    max_items: int,
+    max_tokens: int,
+    memory_token_budget: int,
+    token_counter: Callable[[str], int],
+) -> ContextBundle:
+    """核验后若记忆组变大，仍按完整 ContextItem 重做窗口预算。"""
+    selected: list[ContextItem] = []
+    tokens = 0
+    memory_tokens = 0
+    dropped: dict[tuple[str, str], str] = {}
+    for item in bundle.items:
+        item_tokens = token_counter(item.content)
+        if len(selected) >= max_items:
+            dropped[(item.provider, _selection_source_id(item))] = "context_max_items"
+            continue
+        is_memory = item.provider in {"memory", "memory_index", "episode"}
+        if is_memory and memory_tokens + item_tokens > memory_token_budget:
+            dropped[(item.provider, _selection_source_id(item))] = "memory_token_budget"
+            continue
+        if tokens + item_tokens > max_tokens:
+            dropped[(item.provider, _selection_source_id(item))] = (
+                "context_token_budget"
+            )
+            continue
+        selected.append(item)
+        tokens += item_tokens
+        if is_memory:
+            memory_tokens += item_tokens
+
+    selections = tuple(
+        (
+            selection.model_copy(
+                update={
+                    "context_selected": False,
+                    "filter_reason": dropped[(selection.provider, selection.source_id)],
+                }
+            )
+            if selection.context_selected
+            and (selection.provider, selection.source_id) in dropped
+            else selection
+        )
+        for selection in bundle.context_selection
+    )
+    return replace(
+        bundle,
+        items=tuple(selected),
+        truncated=bundle.truncated or bool(dropped),
+        context_selection=selections,
+    )
+
+
 def _context_item_identity(item: ContextItem) -> tuple[str, str]:
+    group_key = item.metadata.get("memory_group_key")
+    if item.provider == "memory" and isinstance(group_key, str) and group_key:
+        return item.provider, group_key
     if item.source_id:
         return item.provider, item.source_id
     return item.provider, item.content
+
+
+def _filter_memory_context_scope(
+    bundle: ContextBundle,
+    *,
+    session_id: str,
+    project_id: str | None,
+    enabled: bool,
+) -> ContextBundle:
+    """每次模型调用前按最新会话绑定重新过滤记忆和任务回顾。"""
+    retained: list[ContextItem] = []
+    rejected_source_ids: set[tuple[str, str]] = set()
+    for item in bundle.items:
+        if item.provider not in {"memory", "memory_index", "episode"}:
+            retained.append(item)
+            continue
+        allowed = enabled
+        if allowed and item.provider == "memory_index":
+            allowed = (
+                item.metadata.get("session_id") == session_id
+                and item.metadata.get("project_id") == project_id
+            )
+        elif allowed and item.provider == "episode":
+            episode_project_id = item.metadata.get("project_id")
+            allowed = episode_project_id is None or episode_project_id == project_id
+        elif allowed and item.provider == "memory":
+            fact_value = item.metadata.get(
+                "memory_fact_identity", item.metadata.get("fact")
+            )
+            fact_scope = (
+                fact_value
+                if isinstance(fact_value, dict)
+                else (
+                    fact_value.model_dump(mode="python")
+                    if hasattr(fact_value, "model_dump")
+                    else None
+                )
+            )
+            if fact_scope is not None:
+                scope_kind = fact_scope.get("scope_kind")
+                scope_id = fact_scope.get("scope_id")
+                allowed = (
+                    (scope_kind == "global" and scope_id == "global")
+                    or (scope_kind == "session" and scope_id == session_id)
+                    or (
+                        project_id is not None
+                        and scope_kind == "project"
+                        and scope_id == project_id
+                    )
+                )
+            else:
+                category = item.metadata.get("category", item.metadata.get("type"))
+                allowed = (
+                    category in {"preference", "profile"}
+                    or item.metadata.get("session_id") == session_id
+                )
+        if allowed:
+            retained.append(item)
+        else:
+            rejected_source_ids.add((item.provider, item.source_id or ""))
+
+    reason = (
+        "session_memory_read_disabled"
+        if not enabled
+        else "memory_scope_binding_changed"
+    )
+    selections = tuple(
+        (
+            selection.model_copy(
+                update={
+                    "context_selected": False,
+                    "source_ids": (),
+                    "filter_reason": reason,
+                }
+            )
+            if selection.context_selected
+            and (selection.provider, selection.source_id) in rejected_source_ids
+            else selection
+        )
+        for selection in bundle.context_selection
+    )
+    if len(retained) == len(bundle.items) and selections == bundle.context_selection:
+        return bundle
+    return replace(
+        bundle,
+        items=tuple(retained),
+        context_selection=selections,
+    )
 
 
 def _has_context_progress(previous: ContextBundle, current: ContextBundle) -> bool:
@@ -522,6 +693,20 @@ def _selection_source_id(item: ContextItem) -> str:
         return item.source_id
     digest = sha256(item.content.encode("utf-8")).hexdigest()[:24]
     return f"inline_{digest}"
+
+
+def _selection_source_ids(item: ContextItem) -> tuple[str, ...]:
+    """展开事实组的真实成员 ID，供选择轨迹和访问统计共用。"""
+    raw_ids = item.metadata.get("memory_member_ids")
+    member_ids = (
+        tuple(value for value in raw_ids if isinstance(value, str) and value)
+        if isinstance(raw_ids, (tuple, list))
+        else ()
+    )
+    source_id = _selection_source_id(item)
+    if item.provider != "memory":
+        return ()
+    return tuple(dict.fromkeys((source_id, *member_ids)))
 
 
 def _filter_context_queries(
@@ -608,6 +793,16 @@ async def _retrieve_context_batch(
             knowledge_base_ids=knowledge_base_ids,
         )
         plan = plan.with_updates(provider_timeout_seconds=provider_timeout_seconds)
+        logger.debug(
+            "context_plan_generated",
+            extra={
+                "plan": as_dict(plan),
+                "stage": stage,
+                "session_id": request.session_id,
+                "run_id": request.run_id,
+                "message_id": request.message_id,
+            },
+        )
     except InvalidContextResource as error:
         return (
             ContextBundle(items=(), provider_results=()),
@@ -662,11 +857,14 @@ class RootWorkflow(RootWorkflowPort):
     ) -> RootAgentInput:
         """从当前 checkpoint 构造统一的 Root 决策输入。"""
         request = _request_state(state)
-        bundle = _context_bundle_from_state(state.get("context_bundle", {}))
+        bundle = await self._effective_context_bundle(
+            request.session_id,
+            _context_bundle_from_state(state.get("context_bundle", {})),
+        )
         feedback_value = state.get("planning_feedback")
         worker_tools = await worker_tool_manifest(self.dependencies.tool_service)
         available_context_providers = cast(
-            tuple[Literal["memory", "file", "knowledge", "graph"], ...],
+            tuple[Literal["memory", "episode", "file", "knowledge", "graph"], ...],
             self.dependencies.available_context_providers,
         )
         return RootAgentInput(
@@ -691,6 +889,49 @@ class RootWorkflow(RootWorkflowPort):
             ),
             planning_context_updated=bool(state.get("planning_context_updated", False)),
         )
+
+    async def _effective_context_bundle(
+        self, session_id: str, bundle: ContextBundle
+    ) -> ContextBundle:
+        """每次模型调用前应用读取开关并复核记忆仍然有效。"""
+        settings_port = self.dependencies.memory_settings
+        settings = (
+            await settings_port.get(session_id) if settings_port is not None else None
+        )
+        effective = _filter_memory_context_scope(
+            bundle,
+            session_id=session_id,
+            project_id=None if settings is None else settings.project_id,
+            enabled=settings is None or settings.use_memories,
+        )
+        if (
+            effective.items != bundle.items
+            or effective.context_selection != bundle.context_selection
+        ):
+            await self.dependencies.context_acquisition.persist_revalidated_selection(
+                effective
+            )
+        if settings is not None and not settings.use_memories:
+            return effective
+        validated = await self.dependencies.context_acquisition.validate_memory_context(
+            effective
+        )
+        planner = self.dependencies.context_planner
+        effective = _enforce_context_window_budget(
+            validated,
+            max_items=planner.max_items,
+            max_tokens=planner.max_tokens,
+            memory_token_budget=planner.memory_token_budget,
+            token_counter=planner.count_tokens,
+        )
+        if (
+            effective.items != bundle.items
+            or effective.context_selection != bundle.context_selection
+        ):
+            await self.dependencies.context_acquisition.persist_revalidated_selection(
+                effective
+            )
+        return effective
 
     async def prepare_request(self, state: RootGraphState) -> dict[str, Any]:
         deps = self.dependencies
@@ -721,7 +962,7 @@ class RootWorkflow(RootWorkflowPort):
         }
 
     async def prefetch_context(self, state: RootGraphState) -> dict[str, Any]:
-        """用原始问题预检索记忆和就绪知识库，不占模型决策轮数。
+        """用原始问题预检索记忆、可用任务回顾和就绪知识库，不占决策轮数。
 
         参数：state 是请求准备后的 RootGraphState，包含原文与资源目录。
         返回：dict，更新同一资料窗口和带阶段的查询摘要。
@@ -735,23 +976,16 @@ class RootWorkflow(RootWorkflowPort):
         ready_ids = tuple(
             item.id for item in request.knowledge_bases if item.ready_document_count > 0
         )
-        queries: list[ContextQuery] = [MemoryQuery(provider="memory", query=query)]
-        knowledge_query = KnowledgeQuery(
-            provider="knowledge", query=query, knowledge_base_ids=ready_ids
-        )
-        # 未装配通道由共用过滤逻辑记录；已装配但无就绪资料时禁止空范围回退。
-        pre_skipped_outcomes: tuple[ContextQueryOutcome, ...] = ()
-        if ready_ids:
-            queries.append(knowledge_query)
-        else:
-            pre_skipped_outcomes = (
-                ContextQueryOutcome(
-                    stage="prefetch",
-                    query=knowledge_query,
-                    status="skipped",
-                    result_count=0,
-                    error_message="no_ready_knowledge_bases",
-                ),
+        queries: list[ContextQuery] = []
+        if "memory" in self.dependencies.available_context_providers:
+            queries.append(MemoryQuery(provider="memory", query=query))
+        if "episode" in self.dependencies.available_context_providers:
+            queries.append(EpisodeQuery(provider="episode", query=query))
+        if "knowledge" in self.dependencies.available_context_providers and ready_ids:
+            queries.append(
+                KnowledgeQuery(
+                    provider="knowledge", query=query, knowledge_base_ids=ready_ids
+                )
             )
 
         return await self._acquire_context_queries(
@@ -759,7 +993,6 @@ class RootWorkflow(RootWorkflowPort):
             queries=tuple(queries),
             stage="prefetch",
             provider_timeout_seconds=self.dependencies.context_prefetch_timeout_seconds,
-            pre_skipped_outcomes=pre_skipped_outcomes,
         )
 
     async def decide_root_action(self, state: RootGraphState) -> dict[str, Any]:
@@ -870,9 +1103,7 @@ class RootWorkflow(RootWorkflowPort):
             CancelledError: Run 被取消时由采集服务传播。
             ValueError: 图状态中的决策不再是有效 ContextRequest 时。
         """
-        decision = ROOT_DECISION_ADAPTER.validate_python(
-            state.get("root_decision", {})
-        )
+        decision = ROOT_DECISION_ADAPTER.validate_python(state.get("root_decision", {}))
         if not isinstance(decision, ContextRequest):
             raise ValueError("root_context_request_missing")
         return await self._acquire_context_queries(
@@ -886,12 +1117,11 @@ class RootWorkflow(RootWorkflowPort):
         queries: tuple[ContextQuery, ...],
         stage: RetrievalStage,
         provider_timeout_seconds: float | None = None,
-        pre_skipped_outcomes: tuple[ContextQueryOutcome, ...] = (),
     ) -> dict[str, Any]:
         """共用两阶段的范围校验、采集、窗口合并与选择确认。
 
         参数：state 提供请求与旧窗口；queries 为具体查询；stage 由程序指定；
-        provider_timeout_seconds 仅在预检索设置；pre_skipped_outcomes 记录无须调用提供方的查询。
+        provider_timeout_seconds 仅在预检索设置。
         返回：dict，包含新的窗口、累积摘要和规划进展。
         异常：取消时传播 CancelledError；损坏的状态契约向上传播。
         """
@@ -905,7 +1135,7 @@ class RootWorkflow(RootWorkflowPort):
             self.dependencies.available_context_providers,
             stage,
         )
-        skipped = [*pre_skipped_outcomes, *unavailable_outcomes]
+        skipped = list(unavailable_outcomes)
         new_bundle = ContextBundle(items=(), provider_results=())
         if available_queries:
             new_bundle, query_outcomes, context_plan = await _retrieve_context_batch(
@@ -939,11 +1169,40 @@ class RootWorkflow(RootWorkflowPort):
             if context_plan is not None
             else deps.context_planner.max_tokens
         )
+        memory_token_budget = (
+            context_plan.memory_token_budget
+            if context_plan is not None
+            else deps.context_planner.memory_token_budget
+        )
         merged_bundle = _merge_context_window(
             previous_bundle,
             new_bundle,
             max_items=max_items,
             max_tokens=max_tokens,
+            memory_token_budget=memory_token_budget,
+            token_counter=deps.context_planner.count_tokens,
+        )
+        memory_settings = (
+            await deps.memory_settings.get(request_state.session_id)
+            if deps.memory_settings is not None
+            else None
+        )
+        merged_bundle = _filter_memory_context_scope(
+            merged_bundle,
+            session_id=request_state.session_id,
+            project_id=(
+                None if memory_settings is None else memory_settings.project_id
+            ),
+            enabled=memory_settings is None or memory_settings.use_memories,
+        )
+        merged_bundle = await deps.context_acquisition.validate_memory_context(
+            merged_bundle
+        )
+        merged_bundle = _enforce_context_window_budget(
+            merged_bundle,
+            max_items=max_items,
+            max_tokens=max_tokens,
+            memory_token_budget=memory_token_budget,
             token_counter=deps.context_planner.count_tokens,
         )
         context_progress = _has_context_progress(previous_bundle, merged_bundle)
@@ -974,13 +1233,14 @@ class RootWorkflow(RootWorkflowPort):
         """根据轻量计划意图生成草稿或返回必要信息缺口。"""
         deps = self.dependencies
         request_state = _request_state(state)
-        decision = ROOT_DECISION_ADAPTER.validate_python(
-            state.get("root_decision", {})
-        )
+        decision = ROOT_DECISION_ADAPTER.validate_python(state.get("root_decision", {}))
         if not isinstance(decision, PlanIntent):
             return {"error": {"code": "root_plan_intent_missing"}, "status": "failed"}
         messages = self._conversation_messages(state)
-        bundle = _context_bundle_from_state(state.get("context_bundle", {}))
+        bundle = await self._effective_context_bundle(
+            request_state.session_id,
+            _context_bundle_from_state(state.get("context_bundle", {})),
+        )
         worker_tools = await worker_tool_manifest(self.dependencies.tool_service)
 
         plan_input = RootPlanInput(
@@ -1011,9 +1271,7 @@ class RootWorkflow(RootWorkflowPort):
             "plan_draft": result.model_dump(mode="json"),
             "planning_feedback": None,
             "planning_context_updated": False,
-            "worker_tools": [
-                tool.model_dump(mode="json") for tool in worker_tools
-            ],
+            "worker_tools": [tool.model_dump(mode="json") for tool in worker_tools],
         }
 
     async def materialize_execution_plan(self, state: RootGraphState) -> dict[str, Any]:
@@ -1171,7 +1429,10 @@ class RootWorkflow(RootWorkflowPort):
                 instructions=decision.instructions,
             )
         messages = self._conversation_messages(state)
-        bundle = _context_bundle_from_state(state.get("context_bundle", {}))
+        bundle = await self._effective_context_bundle(
+            request.session_id,
+            _context_bundle_from_state(state.get("context_bundle", {})),
+        )
         result = await deps.answer_generation.generate(
             AnswerGenerationInput(
                 session_id=request.session_id,

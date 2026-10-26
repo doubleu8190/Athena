@@ -6,11 +6,17 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from application.configuration import ProviderQueryService, SettingsQueryService
-from application.memory import MemoryQueryService, MemoryService
+from application.memory import (
+    MemoryEpisodeManagementService,
+    MemoryJobManagementService,
+    MemoryProjectSpaceService,
+    MemoryQueryService,
+    MemoryService,
+)
 from application.retrieval import RetrievalQueryService
 from application.knowledge import KnowledgeBaseQueryService
 from application.tools import ToolQueryService
@@ -142,6 +148,17 @@ class KnowledgeBaseResponse(BaseModel):
         )
 
 
+class MemoryProjectCreateRequest(BaseModel):
+    name: str
+
+
+class MemoryProjectResponse(BaseModel):
+    id: str
+    name: str
+    created_at: str
+    updated_at: str
+
+
 def build_query_router(
     *,
     tool_factory: Callable[[], ToolQueryService] | None = None,
@@ -149,6 +166,9 @@ def build_query_router(
     settings_factory: Callable[[], SettingsQueryService] | None = None,
     memory_factory: Callable[[], MemoryQueryService] | None = None,
     memory_service_factory: Callable[[], MemoryService] | None = None,
+    memory_episode_service_factory: Callable[[], MemoryEpisodeManagementService] | None = None,
+    memory_job_service_factory: Callable[[], MemoryJobManagementService] | None = None,
+    memory_project_factory: Callable[[], MemoryProjectSpaceService] | None = None,
     retrieval_factory: Callable[[], RetrievalQueryService] | None = None,
     knowledge_factory: Callable[[], KnowledgeBaseQueryService] | None = None,
     include_tools: bool = True,
@@ -156,6 +176,79 @@ def build_query_router(
     """创建只依赖 application service 工厂的查询路由。"""
 
     router = APIRouter(tags=["queries"])
+
+    if memory_project_factory is not None:
+        @router.get("/memory-projects", response_model=list[MemoryProjectResponse])
+        async def list_memory_projects() -> list[MemoryProjectResponse]:
+            projects = await memory_project_factory().list()
+            return [
+                MemoryProjectResponse(
+                    id=project.id,
+                    name=project.name,
+                    created_at=project.created_at,
+                    updated_at=project.updated_at,
+                )
+                for project in projects
+            ]
+
+        @router.post("/memory-projects", response_model=MemoryProjectResponse)
+        async def create_memory_project(
+            request: MemoryProjectCreateRequest,
+        ) -> MemoryProjectResponse:
+            try:
+                project = await memory_project_factory().create(request.name)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            return MemoryProjectResponse(
+                id=project.id,
+                name=project.name,
+                created_at=project.created_at,
+                updated_at=project.updated_at,
+            )
+
+        @router.delete("/memory-projects/{project_id}", status_code=204)
+        async def forget_memory_project(project_id: str) -> Response:
+            if not await memory_project_factory().forget(project_id):
+                raise HTTPException(status_code=404, detail="memory_project_not_found")
+            return Response(status_code=204)
+
+    if memory_episode_service_factory is not None:
+        @router.get("/memory/episodes")
+        async def list_memory_episodes(
+            limit: int = Query(default=50, ge=1, le=100),
+            offset: int = Query(default=0, ge=0),
+            session_id: str | None = None,
+        ) -> dict[str, Any]:
+            items, total = await memory_episode_service_factory().list_recent(
+                limit=limit, offset=offset, session_id=session_id
+            )
+            return {
+                "items": [item.model_dump(mode="json") for item in items],
+                "total": total,
+            }
+
+        @router.delete("/memory/episodes/{episode_id}", status_code=204)
+        async def forget_memory_episode(episode_id: str) -> Response:
+            if not await memory_episode_service_factory().forget(episode_id):
+                raise HTTPException(status_code=404, detail="memory_episode_not_found")
+            return Response(status_code=204)
+
+    if memory_job_service_factory is not None:
+        @router.get("/memory/jobs")
+        async def list_memory_jobs(
+            limit: int = Query(default=30, ge=1, le=100),
+            offset: int = Query(default=0, ge=0),
+            session_id: str | None = None,
+        ) -> dict[str, Any]:
+            items, total = await memory_job_service_factory().list_recent(
+                limit=limit, offset=offset, session_id=session_id
+            )
+            return {
+                "items": [asdict(item) for item in items],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
 
     if include_tools:
         @router.get("/tools")
@@ -284,6 +377,23 @@ def build_query_router(
         if not values:
             raise HTTPException(status_code=404, detail="memory_not_found")
         return [_memory_response(value) for value in values]
+
+    @router.get("/memory/{memory_id}/relations")
+    async def list_memory_relations(memory_id: str) -> list[dict[str, Any]]:
+        if memory_service_factory is None:
+            raise HTTPException(status_code=503, detail="memory_service_not_configured")
+        service = memory_service_factory()
+        if await service.get(memory_id) is None:
+            raise HTTPException(status_code=404, detail="memory_not_found")
+        return [asdict(value) for value in await service.related_entries(memory_id)]
+
+    @router.delete("/memory/{memory_id}", status_code=204)
+    async def forget_memory(memory_id: str) -> Response:
+        if memory_service_factory is None:
+            raise HTTPException(status_code=503, detail="memory_service_not_configured")
+        if not await memory_service_factory().delete(memory_id):
+            raise HTTPException(status_code=404, detail="memory_not_found")
+        return Response(status_code=204)
 
     @router.get(
         "/retrieval/runs", response_model=RetrievalRunListHttpResponse

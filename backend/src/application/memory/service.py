@@ -7,6 +7,7 @@ from domain.memory import (
     MemoryPage,
     MemoryRepositoryPort,
     MemoryRecord,
+    MemoryRelationRecord,
     MemorySearchRequest,
     MemoryWriteCommand,
 )
@@ -52,6 +53,10 @@ class MemoryService:
         """获取记忆的不可变修订历史。"""
         return [_to_response(value) for value in await self._port.revisions(memory_id)]
 
+    async def related_entries(self, memory_id: str) -> list[MemoryRelationRecord]:
+        """返回与记忆直接关联的替代或矛盾条目。"""
+        return await self._port.related_entries(memory_id)
+
     async def create_memory(self, command: MemoryWriteCommand) -> str:
         """创建记忆并返回稳定 ID。"""
         return await self._port.create_memory(command)
@@ -88,9 +93,9 @@ class MemoryService:
             valid_until=valid_until,
         )
 
-    async def delete(self, memory_id: str) -> None:
-        """软删除一条记忆。"""
-        await self._port.delete(memory_id)
+    async def delete(self, memory_id: str) -> bool:
+        """遗忘一条记忆并返回目标是否存在。"""
+        return await self._port.delete(memory_id)
 
     async def flush_access_stats(self) -> int:
         """刷新检索访问统计。"""

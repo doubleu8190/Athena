@@ -58,12 +58,15 @@ async def test_prefetch_and_directed_trace_stage_survive_postgres_round_trip() -
         memory = PostgresMemoryRepository(factory)
         traces = PostgresRetrievalRepository(factory)
         await memory.create_memory(MemoryWriteCommand(
-            content="用户喜欢吃苹果", metadata={"session_id": "old-session"}, operation_key="fruit"
+            content="用户喜欢吃苹果",
+            metadata={"session_id": "old-session", "category": "preference"},
+            operation_key="fruit",
         ))
         deps = _dependencies(_Agent([]))
         deps.context_acquisition = ContextAcquisitionService(
             {"memory": MemoryContextProvider(memory)}, traces, _Events(), memory_repository=memory
         )
+        deps.available_context_providers = ("memory",)
         workflow = RootWorkflow(deps)
         state = {
             "request": {"session_id": "new-session", "run_id": "round-trip", "message_id": "m", "user_message": "苹果"},
@@ -80,7 +83,10 @@ async def test_prefetch_and_directed_trace_stage_survive_postgres_round_trip() -
         detail = await traces.get_run(by_stage["prefetch"]["run_id"])
         assert detail["candidates"][0]["context_selected"] is True
         assert (await memory.get("fruit")).access_count == 1
-        assert "苹果" in state["context_bundle"]["items"][0]["content"]
+        assert any(
+            "苹果" in item["content"]
+            for item in state["context_bundle"]["items"]
+        )
     finally:
         await engine.dispose()
         if created:

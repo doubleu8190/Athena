@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from domain.memory import CompletedTurn, MemoryCandidate, MemoryResolution
+from domain.memory import (
+    CompletedTurn,
+    MemoryCandidate,
+    MemoryEpisodeProposal,
+    MemoryResolution,
+)
 
 
 class MemoryWriteTrigger(Protocol):
@@ -15,10 +20,19 @@ class MemoryFactExtractor(Protocol):
     async def extract(self, turn: CompletedTurn) -> list[MemoryCandidate]: ...
 
 
+class MemoryEpisodeSummarizer(Protocol):
+    async def summarize(self, turn: CompletedTurn) -> MemoryEpisodeProposal: ...
+
+
 class MemoryResolver(Protocol):
     async def resolve(
         self, candidates: list[MemoryCandidate]
     ) -> list[MemoryResolution]: ...
 
 
-__all__ = ["MemoryFactExtractor", "MemoryResolver", "MemoryWriteTrigger"]
+__all__ = [
+    "MemoryEpisodeSummarizer",
+    "MemoryFactExtractor",
+    "MemoryResolver",
+    "MemoryWriteTrigger",
+]

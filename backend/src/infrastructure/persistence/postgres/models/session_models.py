@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -27,6 +27,19 @@ class SessionModel(Base):
         String, nullable=True
     )
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class SessionMemorySettingsModel(Base):
+    """会话级记忆读取与生成开关，独立于既有 sessions 表。"""
+
+    __tablename__ = "session_memory_settings"
+
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), primary_key=True
+    )
+    use_memories: Mapped[bool] = mapped_column(Boolean, default=True)
+    generate_memories: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[str] = mapped_column(String)
 
 
 class MessageModel(Base):

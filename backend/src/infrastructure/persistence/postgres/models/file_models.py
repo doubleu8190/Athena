@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import CheckConstraint, Computed, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 
@@ -76,7 +75,6 @@ class FileChunkModel(Base):
             postgresql_where="deleted_time IS NULL",
         ),
         Index("idx_file_chunks_attachment", "attachment_id"),
-        Index("idx_file_chunks_content_fts", "content_fts", postgresql_using="gin"),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -84,10 +82,6 @@ class FileChunkModel(Base):
     ordinal: Mapped[int] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
-    content_fts: Mapped[str] = mapped_column(
-        TSVECTOR,
-        Computed("to_tsvector('chinese'::regconfig, content)", persisted=True),
-    )
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     locator_json: Mapped[str] = mapped_column(Text, default="{}")
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")

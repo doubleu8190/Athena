@@ -24,10 +24,19 @@ class MemoryRepository:
             MemoryRecord(
                 "turn:old:0",
                 "fruit_preference: 苹果",
-                {"session_id": "old-session"},
+                {"session_id": "old-session", "category": "preference"},
                 score=1.0,
             )
         ]
+
+    async def get(self, memory_id: str) -> MemoryRecord | None:
+        return next(
+            (record for record in await self.search(MemorySearchRequest("fruit")) if record.id == memory_id),
+            None,
+        )
+
+    async def list_scope_index(self, *, session_id: str, project_id: str | None, limit: int = 80) -> list[MemoryRecord]:
+        return []
 
     async def record_access(self, memory_ids: list[str]) -> int:
         self.accessed.extend(memory_ids)
@@ -72,7 +81,9 @@ async def test_memory_context_recalls_a_memory_from_an_earlier_session() -> None
     # 召回本身不增加访问量，只有最终选入 Root 窗口后才由采集服务确认。
     assert repository.accessed == []
     assert repository.request is not None
-    assert not repository.request.filters
+    assert repository.request.filters == {
+        "memory_scope": {"session_id": "new-session", "project_id": None}
+    }
     assert "session_id" not in vectors.kwargs
 
 

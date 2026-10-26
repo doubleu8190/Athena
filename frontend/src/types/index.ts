@@ -201,6 +201,20 @@ export interface Session {
   message_count?: number
 }
 
+export interface SessionMemorySettings {
+  session_id: string
+  use_memories: boolean
+  generate_memories: boolean
+  project_id: string | null
+}
+
+export interface MemoryProjectSpace {
+  id: string
+  name: string
+  created_at: string
+  updated_at: string
+}
+
 export interface SessionRunSummary {
   run_id: string
   session_id: string
@@ -623,6 +637,64 @@ export interface MemoryEntry {
   valid_until: string | null
   validity_status: string
   access_count: number
+}
+
+export interface MemoryRelationEntry {
+  id: string
+  kind: "supersedes" | "contradicts"
+  related_memory_id: string
+  related_content: string
+  related_status: string
+  created_at: string
+}
+
+export interface MemoryEpisodeEntry {
+  episode_id: string
+  turn_id: string
+  session_id: string
+  project_id: string | null
+  content: string
+  summary: {
+    title: string
+    goal: string
+    outcome: "completed" | "partial" | "failed" | "cancelled" | "unknown"
+    result: string
+    attempts: string
+    verification_scope: string
+    reusable_learnings: string[]
+    unresolved: string[]
+  }
+  source_refs: Array<{
+    source_type: string
+    source_id: string
+    excerpt: string
+    observed_at: string
+  }>
+  source_fingerprint: string
+  created_at: string
+}
+
+export interface MemoryEpisodeListResponse {
+  items: MemoryEpisodeEntry[]
+  total: number
+}
+
+export interface MemoryJobStatus {
+  turn_id: string
+  session_id: string
+  project_id: string | null
+  status: string
+  attempt: number
+  created_at: string
+  updated_at: string
+  available_at: string
+}
+
+export interface MemoryJobListResponse {
+  items: MemoryJobStatus[]
+  total: number
+  limit: number
+  offset: number
 }
 
 export interface MemoryListResponse {

@@ -183,8 +183,9 @@ class PostgresRetrievalRepository(RetrievalPort):
     ) -> bool:
         """回写本次新候选在 Root 最终资料窗口中的选择结果。"""
         selection_by_key = {
-            (selection.provider, selection.source_id): selection
+            (selection.provider, source_id): selection
             for selection in selections
+            for source_id in (selection.source_ids or (selection.source_id,))
         }
         async with self._session_factory() as session:
             async with session.begin():

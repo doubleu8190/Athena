@@ -11,7 +11,7 @@ from .approval_repository import PostgresApprovalRepository
 from .event_repository import PostgresEventRepository
 from .memory_repository import PostgresMemoryRepository
 from .memory_episode_repository import PostgresMemoryEpisodeRepository
-from .memory_project_space_repository import PostgresMemoryProjectSpaceRepository
+from .project_repository import PostgresProjectRepository
 from .memory_job_repository import PostgresMemoryJobRepository
 from .memory_operations_repository import PostgresMemoryOperationsRepository
 from .retrieval_repository import PostgresRetrievalRepository
@@ -19,6 +19,7 @@ from .run_repository import PostgresRunRepository
 from .mcp_repository import PostgresMCPServerRepository
 from .message_repository import PostgresMessageRepository
 from .session_repository import PostgresSessionRepository
+from .session_title_job_repository import PostgresSessionTitleJobRepository
 from .session_memory_settings_repository import PostgresSessionMemorySettingsRepository
 from .tool_repository import PostgresToolConfigRepository
 from .orchestration_repository import PostgresOrchestrationRepository, PostgresPlanLoader
@@ -54,7 +55,7 @@ __all__ = [
     "PostgresEventRepository",
     "PostgresMemoryRepository",
     "PostgresMemoryEpisodeRepository",
-    "PostgresMemoryProjectSpaceRepository",
+    "PostgresProjectRepository",
     "PostgresMemoryJobRepository",
     "PostgresMemoryOperationsRepository",
     "PostgresRetrievalRepository",
@@ -62,6 +63,7 @@ __all__ = [
     "PostgresMCPServerRepository",
     "PostgresMessageRepository",
     "PostgresSessionRepository",
+    "PostgresSessionTitleJobRepository",
     "PostgresSessionMemorySettingsRepository",
     "PostgresToolConfigRepository",
     "PostgresOrchestrationRepository",

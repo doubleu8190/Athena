@@ -11,9 +11,18 @@ from domain.sessions import Session
 class FakeSessionRepository:
     def __init__(self) -> None:
         self.items: dict[str, Session] = {}
+        self.creation_requests: dict[str, str] = {}
 
     async def create(self, session: Session) -> Session:
         self.items[session.id] = session
+        return session
+
+    async def create_idempotent(self, session: Session, *, creation_request_id: str) -> Session:
+        existing_id = self.creation_requests.get(creation_request_id)
+        if existing_id:
+            return self.items[existing_id]
+        self.items[session.id] = session
+        self.creation_requests[creation_request_id] = session.id
         return session
 
     async def get(self, session_id: str) -> Session | None:
@@ -23,6 +32,10 @@ class FakeSessionRepository:
         return list(self.items.values())
 
     async def save(self, session: Session) -> Session:
+        self.items[session.id] = session
+        return session
+
+    async def rename(self, session: Session) -> Session:
         self.items[session.id] = session
         return session
 
@@ -40,7 +53,11 @@ async def test_session_service_owns_create_and_rename_rules() -> None:
         clock=lambda: now,
     )
 
-    created = await service.create("  Project  ")
+    created = await service.create(
+        project_id="project-1",
+        creation_request_id="request-1",
+        title="  Project  ",
+    )
     renamed = await service.rename(created.id, " New title ")
 
     assert renamed.title == "New title"

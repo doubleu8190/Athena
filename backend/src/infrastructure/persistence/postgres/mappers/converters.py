@@ -50,11 +50,19 @@ def session_model_to_domain(row: SessionModel) -> Session:
     """把 Session ORM 行转换为领域实体。"""
     return Session(
         id=row.id,
+        project_id=row.project_id,
         title=row.title,
         status=SessionStatus(row.status),
         run_id=row.run_id,
         created_at=datetime.fromisoformat(row.created_at),
         updated_at=datetime.fromisoformat(row.updated_at),
+        title_source=row.title_source,
+        title_revision=row.title_revision,
+        last_activity_at=(
+            datetime.fromisoformat(row.last_activity_at)
+            if row.last_activity_at is not None
+            else None
+        ),
         compression_summary=row.compression_summary,
         last_compressed_message_id=row.last_compressed_message_id,
         last_summarized_message_id=row.last_summarized_message_id,
@@ -65,11 +73,19 @@ def session_domain_to_model(value: Session) -> SessionModel:
     """把领域会话转换为 Session ORM 行。"""
     return SessionModel(
         id=value.id,
+        project_id=value.project_id,
         title=value.title,
         status=value.status.value,
         run_id=value.run_id,
         created_at=value.created_at.isoformat(),
         updated_at=value.updated_at.isoformat(),
+        title_source=value.title_source,
+        title_revision=value.title_revision,
+        last_activity_at=(
+            value.last_activity_at.isoformat()
+            if value.last_activity_at is not None
+            else None
+        ),
         compression_summary=value.compression_summary,
         last_compressed_message_id=value.last_compressed_message_id,
         last_summarized_message_id=value.last_summarized_message_id,

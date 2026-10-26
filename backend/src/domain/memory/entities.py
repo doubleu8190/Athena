@@ -111,23 +111,6 @@ class MemoryListRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryProjectSpace:
-    """用户显式创建并绑定的可跨会话记忆空间。"""
-
-    id: str
-    name: str
-    created_at: str
-    updated_at: str
-
-    def __post_init__(self) -> None:
-        """校验稳定 ID 和项目名称。"""
-        if not self.id.strip():
-            raise ValueError("memory_project_id_required")
-        if not self.name.strip() or len(self.name.strip()) > 120:
-            raise ValueError("memory_project_name_invalid")
-
-
-@dataclass(frozen=True, slots=True)
 class MemoryPage:
     """带总数的记忆列表结果。"""
 
@@ -243,7 +226,6 @@ __all__ = [
     "MemoryRecord",
     "MemorySearchRequest",
     "MemoryEpisodeSearchRequest",
-    "MemoryProjectSpace",
     "MemoryStatus",
     "MemoryValidity",
     "MemoryWriteCommand",

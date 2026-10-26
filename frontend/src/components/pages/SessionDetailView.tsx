@@ -10,12 +10,10 @@ import {
   X,
   Bot,
   Brain,
-  Plus,
-  Trash2,
 } from "lucide-react"
 import { apiClient } from "../../api/client"
 import type {
-  MemoryProjectSpace,
+  Project,
   Message,
   Session,
   SessionMemorySettings,
@@ -36,8 +34,7 @@ function SessionDetailView() {
   const [messages, setMessages] = useState<Message[]>([])
   const [runs, setRuns] = useState<SessionRunSummary[]>([])
   const [memorySettings, setMemorySettings] = useState<SessionMemorySettings | null>(null)
-  const [memoryProjects, setMemoryProjects] = useState<MemoryProjectSpace[]>([])
-  const [newMemoryProjectName, setNewMemoryProjectName] = useState("")
+  const [projects, setProjects] = useState<Project[]>([])
   const [memorySettingsSaving, setMemorySettingsSaving] = useState(false)
   const [memorySettingsError, setMemorySettingsError] = useState<string | null>(null)
   const steps = useChatStore((state) => state.steps)
@@ -60,10 +57,10 @@ function SessionDetailView() {
       try {
         const [settings, projects] = await Promise.all([
           apiClient.getSessionMemorySettings(sessionId),
-          apiClient.listMemoryProjectSpaces(),
+          apiClient.listProjects(),
         ])
         setMemorySettings(settings)
-        setMemoryProjects(projects)
+        setProjects(projects)
         setMemorySettingsError(null)
       } catch (settingsError) {
         setMemorySettings(null)
@@ -86,8 +83,7 @@ function SessionDetailView() {
   const handleSelect = (id: string) => {
     setSessionId(id)
     setMemorySettings(null)
-    setMemoryProjects([])
-    setNewMemoryProjectName("")
+    setProjects([])
     setMemorySettingsError(null)
     setError(null)
     setEditing(false)
@@ -98,7 +94,12 @@ function SessionDetailView() {
     try {
       const updated = await apiClient.updateSessionTitle(session.id, draftTitle.trim())
       setSession(updated)
-      useChatStore.getState().updateSession(session.id, { title: updated.title })
+      useChatStore.getState().updateSession(session.id, {
+        title: updated.title,
+        title_source: updated.title_source,
+        title_revision: updated.title_revision,
+        title_pending: updated.title_pending,
+      })
       setEditing(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : "会话重命名失败")
@@ -106,7 +107,7 @@ function SessionDetailView() {
   }
 
   const updateMemorySettings = async (
-    update: Partial<Pick<SessionMemorySettings, "use_memories" | "generate_memories" | "project_id">>,
+    update: Partial<Pick<SessionMemorySettings, "use_memories" | "generate_memories">>,
   ) => {
     if (!sessionId || !memorySettings || memorySettingsSaving) return
     setMemorySettingsSaving(true)
@@ -114,58 +115,11 @@ function SessionDetailView() {
       const saved = await apiClient.updateSessionMemorySettings(sessionId, {
         use_memories: update.use_memories ?? memorySettings.use_memories,
         generate_memories: update.generate_memories ?? memorySettings.generate_memories,
-        project_id: update.project_id !== undefined ? update.project_id : memorySettings.project_id,
       })
       setMemorySettings(saved)
       setMemorySettingsError(null)
     } catch (e) {
       setMemorySettingsError(e instanceof Error ? e.message : "记忆设置保存失败")
-    } finally {
-      setMemorySettingsSaving(false)
-    }
-  }
-
-  const createMemoryProject = async () => {
-    if (!sessionId || !memorySettings || !newMemoryProjectName.trim() || memorySettingsSaving) return
-    setMemorySettingsSaving(true)
-    try {
-      const project = await apiClient.createMemoryProjectSpace(newMemoryProjectName)
-      setMemoryProjects((current) => [project, ...current])
-      setNewMemoryProjectName("")
-      const saved = await apiClient.updateSessionMemorySettings(sessionId, {
-        use_memories: memorySettings.use_memories,
-        generate_memories: memorySettings.generate_memories,
-        project_id: project.id,
-      })
-      setMemorySettings(saved)
-      setMemorySettingsError(null)
-    } catch (e) {
-      setMemorySettingsError(e instanceof Error ? e.message : "项目记忆空间创建失败")
-    } finally {
-      setMemorySettingsSaving(false)
-    }
-  }
-
-  const forgetMemoryProject = async () => {
-    if (!memorySettings?.project_id || memorySettingsSaving) return
-    const project = memoryProjects.find((item) => item.id === memorySettings.project_id)
-    if (!project) return
-    const confirmed = window.confirm(
-      `删除项目记忆空间“${project.name}”？项目事实、任务回顾、派生经验和待处理记忆作业都会移除，绑定会话将恢复为仅当前会话。原始聊天与执行记录仍保留。`,
-    )
-    if (!confirmed) return
-    setMemorySettingsSaving(true)
-    try {
-      await apiClient.deleteMemoryProjectSpace(project.id)
-      const [settings, projects] = await Promise.all([
-        apiClient.getSessionMemorySettings(sessionId!),
-        apiClient.listMemoryProjectSpaces(),
-      ])
-      setMemorySettings(settings)
-      setMemoryProjects(projects)
-      setMemorySettingsError(null)
-    } catch (e) {
-      setMemorySettingsError(e instanceof Error ? e.message : "项目记忆空间删除失败")
     } finally {
       setMemorySettingsSaving(false)
     }
@@ -270,54 +224,13 @@ function SessionDetailView() {
               </div>
               <div className="px-5 divide-y divide-athena-border/60">
                 <div className="py-4">
-                  <label className="block text-sm font-medium" htmlFor="memory-project-space">
-                    项目记忆空间
-                  </label>
+                  <div className="block text-sm font-medium">所属项目</div>
                   <p className="text-xs text-athena-muted mt-1 mb-3">
-                    只有显式绑定后，项目事实和任务回顾才会在该项目的其他会话中复用；同名空间不会自动合并。
+                    会话在创建时归入项目；项目同时决定项目级记忆的共享范围。
                   </p>
-                  <select
-                    id="memory-project-space"
-                    className="w-full rounded-lg border border-athena-border bg-athena-surface px-3 py-2 text-sm"
-                    value={memorySettings?.project_id ?? ""}
-                    onChange={(event) => updateMemorySettings({ project_id: event.target.value || null })}
-                    disabled={!memorySettings || memorySettingsSaving}
-                  >
-                    <option value="">仅当前会话</option>
-                    {memoryProjects.map((project) => (
-                      <option key={project.id} value={project.id}>{project.name}</option>
-                    ))}
-                  </select>
-                  <div className="flex gap-2 mt-3">
-                    <input
-                      className="min-w-0 flex-1 rounded-lg border border-athena-border bg-athena-surface px-3 py-2 text-sm"
-                      value={newMemoryProjectName}
-                      onChange={(event) => setNewMemoryProjectName(event.target.value)}
-                      placeholder="创建项目空间"
-                      maxLength={120}
-                      disabled={!memorySettings || memorySettingsSaving}
-                    />
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 rounded-lg border border-athena-border px-3 py-2 text-sm hover:bg-athena-surface disabled:opacity-50"
-                      onClick={createMemoryProject}
-                      disabled={!memorySettings || memorySettingsSaving || !newMemoryProjectName.trim()}
-                    >
-                      <Plus className="w-4 h-4" />
-                      创建并绑定
-                    </button>
+                  <div className="rounded-lg border border-athena-border bg-athena-surface px-3 py-2 text-sm">
+                    {projects.find((item) => item.id === session?.project_id)?.name ?? "未归属项目"}
                   </div>
-                  {memorySettings?.project_id ? (
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 mt-3 rounded-lg px-3 py-2 text-sm text-athena-danger hover:bg-athena-danger/10 disabled:opacity-50"
-                      onClick={forgetMemoryProject}
-                      disabled={memorySettingsSaving}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      删除当前项目空间及其记忆
-                    </button>
-                  ) : null}
                 </div>
                 <div className="flex items-center justify-between gap-4 py-4">
                   <div>

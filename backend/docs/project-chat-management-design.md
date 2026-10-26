@@ -1,6 +1,6 @@
 # 项目化聊天管理与首轮自动命名改造方案
 
-状态：设计完成，尚未实施。本文以当前工作树代码为基线，覆盖前端、会话接口、项目归属和记忆范围。实施时以本文中的行为和验收标准为准。
+状态：主要实现已落地，静态检查已通过；真实数据库重建和运行时验证待完成。本文记录项目化聊天、项目归属和记忆范围的目标行为与验收边界。
 
 ## 1. 当前行为与问题
 
@@ -195,7 +195,7 @@ flowchart LR
 | `GET /api/sessions/{id}` | 返回带项目归属和标题元数据的 Session |
 | `PATCH /api/sessions/{id}` | 请求 `{title}`，执行手动命名 |
 | `GET/PUT /api/sessions/{id}/memory-settings` | 仅含两个开关，项目归属从 Session 读取 |
-| `GET /api/attachment-types` | 草稿查询附件类型；复用当前类型来源 |
+| `GET /api/knowledge-bases/attachment-types` | 草稿查询附件类型；复用当前类型来源 |
 
 `/api/memory-projects` 由统一项目接口替换，其前端调用与路由一并调整，避免保留两个项目目录。现有消息、附件上传、运行提交、审批和会话事件流地址保持使用。
 

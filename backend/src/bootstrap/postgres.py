@@ -15,7 +15,6 @@ from application.memory import (
     LLMMemoryEpisodeSummarizer,
     LLMMemoryResolver,
     MemoryEpisodeManagementService,
-    MemoryProjectSpaceService,
     MemoryService,
     SessionMemorySettingsService,
     MemoryWriteWorkflow,
@@ -27,7 +26,8 @@ from application.runs import (
     RunQueryService,
     RunRequestPreparationService,
 )
-from application.sessions import SessionMessageQueryService, SessionService
+from application.sessions import SessionMessageQueryService, SessionService, SessionTitleService
+from application.projects import ProjectService
 from application.tools import MCPService, ToolQueryService, ToolService
 from application.orchestration import (
     OrchestrationCommandHandler,
@@ -120,12 +120,13 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresMemoryJobRepository,
     PostgresMemoryOperationsRepository,
     PostgresMemoryEpisodeRepository,
-    PostgresMemoryProjectSpaceRepository,
+    PostgresProjectRepository,
     PostgresMemoryRepository,
     PostgresMessageRepository,
     PostgresRetrievalRepository,
     PostgresRunRepository,
     PostgresSessionRepository,
+    PostgresSessionTitleJobRepository,
     PostgresSessionMemorySettingsRepository,
     PostgresToolConfigRepository,
     PostgresFileChunkRepository,
@@ -151,6 +152,7 @@ from workers import (
     RootResumeDispatcher,
     OrchestrationOutboxDispatcher,
     ApprovalExpiryWorker,
+    SessionTitleWorker,
     WorkerSupervisor,
 )
 
@@ -178,8 +180,9 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     session_factory = postgres.session
     sessions = PostgresSessionRepository(session_factory)
     session_memory_settings = PostgresSessionMemorySettingsRepository(session_factory)
-    memory_project_spaces = PostgresMemoryProjectSpaceRepository(session_factory)
+    projects = PostgresProjectRepository(session_factory)
     messages = PostgresMessageRepository(session_factory)
+    session_title_jobs = PostgresSessionTitleJobRepository(session_factory)
     runs = PostgresRunRepository(session_factory)
     events = PostgresEventRepository(session_factory)
     approvals = PostgresApprovalRepository(session_factory)
@@ -310,6 +313,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
     ids = monotonic_timestamp_id_factory()
     llm_provider = ConfiguredLLMProvider(llm_options)
+    session_title_service = SessionTitleService(llm_provider, messages)
     memory_extractor = LLMFactExtractor(
         llm_provider,
         memory,
@@ -481,12 +485,14 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
 
     root_run_executor = LangGraphRunExecutor(root_graph)
     providers: dict[str, Provider] = {
-        "session_service_factory": lambda: SessionService(sessions, id_factory=ids),
+        "session_service_factory": lambda: SessionService(
+            sessions, id_factory=ids, projects=projects
+        ),
         "session_memory_settings_factory": lambda: SessionMemorySettingsService(
             sessions, session_memory_settings
         ),
-        "memory_project_factory": lambda: MemoryProjectSpaceService(
-            memory_project_spaces,
+        "project_factory": lambda: ProjectService(
+            projects,
             id_factory=ids,
         ),
         "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
@@ -541,6 +547,11 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     }
     resources: list[object] = [postgres, checkpointer, root_graph, neo4j, embedding]
     resources.append(sandbox)
+    session_title_worker = SessionTitleWorker(
+        session_title_jobs,
+        session_title_service,
+        poll_interval=settings.worker_job_poll_interval_seconds,
+    )
     if settings.workers_enabled:
         command_execution = RunExecutionService(
             runs,
@@ -583,9 +594,13 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
                     root_resume_dispatcher,
                     orchestration_outbox_dispatcher,
                     approval_expiry_worker,
+                    session_title_worker,
                 )
             )
         )
+    else:
+        # 标题生成是会话基础体验，和命令/编排 Worker 的总开关分开运行。
+        resources.append(WorkerSupervisor((session_title_worker,)))
     return build_dependencies(factories=providers, resources=resources)
 
 

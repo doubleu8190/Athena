@@ -7,7 +7,6 @@ from .entities import (
     MemoryRecord,
     MemorySearchRequest,
     MemoryEpisodeSearchRequest,
-    MemoryProjectSpace,
     MemoryStatus,
     MemoryValidity,
     MemoryWriteCommand,
@@ -24,7 +23,6 @@ from .retrieval_ports import MemoryVectorIndexPort, MemoryVectorSearchPort
 from .ledger_ports import (
     MemoryEpisodeRepositoryPort,
     MemoryOperationsPort,
-    MemoryProjectSpaceRepositoryPort,
 )
 from .settings import SessionMemorySettings
 from .settings_ports import SessionMemorySettingsPort
@@ -58,7 +56,6 @@ __all__ = [
     "MemoryRecord",
     "MemorySearchRequest",
     "MemoryEpisodeSearchRequest",
-    "MemoryProjectSpace",
     "MemoryStatus",
     "MemoryValidity",
     "MemoryWriteCommand",
@@ -82,7 +79,6 @@ __all__ = [
     "MemorySourceReference",
     "MemoryWriteOperation",
     "MemoryOperationsPort",
-    "MemoryProjectSpaceRepositoryPort",
     "MemoryEpisodeRepositoryPort",
     "MemoryEpisode",
     "MemoryEpisodeProposal",

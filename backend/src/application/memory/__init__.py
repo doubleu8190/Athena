@@ -5,7 +5,6 @@ from .query_service import MemoryQueryService
 from .episode_retrieval_service import MemoryEpisodeContextProvider
 from .workflow import MemoryWriteWorkflow
 from .settings_service import SessionMemorySettingsService
-from .project_space_service import MemoryProjectSpaceService
 from .extraction import DefaultMemoryWriteTrigger, LLMFactExtractor, LLMMemoryResolver
 from .episode_summarizer import LLMMemoryEpisodeSummarizer
 from .episode_service import MemoryEpisodeManagementService
@@ -23,7 +22,6 @@ __all__ = [
     "MemoryJobManagementService",
     "MemoryListRequest",
     "MemoryPageResponse",
-    "MemoryProjectSpaceService",
     "MemoryQueryService",
     "MemoryResponse",
     "MemorySearchRequest",

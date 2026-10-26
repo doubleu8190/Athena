@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
+from .project_models import ProjectModel
 from .runtime_models import MemoryModel
 
 
@@ -39,7 +40,7 @@ class MemoryJobScopeSnapshotModel(Base):
     turn_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(String, nullable=False)
     project_id: Mapped[str | None] = mapped_column(
-        ForeignKey("memory_project_spaces.id", ondelete="RESTRICT"), nullable=True
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=True
     )
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
@@ -72,33 +73,6 @@ class MemoryEpisodeModel(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class MemoryProjectSpaceModel(Base):
-    """由用户明确命名的项目记忆空间目录。"""
-
-    __tablename__ = "memory_project_spaces"
-    __table_args__ = (Index("idx_memory_project_spaces_updated", "updated_at"),)
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-    updated_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
-class SessionMemoryProjectBindingModel(Base):
-    """当前会话到显式项目记忆空间的绑定。"""
-
-    __tablename__ = "session_memory_project_bindings"
-    __table_args__ = (Index("idx_session_memory_project_bindings_project", "project_id"),)
-
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.id", ondelete="CASCADE"), primary_key=True
-    )
-    project_id: Mapped[str] = mapped_column(
-        ForeignKey("memory_project_spaces.id", ondelete="RESTRICT"), nullable=False
-    )
-    updated_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
 class MemoryEpisodeProjectBindingModel(Base):
     """冻结 episode 首次提交时所属的项目空间。"""
 
@@ -109,7 +83,7 @@ class MemoryEpisodeProjectBindingModel(Base):
         ForeignKey("memory_episodes.episode_id", ondelete="CASCADE"), primary_key=True
     )
     project_id: Mapped[str] = mapped_column(
-        ForeignKey("memory_project_spaces.id", ondelete="RESTRICT"), nullable=False
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False
     )
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
@@ -171,11 +145,9 @@ __all__ = [
     "MemoryJobScopeSnapshotModel",
     "MemoryEpisodeModel",
     "MemoryEpisodeProjectBindingModel",
-    "MemoryProjectSpaceModel",
     "MemoryModel",
     "MemoryRelationModel",
     "MemoryRunEvidenceSnapshotModel",
     "MemorySourceSuppressionModel",
     "MemoryWriteOperationModel",
-    "SessionMemoryProjectBindingModel",
 ]

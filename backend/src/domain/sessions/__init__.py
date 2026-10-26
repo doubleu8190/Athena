@@ -5,6 +5,7 @@ from domain.files.entities import AttachmentRef, AttachmentStatus
 
 from .messages import Message, MessageRole, ToolCall
 from .ports import MessageRepository, SessionRepository
+from .title_jobs import SessionTitleJob, SessionTitleJobRepository
 
 __all__ = [
     "AttachmentRef",
@@ -15,5 +16,7 @@ __all__ = [
     "Session",
     "SessionRepository",
     "SessionStatus",
+    "SessionTitleJob",
+    "SessionTitleJobRepository",
     "ToolCall",
 ]

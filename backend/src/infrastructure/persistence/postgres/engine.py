@@ -33,12 +33,48 @@ class PostgresEngine:
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         if self.create_schema:
             async with self.engine.begin() as connection:
-                # The extension is optional for local schema smoke tests. The
-                # vector columns still require it in a production PostgreSQL.
-                try:
-                    await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                except Exception:
-                    await connection.rollback()
+                await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                # Fresh databases need the same zhparser configuration used by
+                # the generated Chinese full-text columns below.
+                await connection.execute(
+                    text(
+                        "SELECT pg_advisory_xact_lock("
+                        "hashtextextended(:lock_key, 0))"
+                    ),
+                    {"lock_key": "athena:chinese-text-search-configuration"},
+                )
+                await connection.exec_driver_sql(
+                    "CREATE EXTENSION IF NOT EXISTS zhparser"
+                )
+                has_chinese_config = await connection.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_ts_config "
+                        "WHERE cfgname = 'chinese')"
+                    )
+                )
+                if not has_chinese_config:
+                    await connection.exec_driver_sql(
+                        "CREATE TEXT SEARCH CONFIGURATION chinese "
+                        "(PARSER = zhparser)"
+                    )
+                    aliases = (
+                        await connection.execute(
+                            text(
+                                "SELECT alias FROM ts_token_type('zhparser') "
+                                "ORDER BY tokid"
+                            )
+                        )
+                    ).scalars().all()
+                    if not aliases:
+                        raise RuntimeError(
+                            "zhparser returned no token types for chinese configuration"
+                        )
+                    quote = connection.dialect.identifier_preparer.quote
+                    token_aliases = ", ".join(quote(alias) for alias in aliases)
+                    await connection.exec_driver_sql(
+                        "ALTER TEXT SEARCH CONFIGURATION chinese "
+                        f"ADD MAPPING FOR {token_aliases} WITH simple"
+                    )
                 await connection.run_sync(Base.metadata.create_all)
 
     async def stop(self) -> None:

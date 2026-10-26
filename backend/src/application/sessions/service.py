@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from domain.sessions import Session, SessionRepository
+from domain.projects import ProjectRepositoryPort
 
 from application.common.responses import SessionResponse
 
@@ -22,30 +23,51 @@ class SessionService:
         repository: SessionRepository,
         *,
         id_factory: Callable[[], str],
+        projects: ProjectRepositoryPort | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._repository = repository
         self._id_factory = id_factory
+        self._projects = projects
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
-    async def create(self, title: str = "New Session") -> SessionResponse:
+    async def create(
+        self,
+        *,
+        project_id: str,
+        creation_request_id: str,
+        title: str = "新聊天",
+    ) -> SessionResponse:
         """创建会话并持久化。
 
         参数：
-            title: 会话标题；空白标题由领域实体拒绝。
+            project_id: 新会话所属的未删除项目。
+            creation_request_id: 稳定请求 ID，用于网络重试幂等。
+            title: 初始会话标题；正常聊天使用默认占位标题。
         返回值：
             Session: 新创建的会话。
         异常：
             ValueError: 标题为空时抛出。
         """
+        if not project_id.strip() or not creation_request_id.strip():
+            raise ValueError("session_creation_request_invalid")
+        if self._projects is not None and await self._projects.get(project_id) is None:
+            raise LookupError("project_not_found")
         session = Session.create(
             session_id=self._id_factory(),
             title=title,
             now=self._clock(),
+            project_id=project_id,
         )
-        return _to_response(await self._repository.create(session))
+        return _to_response(
+            await self._repository.create_idempotent(
+                session, creation_request_id=creation_request_id
+            )
+        )
 
-    async def list_sessions(self) -> list[SessionResponse]:
+    async def list_sessions(
+        self, *, project_id: str | None = None
+    ) -> list[SessionResponse]:
         """返回所有未删除会话。
 
         参数：无。
@@ -54,7 +76,12 @@ class SessionService:
         异常：
             不主动抛出业务异常。
         """
-        return [_to_response(value) for value in await self._repository.list_sessions()]
+        values = (
+            await self._repository.list_sessions()
+            if project_id is None
+            else await self._repository.list_sessions(project_id=project_id)
+        )
+        return [_to_response(value) for value in values]
 
     async def get(self, session_id: str) -> SessionResponse:
         """按 ID 获取会话。
@@ -87,7 +114,7 @@ class SessionService:
         if current is None:
             raise SessionNotFoundError(session_id)
         updated = current.rename(title, now=self._clock())
-        return _to_response(await self._repository.save(updated))
+        return _to_response(await self._repository.rename(updated))
 
     async def delete(self, session_id: str) -> None:
         """删除指定会话。
@@ -112,4 +139,9 @@ def _to_response(value: Session) -> SessionResponse:
         run_id=value.run_id,
         created_at=value.created_at,
         updated_at=value.updated_at,
+        project_id=value.project_id,
+        title_source=value.title_source,
+        title_revision=value.title_revision,
+        last_activity_at=value.last_activity_at,
+        title_pending=value.title_pending,
     )

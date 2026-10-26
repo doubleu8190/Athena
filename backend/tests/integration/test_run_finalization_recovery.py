@@ -26,12 +26,11 @@ from infrastructure.persistence.postgres.models import (
     Base,
     MemoryJobScopeSnapshotModel,
     MemoryProcessingJobModel,
-    MemoryProjectSpaceModel,
+    ProjectModel,
     MemoryRunEvidenceSnapshotModel,
     MemorySourceSuppressionModel,
     MessageModel,
     SessionModel,
-    SessionMemoryProjectBindingModel,
     SessionMemorySettingsModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
@@ -80,6 +79,7 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
     now = datetime.now(timezone.utc)
     run_id = f"run-{uuid4().hex}"
     session_id = f"session-{run_id}"
+    project_id = f"project-{run_id}"
     message_id = f"message-{run_id}"
     command_id = f"command-{run_id}"
 
@@ -108,10 +108,9 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             AgentEventModel.__table__,
             MemoryProcessingJobModel.__table__,
             MemoryJobScopeSnapshotModel.__table__,
-            MemoryProjectSpaceModel.__table__,
+            ProjectModel.__table__,
             MemoryRunEvidenceSnapshotModel.__table__,
             MemorySourceSuppressionModel.__table__,
-            SessionMemoryProjectBindingModel.__table__,
             SessionMemorySettingsModel.__table__,
         ]
         async with test_engine.begin() as connection:
@@ -123,7 +122,21 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session:
-            session.add(SessionModel(id=session_id, title="stream recovery", created_at=now.isoformat(), updated_at=now.isoformat()))
+            session.add(ProjectModel(
+                id=project_id,
+                name="Stream recovery",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+            ))
+            await session.flush()
+            session.add(SessionModel(
+                id=session_id,
+                project_id=project_id,
+                title="stream recovery",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                last_activity_at=now.isoformat(),
+            ))
             await session.commit()
         final_result = {
             "content": "I will keep reports concise.",

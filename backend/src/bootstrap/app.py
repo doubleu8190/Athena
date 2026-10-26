@@ -28,9 +28,9 @@ from application.memory import (
     MemoryJobManagementService,
     MemoryQueryService,
     MemoryService,
-    MemoryProjectSpaceService,
     SessionMemorySettingsService,
 )
+from application.projects import ProjectService
 from application.retrieval import RetrievalQueryService
 from application.files import AttachmentService
 from interfaces.http.controllers.files_controller import build_files_router
@@ -55,7 +55,7 @@ def create_app(
     dependencies: ApplicationDependencies | None = None,
     session_service_factory: Callable[[], SessionService] | None = None,
     session_memory_settings_factory: Callable[[], SessionMemorySettingsService] | None = None,
-    memory_project_factory: Callable[[], MemoryProjectSpaceService] | None = None,
+    project_factory: Callable[[], ProjectService] | None = None,
     message_query_factory: Callable[[], SessionMessageQueryService] | None = None,
     run_query_factory: Callable[[], RunQueryService] | None = None,
     run_command_factory: Callable[[], RunCommandService] | None = None,
@@ -129,7 +129,7 @@ def create_app(
     session_memory_settings_factory = registered(
         "session_memory_settings_factory", session_memory_settings_factory
     )
-    memory_project_factory = registered("memory_project_factory", memory_project_factory)
+    project_factory = registered("project_factory", project_factory)
     message_query_factory = registered("message_query_factory", message_query_factory)
     run_query_factory = registered("run_query_factory", run_query_factory)
     run_command_factory = registered("run_command_factory", run_command_factory)
@@ -200,7 +200,7 @@ def create_app(
             memory_job_service_factory,
             retrieval_query_factory,
             knowledge_query_factory,
-            memory_project_factory,
+            project_factory,
         )
     ):
         app.include_router(
@@ -212,7 +212,7 @@ def create_app(
                 memory_service_factory=memory_service_factory,
                 memory_episode_service_factory=memory_episode_service_factory,
                 memory_job_service_factory=memory_job_service_factory,
-                memory_project_factory=memory_project_factory,
+                project_factory=project_factory,
                 retrieval_factory=retrieval_query_factory,
                 knowledge_factory=knowledge_query_factory,
                 include_tools=tool_service_factory is None,

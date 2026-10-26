@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from application.runs import RunQueryService
 from application.sessions import (
@@ -60,16 +60,32 @@ def build_sessions_router(
     @router.post("", response_model=SessionResponse)
     async def create_session(
         request: CreateSessionRequest,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
         sessions: SessionService = Depends(service),
     ) -> SessionResponse:
-        return SessionResponse.from_application(await sessions.create(request.title))
+        try:
+            value = await sessions.create(
+                project_id=request.project_id,
+                creation_request_id=idempotency_key,
+                title=request.title,
+            )
+        except LookupError as error:
+            detail = str(error)
+            raise HTTPException(status_code=404, detail=detail) from error
+        except ValueError as error:
+            if str(error) in {"idempotency_conflict", "session_deleted"}:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            raise
+        return SessionResponse.from_application(value)
 
     @router.get("", response_model=list[SessionResponse])
     async def list_sessions(
+        project_id: str | None = Query(default=None),
         sessions: SessionService = Depends(service),
     ) -> list[SessionResponse]:
         return [
-            SessionResponse.from_application(item) for item in await sessions.list_sessions()
+            SessionResponse.from_application(item)
+            for item in await sessions.list_sessions(project_id=project_id)
         ]
 
     @router.get("/{session_id}", response_model=SessionResponse)
@@ -93,7 +109,8 @@ def build_sessions_router(
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="title_empty") from exc
+            detail = "title_too_long" if str(exc) == "title_too_long" else "title_empty"
+            raise HTTPException(status_code=400, detail=detail) from exc
         return SessionResponse.from_application(updated)
 
     @router.delete("/{session_id}", response_model=SessionDeletionResponse)
@@ -124,7 +141,6 @@ def build_sessions_router(
                 session_id=value.session_id,
                 use_memories=value.use_memories,
                 generate_memories=value.generate_memories,
-                project_id=value.project_id,
             )
 
         @router.put(
@@ -141,18 +157,16 @@ def build_sessions_router(
                     session_id,
                     use_memories=request.use_memories,
                     generate_memories=request.generate_memories,
-                    project_id=request.project_id,
                 )
             except LookupError as exc:
                 detail = str(exc)
-                if detail not in {"session_not_found", "memory_project_not_found"}:
+                if detail not in {"session_not_found"}:
                     detail = "session_not_found"
                 raise HTTPException(status_code=404, detail=detail) from exc
             return SessionMemorySettingsResponse(
                 session_id=value.session_id,
                 use_memories=value.use_memories,
                 generate_memories=value.generate_memories,
-                project_id=value.project_id,
             )
 
     @router.get("/{session_id}/messages", response_model=list[MessageResponse])

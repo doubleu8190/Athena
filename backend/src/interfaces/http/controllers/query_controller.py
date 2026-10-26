@@ -13,10 +13,10 @@ from application.configuration import ProviderQueryService, SettingsQueryService
 from application.memory import (
     MemoryEpisodeManagementService,
     MemoryJobManagementService,
-    MemoryProjectSpaceService,
     MemoryQueryService,
     MemoryService,
 )
+from application.projects import ProjectNotFoundError, ProjectService
 from application.retrieval import RetrievalQueryService
 from application.knowledge import KnowledgeBaseQueryService
 from application.tools import ToolQueryService
@@ -148,11 +148,11 @@ class KnowledgeBaseResponse(BaseModel):
         )
 
 
-class MemoryProjectCreateRequest(BaseModel):
+class ProjectCreateRequest(BaseModel):
     name: str
 
 
-class MemoryProjectResponse(BaseModel):
+class ProjectResponse(BaseModel):
     id: str
     name: str
     created_at: str
@@ -168,7 +168,7 @@ def build_query_router(
     memory_service_factory: Callable[[], MemoryService] | None = None,
     memory_episode_service_factory: Callable[[], MemoryEpisodeManagementService] | None = None,
     memory_job_service_factory: Callable[[], MemoryJobManagementService] | None = None,
-    memory_project_factory: Callable[[], MemoryProjectSpaceService] | None = None,
+    project_factory: Callable[[], ProjectService] | None = None,
     retrieval_factory: Callable[[], RetrievalQueryService] | None = None,
     knowledge_factory: Callable[[], KnowledgeBaseQueryService] | None = None,
     include_tools: bool = True,
@@ -177,12 +177,12 @@ def build_query_router(
 
     router = APIRouter(tags=["queries"])
 
-    if memory_project_factory is not None:
-        @router.get("/memory-projects", response_model=list[MemoryProjectResponse])
-        async def list_memory_projects() -> list[MemoryProjectResponse]:
-            projects = await memory_project_factory().list()
+    if project_factory is not None:
+        @router.get("/projects", response_model=list[ProjectResponse])
+        async def list_projects() -> list[ProjectResponse]:
+            projects = await project_factory().list()
             return [
-                MemoryProjectResponse(
+                ProjectResponse(
                     id=project.id,
                     name=project.name,
                     created_at=project.created_at,
@@ -191,26 +191,50 @@ def build_query_router(
                 for project in projects
             ]
 
-        @router.post("/memory-projects", response_model=MemoryProjectResponse)
-        async def create_memory_project(
-            request: MemoryProjectCreateRequest,
-        ) -> MemoryProjectResponse:
+        @router.post("/projects", response_model=ProjectResponse)
+        async def create_project(
+            request: ProjectCreateRequest,
+        ) -> ProjectResponse:
             try:
-                project = await memory_project_factory().create(request.name)
+                project = await project_factory().create(request.name)
             except ValueError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
-            return MemoryProjectResponse(
+            return ProjectResponse(
                 id=project.id,
                 name=project.name,
                 created_at=project.created_at,
                 updated_at=project.updated_at,
             )
 
-        @router.delete("/memory-projects/{project_id}", status_code=204)
-        async def forget_memory_project(project_id: str) -> Response:
-            if not await memory_project_factory().forget(project_id):
-                raise HTTPException(status_code=404, detail="memory_project_not_found")
+        @router.delete("/projects/{project_id}", status_code=204)
+        async def delete_project(project_id: str) -> Response:
+            try:
+                await project_factory().delete(project_id)
+            except ProjectNotFoundError as error:
+                raise HTTPException(status_code=404, detail="project_not_found") from error
+            except ValueError as error:
+                if str(error) == "project_busy":
+                    raise HTTPException(status_code=409, detail="project_busy") from error
+                raise
             return Response(status_code=204)
+
+        @router.patch("/projects/{project_id}", response_model=ProjectResponse)
+        async def rename_project(
+            project_id: str,
+            request: ProjectCreateRequest,
+        ) -> ProjectResponse:
+            try:
+                project = await project_factory().rename(project_id, request.name)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            except ProjectNotFoundError as error:
+                raise HTTPException(status_code=404, detail="project_not_found") from error
+            return ProjectResponse(
+                id=project.id,
+                name=project.name,
+                created_at=project.created_at,
+                updated_at=project.updated_at,
+            )
 
     if memory_episode_service_factory is not None:
         @router.get("/memory/episodes")

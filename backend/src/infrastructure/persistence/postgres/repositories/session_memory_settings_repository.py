@@ -6,23 +6,12 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.memory import SessionMemorySettings, SessionMemorySettingsPort
-from domain.memory.suppression import (
-    PROJECT_SUPPRESSION_FINGERPRINT,
-    source_suppression_lock_id,
-)
-
-from ..models import (
-    MemoryProjectSpaceModel,
-    SessionMemoryProjectBindingModel,
-    SessionMemorySettingsModel,
-    SessionModel,
-    MemorySourceSuppressionModel,
-)
+from ..models import SessionMemorySettingsModel, SessionModel
 
 
 class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
@@ -41,17 +30,19 @@ class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
         """读取设置；首次读取沿用现有行为并默认开启两个开关。"""
         async with self._session_factory() as session:
             row = await session.get(SessionMemorySettingsModel, session_id)
-            binding = await session.get(SessionMemoryProjectBindingModel, session_id)
+            project_id = await session.scalar(
+                select(SessionModel.project_id).where(SessionModel.id == session_id)
+            )
         if row is None:
             return SessionMemorySettings(
                 session_id=session_id,
-                project_id=None if binding is None else binding.project_id,
+                project_id=project_id,
             )
         return SessionMemorySettings(
             session_id=row.session_id,
             use_memories=row.use_memories,
             generate_memories=row.generate_memories,
-            project_id=None if binding is None else binding.project_id,
+            project_id=project_id,
         )
 
     async def save(
@@ -71,35 +62,6 @@ class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
                 )
                 if active_session_id is None:
                     raise LookupError("session_not_found")
-                if settings.project_id is not None:
-                    await session.execute(
-                        select(
-                            func.pg_advisory_xact_lock(
-                                source_suppression_lock_id(
-                                    settings.project_id,
-                                    PROJECT_SUPPRESSION_FINGERPRINT,
-                                )
-                            )
-                        )
-                    )
-                    suppressed = await session.scalar(
-                        select(MemorySourceSuppressionModel.source_id)
-                        .where(
-                            MemorySourceSuppressionModel.source_type == "project",
-                            MemorySourceSuppressionModel.source_id
-                            == settings.project_id,
-                            MemorySourceSuppressionModel.item_fingerprint
-                            == PROJECT_SUPPRESSION_FINGERPRINT,
-                        )
-                        .limit(1)
-                    )
-                    if suppressed is not None:
-                        raise LookupError("memory_project_not_found")
-                    project = await session.get(
-                        MemoryProjectSpaceModel, settings.project_id
-                    )
-                    if project is None:
-                        raise LookupError("memory_project_not_found")
                 await session.execute(
                     pg_insert(SessionMemorySettingsModel)
                     .values(
@@ -117,27 +79,20 @@ class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
                         },
                     )
                 )
-                if settings.project_id is None:
-                    await session.execute(
-                        delete(SessionMemoryProjectBindingModel).where(
-                            SessionMemoryProjectBindingModel.session_id
-                            == settings.session_id
-                        )
+        project_id = settings.project_id
+        if project_id is None:
+            async with self._session_factory() as session:
+                project_id = await session.scalar(
+                    select(SessionModel.project_id).where(
+                        SessionModel.id == settings.session_id
                     )
-                else:
-                    await session.execute(
-                        pg_insert(SessionMemoryProjectBindingModel)
-                        .values(
-                            session_id=settings.session_id,
-                            project_id=settings.project_id,
-                            updated_at=now,
-                        )
-                        .on_conflict_do_update(
-                            index_elements=["session_id"],
-                            set_={"project_id": settings.project_id, "updated_at": now},
-                        )
-                    )
-        return settings
+                )
+        return SessionMemorySettings(
+            session_id=settings.session_id,
+            use_memories=settings.use_memories,
+            generate_memories=settings.generate_memories,
+            project_id=project_id,
+        )
 
 
 __all__ = ["PostgresSessionMemorySettingsRepository"]

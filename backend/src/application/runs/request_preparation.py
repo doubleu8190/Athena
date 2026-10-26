@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
+import re
 
 from application.runs.request_contracts import (
     RootAttachment,
@@ -19,6 +20,35 @@ from domain.sessions import Message, MessageRepository, MessageRole, SessionRepo
 from shared import get_logger
 
 logger = get_logger(__name__)
+
+_GENERIC_ATTACHMENT_MESSAGES = {
+    "please process the attached files.",
+    "please process the attached files",
+    "请处理附件。",
+    "请处理附件",
+}
+
+
+def _fallback_title(message: Message) -> str:
+    """从首条文本或附件文件名生成一个可读的即时标题。"""
+    content = re.sub(r"\s+", " ", message.content).strip()
+    if content.lower() in _GENERIC_ATTACHMENT_MESSAGES:
+        content = ""
+    content = re.sub(
+        r"^(请帮我|请帮忙|请|帮我|麻烦你|麻烦|please help me|please|help me)[，,：:\s]*",
+        "",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if content:
+        first_sentence = re.split(r"[。！？!?；;]", content, maxsplit=1)[0].strip()
+        return (first_sentence or content)[:32] or "新聊天"
+    if message.attachments:
+        filename = message.attachments[0].filename.strip()
+        if len(message.attachments) > 1:
+            filename = f"{filename}等{len(message.attachments)}个文件"
+        return f"分析{filename}"[:48]
+    return "新聊天"
 
 
 class RunRequestPreparationService:
@@ -103,7 +133,10 @@ class RunRequestPreparationService:
                 run_id=request.run_id or None,
                 attachments=tuple(attachment_values),
             )
-            await self._messages.save(user_message)
+            await self._messages.save_user_message_with_title(
+                user_message,
+                fallback_title=_fallback_title(user_message),
+            )
             logger.info(f"用户消息保存成功。", user_message=user_message.content)
         if self._events is not None:
             await self._events.publish(
@@ -128,25 +161,25 @@ class RunRequestPreparationService:
         *,
         session_id: str,
         exclude_message_id: str,
-    ) -> list[dict[str, object]]:
+    ) -> list[RootRequestHistoryMessage]:
         """加载当前消息之前的会话历史。
 
         参数：
             session_id: 要查询的会话标识。
             exclude_message_id: 当前用户消息标识，避免历史中重复注入。
         返回值：
-            list[dict[str, object]]: 可直接提供给模型的消息列表。
+            list[RootRequestHistoryMessage]: 已校验且排除当前消息的历史列表。
         异常：
             不主动抛出业务异常。
         """
         values = await self._messages.list_recent_conversation(session_id, limit=100)
         return [
-            {
-                "role": message.role.value,
-                "content": message.content,
-                "message_id": message.id,
-                "timestamp": message.timestamp.isoformat(),
-            }
+            RootRequestHistoryMessage(
+                role=message.role.value,
+                content=message.content,
+                message_id=message.id,
+                timestamp=message.timestamp.isoformat(),
+            )
             for message in values
             if message.id != exclude_message_id
             and message.role in {MessageRole.USER, MessageRole.ASSISTANT}

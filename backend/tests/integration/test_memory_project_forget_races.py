@@ -24,19 +24,18 @@ from infrastructure.persistence.postgres.models import (
     MemoryJobScopeSnapshotModel,
     MemoryModel,
     MemoryProcessingJobModel,
-    MemoryProjectSpaceModel,
+    ProjectModel,
     MemoryRunEvidenceSnapshotModel,
     MemorySourceSuppressionModel,
     MemoryWriteOperationModel,
     MessageModel,
     OrchestrationOutboxModel,
     RootResumeJobModel,
-    SessionMemoryProjectBindingModel,
     SessionMemorySettingsModel,
     SessionModel,
 )
 from infrastructure.persistence.postgres.repositories import (
-    PostgresMemoryProjectSpaceRepository,
+    PostgresProjectRepository,
     PostgresRunRepository,
 )
 
@@ -68,13 +67,12 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
     memory_id = f"memory-{uuid4().hex}"
     now = datetime.now(timezone.utc).isoformat()
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    projects = PostgresMemoryProjectSpaceRepository(factory)
+    projects = PostgresProjectRepository(factory)
     runs = PostgresRunRepository(factory)
 
     tables = [
         SessionModel.__table__,
-        MemoryProjectSpaceModel.__table__,
-        SessionMemoryProjectBindingModel.__table__,
+        ProjectModel.__table__,
         SessionMemorySettingsModel.__table__,
         AgentCommandModel.__table__,
         AgentRunModel.__table__,
@@ -105,35 +103,30 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                 text(
                     "SELECT n.nspname FROM pg_class c "
                     "JOIN pg_namespace n ON n.oid=c.relnamespace "
-                    "WHERE c.oid='memory_project_spaces'::regclass"
+                    "WHERE c.oid='projects'::regclass"
                 )
             )
             assert actual_schema == schema
 
         async with factory() as session, session.begin():
-            session.add_all(
-                [
-                    SessionModel(
-                        id=session_id,
-                        title="Forget race",
-                        status="idle",
-                        created_at=now,
-                        updated_at=now,
-                    ),
-                    MemoryProjectSpaceModel(
-                        id=project_id,
-                        name="Forget race project",
-                        created_at=now,
-                        updated_at=now,
-                    ),
-                ]
+            session.add(
+                ProjectModel(
+                    id=project_id,
+                    name="Forget race project",
+                    created_at=now,
+                    updated_at=now,
+                )
             )
             await session.flush()
             session.add(
-                SessionMemoryProjectBindingModel(
-                    session_id=session_id,
+                SessionModel(
+                    id=session_id,
                     project_id=project_id,
+                    title="Forget race",
+                    status="idle",
+                    created_at=now,
                     updated_at=now,
+                    last_activity_at=now,
                 )
             )
             await session.flush()
@@ -241,32 +234,30 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
             assert start_snapshot is not None
             assert start_snapshot.project_id == project_id
 
-        # Racing project deletion with terminal enqueue exercises both legal
-        # serial orders while the Run is active and absent from the memory queue.
-        forgotten, completed = await asyncio.gather(
-            projects.forget(project_id),
-            runs.complete(
-                run_id,
-                {
-                    "content": "late terminal result",
-                    "answer_stream": {
-                        "message_id": f"assistant:{run_id}",
-                        "stream_id": f"answer-{run_id}",
-                        "started_at": datetime.now(timezone.utc).isoformat(),
-                        "last_chunk_id": 1,
-                    },
+        with pytest.raises(ValueError, match="project_busy"):
+            await projects.delete(project_id)
+        completed = await runs.complete(
+            run_id,
+            {
+                "content": "late terminal result",
+                "answer_stream": {
+                    "message_id": f"assistant:{run_id}",
+                    "stream_id": f"answer-{run_id}",
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "last_chunk_id": 1,
                 },
-            ),
+            },
         )
-        assert forgotten is True
         assert completed is True
+        assert await projects.delete(project_id) is True
 
         async with factory() as session:
-            assert await session.get(MemoryProjectSpaceModel, project_id) is None
-            assert (
-                await session.get(SessionMemoryProjectBindingModel, session_id)
-                is None
-            )
+            deleted_project = await session.get(ProjectModel, project_id)
+            assert deleted_project is not None
+            assert deleted_project.deleted_time is not None
+            deleted_session = await session.get(SessionModel, session_id)
+            assert deleted_session is not None
+            assert deleted_session.deleted_time is not None
             assert await session.get(MemoryJobScopeSnapshotModel, run_id) is None
             assert await session.get(MemoryJobScopeSnapshotModel, legacy_turn_id) is None
             assert await session.get(MemoryProcessingJobModel, legacy_turn_id) is None

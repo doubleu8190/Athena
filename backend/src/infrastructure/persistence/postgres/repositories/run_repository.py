@@ -148,6 +148,25 @@ class PostgresRunRepository(
                 if existing is not None:
                     return self._result(existing, True)
                 now = command.issued_at.isoformat()
+                if isinstance(command.payload, RunStartPayload):
+                    writable, _ = await ensure_writable_run_scope(
+                        session,
+                        session_id=command.session_id,
+                        turn_id=command.run_id or command.command_id,
+                        now=now,
+                    )
+                    if not writable:
+                        raise ValueError("project_not_found")
+                    session_exists = await session.scalar(
+                        select(SessionModel.id)
+                        .where(
+                            SessionModel.id == command.session_id,
+                            SessionModel.deleted_time.is_(None),
+                        )
+                        .with_for_update()
+                    )
+                    if session_exists is None:
+                        raise ValueError("session_not_found")
                 session.add(
                     AgentCommandModel(
                         command_id=command.command_id,
@@ -168,13 +187,6 @@ class PostgresRunRepository(
                     command.run_id
                     and await session.get(AgentRunModel, command.run_id) is None
                 ):
-                    if isinstance(command.payload, RunStartPayload):
-                        await ensure_writable_run_scope(
-                            session,
-                            session_id=command.session_id,
-                            turn_id=command.run_id,
-                            now=now,
-                        )
                     session.add(
                         AgentRunModel(
                             run_id=command.run_id,
@@ -1021,6 +1033,21 @@ class PostgresRunRepository(
                                     )
                                     .on_conflict_do_nothing(index_elements=["id"])
                                 )
+                                session_row = await session.scalar(
+                                    select(SessionModel)
+                                    .where(
+                                        SessionModel.id == run.session_id,
+                                        SessionModel.deleted_time.is_(None),
+                                    )
+                                    .with_for_update()
+                                )
+                                if session_row is not None:
+                                    session_row.updated_at = now_iso
+                                    if (
+                                        session_row.last_activity_at is None
+                                        or now_iso > session_row.last_activity_at
+                                    ):
+                                        session_row.last_activity_at = now_iso
                                 self._add_completion_outbox(
                                     session,
                                     run=run,

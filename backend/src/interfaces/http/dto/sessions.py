@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from application.sessions.responses import (
     MessageResponse as ApplicationMessageResponse,
@@ -14,11 +14,12 @@ from application.sessions.responses import (
 
 
 class CreateSessionRequest(BaseModel):
-    title: str = "New Session"
+    project_id: str = Field(min_length=1)
+    title: str = Field(default="新聊天", min_length=1, max_length=120)
 
 
 class UpdateSessionRequest(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=120)
 
 
 class SessionMemorySettingsRequest(BaseModel):
@@ -26,14 +27,12 @@ class SessionMemorySettingsRequest(BaseModel):
 
     use_memories: bool
     generate_memories: bool
-    project_id: str | None
 
 
 class SessionMemorySettingsResponse(BaseModel):
     session_id: str
     use_memories: bool
     generate_memories: bool
-    project_id: str | None
 
 
 class SessionResponse(BaseModel):
@@ -43,6 +42,11 @@ class SessionResponse(BaseModel):
     run_id: str | None
     created_at: datetime
     updated_at: datetime
+    project_id: str | None = None
+    title_source: str = "manual"
+    title_revision: int = 0
+    last_activity_at: datetime | None = None
+    title_pending: bool = False
 
     @classmethod
     def from_application(cls, session: ApplicationSessionResponse) -> "SessionResponse":
@@ -53,6 +57,11 @@ class SessionResponse(BaseModel):
             run_id=session.run_id,
             created_at=session.created_at,
             updated_at=session.updated_at,
+            project_id=session.project_id,
+            title_source=session.title_source,
+            title_revision=session.title_revision,
+            last_activity_at=session.last_activity_at,
+            title_pending=session.title_pending,
         )
 
 

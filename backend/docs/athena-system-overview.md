@@ -61,7 +61,7 @@ Athena 是一个本地优先的自主 AI Agent 桌面 Web 应用。系统必须�
 
 ## 3. 启动前置条件
 
-必须准备 Python 3.11+、Node.js 18+、PostgreSQL（含 `vector`；中文检索建议启用 `zhparser`）和 Neo4j 5。至少配置一个 LLM Provider。Docker 只在启用 shell 或 MCP 沙箱时需要。
+必须准备 Python 3.11+、Node.js 18+、PostgreSQL（含 `vector` 与 `zhparser`）和 Neo4j 5。应用初始化数据库时会创建 `chinese` 全文检索配置；至少配置一个 LLM Provider。Docker 只在启用 shell 或 MCP 沙箱时需要。
 
 配置从项目根目录 `.env` 和环境变量读取，支持 `__` 嵌套。最小配置包括：
 

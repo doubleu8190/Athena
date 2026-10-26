@@ -5,7 +5,7 @@ import type {
   CreateSessionResponse,
   Session,
   SessionMemorySettings,
-  MemoryProjectSpace,
+  Project,
   Message,
   ApprovalRequest,
   ApprovalHistoryEntry,
@@ -91,8 +91,8 @@ class ApiClient {
     }
     const url = `${this.baseUrl}${path}`
     const res = await fetch(url, {
-      headers,
       ...options,
+      headers,
       credentials: "include",
     })
     if (!res.ok) {
@@ -139,17 +139,21 @@ class ApiClient {
   // ─── 会话管理 ─────────────────────────────────────────────────
 
   /** 查询全部会话，后端负责按最近更新时间排序。 */
-  async listSessions(): Promise<Session[]> {
-    return this.request<Session[]>("/api/sessions")
+  async listSessions(projectId?: string): Promise<Session[]> {
+    const suffix = projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""
+    return this.request<Session[]>(`/api/sessions${suffix}`)
   }
 
-  /** 创建会话。
-   * @param title 会话标题；为空时使用默认标题。
-   */
-  async createSession(title: string = "New Session"): Promise<CreateSessionResponse> {
+  /** 幂等创建项目下的会话。 */
+  async createSession(
+    projectId: string,
+    creationRequestId: string,
+    title = "新聊天",
+  ): Promise<CreateSessionResponse> {
     return this.request<CreateSessionResponse>("/api/sessions", {
       method: "POST",
-      body: JSON.stringify({ title }),
+      headers: { "Idempotency-Key": creationRequestId },
+      body: JSON.stringify({ project_id: projectId, title }),
     })
   }
 
@@ -166,7 +170,7 @@ class ApiClient {
 
   async updateSessionMemorySettings(
     sessionId: string,
-    settings: Pick<SessionMemorySettings, "use_memories" | "generate_memories" | "project_id">,
+    settings: Pick<SessionMemorySettings, "use_memories" | "generate_memories">,
   ): Promise<SessionMemorySettings> {
     return this.request<SessionMemorySettings>(
       `/api/sessions/${encodeURIComponent(sessionId)}/memory-settings`,
@@ -174,20 +178,27 @@ class ApiClient {
     )
   }
 
-  async listMemoryProjectSpaces(): Promise<MemoryProjectSpace[]> {
-    return this.request<MemoryProjectSpace[]>("/api/memory-projects")
+  async listProjects(): Promise<Project[]> {
+    return this.request<Project[]>("/api/projects")
   }
 
-  async createMemoryProjectSpace(name: string): Promise<MemoryProjectSpace> {
-    return this.request<MemoryProjectSpace>("/api/memory-projects", {
+  async createProject(name: string): Promise<Project> {
+    return this.request<Project>("/api/projects", {
       method: "POST",
       body: JSON.stringify({ name }),
     })
   }
 
-  async deleteMemoryProjectSpace(projectId: string): Promise<void> {
-    await this.request<void>(`/api/memory-projects/${encodeURIComponent(projectId)}`, {
+  async deleteProject(projectId: string): Promise<void> {
+    await this.request<void>(`/api/projects/${encodeURIComponent(projectId)}`, {
       method: "DELETE",
+    })
+  }
+
+  async renameProject(projectId: string, name: string): Promise<Project> {
+    return this.request<Project>(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
     })
   }
 
@@ -338,8 +349,11 @@ class ApiClient {
   }
 
   /** 获取当前后端支持的附件类型。 */
-  async getSupportedAttachmentTypes(sessionId: string): Promise<SupportedAttachmentTypes> {
-    return this.request<SupportedAttachmentTypes>(`/api/sessions/${encodeURIComponent(sessionId)}/attachment-types`)
+  async getSupportedAttachmentTypes(sessionId?: string): Promise<SupportedAttachmentTypes> {
+    const path = sessionId
+      ? `/api/sessions/${encodeURIComponent(sessionId)}/attachment-types`
+      : "/api/knowledge-bases/attachment-types"
+    return this.request<SupportedAttachmentTypes>(path)
   }
 
   /** 软删除会话附件。 */

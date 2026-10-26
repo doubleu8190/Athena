@@ -19,6 +19,11 @@ class SessionResponse:
     run_id: str | None
     created_at: datetime
     updated_at: datetime
+    project_id: str | None = None
+    title_source: str = "manual"
+    title_revision: int = 0
+    last_activity_at: datetime | None = None
+    title_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)

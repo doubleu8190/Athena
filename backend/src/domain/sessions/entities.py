@@ -28,6 +28,11 @@ class Session:
     compression_summary: str | None = None
     last_compressed_message_id: str | None = None
     last_summarized_message_id: str | None = None
+    project_id: str | None = None
+    title_source: str = "manual"
+    title_revision: int = 0
+    last_activity_at: datetime | None = None
+    title_pending: bool = False
 
     @classmethod
     def create(
@@ -36,11 +41,14 @@ class Session:
         session_id: str,
         title: str,
         now: datetime,
+        project_id: str | None = None,
     ) -> "Session":
         """创建处于空闲状态的新会话。"""
         normalized_title = title.strip()
         if not normalized_title:
             raise ValueError("title must not be empty")
+        if len(normalized_title) > 120:
+            raise ValueError("title_too_long")
         return cls(
             id=session_id,
             title=normalized_title,
@@ -48,6 +56,12 @@ class Session:
             run_id=None,
             created_at=now,
             updated_at=now,
+            project_id=project_id,
+            title_source=(
+                "placeholder" if normalized_title in {"New Session", "新聊天"} else "manual"
+            ),
+            title_revision=0,
+            last_activity_at=now,
         )
 
     def rename(self, title: str, *, now: datetime) -> "Session":
@@ -55,6 +69,8 @@ class Session:
         normalized_title = title.strip()
         if not normalized_title:
             raise ValueError("title must not be empty")
+        if len(normalized_title) > 120:
+            raise ValueError("title_too_long")
         return Session(
             id=self.id,
             title=normalized_title,
@@ -65,4 +81,8 @@ class Session:
             compression_summary=self.compression_summary,
             last_compressed_message_id=self.last_compressed_message_id,
             last_summarized_message_id=self.last_summarized_message_id,
+            project_id=self.project_id,
+            title_source="manual",
+            title_revision=self.title_revision + 1,
+            last_activity_at=self.last_activity_at,
         )

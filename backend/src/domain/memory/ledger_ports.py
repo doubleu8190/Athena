@@ -12,7 +12,7 @@ from .contracts import (
     MemorySourceReference,
     MemoryWriteOperation,
 )
-from .entities import MemoryEpisodeSearchRequest, MemoryProjectSpace
+from .entities import MemoryEpisodeSearchRequest
 
 
 class MemoryOperationsPort(Protocol):
@@ -107,22 +107,7 @@ class MemoryEpisodeRepositoryPort(Protocol):
         ...
 
 
-class MemoryProjectSpaceRepositoryPort(Protocol):
-    """显式项目记忆空间的目录读写能力。"""
-
-    async def create(self, project: MemoryProjectSpace) -> MemoryProjectSpace: ...
-
-    async def get(self, project_id: str) -> MemoryProjectSpace | None: ...
-
-    async def list(self) -> list[MemoryProjectSpace]: ...
-
-    async def forget(self, project_id: str) -> bool:
-        """Remove a project space and suppress its stored and queued history."""
-        ...
-
-
 __all__ = [
     "MemoryEpisodeRepositoryPort",
     "MemoryOperationsPort",
-    "MemoryProjectSpaceRepositoryPort",
 ]

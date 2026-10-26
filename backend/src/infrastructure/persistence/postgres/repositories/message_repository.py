@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.sessions import AttachmentRef, Message, MessageRepository
 
-from ..models import MessageModel
+from ..models import MessageModel, SessionModel, SessionTitleJobModel
 from ..mappers.converters import message_domain_to_model, message_model_to_domain
 
 AttachmentReader = Callable[[list[str]], Awaitable[dict[str, list[AttachmentRef]]]]
@@ -32,8 +33,95 @@ class PostgresMessageRepository(MessageRepository):
         """保存消息并返回消息 ID。"""
         async with self._session_factory() as db:
             async with db.begin():
+                session_row = None
+                if message.role.value in {"user", "assistant"}:
+                    session_row = await db.scalar(
+                        select(SessionModel)
+                        .where(
+                            SessionModel.id == message.session_id,
+                            SessionModel.deleted_time.is_(None),
+                        )
+                        .with_for_update()
+                    )
+                    if session_row is None:
+                        raise LookupError("session_not_found")
                 db.add(message_domain_to_model(message))
+                if session_row is not None:
+                    timestamp = message.timestamp.isoformat()
+                    session_row.updated_at = timestamp
+                    if (
+                        session_row.last_activity_at is None
+                        or timestamp > session_row.last_activity_at
+                    ):
+                        session_row.last_activity_at = timestamp
         return message.id
+
+    async def save_user_message_with_title(
+        self, message: Message, *, fallback_title: str
+    ) -> bool:
+        """原子写入用户消息、最近活动和第一条消息的标题任务。"""
+        if message.role.value != "user":
+            raise ValueError("title_source_message_must_be_user")
+        timestamp = message.timestamp.isoformat()
+        async with self._session_factory() as db:
+            async with db.begin():
+                session_row = await db.scalar(
+                    select(SessionModel)
+                    .where(
+                        SessionModel.id == message.session_id,
+                        SessionModel.deleted_time.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if session_row is None:
+                    raise LookupError("session_not_found")
+
+                existing = await db.scalar(
+                    select(MessageModel).where(MessageModel.id == message.id)
+                )
+                if existing is not None:
+                    if existing.session_id != message.session_id:
+                        raise ValueError("message_id_conflict")
+                    return False
+
+                has_user_message = await db.scalar(
+                    select(MessageModel.id)
+                    .where(
+                        MessageModel.session_id == message.session_id,
+                        MessageModel.role == "user",
+                        MessageModel.deleted_time.is_(None),
+                    )
+                    .limit(1)
+                )
+                db.add(message_domain_to_model(message))
+                session_row.updated_at = timestamp
+                if (
+                    session_row.last_activity_at is None
+                    or timestamp > session_row.last_activity_at
+                ):
+                    session_row.last_activity_at = timestamp
+
+                if has_user_message is None and session_row.title_source == "placeholder":
+                    session_row.title = fallback_title[:48] or "新聊天"
+                    session_row.title_source = "fallback"
+                    session_row.title_revision += 1
+                    db.add(
+                        SessionTitleJobModel(
+                            session_id=message.session_id,
+                            source_message_id=message.id,
+                            expected_title_revision=session_row.title_revision,
+                            status="queued",
+                            attempt=0,
+                            attachment_names_json=json.dumps(
+                                [item.filename for item in message.attachments],
+                                ensure_ascii=False,
+                            ),
+                            available_at=timestamp,
+                            created_at=timestamp,
+                            updated_at=timestamp,
+                        )
+                    )
+        return has_user_message is None
 
     async def get(self, message_id: str) -> Message | None:
         """查询未删除消息。"""

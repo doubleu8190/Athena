@@ -14,9 +14,8 @@ from domain.memory.suppression import (
 
 from ..models import (
     MemoryJobScopeSnapshotModel,
-    MemoryProjectSpaceModel,
+    ProjectModel,
     MemorySourceSuppressionModel,
-    SessionMemoryProjectBindingModel,
     SessionModel,
 )
 
@@ -37,8 +36,9 @@ async def project_scope_is_writable(
         )
     )
     exists = await session.scalar(
-        select(MemoryProjectSpaceModel.id).where(
-            MemoryProjectSpaceModel.id == project_id
+        select(ProjectModel.id).where(
+            ProjectModel.id == project_id,
+            ProjectModel.deleted_time.is_(None),
         )
     )
     suppressed = await session.scalar(
@@ -118,17 +118,16 @@ async def ensure_writable_run_scope(
     The project advisory lock is always acquired before the turn lock, matching
     the project-forget transaction's lock order.
     """
-    await session.scalar(
-        select(SessionModel.id)
-        .where(SessionModel.id == session_id)
-        .with_for_update()
-    )
     snapshot = await session.get(MemoryJobScopeSnapshotModel, turn_id)
     if snapshot is not None:
         project_id = snapshot.project_id
     else:
-        binding = await session.get(SessionMemoryProjectBindingModel, session_id)
-        project_id = None if binding is None else binding.project_id
+        project_id = await session.scalar(
+            select(SessionModel.project_id).where(
+                SessionModel.id == session_id,
+                SessionModel.deleted_time.is_(None),
+            )
+        )
 
     if not await project_scope_is_writable(session, project_id):
         await record_project_turn_suppression(session, turn_id, now=now)

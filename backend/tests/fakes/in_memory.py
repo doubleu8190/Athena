@@ -84,9 +84,18 @@ from domain.tools import (
 class InMemorySessionRepository(SessionRepository):
     def __init__(self) -> None:
         self.items: dict[str, Session] = {}
+        self.creation_requests: dict[str, str] = {}
 
     async def create(self, session: Session) -> Session:
         self.items[session.id] = session
+        return session
+
+    async def create_idempotent(self, session: Session, *, creation_request_id: str) -> Session:
+        existing_id = self.creation_requests.get(creation_request_id)
+        if existing_id is not None:
+            return self.items[existing_id]
+        self.items[session.id] = session
+        self.creation_requests[creation_request_id] = session.id
         return session
 
     async def get(self, session_id: str) -> Session | None:
@@ -96,6 +105,10 @@ class InMemorySessionRepository(SessionRepository):
         return sorted(self.items.values(), key=lambda item: item.updated_at, reverse=True)
 
     async def save(self, session: Session) -> Session:
+        self.items[session.id] = session
+        return session
+
+    async def rename(self, session: Session) -> Session:
         self.items[session.id] = session
         return session
 
@@ -110,6 +123,14 @@ class InMemoryMessageRepository(MessageRepository):
     async def save(self, message: Message) -> str:
         self.items[message.id] = message
         return message.id
+
+    async def save_user_message_with_title(self, message: Message, *, fallback_title: str) -> bool:
+        first = not any(
+            item.session_id == message.session_id and item.role.value == "user"
+            for item in self.items.values()
+        )
+        self.items[message.id] = message
+        return first
 
     async def get(self, message_id: str) -> Message | None:
         return self.items.get(message_id)

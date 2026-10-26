@@ -8,7 +8,13 @@ from .file_models import (
     FileChunkModel,
     KnowledgeBaseModel,
 )
-from .session_models import MessageModel, SessionMemorySettingsModel, SessionModel
+from .session_models import (
+    MessageModel,
+    SessionMemorySettingsModel,
+    SessionModel,
+    SessionTitleJobModel,
+)
+from .project_models import ProjectModel
 from .tool_models import MCPServerModel, ToolModel
 from .runtime_models import (
     AgentCommandModel,
@@ -31,12 +37,10 @@ from .memory_models import (
     MemoryEpisodeProjectBindingModel,
     MemoryJobScopeSnapshotModel,
     MemoryModel,
-    MemoryProjectSpaceModel,
     MemoryRelationModel,
     MemoryRunEvidenceSnapshotModel,
     MemorySourceSuppressionModel,
     MemoryWriteOperationModel,
-    SessionMemoryProjectBindingModel,
 )
 from .evaluation_models import (
     EvalCaseAttemptModel,
@@ -72,7 +76,9 @@ __all__ = [
     "MCPServerModel",
     "MessageModel",
     "SessionModel",
+    "SessionTitleJobModel",
     "SessionMemorySettingsModel",
+    "ProjectModel",
     "ToolModel",
     "AgentCommandModel",
     "AgentEventModel",
@@ -88,8 +94,6 @@ __all__ = [
     "MemoryEpisodeModel",
     "MemoryEpisodeProjectBindingModel",
     "MemoryJobScopeSnapshotModel",
-    "MemoryProjectSpaceModel",
-    "SessionMemoryProjectBindingModel",
     "MemoryRunEvidenceSnapshotModel",
     "MemorySourceSuppressionModel",
     "MemoryRelationModel",

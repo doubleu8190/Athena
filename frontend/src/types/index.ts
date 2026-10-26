@@ -197,6 +197,11 @@ export interface Session {
   status: "idle" | "running" | "interrupted" | "completed"
   created_at: string
   updated_at: string
+  project_id?: string | null
+  title_source?: "placeholder" | "fallback" | "generated" | "manual"
+  title_revision?: number
+  last_activity_at?: string | null
+  title_pending?: boolean
   last_message?: string
   message_count?: number
 }
@@ -205,14 +210,19 @@ export interface SessionMemorySettings {
   session_id: string
   use_memories: boolean
   generate_memories: boolean
-  project_id: string | null
+  project_id?: string | null
 }
 
-export interface MemoryProjectSpace {
+export interface Project {
   id: string
   name: string
   created_at: string
   updated_at: string
+}
+
+export interface ChatDraft {
+  id: string
+  projectId: string
 }
 
 export interface SessionRunSummary {
@@ -438,6 +448,12 @@ export interface CreateSessionResponse {
   title: string
   status: string
   created_at: string
+  updated_at?: string
+  project_id: string
+  title_source?: Session["title_source"]
+  title_revision?: number
+  last_activity_at?: string | null
+  title_pending?: boolean
 }
 
 export interface ListSessionsResponse {

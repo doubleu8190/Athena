@@ -99,11 +99,13 @@ def build_runs_router(
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except CommandRejectedError as exc:
-            status = 409 if exc.code in {
-                "command_id_conflict",
-                "run_id_conflict",
-                "session_busy",
-            } else 400
+            status = (
+                404
+                if exc.code in {"session_not_found", "project_not_found"}
+                else 409
+                if exc.code in {"command_id_conflict", "run_id_conflict", "session_busy"}
+                else 400
+            )
             raise HTTPException(status_code=status, detail=exc.code) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

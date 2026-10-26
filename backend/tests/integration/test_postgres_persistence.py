@@ -21,6 +21,7 @@ from domain.tools import (
 from infrastructure.persistence.postgres.models import (
     Base,
     MessageModel,
+    ProjectModel,
     SessionModel,
     MCPServerModel,
     ToolModel,
@@ -48,7 +49,11 @@ async def test_session_repository_against_postgresql() -> None:
             await connection.run_sync(
                 lambda sync_connection: Base.metadata.create_all(
                     sync_connection,
-                    tables=[SessionModel.__table__, MessageModel.__table__],
+                    tables=[
+                        ProjectModel.__table__,
+                        SessionModel.__table__,
+                        MessageModel.__table__,
+                    ],
                 )
             )
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -56,13 +61,25 @@ async def test_session_repository_against_postgresql() -> None:
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
+        project_id = f"integration-project-{uuid4().hex}"
+        async with factory() as db, db.begin():
+            db.add(
+                ProjectModel(
+                    id=project_id,
+                    name="Integration project",
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
         session = Session(
             id=session_id,
+            project_id=project_id,
             title="Integration",
             status=SessionStatus.IDLE,
             run_id=None,
             created_at=now,
             updated_at=now,
+            last_activity_at=now,
         )
         await repository.create(session)
         persisted = await repository.get(session.id)

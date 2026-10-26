@@ -43,6 +43,14 @@ class Messages:
         self.saved.append(message)
         return message.id
 
+    async def save_user_message_with_title(self, message: Message, *, fallback_title: str) -> bool:
+        first = not any(
+            value.session_id == message.session_id and value.role == MessageRole.USER
+            for value in self.values.values()
+        )
+        await self.save(message)
+        return first
+
     async def list_recent_conversation(self, session_id: str, *, limit: int | None = None):
         values = [value for value in self.values.values() if value.session_id == session_id]
         return values[:limit] if limit is not None else values

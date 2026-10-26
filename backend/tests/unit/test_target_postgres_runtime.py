@@ -105,6 +105,7 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     db = DB()
     runs = PostgresRunRepository(factory(db))
     db.get_values = [None, None]
+    db.scalar_values = ["project-1", "project-1", None, None, "s-1"]
     result = await runs.enqueue_command(command())
     assert result.command_id == "c-1" and db.added
     db.get_values = [SimpleNamespace(command_id="c-1", session_id="s-1", run_id="r-1", command_type="run.start", status="queued", payload_json='{"message":"hello","message_id":"message-1","attachment_ids":[]}', result_json=None, error_json=None)]
@@ -376,7 +377,7 @@ async def test_target_file_parser_and_document_job_queue():
 def test_postgres_dependency_graph_is_explicit(monkeypatch):
     monkeypatch.setenv("ATHENA_DATABASE_BACKEND", "postgres")
     graph = build_default_dependencies()
-    assert len(graph.resources) == 6
+    assert len(graph.resources) == 7
     app = create_app(dependencies=graph)
     assert "/api/sessions" in app.openapi()["paths"]
     assert graph.provider("memory_service_factory") is not None
@@ -472,23 +473,52 @@ async def test_postgres_resource_lifecycle_without_connecting_to_database(monkey
 
 @pytest.mark.asyncio
 async def test_postgres_resource_schema_and_session_context(monkeypatch):
+    from sqlalchemy.sql.elements import TextClause
+
     class Connection:
-        async def execute(self, _statement):
-            raise RuntimeError("vector extension unavailable")
-        async def rollback(self):
-            self.rolled_back = True
+        def __init__(self):
+            self.statements = []
+            self.dialect = SimpleNamespace(
+                identifier_preparer=SimpleNamespace(
+                    quote=lambda value: f'"{value}"'
+                )
+            )
+
+        async def execute(self, statement, *_args):
+            rendered = (
+                str(statement)
+                if isinstance(statement, TextClause)
+                else str(statement)
+            )
+            self.statements.append(rendered)
+            if "ts_token_type" in rendered:
+                return Result(rows=["n", "v"])
+            return Result()
+
+        async def scalar(self, _statement):
+            return False
+
+        async def exec_driver_sql(self, statement):
+            self.statements.append(statement)
+
         async def run_sync(self, callback):
             callback(object())
 
     class Begin:
+        def __init__(self, connection):
+            self.connection = connection
+
         async def __aenter__(self):
-            return Connection()
+            return self.connection
         async def __aexit__(self, *_args):
             return False
 
     class Engine:
+        def __init__(self):
+            self.connection = Connection()
+
         def begin(self):
-            return Begin()
+            return Begin(self.connection)
         async def dispose(self):
             return None
 
@@ -515,6 +545,10 @@ async def test_postgres_resource_schema_and_session_context(monkeypatch):
     resource = PostgresEngine(PostgresOptions(Settings().postgres_url, create_schema=True))
     await resource.start()
     assert schema_calls == ["created"]
+    assert any(
+        "CREATE TEXT SEARCH CONFIGURATION chinese" in statement
+        for statement in engine.connection.statements
+    )
     async with resource.session() as value:
         assert isinstance(value, Session)
     await resource.stop()

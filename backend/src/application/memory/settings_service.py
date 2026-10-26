@@ -20,9 +20,16 @@ class SessionMemorySettingsService:
 
     async def get(self, session_id: str) -> SessionMemorySettings:
         """获取指定会话的设置；首次读取使用默认值。"""
-        if await self._sessions.get(session_id) is None:
+        session = await self._sessions.get(session_id)
+        if session is None:
             raise LookupError("session_not_found")
-        return await self._settings.get(session_id)
+        value = await self._settings.get(session_id)
+        return SessionMemorySettings(
+            session_id=value.session_id,
+            use_memories=value.use_memories,
+            generate_memories=value.generate_memories,
+            project_id=session.project_id,
+        )
 
     async def update(
         self,
@@ -30,18 +37,23 @@ class SessionMemorySettingsService:
         *,
         use_memories: bool,
         generate_memories: bool,
-        project_id: str | None = None,
     ) -> SessionMemorySettings:
         """完整替换读取和生成开关。"""
-        if await self._sessions.get(session_id) is None:
+        session = await self._sessions.get(session_id)
+        if session is None:
             raise LookupError("session_not_found")
-        return await self._settings.save(
+        saved = await self._settings.save(
             SessionMemorySettings(
                 session_id=session_id,
                 use_memories=use_memories,
                 generate_memories=generate_memories,
-                project_id=project_id,
             )
+        )
+        return SessionMemorySettings(
+            session_id=saved.session_id,
+            use_memories=saved.use_memories,
+            generate_memories=saved.generate_memories,
+            project_id=session.project_id,
         )
 
 

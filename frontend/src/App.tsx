@@ -11,7 +11,7 @@ import { useSessionEventStream } from "./hooks/useSessionEventStream"
 import { ClientEventType } from "./types/events"
 import { apiClient } from "./api/client"
 import LoginPage from "./components/LoginPage"
-import type { Session, AppView, Message, Step, ToolCall, OrchestrationTask, OrchestrationPlan } from "./types"
+import type { Session, Project, ChatDraft, AppView, Message, Step, ToolCall, OrchestrationTask, OrchestrationPlan } from "./types"
 
 /** 渲染主应用布局，并协调会话、视图和事件流状态。 */
 function AppContent() {
@@ -28,6 +28,12 @@ function AppContent() {
 
   const [apiBase] = useState("")
   const initializedSessions = useRef(false)
+  const createPromises = useRef(new Map<string, Promise<Session>>())
+  const titleWatchUntil = useRef(0)
+  const [projects, setProjects] = useState<Project[]>([])
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const [drafts, setDrafts] = useState<ChatDraft[]>([])
+  const [activeDraft, setActiveDraft] = useState<ChatDraft | null>(null)
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false)
   const demoMode = useState(() => new URLSearchParams(window.location.search).get("demo") === "execution")[0]
   const [authState, setAuthState] = useState<"loading" | "authenticated" | "unauthenticated">(demoMode ? "authenticated" : "loading")
@@ -69,24 +75,33 @@ function AppContent() {
     initializedSessions.current = true
     const loadSessions = async () => {
       try {
-        const listedSessions = await apiClient.listSessions()
+        const [listedProjects, listedSessions] = await Promise.all([
+          apiClient.listProjects(),
+          apiClient.listSessions(),
+        ])
         const emptyDefaultSessions = await Promise.all(listedSessions.map(async (session) => {
-          if (session.title !== "New Session") return false
+          if (session.title_source !== "placeholder" && session.title !== "New Session" && session.title !== "新聊天") return false
           try {
-            return (await apiClient.getMessages(session.id)).length === 0
+            const [messages, attachments] = await Promise.all([
+              apiClient.getMessages(session.id),
+              apiClient.listAttachments(session.id),
+            ])
+            return messages.length === 0 && attachments.length === 0
           } catch {
             return false
           }
         }))
         const list = listedSessions.filter((_, index) => !emptyDefaultSessions[index])
-        // 整体替换而非逐条前插：后端已按 updated_at desc（最近活跃在前）排序，
-        // 逐条 addSession 会前插倒转顺序，导致侧栏最旧会话排在最上
+        setProjects(listedProjects)
         setSessions(list)
+        const current = useChatStore.getState().activeSessionId
         if (list.length > 0) {
-          const current = useChatStore.getState().activeSessionId
-          setActiveSession(current && list.some((session) => session.id === current) ? current : list[0].id)
+          const selected = list.find((session) => session.id === current) ?? list[0]
+          setActiveSession(selected.id)
+          setActiveProjectId(selected.project_id ?? listedProjects[0]?.id ?? null)
         } else {
           setActiveSession(null)
+          setActiveProjectId((previous) => previous && listedProjects.some((project) => project.id === previous) ? previous : listedProjects[0]?.id ?? null)
         }
       } catch {
         useChatStore.getState().setError("Unable to connect to Athena. Check that the backend is running, then reload.")
@@ -94,6 +109,42 @@ function AppContent() {
     }
     loadSessions()
   }, [authState, demoMode, setActiveSession, setSessions])
+
+  const refreshSessions = useCallback(async () => {
+    const [incoming, currentProjects] = await Promise.all([
+      apiClient.listSessions(),
+      apiClient.listProjects(),
+    ])
+    setProjects(currentProjects)
+    const currentById = new Map(useChatStore.getState().sessions.map((session) => [session.id, session]))
+    const merged = incoming.map((remote) => {
+      const current = currentById.get(remote.id)
+      if (!current || (current.title_revision ?? 0) <= (remote.title_revision ?? 0)) return remote
+      return {
+        ...remote,
+        title: current.title,
+        title_source: current.title_source,
+        title_revision: current.title_revision,
+      }
+    })
+    setSessions(merged)
+  }, [setSessions])
+
+  useEffect(() => {
+    if (demoMode || authState !== "authenticated") return
+    const refreshIfNeeded = () => {
+      if (document.visibilityState === "hidden") return
+      const pending = useChatStore.getState().sessions.some((session) => session.title_pending)
+      if (!pending && Date.now() > titleWatchUntil.current) return
+      void refreshSessions().catch(() => undefined)
+    }
+    const timer = window.setInterval(refreshIfNeeded, 3000)
+    document.addEventListener("visibilitychange", refreshIfNeeded)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener("visibilitychange", refreshIfNeeded)
+    }
+  }, [authState, demoMode, refreshSessions])
 
   useSessionEventStream(demoMode || authState !== "authenticated" ? null : activeSessionId, apiBase)
 
@@ -181,51 +232,98 @@ function AppContent() {
 
     return () => timers.forEach((timer) => window.clearTimeout(timer))
   }, [demoMode])
-  const sendEvent = useCallback((type: string, data: Record<string, unknown> = {}): boolean => {
-    if (!activeSessionId) return false
-    const run = async () => {
-      try {
-        if (type === ClientEventType.USER_COMMAND) {
-          await apiClient.submitRun(activeSessionId, {
-            message: String(data.message || ""),
-            ...(data.message_id ? { message_id: String(data.message_id) } : {}),
-            attachment_ids: Array.isArray(data.attachment_ids)
-              ? data.attachment_ids.map(String)
-              : [],
-          })
-        }
-      } catch (error) { useChatStore.getState().setError(error instanceof Error ? error.message : "Command failed") }
-    }
-    void run()
-    return true
-  }, [activeSessionId])
+  const sendEvent = useCallback(async (type: string, sessionId: string, data: Record<string, unknown> = {}): Promise<void> => {
+    if (type !== ClientEventType.USER_COMMAND) return
+    await apiClient.submitRun(sessionId, {
+      message: String(data.message || ""),
+      ...(data.message_id ? { message_id: String(data.message_id) } : {}),
+      ...(data.command_id ? { command_id: String(data.command_id) } : {}),
+      attachment_ids: Array.isArray(data.attachment_ids) ? data.attachment_ids.map(String) : [],
+    })
+    titleWatchUntil.current = Date.now() + 60_000
+    void refreshSessions().catch(() => undefined)
+  }, [refreshSessions])
 
-  const handleNewSession = useCallback(async () => {
+  const handleCreateProject = useCallback(async () => {
+    const name = window.prompt("项目名称")?.trim()
+    if (!name) return
     try {
-      const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const day = String(now.getDate()).padStart(2, '0');
-      const hours = String(now.getHours()).padStart(2, '0');
-      const minutes = String(now.getMinutes()).padStart(2, '0');
-      const seconds = String(now.getSeconds()).padStart(2, '0');
-      const milliseconds = String(now.getMilliseconds()).padStart(3, '0');
-      const title = `Session ${year}.${month}.${day} ${hours}:${minutes}:${seconds},${milliseconds}`;
-      const session = await apiClient.createSession(title)
-      addSession({
-        id: session.id,
-        title: session.title,
-        status: session.status as Session["status"],
-        created_at: session.created_at,
-        updated_at: session.created_at,
-      })
-      setActiveSession(session.id)
-      return session.id
-    } catch (err) {
-      useChatStore.getState().setError(err instanceof Error ? err.message : "Failed to create session")
-      return null
+      const project = await apiClient.createProject(name)
+      setProjects((current) => [project, ...current.filter((item) => item.id !== project.id)])
+      setActiveProjectId(project.id)
+      setActiveSession(null)
+      setActiveDraft(null)
+      setActiveView("chat")
+    } catch (error) {
+      useChatStore.getState().setError(error instanceof Error ? error.message : "项目创建失败")
     }
-  }, [addSession, setActiveSession])
+  }, [setActiveSession, setActiveView])
+
+  const handleNewSession = useCallback(async (requestedProjectId?: string) => {
+    let projectId = requestedProjectId ?? activeProjectId ?? projects[0]?.id ?? null
+    if (!projectId) {
+      const name = window.prompt("还没有项目。请输入新项目名称：")?.trim()
+      if (!name) return
+      try {
+        const project = await apiClient.createProject(name)
+        setProjects((current) => [project, ...current])
+        projectId = project.id
+      } catch (error) {
+        useChatStore.getState().setError(error instanceof Error ? error.message : "项目创建失败")
+        return
+      }
+    }
+    setActiveProjectId(projectId)
+    setActiveSession(null)
+    const draft = { id: crypto.randomUUID(), projectId }
+    setDrafts((current) => [draft, ...current])
+    setActiveDraft(draft)
+    setActiveView("chat")
+  }, [activeProjectId, projects, setActiveSession, setActiveView, setDrafts])
+
+  const handleSelectProject = useCallback((projectId: string) => {
+    setActiveProjectId(projectId)
+    setActiveSession(null)
+    const draft = { id: crypto.randomUUID(), projectId }
+    setDrafts((current) => [draft, ...current])
+    setActiveDraft(draft)
+    setActiveView("chat")
+  }, [setActiveSession, setActiveView, setDrafts])
+
+  const ensureSession = useCallback((draftId: string, projectId: string): Promise<string> => {
+    const inFlight = createPromises.current.get(draftId)
+    if (inFlight) return inFlight.then((session) => session.id)
+    const creation = apiClient.createSession(projectId, draftId).then((value) => {
+      const session: Session = {
+        id: value.id,
+        title: value.title,
+        status: value.status as Session["status"],
+        created_at: value.created_at,
+        updated_at: value.updated_at ?? value.created_at,
+        project_id: value.project_id,
+        title_source: value.title_source,
+        title_revision: value.title_revision,
+        last_activity_at: value.last_activity_at,
+        title_pending: value.title_pending,
+      }
+      addSession(session)
+      setDrafts((current) => current.filter((draft) => draft.id !== draftId))
+      if (activeDraft?.id === draftId) {
+        setActiveProjectId(projectId)
+        setActiveSession(session.id)
+        setActiveDraft(null)
+      }
+      return session
+    })
+    createPromises.current.set(draftId, creation)
+    return creation
+      .then((session) => session.id)
+      .catch((error: unknown) => {
+        createPromises.current.delete(draftId)
+        throw error
+      })
+      .finally(() => createPromises.current.delete(draftId))
+  }, [activeDraft, addSession, setActiveSession, setDrafts])
 
   const handleDeleteSession = useCallback(
     async (sessionId: string) => {
@@ -233,7 +331,10 @@ function AppContent() {
         await apiClient.deleteSession(sessionId)
         removeSession(sessionId)
         if (activeSessionId === sessionId) {
-          setActiveSession(useChatStore.getState().sessions[0]?.id ?? null)
+          const nextSession = useChatStore.getState().sessions[0] ?? null
+          setActiveSession(nextSession?.id ?? null)
+          setActiveProjectId(nextSession?.project_id ?? null)
+          setActiveDraft(null)
         }
       } catch (err) {
         useChatStore.getState().setError(err instanceof Error ? err.message : "Failed to delete session")
@@ -244,20 +345,60 @@ function AppContent() {
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
+      const selected = useChatStore.getState().sessions.find((session) => session.id === sessionId)
       setActiveSession(sessionId)
-      // 选中即视为最近活跃：把会话浮到列表顶部，
-      // 后端 updated_at 只在消息落库时刷新，选中到下一次落库之间需要即时反映
-      useChatStore.setState((state) => {
-        if (state.sessions[0]?.id === sessionId) return {}
-        const idx = state.sessions.findIndex((s) => s.id === sessionId)
-        if (idx === -1) return {}
-        const sessions = [...state.sessions]
-        const [s] = sessions.splice(idx, 1)
-        return { sessions: [s, ...sessions] }
-      })
+      setActiveProjectId(selected?.project_id ?? null)
+      setActiveDraft(null)
     },
     [setActiveSession],
   )
+
+  const handleRenameProject = useCallback(async (projectId: string, name: string) => {
+    try {
+      const project = await apiClient.renameProject(projectId, name)
+      setProjects((current) => current.map((item) => item.id === project.id ? project : item))
+    } catch (error) {
+      useChatStore.getState().setError(error instanceof Error ? error.message : "项目重命名失败")
+      throw error
+    }
+  }, [])
+
+  const handleDeleteProject = useCallback(async (projectId: string) => {
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+    const projectSessions = sessions.filter((session) => session.project_id === projectId)
+    const confirmed = window.confirm(`删除项目“${project.name}”及其 ${projectSessions.length} 个聊天和项目级记忆？此操作会软删除聊天，并移除该项目的记忆与任务回顾。`)
+    if (!confirmed) return
+    try {
+      await apiClient.deleteProject(projectId)
+      const deletedSessionIds = new Set(projectSessions.map((session) => session.id))
+      setProjects((current) => current.filter((item) => item.id !== projectId))
+      setDrafts((current) => current.filter((draft) => draft.projectId !== projectId))
+      setSessions(useChatStore.getState().sessions.filter((session) => !deletedSessionIds.has(session.id)))
+      if (activeProjectId === projectId) {
+        const nextSession = useChatStore.getState().sessions.find((session) => !deletedSessionIds.has(session.id)) ?? null
+        setActiveSession(nextSession?.id ?? null)
+        setActiveProjectId(nextSession?.project_id ?? null)
+        setActiveDraft(null)
+      }
+    } catch (error) {
+      useChatStore.getState().setError(error instanceof Error ? error.message : "项目删除失败")
+    }
+  }, [activeProjectId, projects, sessions, setActiveSession, setSessions, setDrafts])
+
+  const handleSelectDraft = useCallback((draftId: string) => {
+    const draft = drafts.find((item) => item.id === draftId)
+    if (!draft) return
+    setActiveProjectId(draft.projectId)
+    setActiveSession(null)
+    setActiveDraft(draft)
+    setActiveView("chat")
+  }, [drafts, setActiveSession, setActiveView])
+
+  const handleDeleteDraft = useCallback((draftId: string) => {
+    setDrafts((current) => current.filter((draft) => draft.id !== draftId))
+    if (activeDraft?.id === draftId) setActiveDraft(null)
+  }, [activeDraft, setDrafts])
 
   const handleSelectView = useCallback((view: AppView) => {
     setActiveView(view)
@@ -266,7 +407,13 @@ function AppContent() {
   const handleRenameSession = useCallback(async (sessionId: string, title: string) => {
     try {
       const updated = await apiClient.updateSessionTitle(sessionId, title)
-      useChatStore.getState().updateSession(sessionId, { title: updated.title, updated_at: updated.updated_at })
+      useChatStore.getState().updateSession(sessionId, {
+        title: updated.title,
+        updated_at: updated.updated_at,
+        title_source: updated.title_source,
+        title_revision: updated.title_revision,
+        title_pending: updated.title_pending,
+      })
     } catch (error) {
       useChatStore.getState().setError(error instanceof Error ? error.message : "Session rename failed")
       throw error
@@ -278,9 +425,15 @@ function AppContent() {
       await apiClient.logout()
     } finally {
       initializedSessions.current = false
+      setDrafts([])
+      setActiveDraft(null)
+      setProjects([])
+      setActiveProjectId(null)
+      setSessions([])
+      setActiveSession(null)
       setAuthState("unauthenticated")
     }
-  }, [])
+  }, [setActiveSession, setSessions, setDrafts])
 
   if (authState === "loading") {
     return <main className="flex min-h-screen items-center justify-center bg-athena-bg text-athena-muted">加载中...</main>
@@ -300,18 +453,35 @@ function AppContent() {
         />
       )}
       <Sidebar
+        projects={projects}
         sessions={sessions}
+        drafts={drafts}
+        activeProjectId={activeProjectId}
         activeSessionId={activeSessionId}
+        activeDraftId={activeDraft?.id ?? null}
+        onSelectProject={(projectId) => {
+          handleSelectProject(projectId)
+          setMobileSessionsOpen(false)
+          setActiveView("chat")
+        }}
         onSelectSession={(sessionId) => {
           handleSelectSession(sessionId)
           setMobileSessionsOpen(false)
           setActiveView("chat")
         }}
-        onNewSession={async () => {
-          await handleNewSession()
+        onSelectDraft={(draftId) => {
+          handleSelectDraft(draftId)
+          setMobileSessionsOpen(false)
+        }}
+        onDeleteDraft={handleDeleteDraft}
+        onNewSession={(projectId) => {
+          void handleNewSession(projectId)
           setMobileSessionsOpen(false)
           setActiveView("chat")
         }}
+        onCreateProject={() => void handleCreateProject()}
+        onRenameProject={handleRenameProject}
+        onDeleteProject={(projectId) => void handleDeleteProject(projectId)}
         onDeleteSession={handleDeleteSession}
         onRenameSession={handleRenameSession}
         activeView={activeView}
@@ -331,10 +501,14 @@ function AppContent() {
             <div className="min-w-0 flex-1">
               <div className="chat-workspace-title truncate">
                 {activeView === "chat"
-                  ? sessions.find((session) => session.id === activeSessionId)?.title || "新对话"
+                  ? sessions.find((session) => session.id === activeSessionId)?.title || (activeDraft ? "新聊天" : "选择项目")
                   : NAV_ITEMS.find((item) => item.view === activeView)?.label || "Athena 工作区"}
               </div>
-              <div className="chat-workspace-subtitle">Athena 工作区</div>
+              <div className="chat-workspace-subtitle">
+                {activeView === "chat"
+                  ? projects.find((project) => project.id === activeProjectId)?.name || "Athena 工作区"
+                  : "Athena 工作区"}
+              </div>
             </div>
           </div>
           <div className="chat-workspace-header-status"><StatusIndicator /></div>
@@ -343,7 +517,13 @@ function AppContent() {
           </button>}
         </header>
         {activeView === "chat" ? (
-            <Chat sendEvent={sendEvent} onOpenSessions={() => setMobileSessionsOpen(true)} demoMode={demoMode} />
+            <Chat
+              sendEvent={sendEvent}
+              draft={activeDraft}
+              ensureSession={ensureSession}
+              onOpenSessions={() => setMobileSessionsOpen(true)}
+              demoMode={demoMode}
+            />
         ) : (
           <PageView view={activeView} />
         )}

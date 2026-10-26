@@ -12,13 +12,31 @@ class SessionModel(Base):
     """sessions 表的基础设施映射。"""
 
     __tablename__ = "sessions"
+    __table_args__ = (
+        Index(
+            "idx_sessions_project_activity",
+            "project_id",
+            "deleted_time",
+            "last_activity_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    title: Mapped[str] = mapped_column(String, default="New Session")
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    creation_request_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, unique=True
+    )
+    title: Mapped[str] = mapped_column(String, default="新聊天")
+    title_source: Mapped[str] = mapped_column(String, default="placeholder")
+    title_revision: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String, default="idle")
     run_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
+    last_activity_at: Mapped[str] = mapped_column(String, nullable=False)
     compression_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_compressed_message_id: Mapped[str | None] = mapped_column(
         String, nullable=True
@@ -27,6 +45,29 @@ class SessionModel(Base):
         String, nullable=True
     )
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class SessionTitleJobModel(Base):
+    """持久化首条用户消息触发的会话标题生成任务。"""
+
+    __tablename__ = "session_title_jobs"
+
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), primary_key=True
+    )
+    source_message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), unique=True
+    )
+    expected_title_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String, default="queued", index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    claimed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    available_at: Mapped[str] = mapped_column(String)
+    lease_expires_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    attachment_names_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
 
 
 class SessionMemorySettingsModel(Base):

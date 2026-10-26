@@ -40,6 +40,9 @@ class Result:
     def scalar_one_or_none(self):
         return self.scalar
 
+    def one_or_none(self):
+        return self.rows[0] if self.rows else None
+
     def scalars(self):
         return self
 
@@ -70,6 +73,9 @@ class DB:
 
     async def execute(self, statement):
         return self.results.pop(0) if self.results else Result()
+
+    async def scalar(self, statement):
+        return self.results.pop(0).scalar if self.results else None
 
     async def get(self, model, key):
         return self.get_values.pop(0) if self.get_values else None
@@ -126,26 +132,26 @@ async def test_session_and_message_repositories_cover_crud_and_attachment_reader
     db = DB(); repo = PostgresSessionRepository(factory(db))
     value = session()
     assert await repo.create(value) == value
-    db.results = [Result(scalar=SimpleNamespace(
-        id="s-1", title="Title", status="idle", run_id=None,
-        created_at=now().isoformat(), updated_at=now().isoformat(),
-        compression_summary=None, last_compressed_message_id=None, last_summarized_message_id=None))]
-    assert (await repo.get("s-1")).id == "s-1"
     session_row = SimpleNamespace(
         id="s-1", title="Title", status="idle", run_id=None,
         created_at=now().isoformat(), updated_at=now().isoformat(),
-        compression_summary=None, last_compressed_message_id=None, last_summarized_message_id=None,
+        project_id="project-1", title_source="manual", title_revision=0,
+        last_activity_at=now().isoformat(), compression_summary=None,
+        last_compressed_message_id=None, last_summarized_message_id=None,
     )
-    db.results = [Result(rows=[session_row])]
+    db.results = [Result(rows=[(session_row, False)])]
+    assert (await repo.get("s-1")).id == "s-1"
+    db.results = [Result(rows=[(session_row, False)])]
     assert len(await repo.list_sessions()) == 1
     assert await repo.save(value) == value
-    db.results = [Result(scalar="s-1")]
+    db.results = [Result(scalar=session_row), Result(), Result(scalar="s-1")]
     assert await repo.delete("s-1")
 
     messages = DB()
     async def read(ids):
         return {item: [] for item in ids}
     mrepo = PostgresMessageRepository(factory(messages), attachment_reader=read)
+    messages.results = [Result(scalar=session_row)]
     assert await mrepo.save(message()) == "m-1"
     row = SimpleNamespace(id="m-1", session_id="s-1", role="user", content="hello",
         tool_calls_json="[]", tool_call_id=None, run_id=None, tool_call_record_id=None,

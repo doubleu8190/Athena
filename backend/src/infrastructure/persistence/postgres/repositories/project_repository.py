@@ -7,11 +7,12 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 
-from sqlalchemy import cast, delete as sql_delete, func, select
+from sqlalchemy import cast, delete as sql_delete, func, select, update
 from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.memory import MemoryProjectSpace, MemoryProjectSpaceRepositoryPort, MemoryRecordMetadata
+from domain.memory import MemoryRecordMetadata
+from domain.projects import Project, ProjectRepositoryPort
 from domain.memory.suppression import (
     EPISODE_SUPPRESSION_FINGERPRINT,
     PROJECT_SUPPRESSION_FINGERPRINT,
@@ -20,6 +21,7 @@ from domain.memory.suppression import (
 )
 
 from ..models import (
+    AgentCommandModel,
     AgentRunModel,
     MemoryEpisodeModel,
     MemoryEpisodeProjectBindingModel,
@@ -27,11 +29,12 @@ from ..models import (
     MemoryJobScopeSnapshotModel,
     MemoryModel,
     MemoryProcessingJobModel,
-    MemoryProjectSpaceModel,
+    ProjectModel,
+    SessionTitleJobModel,
     MemoryRunEvidenceSnapshotModel,
     MemorySourceSuppressionModel,
     MemoryWriteOperationModel,
-    SessionMemoryProjectBindingModel,
+    SessionModel,
 )
 
 
@@ -59,7 +62,7 @@ def _source_turn_ids(metadata: object) -> set[str]:
     return result
 
 
-class PostgresMemoryProjectSpaceRepository(MemoryProjectSpaceRepositoryPort):
+class PostgresProjectRepository(ProjectRepositoryPort):
     """只管理用户明确创建的项目空间名称与稳定 ID。"""
 
     def __init__(
@@ -70,7 +73,7 @@ class PostgresMemoryProjectSpaceRepository(MemoryProjectSpaceRepositoryPort):
     ) -> None:
         self._session_factory = session_factory
 
-    async def create(self, project: MemoryProjectSpace) -> MemoryProjectSpace:
+    async def create(self, project: Project) -> Project:
         """保存新项目空间。
 
         参数：project 是服务端生成 ID 且名称已规范化的项目空间。
@@ -80,7 +83,7 @@ class PostgresMemoryProjectSpaceRepository(MemoryProjectSpaceRepositoryPort):
         async with self._session_factory() as session:
             async with session.begin():
                 session.add(
-                    MemoryProjectSpaceModel(
+                    ProjectModel(
                         id=project.id,
                         name=project.name,
                         created_at=project.created_at,
@@ -89,27 +92,69 @@ class PostgresMemoryProjectSpaceRepository(MemoryProjectSpaceRepositoryPort):
                 )
         return project
 
-    async def get(self, project_id: str) -> MemoryProjectSpace | None:
+    async def get(self, project_id: str) -> Project | None:
         """按稳定 ID 读取项目空间。"""
         async with self._session_factory() as session:
-            row = await session.get(MemoryProjectSpaceModel, project_id)
+            row = await session.scalar(
+                select(ProjectModel).where(
+                    ProjectModel.id == project_id,
+                    ProjectModel.deleted_time.is_(None),
+                )
+            )
         return None if row is None else _to_domain(row)
 
-    async def list(self) -> list[MemoryProjectSpace]:
+    async def list(self) -> list[Project]:
         """按最近更新时间倒序列出显式项目空间。"""
         async with self._session_factory() as session:
+            activity = (
+                select(
+                    SessionModel.project_id.label("project_id"),
+                    func.max(SessionModel.last_activity_at).label("last_activity_at"),
+                )
+                .where(
+                    SessionModel.deleted_time.is_(None),
+                    SessionModel.project_id.is_not(None),
+                )
+                .group_by(SessionModel.project_id)
+                .subquery()
+            )
             rows = (
                 await session.scalars(
-                    select(MemoryProjectSpaceModel).order_by(
-                        MemoryProjectSpaceModel.updated_at.desc(),
-                        MemoryProjectSpaceModel.id,
+                    select(ProjectModel)
+                    .outerjoin(activity, activity.c.project_id == ProjectModel.id)
+                    .where(ProjectModel.deleted_time.is_(None))
+                    .order_by(
+                        func.coalesce(
+                            activity.c.last_activity_at, ProjectModel.created_at
+                        ).desc(),
+                        ProjectModel.id,
                     )
                 )
             ).all()
         return [_to_domain(row) for row in rows]
 
-    async def forget(self, project_id: str) -> bool:
-        """Remove project data and atomically suppress all known source turns."""
+    async def rename(self, project_id: str, name: str) -> Project | None:
+        """只更新显示名称，不改变项目 ID 和聊天活动时间。"""
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.scalar(
+                    select(ProjectModel)
+                    .where(
+                        ProjectModel.id == project_id,
+                        ProjectModel.deleted_time.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if row is None:
+                    return None
+                row.name = name
+                row.updated_at = now
+                await session.flush()
+                return _to_domain(row)
+
+    async def delete(self, project_id: str) -> bool:
+        """清理项目记忆并软删除项目下的聊天；活动 Run 会拒绝删除。"""
         now = datetime.now(timezone.utc).isoformat()
         async with self._session_factory() as session:
             async with session.begin():
@@ -123,12 +168,65 @@ class PostgresMemoryProjectSpaceRepository(MemoryProjectSpaceRepositoryPort):
                     )
                 )
                 project = await session.scalar(
-                    select(MemoryProjectSpaceModel)
-                    .where(MemoryProjectSpaceModel.id == project_id)
+                    select(ProjectModel)
+                    .where(
+                        ProjectModel.id == project_id,
+                        ProjectModel.deleted_time.is_(None),
+                    )
                     .with_for_update()
                 )
                 if project is None:
                     return False
+
+                session_ids = list((await session.scalars(
+                    select(SessionModel.id).where(
+                        SessionModel.project_id == project_id,
+                        SessionModel.deleted_time.is_(None),
+                    ).with_for_update()
+                )).all())
+                active_run = (
+                    await session.scalar(
+                        select(AgentRunModel.run_id)
+                        .where(
+                            AgentRunModel.session_id.in_(session_ids),
+                            AgentRunModel.status.notin_(
+                                ("completed", "failed", "cancelled")
+                            ),
+                        )
+                        .limit(1)
+                    )
+                    if session_ids
+                    else None
+                )
+                active_command = (
+                    await session.scalar(
+                        select(AgentCommandModel.command_id)
+                        .where(
+                            AgentCommandModel.session_id.in_(session_ids),
+                            AgentCommandModel.status.in_(("queued", "running")),
+                        )
+                        .limit(1)
+                    )
+                    if session_ids
+                    else None
+                )
+                if active_run is not None or active_command is not None:
+                    raise ValueError("project_busy")
+
+                if session_ids:
+                    await session.execute(
+                        update(SessionTitleJobModel)
+                        .where(
+                            SessionTitleJobModel.session_id.in_(session_ids),
+                            SessionTitleJobModel.status.in_(("queued", "running")),
+                        )
+                        .values(
+                            status="cancelled",
+                            lease_expires_at=None,
+                            claimed_by=None,
+                            updated_at=now,
+                        )
+                    )
 
                 await session.execute(
                     pg_insert(MemorySourceSuppressionModel)
@@ -192,22 +290,12 @@ class PostgresMemoryProjectSpaceRepository(MemoryProjectSpaceRepositoryPort):
                 episode_ids = [episode_id for episode_id, _ in project_episode_rows]
                 turn_ids.update(turn_id for _, turn_id in project_episode_rows)
 
-                bound_session_ids = list(
-                    (
-                        await session.scalars(
-                            select(SessionMemoryProjectBindingModel.session_id).where(
-                                SessionMemoryProjectBindingModel.project_id
-                                == project_id
-                            )
-                        )
-                    ).all()
-                )
-                if bound_session_ids:
+                if session_ids:
                     turn_ids.update(
                         (
                             await session.scalars(
                                 select(AgentRunModel.run_id).where(
-                                    AgentRunModel.session_id.in_(bound_session_ids)
+                                    AgentRunModel.session_id.in_(session_ids)
                                 )
                             )
                         ).all()
@@ -287,21 +375,26 @@ class PostgresMemoryProjectSpaceRepository(MemoryProjectSpaceRepositoryPort):
                         )
                     )
                 await session.execute(
-                    sql_delete(SessionMemoryProjectBindingModel).where(
-                        SessionMemoryProjectBindingModel.project_id == project_id
+                    update(SessionModel)
+                    .where(
+                        SessionModel.project_id == project_id,
+                        SessionModel.deleted_time.is_(None),
                     )
+                    .values(deleted_time=now)
                 )
-                await session.delete(project)
+                project.deleted_time = now
+                project.updated_at = now
         return True
 
 
-def _to_domain(row: MemoryProjectSpaceModel) -> MemoryProjectSpace:
-    return MemoryProjectSpace(
+def _to_domain(row: ProjectModel) -> Project:
+    return Project(
         id=row.id,
         name=row.name,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        deleted_time=row.deleted_time,
     )
 
 
-__all__ = ["PostgresMemoryProjectSpaceRepository"]
+__all__ = ["PostgresProjectRepository"]

@@ -981,7 +981,7 @@ class RootWorkflow(RootWorkflowPort):
             queries.append(MemoryQuery(provider="memory", query=query))
         if "episode" in self.dependencies.available_context_providers:
             queries.append(EpisodeQuery(provider="episode", query=query))
-        if "knowledge" in self.dependencies.available_context_providers and ready_ids:
+        if "knowledge" in self.dependencies.available_context_providers:
             queries.append(
                 KnowledgeQuery(
                     provider="knowledge", query=query, knowledge_base_ids=ready_ids

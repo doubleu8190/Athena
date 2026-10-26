@@ -14,9 +14,21 @@ from domain.sessions import Session
 class FakeSessionRepository:
     def __init__(self) -> None:
         self.items: dict[str, Session] = {}
+        self.creation_requests: dict[str, str] = {}
 
     async def create(self, session: Session) -> Session:
         self.items[session.id] = session
+        return session
+
+    async def create_idempotent(self, session: Session, *, creation_request_id: str) -> Session:
+        existing_id = self.creation_requests.get(creation_request_id)
+        if existing_id:
+            existing = self.items.get(existing_id)
+            if existing is None:
+                raise ValueError("session_deleted")
+            return existing
+        self.items[session.id] = session
+        self.creation_requests[creation_request_id] = session.id
         return session
 
     async def get(self, session_id: str) -> Session | None:
@@ -26,6 +38,10 @@ class FakeSessionRepository:
         return list(self.items.values())
 
     async def save(self, session: Session) -> Session:
+        self.items[session.id] = session
+        return session
+
+    async def rename(self, session: Session) -> Session:
         self.items[session.id] = session
         return session
 
@@ -46,7 +62,11 @@ def make_client() -> TestClient:
 def test_session_controller_routes_crud_through_service() -> None:
     client = make_client()
 
-    created = client.post("/api/sessions", json={"title": "  Project  "})
+    created = client.post(
+        "/api/sessions",
+        json={"project_id": "project-1", "title": "  Project  "},
+        headers={"Idempotency-Key": "request-1"},
+    )
     assert created.status_code == 200
     assert created.json()["title"] == "Project"
     assert created.json()["status"] == "idle"
@@ -83,10 +103,31 @@ def test_session_controller_maps_missing_and_invalid_requests() -> None:
     ).status_code == 404
     assert client.delete("/api/sessions/missing").status_code == 404
 
-    created = client.post("/api/sessions", json={"title": "Existing"})
+    created = client.post(
+        "/api/sessions",
+        json={"project_id": "project-1", "title": "Existing"},
+        headers={"Idempotency-Key": "request-2"},
+    )
     session_id = created.json()["id"]
     invalid = client.patch(
         f"/api/sessions/{session_id}", json={"title": "   "}
     )
     assert invalid.status_code == 400
     assert invalid.json()["detail"] == "title_empty"
+
+
+def test_session_controller_rejects_replay_for_deleted_idempotent_session() -> None:
+    client = make_client()
+    headers = {"Idempotency-Key": "request-deleted"}
+    created = client.post(
+        "/api/sessions", json={"project_id": "project-1"}, headers=headers
+    )
+    assert created.status_code == 200
+    assert client.delete(f"/api/sessions/{created.json()['id']}").status_code == 200
+
+    replay = client.post(
+        "/api/sessions", json={"project_id": "project-1"}, headers=headers
+    )
+
+    assert replay.status_code == 409
+    assert replay.json()["detail"] == "session_deleted"

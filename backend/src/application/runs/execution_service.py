@@ -1,298 +1,167 @@
-"""运行执行和终态持久化用例。"""
+"""Execute one claimed Run invocation and converge its lifecycle."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from time import perf_counter
 
-from domain.events import (
-    ApplicationEvent,
-    EventDurability,
-    EventPort,
-    EventType,
-)
+from application.runs.ports import RunExecutorPort
+from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
 from domain.memory import MemoryJobPort
 from domain.runs import (
     CommandType,
-    CommandStatus,
-    CommandQueuePort,
     RunCommand,
-    RunCancelPayload,
-    RunCancellationResult,
     RunLifecyclePort,
     RunQueryPort,
+    RunResumePayload,
     RunStartPayload,
-    RootWaitCheckpoint,
     RunStatus,
+    RootWaitCheckpoint,
 )
-from application.runs.ports import RunExecutorPort
 
 
 class RunExecutionService:
-    """统一一次命令的执行、状态转换、事件和命令结果收敛。"""
+    """Run Root start/resume calls without a separate command state machine."""
 
     def __init__(
         self,
         lifecycle: RunLifecyclePort,
-        commands: CommandQueuePort,
         executor: RunExecutorPort,
         events: EventPort,
         memory_jobs: MemoryJobPort | None = None,
         run_query: RunQueryPort | None = None,
     ) -> None:
         self._lifecycle = lifecycle
-        self._commands = commands
         self._executor = executor
         self._events = events
         self._memory_jobs = memory_jobs
         self._run_query = run_query
-        # Approval resumes are internal commands. Keep the original queued
-        # command so its status can converge when the resumed execution ends.
-        self._waiting_commands: dict[str, str] = {}
         self._run_started: dict[str, tuple[datetime, float]] = {}
-        # Volatile adapters still need the original user message ID when a
-        # resumed run publishes its final answer outside a completion outbox.
         self._user_message_ids_by_run_id: dict[str, str] = {}
 
-    async def execute(self, command: RunCommand) -> dict[str, object] | None:
-        """执行取消或 Root 命令，并委托对应分支完成状态收敛。
-
-        Args:
-            command: 已从命令队列领取的运行命令。
-
-        Returns:
-            已完成命令的结果；等待 Root Resume 时返回 None。
-
-        Raises:
-            Exception: 生命周期、事件或命令仓储操作失败时透传。
-        """
-        if command.command_type == CommandType.RUN_CANCEL:
-            return await self._execute_cancellation(command)
-        if not command.run_id:
-            await self._commands.complete_command(
-                command.command_id,
-                status=CommandStatus.FAILED,
-                error={"code": "run_id_required"},
-            )
+    async def execute(self, invocation: RunCommand) -> dict[str, object] | None:
+        if not invocation.run_id:
             return None
+        if invocation.command_type not in {CommandType.RUN_START, CommandType.RUN_RESUME}:
+            raise TypeError("Run execution accepts only start or resume invocations")
+        return await self._execute_run(invocation, invocation.run_id)
 
-        return await self._execute_run(command, command.run_id)
-
-    async def _execute_cancellation(
-        self, command: RunCommand
-    ) -> dict[str, object]:
-        """先持久化取消栅栏，再停止 Root 并完成取消命令。"""
-        cancellation: RunCancellationResult | None = None
-        if command.run_id:
-            if not isinstance(command.payload, RunCancelPayload):
-                raise TypeError("run.cancel requires RunCancelPayload")
-            cancellation = await self._lifecycle.cancel(
-                command.run_id,
-                reason=command.payload.reason,
-            )
-
-        # 数据库事务先设置取消栅栏，之后才中断 Root，避免新 Worker 越过取消边界。
-        cancel_error: Exception | None = None
-        try:
-            await self._executor.cancel(command.run_id)
-        except Exception as error:
-            cancel_error = error
-        if command.run_id and cancellation and cancellation.changed:
-            self._user_message_ids_by_run_id.pop(command.run_id, None)
-
-        if (
-            command.run_id
-            and cancellation is not None
-            and cancellation.changed
-            and not self._lifecycle.writes_cancellation_events_to_outbox
-        ):
-            event_type = (
-                EventType.RUN_CANCELLING
-                if cancellation.status == RunStatus.CANCELLING
-                else EventType.RUN_CANCELLED
-            )
-            await self._publish(
-                command,
-                event_type,
-                payload={
-                    **self._run_payload(command, cancellation.status.value),
-                    "external_effect_status": cancellation.external_effect_status,
-                },
-            )
-
-        if cancel_error is not None:
-            raise cancel_error
-        result: dict[str, object] = {
-            "status": cancellation.status.value if cancellation else "unchanged",
-            "external_effect_status": (
-                cancellation.external_effect_status if cancellation else "unknown"
-            ),
-        }
-        await self._commands.complete_command(
-            command.command_id,
-            status=CommandStatus.COMPLETED,
-            result=result,
-        )
-        return result
+    async def interrupt(self, run_id: str) -> None:
+        """Signal and cancel a local Root invocation for an accepted stop."""
+        await self._executor.cancel(run_id)
 
     async def _execute_run(
-        self, command: RunCommand, run_id: str
+        self, invocation: RunCommand, run_id: str
     ) -> dict[str, object] | None:
-        """执行一次 Run/Resume，并按结果分派等待、失败或完成收敛。"""
-        started = await self._lifecycle.update_status(
-            run_id, RunStatus.RUNNING
-        )
-        if not started:
-            self._user_message_ids_by_run_id.pop(run_id, None)
-            result = {"status": RunStatus.CANCELLED.value}
-            await self._commands.complete_command(
-                command.command_id,
-                status=CommandStatus.CANCELLED,
-                result=result,
-            )
-            return result
+        if not await self._lifecycle.update_status(run_id, RunStatus.RUNNING):
+            return None
         if run_id not in self._run_started:
             self._run_started[run_id] = (datetime.now(timezone.utc), perf_counter())
-        if isinstance(command.payload, RunStartPayload):
-            self._user_message_ids_by_run_id[run_id] = command.payload.message_id
+        if isinstance(invocation.payload, RunStartPayload):
+            self._user_message_ids_by_run_id[run_id] = invocation.payload.message_id
 
-        start_event = (
+        event_type = (
             EventType.RUN_RESUMED
-            if command.command_type == CommandType.RUN_RESUME
+            if invocation.command_type == CommandType.RUN_RESUME
             else EventType.RUN_STARTED
         )
         await self._publish(
-            command,
-            start_event,
+            invocation,
+            event_type,
             payload=self._run_payload(
-                command, "running", started_at=self._run_started[run_id][0]
+                invocation, "running", started_at=self._run_started[run_id][0]
             ),
         )
 
         try:
-            outcome = await self._executor.execute(command)
+            outcome = await self._executor.execute(invocation)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             await self.fail(
-                command,
+                invocation,
                 {"code": "run_failed", "message": str(exc) or type(exc).__name__},
             )
             return None
-        # 处理root agent的等待事件
+
         if outcome.root_wait is not None:
             await self._arm_root_wait(run_id, outcome.root_wait)
-            self._waiting_commands[run_id] = command.command_id
             await self._publish(
-                command,
+                invocation,
                 EventType.RUN_ROOT_SUSPENDED,
-                payload=self._run_payload(command, "waiting"),
+                payload=self._run_payload(invocation, "waiting"),
             )
             return None
-
         if outcome.error is not None:
-            await self.fail(command, outcome.error)
+            await self.fail(invocation, outcome.error)
             return None
 
         result = outcome.result or {}
-        completed = await self._lifecycle.complete(run_id, result)
-        if not completed:
+        lease = (
+            {"owner": invocation.lease_owner, "generation": invocation.execution_generation}
+            if invocation.lease_owner is not None else {}
+        )
+        if not await self._lifecycle.complete(run_id, result, **lease):
             current = await self._run_query.get(run_id) if self._run_query else None
             status = current.status if current is not None else "unknown"
-            command_status = (
-                CommandStatus.CANCELLED
-                if status in {RunStatus.CANCELLED.value, RunStatus.CANCELLING.value}
-                else CommandStatus.COMPLETED
-                if status == RunStatus.COMPLETED.value
-                else CommandStatus.FAILED
-            )
-            terminal_result = {"status": status}
-            await self._commands.complete_command(
-                command.command_id,
-                status=command_status,
-                result=terminal_result,
-                error=(
-                    {"code": "run_completion_transition_rejected"}
-                    if command_status == CommandStatus.FAILED
-                    else None
+            if status == RunStatus.STOPPING.value:
+                return None
+            self._clear_local_state(run_id)
+            return {"status": str(getattr(status, "value", status))}
+
+        if not self._lifecycle.writes_terminal_artifacts_to_outbox:
+            await self._publish_result_message(invocation, result)
+            await self._enqueue_memory(invocation, result)
+            await self._publish(
+                invocation,
+                EventType.RUN_COMPLETED,
+                payload=self._run_payload(
+                    invocation, "completed", summary="运行已完成"
                 ),
             )
-            return terminal_result
-        if not self._lifecycle.writes_terminal_artifacts_to_outbox:
-            # 将结果通过事件发送给用户
-            await self._publish_result_message(command, result)
-            # 入队一个记忆提取任务
-            await self._enqueue_memory(command, result)
-            await self._publish(
-                command,
-                EventType.RUN_COMPLETED,
-                payload=self._run_payload(command, "completed", summary="运行已完成"),
-            )
-        self._run_started.pop(run_id, None)
-        self._user_message_ids_by_run_id.pop(run_id, None)
-        original_command_id = self._waiting_commands.pop(run_id, None)
-        await self._commands.complete_command(
-            command.command_id, status=CommandStatus.COMPLETED, result=result
-        )
-        if original_command_id and original_command_id != command.command_id:
-            await self._commands.complete_command(
-                original_command_id, status=CommandStatus.COMPLETED, result=result
-            )
-        await self._commands.complete_active_command_for_run(
-            run_id, status=CommandStatus.COMPLETED, result=result
-        )
+        self._clear_local_state(run_id)
         return result
 
     async def _arm_root_wait(
         self, run_id: str, root_wait: RootWaitCheckpoint
     ) -> None:
-        """登记已由 LangGraph 适配器验证的中断身份。
-
-        Args:
-            run_id: 当前运行 ID。
-            root_wait: 包含 Run、Plan、Round、interrupt 和 checkpoint 身份的数据。
-
-        Returns:
-            成功登记时不返回值。
-
-        Raises:
-            ValueError: 等待身份不属于当前 Run。
-            RuntimeError: 仓储拒绝登记该 checkpoint。
-        """
         if root_wait.run_id != run_id:
             raise ValueError("root_wait_run_identity_mismatch")
-        armed = await self._lifecycle.arm_root_wait(
+        if not await self._lifecycle.arm_root_wait(
             run_id,
             plan_id=root_wait.plan_id,
             round_id=root_wait.round_id,
             plan_version=root_wait.plan_version,
             interrupt_id=root_wait.interrupt_id,
             checkpoint_id=root_wait.checkpoint_id,
-        )
-        if not armed:
+        ):
             raise RuntimeError("root_wait_checkpoint_not_armed")
 
-    async def fail(self, command: RunCommand, error: dict[str, object]) -> None:
-        if command.run_id:
-            changed = await self._lifecycle.fail(command.run_id, error)
-            if changed and not self._lifecycle.writes_terminal_artifacts_to_outbox:
-                await self._publish(command, EventType.RUN_FAILED, payload=self._run_payload(command, "failed", error=error))
-            self._run_started.pop(command.run_id, None)
-            self._user_message_ids_by_run_id.pop(command.run_id, None)
-        await self._commands.complete_command(
-            command.command_id, status=CommandStatus.FAILED, error=error
+    async def fail(self, invocation: RunCommand, error: dict[str, object]) -> None:
+        run_id = invocation.run_id
+        if run_id is None:
+            return
+        lease = (
+            {"owner": invocation.lease_owner, "generation": invocation.execution_generation}
+            if invocation.lease_owner is not None else {}
         )
-        original_command_id = self._waiting_commands.pop(command.run_id, None) if command.run_id else None
-        if original_command_id and original_command_id != command.command_id:
-            await self._commands.complete_command(
-                original_command_id, status=CommandStatus.FAILED, error=error
+        changed = await self._lifecycle.fail(run_id, error, **lease)
+        if changed and not self._lifecycle.writes_terminal_artifacts_to_outbox:
+            await self._publish(
+                invocation,
+                EventType.RUN_FAILED,
+                payload=self._run_payload(invocation, "failed", error=error),
             )
-        if command.run_id:
-            await self._commands.complete_active_command_for_run(
-                command.run_id, status=CommandStatus.FAILED, error=error
-            )
+        self._clear_local_state(run_id)
+
+    def _clear_local_state(self, run_id: str) -> None:
+        self._run_started.pop(run_id, None)
+        self._user_message_ids_by_run_id.pop(run_id, None)
 
     async def _publish(
         self,
-        command: RunCommand,
+        invocation: RunCommand,
         event_type: EventType,
         *,
         payload: dict[str, object] | None = None,
@@ -301,24 +170,23 @@ class RunExecutionService:
             ApplicationEvent(
                 event_type=event_type,
                 durability=EventDurability.DURABLE,
-                session_id=command.session_id,
-                run_id=command.run_id,
-                payload=payload or {"command_id": command.command_id},
+                session_id=invocation.session_id,
+                run_id=invocation.run_id,
+                payload=payload or {},
             )
         )
 
     def _run_payload(
         self,
-        command: RunCommand,
+        invocation: RunCommand,
         status: str,
         *,
         started_at: datetime | None = None,
         summary: str | None = None,
         error: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        run_id = command.run_id or ""
+        run_id = invocation.run_id or ""
         payload: dict[str, object] = {
-            "command_id": command.command_id,
             "activity_id": f"run:{run_id}",
             "activity_type": "run",
             "name": "run",
@@ -334,7 +202,7 @@ class RunExecutionService:
         if summary:
             payload["summary"] = summary
         if error:
-            safe_error: dict[str, object] = {
+            safe_error = {
                 key: value for key, value in error.items()
                 if key in {"code", "stage", "retryable"}
             }
@@ -343,51 +211,41 @@ class RunExecutionService:
         return payload
 
     async def _enqueue_memory(
-        self, command: RunCommand, result: dict[str, object]
+        self, invocation: RunCommand, result: dict[str, object]
     ) -> None:
-        """Submit the completed user/assistant turn without breaking the run."""
-        if self._memory_jobs is None or not command.run_id:
+        if self._memory_jobs is None or not invocation.run_id:
             return
-        if not isinstance(command.payload, RunStartPayload):
+        if not isinstance(invocation.payload, RunStartPayload):
             return
-        user_text = command.payload.message.strip()
+        user_text = invocation.payload.message.strip()
         if not user_text:
             return
-        content = result.get("content")
-        if not isinstance(content, str):
-            nested = result.get("result")
-            content = nested.get("content") if isinstance(nested, dict) else None
+        content = _result_content(result)
         try:
             await self._memory_jobs.enqueue(
-                turn_id=command.run_id,
-                session_id=command.session_id,
+                turn_id=invocation.run_id,
+                session_id=invocation.session_id,
                 user_text=user_text,
-                assistant_text=content if isinstance(content, str) else "",
+                assistant_text=content,
             )
         except Exception:
-            # Memory extraction is asynchronous and must never turn a
-            # successful answer into a failed run.
             return
 
     async def _publish_result_message(
-        self, command: RunCommand, result: dict[str, object]
+        self, invocation: RunCommand, result: dict[str, object]
     ) -> None:
-        """Project a completed graph result into the session chat stream."""
-        if not command.run_id:
+        if not invocation.run_id:
             return
-        if isinstance(command.payload, RunStartPayload):
-            reply_to_message_id = command.payload.message_id
-        elif command.command_type == CommandType.RUN_RESUME:
-            reply_to_message_id = self._user_message_ids_by_run_id.get(command.run_id)
+        if isinstance(invocation.payload, RunStartPayload):
+            reply_to_message_id = invocation.payload.message_id
+        elif invocation.command_type == CommandType.RUN_RESUME:
+            reply_to_message_id = self._user_message_ids_by_run_id.get(invocation.run_id)
         else:
             return
         if not reply_to_message_id:
             return
-        content = result.get("content")
-        if not isinstance(content, str):
-            nested = result.get("result")
-            content = nested.get("content") if isinstance(nested, dict) else None
-        if not isinstance(content, str) or not content:
+        content = _result_content(result)
+        if not content:
             return
         answer_stream = result.get("answer_stream")
         if not isinstance(answer_stream, dict):
@@ -396,13 +254,13 @@ class RunExecutionService:
         if not isinstance(answer_stream, dict):
             raise ValueError("answer_stream_metadata_missing")
         stream_id = str(answer_stream["stream_id"])
-        assistant_message_id = f"assistant:{command.run_id}"
+        assistant_message_id = f"assistant:{invocation.run_id}"
         await self._events.publish(
             ApplicationEvent(
                 event_type=EventType.MESSAGE_COMPLETED,
                 durability=EventDurability.DURABLE,
-                session_id=command.session_id,
-                run_id=command.run_id,
+                session_id=invocation.session_id,
+                run_id=invocation.run_id,
                 message_id=assistant_message_id,
                 stream_id=stream_id,
                 stream_type="answer",
@@ -419,6 +277,16 @@ class RunExecutionService:
                 },
             )
         )
+
+
+def _result_content(result: dict[str, object]) -> str:
+    value = result.get("content")
+    if isinstance(value, str):
+        return value
+    nested = result.get("result")
+    if isinstance(nested, dict) and isinstance(nested.get("content"), str):
+        return str(nested["content"])
+    return ""
 
 
 __all__ = ["RunExecutionService"]

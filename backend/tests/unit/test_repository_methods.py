@@ -12,7 +12,7 @@ from domain.files import (
     FileLocator, FileMetadata,
 )
 from domain.knowledge import KnowledgeBase
-from domain.sessions import Message, MessageRole, Session, SessionStatus
+from domain.sessions import Message, MessageRole, Session
 from domain.tools import (
     JsonSchema, MCPServer, MCPServerConfig, RiskLevel, ToolConfig, ToolExecutionMode,
 )
@@ -93,7 +93,7 @@ def now():
 
 def session():
     stamp = now()
-    return Session("s-1", "Title", SessionStatus.IDLE, None, stamp, stamp)
+    return Session("s-1", "Title", None, stamp, stamp)
 
 
 def message():
@@ -133,7 +133,7 @@ async def test_session_and_message_repositories_cover_crud_and_attachment_reader
     value = session()
     assert await repo.create(value) == value
     session_row = SimpleNamespace(
-        id="s-1", title="Title", status="idle", run_id=None,
+        id="s-1", title="Title", active_run_id=None, last_run_sequence=0,
         created_at=now().isoformat(), updated_at=now().isoformat(),
         project_id="project-1",
         last_activity_at=now().isoformat(), compression_summary=None,

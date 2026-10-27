@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import timezone
 from typing import Literal
 
@@ -33,6 +34,7 @@ from application.memory.ports import (
     MemoryResolver,
     MemoryWriteTrigger,
 )
+from shared.contracts.memory import memory_domain_to_schema
 
 
 class MemoryWriteWorkflow:
@@ -209,8 +211,10 @@ class MemoryWriteWorkflow:
                 raise ValueError("memory_episode_source_reference_invalid")
 
             outcome = _episode_outcome(evidence)
-            summary = proposal.summary.model_copy(
-                update={"outcome": outcome, "verification_scope": ""}
+            summary = replace(
+                proposal.summary,
+                outcome=outcome,
+                verification_scope="",
             )
             source_refs = tuple(
                 source_refs_by_id[source_id] for source_id in proposal.source_ref_ids
@@ -277,7 +281,7 @@ class MemoryWriteWorkflow:
                 "outcome": episode.summary.outcome,
                 "verification_scope": episode.summary.verification_scope,
                 "source_refs": [
-                    reference.model_dump(mode="json")
+                    memory_domain_to_schema(reference).model_dump(mode="json")
                     for reference in episode.source_refs
                 ],
             }
@@ -329,16 +333,18 @@ class MemoryWriteWorkflow:
     ) -> tuple[str, str | None, str]:
         """提交单条决策，随后建立关系并更新检索投影。"""
         candidate = resolution.candidate
-        metadata = MemoryRecordMetadata.model_validate(
-            {
-                "session_id": turn.session_id,
-                "source_turn_id": turn.turn_id,
-                "type": candidate.memory_type,
-                "category": candidate.category,
-                "confidence": candidate.confidence,
-                "source": "extraction",
-                "fact": candidate.fact,
-            }
+        metadata = memory_domain_to_schema(
+            MemoryRecordMetadata(
+                extra_fields={
+                    "session_id": turn.session_id,
+                    "source_turn_id": turn.turn_id,
+                    "type": candidate.memory_type,
+                    "category": candidate.category,
+                    "confidence": candidate.confidence,
+                    "source": "extraction",
+                },
+                fact=candidate.fact,
+            )
         ).model_dump(mode="json", exclude_none=True)
 
         if resolution.action is ResolutionAction.CREATE:
@@ -404,7 +410,7 @@ class MemoryWriteWorkflow:
 def _operation_id(turn_id: str, candidate: MemoryCandidateSnapshot) -> str:
     """根据轮次和规范候选内容生成与数组顺序无关的 ID。"""
     canonical = json.dumps(
-        candidate.model_dump(mode="json"),
+        memory_domain_to_schema(candidate).model_dump(mode="json"),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

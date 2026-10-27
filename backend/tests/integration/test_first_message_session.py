@@ -14,13 +14,14 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from application.common.responses import CommandEnqueueResponse
-from application.runs import CommandRejectedError, RunCommandService
+from application.runs import RunRejectedError, RunService
 from domain.memory.suppression import PROJECT_TURN_SUPPRESSION_FINGERPRINT
 from infrastructure.persistence.postgres.models import (
-    AgentCommandModel,
+    AgentEventModel,
     AgentRunModel,
     Base,
+    IdempotencyReceiptModel,
+    MessageModel,
     MemoryJobScopeSnapshotModel,
     MemorySourceSuppressionModel,
     ProjectModel,
@@ -49,8 +50,10 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     tables = [
         ProjectModel.__table__,
         SessionModel.__table__,
-        AgentCommandModel.__table__,
+        MessageModel.__table__,
         AgentRunModel.__table__,
+        AgentEventModel.__table__,
+        IdempotencyReceiptModel.__table__,
         MemoryJobScopeSnapshotModel.__table__,
         MemorySourceSuppressionModel.__table__,
     ]
@@ -87,34 +90,34 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 async def test_concurrent_first_message_retries_reuse_one_session_and_run(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """相同首条命令并发重试只能提交一份会话、Run 和项目范围快照。"""
-    sessions = PostgresSessionRepository(session_factory)
+    """相同幂等请求并发重试只提交一份会话、消息和 Run。"""
     runs = PostgresRunRepository(session_factory)
-    service = RunCommandService(sessions, runs, runs, id_factory=lambda: uuid4().hex)
+    service = RunService(runs, runs, id_factory=lambda: uuid4().hex)
 
-    async def submit() -> CommandEnqueueResponse:
-        """让并发请求携带相同的客户端命令和消息身份。"""
+    async def submit():
         return await service.submit(
-            None, project_id="project-1", command_id="first-command",
-            message="请帮我整理记忆系统。", message_id="first-message",
+            None, project_id="project-1", request_id="first-request",
+            message="请帮我整理记忆系统。",
         )
 
     first, retry = await asyncio.gather(submit(), submit())
 
     assert first.session_id == retry.session_id
     assert first.run_id == retry.run_id
-    assert sorted([first.deduplicated, retry.deduplicated]) == [False, True]
+    assert sorted([first.replayed, retry.replayed]) == [False, True]
+    sessions = PostgresSessionRepository(session_factory)
     saved = await sessions.get(first.session_id)
     assert saved is not None
     assert saved.project_id == "project-1"
     assert saved.title == "整理记忆系统"
     async with session_factory() as session:
         for model in (
-            SessionModel, AgentCommandModel, AgentRunModel, MemoryJobScopeSnapshotModel
+            SessionModel, MessageModel, AgentRunModel, IdempotencyReceiptModel,
+            MemoryJobScopeSnapshotModel,
         ):
             assert await session.scalar(select(func.count()).select_from(model)) == 1
 
-    # 后续命令重放只复用原结果，不回写创建时的自动标题。
+    # 重放原请求只复用首次响应，不回写创建时的自动标题。
     await sessions.rename(saved.rename("手动标题", now=datetime.now(timezone.utc)))
     replay = await submit()
     assert replay.session_id == first.session_id
@@ -137,19 +140,20 @@ async def test_rejected_first_run_rolls_back_the_new_session(
             created_at=now,
         ))
     runs = PostgresRunRepository(session_factory)
-    service = RunCommandService(
-        PostgresSessionRepository(session_factory), runs, runs,
-        id_factory=iter(["rejected-session", "blocked-run"]).__next__,
+    service = RunService(
+        runs, runs,
+        id_factory=iter(["rejected-session", "blocked-run", "rejected-message"]).__next__,
     )
 
-    with pytest.raises(CommandRejectedError):
+    with pytest.raises(RunRejectedError):
         await service.submit(
-            None, project_id="project-1", command_id="rejected-command",
-            message="整理记忆系统", message_id="rejected-message",
+            None, project_id="project-1", request_id="rejected-request",
+            message="整理记忆系统",
         )
 
     async with session_factory() as session:
         for model in (
-            SessionModel, AgentCommandModel, AgentRunModel, MemoryJobScopeSnapshotModel
+            SessionModel, MessageModel, AgentRunModel, IdempotencyReceiptModel,
+            MemoryJobScopeSnapshotModel,
         ):
             assert await session.scalar(select(func.count()).select_from(model)) == 0

@@ -37,6 +37,11 @@ from .protocols import ContextProvider
 from application.memory.fact_groups import build_fact_context_group, record_fact
 from application.memory.fact_policy import cardinality_for
 from application.memory.index_views import build_memory_index_item
+from shared.contracts.memory import (
+    MemoryFactIdentitySchema,
+    memory_domain_to_schema,
+    memory_schema_to_domain,
+)
 
 logger = logging.getLogger(__name__)
 _EPISODE_SOURCE_MARKER = "\n\n按需展开的来源证据（可能截断）："
@@ -116,12 +121,11 @@ def _memory_record_is_current(record: Any) -> bool:
 def _without_unvalidated_memory(bundle: ContextBundle) -> ContextBundle:
     """Remove unverified memory and record why selected candidates were dropped."""
     selections = tuple(
-        selection.model_copy(
-            update={
-                "context_selected": False,
-                "source_ids": (),
-                "filter_reason": "memory_final_validation_failed",
-            }
+        replace(
+            selection,
+            context_selected=False,
+            source_ids=(),
+            filter_reason="memory_final_validation_failed",
         )
         if selection.provider in {"memory", "memory_index"} and selection.context_selected
         else selection
@@ -303,12 +307,11 @@ class ContextAcquisitionService:
                 current_index = validated_index_by_id.get(selection.source_id)
                 if current_index is None:
                     selections.append(
-                        selection.model_copy(
-                            update={
-                                "context_selected": False,
-                                "source_ids": (),
-                                "filter_reason": "memory_final_validation_failed",
-                            }
+                        replace(
+                            selection,
+                            context_selected=False,
+                            source_ids=(),
+                            filter_reason="memory_final_validation_failed",
                         )
                     )
                 else:
@@ -327,26 +330,26 @@ class ContextAcquisitionService:
             )
             if current is None:
                 selections.append(
-                    selection.model_copy(
-                        update={
-                            "context_selected": False,
-                            "source_ids": (),
-                            "filter_reason": "memory_final_validation_failed",
-                        }
+                    replace(
+                        selection,
+                        context_selected=False,
+                        source_ids=(),
+                        filter_reason="memory_final_validation_failed",
                     )
                 )
                 continue
             current_ids = current.metadata.get("memory_member_ids", ())
             selections.append(
-                selection.model_copy(
-                    update={
-                        "source_id": current.source_id or selection.source_id,
-                        "source_ids": tuple(current_ids)
+                replace(
+                    selection,
+                    source_id=current.source_id or selection.source_id,
+                    source_ids=(
+                        tuple(current_ids)
                         if current_ids
-                        else ((current.source_id,) if current.source_id else ()),
-                        "context_selected": True,
-                        "filter_reason": None,
-                    }
+                        else ((current.source_id,) if current.source_id else ())
+                    ),
+                    context_selected=True,
+                    filter_reason=None,
                 )
             )
         return replace(
@@ -394,7 +397,9 @@ class ContextAcquisitionService:
         identity: MemoryFactIdentity | None = None
         if identity_value is not None:
             try:
-                identity = MemoryFactIdentity.model_validate(identity_value)
+                identity = memory_schema_to_domain(
+                    MemoryFactIdentitySchema.model_validate(identity_value)
+                )
             except (TypeError, ValueError):
                 identity = None
 
@@ -443,7 +448,7 @@ class ContextAcquisitionService:
             "memory_total_count": group.total_member_count,
             "memory_complete": group.complete,
             "fact_cardinality": group.cardinality.value,
-            "memory_fact_identity": group.identity.model_dump(mode="json"),
+            "memory_fact_identity": memory_domain_to_schema(group.identity).model_dump(mode="json"),
             "memory_group_member_value": group.member_value,
         }
         return replace(
@@ -1211,16 +1216,15 @@ def _mark_bundle_selection(
             candidates.append(candidate)
         elif key in kept_keys or group_selected:
             candidates.append(
-                candidate.model_copy(update={"selection_stage": "bundle"})
+                replace(candidate, selection_stage="bundle")
             )
         else:
             candidates.append(
-                candidate.model_copy(
-                    update={
-                        "filter_reason": candidate.filter_reason
-                        or reasons.get(key, "bundle_filtered"),
-                        "selection_stage": "bundle",
-                    }
+                replace(
+                    candidate,
+                    filter_reason=candidate.filter_reason
+                    or reasons.get(key, "bundle_filtered"),
+                    selection_stage="bundle",
                 )
             )
     return replace(result, candidates=tuple(candidates))

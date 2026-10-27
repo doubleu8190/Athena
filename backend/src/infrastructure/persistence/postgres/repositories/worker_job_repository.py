@@ -23,6 +23,7 @@ from domain.orchestration import (
     WorkerJobRepository,
 )
 from domain.runs import RunStartPayload
+from shared.contracts.runs import RunStartPayloadSchema
 from ..models import (
     AgentPlanModel,
     AgentRunModel,
@@ -34,6 +35,7 @@ from ..models import (
     PlanVersionModel,
     RoundTaskModel,
     RootResumeJobModel,
+    SessionModel,
     SessionMemorySettingsModel,
     TaskExecutionModel,
     WorkerJobModel,
@@ -46,6 +48,7 @@ from .memory_suppression import ensure_writable_run_scope
 class _Candidate:
     job_id: str
     run_id: str
+    session_id: str
     plan_id: str
     round_id: str
     task_id: str
@@ -330,7 +333,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 assert round_task is not None and execution is not None
                 assert job is not None
                 if (
-                    run.status != "cancelling"
+                    run.status != "stopping"
                     or plan.status != "cancelling"
                     or run.cancellation_epoch != plan.cancellation_epoch
                     or execution.cancellation_epoch != run.cancellation_epoch
@@ -392,7 +395,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 run_ids = (
                     await session.execute(
                         select(AgentRunModel.run_id)
-                        .where(AgentRunModel.status == "cancelling")
+                        .where(AgentRunModel.status == "stopping")
                         .order_by(AgentRunModel.updated_at)
                         .limit(self._candidate_limit)
                     )
@@ -409,8 +412,23 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         self, session: AsyncSession, *, run_id: str, now: datetime
     ) -> RunCancellationReceipt | None:
         """锁定 Run 与 Plan，回收过期租约后决定是否可完成取消。"""
+        session_id = await session.scalar(
+            select(AgentRunModel.session_id).where(AgentRunModel.run_id == run_id)
+        )
+        if session_id is None:
+            return None
+        session_row = await session.scalar(
+            select(SessionModel)
+            .where(SessionModel.id == session_id)
+            .with_for_update()
+        )
         run = await session.get(AgentRunModel, run_id, with_for_update=True)
-        if run is None or run.status != "cancelling":
+        if (
+            session_row is None
+            or run is None
+            or run.status != "stopping"
+            or session_row.active_run_id != run_id
+        ):
             return None
         plan = (
             await session.execute(
@@ -419,7 +437,51 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        if plan is None or plan.status != "cancelling":
+        root_lease_until = (
+            datetime.fromisoformat(run.execution_lease_until)
+            if run.execution_lease_until
+            else None
+        )
+        if root_lease_until is not None and root_lease_until > now:
+            return None
+        if plan is None or plan.status in {"completed", "failed", "cancelled"}:
+            failed = run.error_json is not None
+            run.status = "failed" if failed else "cancelled"
+            run.updated_at = now.isoformat()
+            run.execution_lease_owner = None
+            run.execution_lease_until = None
+            if session_row.active_run_id == run.run_id:
+                session_row.active_run_id = None
+            await self._enqueue_cancelled_run_memory_job(session, run=run, now=now)
+            session.add(
+                OrchestrationOutboxModel(
+                    message_id=uuid4().hex,
+                    dedupe_key=f"run:{run.run_id}:{run.status}:{run.cancellation_epoch}",
+                    event_type="RunFailed" if failed else "RunCancelled",
+                    correlation_id=run.run_id,
+                    plan_id=plan.plan_id if plan is not None else None,
+                    plan_version=plan.current_version if plan is not None else None,
+                    round_id=plan.active_round_id if plan is not None else None,
+                    payload_json={
+                        "cancellation_epoch": run.cancellation_epoch,
+                        "external_effect_status": run.cancellation_external_effect_status,
+                        "error": json.loads(run.error_json) if failed else None,
+                    },
+                    schema_version=1,
+                    status="pending",
+                    attempt=0,
+                    available_at=now,
+                    occurred_at=now,
+                )
+            )
+            return RunCancellationReceipt(
+                run_id=run.run_id,
+                session_id=run.session_id,
+                plan_id=plan.plan_id if plan is not None else "",
+                cancellation_epoch=run.cancellation_epoch,
+                external_effect_status=run.cancellation_external_effect_status,
+            )
+        if plan.status != "cancelling":
             return None
 
         await self._cancel_expired_worker_executions(
@@ -623,8 +685,14 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         )
         plan.status = "cancelled"
         plan.updated_at = now.isoformat()
-        run.status = "cancelled"
+        failed = run.error_json is not None
+        run.status = "failed" if failed else "cancelled"
         run.updated_at = now.isoformat()
+        run.execution_lease_owner = None
+        run.execution_lease_until = None
+        session_row = await session.get(SessionModel, run.session_id)
+        if session_row is not None and session_row.active_run_id == run.run_id:
+            session_row.active_run_id = None
         await self._enqueue_cancelled_run_memory_job(session, run=run, now=now)
         await session.execute(
             update(RootResumeJobModel)
@@ -651,8 +719,8 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 self._cancellation_outbox(
                     run=run,
                     plan=plan,
-                    event_type="RunCancelled",
-                    dedupe_key=f"run:{run.run_id}:cancelled:{run.cancellation_epoch}",
+                    event_type="RunFailed" if failed else "RunCancelled",
+                    dedupe_key=f"run:{run.run_id}:{run.status}:{run.cancellation_epoch}",
                     now=now,
                 ),
             ]
@@ -674,9 +742,9 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
     ) -> None:
         """在取消终态事务内提交回顾作业和冻结的项目绑定。"""
         try:
-            request = RunStartPayload.model_validate_json(
+            request = RunStartPayloadSchema.model_validate_json(
                 getattr(run, "request_json", "{}")
-            )
+            ).to_domain()
         except (TypeError, ValueError):
             return
         user_text = request.message.strip()
@@ -732,6 +800,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             payload_json={
                 "cancellation_epoch": run.cancellation_epoch,
                 "external_effect_status": run.cancellation_external_effect_status,
+                **({"error": json.loads(run.error_json)} if event_type == "RunFailed" and run.error_json else {}),
             },
             schema_version=1,
             status="pending",
@@ -808,6 +877,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             select(
                 WorkerJobModel.job_id,
                 AgentRunModel.run_id,
+                AgentRunModel.session_id,
                 AgentPlanModel.plan_id,
                 PlanRoundModel.round_id,
                 AgentTaskModel.task_id,
@@ -1038,7 +1108,15 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         *,
         skip_locked: bool = False,
     ):
-        """按 Run、Plan、Round、Task、RoundTask、Execution、Job 顺序加锁。"""
+        """先锁 Session，再按 Run、Plan、Round、Task、Execution、Job 顺序加锁。"""
+        session_row = await _locked_one(
+            session,
+            SessionModel,
+            SessionModel.id == lease.session_id,
+            skip_locked=skip_locked,
+        )
+        if session_row is None or session_row.active_run_id != lease.run_id:
+            return (None, None, None, None, None, None, None)
         run = await _locked_one(
             session,
             AgentRunModel,

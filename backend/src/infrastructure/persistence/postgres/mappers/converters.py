@@ -11,7 +11,6 @@ from domain.sessions import (
     Message,
     MessageRole,
     Session,
-    SessionStatus,
     ToolCall,
 )
 from domain.files import (
@@ -52,8 +51,7 @@ def session_model_to_domain(row: SessionModel) -> Session:
         id=row.id,
         project_id=row.project_id,
         title=row.title,
-        status=SessionStatus(row.status),
-        run_id=row.run_id,
+        active_run_id=row.active_run_id,
         created_at=datetime.fromisoformat(row.created_at),
         updated_at=datetime.fromisoformat(row.updated_at),
         last_activity_at=(
@@ -73,8 +71,7 @@ def session_domain_to_model(value: Session) -> SessionModel:
         id=value.id,
         project_id=value.project_id,
         title=value.title,
-        status=value.status.value,
-        run_id=value.run_id,
+        active_run_id=value.active_run_id,
         created_at=value.created_at.isoformat(),
         updated_at=value.updated_at.isoformat(),
         last_activity_at=(

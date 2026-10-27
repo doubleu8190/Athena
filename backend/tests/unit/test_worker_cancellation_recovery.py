@@ -75,6 +75,10 @@ class ReconcileSession:
         self.expired_rows = list(expired_rows)
         self.execute_count = 0
         self.added = []
+        self.scalar_values = [
+            run.session_id,
+            SimpleNamespace(active_run_id=run.run_id),
+        ]
 
     async def __aenter__(self):
         return self
@@ -84,6 +88,9 @@ class ReconcileSession:
 
     def begin(self):
         return self
+
+    async def scalar(self, _statement):
+        return self.scalar_values.pop(0) if self.scalar_values else None
 
     async def get(self, model, _key, **_kwargs):
         return self.run if model.__name__ == "AgentRunModel" else None
@@ -251,9 +258,7 @@ async def test_worker_claim_commits_task_started_outbox_with_execution_lease(
 
 @pytest.mark.asyncio
 async def test_worker_acknowledges_only_its_fenced_cancellation():
-    run = SimpleNamespace(
-        run_id="run-1", status="cancelling", cancellation_epoch=4
-    )
+    run = SimpleNamespace(run_id="run-1", status="stopping", cancellation_epoch=4)
     plan = SimpleNamespace(
         plan_id="plan-1",
         status="cancelling",
@@ -290,7 +295,10 @@ async def test_worker_acknowledges_only_its_fenced_cancellation():
         lease_until=NOW,
         updated_at=NOW,
     )
-    session = ChainSession([run, plan, round_row, task, round_task, execution, job])
+    session = ChainSession([
+        SimpleNamespace(active_run_id="run-1"),
+        run, plan, round_row, task, round_task, execution, job,
+    ])
     repository = PostgresWorkerJobRepository(
         factory(session), clock=lambda: NOW
     )
@@ -313,9 +321,11 @@ async def test_reconciler_finishes_cancel_when_no_workers_remain():
     run = SimpleNamespace(
         run_id="run-1",
         session_id="session-1",
-        status="cancelling",
+        status="stopping",
         cancellation_epoch=5,
         cancellation_external_effect_status="none",
+        execution_lease_until=None,
+        error_json=None,
         updated_at=None,
     )
     plan = SimpleNamespace(
@@ -346,9 +356,11 @@ async def test_reconciler_persists_task_cancelled_when_worker_lease_expires():
     run = SimpleNamespace(
         run_id="run-1",
         session_id="session-1",
-        status="cancelling",
+        status="stopping",
         cancellation_epoch=5,
         cancellation_external_effect_status="unknown",
+        execution_lease_until=None,
+        error_json=None,
         updated_at=None,
     )
     plan = SimpleNamespace(

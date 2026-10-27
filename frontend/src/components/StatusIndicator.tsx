@@ -1,13 +1,10 @@
 import { useChatStore } from "../store/chatStore"
-import { Wifi, WifiOff, Loader2, AlertCircle, Cpu, CheckCircle, Pause } from "lucide-react"
+import { Wifi, WifiOff, Loader2, AlertCircle, Cpu } from "lucide-react"
 
 export default function StatusIndicator() {
   const connectionStatus = useChatStore((s) => s.connectionStatus)
   const agentStatus = useChatStore((s) => s.agentStatus)
   const error = useChatStore((s) => s.error)
-  const sessions = useChatStore((s) => s.sessions)
-
-  const completedCount = sessions.filter((s) => s.status === "completed").length
 
   const connectionIcon = () => {
     switch (connectionStatus) {
@@ -37,6 +34,13 @@ export default function StatusIndicator() {
 
   const agentBadge = () => {
     switch (agentStatus) {
+      case "queued":
+        return (
+          <span className="flex items-center gap-1.5 text-sm text-yellow-400">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            等待执行
+          </span>
+        )
       case "thinking":
         return (
           <span className="flex items-center gap-1.5 text-sm text-yellow-400">
@@ -56,13 +60,6 @@ export default function StatusIndicator() {
           <span className="flex items-center gap-1.5 text-sm text-yellow-400">
             <Loader2 className="w-4 h-4 animate-spin" />
             正在停止
-          </span>
-        )
-      case "paused":
-        return (
-          <span className="flex items-center gap-1.5 text-sm text-athena-muted">
-            <Pause className="w-4 h-4" />
-            已暂停
           </span>
         )
       case "waiting_approval":
@@ -92,15 +89,6 @@ export default function StatusIndicator() {
     <div className="h-10 px-4 border-b border-athena-border bg-athena-surface flex items-center justify-between">
       <div className="flex items-center gap-4">
         {agentBadge()}
-        {completedCount > 0 && (
-          <>
-            <span className="text-athena-border">|</span>
-            <span className="flex items-center gap-1.5 text-xs text-athena-muted">
-              <CheckCircle className="w-3.5 h-3.5 text-athena-success" />
-              <span>{completedCount} 个会话已完成</span>
-            </span>
-          </>
-        )}
         {error && (
           <span className="text-xs text-athena-danger bg-red-500/10 px-2 py-0.5 rounded">
             {error}

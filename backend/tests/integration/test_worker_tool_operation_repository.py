@@ -123,6 +123,8 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
             session.add(
                 AgentRunModel(
                     run_id="run-1",
+                    message_id="message:" + str("run-1"),
+                    sequence=1,
                     session_id="session-1",
                     status="running",
                     root_thread_id="run:run-1",

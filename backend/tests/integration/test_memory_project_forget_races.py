@@ -13,11 +13,13 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from domain.runs import CommandType, RunCommand, RunStartPayload
+from domain.runs import RunStartPayload
 from infrastructure.persistence.postgres.models import (
-    AgentCommandModel,
+    AgentEventModel,
+    AgentPlanModel,
     AgentRunModel,
     Base,
+    IdempotencyReceiptModel,
     MemoryEpisodeModel,
     MemoryEpisodeProjectBindingModel,
     MemoryExtractionSnapshotModel,
@@ -30,6 +32,8 @@ from infrastructure.persistence.postgres.models import (
     MemoryWriteOperationModel,
     MessageModel,
     OrchestrationOutboxModel,
+    PlanRoundModel,
+    PlanVersionModel,
     RootResumeJobModel,
     SessionMemorySettingsModel,
     SessionModel,
@@ -74,10 +78,14 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
         SessionModel.__table__,
         ProjectModel.__table__,
         SessionMemorySettingsModel.__table__,
-        AgentCommandModel.__table__,
         AgentRunModel.__table__,
+        AgentEventModel.__table__,
+        IdempotencyReceiptModel.__table__,
         MessageModel.__table__,
         RootResumeJobModel.__table__,
+        AgentPlanModel.__table__,
+        PlanVersionModel.__table__,
+        PlanRoundModel.__table__,
         OrchestrationOutboxModel.__table__,
         MemoryModel.__table__,
         MemoryProcessingJobModel.__table__,
@@ -123,7 +131,6 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                     id=session_id,
                     project_id=project_id,
                     title="Forget race",
-                    status="idle",
                     created_at=now,
                     updated_at=now,
                     last_activity_at=now,
@@ -216,19 +223,19 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                 )
             )
 
-        command = RunCommand(
-            command_id=f"command-{uuid4().hex}",
-            command_type=CommandType.RUN_START,
+        await runs.enqueue_run(
+            request_id=f"request-{uuid4().hex}",
+            parameters={"message": "Keep this run in the project memory scope"},
             session_id=session_id,
+            project_id=project_id,
             run_id=run_id,
             payload=RunStartPayload(
                 message="Keep this run in the project memory scope",
                 message_id=f"message-{uuid4().hex}",
             ),
-            issued_at=datetime.now(timezone.utc),
         )
-
-        await runs.enqueue_command(command)
+        invocation = await runs.claim_next_run()
+        assert invocation is not None and invocation.run_id == run_id
         async with factory() as session:
             start_snapshot = await session.get(MemoryJobScopeSnapshotModel, run_id)
             assert start_snapshot is not None

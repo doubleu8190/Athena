@@ -4,7 +4,7 @@ from infrastructure.persistence.postgres.models import Base
 
 
 EXPECTED_TABLES = {
-    "embedding_metadata", "agent_runs", "agent_commands", "agent_plans", "agent_tasks",
+    "embedding_metadata", "agent_runs", "idempotency_receipts", "agent_plans", "agent_tasks",
     "agent_events", "approvals", "sessions", "messages", "steps", "tool_calls",
     "memories", "mcp_servers", "tools", "knowledge_bases", "attachments",
     "knowledge_document_jobs", "file_chunks", "file_artifacts", "adapter_registry",

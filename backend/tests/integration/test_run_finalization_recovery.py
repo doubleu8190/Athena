@@ -14,16 +14,16 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from application.runs import RunExecutionService
-from domain.runs import CommandExecutionResult, CommandType, RunCommand, RunStartPayload
+from domain.runs import CommandExecutionResult, RunStartPayload
 from domain.memory import ClaimedMemoryJob
 from infrastructure.persistence.postgres.models import (
-    AgentCommandModel,
     AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    IdempotencyReceiptModel,
     MemoryJobScopeSnapshotModel,
     MemoryProcessingJobModel,
     ProjectModel,
@@ -81,7 +81,6 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
     session_id = f"session-{run_id}"
     project_id = f"project-{run_id}"
     message_id = f"message-{run_id}"
-    command_id = f"command-{run_id}"
 
     try:
         async with base_engine.begin() as connection:
@@ -91,7 +90,6 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
         tables = [
             SessionModel.__table__,
             MessageModel.__table__,
-            AgentCommandModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -106,6 +104,7 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             RootResumeJobModel.__table__,
             WorkerJobModel.__table__,
             AgentEventModel.__table__,
+            IdempotencyReceiptModel.__table__,
             MemoryProcessingJobModel.__table__,
             MemoryJobScopeSnapshotModel.__table__,
             ProjectModel.__table__,
@@ -146,20 +145,19 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             },
         }
         repository = PostgresRunRepository(session_factory)
-        command = RunCommand(
-            command_id=command_id,
-            command_type=CommandType.RUN_START,
+        await repository.enqueue_run(
+            request_id=f"request-{run_id}",
+            parameters={"message": "Remember that I prefer concise reports"},
             session_id=session_id,
+            project_id=project_id,
             run_id=run_id,
             payload=RunStartPayload(
                 message="Remember that I prefer concise reports",
                 message_id=message_id,
             ),
-            issued_at=now,
         )
-        await repository.enqueue_command(command)
-        claimed_command = await repository.claim_next_command()
-        assert claimed_command is not None
+        invocation = await repository.claim_next_run()
+        assert invocation is not None and invocation.run_id == run_id
 
         class LoseCompletionReceipt:
             writes_cancellation_events_to_outbox = False
@@ -168,8 +166,8 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             async def update_status(self, target_run_id, status):
                 return await repository.update_status(target_run_id, status)
 
-            async def complete(self, target_run_id, result):
-                assert await repository.complete(target_run_id, result)
+            async def complete(self, target_run_id, result, **lease):
+                assert await repository.complete(target_run_id, result, **lease)
                 raise asyncio.CancelledError
 
             async def arm_root_wait(self, target_run_id, **identity):
@@ -192,17 +190,15 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
         memory_jobs = PostgresMemoryJobRepository(session_factory)
         service = RunExecutionService(
             LoseCompletionReceipt(),
-            repository,
             executor,
             PostgresEventRepository(session_factory),
             memory_jobs,
         )
         with pytest.raises(asyncio.CancelledError):
-            await service.execute(claimed_command)
+            await service.execute(invocation)
 
         async with session_factory() as session:
             run = await session.get(AgentRunModel, run_id)
-            queued_command = await session.get(AgentCommandModel, command_id)
             outbox_count = await session.scalar(
                 select(func.count()).select_from(OrchestrationOutboxModel)
             )
@@ -211,7 +207,6 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             )
         assert run is not None and run.status == "completed"
         assert json.loads(run.response_json) == final_result
-        assert queued_command is not None and queued_command.status == "completed"
         assert outbox_count == 2
         assert memory_count == 1
         assert executor.calls == 1

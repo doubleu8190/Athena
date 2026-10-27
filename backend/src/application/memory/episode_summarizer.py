@@ -8,6 +8,11 @@ from pathlib import Path
 
 from domain.integrations import LLMPort
 from domain.memory import CompletedTurn, MemoryEpisodeProposal
+from shared.contracts.memory import (
+    MemoryEpisodeProposalSchema,
+    memory_domain_to_schema,
+    memory_schema_to_domain,
+)
 
 
 _PROMPT_ROOT = Path(__file__).resolve().parents[3] / "prompt"
@@ -44,7 +49,7 @@ class LLMMemoryEpisodeSummarizer:
         values = {
             "user_request": turn.user_text,
             "assistant_response": turn.assistant_text,
-            "execution_evidence": evidence.model_dump_json(),
+            "execution_evidence": memory_domain_to_schema(evidence).model_dump_json(),
         }
         prompt = re.sub(
             r"\{(user_request|assistant_response|execution_evidence)\}",
@@ -63,15 +68,19 @@ class LLMMemoryEpisodeSummarizer:
                 },
                 {"role": "user", "content": prompt},
             ],
-            MemoryEpisodeProposal,
+            MemoryEpisodeProposalSchema,
         )
         if isinstance(value, MemoryEpisodeProposal):
             return value
+        if isinstance(value, MemoryEpisodeProposalSchema):
+            return memory_schema_to_domain(value)
         if isinstance(value, str):
             serialized = value
         else:
             serialized = json.dumps(value, ensure_ascii=False)
-        return MemoryEpisodeProposal.model_validate_json(serialized)
+        return memory_schema_to_domain(
+            MemoryEpisodeProposalSchema.model_validate_json(serialized)
+        )
 
 
 __all__ = ["LLMMemoryEpisodeSummarizer"]

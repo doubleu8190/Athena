@@ -11,7 +11,6 @@ from sqlalchemy import cast, delete as sql_delete, func, select, update
 from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.memory import MemoryRecordMetadata
 from domain.projects import Project, ProjectRepositoryPort
 from domain.memory.suppression import (
     EPISODE_SUPPRESSION_FINGERPRINT,
@@ -19,9 +18,9 @@ from domain.memory.suppression import (
     PROJECT_TURN_SUPPRESSION_FINGERPRINT,
     source_suppression_lock_id,
 )
+from shared.contracts.memory import MemoryRecordMetadataSchema, memory_schema_to_domain
 
 from ..models import (
-    AgentCommandModel,
     AgentRunModel,
     MemoryEpisodeModel,
     MemoryEpisodeProjectBindingModel,
@@ -49,7 +48,14 @@ def _source_turn_ids(metadata: object) -> set[str]:
     raw_fact = metadata.get("fact")
     if raw_fact is not None:
         try:
-            fact = MemoryRecordMetadata.model_validate({"fact": raw_fact}).fact
+            fact_schema = MemoryRecordMetadataSchema.model_validate(
+                {"fact": raw_fact}
+            ).fact
+            fact = (
+                memory_schema_to_domain(fact_schema)
+                if fact_schema is not None
+                else None
+            )
         except (TypeError, ValueError):
             fact = None
         if fact is not None:
@@ -181,7 +187,7 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                     select(SessionModel.id).where(
                         SessionModel.project_id == project_id,
                         SessionModel.deleted_time.is_(None),
-                    ).with_for_update()
+                    )
                 )).all())
                 active_run = (
                     await session.scalar(
@@ -197,20 +203,16 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                     if session_ids
                     else None
                 )
-                active_command = (
-                    await session.scalar(
-                        select(AgentCommandModel.command_id)
-                        .where(
-                            AgentCommandModel.session_id.in_(session_ids),
-                            AgentCommandModel.status.in_(("queued", "running")),
-                        )
-                        .limit(1)
-                    )
-                    if session_ids
-                    else None
-                )
-                if active_run is not None or active_command is not None:
+                if active_run is not None:
                     raise ValueError("project_busy")
+
+                # 先拒绝活动 Run，再锁 Session，避免与终态事务的记忆作用域锁互等。
+                if session_ids:
+                    await session.execute(
+                        select(SessionModel.id)
+                        .where(SessionModel.id.in_(session_ids))
+                        .with_for_update()
+                    )
 
                 await session.execute(
                     pg_insert(MemorySourceSuppressionModel)

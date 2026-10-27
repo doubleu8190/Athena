@@ -7,7 +7,7 @@ from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.files import Attachment, AttachmentStatus, FileMetadata
 from domain.knowledge import KnowledgeBase
 from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
-from domain.runs import CommandType, RunCommand, RunStartPayload, RunStatus
+from domain.runs import RunStartPayload, RunStatus
 from domain.tools import MCPServerConfig, ToolExecutionRequest
 from backend.tests.fakes.in_memory import *
 
@@ -16,18 +16,23 @@ NOW = datetime.now(timezone.utc)
 
 @pytest.mark.asyncio
 async def test_default_session_message_run_and_tool_adapters():
-    sessions, messages, runs = InMemorySessionRepository(), InMemoryMessageRepository(), InMemoryRunStore()
+    sessions, messages = InMemorySessionRepository(), InMemoryMessageRepository()
+    runs = InMemoryRunStore(sessions, messages)
     session = __import__("domain.sessions", fromlist=["Session"]).Session.create(session_id="s", title="x", now=NOW)
     await sessions.create(session); assert await sessions.get("s") == session
     assert await sessions.list_sessions() == [session]; await sessions.save(session.rename("y", now=NOW)); assert await sessions.delete("missing") is False
-    command = RunCommand(
-        "c", CommandType.RUN_START, "s", "r",
-        RunStartPayload(message="hello", message_id="m"), NOW
+    result, replayed = await runs.enqueue_run(
+        request_id="request-1", parameters={"message": "hello"},
+        session_id="s", project_id=None, run_id="r",
+        payload=RunStartPayload(message="hello", message_id="m"),
     )
-    result = await runs.enqueue_command(command); assert result.status == "queued"
-    assert (await runs.claim_next_command()).command_id == "c"; await runs.complete_command("c", status="completed")
-    assert await runs.get_command("c")
-    await runs.update_status("r", RunStatus.RUNNING); assert await runs.get_active_for_session("s")
+    assert result.status == RunStatus.QUEUED and not replayed
+    claimed = await runs.claim_next_run()
+    assert claimed is not None and claimed.run_id == "r"
+    assert await runs.get_active_for_session("s") is not None
+    assert await runs.claim_next_run() is None
+    assert await runs.complete("r", {})
+    assert (await runs.get("r")).status == RunStatus.COMPLETED
     assert await runs.complete("missing", {}) is False
     tool_repo = InMemoryToolRepository(); assert await tool_repo.get("noop")
     tool = InMemoryToolExecution(); assert (await tool.execute(ToolExecutionRequest("noop", {}, "s", "r", "t"))).status == "success"
@@ -36,9 +41,14 @@ async def test_default_session_message_run_and_tool_adapters():
     assert await messages.get("m") == message
     assert await messages.list_after("s", "a") == [message]
     assert await runs.get("r") is not None; assert await runs.list_for_session("s")
-    assert await runs.fail("r", {}) and await runs.cancel("r")
-    assert await runs.claim_next_command() is None
-    assert (await runs.enqueue_command(command)).deduplicated is True
+    assert await runs.fail("r", {}) is False
+    assert await runs.claim_next_run() is None
+    repeated, replayed = await runs.enqueue_run(
+        request_id="request-1", parameters={"message": "hello"},
+        session_id="s", project_id=None, run_id="another-run",
+        payload=RunStartPayload(message="hello", message_id="another-message"),
+    )
+    assert repeated.run_id == "r" and replayed
     await tool_repo.upsert((await tool_repo.get("noop"))); await tool_repo.update((await tool_repo.get("noop"))); assert await tool_repo.list_tools()
 
 

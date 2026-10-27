@@ -21,10 +21,10 @@ from application.memory import (
 )
 from application.retrieval import RetrievalQueryService
 from application.runs import (
-    RunCommandService,
     RunExecutionService,
     RunQueryService,
     RunRequestPreparationService,
+    RunService,
 )
 from application.sessions import SessionMessageQueryService, SessionService
 from application.projects import ProjectService
@@ -144,7 +144,7 @@ from infrastructure.evaluation.retrieval_target import EmbeddingRetrievalTarget
 from infrastructure.evaluation import EvaluationEventPublisher, load_dataset
 from application.evaluation import EvaluationProgressHub
 from workers import (
-    CommandConsumer,
+    RunConsumer,
     KnowledgeDocumentWorker,
     MemoryWorker,
     WorkerJobDispatcher,
@@ -493,8 +493,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         ),
         "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
         "run_query_factory": lambda: RunQueryService(sessions, runs, events),
-        "run_command_factory": lambda: RunCommandService(
-            sessions, runs, runs, id_factory=ids
+        "run_service_factory": lambda: RunService(
+            runs, runs, id_factory=ids, executor=root_run_executor
         ),
         "event_stream_factory": lambda: EventStreamService(sessions, events),
         "tool_query_factory": lambda: ToolQueryService(tools),
@@ -544,19 +544,18 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     resources: list[object] = [postgres, checkpointer, root_graph, neo4j, embedding]
     resources.append(sandbox)
     if settings.workers_enabled:
-        command_execution = RunExecutionService(
-            runs,
+        run_execution = RunExecutionService(
             runs,
             root_run_executor,
             events,
             memory_jobs,
             runs,
         )
-        command_worker = CommandConsumer(runs, command_execution)
+        run_worker = RunConsumer(runs, run_execution)
         root_resume_dispatcher = RootResumeDispatcher(
             root_resume_job_repository,
             root_graph,
-            command_execution,
+            run_execution,
             runs,
             worker_id=f"root-resume-dispatcher:{ids()}",
             lease_seconds=settings.worker_job_lease_seconds,
@@ -578,7 +577,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         resources.append(
             WorkerSupervisor(
                 (
-                    command_worker,
+                    run_worker,
                     document_worker,
                     memory_worker,
                     worker_dispatcher,

@@ -16,7 +16,6 @@ from starlette.requests import Request
 from application.events import EventStreamService
 from application.files import IngestionService
 from application.memory import MemoryWriteWorkflow
-from application.runs import RunCommandService, RunNotFoundError, CommandNotFoundError
 from workers import KnowledgeDocumentWorker, MemoryWorker
 from application.sessions import SessionNotFoundError
 from application.approval import ApprovalService
@@ -27,7 +26,6 @@ from domain.files import Attachment, AttachmentStatus, FileChunk, FileLocator, F
 from domain.memory import ClaimedMemoryJob, CompletedTurn, MemoryCandidate, MemoryResolution, ResolutionAction
 from domain.sessions import Session
 from domain.approval import ApprovalDecision, ApprovalRequest
-from domain.runs import CommandEnqueueResult, CommandStatus, CommandStatusRecord, CommandType, RunSummary
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -126,23 +124,6 @@ async def test_memory_workflow_create_update_and_skip_paths() -> None:
     assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.UPDATE)).process_completed_turn(turn) == 1
     assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.IGNORE)).process_completed_turn(turn) == 0
     assert [item[0] for item in memory.calls] == ["add", "revise"]
-
-
-def test_run_controller_maps_all_command_errors() -> None:
-    class Sessions:
-        async def get(self, key): return Session.create(session_id="s", title="s", now=NOW) if key == "s" else None
-    class Runs:
-        async def get(self, key): return RunSummary("r", "s", "running", "t") if key == "r" else None
-        async def get_active_for_session(self, key): return None
-    class Commands:
-        async def enqueue_command(self, command, *, new_session=None): raise ValueError("session_busy")
-        async def get_command(self, key): return None
-    service = RunCommandService(Sessions(), Commands(), Runs(), id_factory=lambda: "id", clock=lambda: NOW)
-    client = TestClient(create_app(run_command_factory=lambda: service))
-    assert client.post("/api/runs", json={"session_id": "s", "command_id": "c", "message": "x"}).status_code == 409
-    assert client.post("/api/sessions/missing/cancel").status_code == 404
-    assert client.post("/api/runs/missing/cancel").status_code == 404
-    assert client.get("/api/commands/missing").status_code == 404
 
 
 def test_approval_controller_maps_conflicts_and_serializes_history() -> None:

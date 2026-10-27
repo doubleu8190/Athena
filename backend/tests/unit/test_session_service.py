@@ -17,13 +17,15 @@ class FakeSessionRepository:
         self.items[session.id] = session
         return session
 
-    async def create_idempotent(self, session: Session, *, creation_request_id: str) -> Session:
-        existing_id = self.creation_requests.get(creation_request_id)
+    async def create_idempotent(
+        self, session: Session, *, request_id: str, parameters: dict[str, object]
+    ) -> tuple[Session, bool]:
+        existing_id = self.creation_requests.get(request_id)
         if existing_id:
-            return self.items[existing_id]
+            return self.items[existing_id], True
         self.items[session.id] = session
-        self.creation_requests[creation_request_id] = session.id
-        return session
+        self.creation_requests[request_id] = session.id
+        return session, False
 
     async def get(self, session_id: str) -> Session | None:
         return self.items.get(session_id)

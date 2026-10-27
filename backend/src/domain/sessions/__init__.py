@@ -1,6 +1,6 @@
 """会话领域。"""
 
-from .entities import Session, SessionStatus
+from .entities import Session
 from domain.files.entities import AttachmentRef, AttachmentStatus
 
 from .messages import Message, MessageRole, ToolCall
@@ -14,6 +14,5 @@ __all__ = [
     "MessageRole",
     "Session",
     "SessionRepository",
-    "SessionStatus",
     "ToolCall",
 ]

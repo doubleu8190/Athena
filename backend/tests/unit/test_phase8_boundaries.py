@@ -9,103 +9,13 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from application.runs import (
-    CommandRejectedError, RunCommandService, RunExecutionService,
-)
-from application.sessions import SessionNotFoundError as SessionMissing
 from bootstrap import create_app
-from domain.events import ApplicationEvent
-from domain.runs import (
-    CommandEnqueueResult, CommandExecutionResult, CommandStatus, CommandStatusRecord, CommandType,
-    RunCancelPayload, RunCommand, RunStartPayload, RunStatus, RunSummary,
-)
-from domain.sessions import Session
 from bootstrap.check import check_app
 from application.approval import ApprovalService
 from application.files import AttachmentNotFoundError, SessionNotFoundError
 from application.knowledge import KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
-
-
-class SessionRepo:
-    async def get(self, key): return Session.create(session_id=key, title="x", now=NOW) if key == "s" else None
-
-
-class RunRepo:
-    async def get(self, key): return RunSummary(key, "s", "running", "thread") if key == "r" else None
-    async def get_active_for_session(self, key): return await self.get("r") if key == "s" else None
-
-
-class CommandRepo:
-    def __init__(self, *, result=True): self.result = result; self.values = {}
-    async def enqueue_command(self, value, *, new_session=None):
-        if isinstance(self.result, Exception): raise self.result
-        if isinstance(self.result, str): raise ValueError(self.result)
-        self.values[value.command_id] = CommandStatusRecord(value.command_id, value.session_id, value.run_id, value.command_type, CommandStatus.QUEUED)
-        return self.result
-    async def get_command(self, key): return self.values.get(key)
-
-
-def make_run_service(commands=None, sessions=None):
-    return RunCommandService(sessions or SessionRepo(), commands or CommandRepo(), RunRepo(), id_factory=iter(["m", "r", "c", "c2"]).__next__, clock=lambda: NOW)
-
-
-@pytest.mark.asyncio
-async def test_run_command_service_validation_bool_and_cancel_paths() -> None:
-    with pytest.raises(SessionMissing): await make_run_service().submit("missing", command_id="c", message="x")
-    with pytest.raises(ValueError): await make_run_service().submit("s", command_id=" ", message="x")
-    commands = CommandRepo(result=CommandEnqueueResult(
-        "c", "s", "r", "m", (), CommandStatus.QUEUED, False
-    ))
-    service = make_run_service(commands)
-    accepted = await service.submit("s", command_id="c", message="x")
-    assert accepted.deduplicated is False
-    commands = CommandRepo(result=CommandEnqueueResult(
-        "c", "s", "r", "m", (), CommandStatus.QUEUED, True
-    ))
-    service = make_run_service(commands)
-    accepted = await service.submit("s", command_id="c", message="x")
-    assert accepted.deduplicated is True
-    commands = CommandRepo(result="session_busy")
-    with pytest.raises(CommandRejectedError): await make_run_service(commands).submit("s", command_id="c", message="x")
-    cancel_commands = CommandRepo(result=CommandEnqueueResult(
-        "c", "s", "r", None, (), CommandStatus.QUEUED, False
-    ))
-    accepted = await make_run_service(cancel_commands).cancel_session("s")
-    assert accepted.status == "cancelling"
-
-
-@pytest.mark.asyncio
-async def test_run_execution_cancel_missing_id_and_error_result_paths() -> None:
-    class Lifecycle:
-        writes_cancellation_events_to_outbox = False
-        writes_terminal_artifacts_to_outbox = False
-        async def update_status(self, *a): pass
-        async def complete(self, *a): pass
-        async def fail(self, *a): pass
-        async def cancel(self, *a): pass
-        async def arm_root_wait(self, *a, **kw): return True
-    class Queue:
-        def __init__(self): self.done=[]
-        async def complete_command(self, *a, **kw): self.done.append((a,kw))
-        async def complete_active_command_for_run(self, *a, **kw): return True
-    class Executor:
-        async def cancel(self, value): pass
-        async def execute(self, value): return CommandExecutionResult(error={"code": "bad"})
-    class Events:
-        async def publish(self, value): return value
-    queue = Queue(); service = RunExecutionService(Lifecycle(), queue, Executor(), Events())
-    await service.execute(
-        RunCommand("c", CommandType.RUN_CANCEL, "s", None, RunCancelPayload(), NOW)
-    )
-    await service.execute(
-        RunCommand(
-            "c2", CommandType.RUN_START, "s", None,
-            RunStartPayload(message="hello", message_id="m"), NOW
-        )
-    )
-    assert len(queue.done) == 2
 
 
 def test_bootstrap_probe_and_unconfigured_query_routes() -> None:

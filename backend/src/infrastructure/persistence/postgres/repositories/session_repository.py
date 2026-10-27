@@ -5,14 +5,50 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.sessions import Session, SessionRepository
 
 from ..models import ProjectModel, SessionModel
 from ..mappers.converters import session_domain_to_model, session_model_to_domain
+from ..idempotency import execute_idempotent
+
+
+def _session_to_json(value: Session) -> dict[str, Any]:
+    return {
+        "id": value.id,
+        "project_id": value.project_id,
+        "title": value.title,
+        "active_run_id": value.active_run_id,
+        "created_at": value.created_at.isoformat(),
+        "updated_at": value.updated_at.isoformat(),
+        "last_activity_at": value.last_activity_at.isoformat() if value.last_activity_at else None,
+        "compression_summary": value.compression_summary,
+        "last_compressed_message_id": value.last_compressed_message_id,
+        "last_summarized_message_id": value.last_summarized_message_id,
+    }
+
+
+def _session_from_json(value: dict[str, Any]) -> Session:
+    return Session(
+        id=str(value["id"]),
+        project_id=str(value["project_id"]) if value.get("project_id") is not None else None,
+        title=str(value["title"]),
+        active_run_id=str(value["active_run_id"]) if value.get("active_run_id") is not None else None,
+        created_at=datetime.fromisoformat(str(value["created_at"])),
+        updated_at=datetime.fromisoformat(str(value["updated_at"])),
+        last_activity_at=(
+            datetime.fromisoformat(str(value["last_activity_at"]))
+            if value.get("last_activity_at") is not None
+            else None
+        ),
+        compression_summary=value.get("compression_summary"),
+        last_compressed_message_id=value.get("last_compressed_message_id"),
+        last_summarized_message_id=value.get("last_summarized_message_id"),
+    )
 
 
 class PostgresSessionRepository(SessionRepository):
@@ -32,48 +68,41 @@ class PostgresSessionRepository(SessionRepository):
         return session
 
     async def create_idempotent(
-        self, session: Session, *, creation_request_id: str
-    ) -> Session:
-        """锁定项目后幂等创建聊天，确保并发重试只生成一条会话。"""
+        self,
+        session: Session,
+        *,
+        request_id: str,
+        parameters: dict[str, object],
+    ) -> tuple[Session, bool]:
+        """Create a session and its stable response under a shared receipt."""
         if session.project_id is None:
             raise ValueError("session_project_required")
         async with self._session_factory() as db:
             async with db.begin():
-                project = await db.scalar(
-                    select(ProjectModel)
-                    .where(
-                        ProjectModel.id == session.project_id,
-                        ProjectModel.deleted_time.is_(None),
-                    )
-                    .with_for_update()
-                )
-                if project is None:
-                    raise LookupError("project_not_found")
-                # creation_request_id 是跨项目全局唯一键；事务级 advisory lock
-                # 也串行化不同项目上的并发重试，返回稳定的冲突语义。
-                await db.execute(
-                    select(
-                        func.pg_advisory_xact_lock(
-                            func.hashtextextended(creation_request_id, 0)
+                async def create() -> Session:
+                    project = await db.scalar(
+                        select(ProjectModel)
+                        .where(
+                            ProjectModel.id == session.project_id,
+                            ProjectModel.deleted_time.is_(None),
                         )
+                        .with_for_update()
                     )
+                    if project is None:
+                        raise LookupError("project_not_found")
+                    db.add(session_domain_to_model(session))
+                    await db.flush()
+                    return session
+
+                return await execute_idempotent(
+                    db,
+                    scope="sessions.create",
+                    request_id=request_id,
+                    parameters=parameters,
+                    action=create,
+                    encode=_session_to_json,
+                    decode=_session_from_json,
                 )
-                existing = await db.scalar(
-                    select(SessionModel)
-                    .where(SessionModel.creation_request_id == creation_request_id)
-                    .with_for_update()
-                )
-                if existing is not None:
-                    if existing.project_id != session.project_id:
-                        raise ValueError("idempotency_conflict")
-                    if existing.deleted_time is not None:
-                        raise ValueError("session_deleted")
-                    return session_model_to_domain(existing)
-                row = session_domain_to_model(session)
-                row.creation_request_id = creation_request_id
-                db.add(row)
-                await db.flush()
-        return session
 
     async def get(self, session_id: str) -> Session | None:
         """查询未删除会话。"""
@@ -114,8 +143,6 @@ class PostgresSessionRepository(SessionRepository):
                         SessionModel.deleted_time.is_(None),
                     )
                     .values(
-                        status=session.status.value,
-                        run_id=session.run_id,
                         updated_at=session.updated_at.isoformat(),
                         compression_summary=session.compression_summary,
                         last_compressed_message_id=session.last_compressed_message_id,

@@ -20,16 +20,23 @@ class FakeSessionRepository:
         self.items[session.id] = session
         return session
 
-    async def create_idempotent(self, session: Session, *, creation_request_id: str) -> Session:
-        existing_id = self.creation_requests.get(creation_request_id)
+    async def create_idempotent(
+        self, session: Session, *, request_id: str, parameters: dict[str, object]
+    ) -> tuple[Session, bool]:
+        existing_id = self.creation_requests.get(request_id)
         if existing_id:
             existing = self.items.get(existing_id)
             if existing is None:
                 raise ValueError("session_deleted")
-            return existing
+            if getattr(self, "creation_parameters", {}).get(request_id) != parameters:
+                raise ValueError("idempotency_conflict")
+            return existing, True
         self.items[session.id] = session
-        self.creation_requests[creation_request_id] = session.id
-        return session
+        self.creation_requests[request_id] = session.id
+        if not hasattr(self, "creation_parameters"):
+            self.creation_parameters = {}
+        self.creation_parameters[request_id] = parameters
+        return session, False
 
     async def get(self, session_id: str) -> Session | None:
         return self.items.get(session_id)
@@ -69,7 +76,7 @@ def test_session_controller_routes_crud_through_service() -> None:
     )
     assert created.status_code == 200
     assert created.json()["title"] == "Project"
-    assert created.json()["status"] == "idle"
+    assert created.json()["active_run_id"] is None
 
     session_id = created.json()["id"]
     listed = client.get("/api/sessions")

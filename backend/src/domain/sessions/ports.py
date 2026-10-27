@@ -16,9 +16,13 @@ class SessionRepository(Protocol):
         ...
 
     async def create_idempotent(
-        self, session: Session, *, creation_request_id: str
-    ) -> Session:
-        """幂等创建会话并返回同一请求已经创建的会话。"""
+        self,
+        session: Session,
+        *,
+        request_id: str,
+        parameters: dict[str, object],
+    ) -> tuple[Session, bool]:
+        """Create or replay a session under an idempotency receipt."""
         ...
 
     async def get(self, session_id: str) -> Session | None:
@@ -66,6 +70,12 @@ class MessageRepository(Protocol):
         self, session_id: str, *, limit: int
     ) -> list[Message]:
         """返回最近的用户/助手对话消息，并按时间升序排列。"""
+        ...
+
+    async def list_recent_conversation_before_sequence(
+        self, session_id: str, *, before_sequence: int, limit: int
+    ) -> list[Message]:
+        """Return conversation messages belonging to earlier Run sequence numbers."""
         ...
 
     async def list_after(self, session_id: str, after_id: str) -> list[Message]:

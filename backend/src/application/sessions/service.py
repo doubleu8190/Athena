@@ -59,11 +59,12 @@ class SessionService:
             now=self._clock(),
             project_id=project_id,
         )
-        return _to_response(
-            await self._repository.create_idempotent(
-                session, creation_request_id=creation_request_id
-            )
+        persisted, replayed = await self._repository.create_idempotent(
+            session,
+            request_id=creation_request_id,
+            parameters={"project_id": project_id, "title": title},
         )
+        return _to_response(persisted, idempotency_replayed=replayed)
 
     async def list_sessions(
         self, *, project_id: str | None = None
@@ -130,15 +131,17 @@ class SessionService:
             raise SessionNotFoundError(session_id)
 
 
-def _to_response(value: Session) -> SessionResponse:
+def _to_response(
+    value: Session, *, idempotency_replayed: bool = False
+) -> SessionResponse:
     """将领域会话转换为应用层只读返回值。"""
     return SessionResponse(
         id=value.id,
         title=value.title,
-        status=value.status.value,
-        run_id=value.run_id,
+        active_run_id=value.active_run_id,
         created_at=value.created_at,
         updated_at=value.updated_at,
         project_id=value.project_id,
         last_activity_at=value.last_activity_at,
+        idempotency_replayed=idempotency_replayed,
     )

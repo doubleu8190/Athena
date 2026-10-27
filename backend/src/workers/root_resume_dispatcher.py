@@ -158,6 +158,21 @@ class RootResumeDispatcher:
             await self._jobs.retry(lease, delay_seconds=self._retry_delay)
             return
 
+        lease_owner = f"root-resume:{self._worker_id}:{lease.job_id}"
+        execution_generation = await self._runs.acquire_execution_lease(
+            lease.run_id,
+            owner=lease_owner,
+            lease_seconds=self._lease_seconds,
+        )
+        if execution_generation is None:
+            current = await self._runs.get(lease.run_id)
+            status = str(getattr(getattr(current, "status", None), "value", ""))
+            if status in {"stopping", "cancelled", "completed", "failed"}:
+                await self._jobs.complete(lease)
+            else:
+                await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+            return
+
         command = RunCommand(
             command_id=f"root-resume:{lease.job_id}:{lease.root_wait_generation}",
             command_type=CommandType.RUN_RESUME,
@@ -175,6 +190,8 @@ class RootResumeDispatcher:
                 ),
             ),
             issued_at=datetime.now(timezone.utc),
+            execution_generation=execution_generation,
+            lease_owner=lease_owner,
         )
         invocation = asyncio.create_task(
             self._execution.execute(command),
@@ -185,23 +202,40 @@ class RootResumeDispatcher:
             self._maintain_lease(lease, invocation, lease_lost),
             name=f"athena-root-resume-heartbeat:{lease.job_id}",
         )
+        execution_heartbeat = asyncio.create_task(
+            self._maintain_run_execution_lease(command, invocation),
+            name=f"athena-run-execution-heartbeat:{lease.run_id}",
+        )
         try:
             await invocation
         except asyncio.CancelledError:
+            await self._execution.fail(
+                command,
+                {"code": "root_resume_lease_lost" if lease_lost.is_set() else "root_execution_interrupted"},
+            )
             if not lease_lost.is_set():
                 raise
             return
-        except Exception:
+        except Exception as exc:
             logger.error(
                 "root_checkpoint_resume_failed",
                 job_id=lease.job_id,
                 exc_info=True,
             )
-            await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+            await self._execution.fail(
+                command,
+                {"code": "root_checkpoint_resume_failed", "message": str(exc) or type(exc).__name__},
+            )
             return
         finally:
             heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
+            execution_heartbeat.cancel()
+            await asyncio.gather(heartbeat, execution_heartbeat, return_exceptions=True)
+            await self._runs.release_execution_lease(
+                lease.run_id,
+                owner=lease_owner,
+                generation=execution_generation,
+            )
 
         if lease_lost.is_set():
             return
@@ -246,6 +280,34 @@ class RootResumeDispatcher:
                 invocation.cancel()
                 return
             current = renewed
+
+    async def _maintain_run_execution_lease(
+        self, command: RunCommand, invocation: asyncio.Task[Any]
+    ) -> None:
+        if not command.run_id or not command.lease_owner:
+            return
+        interval = max(0.1, self._lease_seconds / 3)
+        while not invocation.done():
+            await asyncio.sleep(interval)
+            try:
+                renewed = await self._runs.renew_execution_lease(
+                    command.run_id,
+                    owner=command.lease_owner,
+                    generation=command.execution_generation,
+                    lease_seconds=self._lease_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error(
+                    "root_execution_lease_renewal_failed",
+                    run_id=command.run_id,
+                    exc_info=True,
+                )
+                continue
+            if not renewed:
+                await self._execution.interrupt(command.run_id)
+                return
 
     def _on_task_done(self, task: asyncio.Task[None]) -> None:
         self._inflight.discard(task)

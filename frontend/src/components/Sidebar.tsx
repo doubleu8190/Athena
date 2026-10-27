@@ -1,6 +1,5 @@
 import {
   Check,
-  CheckCircle,
   ChevronDown,
   ChevronRight,
   Folder,
@@ -110,8 +109,7 @@ function Sidebar({
 
   const renderSession = (session: Session) => {
     const isActive = activeSessionId === session.id
-    const isRunning = session.status === "running"
-    const isCompleted = session.status === "completed"
+    const isRunning = Boolean(session.active_run_id)
     return (
       <li key={session.id}>
         <div className={`group mx-2 my-0.5 flex items-center gap-1 rounded-lg px-1 transition-colors ${isActive ? "bg-athena-accent/20 text-athena-text border border-athena-accent/30" : "hover:bg-athena-bg text-athena-muted hover:text-athena-text"}`}>
@@ -123,10 +121,9 @@ function Sidebar({
           ) : (
             <>
               <button type="button" onClick={() => onSelectSession(session.id)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left" aria-current={isActive ? "page" : undefined} title={session.title}>
-                <MessageSquare className={`h-3.5 w-3.5 flex-shrink-0 ${isActive ? "text-athena-accent" : isCompleted ? "text-athena-success" : ""}`} />
+                <MessageSquare className={`h-3.5 w-3.5 flex-shrink-0 ${isActive ? "text-athena-accent" : ""}`} />
                 <span className="truncate text-sm">{session.title || "未命名聊天"}</span>
                 {isRunning && <span className="h-2 w-2 flex-shrink-0 animate-pulse rounded-full bg-athena-accent" title="运行中" />}
-                {isCompleted && !isActive && <CheckCircle className="h-3.5 w-3.5 flex-shrink-0 text-athena-success" />}
               </button>
               {onRenameSession && <button type="button" onClick={() => { setEditingSessionId(session.id); setSessionTitleDraft(session.title) }} className="rounded p-2 text-athena-muted opacity-0 transition-opacity hover:bg-athena-border/60 hover:text-athena-text group-hover:opacity-100 group-focus-within:opacity-100" title="重命名聊天" aria-label={`重命名 ${session.title}`}><Pencil className="h-3.5 w-3.5" /></button>}
               <button type="button" onClick={() => onDeleteSession(session.id)} className="rounded p-2 text-athena-muted opacity-0 transition-opacity hover:bg-athena-danger/20 hover:text-athena-danger group-hover:opacity-100 group-focus-within:opacity-100" title="删除聊天" aria-label={`删除 ${session.title}`}><Trash2 className="h-3.5 w-3.5" /></button>
@@ -149,8 +146,7 @@ function Sidebar({
     </li>
   )
 
-  const completedCount = sessions.filter((session) => session.status === "completed").length
-  const activeCount = sessions.filter((session) => session.status === "running").length
+  const activeCount = sessions.filter((session) => Boolean(session.active_run_id)).length
 
   return (
     <aside className={`${mobileOpen ? "flex" : "hidden md:flex"} chat-workspace-sidebar fixed inset-y-0 left-0 z-30 w-[min(88vw,18rem)] md:static md:inset-auto md:w-[248px] flex-shrink-0 bg-athena-surface border-r border-athena-border flex-col h-full shadow-2xl md:shadow-none`}>
@@ -237,7 +233,7 @@ function Sidebar({
       </div>
 
       <div className="p-3 border-t border-athena-border text-xs text-athena-muted">
-        {sessions.length} 个聊天{completedCount > 0 && ` · ${completedCount} 已完成`}{activeCount > 0 && ` · ${activeCount} 运行中`}
+        {sessions.length} 个聊天{activeCount > 0 && ` · ${activeCount} 运行中`}
       </div>
     </aside>
   )

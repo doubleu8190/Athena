@@ -147,7 +147,7 @@ async def test_submit_plan_atomically_creates_first_round_executions_and_jobs():
     run = SimpleNamespace(
         run_id="run-1",
         session_id="session-1",
-        status="created",
+        status="running",
         updated_at=None,
     )
     session.get_values = [run]

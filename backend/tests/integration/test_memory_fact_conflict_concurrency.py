@@ -21,7 +21,6 @@ from domain.memory import (
     MemoryFact,
     MemoryListRequest,
     MemoryResolution,
-    MemoryResolutionProposal,
     MemorySourceReference,
     MemoryStateChangedError,
 )
@@ -32,6 +31,7 @@ from infrastructure.persistence.postgres.models import (
     MemorySourceSuppressionModel,
 )
 from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository
+from shared.contracts.memory import MemoryResolutionProposalSchema
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -89,7 +89,7 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
             """
             page = await repository.list_memories(MemoryListRequest(limit=20))
             assert page.items
-            return MemoryResolutionProposal(
+            return MemoryResolutionProposalSchema(
                 action="CREATE",
                 target_memory_id=page.items[0].id,
                 relation="contradicts",

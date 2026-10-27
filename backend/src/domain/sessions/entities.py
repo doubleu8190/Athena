@@ -4,15 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
-
-
-class SessionStatus(StrEnum):
-    IDLE = "idle"
-    RUNNING = "running"
-    INTERRUPTED = "interrupted"
-    RECOVERING = "recovering"
-    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,8 +12,7 @@ class Session:
 
     id: str
     title: str
-    status: SessionStatus
-    run_id: str | None
+    active_run_id: str | None
     created_at: datetime
     updated_at: datetime
     compression_summary: str | None = None
@@ -49,8 +39,7 @@ class Session:
         return cls(
             id=session_id,
             title=normalized_title,
-            status=SessionStatus.IDLE,
-            run_id=None,
+            active_run_id=None,
             created_at=now,
             updated_at=now,
             project_id=project_id,
@@ -67,8 +56,7 @@ class Session:
         return Session(
             id=self.id,
             title=normalized_title,
-            status=self.status,
-            run_id=self.run_id,
+            active_run_id=self.active_run_id,
             created_at=self.created_at,
             updated_at=now,
             compression_summary=self.compression_summary,

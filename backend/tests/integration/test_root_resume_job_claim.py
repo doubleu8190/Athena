@@ -19,7 +19,9 @@ from infrastructure.persistence.postgres.models import (
     Base,
     PlanRoundModel,
     PlanVersionModel,
+    ProjectModel,
     RootResumeJobModel,
+    SessionModel,
 )
 from infrastructure.persistence.postgres.repositories.root_resume_job_repository import (
     PostgresRootResumeJobRepository,
@@ -64,6 +66,8 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             schema_created = True
 
         tables = [
+            ProjectModel.__table__,
+            SessionModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             PlanVersionModel.__table__,
@@ -80,10 +84,24 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
         app_a_sessions = async_sessionmaker(app_a_engine, expire_on_commit=False)
         app_b_sessions = async_sessionmaker(app_b_engine, expire_on_commit=False)
         async with app_a_sessions() as session, session.begin():
+            session_id = f"session-{run_id}"
+            project_id = f"project-{run_id}"
+            session.add(ProjectModel(
+                id=project_id, name="Root resume claim",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=project_id, title="Root resume claim",
+                active_run_id=run_id, last_run_sequence=1,
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+                last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
-                    session_id=f"session-{run_id}",
+                    message_id="message:" + str(run_id),
+                    sequence=1,
+                    session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",
                     root_wait_generation=4,
@@ -101,7 +119,7 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
                 AgentPlanModel(
                     plan_id=plan_id,
                     run_id=run_id,
-                    session_id=f"session-{run_id}",
+                session_id=session_id,
                     status="waiting_review",
                     user_goal="Complete one round and resume Root exactly once",
                     max_parallelism=1,
@@ -210,6 +228,21 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
         class Runs:
             async def get(self, _run_id):
                 return SimpleNamespace(status="completed")
+
+            async def acquire_execution_lease(
+                self, _run_id, *, owner, lease_seconds
+            ):
+                return 5
+
+            async def renew_execution_lease(
+                self, _run_id, *, owner, generation, lease_seconds
+            ):
+                return True
+
+            async def release_execution_lease(
+                self, _run_id, *, owner, generation
+            ):
+                return True
 
         execution = Execution()
         dispatcher = RootResumeDispatcher(

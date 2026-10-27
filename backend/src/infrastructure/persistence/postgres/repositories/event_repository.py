@@ -16,6 +16,7 @@ from domain.events import (
     ApplicationEvent,
     EventPort,
 )
+from domain.runs import RunStatus
 
 from ..models import (
     AgentEventModel,
@@ -112,26 +113,38 @@ class PostgresEventRepository(
         try:
             async with self._session_factory() as session:
                 async with session.begin():
+                    event_type = str(event.event_type)
+                    output_start_events = {
+                        "message.started",
+                        "message.delta",
+                        "stream.snapshot",
+                        "thinking.started",
+                        "thinking.summary",
+                        "thinking.completed",
+                    }
+                    if event_type in output_start_events or event_type == "message.completed":
+                        run = await session.scalar(
+                            select(AgentRunModel)
+                            .where(AgentRunModel.run_id == event.run_id)
+                            .with_for_update()
+                        )
+                        allowed_statuses = (
+                            {RunStatus.RUNNING.value}
+                            if event_type in output_start_events
+                            else {RunStatus.RUNNING.value, RunStatus.COMPLETED.value}
+                        )
+                        if (
+                            run is None
+                            or run.session_id != event.session_id
+                            or run.status not in allowed_statuses
+                        ):
+                            raise ValueError("answer_stream_run_not_running")
+
                     existing = await self._get_transition_event(session, event)
                     if existing is not None:
                         value = _event_from_model(existing)
                         _ensure_same_transition(value, event)
                     else:
-                        if str(event.event_type) in {
-                            "message.started",
-                            "message.delta",
-                        }:
-                            run = await session.scalar(
-                                select(AgentRunModel)
-                                .where(AgentRunModel.run_id == event.run_id)
-                                .with_for_update()
-                            )
-                            if (
-                                run is None
-                                or run.session_id != event.session_id
-                                or run.status != "running"
-                            ):
-                                raise ValueError("answer_stream_run_not_running")
                         # MAX(session_seq) + 1 必须按会话串行化；否则并发发布
                         # 会同时读取相同最大值，并争用同一个主键。
                         await session.scalar(
@@ -247,11 +260,32 @@ class PostgresEventRepository(
     ):
         bounded_limit = min(max(limit, 1), 500)
         async with self._session_factory() as session:
+            hidden_stopped_output = (
+                select(AgentRunModel.run_id)
+                .where(
+                    AgentRunModel.run_id == AgentEventModel.run_id,
+                    AgentRunModel.display_cutoff_session_seq.is_not(None),
+                    AgentEventModel.session_seq > AgentRunModel.display_cutoff_session_seq,
+                    AgentEventModel.event_type.in_(
+                        (
+                            "message.started",
+                            "message.delta",
+                            "message.completed",
+                            "stream.snapshot",
+                            "thinking.started",
+                            "thinking.summary",
+                            "thinking.completed",
+                        )
+                    ),
+                )
+                .exists()
+            )
             query = (
                 select(AgentEventModel)
                 .where(
                     AgentEventModel.session_id == session_id,
                     AgentEventModel.session_seq > after,
+                    ~hidden_stopped_output,
                 )
                 .order_by(AgentEventModel.session_seq)
             )
@@ -272,12 +306,33 @@ class PostgresEventRepository(
         """按会话和运行游标读取链路事件，避免跨会话 run ID 越权。"""
         bounded_limit = min(max(limit, 1), 500)
         async with self._session_factory() as session:
+            hidden_stopped_output = (
+                select(AgentRunModel.run_id)
+                .where(
+                    AgentRunModel.run_id == AgentEventModel.run_id,
+                    AgentRunModel.display_cutoff_session_seq.is_not(None),
+                    AgentEventModel.session_seq > AgentRunModel.display_cutoff_session_seq,
+                    AgentEventModel.event_type.in_(
+                        (
+                            "message.started",
+                            "message.delta",
+                            "message.completed",
+                            "stream.snapshot",
+                            "thinking.started",
+                            "thinking.summary",
+                            "thinking.completed",
+                        )
+                    ),
+                )
+                .exists()
+            )
             query = (
                 select(AgentEventModel)
                 .where(
                     AgentEventModel.session_id == session_id,
                     AgentEventModel.run_id == run_id,
                     AgentEventModel.session_seq > after,
+                    ~hidden_stopped_output,
                 )
                 .order_by(AgentEventModel.session_seq)
                 .limit(bounded_limit + 1)

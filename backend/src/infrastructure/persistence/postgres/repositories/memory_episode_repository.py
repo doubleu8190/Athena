@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,6 +27,12 @@ from domain.memory.suppression import (
     PROJECT_SUPPRESSION_FINGERPRINT,
     PROJECT_TURN_SUPPRESSION_FINGERPRINT,
     source_suppression_lock_id,
+)
+from shared.contracts.memory import (
+    MemoryEpisodeSummarySchema,
+    MemorySourceReferenceSchema,
+    memory_domain_to_schema,
+    memory_schema_to_domain,
 )
 
 from ..models import (
@@ -159,9 +166,12 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
             "turn_id": episode.turn_id,
             "session_id": episode.session_id,
             "content": episode.content,
-            "summary_json": episode.summary.model_dump_json(),
+            "summary_json": memory_domain_to_schema(episode.summary).model_dump_json(),
             "source_refs_json": json.dumps(
-                [item.model_dump(mode="json") for item in episode.source_refs],
+                [
+                    memory_domain_to_schema(item).model_dump(mode="json")
+                    for item in episode.source_refs
+                ],
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -464,7 +474,9 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
                 return ()
             episode, _ = episode_row
             references = tuple(
-                MemorySourceReference.model_validate(value)
+                memory_schema_to_domain(
+                    MemorySourceReferenceSchema.model_validate(value)
+                )
                 for value in json.loads(episode.source_refs_json)
             )[:bounded_limit]
             expanded: list[MemorySourceReference] = []
@@ -477,7 +489,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
                 )
                 if excerpt:
                     expanded.append(
-                        reference.model_copy(update={"excerpt": excerpt[:1600]})
+                        replace(reference, excerpt=excerpt[:1600])
                     )
         return tuple(expanded)
 
@@ -497,9 +509,13 @@ def _to_domain(
         session_id=row.session_id,
         project_id=project_id,
         content=row.content,
-        summary=MemoryEpisodeSummary.model_validate_json(row.summary_json),
+        summary=memory_schema_to_domain(
+            MemoryEpisodeSummarySchema.model_validate_json(row.summary_json)
+        ),
         source_refs=tuple(
-            MemorySourceReference.model_validate(value)
+            memory_schema_to_domain(
+                MemorySourceReferenceSchema.model_validate(value)
+            )
             for value in json.loads(row.source_refs_json)
         ),
         source_fingerprint=row.source_fingerprint,

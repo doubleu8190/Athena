@@ -1,138 +1,88 @@
-"""阶段 5 运行命令 HTTP 契约测试。"""
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from application.runs import RunCommandService
-from application.sessions import SessionNotFoundError
+from application.common.responses import RunStopResponse
+from application.runs import RunService
 from bootstrap import create_app
-from domain.runs import (
-    CommandEnqueueResult,
-    CommandStatus,
-    CommandStatusRecord,
-    CommandType,
-    RunStartPayload,
-    RunSummary,
-)
-from domain.sessions import Session
+from domain.runs import RunCancellationResult, RunEnqueueResult, RunStatus
 
 
-class Sessions:
-    async def get(self, session_id: str):
-        if session_id != "session-1":
-            return None
-        return Session.create(
-            session_id=session_id,
-            title="Session",
-            now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+class Submissions:
+    def __init__(self):
+        self.items = {}
+
+    async def enqueue_run(self, **values):
+        request_id = values["request_id"]
+        if request_id in self.items:
+            return self.items[request_id], True
+        payload = values["payload"]
+        result = RunEnqueueResult(
+            values["session_id"], values["run_id"], payload.message_id,
+            1, RunStatus.QUEUED, False,
         )
+        self.items[request_id] = result
+        return result, False
 
 
-class Runs:
-    async def get(self, run_id: str):
-        if run_id != "run-1":
-            return None
-        return RunSummary("run-1", "session-1", "running", "thread-1")
+class Lifecycle:
+    async def stop_active(self, session_id, **values):
+        run_id = values["expected_run_id"]
+        if run_id is None:
+            return RunCancellationResult(RunStatus.CANCELLED, False, "none", no_op=True), False
+        return RunCancellationResult(RunStatus.STOPPING, True, "unknown", run_id=run_id), False
 
-    async def get_active_for_session(self, session_id: str):
-        return await self.get("run-1") if session_id == "session-1" else None
-
-    async def list_for_session(self, session_id: str):
-        return []
-
-
-class Commands:
-    def __init__(self) -> None:
-        self.items: dict[str, CommandStatusRecord] = {}
-
-    async def enqueue_command(self, command, *, new_session=None):
-        self.items[command.command_id] = CommandStatusRecord(
-            command_id=command.command_id,
-            session_id=command.session_id,
-            run_id=command.run_id,
-            command_type=command.command_type,
-            status=CommandStatus.QUEUED,
-        )
-        return CommandEnqueueResult(
-            command_id=command.command_id,
-            session_id=command.session_id,
-            run_id=command.run_id,
-            message_id=(
-                command.payload.message_id
-                if isinstance(command.payload, RunStartPayload)
-                else None
-            ),
-            attachment_ids=(
-                command.payload.attachment_ids
-                if isinstance(command.payload, RunStartPayload)
-                else ()
-            ),
-            status=CommandStatus.QUEUED,
-            deduplicated=False,
-        )
-
-    async def get_command(self, command_id: str):
-        return self.items.get(command_id)
+    async def finalize_stop(self, run_id, *, failed=False):
+        return False
 
 
 def make_client() -> TestClient:
-    commands = Commands()
-    service = RunCommandService(
-        Sessions(),
-        commands,
-        Runs(),
-        id_factory=iter(["message-1", "run-1", "cancel-1"]).__next__,
+    ids = iter(["session-1", "run-1", "message-1"])
+    service = RunService(
+        Submissions(),
+        Lifecycle(),
+        id_factory=lambda: next(ids),
         clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
-    return TestClient(create_app(run_command_factory=lambda: service))
+    return TestClient(create_app(run_service_factory=lambda: service))
 
 
-def test_run_command_routes_preserve_contract() -> None:
+def test_submit_run_requires_idempotency_key_and_uses_server_ids():
     client = make_client()
-
-    submitted = client.post(
+    response = client.post(
         "/api/runs",
-        json={
-            "session_id": None,
-            "project_id": "project-1",
-            "command_id": "command-1",
-            "message": "hello",
-        },
+        json={"project_id": "project-1", "message": "hello"},
+        headers={"Idempotency-Key": "request-1"},
     )
-    assert submitted.status_code == 202
-    assert submitted.json()["status"] == "queued"
-    assert submitted.json()["deduplicated"] is False
-    assert submitted.json()["session_id"] == "message-1"
-
-    command_id = submitted.json()["command_id"]
-    status = client.get(f"/api/commands/{command_id}")
-    assert status.status_code == 200
-    assert status.json()["command_type"] == "run.start"
-
-    cancelled = client.post(
-        "/api/runs/run-1/cancel",
-        headers={"Idempotency-Key": "stop-request-1"},
-    )
-    assert cancelled.status_code == 202
-    assert cancelled.json()["run_id"] == "run-1"
-    assert cancelled.json()["status"] == "cancelling"
-    assert cancelled.json()["already_terminal"] is False
-    retried_cancel = client.post(
-        "/api/runs/run-1/cancel",
-        headers={"Idempotency-Key": "stop-request-1"},
-    )
-    assert retried_cancel.status_code == 202
-    assert retried_cancel.json()["command_id"] == cancelled.json()["command_id"]
+    assert response.status_code == 202
+    assert response.json() == {
+        "session_id": "session-1",
+        "message_id": "message-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "status": "queued",
+    }
+    assert "command_id" not in response.json()
 
 
-def test_run_command_routes_map_missing_resources() -> None:
+def test_stop_route_is_session_scoped_and_carries_display_cursor():
     client = make_client()
-    assert client.post(
-        "/api/runs",
-        json={"session_id": "missing", "command_id": "command-1", "message": "hello"},
-    ).status_code == 404
-    assert client.post("/api/runs/missing/cancel").status_code == 404
+    stopped = client.post(
+        "/api/sessions/session-1/stop",
+        json={"expected_run_id": "run-active", "displayed_session_seq": 8},
+        headers={"Idempotency-Key": "stop-1"},
+    )
+    assert stopped.status_code == 202
+    assert stopped.json() == {
+        "run_id": "run-active", "status": "stopping", "no_op": False,
+    }
+
+
+def test_missing_idempotency_key_and_legacy_command_routes_are_rejected():
+    client = make_client()
+    missing_key = client.post("/api/runs", json={"project_id": "p", "message": "x"})
+    assert missing_key.status_code == 422
     assert client.get("/api/commands/missing").status_code == 404
+    assert client.post("/api/runs/missing/cancel").status_code == 404

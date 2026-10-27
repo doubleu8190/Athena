@@ -88,12 +88,34 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           // API 暂时不可用时保留已有事件状态，等待下一次重连同步。
         })
     }
+    let lifecycleSyncGeneration = 0
+    const syncRunLifecycle = async () => {
+      const generation = ++lifecycleSyncGeneration
+      try {
+        const runs = await apiClient.listSessionRuns(sessionId)
+        if (generation !== lifecycleSyncGeneration || useChatStore.getState().activeSessionId !== sessionId) return
+        const active = runs.find((run) => run.status === "running" || run.status === "stopping")
+        const queued = runs.some((run) => run.status === "queued")
+        updateSession(sessionId, { active_run_id: active?.run_id ?? null })
+        const status = active?.status === "stopping"
+          ? "cancelling"
+          : active
+            ? "running"
+            : queued
+              ? "queued"
+              : runs.at(-1)?.status === "failed" ? "error" : "idle"
+        setAgentStatus(status)
+      } catch {
+        // Keep event-derived state while the status query is temporarily unavailable.
+      }
+    }
     currentSource.onopen = () => {
       setConnectionStatus("connected")
       syncPendingApprovals()
     }
     currentSource.onerror = () => setConnectionStatus("error")
     syncPendingApprovals()
+    void syncRunLifecycle()
 
     const upsertAssistant = (
       runId: string,
@@ -197,6 +219,20 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
         const occurredAt = envelope.occurred_at || new Date().toISOString()
         const runId = envelope.run_id || String(data.run_id || "")
+        const streamId = envelope.stream_id || String(data.stream_id || (runId ? `answer-${runId}` : ""))
+        const outputEvents = [
+          "message.started",
+          "message.delta",
+          "message.completed",
+          "stream.snapshot",
+          "thinking.started",
+          "thinking.summary",
+          "thinking.completed",
+        ]
+        const outputCutoff = runId
+          ? useChatStore.getState().suppressedRunOutput[runId]
+          : undefined
+        if (outputEvents.includes(type) && outputCutoff !== undefined && (sequence === undefined || sequence > outputCutoff)) return
         if (runId && typeof sequence === "number") {
           appendRunTimelineEvent({
             session_seq: sequence,
@@ -206,7 +242,6 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             payload: data as RunTimelineEvent["payload"],
           })
         }
-        const streamId = envelope.stream_id || String(data.stream_id || (runId ? `answer-${runId}` : ""))
         if (recoveryTarget && typeof sequence === "number" && sequence <= recoveryUntil) {
           const isTargetStreamEvent = type.startsWith("message.") && streamId === recoveryTarget
           if (!isTargetStreamEvent) {
@@ -227,9 +262,21 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           const persistedMessageId = String(data.message_id || envelope.message_id || "")
           if (persistedMessageId && data.role === "user") {
             const persistedTimestamp = String(data.timestamp || occurredAt)
+            const requestId = text(data.request_id)
+            if (requestId) removeMessage(requestId)
             const existing = useChatStore.getState().messages.find((item) => item.id === persistedMessageId)
             if (existing && (existing.timestamp !== persistedTimestamp || existing.run_id !== runId || existing.session_seq !== sequence)) {
               updateMessage(persistedMessageId, { timestamp: persistedTimestamp, run_id: runId || undefined, session_seq: sequence })
+            } else if (!existing && typeof data.content === "string") {
+              addMessage({
+                id: persistedMessageId,
+                role: "user",
+                content: data.content,
+                timestamp: persistedTimestamp,
+                session_id: sessionId,
+                run_id: runId || undefined,
+                session_seq: sequence,
+              })
             }
           }
           if (Array.isArray(data.attachment_ids) && data.attachment_ids.length > 0) {
@@ -438,32 +485,17 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (toolId) updateToolCall(toolId, { status, completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), output: data.output ? String(data.output) : undefined, error: data.error ? String(data.error) : undefined, error_detail: errorDetail || null })
           if (stepId) updateStep(stepId, { status: status === "success" ? "completed" : "failed", completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
         }
-        if (type === "run.started" || type === "run.resumed") {
+        if (type === "run.queued") {
+          if (!useChatStore.getState().sessions.find((item) => item.id === sessionId)?.active_run_id) setAgentStatus("queued")
+          void syncRunLifecycle()
+        } else if (type === "run.started" || type === "run.resumed") {
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
-          updateSession(sessionId, { status: "running" })
-        } else if (type === "run.paused") {
-          closeRunStreams(runId, "paused")
-          // A run-level terminal/control event must also close any child
-          // activity that did not get its own completion event. Otherwise the
-          // progress panel keeps spinning after pause.
-          const terminalStatus = "paused"
-          const completedAt = occurredAt
-          for (const step of useChatStore.getState().steps) {
-            if (step.run_id === runId && step.status === "running") {
-              updateStep(step.id, { status: terminalStatus, completed_at: completedAt })
-            }
-          }
-          for (const toolCall of useChatStore.getState().toolCalls) {
-            if (toolCall.run_id === runId && toolCall.status === "running") {
-              updateToolCall(toolCall.id, { status: terminalStatus, completed_at: completedAt })
-            }
-          }
-          setAgentStatus("paused")
-          updateSession(sessionId, { status: "interrupted" })
-          clearThinking()
-        } else if (type === "run.cancelling") {
+          updateSession(sessionId, { active_run_id: runId || null })
+          void syncRunLifecycle()
+        } else if (type === "run.stopping") {
           setAgentStatus("cancelling")
           clearThinking()
+          void syncRunLifecycle()
         } else if (type === "run.cancelled") {
           closeRunStreams(runId, "cancelled")
           const completedAt = occurredAt
@@ -500,22 +532,26 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             }
           }
           setAgentStatus("idle")
-          updateSession(sessionId, { status: "interrupted" })
+          if (useChatStore.getState().sessions.find((item) => item.id === sessionId)?.active_run_id === runId) {
+            updateSession(sessionId, { active_run_id: null })
+          }
           clearApprovals()
           clearThinking()
+          void syncRunLifecycle()
         }
         else if (type === "run.root_suspended") {
           // The root run can wait while workers continue. Clear transient
           // thinking state without presenting the whole plan as failed.
           clearThinking()
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
-          updateSession(sessionId, { status: "running" })
         }
         else if (type === "run.failed" || type === "run.budget_exceeded") {
           closeRunStreams(runId, "failed")
           setAgentStatus("error")
           setErrorDetail(errorDetail || null)
-          updateSession(sessionId, { status: "interrupted" })
+          if (useChatStore.getState().sessions.find((item) => item.id === sessionId)?.active_run_id === runId) {
+            updateSession(sessionId, { active_run_id: null })
+          }
           clearThinking()
           const phase = text(errorDetail?.phase) || text((data.error as Record<string, unknown> | undefined)?.phase)
           const hasCompletedPlan = useChatStore.getState().orchestrationPlans.some((plan) => plan.run_id === runId && plan.status === "completed")
@@ -528,18 +564,22 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             || text(data.message)
             || (type === "run.budget_exceeded" ? "运行已达到限制" : "任务未能完成")
           setError(errorMessage)
+          void syncRunLifecycle()
         }
         else if (type === "run.completed") {
           setAgentStatus("idle")
-          updateSession(sessionId, { status: "completed" })
+          if (useChatStore.getState().sessions.find((item) => item.id === sessionId)?.active_run_id === runId) {
+            updateSession(sessionId, { active_run_id: null })
+          }
           clearThinking()
           if (runId) confirmFinalMessage(runId)
+          void syncRunLifecycle()
         }
       } catch { /* 单条事件格式错误不应中断 EventSource。 */ }
     }
 
     const eventNames = [
-      "run.started", "run.resumed", "run.paused", "run.cancelling", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded", "run.root_suspended",
+      "run.queued", "run.started", "run.resumed", "run.stopping", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded", "run.root_suspended",
       "node.started", "node.completed", "node.failed",
       "retrieval.started", "retrieval.completed", "retrieval.failed",
       "retrieval.provider.started", "retrieval.provider.completed", "retrieval.provider.failed",
@@ -714,8 +754,8 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
 
   if (type === "run.started" || type === "run.resumed") return null
   if (type === "run.completed") return null
-  if (type === "run.paused") return base({ id: `run:${runId}`, label: "任务已暂停", status: "paused" })
-  if (type === "run.cancelling") return base({ id: `run:${runId}`, label: "正在停止任务", detail: "正在等待运行中的工作安全结束。", status: "waiting" })
+  if (type === "run.queued") return base({ id: `run:${runId}`, label: "任务已排队", detail: `会话内序号 ${number(data.sequence) ?? "未知"}，前序任务结束后开始执行。`, status: "waiting" })
+  if (type === "run.stopping") return base({ id: `run:${runId}`, label: "正在停止任务", detail: "正在等待运行中的工作安全结束。", status: "waiting" })
   if (type === "run.cancelled") return base({ id: `run:${runId}`, label: "任务已取消", status: "info" })
   if (type === "run.root_suspended") return base({ id: `run:${runId}`, label: "主任务等待子任务继续", detail: "并行任务仍在处理，完成后将继续汇总结果。", status: "waiting" })
   if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "任务已达到运行限制" : "任务未能完成", detail, status: "failed" })

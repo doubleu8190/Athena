@@ -72,6 +72,8 @@ async def test_legacy_run_level_approval_is_not_resolvable() -> None:
             session.add(
                 AgentRunModel(
                     run_id=run_id,
+                    message_id="message:" + str(run_id),
+                    sequence=1,
                     session_id=f"session-{run_id}",
                     status="running",
                     root_thread_id=f"run:{run_id}",

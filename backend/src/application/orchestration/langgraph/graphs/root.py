@@ -26,6 +26,7 @@ from application.orchestration.root_decision import (
     PlanningFeedback,
 )
 from domain.runs import RoundCompletedResumeValue
+from shared.contracts.runs import RoundCompletedResumeValueSchema
 from application.runs.request_contracts import RootRequestState
 from shared import get_logger
 
@@ -444,6 +445,7 @@ async def invoke_root_graph(
     run_id: str,
     user_message: str = "",
     message_id: str = "",
+    run_sequence: int = 1,
     attachment_ids: list[str] | None = None,
     resume_value: RoundCompletedResumeValue | Mapping[str, Any] | None = None,
     stop_signal: asyncio.Event | None = None,
@@ -461,6 +463,7 @@ async def invoke_root_graph(
             "session_id": session_id,
             "run_id": run_id,
             "message_id": message_id,
+            "run_sequence": run_sequence,
             "user_message": user_message,
             "attachment_ids": list(attachment_ids or []),
         }
@@ -476,7 +479,9 @@ async def invoke_root_graph(
     if resume_value is not None:
         if isinstance(resume_value, Mapping):
             try:
-                resume_value = RoundCompletedResumeValue.model_validate(resume_value)
+                resume_value = RoundCompletedResumeValueSchema.model_validate(
+                    resume_value
+                ).to_domain()
             except ValidationError as error:
                 raise RuntimeError("root_resume_value_type_invalid") from error
         elif not isinstance(resume_value, RoundCompletedResumeValue):
@@ -487,7 +492,11 @@ async def invoke_root_graph(
             f"Resuming root graph for run {run_id} from round {resume_value.round_id}"
         )
         result = await graph.ainvoke(
-            Command(resume=dict(resume_value.model_dump(mode="json"))),
+            Command(
+                resume=RoundCompletedResumeValueSchema.from_domain(
+                    resume_value
+                ).model_dump(mode="json")
+            ),
             config=config,
         )
     else:

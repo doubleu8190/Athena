@@ -122,12 +122,8 @@ function SessionDetailView() {
     }
   }
 
-  const statusTone =
-    session?.status === "completed"
-      ? "success"
-      : session?.status === "running"
-        ? "accent"
-        : "default"
+  const sessionState = session?.active_run_id ? "执行中" : "空闲"
+  const statusTone = session?.active_run_id ? "accent" : "default"
 
   if (!sessionId) {
     return (
@@ -187,7 +183,7 @@ function SessionDetailView() {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3 min-w-0">
                       <h2 className="font-semibold truncate">{session?.title}</h2>
-                      {session ? <Badge tone={statusTone}>{session.status}</Badge> : null}
+                      {session ? <Badge tone={statusTone}>{sessionState}</Badge> : null}
                     </div>
                     <button
                       onClick={() => {

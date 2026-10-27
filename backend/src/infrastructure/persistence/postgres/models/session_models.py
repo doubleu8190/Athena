@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, ForeignKey, Index, String, Text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -26,12 +26,9 @@ class SessionModel(Base):
     project_id: Mapped[str] = mapped_column(
         ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    creation_request_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, unique=True
-    )
     title: Mapped[str] = mapped_column(String, default="新聊天")
-    status: Mapped[str] = mapped_column(String, default="idle")
-    run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    active_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_run_sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
     last_activity_at: Mapped[str] = mapped_column(String, nullable=False)

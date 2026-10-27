@@ -66,6 +66,11 @@ from domain.retrieval.trace_contracts import (
     RetrievalCandidateTrace,
     RetrievalChannelTrace,
 )
+from shared.contracts.retrieval import (
+    RetrievalCandidateSelectionSchema,
+    RetrievalCandidateTraceSchema,
+    RetrievalChannelTraceSchema,
+)
 from .plan_materialization import (
     coerce_plan,
     plan_dict,
@@ -393,7 +398,7 @@ def _context_bundle_from_state(value: Mapping[str, Any]) -> ContextBundle:
         truncated=bool(value.get("truncated", False)),
         retrieval_run_id=value.get("retrieval_run_id"),
         context_selection=tuple(
-            RetrievalCandidateSelection.model_validate(item)
+            RetrievalCandidateSelectionSchema.model_validate(item).to_domain()
             for item in value.get("context_selection", ())
             if isinstance(item, Mapping)
         ),
@@ -409,12 +414,12 @@ def _provider_result_from_state(value: Mapping[str, Any]) -> ProviderResult:
     """恢复采集服务 checkpoint 中的模块摘要和候选类型。"""
     values = dict(value)
     values["candidates"] = tuple(
-        RetrievalCandidateTrace.model_validate(item)
+        RetrievalCandidateTraceSchema.model_validate(item).to_domain()
         for item in values.get("candidates", ())
         if isinstance(item, Mapping)
     )
     values["channels"] = tuple(
-        RetrievalChannelTrace.model_validate(item)
+        RetrievalChannelTraceSchema.model_validate(item).to_domain()
         for item in values.get("channels", ())
         if isinstance(item, Mapping)
     )
@@ -557,11 +562,10 @@ def _enforce_context_window_budget(
 
     selections = tuple(
         (
-            selection.model_copy(
-                update={
-                    "context_selected": False,
-                    "filter_reason": dropped[(selection.provider, selection.source_id)],
-                }
+            replace(
+                selection,
+                context_selected=False,
+                filter_reason=dropped[(selection.provider, selection.source_id)],
             )
             if selection.context_selected
             and (selection.provider, selection.source_id) in dropped
@@ -652,12 +656,11 @@ def _filter_memory_context_scope(
     )
     selections = tuple(
         (
-            selection.model_copy(
-                update={
-                    "context_selected": False,
-                    "source_ids": (),
-                    "filter_reason": reason,
-                }
+            replace(
+                selection,
+                context_selected=False,
+                source_ids=(),
+                filter_reason=reason,
             )
             if selection.context_selected
             and (selection.provider, selection.source_id) in rejected_source_ids
@@ -942,6 +945,7 @@ class RootWorkflow(RootWorkflowPort):
             history = await deps.request_preparation.load_history(
                 session_id=updated_request.session_id,
                 exclude_message_id=updated_request.message_id,
+                before_sequence=updated_request.run_sequence,
             )
             updated_request = RootRequestState.model_validate(
                 {

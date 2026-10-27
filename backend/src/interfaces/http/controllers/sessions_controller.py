@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from application.runs import RunQueryService
 from application.sessions import (
@@ -60,6 +60,7 @@ def build_sessions_router(
     @router.post("", response_model=SessionResponse)
     async def create_session(
         request: CreateSessionRequest,
+        response: Response,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         sessions: SessionService = Depends(service),
     ) -> SessionResponse:
@@ -76,6 +77,8 @@ def build_sessions_router(
             if str(error) in {"idempotency_conflict", "session_deleted"}:
                 raise HTTPException(status_code=409, detail=str(error)) from error
             raise
+        if value.idempotency_replayed:
+            response.headers["Idempotency-Replayed"] = "true"
         return SessionResponse.from_application(value)
 
     @router.get("", response_model=list[SessionResponse])

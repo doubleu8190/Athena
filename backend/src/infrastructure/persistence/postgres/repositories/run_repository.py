@@ -3,36 +3,33 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import DateTime, cast, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
 from domain.runs import (
-    CommandEnqueueResult,
-    CommandStatus,
-    CommandStatusRecord,
     CommandType,
     RunCommand,
-    RunCommandPayload,
+    RunEnqueueResult,
     RunStartPayload,
     RunCancellationResult,
     RunQueryPort,
     RunStatus,
     RunSummary,
-    parse_run_command_payload,
 )
-from domain.runs.ports import CommandQueuePort, CommandStorePort, RunLifecyclePort
+from domain.runs.ports import RunLifecyclePort, RunQueuePort, RunSubmissionPort
 from domain.sessions import Session
+from shared.contracts.runs import RunStartPayloadSchema
 
 from ..models import (
-    AgentCommandModel,
+    AttachmentModel,
     AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
@@ -53,6 +50,7 @@ from .memory_suppression import (
     project_scope_is_writable,
 )
 from ..mappers.converters import session_domain_to_model
+from ..idempotency import execute_idempotent
 
 
 def _now() -> str:
@@ -109,34 +107,57 @@ def _answer_stream_metadata(result: dict[str, object]) -> dict[str, Any]:
     return value
 
 
-def _message_id(payload: RunCommandPayload) -> str | None:
-    """Return the user message identity only for a new run."""
-    if isinstance(payload, RunStartPayload):
-        return payload.message_id
-    return None
+def _run_enqueue_to_json(value: RunEnqueueResult) -> dict[str, Any]:
+    return {
+        "session_id": value.session_id,
+        "run_id": value.run_id,
+        "message_id": value.message_id,
+        "sequence": value.sequence,
+        "status": str(value.status),
+        "deduplicated": value.deduplicated,
+    }
 
 
-def _attachment_ids(payload: RunCommandPayload) -> tuple[str, ...]:
-    """Expose attachments only for user-submitted start commands."""
-    if isinstance(payload, RunStartPayload):
-        return payload.attachment_ids
-    return ()
+def _run_enqueue_from_json(value: dict[str, Any]) -> RunEnqueueResult:
+    return RunEnqueueResult(
+        session_id=str(value["session_id"]),
+        run_id=str(value["run_id"]),
+        message_id=str(value["message_id"]),
+        sequence=int(value["sequence"]),
+        status=str(value["status"]),
+        deduplicated=True,
+    )
+
+
+def _stop_to_json(value: RunCancellationResult) -> dict[str, Any]:
+    return {
+        "run_id": value.run_id,
+        "status": value.status.value,
+        "changed": value.changed,
+        "external_effect_status": value.external_effect_status,
+        "no_op": value.no_op,
+    }
+
+
+def _stop_from_json(value: dict[str, Any]) -> RunCancellationResult:
+    return RunCancellationResult(
+        status=RunStatus(str(value["status"])),
+        changed=bool(value["changed"]),
+        external_effect_status=str(value["external_effect_status"]),
+        run_id=str(value["run_id"]) if value.get("run_id") is not None else None,
+        no_op=bool(value.get("no_op", False)),
+    )
 
 
 def _run_start_payload_or_none(request_json: str) -> RunStartPayload | None:
     """Treat an empty run request as absent; validate every populated request."""
     if not request_json or request_json.strip() == "{}":
         return None
-    return RunStartPayload.model_validate_json(request_json)
+    return RunStartPayloadSchema.model_validate_json(request_json).to_domain()
 
 
-class PostgresRunRepository(
-    CommandQueuePort,
-    CommandStorePort,
-    RunLifecyclePort,
-    RunQueryPort,
-):
-    """Command queue, run projection and lifecycle in the target schema."""
+class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, RunQueryPort):
+    """FIFO Run queue, run projection and lifecycle in the target schema."""
 
     writes_cancellation_events_to_outbox = True
     writes_terminal_artifacts_to_outbox = True
@@ -146,199 +167,280 @@ class PostgresRunRepository(
     ) -> None:
         self._session_factory = session_factory
 
-    async def enqueue_command(
-        self, command: RunCommand, *, new_session: Session | None = None
-    ) -> CommandEnqueueResult:
-        """幂等地入队命令，并将新会话与首条运行写入同一事务。
+    async def enqueue_run(
+        self,
+        *,
+        request_id: str,
+        parameters: dict[str, object],
+        session_id: str,
+        project_id: str | None,
+        run_id: str,
+        payload: RunStartPayload,
+        new_session: Session | None = None,
+    ) -> tuple[RunEnqueueResult, bool]:
+        """Atomically persist an idempotent user message and queued Run."""
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
 
-        参数：
-            command: 已校验的运行命令。
-            new_session: 首次发送时待创建的会话；已有会话提交时为 None。
-        返回值：
-            命令队列中的稳定结果，重复命令会返回原 session_id。
-        异常：
-            ValueError: 项目、会话或运行作用域不可写，或命令参数不匹配。
-        """
-        async with self._session_factory() as session:
-            async with session.begin():
-                # 相同命令 ID 的并发请求先串行化，避免各自创建会话后再争抢命令主键。
-                await session.execute(
-                    select(
-                        func.pg_advisory_xact_lock(
-                            func.hashtextextended(
-                                f"agent-command:{command.command_id}", 0
-                            )
+        async with self._session_factory() as db:
+            async with db.begin():
+                async def create() -> RunEnqueueResult:
+                    if new_session is not None:
+                        if new_session.id != session_id or new_session.project_id is None:
+                            raise ValueError("new_session_invalid")
+                        if not await project_scope_is_writable(db, new_session.project_id):
+                            raise ValueError("project_not_found")
+                        db.add(session_domain_to_model(new_session))
+                        await db.flush()
+
+                    # 项目删除也先取得作用域锁；已有会话提交必须采用相同顺序。
+                    scope_project_id = await db.scalar(
+                        select(SessionModel.project_id).where(
+                            SessionModel.id == session_id,
+                            SessionModel.deleted_time.is_(None),
                         )
                     )
-                )
-                existing = await session.get(AgentCommandModel, command.command_id)
-                if existing is not None:
-                    return self._result(existing, True)
-                now = command.issued_at.isoformat()
-                if new_session is not None:
-                    if (
-                        not isinstance(command.payload, RunStartPayload)
-                        or new_session.id != command.session_id
-                        or new_session.project_id is None
-                    ):
-                        raise ValueError("new_session_command_invalid")
-                    if not await project_scope_is_writable(
-                        session, new_session.project_id
-                    ):
+                    if scope_project_id is not None and not await project_scope_is_writable(db, scope_project_id):
                         raise ValueError("project_not_found")
-                    session.add(session_domain_to_model(new_session))
-                    await session.flush()
-                if isinstance(command.payload, RunStartPayload):
-                    writable, _ = await ensure_writable_run_scope(
-                        session,
-                        session_id=command.session_id,
-                        turn_id=command.run_id or command.command_id,
-                        now=now,
-                    )
-                    if not writable:
-                        raise ValueError("project_not_found")
-                    session_exists = await session.scalar(
-                        select(SessionModel.id)
+                    session_row = await db.scalar(
+                        select(SessionModel)
                         .where(
-                            SessionModel.id == command.session_id,
+                            SessionModel.id == session_id,
                             SessionModel.deleted_time.is_(None),
                         )
                         .with_for_update()
                     )
-                    if session_exists is None:
+                    if session_row is None:
                         raise ValueError("session_not_found")
-                session.add(
-                    AgentCommandModel(
-                        command_id=command.command_id,
-                        session_id=command.session_id,
-                        run_id=command.run_id,
-                        command_type=str(command.command_type),
-                        schema_version=command.schema_version,
-                        idempotency_key=command.command_id,
-                        payload_json=json.dumps(
-                            command.payload.model_dump(mode="json", exclude_none=True),
-                            ensure_ascii=False,
-                        ),
-                        status=CommandStatus.QUEUED.value,
-                        queued_at=now,
+                    if project_id is not None and session_row.project_id != project_id:
+                        raise ValueError("session_project_mismatch")
+                    writable, _ = await ensure_writable_run_scope(
+                        db, session_id=session_id, turn_id=run_id, now=now_iso
                     )
-                )
-                if (
-                    command.run_id
-                    and await session.get(AgentRunModel, command.run_id) is None
-                ):
-                    session.add(
-                        AgentRunModel(
-                            run_id=command.run_id,
-                            session_id=command.session_id,
-                            status=RunStatus.CREATED.value,
-                            request_json=json.dumps(
-                                command.payload.model_dump(
-                                    mode="json", exclude_none=True
+                    if not writable:
+                        raise ValueError("project_not_found")
+
+                    attachment_rows: list[AttachmentModel] = []
+                    if payload.attachment_ids:
+                        attachment_rows = list(
+                            (
+                                await db.execute(
+                                    select(AttachmentModel)
+                                    .where(
+                                        AttachmentModel.id.in_(payload.attachment_ids),
+                                        AttachmentModel.session_id == session_id,
+                                        AttachmentModel.status == "ready",
+                                        AttachmentModel.deleted_time.is_(None),
+                                    )
+                                    .with_for_update()
                                 )
-                            ),
-                            root_thread_id=f"thread-{command.run_id}",
-                            created_at=now,
-                            updated_at=now,
+                            ).scalars().all()
+                        )
+                        if {row.id for row in attachment_rows} != set(payload.attachment_ids):
+                            raise ValueError("attachment_not_ready_or_not_found")
+
+                    sequence = int(session_row.last_run_sequence or 0) + 1
+                    session_row.last_run_sequence = sequence
+                    session_row.updated_at = now_iso
+                    session_row.last_activity_at = now_iso
+                    db.add(
+                        MessageModel(
+                            id=payload.message_id,
+                            session_id=session_id,
+                            role="user",
+                            content=payload.message,
+                            tool_calls_json="[]",
+                            run_id=run_id,
+                            timestamp=now_iso,
                         )
                     )
-            return CommandEnqueueResult(
-                command_id=command.command_id,
-                session_id=command.session_id,
-                run_id=command.run_id,
-                message_id=_message_id(command.payload),
-                attachment_ids=_attachment_ids(command.payload),
-                status=CommandStatus.QUEUED,
-                deduplicated=False,
+                    for attachment in attachment_rows:
+                        attachment.message_id = payload.message_id
+
+                    persisted_payload = replace(payload, sequence=sequence)
+                    request_json = json.dumps(
+                        RunStartPayloadSchema.from_domain(persisted_payload).model_dump(
+                            mode="json", exclude_none=True
+                        ),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    db.add(
+                        AgentRunModel(
+                            run_id=run_id,
+                            session_id=session_id,
+                            message_id=payload.message_id,
+                            sequence=sequence,
+                            status=RunStatus.QUEUED.value,
+                            request_json=request_json,
+                            root_thread_id=f"thread-{run_id}",
+                            created_at=now_iso,
+                            updated_at=now_iso,
+                        )
+                    )
+                    await self._write_queued_events(
+                        db,
+                        session_id=session_id,
+                        run_id=run_id,
+                        message_id=payload.message_id,
+                        sequence=sequence,
+                        occurred_at=now_iso,
+                        content=payload.message,
+                        request_id=request_id,
+                        attachment_ids=payload.attachment_ids,
+                    )
+                    return RunEnqueueResult(
+                        session_id=session_id,
+                        run_id=run_id,
+                        message_id=payload.message_id,
+                        sequence=sequence,
+                        status=RunStatus.QUEUED,
+                        deduplicated=False,
+                    )
+
+                result, replayed = await execute_idempotent(
+                    db,
+                    scope="runs.submit",
+                    request_id=request_id,
+                    parameters=parameters,
+                    action=create,
+                    encode=_run_enqueue_to_json,
+                    decode=_run_enqueue_from_json,
+                )
+                # The stable first response is persisted with the Run and source Message.
+                return result, replayed
+
+    async def _write_queued_events(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        run_id: str,
+        message_id: str,
+        sequence: int,
+        occurred_at: str,
+        content: str,
+        request_id: str,
+        attachment_ids: Sequence[str],
+    ) -> None:
+        """Write submission lifecycle events within the business transaction."""
+        await db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(session_id, 0)
+                )
+            )
+        )
+        max_seq = int(
+            await db.scalar(
+                select(func.max(AgentEventModel.session_seq)).where(
+                    AgentEventModel.session_id == session_id
+                )
+            )
+            or 0
+        )
+        for offset, (event_type, payload) in enumerate(
+            (
+                (
+                    "message.persisted",
+                    {
+                        "role": "user",
+                        "timestamp": occurred_at,
+                        "content": content,
+                        "request_id": request_id,
+                        "attachment_ids": list(attachment_ids),
+                    },
+                ),
+                ("run.queued", {"sequence": sequence, "status": "queued"}),
+            ),
+            start=1,
+        ):
+            db.add(
+                AgentEventModel(
+                    session_id=session_id,
+                    session_seq=max_seq + offset,
+                    run_id=run_id,
+                    message_id=message_id,
+                    event_type=event_type,
+                    durability="durable",
+                    payload_json=json.dumps(payload, ensure_ascii=False),
+                    occurred_at=occurred_at,
+                )
             )
 
-    async def get_command(self, command_id: str) -> CommandStatusRecord | None:
-        async with self._session_factory() as session:
-            row = await session.get(AgentCommandModel, command_id)
-        return None if row is None else self._record(row)
-
-    async def claim_next_command(self) -> RunCommand | None:
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = (
-                    await session.execute(
-                        select(AgentCommandModel)
-                        .where(AgentCommandModel.status == CommandStatus.QUEUED.value)
-                        .order_by(AgentCommandModel.queued_at)
+    async def claim_next_run(self) -> RunCommand | None:
+        """Claim the oldest queued Run for one locked, idle Session."""
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        async with self._session_factory() as db:
+            async with db.begin():
+                candidate_session = (
+                    await db.execute(
+                        select(SessionModel)
+                        .where(
+                            SessionModel.deleted_time.is_(None),
+                            SessionModel.active_run_id.is_(None),
+                            select(AgentRunModel.run_id)
+                            .where(
+                                AgentRunModel.session_id == SessionModel.id,
+                                AgentRunModel.status == RunStatus.QUEUED.value,
+                            )
+                            .exists(),
+                        )
+                        .order_by(SessionModel.last_activity_at, SessionModel.id)
                         .with_for_update(skip_locked=True)
                         .limit(1)
                     )
                 ).scalar_one_or_none()
-                if row is None:
+                if candidate_session is None:
                     return None
-                row.status = CommandStatus.RUNNING.value
-                row.started_at = _now()
-                return RunCommand(
-                    row.command_id,
-                    CommandType(row.command_type),
-                    row.session_id,
-                    row.run_id,
-                    parse_run_command_payload(
-                        CommandType(row.command_type), row.payload_json
-                    ),
-                    datetime.fromisoformat(row.queued_at),
-                    row.schema_version,
-                )
-
-    async def complete_command(
-        self,
-        command_id: str,
-        *,
-        status: CommandStatus,
-        result: object = None,
-        error: object = None,
-    ) -> None:
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = await session.get(AgentCommandModel, command_id)
-                if row is not None:
-                    row.status = str(status)
-                    row.result_json = (
-                        json.dumps(result, default=str) if result is not None else None
-                    )
-                    row.error_json = (
-                        json.dumps(error, default=str) if error is not None else None
-                    )
-                    row.completed_at = _now()
-
-    async def complete_active_command_for_run(
-        self,
-        run_id: str,
-        *,
-        status: CommandStatus,
-        result: object = None,
-        error: object = None,
-    ) -> bool:
-        """Converge the original command after an internal approval resume."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = (
-                    await session.execute(
-                        select(AgentCommandModel)
+                run = (
+                    await db.execute(
+                        select(AgentRunModel)
                         .where(
-                            AgentCommandModel.run_id == run_id,
-                            AgentCommandModel.status == CommandStatus.RUNNING.value,
+                            AgentRunModel.session_id == candidate_session.id,
+                            AgentRunModel.status == RunStatus.QUEUED.value,
                         )
-                        .order_by(AgentCommandModel.started_at)
+                        .order_by(AgentRunModel.sequence)
+                        .with_for_update()
                         .limit(1)
                     )
                 ).scalar_one_or_none()
-                if row is None:
-                    return False
-                row.status = str(status)
-                row.result_json = (
-                    json.dumps(result, default=str) if result is not None else None
+                if run is None:
+                    return None
+                payload = _run_start_payload_or_none(run.request_json)
+                if payload is None:
+                    run.status = RunStatus.FAILED.value
+                    run.error_json = json.dumps({"code": "run_request_missing"})
+                    run.updated_at = now_iso
+                    self._add_completion_outbox(
+                        db,
+                        run=run,
+                        message_id=f"run-final:{run.run_id}:failed",
+                        event_type="RunFailed",
+                        dedupe_key=f"run:{run.run_id}:failed",
+                        payload_json={"error": {"code": "run_request_missing"}},
+                        now=now,
+                    )
+                    return None
+                run.status = RunStatus.RUNNING.value
+                run.updated_at = now_iso
+                run.execution_generation = int(run.execution_generation or 0) + 1
+                lease_owner = f"run-consumer:{uuid4().hex}"
+                run.execution_lease_owner = lease_owner
+                run.execution_lease_until = (now + timedelta(seconds=60)).isoformat()
+                candidate_session.active_run_id = run.run_id
+                return RunCommand(
+                    command_id=f"run:{run.run_id}:generation:{run.execution_generation}",
+                    command_type=CommandType.RUN_START,
+                    session_id=run.session_id,
+                    run_id=run.run_id,
+                    payload=payload,
+                    issued_at=datetime.fromisoformat(run.created_at),
+                    schema_version=1,
+                    execution_generation=run.execution_generation,
+                    lease_owner=lease_owner,
                 )
-                row.error_json = (
-                    json.dumps(error, default=str) if error is not None else None
-                )
-                row.completed_at = _now()
-                return True
 
     async def list_for_session(self, session_id: str) -> list[RunSummary]:
         async with self._session_factory() as session:
@@ -347,7 +449,7 @@ class PostgresRunRepository(
                     await session.execute(
                         select(AgentRunModel)
                         .where(AgentRunModel.session_id == session_id)
-                        .order_by(AgentRunModel.created_at)
+                        .order_by(AgentRunModel.sequence)
                     )
                 )
                 .scalars()
@@ -452,50 +554,62 @@ class PostgresRunRepository(
 
     async def get_active_for_session(self, session_id: str) -> RunSummary | None:
         async with self._session_factory() as session:
+            active_run_id = await session.scalar(
+                select(SessionModel.active_run_id).where(
+                    SessionModel.id == session_id,
+                    SessionModel.deleted_time.is_(None),
+                )
+            )
+            if active_run_id is None:
+                return None
             row = (
                 await session.execute(
                     select(AgentRunModel)
-                    .where(
-                        AgentRunModel.session_id == session_id,
-                        AgentRunModel.status.in_(
-                            [
-                                RunStatus.CREATED.value,
-                                RunStatus.RUNNING.value,
-                                RunStatus.CANCELLING.value,
-                                RunStatus.PAUSED.value,
-                            ]
-                        ),
-                    )
-                    .order_by(AgentRunModel.created_at)
-                    .limit(1)
+                    .where(AgentRunModel.run_id == active_run_id)
                 )
             ).scalar_one_or_none()
         return None if row is None else self._run(row)
 
     async def update_status(self, run_id: str, status: RunStatus | str) -> bool:
         """仅从可运行状态推进 Run，禁止迟到的启动覆盖取消。"""
-        active_states = (
-            (RunStatus.CREATED.value, RunStatus.RUNNING.value)
-            if str(status) == RunStatus.RUNNING.value
-            else (
-                RunStatus.CREATED.value,
-                RunStatus.RUNNING.value,
-                RunStatus.PAUSED.value,
-            )
-        )
-        async with self._session_factory() as session:
-            async with session.begin():
-                # ORM 的 RETURNING 结果不要求提供 rowcount，用返回的 Run ID 判断是否命中。
-                result = await session.execute(
-                    update(AgentRunModel)
+        if str(status) == RunStatus.RUNNING.value:
+            async with self._session_factory() as session:
+                return await session.scalar(
+                    select(AgentRunModel.run_id)
+                    .join(SessionModel, SessionModel.id == AgentRunModel.session_id)
                     .where(
                         AgentRunModel.run_id == run_id,
-                        AgentRunModel.status.in_(active_states),
+                        AgentRunModel.status == RunStatus.RUNNING.value,
+                        SessionModel.active_run_id == run_id,
                     )
-                    .values(status=str(status), updated_at=_now())
-                    .returning(AgentRunModel.run_id)
+                ) is not None
+        if str(status) not in {RunStatus.COMPLETED.value, RunStatus.FAILED.value}:
+            return False
+        async with self._session_factory() as session:
+            async with session.begin():
+                session_id = await session.scalar(
+                    select(AgentRunModel.session_id).where(
+                        AgentRunModel.run_id == run_id
+                    )
                 )
-        return result.scalar_one_or_none() is not None
+                if session_id is None:
+                    return False
+                session_row = await session.scalar(
+                    select(SessionModel)
+                    .where(SessionModel.id == session_id)
+                    .with_for_update()
+                )
+                run = await session.get(AgentRunModel, run_id, with_for_update=True)
+                if (
+                    session_row is None
+                    or session_row.active_run_id != run_id
+                    or run.status != RunStatus.RUNNING.value
+                ):
+                    return False
+                run.status = str(status)
+                run.updated_at = _now()
+                session_row.active_run_id = None
+                return True
 
     async def arm_root_wait(
         self,
@@ -510,10 +624,24 @@ class PostgresRunRepository(
         """Record a checkpointed Root wait only for its current Round generation."""
         async with self._session_factory() as session:
             async with session.begin():
+                session_id = await session.scalar(
+                    select(AgentRunModel.session_id).where(
+                        AgentRunModel.run_id == run_id
+                    )
+                )
+                if session_id is None:
+                    return False
+                session_row = await session.scalar(
+                    select(SessionModel)
+                    .where(SessionModel.id == session_id)
+                    .with_for_update()
+                )
                 row = await session.get(AgentRunModel, run_id, with_for_update=True)
                 plan = await session.get(AgentPlanModel, plan_id, with_for_update=True)
                 if (
-                    row is None
+                    session_row is None
+                    or session_row.active_run_id != run_id
+                    or row is None
                     or plan is None
                     or row.status != RunStatus.RUNNING.value
                     or plan.run_id != run_id
@@ -538,82 +666,393 @@ class PostgresRunRepository(
                 row.updated_at = _now()
                 return True
 
-    async def complete(self, run_id: str, result: dict[str, object]) -> bool:
-        return await self._finish(run_id, RunStatus.COMPLETED, response=result)
+    async def complete(
+        self, run_id: str, result: dict[str, object], *,
+        owner: str | None = None, generation: int | None = None,
+    ) -> bool:
+        return await self._finish(
+            run_id, RunStatus.COMPLETED, response=result,
+            owner=owner, generation=generation,
+        )
 
-    async def fail(self, run_id: str, error: dict[str, object]) -> bool:
-        return await self._finish(run_id, RunStatus.FAILED, error=error)
-
-    async def cancel(
-        self, run_id: str, *, reason: str = "USER_REQUEST"
-    ) -> RunCancellationResult | None:
-        """在一个事务内设置取消栅栏并收敛关联计划状态。
-
-        Args:
-            run_id: 用户请求停止的 Run ID。
-            reason: 取消原因，写入任务和计划事件。
-
-        Returns:
-            首次受理时返回取消状态；重复请求、缺失或终态 Run 返回 None。
-
-        Raises:
-            Exception: 数据库错误由调用方按可重试命令处理。
-        """
+    async def fail(
+        self, run_id: str, error: dict[str, object], *,
+        owner: str | None = None, generation: int | None = None,
+    ) -> bool:
+        """记录失败并撤销工作，保留会话执行权直到所有调用停止。"""
         now = datetime.now(timezone.utc)
-        async with self._session_factory() as session:
-            async with session.begin():
-                run = await session.get(AgentRunModel, run_id, with_for_update=True)
-                if run is None:
-                    return None
-                if run.status in {
-                    RunStatus.CANCELLING.value,
-                    RunStatus.CANCELLED.value,
-                    RunStatus.COMPLETED.value,
-                    RunStatus.FAILED.value,
-                }:
-                    return RunCancellationResult(
-                        RunStatus(run.status),
-                        False,
-                        str(run.cancellation_external_effect_status or "none"),
-                    )
+        async with self._session_factory() as db:
+            async with db.begin():
+                session_id = await db.scalar(
+                    select(AgentRunModel.session_id).where(AgentRunModel.run_id == run_id)
+                )
+                if session_id is None:
+                    return False
+                session_row = await db.scalar(
+                    select(SessionModel).where(SessionModel.id == session_id).with_for_update()
+                )
+                run = await db.get(AgentRunModel, run_id, with_for_update=True)
+                if (
+                    session_row is None or run is None
+                    or session_row.active_run_id != run_id
+                    or run.status != RunStatus.RUNNING.value
+                    or not self._owns_execution_lease(run, owner, generation, datetime.now(timezone.utc))
+                ):
+                    return False
+                await self._begin_failure_locked(db, run, error, now)
+        # 无执行中的调用或 Worker 时可立即完成；否则由调用端或 Worker 收尾。
+        await self.finalize_stop(run_id)
+        return True
 
-                plan = (
-                    await session.execute(
-                        select(AgentPlanModel)
-                        .where(AgentPlanModel.run_id == run_id)
+    async def reconcile_expired_execution_leases(self) -> int:
+        """回收异常退出的 Root 调用；正常 checkpoint 等待没有调用租约。"""
+        now = datetime.now(timezone.utc)
+        recovered: list[str] = []
+        async with self._session_factory() as db:
+            async with db.begin():
+                sessions = (await db.scalars(
+                    select(SessionModel)
+                    .join(AgentRunModel, AgentRunModel.run_id == SessionModel.active_run_id)
+                    .where(
+                        AgentRunModel.status == RunStatus.RUNNING.value,
+                        AgentRunModel.execution_lease_owner.is_not(None),
+                        AgentRunModel.execution_lease_until.is_not(None),
+                        AgentRunModel.execution_lease_until <= now.isoformat(),
+                    )
+                    .order_by(SessionModel.id)
+                    .with_for_update(of=SessionModel, skip_locked=True)
+                    .limit(32)
+                )).all()
+                for session_row in sessions:
+                    run = await db.get(AgentRunModel, session_row.active_run_id, with_for_update=True)
+                    if (
+                        run is None or run.status != RunStatus.RUNNING.value
+                        or run.execution_lease_owner is None
+                        or run.execution_lease_until is None
+                        or datetime.fromisoformat(run.execution_lease_until) > now
+                    ):
+                        continue
+                    await self._begin_failure_locked(
+                        db, run, {"code": "root_execution_lease_expired"}, now
+                    )
+                    recovered.append(run.run_id)
+        for run_id in recovered:
+            await self.finalize_stop(run_id)
+        return len(recovered)
+
+    async def _begin_failure_locked(
+        self, db: AsyncSession, run: AgentRunModel,
+        error: dict[str, object], now: datetime,
+    ) -> None:
+        """在 Session、Run 锁内保存失败原因并启动同一套取消栅栏。"""
+        run.error_json = json.dumps(error, ensure_ascii=False)
+        plan = await db.scalar(
+            select(AgentPlanModel).where(AgentPlanModel.run_id == run.run_id).with_for_update()
+        )
+        if plan is None or plan.status in {"completed", "failed", "cancelled"}:
+            await self._begin_stop_without_active_plan(db, run.run_id, run, plan, now)
+        else:
+            await self._begin_plan_cancellation(
+                db, run.run_id, run, plan, reason="ROOT_EXECUTION_FAILED",
+                now=now, active_execution_count=0,
+            )
+
+    @staticmethod
+    def _owns_execution_lease(
+        run: AgentRunModel, owner: str | None, generation: int | None, now: datetime,
+    ) -> bool:
+        """校验调用端的租约和代次，拒绝失去执行权的迟到结果。"""
+        if owner is None and generation is None:
+            return True
+        return (
+            owner is not None and generation is not None
+            and run.execution_lease_owner == owner
+            and run.execution_generation == generation
+            and run.execution_lease_until is not None
+            and datetime.fromisoformat(run.execution_lease_until) > now
+        )
+
+    async def acquire_execution_lease(
+        self, run_id: str, *, owner: str, lease_seconds: float
+    ) -> int | None:
+        if not owner.strip() or lease_seconds <= 0:
+            raise ValueError("execution_lease_owner_and_duration_required")
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as db:
+            async with db.begin():
+                session_id = await db.scalar(
+                    select(AgentRunModel.session_id).where(AgentRunModel.run_id == run_id)
+                )
+                if session_id is None:
+                    return None
+                session_row = await db.scalar(
+                    select(SessionModel).where(SessionModel.id == session_id).with_for_update()
+                )
+                run = await db.get(AgentRunModel, run_id, with_for_update=True)
+                if (
+                    session_row is None
+                    or run is None
+                    or session_row.active_run_id != run_id
+                    or run.status != RunStatus.RUNNING.value
+                ):
+                    return None
+                # 过期租约代表调用异常退出，必须先失败收尾，不能自动重放。
+                if run.execution_lease_owner is not None or run.execution_lease_until is not None:
+                    return None
+                run.execution_generation = int(run.execution_generation or 0) + 1
+                run.execution_lease_owner = owner
+                run.execution_lease_until = (
+                    now + timedelta(seconds=lease_seconds)
+                ).isoformat()
+                run.updated_at = now.isoformat()
+                return run.execution_generation
+
+    async def renew_execution_lease(
+        self,
+        run_id: str,
+        *,
+        owner: str,
+        generation: int,
+        lease_seconds: float,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as db:
+            async with db.begin():
+                session_id = await db.scalar(
+                    select(AgentRunModel.session_id).where(
+                        AgentRunModel.run_id == run_id
+                    )
+                )
+                if session_id is None:
+                    return False
+                session_row = await db.scalar(
+                    select(SessionModel)
+                    .where(SessionModel.id == session_id)
+                    .with_for_update()
+                )
+                run = await db.get(AgentRunModel, run_id, with_for_update=True)
+                if (
+                    session_row is None
+                    or session_row.active_run_id != run_id
+                    or run is None
+                    or run.status != RunStatus.RUNNING.value
+                    or run.execution_lease_owner != owner
+                    or run.execution_generation != generation
+                    or not run.execution_lease_until
+                    or datetime.fromisoformat(run.execution_lease_until) <= now
+                ):
+                    return False
+                run.execution_lease_until = (
+                    now + timedelta(seconds=lease_seconds)
+                ).isoformat()
+                run.updated_at = now.isoformat()
+                return True
+
+    async def release_execution_lease(
+        self, run_id: str, *, owner: str, generation: int
+    ) -> bool:
+        async with self._session_factory() as db:
+            async with db.begin():
+                session_id = await db.scalar(
+                    select(AgentRunModel.session_id).where(
+                        AgentRunModel.run_id == run_id
+                    )
+                )
+                if session_id is None:
+                    return False
+                session_row = await db.scalar(
+                    select(SessionModel)
+                    .where(SessionModel.id == session_id)
+                    .with_for_update()
+                )
+                run = await db.get(AgentRunModel, run_id, with_for_update=True)
+                if (
+                    session_row is None
+                    or session_row.active_run_id != run_id
+                    or run is None
+                    or run.execution_lease_owner != owner
+                    or run.execution_generation != generation
+                    or not run.execution_lease_until
+                    or datetime.fromisoformat(run.execution_lease_until) <= datetime.now(timezone.utc)
+                ):
+                    return False
+                run.execution_lease_owner = None
+                run.execution_lease_until = None
+                return True
+
+    async def finalize_stop(self, run_id: str, *, failed: bool = False) -> bool:
+        """Finalize a stopped Root after its caller confirms the invocation ended."""
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        async with self._session_factory() as db:
+            async with db.begin():
+                session_id = await db.scalar(
+                    select(AgentRunModel.session_id).where(AgentRunModel.run_id == run_id)
+                )
+                if session_id is None:
+                    return False
+                session_row = await db.scalar(
+                    select(SessionModel)
+                    .where(SessionModel.id == session_id)
+                    .with_for_update()
+                )
+                run = await db.get(AgentRunModel, run_id, with_for_update=True)
+                if (
+                    session_row is None
+                    or run is None
+                    or run.status != RunStatus.STOPPING.value
+                    or session_row.active_run_id != run_id
+                ):
+                    return False
+                plan = await db.scalar(
+                    select(AgentPlanModel).where(AgentPlanModel.run_id == run_id)
+                )
+                lease_until = (
+                    datetime.fromisoformat(run.execution_lease_until)
+                    if run.execution_lease_until
+                    else None
+                )
+                if lease_until is not None and lease_until > now:
+                    return False
+                if plan is not None and plan.status not in {"completed", "failed", "cancelled"}:
+                    # Worker reconciliation owns the terminal transition while workers
+                    # still hold leases; it clears active_run_id with the plan result.
+                    return False
+                failed = failed or run.error_json is not None
+                terminal = RunStatus.FAILED if failed else RunStatus.CANCELLED
+                run.status = terminal.value
+                run.updated_at = now_iso
+                run.execution_lease_owner = None
+                run.execution_lease_until = None
+                session_row.active_run_id = None
+                await self._enqueue_memory_job(db, run, assistant_text="", now_iso=now_iso)
+                self._add_completion_outbox(
+                    db,
+                    run=run,
+                    message_id=f"run-final:{run_id}:{terminal.value}",
+                    event_type="RunFailed" if failed else "RunCancelled",
+                    dedupe_key=f"run:{run_id}:{terminal.value}",
+                    payload_json={
+                        "error": _json(run.error_json, {"code": "run_failed"}) if failed else None,
+                        "external_effect_status": run.cancellation_external_effect_status,
+                    },
+                    now=now,
+                )
+                return True
+
+    async def stop_active(
+        self,
+        session_id: str,
+        *,
+        request_id: str,
+        expected_run_id: str | None,
+        displayed_session_seq: int,
+    ) -> tuple[RunCancellationResult, bool]:
+        """Idempotently stop only the Run the client saw as active."""
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as db:
+            async with db.begin():
+                async def stop() -> RunCancellationResult:
+                    session_row = await db.scalar(
+                        select(SessionModel)
+                        .where(
+                            SessionModel.id == session_id,
+                            SessionModel.deleted_time.is_(None),
+                        )
                         .with_for_update()
                     )
-                ).scalar_one_or_none()
-                if plan is None or plan.status in {"completed", "failed", "cancelled"}:
-                    return await self._cancel_run_without_active_plan(
-                        session, run_id, run, plan, now
+                    if session_row is None:
+                        raise LookupError("session_not_found")
+                    active_run_id = session_row.active_run_id
+                    if active_run_id != expected_run_id:
+                        raise ValueError("active_run_changed")
+                    if active_run_id is None:
+                        return RunCancellationResult(
+                            RunStatus.CANCELLED,
+                            changed=False,
+                            external_effect_status="none",
+                            no_op=True,
+                        )
+                    if displayed_session_seq < 0:
+                        raise ValueError("displayed_session_seq_invalid")
+                    max_session_seq = int(
+                        await db.scalar(
+                            select(func.max(AgentEventModel.session_seq)).where(
+                                AgentEventModel.session_id == session_id
+                            )
+                        )
+                        or 0
+                    )
+                    if displayed_session_seq > max_session_seq:
+                        raise ValueError("displayed_session_seq_invalid")
+
+                    run = await db.get(AgentRunModel, active_run_id, with_for_update=True)
+                    if run is None or run.session_id != session_id:
+                        raise ValueError("active_run_changed")
+                    if run.status == RunStatus.STOPPING.value:
+                        return RunCancellationResult(
+                            RunStatus.STOPPING,
+                            changed=False,
+                            external_effect_status=str(
+                                run.cancellation_external_effect_status or "unknown"
+                            ),
+                            run_id=run.run_id,
+                        )
+                    if run.status != RunStatus.RUNNING.value:
+                        raise ValueError("active_run_changed")
+
+                    run.display_cutoff_session_seq = displayed_session_seq
+                    plan = (
+                        await db.execute(
+                            select(AgentPlanModel)
+                            .where(AgentPlanModel.run_id == run.run_id)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if plan is None or plan.status in {"completed", "failed", "cancelled"}:
+                        return await self._begin_stop_without_active_plan(
+                            db, run.run_id, run, plan, now
+                        )
+
+                    active_execution_count = (
+                        await db.execute(
+                            select(func.count())
+                            .select_from(TaskExecutionModel)
+                            .join(
+                                AgentTaskModel,
+                                TaskExecutionModel.task_id == AgentTaskModel.task_id,
+                            )
+                            .where(
+                                AgentTaskModel.plan_id == plan.plan_id,
+                                TaskExecutionModel.status == "running",
+                            )
+                        )
+                    ).scalar_one()
+                    return await self._begin_plan_cancellation(
+                        db,
+                        run.run_id,
+                        run,
+                        plan,
+                        reason="USER_REQUEST",
+                        now=now,
+                        active_execution_count=active_execution_count,
                     )
 
-                active_execution_count = (
-                    await session.execute(
-                        select(func.count())
-                        .select_from(TaskExecutionModel)
-                        .join(
-                            AgentTaskModel,
-                            TaskExecutionModel.task_id == AgentTaskModel.task_id,
-                        )
-                        .where(
-                            AgentTaskModel.plan_id == plan.plan_id,
-                            TaskExecutionModel.status == "running",
-                        )
-                    )
-                ).scalar_one()
-                return await self._begin_plan_cancellation(
-                    session,
-                    run_id,
-                    run,
-                    plan,
-                    reason=reason,
-                    now=now,
-                    active_execution_count=active_execution_count,
+                result, replayed = await execute_idempotent(
+                    db,
+                    scope=f"sessions:{session_id}:stop",
+                    request_id=request_id,
+                    parameters={
+                        "expected_run_id": expected_run_id,
+                        "displayed_session_seq": displayed_session_seq,
+                    },
+                    action=stop,
+                    encode=_stop_to_json,
+                    decode=_stop_from_json,
                 )
+                return result, replayed
 
-    async def _cancel_run_without_active_plan(
+    async def _begin_stop_without_active_plan(
         self,
         session: AsyncSession,
         run_id: str,
@@ -621,38 +1060,22 @@ class PostgresRunRepository(
         plan: AgentPlanModel | None,
         now: datetime,
     ) -> RunCancellationResult:
-        """直接终结没有活动 Plan 的 Run，并在同一事务写入清理事件。"""
+        """Set the stop fence and revoke pending work while retaining the pointer."""
         now_iso = now.isoformat()
         external_effect_status = (
             "unknown" if run.status == RunStatus.RUNNING.value else "none"
         )
-        run.status = RunStatus.CANCELLED.value
+        run.status = RunStatus.STOPPING.value
         run.cancellation_epoch = int(run.cancellation_epoch or 0) + 1
         run.cancellation_external_effect_status = external_effect_status
         run.updated_at = now_iso
-        await self._enqueue_memory_job(session, run, assistant_text="", now_iso=now_iso)
         await self._cancel_root_resume_jobs(session, run_id, now)
         await self._cancel_pending_approvals(session, run_id=run_id, plan=None, now=now)
-        await session.execute(
-            update(AgentCommandModel)
-            .where(
-                AgentCommandModel.run_id == run_id,
-                AgentCommandModel.status == CommandStatus.QUEUED.value,
-                AgentCommandModel.command_type.in_(
-                    (CommandType.RUN_START.value, CommandType.RUN_RESUME.value)
-                ),
-            )
-            .values(
-                status=CommandStatus.CANCELLED.value,
-                completed_at=now_iso,
-                result_json=json.dumps({"status": RunStatus.CANCELLED.value}),
-            )
-        )
         session.add(
             OrchestrationOutboxModel(
                 message_id=uuid4().hex,
-                dedupe_key=f"run:{run_id}:cancelled:{run.cancellation_epoch}",
-                event_type="RunCancelled",
+                dedupe_key=f"run:{run_id}:stopping:{run.cancellation_epoch}",
+                event_type="RunStopping",
                 correlation_id=run_id,
                 plan_id=plan.plan_id if plan is not None else None,
                 plan_version=plan.current_version if plan is not None else None,
@@ -668,7 +1091,12 @@ class PostgresRunRepository(
                 occurred_at=now,
             )
         )
-        return RunCancellationResult(RunStatus.CANCELLED, True, external_effect_status)
+        return RunCancellationResult(
+            RunStatus.STOPPING,
+            True,
+            external_effect_status,
+            run_id=run_id,
+        )
 
     async def _begin_plan_cancellation(
         self,
@@ -691,7 +1119,7 @@ class PostgresRunRepository(
         cancellation_epoch = (
             max(int(run.cancellation_epoch or 0), int(plan.cancellation_epoch or 0)) + 1
         )
-        run.status = RunStatus.CANCELLING.value
+        run.status = RunStatus.STOPPING.value
         run.cancellation_epoch = cancellation_epoch
         run.cancellation_external_effect_status = external_effect_status
         run.updated_at = now_iso
@@ -717,7 +1145,7 @@ class PostgresRunRepository(
         await self._cancel_root_resume_jobs(session, run_id, now)
         for event_type, scope in (
             ("PlanCancelling", f"plan:{plan.plan_id}"),
-            ("RunCancelling", f"run:{run_id}"),
+            ("RunStopping", f"run:{run_id}"),
         ):
             session.add(
                 OrchestrationOutboxModel(
@@ -740,7 +1168,12 @@ class PostgresRunRepository(
                     occurred_at=now,
                 )
             )
-        return RunCancellationResult(RunStatus.CANCELLING, True, external_effect_status)
+        return RunCancellationResult(
+            RunStatus.STOPPING,
+            True,
+            external_effect_status,
+            run_id=run_id,
+        )
 
     async def _cancel_pending_plan_tasks(
         self,
@@ -1028,31 +1461,50 @@ class PostgresRunRepository(
         *,
         response: dict[str, object] | None = None,
         error: dict[str, object] | None = None,
+        owner: str | None = None,
+        generation: int | None = None,
     ) -> bool:
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
-        values: dict[str, Any] = {"status": status.value, "updated_at": now_iso}
-        if response is not None:
-            values["response_json"] = json.dumps(response, ensure_ascii=False)
-        if error is not None:
-            values["error_json"] = json.dumps(error, ensure_ascii=False)
         async with self._session_factory() as session:
             async with session.begin():
-                result = await session.execute(
-                    update(AgentRunModel)
-                    .where(
-                        AgentRunModel.run_id == run_id,
-                        AgentRunModel.status.in_(
-                            (
-                                RunStatus.CREATED.value,
-                                RunStatus.RUNNING.value,
-                                RunStatus.PAUSED.value,
-                            )
-                        ),
+                session_id = await session.scalar(
+                    select(AgentRunModel.session_id).where(
+                        AgentRunModel.run_id == run_id
                     )
-                    .values(**values)
                 )
-                if result.rowcount:
+                if session_id is None:
+                    return False
+                session_row = await session.scalar(
+                    select(SessionModel)
+                    .where(SessionModel.id == session_id)
+                    .with_for_update()
+                )
+                run = await session.get(AgentRunModel, run_id, with_for_update=True)
+                allowed_states = (
+                    {RunStatus.RUNNING.value}
+                    if status == RunStatus.COMPLETED
+                    else {RunStatus.RUNNING.value, RunStatus.STOPPING.value}
+                )
+                if (
+                    session_row is None
+                    or run is None
+                    or session_row.active_run_id != run_id
+                    or run.status not in allowed_states
+                    or not self._owns_execution_lease(run, owner, generation, datetime.now(timezone.utc))
+                ):
+                    return False
+                run.status = status.value
+                run.updated_at = now_iso
+                run.execution_lease_owner = None
+                run.execution_lease_until = None
+                if response is not None:
+                    run.response_json = json.dumps(response, ensure_ascii=False)
+                if error is not None:
+                    run.error_json = json.dumps(error, ensure_ascii=False)
+                session_row.active_run_id = None
+                changed = True
+                if changed:
                     await session.execute(
                         update(RootResumeJobModel)
                         .where(
@@ -1061,9 +1513,7 @@ class PostgresRunRepository(
                         )
                         .values(
                             status=(
-                                "cancelled"
-                                if status == RunStatus.CANCELLED
-                                else "completed"
+                                "cancelled" if status == RunStatus.CANCELLED else "completed"
                             ),
                             lease_owner=None,
                             lease_until=None,
@@ -1103,21 +1553,12 @@ class PostgresRunRepository(
                                     )
                                     .on_conflict_do_nothing(index_elements=["id"])
                                 )
-                                session_row = await session.scalar(
-                                    select(SessionModel)
-                                    .where(
-                                        SessionModel.id == run.session_id,
-                                        SessionModel.deleted_time.is_(None),
-                                    )
-                                    .with_for_update()
-                                )
-                                if session_row is not None:
-                                    session_row.updated_at = now_iso
-                                    if (
-                                        session_row.last_activity_at is None
-                                        or now_iso > session_row.last_activity_at
-                                    ):
-                                        session_row.last_activity_at = now_iso
+                                session_row.updated_at = now_iso
+                                if (
+                                    session_row.last_activity_at is None
+                                    or now_iso > session_row.last_activity_at
+                                ):
+                                    session_row.last_activity_at = now_iso
                                 self._add_completion_outbox(
                                     session,
                                     run=run,
@@ -1147,31 +1588,6 @@ class PostgresRunRepository(
                                 payload_json={"summary": "运行已完成"},
                                 now=now,
                             )
-                        await session.execute(
-                            update(AgentCommandModel)
-                            .where(
-                                AgentCommandModel.run_id == run_id,
-                                AgentCommandModel.status.in_(
-                                    (
-                                        CommandStatus.QUEUED.value,
-                                        CommandStatus.RUNNING.value,
-                                    )
-                                ),
-                                AgentCommandModel.command_type.in_(
-                                    (
-                                        CommandType.MESSAGE_SUBMIT.value,
-                                        CommandType.RUN_START.value,
-                                        CommandType.RUN_RESUME.value,
-                                    )
-                                ),
-                            )
-                            .values(
-                                status=CommandStatus.COMPLETED.value,
-                                result_json=json.dumps(response, ensure_ascii=False),
-                                error_json=None,
-                                completed_at=now_iso,
-                            )
-                        )
                     elif status == RunStatus.FAILED:
                         run = await session.get(AgentRunModel, run_id)
                         if run is not None:
@@ -1190,26 +1606,7 @@ class PostgresRunRepository(
                                 payload_json={"error": error or {"code": "run_failed"}},
                                 now=now,
                             )
-                        await session.execute(
-                            update(AgentCommandModel)
-                            .where(
-                                AgentCommandModel.run_id == run_id,
-                                AgentCommandModel.status.in_(
-                                    (
-                                        CommandStatus.QUEUED.value,
-                                        CommandStatus.RUNNING.value,
-                                    )
-                                ),
-                            )
-                            .values(
-                                status=CommandStatus.FAILED.value,
-                                error_json=json.dumps(
-                                    error or {"code": "run_failed"}, ensure_ascii=False
-                                ),
-                                completed_at=now_iso,
-                            )
-                        )
-        return bool(result.rowcount)
+        return changed
 
     @staticmethod
     def _add_completion_outbox(
@@ -1243,33 +1640,6 @@ class PostgresRunRepository(
         )
 
     @staticmethod
-    def _result(row: AgentCommandModel, deduplicated: bool) -> CommandEnqueueResult:
-        payload = parse_run_command_payload(
-            CommandType(row.command_type), row.payload_json
-        )
-        return CommandEnqueueResult(
-            command_id=row.command_id,
-            session_id=row.session_id,
-            run_id=row.run_id,
-            message_id=_message_id(payload),
-            attachment_ids=_attachment_ids(payload),
-            status=row.status,
-            deduplicated=deduplicated,
-        )
-
-    @staticmethod
-    def _record(row: AgentCommandModel) -> CommandStatusRecord:
-        return CommandStatusRecord(
-            row.command_id,
-            row.session_id,
-            row.run_id,
-            row.command_type,
-            row.status,
-            _json(row.result_json, None),
-            _json(row.error_json, None),
-        )
-
-    @staticmethod
     def _run(row: AgentRunModel, started_at: datetime | None = None) -> RunSummary:
         """将数据库行转为摘要，并提取用户任务标题。
 
@@ -1288,6 +1658,8 @@ class PostgresRunRepository(
         return RunSummary(
             row.run_id,
             row.session_id,
+            row.message_id,
+            row.sequence,
             row.status,
             row.root_thread_id,
             _json(row.error_json, None),

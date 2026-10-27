@@ -49,6 +49,7 @@ class RootRequestState(BaseModel):
 
     session_id: str = ""
     run_id: str = ""
+    run_sequence: int = Field(default=1, ge=1)
     message_id: str = ""
     user_message: str = ""
     attachment_ids: list[str] = Field(default_factory=list)

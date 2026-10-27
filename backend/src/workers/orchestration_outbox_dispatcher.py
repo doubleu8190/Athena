@@ -33,7 +33,7 @@ _EVENT_TYPES = {
     "RoundCompleted": (EventType.ROUND_COMPLETED, "completed", "round"),
     "PlanCancelling": (EventType.PLAN_CANCELLING, "cancelling", "plan"),
     "PlanCancelled": (EventType.PLAN_CANCELLED, "cancelled", "plan"),
-    "RunCancelling": (EventType.RUN_CANCELLING, "cancelling", "run"),
+    "RunStopping": (EventType.RUN_STOPPING, "stopping", "run"),
     "RunCancelled": (EventType.RUN_CANCELLED, "cancelled", "run"),
     "RunAnswerCompleted": (EventType.MESSAGE_COMPLETED, "completed", "message"),
     "RunCompleted": (EventType.RUN_COMPLETED, "completed", "run"),
@@ -176,7 +176,7 @@ def _application_event(lease: OrchestrationOutboxLease) -> ApplicationEvent:
         "outbox_message_id": lease.message_id,
     })
     if activity_type == "run" and lease.event_type in {
-        "RunCancelling",
+        "RunStopping",
         "RunCancelled",
     }:
         payload.setdefault("external_effect_status", "unknown")

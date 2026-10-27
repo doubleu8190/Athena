@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from application.sessions import SessionService
 from application.auth import AuthenticationConfig, AuthenticationService
 from application.runs import RunQueryService
-from application.runs import RunCommandService
+from application.runs import RunService
 from application.sessions import SessionMessageQueryService
 from interfaces.http.controllers.sessions_controller import (
     build_sessions_router,
@@ -58,7 +58,7 @@ def create_app(
     project_factory: Callable[[], ProjectService] | None = None,
     message_query_factory: Callable[[], SessionMessageQueryService] | None = None,
     run_query_factory: Callable[[], RunQueryService] | None = None,
-    run_command_factory: Callable[[], RunCommandService] | None = None,
+    run_service_factory: Callable[[], RunService] | None = None,
     orchestration_query_factory: Callable[[], OrchestrationQueryService] | None = None,
     event_stream_factory: Callable[[], EventStreamService] | None = None,
     tool_query_factory: Callable[[], ToolQueryService] | None = None,
@@ -132,7 +132,7 @@ def create_app(
     project_factory = registered("project_factory", project_factory)
     message_query_factory = registered("message_query_factory", message_query_factory)
     run_query_factory = registered("run_query_factory", run_query_factory)
-    run_command_factory = registered("run_command_factory", run_command_factory)
+    run_service_factory = registered("run_service_factory", run_service_factory)
     orchestration_query_factory = registered(
         "orchestration_query_factory", orchestration_query_factory
     )
@@ -237,8 +237,8 @@ def create_app(
         app.include_router(build_approval_router(approval_service_factory), prefix="/api")
     if mcp_service_factory is not None:
         app.include_router(build_mcp_router(mcp_service_factory), prefix="/api")
-    if run_command_factory is not None:
-        app.include_router(build_runs_router(run_command_factory), prefix="/api")
+    if run_service_factory is not None:
+        app.include_router(build_runs_router(run_service_factory), prefix="/api")
     if run_query_factory is not None:
         app.include_router(build_run_query_router(run_query_factory), prefix="/api")
     if orchestration_query_factory is not None:

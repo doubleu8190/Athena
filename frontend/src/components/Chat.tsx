@@ -9,8 +9,33 @@ import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
 import type { ApprovalRequest, ExecutionTimelineEntry, Message, SupportedAttachmentTypes } from "../types"
 
+const STOP_REQUESTS_STORAGE_KEY = "athena:pending-stop-requests"
+
+function readPendingStopRequests(): Map<string, { requestId: string; cursor: number }> {
+  try {
+    const value = localStorage.getItem(STOP_REQUESTS_STORAGE_KEY)
+    const parsed = value ? JSON.parse(value) as Record<string, { requestId?: unknown; cursor?: unknown }> : {}
+    return new Map(Object.entries(parsed).flatMap(([key, item]) =>
+      typeof item?.requestId === "string" && typeof item.cursor === "number"
+        ? [[key, { requestId: item.requestId, cursor: item.cursor }]]
+        : [],
+    ))
+  } catch {
+    return new Map()
+  }
+}
+
+function persistPendingStopRequests(
+  requests: Map<string, { requestId: string; cursor: number }>,
+): void {
+  try {
+    localStorage.setItem(STOP_REQUESTS_STORAGE_KEY, JSON.stringify(Object.fromEntries(requests)))
+  } catch {
+    // The current page still retains the request ID if browser storage is unavailable.
+  }
+}
 interface ChatProps {
-  sendEvent: (type: string, sessionId: string | null, data?: Record<string, unknown>) => Promise<string | null>
+  sendEvent: (type: string, sessionId: string | null, data?: Record<string, unknown>) => Promise<{ sessionId: string; messageId: string; runId: string; sequence: number; status: string } | null>
   draft: { id: string; projectId: string } | null
   ensureSession: (draftId: string, projectId: string, title?: string) => Promise<string>
   onOpenSessions?: () => void
@@ -18,9 +43,9 @@ interface ChatProps {
 }
 
 type ChatFeedItem =
-  | { kind: "message"; id: string; timestamp: string; message: Message; sessionSeq?: number }
-  | { kind: "event"; id: string; timestamp: string; entry: ExecutionTimelineEntry; sessionSeq?: number }
-  | { kind: "run_header"; id: string; timestamp: string; runId: string; sessionSeq?: number }
+  | { kind: "message"; id: string; timestamp: string; message: Message; sessionSeq?: number; runSequence?: number }
+  | { kind: "event"; id: string; timestamp: string; entry: ExecutionTimelineEntry; sessionSeq?: number; runSequence?: number }
+  | { kind: "run_header"; id: string; timestamp: string; runId: string; sessionSeq?: number; runSequence?: number }
 
 function isSupportedAttachment(file: File, supportedTypes: SupportedAttachmentTypes): boolean {
   const filename = file.name.toLowerCase()
@@ -36,6 +61,7 @@ function _attachmentTitle(files: File[]): string {
 function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = false }: ChatProps) {
   const {
     messages,
+    sessions,
     orchestrationTasks,
     orchestrationPlans,
     activeSessionId,
@@ -45,6 +71,8 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     thinking,
     error,
     setMessages,
+    addMessage,
+    updateSession,
     clearMessages,
     clearSteps,
     clearToolCalls,
@@ -58,6 +86,8 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     setError,
     clearError,
     attachments,
+    suppressRunOutput,
+    restoreRunOutput,
     setAttachments,
     upsertAttachment,
     removeAttachment,
@@ -65,6 +95,10 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
 
   const [input, setInput] = useState("")
   const [isSending, setIsSending] = useState(false)
+  const [stopAllowsSend, setStopAllowsSend] = useState(false)
+  const [stopRequestUncertain, setStopRequestUncertain] = useState(false)
+  const [hasQueuedRuns, setHasQueuedRuns] = useState(false)
+  const [runSequenceState, setRunSequenceState] = useState<Record<string, number>>({})
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [showActivity, setShowActivity] = useState(false)
   const [collapsedRunIds, setCollapsedRunIds] = useState<Set<string>>(() => new Set())
@@ -82,7 +116,11 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const loadingSessionIdRef = useRef<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const pendingSendsRef = useRef(new Map<string, { fingerprint: string; messageId: string; commandId: string }>())
+  const pendingSendsRef = useRef(new Map<string, { fingerprint: string; requestId: string }>())
+  const stopRequestsRef = useRef(readPendingStopRequests())
+  const runStateRefreshGenerationRef = useRef(0)
+  const runStateRequestSequenceRef = useRef(0)
+  const runStateAppliedSequenceRef = useRef(0)
   const composerDraftsRef = useRef<Map<string, string>>(new Map())
   const queuedFilesByTargetRef = useRef<Map<string, File[]>>(new Map())
   const latestInputRef = useRef(input)
@@ -94,10 +132,18 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     const item = attachments.find((attachment) => attachment.id === id)
     return !item || item.status !== "ready"
   })
+  const activeRunId = sessions.find((session) => session.id === activeSessionId)?.active_run_id ?? null
+  const isAgentActive = Boolean(activeRunId || hasQueuedRuns)
+    || agentStatus === "queued"
+    || agentStatus === "thinking"
+    || agentStatus === "running"
+    || agentStatus === "cancelling"
+    || agentStatus === "waiting_approval"
   const canSend = (input.trim().length > 0 || selectedAttachmentIds.length > 0)
     && !hasPendingSelectedAttachments
     && !isSending
     && !isUploading
+    && (!isAgentActive || stopAllowsSend)
     && Boolean(activeSessionId || draft)
   const hasPendingAttachmentProcessing = attachments.some(
     (item) => item.status === "uploaded" || item.status === "processing",
@@ -283,36 +329,67 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
-    if ((!text && selectedAttachmentIds.length === 0) || (!activeSessionId && !draft) || isSending || isUploading || hasPendingSelectedAttachments) return
+    const status = useChatStore.getState().agentStatus
+    const currentlyActive = Boolean(activeRunId || hasQueuedRuns)
+      || ["queued", "thinking", "running", "cancelling", "waiting_approval"].includes(status)
+    if ((!text && selectedAttachmentIds.length === 0) || (!activeSessionId && !draft) || isSending || isUploading || hasPendingSelectedAttachments || (currentlyActive && !stopAllowsSend)) return
 
     const targetComposerId = activeSessionId ?? draft!.id
+    runStateRefreshGenerationRef.current += 1
     setIsSending(true)
     const fingerprint = JSON.stringify([text, selectedAttachmentIds])
     if (pendingSendsRef.current.get(targetComposerId)?.fingerprint !== fingerprint) {
+      const prior = pendingSendsRef.current.get(targetComposerId)
+      if (prior) useChatStore.getState().removeMessage(prior.requestId)
       pendingSendsRef.current.set(targetComposerId, {
         fingerprint,
-        messageId: crypto.randomUUID(),
-        commandId: `cmd_${crypto.randomUUID()}`,
+        requestId: crypto.randomUUID(),
       })
     }
     const pending = pendingSendsRef.current.get(targetComposerId)!
+    const optimisticId = pending.requestId
+    if (!useChatStore.getState().messages.some((message) => message.id === optimisticId)) {
+      addMessage({
+        id: optimisticId,
+        role: "user",
+        content: text || "Please process the attached files.",
+        timestamp: new Date().toISOString(),
+        session_id: activeSessionId ?? "",
+      })
+    }
     try {
       composerDraftsRef.current.set(targetComposerId, input)
-      const sessionId = await sendEvent(ClientEventType.USER_COMMAND, activeSessionId, {
+      const result = await sendEvent(ClientEventType.USER_COMMAND, activeSessionId, {
         ...(draft ? { draft_id: draft.id, project_id: draft.projectId } : {}),
         message: text || "Please process the attached files.",
-        message_id: pending.messageId,
-        command_id: pending.commandId,
+        request_id: pending.requestId,
         attachment_ids: selectedAttachmentIds,
       })
+      if (!result) throw new Error("Run submission returned no receipt")
+      runStateRefreshGenerationRef.current += 1
+      const currentMessages = useChatStore.getState().messages
+      useChatStore.getState().removeMessage(optimisticId)
+      if (!currentMessages.some((message) => message.id === result.messageId)) {
+        addMessage({
+          id: result.messageId,
+          role: "user",
+          content: text || "Please process the attached files.",
+          timestamp: new Date().toISOString(),
+          session_id: result.sessionId,
+          run_id: result.runId,
+        })
+      }
+      setRunSequenceState((current) => ({ ...current, [result.runId]: result.sequence }))
       composerDraftsRef.current.set(targetComposerId, "")
-      if (sessionId) composerDraftsRef.current.set(sessionId, "")
+      composerDraftsRef.current.set(result.sessionId, "")
       pendingSendsRef.current.delete(targetComposerId)
       const currentComposerId = composerKeyRef.current
-      if (currentComposerId === targetComposerId || currentComposerId === sessionId) {
+      if (currentComposerId === targetComposerId || currentComposerId === result.sessionId) {
         setInput("")
         setSelectedAttachmentIds([])
-        setAgentStatus("running")
+        setAgentStatus(result.status === "queued" ? "queued" : "running")
+        setHasQueuedRuns(true)
+        setStopAllowsSend(false)
         clearThinking()
         clearError()
       }
@@ -327,6 +404,10 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     activeSessionId,
     draft,
     isSending,
+    stopAllowsSend,
+    activeRunId,
+    hasQueuedRuns,
+    addMessage,
     setAgentStatus,
     setError,
     clearError,
@@ -443,23 +524,92 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     removeAttachment(fileId)
   }, [activeSessionId, removeAttachment])
 
+  const refreshRunState = useCallback(async (sessionId: string) => {
+    const generation = runStateRefreshGenerationRef.current
+    const requestSequence = ++runStateRequestSequenceRef.current
+    const runs = await apiClient.listSessionRuns(sessionId)
+    if (generation !== runStateRefreshGenerationRef.current || requestSequence < runStateAppliedSequenceRef.current || useChatStore.getState().activeSessionId !== sessionId) return
+    runStateAppliedSequenceRef.current = requestSequence
+    setRunSequenceState(Object.fromEntries(runs.map((run) => [run.run_id, run.sequence])))
+    const active = runs.find((run) => run.status === "running" || run.status === "stopping")
+    const queued = runs.some((run) => run.status === "queued")
+    const pendingStopKey = active && stopRequestsRef.current.has(`${sessionId}:${active.run_id}`)
+      ? `${sessionId}:${active.run_id}`
+      : null
+    let removedStopRequest = false
+    for (const key of stopRequestsRef.current.keys()) {
+      if (key.startsWith(`${sessionId}:`) && key !== pendingStopKey) {
+        stopRequestsRef.current.delete(key)
+        removedStopRequest = true
+      }
+    }
+    if (removedStopRequest) persistPendingStopRequests(stopRequestsRef.current)
+    updateSession(sessionId, { active_run_id: active?.run_id ?? null })
+    setHasQueuedRuns(queued)
+    setStopAllowsSend(!queued && (active?.status === "stopping" || pendingStopKey !== null))
+    setStopRequestUncertain(Boolean(pendingStopKey))
+    setAgentStatus(active?.status === "stopping" ? "cancelling" : active ? "running" : queued ? "queued" : "idle")
+  }, [setAgentStatus, setRunSequenceState, setStopAllowsSend, setStopRequestUncertain, updateSession])
+
+  useEffect(() => {
+    if (!activeSessionId || demoMode) return
+    void refreshRunState(activeSessionId).catch(() => undefined)
+    const timer = window.setInterval(() => void refreshRunState(activeSessionId).catch(() => undefined), 1000)
+    return () => window.clearInterval(timer)
+  }, [activeSessionId, demoMode, refreshRunState])
+
+  useEffect(() => {
+    runStateRefreshGenerationRef.current += 1
+    setStopAllowsSend(false)
+    setHasQueuedRuns(false)
+    setStopRequestUncertain(false)
+    setRunSequenceState({})
+  }, [activeSessionId])
+
   const handleStop = useCallback(() => {
-    if (!activeSessionId) return
-    const previousStatus = useChatStore.getState().agentStatus
+    if (!activeSessionId || !activeRunId) return
+    const runId = activeRunId
+    const requestKey = `${activeSessionId}:${runId}`
+    const cursor = Math.max(
+      0,
+      ...runTimelineEvents.map((event) => event.session_seq),
+      ...messages.map((message) => message.session_seq ?? 0),
+    )
+    const existing = stopRequestsRef.current.get(requestKey)
+    const stopRequest = existing ?? { requestId: crypto.randomUUID(), cursor }
+    runStateRefreshGenerationRef.current += 1
+    stopRequestsRef.current.set(requestKey, stopRequest)
+    persistPendingStopRequests(stopRequestsRef.current)
+    setStopRequestUncertain(false)
     clearError()
+    suppressRunOutput(runId, stopRequest.cursor)
+    setStopAllowsSend(!hasQueuedRuns)
     setAgentStatus("cancelling")
-    void apiClient.cancelSession(activeSessionId)
-      .then((response) => {
-        if (response.status === "cancelling") setAgentStatus("cancelling")
-        else if (response.status === "completed") setAgentStatus("completed")
-        else if (response.status === "failed") setAgentStatus("error")
-        else setAgentStatus("idle")
-      })
-      .catch((err) => {
-        if (useChatStore.getState().agentStatus === "cancelling") setAgentStatus(previousStatus)
-        setError(err instanceof Error ? err.message : "Failed to stop run")
-      })
-  }, [activeSessionId, clearError, setAgentStatus, setError])
+    void apiClient.stopSession(activeSessionId, stopRequest.requestId, {
+      expected_run_id: runId,
+      displayed_session_seq: stopRequest.cursor,
+    }).then(() => {
+      stopRequestsRef.current.delete(requestKey)
+      persistPendingStopRequests(stopRequestsRef.current)
+      if (useChatStore.getState().activeSessionId !== activeSessionId) return
+      setStopRequestUncertain(false)
+      void refreshRunState(activeSessionId).catch(() => undefined)
+    }).catch((err) => {
+      if (useChatStore.getState().activeSessionId !== activeSessionId) return
+      const status = err && typeof err === "object" && "status" in err
+        ? Number((err as { status?: unknown }).status)
+        : 0
+      if (status >= 400 && status < 500) {
+        stopRequestsRef.current.delete(requestKey)
+        persistPendingStopRequests(stopRequestsRef.current)
+        setStopRequestUncertain(false)
+        restoreRunOutput(runId)
+        setStopAllowsSend(false)
+        void refreshRunState(activeSessionId).catch(() => undefined)
+      } else setStopRequestUncertain(true)
+      setError(err instanceof Error ? err.message : "Failed to stop run")
+    })
+  }, [activeSessionId, activeRunId, hasQueuedRuns, runTimelineEvents, messages, clearError, suppressRunOutput, setAgentStatus, setError, refreshRunState, restoreRunOutput])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -514,19 +664,24 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     }
   }, [clearError, demoMode, setError])
 
-  const isAgentActive =
-    agentStatus === "thinking" ||
-    agentStatus === "running" ||
-    agentStatus === "cancelling" ||
-    agentStatus === "waiting_approval"
-
   useEffect(() => {
     if (!isAgentActive) return
     const timer = window.setInterval(() => setActivityNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [isAgentActive])
 
+  const runSequenceById = new Map<string, number>(Object.entries(runSequenceState))
+  for (const event of runTimelineEvents) {
+    if (event.event_type === "run.queued" && event.run_id && typeof event.payload.sequence === "number") {
+      runSequenceById.set(event.run_id, event.payload.sequence)
+    }
+  }
   const orderedMessages = [...messages].sort((left, right) => {
+    const leftSequence = left.run_id ? runSequenceById.get(left.run_id) : undefined
+    const rightSequence = right.run_id ? runSequenceById.get(right.run_id) : undefined
+    if (leftSequence !== undefined && rightSequence !== undefined && leftSequence !== rightSequence) {
+      return leftSequence - rightSequence
+    }
     const delta = Date.parse(left.timestamp) - Date.parse(right.timestamp)
     return Number.isNaN(delta) || delta === 0 ? left.id.localeCompare(right.id) : delta
   })
@@ -541,15 +696,10 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       }
       if (event.event_type === "run.resumed") runTerminalById.delete(event.run_id)
     }
-    if (["run.completed", "run.failed", "run.cancelled", "run.paused", "run.budget_exceeded"].includes(event.event_type)) {
+    if (["run.completed", "run.failed", "run.cancelled", "run.budget_exceeded"].includes(event.event_type)) {
       runTerminalById.set(event.run_id, { eventType: event.event_type, timestamp: event.occurred_at })
     }
   }
-  const activeRunId = [...runTimelineEvents].reverse().find((event) =>
-    event.run_id !== null
-    && (event.event_type === "run.started" || event.event_type === "run.resumed")
-    && !runTerminalById.has(event.run_id),
-  )?.run_id
   const activeExecutionEntry = activeRunId
     ? [...executionTimeline].reverse().find((entry) => entry.status === "running" && entry.run_id === activeRunId)
     : undefined
@@ -561,7 +711,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   const runHeaders: ChatFeedItem[] = [...runIds].flatMap((runId) => {
     const started = runStartById.get(runId)
     if (!started) return []
-    return [{ kind: "run_header", id: `run-header:${runId}`, timestamp: started.timestamp, runId, sessionSeq: started.sessionSeq }]
+    return [{ kind: "run_header", id: `run-header:${runId}`, timestamp: started.timestamp, runId, sessionSeq: started.sessionSeq, runSequence: runSequenceById.get(runId) }]
   })
 
   const timelineFeed: ChatFeedItem[] = [
@@ -571,6 +721,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       timestamp: message.timestamp,
       message,
       sessionSeq: message.session_seq,
+      runSequence: message.run_id ? runSequenceById.get(message.run_id) : undefined,
     })),
     ...executionTimeline.map((entry) => ({
       kind: "event" as const,
@@ -578,9 +729,13 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       timestamp: entry.timestamp,
       entry,
       sessionSeq: entry.session_seq,
+      runSequence: entry.run_id ? runSequenceById.get(entry.run_id) : undefined,
     })),
     ...runHeaders,
   ].sort((left, right) => {
+    if (left.runSequence !== undefined && right.runSequence !== undefined && left.runSequence !== right.runSequence) {
+      return left.runSequence - right.runSequence
+    }
     const delta = Date.parse(left.timestamp) - Date.parse(right.timestamp)
     if (!Number.isNaN(delta) && delta !== 0) return delta
     if (left.sessionSeq !== undefined && right.sessionSeq !== undefined && left.sessionSeq !== right.sessionSeq) {
@@ -804,7 +959,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
                 style={{ maxHeight: "200px", minHeight: "48px" }}
               />
             </div>
-            {isAgentActive ? (
+            {isAgentActive && !stopAllowsSend && activeRunId ? (
               <>
                 <button
                   onClick={handleStop}
@@ -819,12 +974,23 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!canSend}
+                disabled={!canSend || (isAgentActive && !stopAllowsSend)}
                 className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
-                title="Send"
+                title={isAgentActive && !stopAllowsSend ? "等待当前任务完成" : "发送消息"}
                 aria-label="发送消息"
               >
                 <Send className="w-4 h-4" />
+              </button>
+            )}
+            {stopRequestUncertain && stopAllowsSend && activeRunId && (
+              <button
+                type="button"
+                onClick={handleStop}
+                className="inline-flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg border border-athena-danger text-athena-danger hover:bg-athena-danger/10"
+                title="重试停止当前任务"
+                aria-label="重试停止当前任务"
+              >
+                <Square className="w-4 h-4" />
               </button>
             )}
           </div>

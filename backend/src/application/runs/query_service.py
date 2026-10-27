@@ -9,7 +9,10 @@ from domain.sessions import SessionRepository
 from application.common.responses import RunListResponse, RunSummaryResponse, RunTimelineEventResponse, RunTimelineResponse
 
 from application.sessions import SessionNotFoundError
-from .command_service import RunNotFoundError
+
+
+class RunNotFoundError(LookupError):
+    """The requested Run does not exist."""
 
 
 class RunQueryService:
@@ -96,6 +99,8 @@ def _to_response(value: RunSummary) -> RunSummaryResponse:
     return RunSummaryResponse(
         run_id=value.run_id,
         session_id=value.session_id,
+        message_id=value.message_id,
+        sequence=value.sequence,
         status=value.status.value if isinstance(value.status, RunStatus) else str(value.status),
         root_thread_id=value.root_thread_id,
         error=value.error,
@@ -120,6 +125,8 @@ def _to_timeline_run_response(value: RunSummary) -> RunSummaryResponse:
     return RunSummaryResponse(
         run_id=response.run_id,
         session_id=response.session_id,
+        message_id=response.message_id,
+        sequence=response.sequence,
         status=response.status,
         root_thread_id=response.root_thread_id,
         error=safe_error,

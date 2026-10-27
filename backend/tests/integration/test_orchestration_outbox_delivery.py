@@ -199,6 +199,8 @@ async def test_outbox_replay_after_publish_before_ack_persists_one_event() -> No
             session.add(
                 AgentRunModel(
                     run_id="run-outbox-1",
+                    message_id="message:" + str("run-outbox-1"),
+                    sequence=1,
                     session_id="session-outbox-1",
                     status="cancelled",
                     root_thread_id="run:run-outbox-1",

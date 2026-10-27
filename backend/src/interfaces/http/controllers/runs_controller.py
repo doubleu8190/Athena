@@ -1,23 +1,17 @@
-"""运行命令和命令状态 Controller。"""
+"""Run submission, stop and query HTTP routes."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
-from application.runs import (
-    CommandNotFoundError,
-    CommandRejectedError,
-    RunNotFoundError,
-    RunCommandService,
-    RunQueryService,
-)
+from application.runs import RunNotFoundError, RunQueryService, RunRejectedError, RunService
 from application.sessions import SessionNotFoundError
 from interfaces.http.dto.runs import (
-    CancelCommandResponse,
-    CommandStatusResponse,
     RunListResponse,
+    StopRunRequest,
+    StopRunResponse,
     SubmitRunRequest,
     SubmitRunResponse,
 )
@@ -27,17 +21,6 @@ from interfaces.http.dto.sessions import RunSummaryResponse
 def build_run_query_router(
     query_service_factory: Callable[[], RunQueryService],
 ) -> APIRouter:
-    """创建运行历史路由。
-
-    Args:
-        query_service_factory: 返回运行查询用例的工厂。
-
-    Returns:
-        提供跨会话分页查询的路由。
-
-    Raises:
-        无预期业务异常。
-    """
     router = APIRouter(tags=["runs"])
 
     @router.get("/runs", response_model=RunListResponse)
@@ -47,124 +30,85 @@ def build_run_query_router(
         session_id: str | None = None,
         runs: RunQueryService = Depends(query_service_factory),
     ) -> RunListResponse:
-        """返回运行历史。
-
-        Args:
-            limit: 每页条数，范围 1 到 200。
-            offset: 非负分页偏移。
-            session_id: 可选的会话 ID。
-            runs: 注入的运行查询用例。
-
-        Returns:
-            运行摘要、总条数及分页标记。
-
-        Raises:
-            HTTPException: 指定会话不存在时返回 404。
-        """
         try:
             value = await runs.list_recent(limit=limit, offset=offset, session_id=session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return RunListResponse(
             items=[RunSummaryResponse.from_application(item) for item in value.items],
-            total=value.total, has_more=value.has_more,
+            total=value.total,
+            has_more=value.has_more,
         )
+
+    @router.get("/runs/{run_id}", response_model=RunSummaryResponse)
+    async def get_run(
+        run_id: str,
+        runs: RunQueryService = Depends(query_service_factory),
+    ) -> RunSummaryResponse:
+        try:
+            return RunSummaryResponse.from_application(await runs.get(run_id))
+        except RunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run_not_found") from exc
 
     return router
 
 
 def build_runs_router(
-    command_service_factory: Callable[[], RunCommandService],
+    run_service_factory: Callable[[], RunService],
 ) -> APIRouter:
-    """注册运行提交、取消和命令状态路由。"""
     router = APIRouter(tags=["runs"])
 
-    def service() -> RunCommandService:
-        return command_service_factory()
-
-    @router.post("/runs", status_code=202)
+    @router.post("/runs", status_code=202, response_model=SubmitRunResponse)
     async def submit_run(
         request: SubmitRunRequest,
-        commands: RunCommandService = Depends(service),
+        response: Response,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        runs: RunService = Depends(run_service_factory),
     ) -> SubmitRunResponse:
-        """提交消息；空会话 ID 由用例在命令事务中创建项目聊天。"""
         try:
-            value = await commands.submit(
+            value = await runs.submit(
                 request.session_id,
                 project_id=request.project_id,
-                command_id=request.command_id,
+                request_id=idempotency_key,
                 message=request.message,
-                message_id=request.message_id,
                 attachment_ids=request.attachment_ids,
             )
-        except SessionNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="session_not_found") from exc
-        except CommandRejectedError as exc:
-            status = (
-                404
-                if exc.code in {"session_not_found", "project_not_found"}
-                else 409
-                if exc.code in {
-                    "command_id_conflict",
-                    "run_id_conflict",
-                    "session_busy",
-                    "session_project_mismatch",
-                }
-                else 400
-            )
+        except RunRejectedError as exc:
+            status = 404 if exc.code in {"session_not_found", "project_not_found"} else 409 if exc.code in {
+                "idempotency_conflict", "session_project_mismatch", "active_run_changed"
+            } else 400
             raise HTTPException(status_code=status, detail=exc.code) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if value.replayed:
+            response.headers["Idempotency-Replayed"] = "true"
         return SubmitRunResponse.from_application(value)
 
-    @router.post("/sessions/{session_id}/cancel", status_code=202)
-    async def cancel_session(
+    @router.post(
+        "/sessions/{session_id}/stop",
+        status_code=202,
+        response_model=StopRunResponse,
+    )
+    async def stop_session(
         session_id: str,
-        run_id: str | None = None,
-        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-        commands: RunCommandService = Depends(service),
-    ) -> CancelCommandResponse:
+        request: StopRunRequest,
+        response: Response,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        runs: RunService = Depends(run_service_factory),
+    ) -> StopRunResponse:
         try:
-            value = await commands.cancel_session(
+            value = await runs.stop_session(
                 session_id,
-                run_id=run_id,
-                idempotency_key=idempotency_key,
+                request_id=idempotency_key,
+                expected_run_id=request.expected_run_id,
+                displayed_session_seq=request.displayed_session_seq,
             )
-        except SessionNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="session_not_found") from exc
-        except RunNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="run_not_found") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return CancelCommandResponse.from_application(value)
-
-    @router.post("/runs/{run_id}/cancel", status_code=202)
-    async def cancel_run(
-        run_id: str,
-        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-        commands: RunCommandService = Depends(service),
-    ) -> CancelCommandResponse:
-        try:
-            value = await commands.cancel_run(
-                run_id,
-                idempotency_key=idempotency_key,
-            )
-        except RunNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="run_not_found") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return CancelCommandResponse.from_application(value)
-
-    @router.get("/commands/{command_id}")
-    async def get_command(
-        command_id: str,
-        commands: RunCommandService = Depends(service),
-    ) -> CommandStatusResponse:
-        try:
-            value = await commands.get_command(command_id)
-        except CommandNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="command_not_found") from exc
-        return CommandStatusResponse.from_application(value)
+        except RunRejectedError as exc:
+            status = 404 if exc.code == "session_not_found" else 409 if exc.code == "active_run_changed" else 422
+            raise HTTPException(status_code=status, detail=exc.code) from exc
+        if value.replayed:
+            response.headers["Idempotency-Replayed"] = "true"
+        return StopRunResponse.from_application(value)
 
     return router
 

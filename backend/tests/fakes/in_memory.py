@@ -9,7 +9,7 @@ without changing controllers or application services.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from domain.approval import ApprovalDecision, ApprovalRepository, ApprovalRequest
@@ -53,20 +53,20 @@ from domain.memory import (
     MemoryWriteCommand,
 )
 from domain.runs import (
-    CommandEnqueueResult,
-    CommandStatus,
-    CommandStatusRecord,
+    CommandType,
+    RunCancellationResult,
     RunCommand,
-    RunCommandPayload,
+    RunEnqueueResult,
     RunStartPayload,
-    CommandQueuePort,
-    CommandStorePort,
+    RunQueuePort,
+    RunSubmissionPort,
     RunLifecyclePort,
     RunQueryPort,
     RunStatus,
     RunSummary,
 )
-from domain.sessions import Message, MessageRepository, Session, SessionRepository
+from domain.sessions import Message, MessageRepository, MessageRole, Session, SessionRepository
+from shared.contracts.memory import MemoryFactSchema, memory_schema_to_domain
 from domain.tools import (
     JsonSchema,
     MCPServerConfig,
@@ -81,6 +81,11 @@ from domain.tools import (
 )
 
 
+def _memory_fact_from(value: object) -> MemoryFact:
+    """在测试适配器边界解析 JSON 事实并返回领域对象。"""
+    return memory_schema_to_domain(MemoryFactSchema.model_validate(value))
+
+
 class InMemorySessionRepository(SessionRepository):
     def __init__(self) -> None:
         self.items: dict[str, Session] = {}
@@ -90,13 +95,15 @@ class InMemorySessionRepository(SessionRepository):
         self.items[session.id] = session
         return session
 
-    async def create_idempotent(self, session: Session, *, creation_request_id: str) -> Session:
-        existing_id = self.creation_requests.get(creation_request_id)
+    async def create_idempotent(
+        self, session: Session, *, request_id: str, parameters: dict[str, object]
+    ) -> tuple[Session, bool]:
+        existing_id = self.creation_requests.get(request_id)
         if existing_id is not None:
-            return self.items[existing_id]
+            return self.items[existing_id], True
         self.items[session.id] = session
-        self.creation_requests[creation_request_id] = session.id
-        return session
+        self.creation_requests[request_id] = session.id
+        return session, False
 
     async def get(self, session_id: str) -> Session | None:
         return self.items.get(session_id)
@@ -146,121 +153,227 @@ class InMemoryMessageRepository(MessageRepository):
         values.reverse()
         return values
 
+    async def list_recent_conversation_before_sequence(
+        self, session_id: str, *, before_sequence: int, limit: int
+    ) -> list[Message]:
+        run_sequence = {
+            run.run_id: run.sequence
+            for run in getattr(self, "runs", {}).values()
+        }
+        values = [
+            item for item in self.items.values()
+            if item.session_id == session_id
+            and item.role.value in {"user", "assistant"}
+            and item.run_id is not None
+            and run_sequence.get(item.run_id, before_sequence) < before_sequence
+        ]
+        values.sort(key=lambda item: (run_sequence.get(item.run_id or "", 0), item.timestamp, item.id))
+        return values[-limit:]
+
     async def list_after(self, session_id: str, after_id: str) -> list[Message]:
         values = await self.list_by_session(session_id)
         return [item for item in values if item.id > after_id]
 
 
-def _command_message_fields(payload: RunCommandPayload) -> tuple[str | None, tuple[str, ...]]:
-    if isinstance(payload, RunStartPayload):
-        return payload.message_id, payload.attachment_ids
-    return None, ()
-
-
 class InMemoryRunStore(
-    CommandQueuePort,
-    CommandStorePort,
+    RunQueuePort,
+    RunSubmissionPort,
     RunLifecyclePort,
     RunQueryPort,
 ):
     writes_cancellation_events_to_outbox = False
     writes_terminal_artifacts_to_outbox = False
 
-    def __init__(self) -> None:
-        self.commands: dict[str, RunCommand] = {}
-        self.command_status: dict[str, CommandStatusRecord] = {}
+    def __init__(self, sessions=None, messages=None, events=None) -> None:
+        self.sessions = sessions
+        self.messages = messages
+        self.events = events
+        self.invocations: dict[str, RunCommand] = {}
         self.runs: dict[str, RunSummary] = {}
         self.root_waits: dict[str, dict[str, object]] = {}
+        self.receipts: dict[tuple[str, str], tuple[str, object]] = {}
+        self.leases: dict[str, tuple[str, int, datetime]] = {}
+        if messages is not None:
+            messages.runs = self.runs
 
-    async def enqueue_command(
-        self, command: RunCommand, *, new_session: Session | None = None
-    ) -> CommandEnqueueResult:
-        message_id, attachment_ids = _command_message_fields(command.payload)
-        existing = self.command_status.get(command.command_id)
-        if existing is not None:
-            return CommandEnqueueResult(
-                command_id=command.command_id,
-                session_id=existing.session_id,
-                run_id=existing.run_id,
-                message_id=message_id,
-                attachment_ids=attachment_ids,
-                status=existing.status,
-                deduplicated=True,
+    async def enqueue_run(
+        self,
+        *,
+        request_id: str,
+        parameters: dict[str, object],
+        session_id: str,
+        project_id: str | None,
+        run_id: str,
+        payload: RunStartPayload,
+        new_session: Session | None = None,
+    ) -> tuple[RunEnqueueResult, bool]:
+        parameter_hash = hashlib.sha256(
+            json.dumps(parameters, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        receipt_key = ("runs.submit", request_id)
+        receipt = self.receipts.get(receipt_key)
+        if receipt is not None:
+            if receipt[0] != parameter_hash:
+                raise ValueError("idempotency_conflict")
+            return replace(receipt[1], deduplicated=True), True
+        if new_session is not None:
+            if self.sessions is None or new_session.id != session_id:
+                raise ValueError("new_session_invalid")
+            await self.sessions.create(new_session)
+        session = await self.sessions.get(session_id) if self.sessions is not None else None
+        if session is None:
+            raise ValueError("session_not_found")
+        sequence = max(
+            (item.sequence for item in self.runs.values() if item.session_id == session_id),
+            default=0,
+        ) + 1
+        persisted_payload = replace(payload, sequence=sequence)
+        now = datetime.now(timezone.utc)
+        if self.messages is not None:
+            await self.messages.save(
+                Message(
+                    id=payload.message_id,
+                    session_id=session_id,
+                    role=MessageRole.USER,
+                    content=payload.message,
+                    timestamp=now,
+                    run_id=run_id,
+                )
             )
-        if new_session is not None and new_session.id != command.session_id:
-            raise ValueError("new_session_command_invalid")
-        self.commands[command.command_id] = command
-        self.command_status[command.command_id] = CommandStatusRecord(command.command_id, command.session_id, command.run_id, command.command_type, CommandStatus.QUEUED)
-        if command.run_id:
-            now = datetime.now(timezone.utc)
-            self.runs.setdefault(command.run_id, RunSummary(command.run_id, command.session_id, RunStatus.CREATED, f"thread-{command.run_id}", created_at=now, updated_at=now))
-        return CommandEnqueueResult(
-            command_id=command.command_id,
-            session_id=command.session_id,
-            run_id=command.run_id,
-            message_id=message_id,
-            attachment_ids=attachment_ids,
-            status=CommandStatus.QUEUED,
-            deduplicated=False,
+        summary = RunSummary(
+            run_id=run_id,
+            session_id=session_id,
+            message_id=payload.message_id,
+            sequence=sequence,
+            status=RunStatus.QUEUED,
+            root_thread_id=f"thread-{run_id}",
+            created_at=now,
+            updated_at=now,
+        )
+        self.runs[run_id] = summary
+        self.invocations[run_id] = RunCommand(
+            command_id=f"run:{run_id}",
+            command_type=CommandType.RUN_START,
+            session_id=session_id,
+            run_id=run_id,
+            payload=persisted_payload,
+            issued_at=now,
+        )
+        result = RunEnqueueResult(session_id, run_id, payload.message_id, sequence, RunStatus.QUEUED, False)
+        self.receipts[receipt_key] = (parameter_hash, result)
+        if self.events is not None:
+            for event_type, event_payload in (
+                ("message.persisted", {"role": "user", "content": payload.message, "timestamp": now.isoformat(), "request_id": request_id}),
+                ("run.queued", {"sequence": sequence, "status": "queued"}),
+            ):
+                await self.events.publish(
+                    ApplicationEvent(
+                        event_type=event_type,
+                        durability="durable",
+                        session_id=session_id,
+                        run_id=run_id,
+                        message_id=payload.message_id,
+                        payload=event_payload,
+                    )
+                )
+        return result, False
+
+    async def list_for_session(self, session_id: str) -> list[RunSummary]:
+        return sorted(
+            (value for value in self.runs.values() if value.session_id == session_id),
+            key=lambda value: value.sequence,
         )
 
-    async def get_command(self, command_id: str) -> CommandStatusRecord | None:
-        return self.command_status.get(command_id)
-    async def list_for_session(self, session_id: str) -> list[RunSummary]:
-        return [value for value in self.runs.values() if value.session_id == session_id]
+    async def list_recent(self, *, limit: int, offset: int, session_id: str | None = None) -> tuple[list[RunSummary], int]:
+        values = [value for value in self.runs.values() if session_id is None or value.session_id == session_id]
+        values.sort(key=lambda value: (str(value.created_at), value.run_id), reverse=True)
+        return values[offset:offset + limit], len(values)
 
     async def get(self, run_id: str) -> RunSummary | None:
         return self.runs.get(run_id)
 
     async def get_active_for_session(self, session_id: str) -> RunSummary | None:
-        return next((value for value in self.runs.values() if value.session_id == session_id and value.status in {RunStatus.CREATED, RunStatus.RUNNING, RunStatus.PAUSED}), None)
+        active_id = (await self.sessions.get(session_id)).active_run_id if self.sessions else None
+        return self.runs.get(active_id) if active_id else None
 
-    async def claim_next_command(self) -> RunCommand | None:
-        for command_id, command in self.commands.items():
-            status = self.command_status[command_id]
-            if status.status == CommandStatus.QUEUED:
-                self.command_status[command_id] = replace(status, status=CommandStatus.RUNNING)
-                return command
+    async def claim_next_run(self) -> RunCommand | None:
+        if self.sessions is None:
+            return None
+        sessions = await self.sessions.list_sessions()
+        for session in sorted(sessions, key=lambda item: (item.last_activity_at or item.updated_at, item.id)):
+            if session.active_run_id is not None:
+                continue
+            queued = next((run for run in self.list_for_session_sync(session.id) if run.status == RunStatus.QUEUED), None)
+            if queued is None:
+                continue
+            generation = 1
+            owner = f"run-consumer:{queued.run_id}"
+            self.runs[queued.run_id] = replace(queued, status=RunStatus.RUNNING, updated_at=datetime.now(timezone.utc))
+            await self.sessions.save(replace(session, active_run_id=queued.run_id))
+            command = self.invocations[queued.run_id]
+            claimed = replace(
+                command,
+                execution_generation=generation,
+                lease_owner=owner,
+            )
+            self.invocations[queued.run_id] = claimed
+            self.leases[queued.run_id] = (owner, generation, datetime.now(timezone.utc) + timedelta(seconds=60))
+            return claimed
         return None
 
-    async def complete_command(self, command_id: str, *, status: CommandStatus, result: object = None, error: object = None) -> None:
-        current = self.command_status.get(command_id)
-        if current:
-            self.command_status[command_id] = replace(current, status=status, result=result, error=error)
+    async def reconcile_expired_execution_leases(self) -> int:
+        now = datetime.now(timezone.utc)
+        expired = [run_id for run_id, (_, _, until) in self.leases.items() if until <= now]
+        for run_id in expired:
+            run = self.runs.get(run_id)
+            if run is not None and run.status == RunStatus.RUNNING:
+                self.runs[run_id] = replace(run, status=RunStatus.STOPPING, error={"code": "root_execution_lease_expired"})
+                self.leases.pop(run_id, None)
+                await self.finalize_stop(run_id)
+        return len(expired)
 
-    async def complete_active_command_for_run(
-        self,
-        run_id: str,
-        *,
-        status: CommandStatus,
-        result: object = None,
-        error: object = None,
-    ) -> bool:
-        active = next(
-            (
-                command_id
-                for command_id, record in self.command_status.items()
-                if record.run_id == run_id and record.status == CommandStatus.RUNNING
-            ),
-            None,
+    def list_for_session_sync(self, session_id: str) -> list[RunSummary]:
+        return sorted(
+            (value for value in self.runs.values() if value.session_id == session_id),
+            key=lambda value: value.sequence,
         )
-        if active is None:
-            return False
-        await self.complete_command(active, status=status, result=result, error=error)
-        return True
 
     async def update_status(self, run_id: str, status: RunStatus | str) -> bool:
         current = self.runs.get(run_id)
-        if current is None:
+        if current is None or str(status) != RunStatus.RUNNING.value:
             return False
-        self.runs[run_id] = replace(current, status=status, updated_at=datetime.now(timezone.utc))
+        session = await self.sessions.get(current.session_id) if self.sessions else None
+        return session is not None and session.active_run_id == run_id and current.status == RunStatus.RUNNING
+
+    async def complete(self, run_id: str, result: dict[str, object], *, owner: str | None = None, generation: int | None = None) -> bool:
+        if owner is not None and (self.leases.get(run_id) or (None, None))[:2] != (owner, generation):
+            return False
+        return await self._finish(run_id, RunStatus.COMPLETED)
+
+    async def fail(self, run_id: str, error: dict[str, object], *, owner: str | None = None, generation: int | None = None) -> bool:
+        run = self.runs.get(run_id)
+        if run is None or run.status != RunStatus.RUNNING:
+            return False
+        if owner is not None and (self.leases.get(run_id) or (None, None))[:2] != (owner, generation):
+            return False
+        self.runs[run_id] = replace(run, status=RunStatus.STOPPING, error=error)
+        await self.finalize_stop(run_id)
         return True
 
-    async def complete(self, run_id: str, result: dict[str, object]) -> bool:
-        return await self.update_status(run_id, RunStatus.COMPLETED)
-
-    async def fail(self, run_id: str, error: dict[str, object]) -> bool:
-        return await self.update_status(run_id, RunStatus.FAILED)
+    async def _finish(self, run_id: str, status: RunStatus, error: dict[str, object] | None = None) -> bool:
+        run = self.runs.get(run_id)
+        if run is None or self.sessions is None:
+            return False
+        session = await self.sessions.get(run.session_id)
+        if session is None or session.active_run_id != run_id:
+            return False
+        self.runs[run_id] = replace(run, status=status, error=error, updated_at=datetime.now(timezone.utc))
+        await self.sessions.save(replace(session, active_run_id=None))
+        self.leases.pop(run_id, None)
+        if self.events is not None:
+            event_type = "run.completed" if status == RunStatus.COMPLETED else "run.failed"
+            await self.events.publish(ApplicationEvent(event_type, "durable", run.session_id, run_id=run_id, payload={"status": status.value}))
+        return True
 
     async def arm_root_wait(
         self,
@@ -290,7 +403,75 @@ class InMemoryRunStore(
         return True
 
     async def cancel(self, run_id: str) -> bool:
-        return await self.update_status(run_id, RunStatus.CANCELLED)
+        return await self.finalize_stop(run_id)
+
+    async def acquire_execution_lease(self, run_id: str, *, owner: str, lease_seconds: float) -> int | None:
+        run = self.runs.get(run_id)
+        if run is None or run.status != RunStatus.RUNNING:
+            return None
+        generation = self.leases.get(run_id, ("", 0, datetime.min.replace(tzinfo=timezone.utc)))[1] + 1
+        if run_id in self.leases:
+            return None
+        self.leases[run_id] = (owner, generation, datetime.now(timezone.utc) + timedelta(seconds=lease_seconds))
+        return generation
+
+    async def renew_execution_lease(self, run_id: str, *, owner: str, generation: int, lease_seconds: float) -> bool:
+        lease = self.leases.get(run_id)
+        if lease is None or lease[:2] != (owner, generation):
+            return False
+        self.leases[run_id] = (owner, generation, datetime.now(timezone.utc) + timedelta(seconds=lease_seconds))
+        return True
+
+    async def release_execution_lease(self, run_id: str, *, owner: str, generation: int) -> bool:
+        lease = self.leases.get(run_id)
+        if lease is None or lease[:2] != (owner, generation):
+            return False
+        self.leases.pop(run_id, None)
+        return True
+
+    async def stop_active(self, session_id: str, *, request_id: str, expected_run_id: str | None, displayed_session_seq: int) -> tuple[RunCancellationResult, bool]:
+        key = (f"sessions:{session_id}:stop", request_id)
+        parameters = {"expected_run_id": expected_run_id, "displayed_session_seq": displayed_session_seq}
+        parameter_hash = hashlib.sha256(json.dumps(parameters, sort_keys=True).encode()).hexdigest()
+        receipt = self.receipts.get(key)
+        if receipt is not None:
+            if receipt[0] != parameter_hash:
+                raise ValueError("idempotency_conflict")
+            return receipt[1], True
+        session = await self.sessions.get(session_id) if self.sessions else None
+        if session is None:
+            raise ValueError("session_not_found")
+        if session.active_run_id != expected_run_id:
+            raise ValueError("active_run_changed")
+        if expected_run_id is None:
+            result = RunCancellationResult(RunStatus.CANCELLED, False, "none", no_op=True)
+        else:
+            run = self.runs.get(expected_run_id)
+            if run is None or run.status != RunStatus.RUNNING:
+                raise ValueError("active_run_changed")
+            self.runs[expected_run_id] = replace(run, status=RunStatus.STOPPING)
+            result = RunCancellationResult(RunStatus.STOPPING, True, "unknown", run_id=expected_run_id)
+            if self.events is not None:
+                await self.events.publish(ApplicationEvent("run.stopping", "durable", session_id, run_id=expected_run_id))
+        self.receipts[key] = (parameter_hash, result)
+        return result, False
+
+    async def finalize_stop(self, run_id: str, *, failed: bool = False) -> bool:
+        run = self.runs.get(run_id)
+        if run is None or run.status != RunStatus.STOPPING or self.sessions is None:
+            return False
+        session = await self.sessions.get(run.session_id)
+        if session is None or session.active_run_id != run_id:
+            return False
+        if run_id in self.leases:
+            return False
+        failed = failed or run.error is not None
+        status = RunStatus.FAILED if failed else RunStatus.CANCELLED
+        self.runs[run_id] = replace(run, status=status)
+        await self.sessions.save(replace(session, active_run_id=None))
+        if self.events is not None:
+            await self.events.publish(ApplicationEvent("run.failed" if failed else "run.cancelled", "durable", run.session_id, run_id=run_id))
+        return True
 
 
 class InMemoryToolRepository(ToolConfigRepository):
@@ -361,7 +542,7 @@ class InMemoryMemoryPort(MemoryRepositoryPort):
                 fact = (
                     raw_fact
                     if isinstance(raw_fact, MemoryFact)
-                    else MemoryFact.model_validate(raw_fact)
+                    else _memory_fact_from(raw_fact)
                     if raw_fact is not None
                     else None
                 )
@@ -404,7 +585,7 @@ class InMemoryMemoryPort(MemoryRepositoryPort):
             fact = (
                 raw_fact
                 if isinstance(raw_fact, MemoryFact)
-                else MemoryFact.model_validate(raw_fact)
+                else _memory_fact_from(raw_fact)
                 if raw_fact is not None
                 else None
             )
@@ -460,7 +641,7 @@ class InMemoryMemoryPort(MemoryRepositoryPort):
             raw_fact = record.metadata.get("fact")
             if raw_fact is None:
                 continue
-            stored = raw_fact if isinstance(raw_fact, MemoryFact) else MemoryFact.model_validate(raw_fact)
+            stored = raw_fact if isinstance(raw_fact, MemoryFact) else _memory_fact_from(raw_fact)
             if stored.valid_from is not None:
                 try:
                     valid_from = datetime.fromisoformat(stored.valid_from)
@@ -563,7 +744,7 @@ def _fake_memory_source_ids(metadata: dict[str, Any]) -> tuple[str, ...]:
         source_ids.add(source_turn_id)
     raw_fact = metadata.get("fact")
     if raw_fact is not None:
-        fact = raw_fact if isinstance(raw_fact, MemoryFact) else MemoryFact.model_validate(raw_fact)
+        fact = raw_fact if isinstance(raw_fact, MemoryFact) else _memory_fact_from(raw_fact)
         source_ids.update(
             item.source_id for item in fact.source_refs if item.source_type == "turn"
         )
@@ -575,7 +756,7 @@ def _fake_memory_suppression_fingerprint(
 ) -> str:
     raw_fact = metadata.get("fact")
     fact = None if raw_fact is None else (
-        raw_fact if isinstance(raw_fact, MemoryFact) else MemoryFact.model_validate(raw_fact)
+        raw_fact if isinstance(raw_fact, MemoryFact) else _memory_fact_from(raw_fact)
     )
     identity = (
         ("fact", fact.scope_kind, fact.scope_id, fact.subject_key, fact.fact_key)

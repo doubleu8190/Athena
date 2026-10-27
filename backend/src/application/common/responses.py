@@ -15,12 +15,12 @@ from typing import Any
 class SessionResponse:
     id: str
     title: str
-    status: str
-    run_id: str | None
+    active_run_id: str | None
     created_at: datetime
     updated_at: datetime
     project_id: str | None = None
     last_activity_at: datetime | None = None
+    idempotency_replayed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +59,8 @@ class MessageResponse:
 class RunSummaryResponse:
     run_id: str
     session_id: str
+    message_id: str
+    sequence: int
     status: str
     root_thread_id: str
     error: Any = None
@@ -94,25 +96,21 @@ class RunTimelineResponse:
 
 
 @dataclass(frozen=True, slots=True)
-class CommandEnqueueResponse:
-    command_id: str
+class RunEnqueueResponse:
     session_id: str
-    run_id: str | None
-    message_id: str | None
-    attachment_ids: tuple[str, ...]
+    run_id: str
+    message_id: str
+    sequence: int
     status: str
-    deduplicated: bool
+    replayed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class CommandStatusResponse:
-    command_id: str
-    session_id: str
+class RunStopResponse:
     run_id: str | None
-    command_type: str
     status: str
-    result: Any = None
-    error: Any = None
+    no_op: bool = False
+    replayed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,9 +343,9 @@ class LoginResponse:
 
 __all__ = [
     "ApprovalResponse", "ApprovalStatsResponse", "AttachmentRefResponse", "AttachmentResponse",
-    "AuthSessionResponse", "CommandEnqueueResponse", "CommandStatusResponse",
+    "AuthSessionResponse",
     "EventResponse", "KnowledgeBaseResponse", "LoginResponse", "McpServerResponse",
     "MemoryPageResponse", "MemoryResponse", "MessageResponse", "ProviderResponse",
-    "RetrievalCandidateResponse", "RetrievalRunResponse", "RunSummaryResponse", "RunListResponse",
+    "RetrievalCandidateResponse", "RetrievalRunResponse", "RunEnqueueResponse", "RunStopResponse", "RunSummaryResponse", "RunListResponse",
     "SessionResponse", "SettingsResponse", "ToolCallResponse", "ToolResponse",
 ]

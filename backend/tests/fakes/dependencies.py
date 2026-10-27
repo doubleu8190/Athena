@@ -13,7 +13,7 @@ from application.events import EventStreamService
 from application.files import AttachmentService
 from application.knowledge import KnowledgeBaseQueryService, KnowledgeBaseService
 from application.memory import MemoryService
-from application.runs import RunCommandService, RunQueryService
+from application.runs import RunQueryService, RunService
 from application.sessions import SessionMessageQueryService, SessionService
 from application.tools import MCPService, ToolQueryService, ToolService
 from bootstrap import ApplicationDependencies, build_dependencies
@@ -43,12 +43,12 @@ def build_test_dependencies() -> ApplicationDependencies:
     """Build a stateful in-process graph without external services."""
     sessions = InMemorySessionRepository()
     messages = InMemoryMessageRepository()
-    runs = InMemoryRunStore()
     memory = InMemoryMemoryPort()
     tools = InMemoryToolRepository()
     mcp = InMemoryMCPPort()
     approvals = InMemoryApprovalRepository()
     events = InMemoryEventStore()
+    runs = InMemoryRunStore(sessions, messages, events)
     storage = InMemoryFileStorage()
     adapters = InMemoryFileAdapters()
     jobs = InMemoryDocumentJobs()
@@ -110,7 +110,7 @@ def build_test_dependencies() -> ApplicationDependencies:
         "session_service_factory": lambda: SessionService(sessions, id_factory=now_id),
         "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
         "run_query_factory": lambda: RunQueryService(sessions, runs, events),
-        "run_command_factory": lambda: RunCommandService(sessions, runs, runs, id_factory=now_id),
+        "run_service_factory": lambda: RunService(runs, runs, id_factory=now_id),
         "event_stream_factory": lambda: EventStreamService(sessions, events),
         "tool_query_factory": lambda: ToolQueryService(tools, queries),
         "tool_service_factory": lambda: ToolService(tools, InMemoryToolExecution()),

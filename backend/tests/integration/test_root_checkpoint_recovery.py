@@ -26,7 +26,9 @@ from infrastructure.persistence.postgres.models import (
     Base,
     PlanRoundModel,
     PlanVersionModel,
+    ProjectModel,
     RootResumeJobModel,
+    SessionModel,
 )
 from infrastructure.persistence.postgres.repositories.root_resume_job_repository import (
     PostgresRootResumeJobRepository,
@@ -35,6 +37,7 @@ from infrastructure.persistence.postgres.repositories.run_repository import (
     PostgresRunRepository,
 )
 from workers.root_resume_dispatcher import RootResumeDispatcher
+from shared.contracts.runs import RoundCompletedResumeValueSchema
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -97,6 +100,8 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                 lambda sync_connection: Base.metadata.create_all(
                     sync_connection,
                     tables=[
+                        ProjectModel.__table__,
+                        SessionModel.__table__,
                         AgentRunModel.__table__,
                         AgentPlanModel.__table__,
                         PlanVersionModel.__table__,
@@ -108,9 +113,21 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
         await checkpointer.start()
 
         async with session_factory() as session, session.begin():
+            session.add(ProjectModel(
+                id=f"project-{run_id}", name="Root checkpoint recovery",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=f"project-{run_id}",
+                title="Root checkpoint recovery", active_run_id=run_id,
+                last_run_sequence=1, created_at=now.isoformat(),
+                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
+                    message_id="message:" + str(run_id),
+                    sequence=1,
                     session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",
@@ -246,7 +263,9 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                     session_id=session_id,
                     run_id=run_id,
                     user_message="",
-                    resume_value=command.payload.resume_value.model_dump(mode="json"),
+                    resume_value=RoundCompletedResumeValueSchema.from_domain(
+                        command.payload.resume_value
+                    ).model_dump(mode="json"),
                 )
                 async with session_factory() as session, session.begin():
                     run = await session.get(AgentRunModel, run_id)

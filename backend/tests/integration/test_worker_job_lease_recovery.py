@@ -27,12 +27,14 @@ from infrastructure.persistence.postgres.models import (
     OrchestrationCommandModel,
     OrchestrationOutboxModel,
     OrchestrationInboxModel,
+    ProjectModel,
     PlanRoundModel,
     PlanVersionModel,
     RoundTaskModel,
     RootResumeJobModel,
     TaskExecutionModel,
     WorkerJobModel,
+    SessionModel,
 )
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
@@ -86,6 +88,8 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
             schema_created = True
 
         required_tables = [
+            ProjectModel.__table__,
+            SessionModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -187,6 +191,8 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
             schema_created = True
 
         required_tables = [
+            ProjectModel.__table__,
+            SessionModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -210,10 +216,24 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
         app_a_sessions = async_sessionmaker(app_a_engine, expire_on_commit=False)
         app_b_sessions = async_sessionmaker(app_b_engine, expire_on_commit=False)
         async with app_a_sessions() as session, session.begin():
+            session_id = f"session-{run_id}"
+            project_id = f"project-{run_id}"
+            session.add(ProjectModel(
+                id=project_id, name="Worker parallelism",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=project_id, title="Worker parallelism",
+                active_run_id=run_id, last_run_sequence=1,
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+                last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
-                    session_id=f"session-{run_id}",
+                    message_id="message:" + str(run_id),
+                    sequence=1,
+                    session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",
                     cancellation_epoch=0,
@@ -225,7 +245,7 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
                 AgentPlanModel(
                     plan_id=plan_id,
                     run_id=run_id,
-                    session_id=f"session-{run_id}",
+                    session_id=session_id,
                     status="running",
                     user_goal="Run no more than three tasks in parallel",
                     max_parallelism=3,
@@ -424,6 +444,8 @@ async def test_worker_terminal_commit_with_lost_receipt_is_deduplicated() -> Non
             schema_created = True
 
         required_tables = [
+            ProjectModel.__table__,
+            SessionModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -561,6 +583,8 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
             schema_created = True
 
         required_tables = [
+            ProjectModel.__table__,
+            SessionModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -587,11 +611,30 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
             restarted_app_engine, expire_on_commit=False
         )
         async with first_sessions() as session, session.begin():
+            session.add(ProjectModel(
+                id=f"project-{run_id}",
+                name="Worker restart recovery",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id,
+                project_id=f"project-{run_id}",
+                title="Worker restart recovery",
+                active_run_id=run_id,
+                last_run_sequence=1,
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                last_activity_at=now.isoformat(),
+            ))
+            await session.flush()
             session.add(
                 AgentRunModel(
                     run_id=run_id,
+                    message_id="message:" + str(run_id),
+                    sequence=1,
                     session_id=session_id,
-                    status="created",
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),
@@ -772,9 +815,21 @@ async def _seed_expired_worker_job(
     now 是测试使用的 UTC datetime。返回值为 None；数据库写入失败时抛出异常。
     """
     async with session_factory() as session, session.begin():
+        session.add(ProjectModel(
+            id="project-1", name="Worker lease recovery",
+            created_at=now.isoformat(), updated_at=now.isoformat(),
+        ))
+        session.add(SessionModel(
+            id="session-1", project_id="project-1", title="Worker lease recovery",
+            active_run_id="run-1", last_run_sequence=1,
+            created_at=now.isoformat(), updated_at=now.isoformat(),
+            last_activity_at=now.isoformat(),
+        ))
         session.add(
             AgentRunModel(
                 run_id="run-1",
+                message_id="message:" + str("run-1"),
+                sequence=1,
                 session_id="session-1",
                 status="running",
                 root_thread_id="run:run-1",

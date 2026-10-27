@@ -23,12 +23,13 @@ from domain.orchestration import (
     WorkerTaskTerminalEvent,
 )
 from infrastructure.persistence.postgres.models import (
-    AgentCommandModel,
+    AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    IdempotencyReceiptModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
     OrchestrationOutboxModel,
@@ -38,6 +39,8 @@ from infrastructure.persistence.postgres.models import (
     RootResumeJobModel,
     TaskExecutionModel,
     WorkerJobModel,
+    ProjectModel,
+    SessionModel,
 )
 from infrastructure.persistence.postgres.repositories.approval_repository import (
     PostgresApprovalRepository,
@@ -89,7 +92,10 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
             schema_created = True
 
         tables = [
-            AgentCommandModel.__table__,
+            ProjectModel.__table__,
+            SessionModel.__table__,
+            AgentEventModel.__table__,
+            IdempotencyReceiptModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -112,11 +118,23 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session, session.begin():
+            session.add(ProjectModel(
+                id=f"project-{run_id}", name="Worker approvals",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=f"project-{run_id}",
+                title="Worker approvals", active_run_id=run_id,
+                last_run_sequence=1, created_at=now.isoformat(),
+                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
                     session_id=session_id,
-                    status="created",
+                    message_id=f"message-{run_id}",
+                    sequence=1,
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),
@@ -252,11 +270,16 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
                 approvals["task-c"],
                 decision=ApprovalDecision.APPROVED,
             ),
-            PostgresRunRepository(session_factory).cancel(run_id),
+            PostgresRunRepository(session_factory).stop_active(
+                session_id,
+                request_id=f"stop-{run_id}",
+                expected_run_id=run_id,
+                displayed_session_seq=0,
+            ),
         )
         assert approval_result in {True, False}
-        assert cancellation_result is not None
-        assert cancellation_result.status.value == "cancelling"
+        cancellation_receipt, replayed = cancellation_result
+        assert not replayed and cancellation_receipt.status.value == "stopping"
 
         async with session_factory() as session:
             run = await session.get(AgentRunModel, run_id)
@@ -283,7 +306,7 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
                     ApprovalRecordModel.status == "pending"
                 )
             )
-        assert run is not None and run.status == "cancelling"
+        assert run is not None and run.status == "stopping"
         assert plan_row is not None and plan_row.status == "cancelling"
         assert task_c is not None and task_c.status == "cancelled"
         assert approval_c is not None
@@ -338,7 +361,10 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
             schema_created = True
 
         tables = [
-            AgentCommandModel.__table__,
+            ProjectModel.__table__,
+            SessionModel.__table__,
+            AgentEventModel.__table__,
+            IdempotencyReceiptModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -362,11 +388,23 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session, session.begin():
+            session.add(ProjectModel(
+                id=f"project-{run_id}", name="Worker stop race",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=f"project-{run_id}",
+                title="Worker stop race", active_run_id=run_id,
+                last_run_sequence=1, created_at=now.isoformat(),
+                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
                     session_id=session_id,
-                    status="created",
+                    message_id=f"message-{run_id}",
+                    sequence=1,
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),
@@ -429,11 +467,17 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
         )
         event_receipt, stop_receipt = await asyncio.gather(
             event_repository.apply_worker_terminal_event(terminal_event),
-            PostgresRunRepository(session_factory).cancel(run_id),
+            PostgresRunRepository(session_factory).stop_active(
+                session_id,
+                request_id=f"stop-{run_id}",
+                expected_run_id=run_id,
+                displayed_session_seq=0,
+            ),
         )
 
-        assert stop_receipt is not None
-        assert stop_receipt.status.value == "cancelling"
+        stop_result, replayed = stop_receipt
+        assert not replayed
+        assert stop_result.status.value == "stopping"
         async with session_factory() as session:
             run = await session.get(AgentRunModel, run_id)
             plan_row = await session.get(AgentPlanModel, plan_id)
@@ -448,7 +492,7 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
             outbox = (
                 await session.execute(select(OrchestrationOutboxModel))
             ).scalars().all()
-        assert run is not None and run.status == "cancelling"
+        assert run is not None and run.status == "stopping"
         assert plan_row is not None and plan_row.status == "cancelling"
         assert task is not None
         assert event_receipt.accepted is (task.status == "completed")
@@ -461,7 +505,7 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
         assert sum(row.event_type == "RoundCompleted" for row in outbox) == int(
             event_receipt.accepted
         )
-        assert sum(row.event_type == "RunCancelling" for row in outbox) == 1
+        assert sum(row.event_type == "RunStopping" for row in outbox) == 1
     finally:
         await test_engine.dispose()
         if schema_created:
@@ -497,7 +541,10 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
             schema_created = True
 
         tables = [
-            AgentCommandModel.__table__,
+            ProjectModel.__table__,
+            SessionModel.__table__,
+            AgentEventModel.__table__,
+            IdempotencyReceiptModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -521,11 +568,23 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session, session.begin():
+            session.add(ProjectModel(
+                id=f"project-{run_id}", name="Root resume approvals",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=f"project-{run_id}",
+                title="Root resume approvals", active_run_id=run_id,
+                last_run_sequence=1, created_at=now.isoformat(),
+                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
                     session_id=session_id,
-                    status="created",
+                    message_id=f"message-{run_id}",
+                    sequence=1,
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),

@@ -74,8 +74,9 @@ async def test_run_snapshot_and_plan_version_read_postgres_facts() -> None:
             async with session.begin():
                 session.add(AgentRunModel(
                     run_id="run-read-1",
+                    message_id="message:" + str("run-read-1"),
+                    sequence=1,
                     session_id="session-read-1",
-                    user_id="user-1",
                     status="running",
                     root_thread_id="root-thread-1",
                     cancellation_epoch=2,

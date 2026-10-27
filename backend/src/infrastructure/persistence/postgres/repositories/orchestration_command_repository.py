@@ -199,7 +199,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                 )
             return run, _receipt(prior.result_json, deduplicated=True)
 
-        if run.status not in {"created", "running"}:
+        if run.status != "running":
             raise PlanCommandRejected("run_not_active")
         if run.session_id != plan.session_id:
             raise PlanCommandRejected("run_session_mismatch")
@@ -560,7 +560,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         run: AgentRunModel,
     ) -> _LockedReviewRows:
         """在 Run 和命令行已锁定后验证并锁住 Plan、Round 与任务。"""
-        if run.status not in {"created", "running"}:
+        if run.status != "running":
             raise PlanCommandRejected("run_not_active")
 
         plan = await session.get(AgentPlanModel, command.plan_id, with_for_update=True)

@@ -38,8 +38,7 @@ class SessionMemorySettingsResponse(BaseModel):
 class SessionResponse(BaseModel):
     id: str
     title: str
-    status: str
-    run_id: str | None
+    active_run_id: str | None
     created_at: datetime
     updated_at: datetime
     project_id: str | None = None
@@ -50,8 +49,7 @@ class SessionResponse(BaseModel):
         return cls(
             id=session.id,
             title=session.title,
-            status=session.status,
-            run_id=session.run_id,
+            active_run_id=session.active_run_id,
             created_at=session.created_at,
             updated_at=session.updated_at,
             project_id=session.project_id,
@@ -122,6 +120,8 @@ class MessageResponse(BaseModel):
 class RunSummaryResponse(BaseModel):
     run_id: str
     session_id: str
+    message_id: str
+    sequence: int
     status: str
     root_thread_id: str
     error: object = None
@@ -135,6 +135,8 @@ class RunSummaryResponse(BaseModel):
         return cls(
             run_id=run.run_id,
             session_id=run.session_id,
+            message_id=run.message_id,
+            sequence=run.sequence,
             status=run.status,
             root_thread_id=run.root_thread_id,
             error=run.error,

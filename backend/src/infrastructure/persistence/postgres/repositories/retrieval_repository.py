@@ -6,6 +6,7 @@ import json
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +21,11 @@ from domain.retrieval.trace_contracts import (
     RetrievalCandidateTrace,
     RetrievalProviderTrace,
     RetrievalRunTrace,
+)
+from shared.contracts.retrieval import (
+    RetrievalCandidateTraceSchema,
+    RetrievalProviderTraceSchema,
+    RetrievalRunTraceSchema,
 )
 
 from ..models import RetrievalCandidateModel, RetrievalRunModel
@@ -144,7 +150,9 @@ class PostgresRetrievalRepository(RetrievalPort):
             "query": query,
             "scope": "context",
             "status": status,
-            "config_json": run_trace.model_dump_json(),
+            "config_json": RetrievalRunTraceSchema.from_domain(
+                run_trace
+            ).model_dump_json(),
             "session_id": session_id,
             "agent_run_id": agent_run_id,
             "message_id": message_id,
@@ -233,15 +241,16 @@ class PostgresRetrievalRepository(RetrievalPort):
                     row.injected_into_context = 0
 
                 trace_data = _json(run.config_json, {})
-                trace = RetrievalRunTrace.model_validate(trace_data)
+                trace = RetrievalRunTraceSchema.model_validate(trace_data).to_domain()
                 context_count = sum(
                     selection.context_selected for selection in selections
                 )
-                run.config_json = trace.model_copy(
-                    update={
-                        "selection_status": "complete",
-                        "context_count": context_count,
-                    }
+                run.config_json = RetrievalRunTraceSchema.from_domain(
+                    replace(
+                        trace,
+                        selection_status="complete",
+                        context_count=context_count,
+                    )
                 ).model_dump_json()
                 await session.flush()
         return True
@@ -252,7 +261,9 @@ class PostgresRetrievalRepository(RetrievalPort):
         candidate: RetrievalCandidateTrace,
         created_at: str,
     ) -> RetrievalCandidateModel:
-        candidate_data = candidate.model_dump(mode="json")
+        candidate_data = RetrievalCandidateTraceSchema.from_domain(
+            candidate
+        ).model_dump(mode="json")
         metadata = dict(candidate_data["metadata"])
         metadata["retrieval_analysis"] = {
             "hits": candidate_data["hits"],
@@ -289,7 +300,7 @@ class PostgresRetrievalRepository(RetrievalPort):
         config = _json(row.config_json, {})
         trace: RetrievalRunTrace | None = None
         try:
-            trace = RetrievalRunTrace.model_validate(config)
+            trace = RetrievalRunTraceSchema.model_validate(config).to_domain()
         except ValidationError:
             # 开发环境中的旧记录没有本版 JSON 结构，直接标为资料不完整。
             trace = None
@@ -316,7 +327,12 @@ class PostgresRetrievalRepository(RetrievalPort):
             "providers": (
                 []
                 if trace is None
-                else [provider.model_dump(mode="json") for provider in trace.providers]
+                else [
+                    RetrievalProviderTraceSchema.from_domain(provider).model_dump(
+                        mode="json"
+                    )
+                    for provider in trace.providers
+                ]
             ),
             "config": config if isinstance(config, dict) else {},
             "index_generation": row.index_generation,

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.sessions import AttachmentRef, Message, MessageRepository
 
-from ..models import MessageModel, SessionModel
+from ..models import AgentRunModel, MessageModel, SessionModel
 from ..mappers.converters import message_domain_to_model, message_model_to_domain
 
 AttachmentReader = Callable[[list[str]], Awaitable[dict[str, list[AttachmentRef]]]]
@@ -79,11 +79,16 @@ class PostgresMessageRepository(MessageRepository):
         async with self._session_factory() as db:
             statement = (
                 select(MessageModel)
+                .outerjoin(AgentRunModel, AgentRunModel.run_id == MessageModel.run_id)
                 .where(
                     MessageModel.session_id == session_id,
                     MessageModel.deleted_time.is_(None),
                 )
-                .order_by(MessageModel.timestamp.asc(), MessageModel.id.asc())
+                .order_by(
+                    AgentRunModel.sequence.asc().nulls_first(),
+                    MessageModel.timestamp.asc(),
+                    MessageModel.id.asc(),
+                )
             )
             if limit is not None:
                 statement = statement.limit(limit)
@@ -96,6 +101,7 @@ class PostgresMessageRepository(MessageRepository):
         async with self._session_factory() as db:
             result = await db.execute(
                 select(MessageModel)
+                .outerjoin(AgentRunModel, AgentRunModel.run_id == MessageModel.run_id)
                 .where(
                     MessageModel.session_id == session_id,
                     MessageModel.id > after_id,
@@ -115,15 +121,54 @@ class PostgresMessageRepository(MessageRepository):
         async with self._session_factory() as db:
             result = await db.execute(
                 select(MessageModel)
+                .outerjoin(AgentRunModel, AgentRunModel.run_id == MessageModel.run_id)
                 .where(
                     MessageModel.session_id == session_id,
                     MessageModel.deleted_time.is_(None),
                     MessageModel.role.in_(("user", "assistant")),
                 )
-                .order_by(MessageModel.timestamp.desc(), MessageModel.id.desc())
+                .order_by(
+                    AgentRunModel.sequence.desc().nulls_last(),
+                    MessageModel.timestamp.desc(),
+                    MessageModel.id.desc(),
+                )
                 .limit(limit)
             )
             rows = list(result.scalars().all())
+        rows.reverse()
+        return await self._convert_rows(rows)
+
+    async def list_recent_conversation_before_sequence(
+        self,
+        session_id: str,
+        *,
+        before_sequence: int,
+        limit: int,
+    ) -> list[Message]:
+        """Load only messages whose owning Run precedes the current queue entry."""
+        if before_sequence < 1 or limit < 1:
+            raise ValueError("run_sequence_and_limit_must_be_positive")
+        async with self._session_factory() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(MessageModel)
+                        .join(AgentRunModel, AgentRunModel.run_id == MessageModel.run_id)
+                        .where(
+                            MessageModel.session_id == session_id,
+                            MessageModel.deleted_time.is_(None),
+                            MessageModel.role.in_(("user", "assistant")),
+                            AgentRunModel.sequence < before_sequence,
+                        )
+                        .order_by(
+                            AgentRunModel.sequence.desc(),
+                            MessageModel.timestamp.desc(),
+                            MessageModel.id.desc(),
+                        )
+                        .limit(limit)
+                    )
+                ).scalars().all()
+            )
         rows.reverse()
         return await self._convert_rows(rows)
 

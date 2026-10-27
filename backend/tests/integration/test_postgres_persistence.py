@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from domain.sessions import Session, SessionStatus
+from domain.sessions import Session
 from domain.tools import (
     JsonSchema,
     MCPServer,
@@ -75,8 +75,7 @@ async def test_session_repository_against_postgresql() -> None:
             id=session_id,
             project_id=project_id,
             title="Integration",
-            status=SessionStatus.IDLE,
-            run_id=None,
+            active_run_id=None,
             created_at=now,
             updated_at=now,
             last_activity_at=now,
@@ -163,6 +162,12 @@ async def test_memory_access_and_expiration_against_postgresql() -> None:
     engine = create_async_engine(DATABASE_URL)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     repository = PostgresMemoryRepository(factory)
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: Base.metadata.create_all(
+                sync_connection, tables=[MemoryModel.__table__]
+            )
+        )
     prefix = f"memory-test-{uuid4().hex}"
     ids = [f"{prefix}-{suffix}" for suffix in ("active", "ttl", "validity")]
     try:

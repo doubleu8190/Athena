@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from domain.sessions import Session, SessionStatus
+from domain.sessions import Session
 from infrastructure.persistence.postgres.repositories import (
     PostgresSessionRepository,
 )
@@ -46,8 +46,7 @@ async def test_session_repository_uses_injected_session_factory() -> None:
     session = Session(
         id="session-1",
         title="Title",
-        status=SessionStatus.IDLE,
-        run_id=None,
+        active_run_id=None,
         created_at=now,
         updated_at=now,
     )

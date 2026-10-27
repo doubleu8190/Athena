@@ -25,7 +25,6 @@ from domain.memory import (
     MemorySearchRequest,
     MemoryStatus,
     MemoryWriteCommand,
-    MemoryRecordMetadata,
     MemoryStateChangedError,
     MemorySuppressedError,
 )
@@ -36,6 +35,7 @@ from domain.memory.suppression import (
     source_suppression_lock_id,
 )
 from domain.memory.repository_ports import MemoryRepositoryPort
+from shared.contracts.memory import MemoryRecordMetadataSchema, memory_schema_to_domain
 
 from ..models import (
     MemoryModel,
@@ -61,8 +61,18 @@ def _now() -> str:
 def _metadata_json(metadata: dict[str, object]) -> str:
     """通过 JSON 边界校验新记忆元数据后生成稳定文本。"""
     raw_json = json.dumps(metadata, ensure_ascii=False)
-    typed_metadata = MemoryRecordMetadata.model_validate_json(raw_json)
+    typed_metadata = MemoryRecordMetadataSchema.model_validate_json(raw_json)
     return typed_metadata.model_dump_json(exclude_none=True)
+
+
+def _metadata_fact(raw_fact: object) -> MemoryFact | None:
+    """在持久化边界校验 metadata 中的事实并转换为领域类型。"""
+    if raw_fact is None:
+        return None
+    typed_fact = MemoryRecordMetadataSchema.model_validate({"fact": raw_fact}).fact
+    if typed_fact is None:
+        return None
+    return memory_schema_to_domain(typed_fact)
 
 
 def _fact_lock_id(fact: MemoryFact) -> int:
@@ -92,7 +102,7 @@ def _suppression_fingerprint(metadata: dict[str, Any], content: str) -> str:
     fact = None
     if raw_fact is not None:
         try:
-            fact = MemoryRecordMetadata.model_validate({"fact": raw_fact}).fact
+            fact = _metadata_fact(raw_fact)
         except (TypeError, ValueError):
             fact = None
     identity: tuple[Any, ...]
@@ -124,7 +134,7 @@ def _source_turn_ids(metadata: dict[str, Any]) -> tuple[str, ...]:
     raw_fact = metadata.get("fact")
     if raw_fact is not None:
         try:
-            fact = MemoryRecordMetadata.model_validate({"fact": raw_fact}).fact
+            fact = _metadata_fact(raw_fact)
         except (TypeError, ValueError):
             fact = None
         if fact is not None:
@@ -260,7 +270,7 @@ def _row_fact_identity(row: MemoryModel) -> tuple[str, str, str, str] | None:
     raw_fact = metadata.get("fact")
     if raw_fact is not None:
         try:
-            fact = MemoryRecordMetadata.model_validate({"fact": raw_fact}).fact
+            fact = _metadata_fact(raw_fact)
         except (TypeError, ValueError):
             return None
         if fact is not None:
@@ -309,9 +319,7 @@ def _matching_fact_rows(
         stored_fact = None
         if raw_fact is not None:
             try:
-                stored_fact = MemoryRecordMetadata.model_validate(
-                    {"fact": raw_fact}
-                ).fact
+                stored_fact = _metadata_fact(raw_fact)
             except (TypeError, ValueError):
                 stored_fact = None
         if stored_fact is not None:
@@ -370,9 +378,7 @@ def _matching_fact_identity_rows(
         if not isinstance(metadata, dict) or metadata.get("fact") is None:
             continue
         try:
-            fact = MemoryRecordMetadata.model_validate(
-                {"fact": metadata["fact"]}
-            ).fact
+            fact = _metadata_fact(metadata["fact"])
         except (TypeError, ValueError):
             continue
         if fact is None or (
@@ -716,7 +722,9 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
             or f"memory-{datetime.now(timezone.utc).timestamp()}"
         )
         metadata_json = _metadata_json(command.metadata)
-        typed_metadata = MemoryRecordMetadata.model_validate_json(metadata_json)
+        typed_metadata = memory_schema_to_domain(
+            MemoryRecordMetadataSchema.model_validate_json(metadata_json)
+        )
         _validate_fact_content(command.content, typed_metadata.fact)
         source_ids = _source_turn_ids(command.metadata)
         suppression_fingerprint = _suppression_fingerprint(
@@ -832,7 +840,9 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         """Insert a new immutable revision and supersede the previous row."""
         metadata_payload = metadata or {}
         metadata_json = _metadata_json(metadata_payload)
-        typed_metadata = MemoryRecordMetadata.model_validate_json(metadata_json)
+        typed_metadata = memory_schema_to_domain(
+            MemoryRecordMetadataSchema.model_validate_json(metadata_json)
+        )
         _validate_fact_content(content, typed_metadata.fact)
         source_ids = _source_turn_ids(metadata_payload)
         suppression_fingerprint = _suppression_fingerprint(metadata_payload, content)

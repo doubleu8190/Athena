@@ -83,6 +83,9 @@ interface ChatStore {
   runTimelineEvents: RunTimelineEvent[]
   appendRunTimelineEvent: (event: RunTimelineEvent) => void
   clearRunTimelineEvents: () => void
+  suppressedRunOutput: Record<string, number>
+  suppressRunOutput: (runId: string, cursor: number) => void
+  restoreRunOutput: (runId: string) => void
 
   // 中心编排
   orchestrationTasks: OrchestrationTask[]
@@ -228,6 +231,24 @@ export const useChatStore = create<ChatStore>((set) => ({
 
   executionTimeline: [],
   runTimelineEvents: [],
+  suppressedRunOutput: (() => {
+    try {
+      const value = localStorage.getItem("athena:suppressed-run-output")
+      return value ? JSON.parse(value) as Record<string, number> : {}
+    } catch { return {} }
+  })(),
+  suppressRunOutput: (runId, cursor) => set((state) => ({
+    suppressedRunOutput: (() => {
+      const suppressedRunOutput = { ...state.suppressedRunOutput, [runId]: cursor }
+      try { localStorage.setItem("athena:suppressed-run-output", JSON.stringify(suppressedRunOutput)) } catch { /* Keep the in-memory cutoff if storage is unavailable. */ }
+      return suppressedRunOutput
+    })(),
+  })),
+  restoreRunOutput: (runId) => set((state) => {
+    const { [runId]: _removed, ...remaining } = state.suppressedRunOutput
+    try { localStorage.setItem("athena:suppressed-run-output", JSON.stringify(remaining)) } catch { /* Keep the in-memory state if storage is unavailable. */ }
+    return { suppressedRunOutput: remaining }
+  }),
   appendRunTimelineEvent: (event) => set((state) => {
     if (state.runTimelineEvents.some((item) => item.session_seq === event.session_seq && item.run_id === event.run_id)) return {}
     return { runTimelineEvents: [...state.runTimelineEvents, event].slice(-5000) }

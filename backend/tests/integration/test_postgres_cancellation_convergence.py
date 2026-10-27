@@ -1,642 +1,508 @@
-"""PostgreSQL acceptance for Run cancellation and Worker lease convergence."""
+"""PostgreSQL acceptance for FIFO Run scheduling and stop convergence."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, text
+import pytest_asyncio
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from domain.orchestration import RunCancellationReceipt, Task, WorkerJobLease
+from application.runs import RunRejectedError, RunService
+from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.runs import RunStatus
 from infrastructure.persistence.postgres.models import (
-    AgentCommandModel,
+    AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    IdempotencyReceiptModel,
+    MemoryJobScopeSnapshotModel,
+    MemoryProcessingJobModel,
+    MemoryRunEvidenceSnapshotModel,
+    MemorySourceSuppressionModel,
+    MessageModel,
     OrchestrationOutboxModel,
     PlanRoundModel,
     PlanVersionModel,
+    ProjectModel,
     RootResumeJobModel,
     RoundTaskModel,
+    SessionMemorySettingsModel,
+    SessionModel,
     TaskExecutionModel,
     WorkerJobModel,
+    WorkerExecutionMessageModel,
 )
 from infrastructure.persistence.postgres.repositories.run_repository import (
     PostgresRunRepository,
 )
+from infrastructure.persistence.postgres.repositories.event_repository import (
+    PostgresEventRepository,
+)
+from infrastructure.persistence.postgres.repositories.message_repository import (
+    PostgresMessageRepository,
+)
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
 )
+from infrastructure.persistence.postgres.repositories.project_repository import PostgresProjectRepository
 
 
-DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_run_cancellation_converges_after_expired_worker_lease() -> None:
-    """Cancel fences active work, cancels approvals, then reaps an expired lease."""
-    if not DATABASE_URL:
+@pytest_asyncio.fixture
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Use an isolated schema so concurrency checks never touch app data."""
+    database_url = os.getenv("ATHENA_TEST_DATABASE_URL")
+    if not database_url:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-
-    schema = f"run_cancel_test_{uuid4().hex}"
-    base_url = make_url(DATABASE_URL)
-    if base_url.drivername in {"postgres", "postgresql"}:
-        base_url = base_url.set(drivername="postgresql+psycopg")
-    base_engine = create_async_engine(base_url)
-    test_engine = create_async_engine(
-        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+    schema = f"run_queue_{uuid4().hex}"
+    url = make_url(database_url)
+    if url.drivername in {"postgres", "postgresql"}:
+        url = url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(url)
+    engine = create_async_engine(
+        url.update_query_dict({"options": f"-c search_path={schema},public"})
     )
-    schema_created = False
-    run_id = f"run-cancel-{uuid4().hex}"
-    session_id = f"session-{run_id}"
-    plan_id = f"plan-{run_id}"
-    round_id = f"round-{run_id}"
-    running_task_id = f"task-running-{run_id}"
-    waiting_task_id = f"task-waiting-{run_id}"
-    running_execution_id = f"execution-running-{run_id}"
-    waiting_execution_id = f"execution-waiting-{run_id}"
-    job_id = f"job-{run_id}"
-    approval_id = f"approval-{run_id}"
-    now = datetime.now(timezone.utc)
-
+    tables = [
+        ProjectModel.__table__,
+        SessionModel.__table__,
+        MessageModel.__table__,
+        AgentRunModel.__table__,
+        AgentPlanModel.__table__,
+        AgentTaskModel.__table__,
+        ApprovalRecordModel.__table__,
+        PlanVersionModel.__table__,
+        PlanRoundModel.__table__,
+        RoundTaskModel.__table__,
+        TaskExecutionModel.__table__,
+        WorkerJobModel.__table__,
+        WorkerExecutionMessageModel.__table__,
+        AgentEventModel.__table__,
+        RootResumeJobModel.__table__,
+        IdempotencyReceiptModel.__table__,
+        MemoryJobScopeSnapshotModel.__table__,
+        MemorySourceSuppressionModel.__table__,
+        MemoryProcessingJobModel.__table__,
+        MemoryRunEvidenceSnapshotModel.__table__,
+        SessionMemorySettingsModel.__table__,
+        OrchestrationOutboxModel.__table__,
+    ]
+    created = False
     try:
         async with base_engine.begin() as connection:
             await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            schema_created = True
-
-        required_tables = [
-            AgentRunModel.__table__,
-            AgentPlanModel.__table__,
-            AgentTaskModel.__table__,
-            AgentCommandModel.__table__,
-            ApprovalRecordModel.__table__,
-            PlanVersionModel.__table__,
-            PlanRoundModel.__table__,
-            RoundTaskModel.__table__,
-            TaskExecutionModel.__table__,
-            WorkerJobModel.__table__,
-            RootResumeJobModel.__table__,
-            OrchestrationOutboxModel.__table__,
-        ]
-        async with test_engine.begin() as connection:
+            created = True
+        async with engine.begin() as connection:
             await connection.run_sync(
-                lambda sync_connection: Base.metadata.create_all(
-                    sync_connection, tables=required_tables
+                lambda sync: Base.metadata.create_all(
+                    sync, tables=tables, checkfirst=False
                 )
             )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        from datetime import datetime, timezone
 
-        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
-        async with session_factory() as session:
-            async with session.begin():
-                session.add(
-                    AgentRunModel(
-                        run_id=run_id,
-                        session_id=session_id,
-                        status="running",
-                        root_thread_id=f"thread-{run_id}",
-                        cancellation_epoch=0,
-                        cancellation_external_effect_status="none",
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
-                    )
+        now = datetime.now(timezone.utc).isoformat()
+        async with factory() as session, session.begin():
+            session.add(
+                ProjectModel(
+                    id="project-1",
+                    name="Run queue tests",
+                    created_at=now,
+                    updated_at=now,
                 )
-                session.add(
-                    AgentPlanModel(
-                        plan_id=plan_id,
-                        run_id=run_id,
-                        session_id=session_id,
-                        status="running",
-                        user_goal="Verify cancellation convergence",
-                        max_parallelism=1,
-                        current_version=1,
-                        active_round_id=round_id,
-                        cancellation_epoch=0,
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
-                    )
-                )
-                await session.flush()
-                session.add(
-                    PlanVersionModel(
-                        plan_id=plan_id,
-                        version=1,
-                        dag_json={"nodes": [], "edges": []},
-                        created_at=now,
-                    )
-                )
-                await session.flush()
-                session.add(
-                    PlanRoundModel(
-                        round_id=round_id,
-                        plan_id=plan_id,
-                        plan_version=1,
-                        round_number=1,
-                        status="running",
-                        expected_task_count=2,
-                        terminal_task_count=0,
-                        created_at=now,
-                    )
-                )
-                await session.flush()
-                session.add_all(
-                    [
-                        AgentTaskModel(
-                            task_id=running_task_id,
-                            plan_id=plan_id,
-                            run_id=run_id,
-                            title="Active work",
-                            objective="Simulate an unresponsive Worker",
-                            status="running",
-                            execution_generation=1,
-                            active_execution_id=running_execution_id,
-                            worker_thread_id=f"thread-{running_execution_id}",
-                            created_at=now.isoformat(),
-                            updated_at=now.isoformat(),
-                        ),
-                        AgentTaskModel(
-                            task_id=waiting_task_id,
-                            plan_id=plan_id,
-                            run_id=run_id,
-                            title="Waiting approval",
-                            objective="Simulate a pending approval",
-                            status="waiting_approval",
-                            execution_generation=1,
-                            active_execution_id=waiting_execution_id,
-                            worker_thread_id=f"thread-{waiting_execution_id}",
-                            created_at=now.isoformat(),
-                            updated_at=now.isoformat(),
-                        ),
-                    ]
-                )
-                await session.flush()
-                session.add_all(
-                    [
-                        RoundTaskModel(
-                            round_id=round_id,
-                            task_id=running_task_id,
-                            status="running",
-                            active_execution_id=running_execution_id,
-                        ),
-                        RoundTaskModel(
-                            round_id=round_id,
-                            task_id=waiting_task_id,
-                            status="waiting_approval",
-                            active_execution_id=waiting_execution_id,
-                        ),
-                    ]
-                )
-                await session.flush()
-                session.add_all(
-                    [
-                        TaskExecutionModel(
-                            execution_id=running_execution_id,
-                            round_id=round_id,
-                            task_id=running_task_id,
-                            attempt=1,
-                            worker_thread_id=f"thread-{running_execution_id}",
-                            status="running",
-                            lease_owner="worker-old",
-                            lease_until=now - timedelta(seconds=5),
-                            fencing_token=7,
-                            cancellation_epoch=0,
-                            created_at=now,
-                            updated_at=now,
-                        ),
-                        TaskExecutionModel(
-                            execution_id=waiting_execution_id,
-                            round_id=round_id,
-                            task_id=waiting_task_id,
-                            attempt=1,
-                            worker_thread_id=f"thread-{waiting_execution_id}",
-                            status="waiting_approval",
-                            fencing_token=2,
-                            cancellation_epoch=0,
-                            created_at=now,
-                            updated_at=now,
-                        ),
-                    ]
-                )
-                session.add(
-                    WorkerJobModel(
-                        job_id=job_id,
-                        dedupe_key=f"execute:{running_execution_id}",
-                        job_type="execute",
-                        execution_id=running_execution_id,
-                        status="running",
-                        attempt=1,
-                        lease_owner="worker-old",
-                        lease_until=now - timedelta(seconds=5),
-                        available_at=now,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-                session.add(
-                    ApprovalRecordModel(
-                        approval_id=approval_id,
-                        session_id=session_id,
-                        run_id=run_id,
-                        plan_id=plan_id,
-                        task_id=waiting_task_id,
-                        execution_id=waiting_execution_id,
-                        worker_thread_id=f"thread-{waiting_execution_id}",
-                        interrupt_id=f"interrupt-{approval_id}",
-                        tool_call_id=f"call-{approval_id}",
-                        tool_name="write_file",
-                        arguments_json="{}",
-                        risk_level="high",
-                        status="pending",
-                        created_at=now.isoformat(),
-                    )
-                )
-
-        run_repository = PostgresRunRepository(session_factory)
-        accepted = await run_repository.cancel(run_id)
-        assert accepted is not None and accepted.changed
-        assert accepted.status == RunStatus.CANCELLING
-        assert accepted.external_effect_status == "unknown"
-
-        async with session_factory() as session:
-            async with session.begin():
-                outbox_before_retry = await session.scalar(
-                    select(func.count())
-                    .select_from(OrchestrationOutboxModel)
-                    .where(OrchestrationOutboxModel.correlation_id == run_id)
-                )
-        repeated = await run_repository.cancel(run_id)
-        assert repeated is not None and not repeated.changed
-        assert repeated.status == RunStatus.CANCELLING
-        assert repeated.external_effect_status == "unknown"
-        async with session_factory() as session:
-            outbox_after_retry = await session.scalar(
-                select(func.count())
-                .select_from(OrchestrationOutboxModel)
-                .where(OrchestrationOutboxModel.correlation_id == run_id)
             )
-        assert outbox_after_retry == outbox_before_retry
-
-        repository = PostgresWorkerJobRepository(
-            session_factory, clock=lambda: now + timedelta(seconds=1)
-        )
-        receipts = await repository.reconcile_cancellations()
-        assert receipts == [
-            RunCancellationReceipt(
-                run_id, session_id, plan_id, 1, "unknown"
-            )
-        ]
-        stale_lease = WorkerJobLease(
-            job_id=job_id,
-            worker_id="worker-old",
-            run_id=run_id,
-            plan_id=plan_id,
-            round_id=round_id,
-            plan_version=1,
-            task_id=running_task_id,
-            execution_id=running_execution_id,
-            session_id=session_id,
-            attempt=1,
-            worker_thread_id=f"thread-{running_execution_id}",
-            fencing_token=7,
-            cancellation_epoch=0,
-            lease_until=now - timedelta(seconds=5),
-            task=Task(
-                task_id=running_task_id,
-                title="Active work",
-                objective="Simulate an unresponsive Worker",
-            ),
-        )
-        assert not await repository.acknowledge_cancelled(stale_lease)
-        terminal_repeat = await run_repository.cancel(run_id)
-        assert terminal_repeat is not None and not terminal_repeat.changed
-        assert terminal_repeat.status == RunStatus.CANCELLED
-        assert terminal_repeat.external_effect_status == "unknown"
-
-        async with session_factory() as session:
-            run = await session.get(AgentRunModel, run_id)
-            plan = await session.get(AgentPlanModel, plan_id)
-            round_row = await session.get(PlanRoundModel, round_id)
-            running_task = await session.get(AgentTaskModel, running_task_id)
-            waiting_task = await session.get(AgentTaskModel, waiting_task_id)
-            execution = await session.get(TaskExecutionModel, running_execution_id)
-            job = await session.get(WorkerJobModel, job_id)
-            approval = await session.get(ApprovalRecordModel, approval_id)
-            events = (
-                await session.execute(
-                    select(OrchestrationOutboxModel).where(
-                        OrchestrationOutboxModel.correlation_id == run_id
-                    )
-                )
-            ).scalars().all()
-            event_count = len(events)
-
-        assert run is not None and run.status == "cancelled"
-        assert run.cancellation_epoch == 1
-        assert run.cancellation_external_effect_status == "unknown"
-        assert plan is not None and plan.status == "cancelled"
-        assert round_row is not None and round_row.status == "cancelled"
-        assert round_row.terminal_task_count == round_row.expected_task_count == 2
-        assert running_task is not None and running_task.status == "cancelled"
-        assert waiting_task is not None and waiting_task.status == "cancelled"
-        assert execution is not None and execution.status == "cancelled"
-        assert job is not None and job.status == "cancelled"
-        assert approval is not None and approval.status == "cancelled"
-        assert {event.event_type for event in events} >= {
-            "PlanCancelling",
-            "RunCancelling",
-            "TaskCancelled",
-            "ApprovalCancelled",
-            "PlanCancelled",
-            "RunCancelled",
-        }
-        assert len([event for event in events if event.event_type == "RunCancelling"]) == 1
-        assert len([event for event in events if event.event_type == "RunCancelled"]) == 1
-        assert event_count == 7
-        assert len([event for event in events if event.event_type == "TaskCancelled"]) == 2
+        yield factory
     finally:
-        await test_engine.dispose()
-        if schema_created:
+        await engine.dispose()
+        if created:
             async with base_engine.begin() as connection:
                 await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await base_engine.dispose()
 
 
+def _service(repository: PostgresRunRepository) -> RunService:
+    return RunService(repository, repository, id_factory=lambda: uuid4().hex)
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_stop_preserves_completed_and_failed_run_without_duplicate_events() -> None:
-    """Stop on terminal Runs preserves status, cancellation metadata, and event log."""
-    if not DATABASE_URL:
-        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-
-    schema = f"terminal_run_stop_{uuid4().hex}"
-    base_url = make_url(DATABASE_URL)
-    if base_url.drivername in {"postgres", "postgresql"}:
-        base_url = base_url.set(drivername="postgresql+psycopg")
-    base_engine = create_async_engine(base_url)
-    test_engine = create_async_engine(
-        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+async def test_same_session_runs_are_fifo_and_stop_keeps_the_pointer_until_release(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Queueing is allowed, but the next Run cannot claim before stop finalizes."""
+    repository = PostgresRunRepository(session_factory)
+    service = _service(repository)
+    first, retry = await asyncio.gather(
+        service.submit(
+            None,
+            project_id="project-1",
+            request_id="first-request",
+            message="first",
+        ),
+        service.submit(
+            None,
+            project_id="project-1",
+            request_id="first-request",
+            message="first",
+        ),
     )
-    schema_created = False
-    now = datetime.now(timezone.utc)
-    initial_states = {
-        f"completed-{uuid4().hex}": (RunStatus.COMPLETED, 0, "none"),
-        f"failed-{uuid4().hex}": (RunStatus.FAILED, 2, "unknown"),
+    assert first.session_id == retry.session_id
+    assert first.run_id == retry.run_id
+    assert {first.replayed, retry.replayed} == {False, True}
+
+    with pytest.raises(RunRejectedError, match="idempotency_conflict"):
+        await service.submit(
+            None,
+            project_id="project-1",
+            request_id="first-request",
+            message="different payload",
+        )
+
+    second = await service.submit(
+        first.session_id,
+        request_id="second-request",
+        message="second",
+    )
+    assert (first.sequence, second.sequence) == (1, 2)
+    async with session_factory() as session, session.begin():
+        first_message = await session.get(MessageModel, first.message_id)
+        second_message = await session.get(MessageModel, second.message_id)
+        assert first_message is not None and second_message is not None
+        first_message.timestamp = "2030-01-01T00:00:00+00:00"
+        second_message.timestamp = "2020-01-01T00:00:00+00:00"
+    ordered_messages = await PostgresMessageRepository(session_factory).list_by_session(
+        first.session_id
+    )
+    assert [message.id for message in ordered_messages] == [
+        first.message_id,
+        second.message_id,
+    ]
+    recent_messages = await PostgresMessageRepository(session_factory).list_recent_conversation(
+        first.session_id, limit=100
+    )
+    assert [message.id for message in recent_messages] == [first.message_id, second.message_id]
+
+    claimed, concurrent_claim = await asyncio.gather(
+        repository.claim_next_run(), repository.claim_next_run()
+    )
+    invocation = claimed or concurrent_claim
+    assert invocation is not None
+    assert invocation.run_id == first.run_id
+    assert (claimed is None) != (concurrent_claim is None)
+    assert await repository.claim_next_run() is None
+
+    accepted, replayed = await repository.stop_active(
+        first.session_id,
+        request_id="stop-first",
+        expected_run_id=first.run_id,
+        displayed_session_seq=4,
+    )
+    assert not replayed
+    assert accepted.changed is True
+    assert accepted.status is RunStatus.STOPPING
+    replay, was_replayed = await repository.stop_active(
+        first.session_id,
+        request_id="stop-first",
+        expected_run_id=first.run_id,
+        displayed_session_seq=4,
+    )
+    assert was_replayed
+    assert replay.run_id == first.run_id
+    assert replay.status is RunStatus.STOPPING
+    assert await repository.claim_next_run() is None
+
+    event_repository = PostgresEventRepository(session_factory)
+    with pytest.raises(ValueError, match="answer_stream_run_not_running"):
+        await event_repository.publish(
+            ApplicationEvent(
+                event_type=EventType.THINKING_COMPLETED,
+                durability=EventDurability.DURABLE,
+                session_id=first.session_id,
+                run_id=first.run_id,
+                payload={"content": "late thinking"},
+            )
+        )
+    async with session_factory() as session, session.begin():
+        session.add(
+            AgentEventModel(
+                session_id=first.session_id,
+                session_seq=5,
+                run_id=first.run_id,
+                event_type="thinking.completed",
+                durability="durable",
+                payload_json='{"content":"late thinking"}',
+                occurred_at="2026-01-01T00:00:00+00:00",
+            )
+        )
+    assert await event_repository.list_events_between(first.session_id, after=4) == []
+    hidden, has_more = await event_repository.list_events_for_run(
+        first.session_id, first.run_id, after=4
+    )
+    assert hidden == [] and not has_more
+
+    async with session_factory() as session:
+        session_row = await session.get(SessionModel, first.session_id)
+        stopped = await session.get(AgentRunModel, first.run_id)
+    assert session_row is not None and session_row.active_run_id == first.run_id
+    assert stopped is not None and stopped.display_cutoff_session_seq == 4
+
+    assert await repository.release_execution_lease(
+        first.run_id,
+        owner=invocation.lease_owner or "",
+        generation=invocation.execution_generation,
+    )
+    assert await repository.finalize_stop(first.run_id)
+    next_invocation = await repository.claim_next_run()
+    assert next_invocation is not None
+    assert next_invocation.run_id == second.run_id
+
+    async with session_factory() as session:
+        session_row = await session.get(SessionModel, first.session_id)
+        first_run = await session.get(AgentRunModel, first.run_id)
+        second_run = await session.get(AgentRunModel, second.run_id)
+        queued_events = (
+            await session.execute(
+                select(AgentEventModel).where(
+                    AgentEventModel.session_id == first.session_id,
+                    AgentEventModel.event_type == "run.queued",
+                )
+            )
+        ).scalars().all()
+    assert session_row is not None and session_row.active_run_id == second.run_id
+    assert first_run is not None and first_run.status == "cancelled"
+    assert second_run is not None and second_run.status == "running"
+    assert len(queued_events) == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_project_delete_rejects_active_run_before_waiting_for_session_lock(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """活动 Run 持有 Session 锁时，项目删除及时拒绝，避免作用域锁互等。"""
+    repository = PostgresRunRepository(session_factory)
+    run = await _service(repository).submit(None, project_id="project-1", request_id="project-lock", message="first")
+    assert await repository.claim_next_run() is not None
+    async with session_factory() as session, session.begin():
+        await session.execute(select(SessionModel).where(SessionModel.id == run.session_id).with_for_update())
+        with pytest.raises(ValueError, match="project_busy"):
+            await asyncio.wait_for(PostgresProjectRepository(session_factory).delete("project-1"), timeout=1)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_different_sessions_can_be_claimed_independently(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    repository = PostgresRunRepository(session_factory)
+    service = _service(repository)
+    first = await service.submit(
+        None,
+        project_id="project-1",
+        request_id="session-a-request",
+        message="session a",
+    )
+    second = await service.submit(
+        None,
+        project_id="project-1",
+        request_id="session-b-request",
+        message="session b",
+    )
+
+    claimed = await asyncio.gather(
+        repository.claim_next_run(), repository.claim_next_run()
+    )
+    invocations = [item for item in claimed if item is not None]
+    assert {item.run_id for item in invocations} == {first.run_id, second.run_id}
+    assert {item.session_id for item in invocations} == {
+        first.session_id,
+        second.session_id,
     }
 
-    try:
-        async with base_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            schema_created = True
-        async with test_engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync_connection: Base.metadata.create_all(
-                    sync_connection,
-                    tables=[
-                        AgentRunModel.__table__,
-                        OrchestrationOutboxModel.__table__,
-                    ],
-                )
-            )
 
-        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
-        async with session_factory() as session, session.begin():
-            for run_id, (
-                status,
-                cancellation_epoch,
-                effect_status,
-            ) in initial_states.items():
-                session.add(
-                    AgentRunModel(
-                        run_id=run_id,
-                        session_id=f"session-{run_id}",
-                        status=status.value,
-                        root_thread_id=f"thread-{run_id}",
-                        cancellation_epoch=cancellation_epoch,
-                        cancellation_external_effect_status=effect_status,
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
-                    )
-                )
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_expired_root_lease_fails_once_and_unblocks_fifo(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """失去 Root 租约后失败收尾；旧代次不能提交结果或重新领取。"""
+    repository = PostgresRunRepository(session_factory)
+    service = _service(repository)
+    first = await service.submit(None, project_id="project-1", request_id="expired-1", message="first")
+    second = await service.submit(first.session_id, request_id="expired-2", message="second")
+    invocation = await repository.claim_next_run()
+    assert invocation is not None and invocation.lease_owner is not None
+    async with session_factory() as session, session.begin():
+        run = await session.get(AgentRunModel, first.run_id)
+        run.execution_lease_until = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
 
-        repository = PostgresRunRepository(session_factory)
-        for run_id, (
-            status,
-            cancellation_epoch,
-            effect_status,
-        ) in initial_states.items():
-            first = await repository.cancel(run_id)
-            repeated = await repository.cancel(run_id)
-            assert first is not None and not first.changed
-            assert repeated is not None and not repeated.changed
-            assert first.status == repeated.status == status
-            assert (
-                first.external_effect_status
-                == repeated.external_effect_status
-                == effect_status
-            )
-
-        async with session_factory() as session:
-            runs = {
-                run.run_id: run
-                for run in (
-                    await session.execute(select(AgentRunModel))
-                ).scalars().all()
-            }
-            event_count = await session.scalar(
-                select(func.count()).select_from(OrchestrationOutboxModel)
-            )
-        assert event_count == 0
-        for run_id, (
-            status,
-            cancellation_epoch,
-            effect_status,
-        ) in initial_states.items():
-            run = runs[run_id]
-            assert run.status == status.value
-            assert run.cancellation_epoch == cancellation_epoch
-            assert run.cancellation_external_effect_status == effect_status
-    finally:
-        await test_engine.dispose()
-        if schema_created:
-            async with base_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        await base_engine.dispose()
+    assert await repository.acquire_execution_lease(first.run_id, owner="resume", lease_seconds=30) is None
+    assert not await repository.complete(first.run_id, {}, owner=invocation.lease_owner, generation=invocation.execution_generation)
+    assert not await repository.release_execution_lease(first.run_id, owner=invocation.lease_owner, generation=invocation.execution_generation)
+    counts = await asyncio.gather(repository.reconcile_expired_execution_leases(), repository.reconcile_expired_execution_leases())
+    assert sum(counts) == 1
+    async with session_factory() as session:
+        run = await session.get(AgentRunModel, first.run_id)
+        session_row = await session.get(SessionModel, first.session_id)
+        events = (await session.execute(select(OrchestrationOutboxModel).where(
+            OrchestrationOutboxModel.correlation_id == first.run_id,
+            OrchestrationOutboxModel.event_type == "RunFailed",
+        ))).scalars().all()
+        assert run.status == "failed"
+        assert json.loads(run.error_json)["code"] == "root_execution_lease_expired"
+        assert session_row.active_run_id is None
+        assert len(events) == 1
+    next_invocation = await repository.claim_next_run()
+    assert next_invocation is not None and next_invocation.run_id == second.run_id
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_stop_converges_during_planning_review_and_finalization() -> None:
-    """Planning, Review, and final-answer phases cannot resume after Stop."""
-    if not DATABASE_URL:
-        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-
-    schema = f"run_stop_stage_matrix_{uuid4().hex}"
-    base_url = make_url(DATABASE_URL)
-    if base_url.drivername in {"postgres", "postgresql"}:
-        base_url = base_url.set(drivername="postgresql+psycopg")
-    base_engine = create_async_engine(base_url)
-    test_engine = create_async_engine(
-        base_url.update_query_dict({"options": f"-c search_path={schema}"})
+@pytest.mark.parametrize("task_count,tool_count", [(13, 1), (1, 5)])
+async def test_memory_evidence_limits_are_applied_before_domain_validation(
+    session_factory: async_sessionmaker[AsyncSession], task_count: int, tool_count: int,
+) -> None:
+    """任务和工具证据超限时冻结有界快照并标记截断，记忆作业仍可继续。"""
+    from infrastructure.persistence.postgres.repositories.memory_job_repository import (
+        _load_or_freeze_execution_evidence,
     )
-    schema_created = False
+
+    repository = PostgresRunRepository(session_factory)
+    run = await _service(repository).submit(None, project_id="project-1", request_id="evidence", message="first")
     now = datetime.now(timezone.utc)
-    run_ids = {phase: f"{phase}-{uuid4().hex}" for phase in ("planning", "review", "finalize")}
+    async with session_factory() as session, session.begin():
+        session.add(AgentPlanModel(plan_id="evidence-plan", run_id=run.run_id, session_id=run.session_id,
+            status="completed", user_goal="goal", current_version=1,
+            created_at=now.isoformat(), updated_at=now.isoformat()))
+        await session.flush()
+        session.add(PlanVersionModel(plan_id="evidence-plan", version=1, dag_json={}, created_at=now))
+        session.add_all([
+            AgentTaskModel(task_id=f"evidence-task-{index:02d}", plan_id="evidence-plan", run_id=run.run_id,
+                title="task", objective="work", status="completed", execution_generation=1,
+                created_at=now.isoformat(), updated_at=now.isoformat())
+            for index in range(task_count)
+        ])
+        await session.flush()
+        session.add(PlanRoundModel(round_id="evidence-round", plan_id="evidence-plan", plan_version=1,
+            round_number=1, status="completed", expected_task_count=task_count, terminal_task_count=task_count, created_at=now))
+        await session.flush()
+        session.add(RoundTaskModel(round_id="evidence-round", task_id="evidence-task-00", status="completed"))
+        await session.flush()
+        session.add(TaskExecutionModel(execution_id="evidence-execution", round_id="evidence-round", task_id="evidence-task-00",
+            attempt=1, worker_thread_id="evidence-thread", status="completed", fencing_token=1, created_at=now, updated_at=now))
+        await session.flush()
+        session.add_all([
+            WorkerExecutionMessageModel(message_id=f"evidence-message-{index}", session_id=run.session_id,
+                run_id=run.run_id, plan_id="evidence-plan", task_id="evidence-task-00", execution_id="evidence-execution",
+                execution_generation=1, invocation_id="evidence-call", sequence_no=index,
+                entry_type="tool_result", role=None, tool_name="shell", content_json={"tool_result": {"status": "succeeded"}},
+                created_at=now + timedelta(microseconds=index))
+            for index in range(tool_count)
+        ])
+    async with session_factory() as session, session.begin():
+        evidence = await _load_or_freeze_execution_evidence(session, turn_id=run.run_id, observed_at=now.isoformat())
+        assert evidence is not None and evidence.truncated
+        assert evidence.total_task_count == task_count
+        assert len(evidence.tasks) == min(task_count, 12)
+        assert len(evidence.tasks[0].tool_outcomes) == min(tool_count, 4)
+        assert evidence.tasks[0].tool_outcomes[-1].message_id == f"evidence-message-{tool_count - 1}"
+        assert await _load_or_freeze_execution_evidence(session, turn_id=run.run_id, observed_at=now.isoformat()) == evidence
 
-    try:
-        async with base_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            schema_created = True
-        tables = [
-            AgentCommandModel.__table__,
-            AgentRunModel.__table__,
-            AgentPlanModel.__table__,
-            AgentTaskModel.__table__,
-            ApprovalRecordModel.__table__,
-            PlanVersionModel.__table__,
-            PlanRoundModel.__table__,
-            RoundTaskModel.__table__,
-            TaskExecutionModel.__table__,
-            WorkerJobModel.__table__,
-            RootResumeJobModel.__table__,
-            OrchestrationOutboxModel.__table__,
-        ]
-        async with test_engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync_connection: Base.metadata.create_all(
-                    sync_connection, tables=tables
-                )
-            )
 
-        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_checkpoint_wait_keeps_session_and_allows_new_resume_generation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """正常释放 Root 调用租约后继续持有会话，并拒绝上代迟到结果。"""
+    repository = PostgresRunRepository(session_factory)
+    first = await _service(repository).submit(None, project_id="project-1", request_id="wait-1", message="first")
+    invocation = await repository.claim_next_run()
+    assert invocation is not None and invocation.lease_owner is not None
+    assert await repository.release_execution_lease(first.run_id, owner=invocation.lease_owner, generation=invocation.execution_generation)
+    assert await repository.reconcile_expired_execution_leases() == 0
+    generation = await repository.acquire_execution_lease(first.run_id, owner="resumer", lease_seconds=30)
+    assert generation is not None and generation > invocation.execution_generation
+    assert not await repository.fail(first.run_id, {"code": "stale"}, owner=invocation.lease_owner, generation=invocation.execution_generation)
+    assert (await repository.get(first.run_id)).status == "running"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired_root", [False, True])
+async def test_failed_root_waits_for_live_worker_before_next_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    expired_root: bool,
+) -> None:
+    """Root 失败后保留执行指针，直到 Worker 停止或租约过期。"""
+    repository = PostgresRunRepository(session_factory)
+    service = _service(repository)
+    first = await service.submit(None, project_id="project-1", request_id="failed-1", message="first")
+    second = await service.submit(first.session_id, request_id="failed-2", message="second")
+    invocation = await repository.claim_next_run()
+    assert invocation is not None and invocation.lease_owner is not None
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session, session.begin():
+        session.add(AgentPlanModel(plan_id="plan-failure", run_id=first.run_id, session_id=first.session_id,
+            status="running", user_goal="goal", current_version=1, active_round_id="round-failure",
+            created_at=now.isoformat(), updated_at=now.isoformat()))
+        await session.flush()
+        session.add_all([
+            AgentTaskModel(task_id="task-failure", plan_id="plan-failure", run_id=first.run_id,
+                title="task", objective="work", status="running", active_execution_id="execution-failure",
+                created_at=now.isoformat(), updated_at=now.isoformat()),
+            PlanVersionModel(plan_id="plan-failure", version=1, dag_json={}, created_at=now),
+        ])
+        await session.flush()
+        session.add(PlanRoundModel(round_id="round-failure", plan_id="plan-failure", plan_version=1,
+            round_number=1, status="running", expected_task_count=1, created_at=now))
+        await session.flush()
+        session.add(RoundTaskModel(round_id="round-failure", task_id="task-failure", status="running", active_execution_id="execution-failure"))
+        await session.flush()
+        session.add(TaskExecutionModel(execution_id="execution-failure", round_id="round-failure", task_id="task-failure",
+            attempt=1, worker_thread_id="thread-failure", status="running", lease_owner="worker", lease_until=now + timedelta(minutes=5),
+            fencing_token=1, created_at=now, updated_at=now))
+        await session.flush()
+        session.add(WorkerJobModel(job_id="job-failure", dedupe_key="job-failure", job_type="execute", execution_id="execution-failure",
+            status="running", lease_owner="worker", lease_until=now + timedelta(minutes=5), available_at=now, created_at=now, updated_at=now))
+
+    if expired_root:
         async with session_factory() as session, session.begin():
-            for phase, run_id in run_ids.items():
-                session.add(
-                    AgentRunModel(
-                        run_id=run_id,
-                        session_id=f"session-{run_id}",
-                        status="running",
-                        root_thread_id=f"thread-{run_id}",
-                        cancellation_epoch=0,
-                        cancellation_external_effect_status="none",
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
-                    )
-                )
-                if phase == "planning":
-                    continue
-
-                plan_id = f"plan-{run_id}"
-                round_id = f"round-{run_id}"
-                plan_status = "waiting_review" if phase == "review" else "completed"
-                session.add(
-                    AgentPlanModel(
-                        plan_id=plan_id,
-                        run_id=run_id,
-                        session_id=f"session-{run_id}",
-                        status=plan_status,
-                        user_goal=f"Stop during {phase}",
-                        max_parallelism=1,
-                        current_version=1,
-                        active_round_id=round_id,
-                        cancellation_epoch=0,
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
-                    )
-                )
-                await session.flush()
-                session.add(
-                    PlanVersionModel(
-                        plan_id=plan_id,
-                        version=1,
-                        dag_json={"nodes": [], "edges": []},
-                        created_at=now,
-                    )
-                )
-                await session.flush()
-                session.add(
-                    PlanRoundModel(
-                        round_id=round_id,
-                        plan_id=plan_id,
-                        plan_version=1,
-                        round_number=1,
-                        status="completed",
-                        expected_task_count=0,
-                        terminal_task_count=0,
-                        created_at=now,
-                        completed_at=now,
-                    )
-                )
-                session.add(
-                    RootResumeJobModel(
-                        job_id=f"root-resume-{run_id}",
-                        dedupe_key=f"root-resume:{run_id}",
-                        run_id=run_id,
-                        plan_id=plan_id,
-                        round_id=round_id,
-                        root_wait_generation=1,
-                        status="pending",
-                        attempt=0,
-                        available_at=now,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-
-        run_repository = PostgresRunRepository(session_factory)
-        planning = await run_repository.cancel(run_ids["planning"])
-        review = await run_repository.cancel(run_ids["review"])
-        finalization = await run_repository.cancel(run_ids["finalize"])
-        assert planning is not None and planning.status is RunStatus.CANCELLED
-        assert review is not None and review.status is RunStatus.CANCELLING
-        assert finalization is not None and finalization.status is RunStatus.CANCELLED
-
-        reconciled = await PostgresWorkerJobRepository(
-            session_factory, clock=lambda: now + timedelta(seconds=1)
-        ).reconcile_cancellations()
-        assert [item.run_id for item in reconciled] == [run_ids["review"]]
-
-        async with session_factory() as session:
-            runs = {
-                row.run_id: row
-                for row in (await session.execute(select(AgentRunModel))).scalars()
-            }
-            plans = {
-                row.run_id: row
-                for row in (await session.execute(select(AgentPlanModel))).scalars()
-            }
-            root_jobs = (
-                await session.execute(select(RootResumeJobModel))
-            ).scalars().all()
-            events = (
-                await session.execute(select(OrchestrationOutboxModel))
-            ).scalars().all()
-        assert all(runs[run_id].status == "cancelled" for run_id in run_ids.values())
-        assert plans[run_ids["review"]].status == "cancelled"
-        assert plans[run_ids["finalize"]].status == "completed"
-        assert len(root_jobs) == 2
-        assert all(job.status == "cancelled" for job in root_jobs)
-        event_types_by_run = {
-            run_id: [event.event_type for event in events if event.correlation_id == run_id]
-            for run_id in run_ids.values()
-        }
-        assert event_types_by_run[run_ids["planning"]] == ["RunCancelled"]
-        assert set(event_types_by_run[run_ids["review"]]) == {
-            "PlanCancelling",
-            "RunCancelling",
-            "PlanCancelled",
-            "RunCancelled",
-        }
-        assert event_types_by_run[run_ids["finalize"]] == ["RunCancelled"]
-    finally:
-        await test_engine.dispose()
-        if schema_created:
-            async with base_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        await base_engine.dispose()
+            run = await session.get(AgentRunModel, first.run_id)
+            run.execution_lease_until = (now - timedelta(seconds=1)).isoformat()
+        assert await repository.reconcile_expired_execution_leases() == 1
+    else:
+        assert await repository.fail(first.run_id, {"code": "root_failed"}, owner=invocation.lease_owner, generation=invocation.execution_generation)
+        assert await repository.release_execution_lease(first.run_id, owner=invocation.lease_owner, generation=invocation.execution_generation)
+    workers = PostgresWorkerJobRepository(session_factory)
+    assert await workers.reconcile_cancellations() == []
+    assert await repository.claim_next_run() is None
+    async with session_factory() as session, session.begin():
+        run = await session.get(AgentRunModel, first.run_id)
+        session_row = await session.get(SessionModel, first.session_id)
+        job = await session.get(WorkerJobModel, "job-failure")
+        assert run.status == "stopping" and session_row.active_run_id == first.run_id
+        assert job.status == "cancel_requested"
+        job.lease_until = now - timedelta(seconds=1)
+    assert len(await workers.reconcile_cancellations()) == 1
+    async with session_factory() as session:
+        run = await session.get(AgentRunModel, first.run_id)
+        job = await session.get(WorkerJobModel, "job-failure")
+        events = (await session.execute(select(OrchestrationOutboxModel).where(
+            OrchestrationOutboxModel.correlation_id == first.run_id,
+            OrchestrationOutboxModel.event_type == "RunFailed",
+        ))).scalars().all()
+        expected_error = "root_execution_lease_expired" if expired_root else "root_failed"
+        assert run.status == "failed" and json.loads(run.error_json)["code"] == expected_error
+        assert job.status == "cancelled" and len(events) == 1
+    next_invocation = await repository.claim_next_run()
+    assert next_invocation is not None and next_invocation.run_id == second.run_id

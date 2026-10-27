@@ -22,12 +22,13 @@ from domain.orchestration import (
 )
 from domain.tools import ToolExecutionRequest
 from infrastructure.persistence.postgres.models import (
-    AgentCommandModel,
+    AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    IdempotencyReceiptModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
     OrchestrationOutboxModel,
@@ -38,6 +39,8 @@ from infrastructure.persistence.postgres.models import (
     TaskExecutionModel,
     WorkerJobModel,
     WorkerToolOperationModel,
+    ProjectModel,
+    SessionModel,
 )
 from infrastructure.persistence.postgres.repositories.orchestration_command_repository import (
     PostgresOrchestrationCommandRepository,
@@ -83,7 +86,10 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
             await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
             schema_created = True
         tables = [
-            AgentCommandModel.__table__,
+            ProjectModel.__table__,
+            SessionModel.__table__,
+            AgentEventModel.__table__,
+            IdempotencyReceiptModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -109,10 +115,32 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session, session.begin():
             session.add(
+                ProjectModel(
+                    id=f"project-{run_id}",
+                    name="Cancellation test",
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+            session.add(
+                SessionModel(
+                    id=session_id,
+                    project_id=f"project-{run_id}",
+                    title="Cancellation test",
+                    active_run_id=run_id,
+                    last_run_sequence=1,
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                    last_activity_at=now.isoformat(),
+                )
+            )
+            session.add(
                 AgentRunModel(
                     run_id=run_id,
                     session_id=session_id,
-                    status="created",
+                    message_id=f"message-{run_id}",
+                    sequence=1,
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     cancellation_epoch=0,
                     cancellation_external_effect_status="none",
@@ -211,9 +239,14 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
             )
         assert len(external_api.sent) == 1
 
-        cancellation = await PostgresRunRepository(session_factory).cancel(run_id)
-        assert cancellation is not None
-        assert cancellation.status.value == "cancelling"
+        cancellation, replayed = await PostgresRunRepository(session_factory).stop_active(
+            session_id,
+            request_id=f"stop-{run_id}",
+            expected_run_id=run_id,
+            displayed_session_seq=0,
+        )
+        assert not replayed
+        assert cancellation.status.value == "stopping"
         assert cancellation.external_effect_status == "unknown"
         await PostgresWorkerJobRepository(
             session_factory, clock=lambda: now + timedelta(seconds=61)

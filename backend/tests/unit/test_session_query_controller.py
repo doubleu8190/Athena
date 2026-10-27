@@ -82,6 +82,8 @@ class RunRepository:
             RunSummary(
                 run_id="run-1",
                 session_id=session_id,
+                message_id="message-1",
+                sequence=1,
                 status=RunStatus.COMPLETED,
                 root_thread_id="thread-1",
                 created_at="2026-01-01T00:00:00+00:00",
@@ -93,7 +95,7 @@ class RunRepository:
 
     async def list_recent(self, *, limit, offset, session_id=None):
         values = [
-            RunSummary("run-2", "session-2", RunStatus.CANCELLED, "thread-2", created_at="2026-01-02T00:00:00Z"),
+            RunSummary("run-2", "session-2", "message-2", 2, RunStatus.CANCELLED, "thread-2", created_at="2026-01-02T00:00:00Z"),
             *(await self.list_for_session("session-1")),
         ]
         if session_id is not None:

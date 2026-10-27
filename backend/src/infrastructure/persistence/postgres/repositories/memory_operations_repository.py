@@ -17,6 +17,13 @@ from domain.memory import (
     MemoryResolutionProposal,
     MemoryWriteOperation,
 )
+from shared.contracts.memory import (
+    MemoryCandidateSnapshotSchema,
+    MemoryFactExtractionSnapshotSchema,
+    MemoryResolutionProposalSchema,
+    memory_domain_to_schema,
+    memory_schema_to_domain,
+)
 
 from ..models import MemoryExtractionSnapshotModel, MemoryWriteOperationModel
 
@@ -46,7 +53,9 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
             row = await session.get(MemoryExtractionSnapshotModel, turn_id)
         if row is None:
             return None
-        return MemoryFactExtractionSnapshot.model_validate_json(row.snapshot_json)
+        return memory_schema_to_domain(
+            MemoryFactExtractionSnapshotSchema.model_validate_json(row.snapshot_json)
+        )
 
     async def save_extraction_snapshot(
         self, snapshot: MemoryFactExtractionSnapshot
@@ -58,7 +67,7 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                     pg_insert(MemoryExtractionSnapshotModel)
                     .values(
                         turn_id=snapshot.turn_id,
-                        snapshot_json=snapshot.model_dump_json(),
+                        snapshot_json=memory_domain_to_schema(snapshot).model_dump_json(),
                         created_at=_now(),
                     )
                     .on_conflict_do_nothing(index_elements=["turn_id"])
@@ -68,15 +77,17 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 )
                 if row is None:
                     raise RuntimeError("memory_extraction_snapshot_not_saved")
-                return MemoryFactExtractionSnapshot.model_validate_json(
-                    row.snapshot_json
+                return memory_schema_to_domain(
+                    MemoryFactExtractionSnapshotSchema.model_validate_json(
+                        row.snapshot_json
+                    )
                 )
 
     async def begin_operation(
         self, operation_id: str, turn_id: str, candidate: MemoryCandidateSnapshot
     ) -> MemoryWriteOperation:
         """创建或读取同一候选的写入回执。"""
-        candidate_json = candidate.model_dump_json()
+        candidate_json = memory_domain_to_schema(candidate).model_dump_json()
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(
@@ -95,8 +106,10 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 row = await session.get(MemoryWriteOperationModel, operation_id)
                 if row is None:
                     raise RuntimeError("memory_write_operation_not_saved")
-                stored_candidate = MemoryCandidateSnapshot.model_validate_json(
-                    row.candidate_json
+                stored_candidate = memory_schema_to_domain(
+                    MemoryCandidateSnapshotSchema.model_validate_json(
+                        row.candidate_json
+                    )
                 )
                 if row.turn_id != turn_id or stored_candidate != candidate:
                     raise ValueError("memory_write_operation_identity_mismatch")
@@ -125,13 +138,17 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 )
                 if row is None:
                     raise ValueError("memory_write_operation_not_found")
-                candidate = MemoryCandidateSnapshot.model_validate_json(
-                    row.candidate_json
+                candidate = memory_schema_to_domain(
+                    MemoryCandidateSnapshotSchema.model_validate_json(
+                        row.candidate_json
+                    )
                 )
                 if row.status == "pending":
                     row.status = status
                     if row.decision_json is None:
-                        row.decision_json = decision.model_dump_json()
+                        row.decision_json = memory_domain_to_schema(
+                            decision
+                        ).model_dump_json()
                     row.result_memory_id = result_memory_id
                     row.projection_status = projection_status
                     row.updated_at = _now()
@@ -141,7 +158,7 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
         self, operation_id: str, decision: MemoryResolutionProposal
     ) -> MemoryWriteOperation:
         """在产生记忆副作用前保存已经校验的决策。"""
-        decision_json = decision.model_dump_json()
+        decision_json = memory_domain_to_schema(decision).model_dump_json()
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.scalar(
@@ -156,8 +173,10 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                         raise ValueError("memory_write_operation_decision_changed")
                     row.decision_json = decision_json
                     row.updated_at = _now()
-                candidate = MemoryCandidateSnapshot.model_validate_json(
-                    row.candidate_json
+                candidate = memory_schema_to_domain(
+                    MemoryCandidateSnapshotSchema.model_validate_json(
+                        row.candidate_json
+                    )
                 )
                 return self._operation(row, candidate)
 
@@ -207,7 +226,11 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
             decision=(
                 None
                 if row.decision_json is None
-                else MemoryResolutionProposal.model_validate_json(row.decision_json)
+                else memory_schema_to_domain(
+                    MemoryResolutionProposalSchema.model_validate_json(
+                        row.decision_json
+                    )
+                )
             ),
             result_memory_id=row.result_memory_id,
             projection_status=row.projection_status,

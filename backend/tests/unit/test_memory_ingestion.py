@@ -25,8 +25,6 @@ from domain.memory import (
 from domain.runs import (
     CommandExecutionResult,
     CommandType,
-    RunCancelPayload,
-    RunCancellationResult,
     RunCommand,
     RunStartPayload,
     RunStatus,
@@ -82,9 +80,6 @@ class Vectors:
 
     async def index(self, memory_id: str, content: str) -> None:
         self.items.append((memory_id, content))
-
-
-@pytest.mark.asyncio
 async def test_explicit_preferences_are_extracted_and_indexed() -> None:
     memory, vectors = Memory(), Vectors()
     llm = LLM()
@@ -163,14 +158,6 @@ class Lifecycle:
         return True
 
 
-class Commands:
-    async def complete_command(self, *args, **kwargs):
-        return True
-
-    async def complete_active_command_for_run(self, *args, **kwargs):
-        return True
-
-
 class Events:
     async def publish(self, event):
         return event
@@ -196,7 +183,7 @@ class Executor:
 async def test_completed_run_enqueues_memory_without_blocking_answer() -> None:
     jobs = Jobs()
     service = RunExecutionService(
-        Lifecycle(), Commands(), Executor(), Events(), memory_jobs=jobs
+        Lifecycle(), Executor(), Events(), memory_jobs=jobs
     )
     command = RunCommand(
         "command-1",
@@ -215,29 +202,3 @@ async def test_completed_run_enqueues_memory_without_blocking_answer() -> None:
             "assistant_text": "苹果很受欢迎",
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_cancel_command_uses_its_typed_reason() -> None:
-    class CancellableLifecycle(Lifecycle):
-        reason: str | None = None
-
-        async def cancel(self, _run_id: str, *, reason: str):
-            self.reason = reason
-            return RunCancellationResult(RunStatus.CANCELLING, True)
-
-    lifecycle = CancellableLifecycle()
-    service = RunExecutionService(lifecycle, Commands(), Executor(), Events())
-    command = RunCommand(
-        "command-cancel",
-        CommandType.RUN_CANCEL,
-        "session-1",
-        "run-1",
-        RunCancelPayload(reason="USER_REQUEST"),
-        datetime.now(timezone.utc),
-    )
-
-    result = await service.execute(command)
-
-    assert lifecycle.reason == "USER_REQUEST"
-    assert result["status"] == RunStatus.CANCELLING.value

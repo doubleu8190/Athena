@@ -10,7 +10,6 @@ from domain.sessions import (
     Message,
     MessageRole,
     Session,
-    SessionStatus,
     ToolCall,
 )
 from infrastructure.persistence.postgres.models import (
@@ -31,8 +30,7 @@ def test_session_converter_preserves_compression_fields() -> None:
     domain = Session(
         id="session-1",
         title="Title",
-        status=SessionStatus.IDLE,
-        run_id=None,
+        active_run_id=None,
         created_at=now,
         updated_at=now,
         compression_summary="summary",

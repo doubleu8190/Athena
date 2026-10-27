@@ -306,38 +306,36 @@ class ApiClient {
   /** 提交消息并在首次发送时由后端创建会话。 */
   async submitRun(
     sessionId: string | null,
+    requestId: string,
     payload: {
       project_id?: string
       message: string
-      message_id?: string
       attachment_ids?: string[]
-      command_id?: string
     },
   ): Promise<SubmitRunResponse> {
-    const commandId = payload.command_id || `cmd_${crypto.randomUUID()}`
     return this.request<SubmitRunResponse>("/api/runs", {
       method: "POST",
+      headers: { "Idempotency-Key": requestId },
       body: JSON.stringify({
         session_id: sessionId,
         project_id: payload.project_id,
         message: payload.message,
-        message_id: payload.message_id,
-        command_id: commandId,
         attachment_ids: payload.attachment_ids ?? [],
       }),
     })
   }
 
-  /** 提交取消运行命令。
-   * @param runId 可选目标运行 ID；为空时由后端选择当前运行。
-   */
-  async cancelSession(sessionId: string, runId?: string): Promise<{ command_id: string | null; run_id: string | null; status: string; already_terminal: boolean }> {
-    const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : ""
-    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/cancel${suffix}`, { method: "POST" })
-  }
-
-  async cancelRun(runId: string): Promise<{ command_id: string | null; run_id: string | null; status: string; already_terminal: boolean }> {
-    return this.request(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" })
+  /** Stop exactly the Run and rendered stream cursor observed by the client. */
+  async stopSession(
+    sessionId: string,
+    requestId: string,
+    payload: { expected_run_id: string | null; displayed_session_seq: number },
+  ): Promise<{ run_id: string | null; status: string; no_op: boolean }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, {
+      method: "POST",
+      headers: { "Idempotency-Key": requestId },
+      body: JSON.stringify(payload),
+    })
   }
 
   /** 列出会话附件。 */

@@ -62,6 +62,7 @@ class RootGraphPort(Protocol):
         run_id: str,
         user_message: str,
         message_id: str = "",
+        run_sequence: int = 1,
         attachment_ids: list[str] | None = None,
         resume_value: RoundCompletedResumeValue | None = None,
         stop_signal: asyncio.Event | None = None,

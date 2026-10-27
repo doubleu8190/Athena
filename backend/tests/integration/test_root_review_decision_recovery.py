@@ -95,6 +95,8 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
             session.add(
                 AgentRunModel(
                     run_id=run_id,
+                    message_id="message:" + str(run_id),
+                    sequence=1,
                     session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",

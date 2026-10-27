@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from typing import Any
 
 from domain.files import (
@@ -18,6 +19,7 @@ from domain.retrieval.trace_contracts import (
     RetrievalChannelTrace,
     RetrievalHitTrace,
 )
+from shared.contracts.retrieval import RetrievalHitTraceSchema
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
 from application.runs.context.protocols import ContextProvider
@@ -144,7 +146,7 @@ class FileContextProvider(ContextProvider):
             for rank, candidate in enumerate(fused, 1):
                 selected = rank <= result_limit
                 hits = tuple(
-                    RetrievalHitTrace.model_validate(hit)
+                    RetrievalHitTraceSchema.model_validate(hit).to_domain()
                     for hit in candidate.metadata.get("hits", [])
                 )
                 stable_metadata = {
@@ -357,15 +359,14 @@ class KnowledgeContextProvider(FileContextProvider):
             for item in result.items
         )
         candidates = tuple(
-            candidate.model_copy(
-                update={
-                    "provider": self.name,
-                    "source_type": "knowledge_chunk",
-                    "metadata": {
-                        **candidate.metadata,
-                        "knowledge_base_ids": list(knowledge_ids),
-                    },
-                }
+            replace(
+                candidate,
+                provider=self.name,
+                source_type="knowledge_chunk",
+                metadata={
+                    **candidate.metadata,
+                    "knowledge_base_ids": list(knowledge_ids),
+                },
             )
             for candidate in result.candidates
         )

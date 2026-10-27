@@ -48,12 +48,14 @@ class LangGraphRunExecutor(RunExecutorPort):
         if isinstance(command.payload, RunStartPayload):
             user_message = command.payload.message
             message_id = command.payload.message_id
+            run_sequence = command.payload.sequence
             attachment_ids = list(command.payload.attachment_ids)
             resume_value = None
         elif isinstance(command.payload, RunResumePayload):
             # 恢复身份来自 checkpoint；这些启动参数不会参与恢复状态。
             user_message = ""
             message_id = ""
+            run_sequence = 1
             attachment_ids = []
             resume_value = command.payload.resume_value
         else:
@@ -71,6 +73,7 @@ class LangGraphRunExecutor(RunExecutorPort):
                 run_id=command.run_id,
                 user_message=user_message,
                 message_id=message_id,
+                run_sequence=run_sequence,
                 attachment_ids=attachment_ids,
                 resume_value=resume_value,
                 stop_signal=stop_signal,

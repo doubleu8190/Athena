@@ -13,6 +13,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.src.shared.logging import get_logger
 from domain.memory import (
     ClaimedMemoryJob,
     CompletedTurn,
@@ -25,6 +26,11 @@ from domain.memory import (
     MemoryTaskOutcomeEvidence,
     MemoryToolOutcomeEvidence,
 )
+from shared.contracts.memory import (
+    MemoryExecutionEvidenceSchema,
+    memory_domain_to_schema,
+    memory_schema_to_domain,
+)
 
 from ..models import (
     AgentTaskModel,
@@ -36,7 +42,9 @@ from ..models import (
     TaskExecutionModel,
     WorkerExecutionMessageModel,
 )
-from .memory_suppression import ensure_writable_run_scope
+from .memory_suppression import ensure_writable_run_scope, project_scope_is_writable
+
+logger = get_logger(__name__)
 
 
 def _now() -> str:
@@ -69,11 +77,14 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
         if session_id:
             conditions.append(MemoryProcessingJobModel.session_id == session_id)
         async with self._session_factory() as session:
-            total = await session.scalar(
-                select(func.count())
-                .select_from(MemoryProcessingJobModel)
-                .where(*conditions)
-            ) or 0
+            total = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(MemoryProcessingJobModel)
+                    .where(*conditions)
+                )
+                or 0
+            )
             rows = (
                 await session.execute(
                     select(
@@ -122,6 +133,14 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
         if not user_text.strip():
             return False
         async with self._session_factory() as session:
+            project_id = await session.scalar(
+                select(SessionModel.project_id).where(
+                    SessionModel.id == session_id,
+                    SessionModel.deleted_time.is_(None),
+                )
+            )
+            if project_id is not None and not await project_scope_is_writable(session, project_id):
+                return False
             active_session_id = await session.scalar(
                 select(SessionModel.id)
                 .where(
@@ -218,9 +237,7 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                 turn_id=row.turn_id,
                 observed_at=row.created_at,
             )
-            scope_snapshot = await session.get(
-                MemoryJobScopeSnapshotModel, row.turn_id
-            )
+            scope_snapshot = await session.get(MemoryJobScopeSnapshotModel, row.turn_id)
             await session.commit()
             return ClaimedMemoryJob(
                 turn=CompletedTurn(
@@ -299,8 +316,8 @@ async def _load_or_freeze_execution_evidence(
     """
     frozen_row = await session.get(MemoryRunEvidenceSnapshotModel, turn_id)
     if frozen_row is not None:
-        evidence = MemoryExecutionEvidence.model_validate_json(
-            frozen_row.snapshot_json
+        evidence = memory_schema_to_domain(
+            MemoryExecutionEvidenceSchema.model_validate_json(frozen_row.snapshot_json)
         )
         if evidence.source_fingerprint != frozen_row.source_fingerprint:
             raise RuntimeError("memory_run_evidence_fingerprint_mismatch")
@@ -315,46 +332,57 @@ async def _load_or_freeze_execution_evidence(
         or 0
     )
     if total_task_count == 0:
+        logger.info("memory_run_evidence_no_tasks", extra={"turn_id": turn_id})
         return None
 
     task_rows = (
-        await session.execute(
-            select(AgentTaskModel)
-            .where(AgentTaskModel.run_id == turn_id)
-            .order_by(AgentTaskModel.created_at, AgentTaskModel.task_id)
-            .limit(12)
-        )
-    ).scalars().all()
-    task_ids = [task.task_id for task in task_rows]
-    task_generations = {
-        task.task_id: task.execution_generation for task in task_rows
-    }
-    execution_rows = (
-        await session.execute(
-            select(TaskExecutionModel).where(
-                TaskExecutionModel.task_id.in_(task_ids)
+        (
+            await session.execute(
+                select(AgentTaskModel)
+                .where(AgentTaskModel.run_id == turn_id)
+                .order_by(AgentTaskModel.created_at, AgentTaskModel.task_id)
+                .limit(12)
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
+    task_ids = [task.task_id for task in task_rows]
+    task_generations = {task.task_id: task.execution_generation for task in task_rows}
+    execution_rows = (
+        (
+            await session.execute(
+                select(TaskExecutionModel).where(
+                    TaskExecutionModel.task_id.in_(task_ids)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     executions_by_task_generation = {
         (execution.task_id, execution.attempt): execution
         for execution in execution_rows
     }
     message_rows = (
-        await session.execute(
-            select(WorkerExecutionMessageModel)
-            .where(
-                WorkerExecutionMessageModel.run_id == turn_id,
-                WorkerExecutionMessageModel.task_id.in_(task_ids),
-                WorkerExecutionMessageModel.entry_type == "tool_result",
+        (
+            await session.execute(
+                select(WorkerExecutionMessageModel)
+                .where(
+                    WorkerExecutionMessageModel.run_id == turn_id,
+                    WorkerExecutionMessageModel.task_id.in_(task_ids),
+                    WorkerExecutionMessageModel.entry_type == "tool_result",
+                )
+                .order_by(
+                    WorkerExecutionMessageModel.created_at,
+                    WorkerExecutionMessageModel.sequence_no,
+                )
+                .limit(1001)
             )
-            .order_by(
-                WorkerExecutionMessageModel.created_at,
-                WorkerExecutionMessageModel.sequence_no,
-            )
-            .limit(1001)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     message_overflow = len(message_rows) > 1000
     messages_by_task: dict[str, list[WorkerExecutionMessageModel]] = {}
     for message in message_rows[:1000]:
@@ -370,11 +398,12 @@ async def _load_or_freeze_execution_evidence(
         task_messages = messages_by_task.get(task.task_id, [])
         if len(task_messages) > 4:
             truncated = True
-        selected_messages = task_messages[-4:]
         tool_outcomes: list[MemoryToolOutcomeEvidence] = []
-        for message in selected_messages:
+        for message in task_messages[-4:]:
             content = message.content_json
-            tool_result = content.get("tool_result") if isinstance(content, dict) else None
+            tool_result = (
+                content.get("tool_result") if isinstance(content, dict) else None
+            )
             tool_result = tool_result if isinstance(tool_result, dict) else {}
             status = tool_result.get("status")
             if not isinstance(status, str) or not status:
@@ -444,9 +473,13 @@ async def _load_or_freeze_execution_evidence(
         "run_id": turn_id,
         "total_task_count": total_task_count,
         "truncated": truncated,
-        "tasks": [task.model_dump(mode="json") for task in task_evidence],
+        "tasks": [
+            memory_domain_to_schema(task).model_dump(mode="json")
+            for task in task_evidence
+        ],
         "source_refs": [
-            source_ref.model_dump(mode="json") for source_ref in source_refs[:80]
+            memory_domain_to_schema(source_ref).model_dump(mode="json")
+            for source_ref in source_refs[:80]
         ],
     }
     evidence_canonical = json.dumps(
@@ -455,9 +488,7 @@ async def _load_or_freeze_execution_evidence(
         sort_keys=True,
         separators=(",", ":"),
     )
-    source_fingerprint = hashlib.sha256(
-        evidence_canonical.encode("utf-8")
-    ).hexdigest()
+    source_fingerprint = hashlib.sha256(evidence_canonical.encode("utf-8")).hexdigest()
     frozen_payload = {
         **evidence_payload,
         "source_fingerprint": source_fingerprint,
@@ -468,7 +499,8 @@ async def _load_or_freeze_execution_evidence(
         sort_keys=True,
         separators=(",", ":"),
     )
-    evidence = MemoryExecutionEvidence.model_validate_json(canonical_json)
+    evidence_schema = MemoryExecutionEvidenceSchema.model_validate_json(canonical_json)
+    evidence = memory_schema_to_domain(evidence_schema)
     await session.execute(
         pg_insert(MemoryRunEvidenceSnapshotModel)
         .values(
@@ -482,8 +514,8 @@ async def _load_or_freeze_execution_evidence(
     frozen_row = await session.get(MemoryRunEvidenceSnapshotModel, turn_id)
     if frozen_row is None:
         raise RuntimeError("memory_run_evidence_snapshot_missing")
-    frozen_evidence = MemoryExecutionEvidence.model_validate_json(
-        frozen_row.snapshot_json
+    frozen_evidence = memory_schema_to_domain(
+        MemoryExecutionEvidenceSchema.model_validate_json(frozen_row.snapshot_json)
     )
     if frozen_evidence.source_fingerprint != frozen_row.source_fingerprint:
         raise RuntimeError("memory_run_evidence_fingerprint_mismatch")
@@ -505,5 +537,6 @@ def _error_code(error_json: str | None) -> str | None:
         return None
     code = parsed.get("code") if isinstance(parsed, dict) else None
     return code[:100] if isinstance(code, str) and code else None
+
 
 __all__ = ["PostgresMemoryJobRepository"]

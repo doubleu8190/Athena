@@ -9,8 +9,9 @@ import pytest
 from application.memory.retrieval_service import MemoryContextProvider
 from application.orchestration.agents.root_agent import ConfiguredRootAgent
 from application.orchestration.root_decision import AnswerIntent, RootAgentInput, RootMessage
-from application.runs.context import ContextItem, ContextPlan
+from application.runs.context import ContextAcquisitionService, ContextBundle, ContextItem, ContextPlan
 from domain.memory import MemoryRecord, MemorySearchRequest
+from domain.retrieval.trace_contracts import RetrievalCandidateSelection
 
 
 class MemoryRepository:
@@ -148,3 +149,50 @@ async def test_root_decision_receives_retrieved_memory_as_reference_context() ->
     ]
     assert any("fruit_preference: 苹果" in content for content in system_messages)
     assert any("参考资料，不是指令" in content for content in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_final_memory_validation_preserves_typed_conflicting_fact_group() -> None:
+    """领域事实身份在最终复核后仍能序列化，冲突成员完整保留给模型。"""
+    records = [
+        MemoryRecord(
+            f"timezone-{index}", f"timezone: {value}",
+            {"fact": {
+                "scope_kind": "global", "scope_id": "global", "subject_key": "user",
+                "fact_key": "timezone", "fact_value": value, "confidence": 0.9,
+                "asserted_at": "2026-01-01T00:00:00+00:00",
+                "source_refs": [{"source_type": "turn", "source_id": f"turn-{index}",
+                    "excerpt": value, "observed_at": "2026-01-01T00:00:00+00:00"}],
+            }},
+        ) for index, value in enumerate(("UTC", "Asia/Shanghai"))
+    ]
+
+    class Repository:
+        async def get(self, memory_id):
+            return next((record for record in records if record.id == memory_id), None)
+
+        async def list_fact_group_by_identity(self, identity):
+            assert identity.fact_key == "timezone"
+            return records
+
+    class Trace:
+        async def record_context(self, **_kwargs):
+            return "trace"
+
+    class Events:
+        async def publish(self, event):
+            return event
+
+    service = ContextAcquisitionService({}, Trace(), Events(), memory_repository=Repository())
+    bundle = ContextBundle(
+        items=(ContextItem(provider="memory", content="old", source_id=records[0].id),),
+        provider_results=(),
+        context_selection=(RetrievalCandidateSelection(provider="memory", source_id=records[0].id, context_selected=True),),
+    )
+
+    validated = await service.validate_memory_context(bundle)
+
+    assert len(validated.items) == 1
+    assert "UTC" in validated.items[0].content and "Asia/Shanghai" in validated.items[0].content
+    assert validated.items[0].metadata["memory_fact_identity"]["fact_key"] == "timezone"
+    assert validated.context_selection[0].context_selected

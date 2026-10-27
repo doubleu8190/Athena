@@ -7,44 +7,22 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import ValidationError
-
-from .payloads import (
-    RunCancelPayload,
-    RunCommandPayload,
-    RunResumePayload,
-    RunStartPayload,
-)
+from .payloads import RunCommandPayload, RunResumePayload, RunStartPayload
 
 
 class CommandType(StrEnum):
-    """可由 HTTP 或后台 Worker 提交的运行控制命令。"""
+    """内部 Run 执行器的调用类型，不作为业务状态持久化。"""
 
-    MESSAGE_SUBMIT = "message.submit"
     RUN_START = "run.start"
-    RUN_CANCEL = "run.cancel"
-    RUN_PAUSE = "run.pause"
     RUN_RESUME = "run.resume"
-    APPROVAL_RESOLVE = "approval.resolve"
-
-
-class CommandStatus(StrEnum):
-    """命令在持久化队列中的生命周期状态。"""
-
-    QUEUED = "queued"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
 
 
 class RunStatus(StrEnum):
-    """运行状态的稳定传输值。"""
+    """用户消息对应 Run 的统一生命周期状态。"""
 
-    CREATED = "created"
+    QUEUED = "queued"
     RUNNING = "running"
-    CANCELLING = "cancelling"
-    PAUSED = "paused"
+    STOPPING = "stopping"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -57,11 +35,13 @@ class RunCancellationResult:
     status: RunStatus
     changed: bool
     external_effect_status: str = "unknown"
+    run_id: str | None = None
+    no_op: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class RunCommand:
-    """与传输技术无关的命令信封。"""
+    """一次 Root start/resume 调用，不代表独立的持久化命令。"""
 
     command_id: str
     command_type: CommandType
@@ -70,6 +50,8 @@ class RunCommand:
     payload: RunCommandPayload
     issued_at: datetime
     schema_version: int = 1
+    execution_generation: int = 0
+    lease_owner: str | None = None
 
     def __post_init__(self) -> None:
         """Reject commands whose concrete payload does not match their type."""
@@ -80,26 +62,10 @@ class RunCommand:
             )
 
 
-def parse_run_command_payload(
-    command_type: CommandType, value: object
-) -> RunCommandPayload:
-    """Validate JSON data from persistence into the command's domain payload."""
-    payload_type = _payload_type_for(command_type)
-    try:
-        if isinstance(value, str):
-            return payload_type.model_validate_json(value)
-        return payload_type.model_validate(value)
-    except ValidationError as error:
-        raise ValueError(
-            f"invalid_payload_for_{command_type.value}"
-        ) from error
-
-
 def _payload_type_for(command_type: CommandType) -> type[RunCommandPayload]:
-    """Return the one supported payload schema for an executable run command."""
+    """Return the validated payload type for an internal Run invocation."""
     payload_types: dict[CommandType, type[RunCommandPayload]] = {
         CommandType.RUN_START: RunStartPayload,
-        CommandType.RUN_CANCEL: RunCancelPayload,
         CommandType.RUN_RESUME: RunResumePayload,
     }
     try:
@@ -109,28 +75,14 @@ def _payload_type_for(command_type: CommandType) -> type[RunCommandPayload]:
 
 
 @dataclass(frozen=True, slots=True)
-class CommandStatusRecord:
-    """命令状态查询返回的只读领域记录。"""
+class RunEnqueueResult:
+    """Run 与源消息写入后的稳定响应。"""
 
-    command_id: str
     session_id: str
-    run_id: str | None
-    command_type: CommandType | str
-    status: CommandStatus | str
-    result: Any = None
-    error: Any = None
-
-
-@dataclass(frozen=True, slots=True)
-class CommandEnqueueResult:
-    """命令入队后的稳定结果，包含幂等复用信息。"""
-
-    command_id: str
-    session_id: str
-    run_id: str | None
-    message_id: str | None
-    attachment_ids: tuple[str, ...]
-    status: CommandStatus | str
+    run_id: str
+    message_id: str
+    sequence: int
+    status: RunStatus | str
     deduplicated: bool
 
 
@@ -179,6 +131,8 @@ class RunSummary:
 
     run_id: str
     session_id: str
+    message_id: str
+    sequence: int
     status: RunStatus | str
     root_thread_id: str
     error: Any = None

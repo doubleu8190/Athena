@@ -196,6 +196,54 @@ async def test_root_wait_node_reviews_completed_round_before_waiting_again():
 
 
 @pytest.mark.asyncio
+async def test_resume_exception_fails_run_instead_of_replaying_checkpoint():
+    """恢复调用发生异常时启动失败收尾，避免重放已经产生副作用的调用。"""
+    class Jobs:
+        def __init__(self):
+            self.retries = []
+
+        async def retry(self, lease, *, delay_seconds):
+            self.retries.append(lease)
+
+    class Graph:
+        async def has_pending_round_wait(self, **_identity):
+            return True
+
+    class Execution:
+        def __init__(self):
+            self.failures = []
+
+        async def execute(self, _command):
+            raise RuntimeError("checkpoint failure")
+
+        async def fail(self, command, error):
+            self.failures.append((command, error))
+
+    class Runs:
+        def __init__(self):
+            self.releases = []
+
+        async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
+            return 3
+
+        async def release_execution_lease(self, run_id, *, owner, generation):
+            self.releases.append((run_id, owner, generation))
+            return True
+
+    jobs, execution, runs = Jobs(), Execution(), Runs()
+    dispatcher = RootResumeDispatcher(jobs, Graph(), execution, runs, worker_id="resumer")
+    lease = SimpleNamespace(job_id="job", run_id="run", session_id="session", plan_id="plan",
+        round_id="round", plan_version=1, root_wait_generation=1,
+        interrupt_id="interrupt", checkpoint_id="checkpoint")
+
+    await dispatcher._resume(lease)
+
+    assert execution.failures[0][1]["code"] == "root_checkpoint_resume_failed"
+    assert jobs.retries == []
+    assert runs.releases[0][2] == 3
+
+
+@pytest.mark.asyncio
 async def test_root_resume_dispatcher_retries_until_matching_interrupt_exists():
     class Jobs:
         def __init__(self):
@@ -297,18 +345,30 @@ async def test_root_resume_recovers_checkpoint_identity_before_dispatch():
             }
 
     class Execution:
-        def __init__(self):
+        def __init__(self, runs):
             """初始化命令记录；本构造函数不接收参数。"""
             self.command = None
+            self.runs = runs
 
         async def execute(self, command):
             """记录 Root 恢复命令并模拟执行成功。"""
             self.command = command
+            self.runs.status = "completed"
 
     class Runs:
         def __init__(self):
             """初始化 Root wait 登记记录；本构造函数不接收参数。"""
             self.armed = []
+            self.status = "running"
+
+        async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
+            return 4
+
+        async def renew_execution_lease(self, _run_id, **_kwargs):
+            return True
+
+        async def release_execution_lease(self, _run_id, *, owner, generation):
+            return True
 
         async def arm_root_wait(self, run_id, **identity):
             """记录从 checkpoint 修复的 Run wait 身份。"""
@@ -316,10 +376,11 @@ async def test_root_resume_recovers_checkpoint_identity_before_dispatch():
             return True
 
         async def get(self, _run_id):
-            """返回已完成的 Run 状态。"""
-            return SimpleNamespace(status="completed")
+            """返回当前 Run 状态。"""
+            return SimpleNamespace(status=self.status)
 
-    jobs, execution, runs = Jobs(), Execution(), Runs()
+    jobs, runs = Jobs(), Runs()
+    execution = Execution(runs)
     dispatcher = RootResumeDispatcher(
         jobs,
         Graph(),
@@ -390,23 +451,37 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
             }
 
     class Execution:
-        def __init__(self):
+        def __init__(self, runs):
             self.command = None
+            self.runs = runs
 
         async def execute(self, command):
             self.command = command
+            self.runs.status = "completed"
             return {"content": "done"}
 
     class Runs:
-        async def get(self, _run_id):
-            return SimpleNamespace(status="completed")
+        status = "running"
 
-    jobs, execution = Jobs(), Execution()
+        async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
+            return 4
+
+        async def renew_execution_lease(self, _run_id, **_kwargs):
+            return True
+
+        async def release_execution_lease(self, _run_id, *, owner, generation):
+            return True
+
+        async def get(self, _run_id):
+            return SimpleNamespace(status=self.status)
+
+    jobs, runs = Jobs(), Runs()
+    execution = Execution(runs)
     dispatcher = RootResumeDispatcher(
         jobs,
         Graph(),
         execution,
-        Runs(),
+        runs,
         worker_id="root-resumer-1",
     )
     lease = SimpleNamespace(

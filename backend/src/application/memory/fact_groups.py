@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from domain.memory import MemoryFact, MemoryFactIdentity, MemoryRecord
 
 from application.memory.fact_policy import FactCardinality, cardinality_for
+from shared.contracts.memory import MemoryFactSchema, memory_schema_to_domain
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +37,7 @@ def record_fact(record: MemoryRecord) -> MemoryFact | None:
     if isinstance(value, MemoryFact):
         return value
     try:
-        return MemoryFact.model_validate(value)
+        return memory_schema_to_domain(MemoryFactSchema.model_validate(value))
     except ValueError:
         return None
 

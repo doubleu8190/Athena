@@ -11,7 +11,7 @@ from application.runs.request_contracts import (
     RootRequestHistoryMessage,
     RootRequestState,
 )
-from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
+from domain.events import EventPort
 from application.sessions import SessionNotFoundError
 from domain.files import AttachmentRepository, AttachmentStatus
 from domain.knowledge import KnowledgeBaseRepository
@@ -63,7 +63,9 @@ class RunRequestPreparationService:
         if await self._sessions.get(session_id) is None:
             raise SessionNotFoundError(session_id)
 
-        message_id = request.message_id or self._id_factory()
+        message_id = request.message_id
+        if not message_id or not request.run_id:
+            raise ValueError("run_source_message_required")
         attachment_refs: list[RootAttachment] = []
         attachment_values = []
 
@@ -87,39 +89,19 @@ class RunRequestPreparationService:
                     status=status,
                 )
             )
-        prepared_request = request.model_copy(
-            update={"message_id": message_id, "attachment_refs": attachment_refs}
-        )
-
         user_message = await self._messages.get(message_id)
         if user_message is None:
-            user_message = Message(
-                id=message_id,
-                session_id=session_id,
-                role=MessageRole.USER,
-                content=request.user_message,
-                timestamp=self._clock(),
-                run_id=request.run_id or None,
-                attachments=tuple(attachment_values),
-            )
-            await self._messages.save(user_message)
-            logger.info(f"用户消息保存成功。", user_message=user_message.content)
-        if self._events is not None:
-            await self._events.publish(
-                ApplicationEvent(
-                    event_type=EventType.MESSAGE_PERSISTED,
-                    durability=EventDurability.DURABLE,
-                    session_id=session_id,
-                    run_id=user_message.run_id,
-                    message_id=user_message.id,
-                    transition_id=f"message:{user_message.id}:persisted",
-                    occurred_at=user_message.timestamp,
-                    payload={
-                        "role": user_message.role.value,
-                        "timestamp": user_message.timestamp.isoformat(),
-                    },
-                )
-            )
+            raise ValueError("source_message_not_found")
+        if (
+            user_message.session_id != session_id
+            or user_message.run_id != request.run_id
+            or user_message.role != MessageRole.USER
+            or user_message.content != request.user_message
+        ):
+            raise ValueError("source_message_mismatch")
+        prepared_request = request.model_copy(
+            update={"attachment_refs": attachment_refs}
+        )
         return prepared_request
 
     async def load_history(
@@ -127,6 +109,7 @@ class RunRequestPreparationService:
         *,
         session_id: str,
         exclude_message_id: str,
+        before_sequence: int | None = None,
     ) -> list[RootRequestHistoryMessage]:
         """加载当前消息之前的会话历史。
 
@@ -138,7 +121,14 @@ class RunRequestPreparationService:
         异常：
             不主动抛出业务异常。
         """
-        values = await self._messages.list_recent_conversation(session_id, limit=100)
+        if before_sequence is None:
+            values = await self._messages.list_recent_conversation(session_id, limit=100)
+        else:
+            values = await self._messages.list_recent_conversation_before_sequence(
+                session_id,
+                before_sequence=before_sequence,
+                limit=100,
+            )
         return [
             RootRequestHistoryMessage(
                 role=message.role.value,

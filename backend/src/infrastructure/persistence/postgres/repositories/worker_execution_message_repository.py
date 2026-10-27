@@ -18,6 +18,7 @@ from domain.orchestration import (
     WorkerExecutionMessageRepository,
     WorkerLLMRole,
 )
+from shared.contracts.worker_messages import WorkerExecutionMessageContentSchema
 
 from ..models import WorkerExecutionMessageModel
 
@@ -36,7 +37,11 @@ class PostgresWorkerExecutionMessageRepository(WorkerExecutionMessageRepository)
     async def append(
         self, message: WorkerExecutionMessageAppend
     ) -> WorkerExecutionMessage:
-        content_json = json_value(message.content.model_dump(mode="json"))
+        content_json = json_value(
+            WorkerExecutionMessageContentSchema.from_domain(
+                message.content
+            ).model_dump(mode="json")
+        )
         async with self._session_factory() as session:
             async with session.begin():
                 lock_key = f"{message.task_id}:{message.execution_generation}"
@@ -144,7 +149,9 @@ def _to_domain(row: WorkerExecutionMessageModel) -> WorkerExecutionMessage:
         sequence_no=row.sequence_no,
         entry_type=WorkerExecutionEntryType(row.entry_type),
         role=WorkerLLMRole(row.role) if row.role is not None else None,
-        content=WorkerExecutionMessageContent.model_validate(row.content_json),
+        content=WorkerExecutionMessageContentSchema.model_validate(
+            row.content_json
+        ).to_domain(),
         created_at=row.created_at,
         tool_call_id=row.tool_call_id,
         tool_name=row.tool_name,

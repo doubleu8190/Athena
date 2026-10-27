@@ -24,15 +24,32 @@ class EmbeddingMetadataModel(Base):
     dimension: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class IdempotencyReceiptModel(Base):
+    """Successful HTTP operation responses, committed with their business write."""
+
+    __tablename__ = "idempotency_receipts"
+    __table_args__ = (Index("idx_idempotency_receipts_created_at", "created_at"),)
+
+    scope: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    parameter_hash: Mapped[str] = mapped_column(String, nullable=False)
+    response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class AgentRunModel(Base):
     __tablename__ = "agent_runs"
     __table_args__ = (
         Index("idx_agent_runs_session_status", "session_id", "status"),
-        Index("one_active_run_per_session", "session_id", unique=True, postgresql_where=text("status IN ('created', 'running', 'cancelling')")),
+        Index("uq_agent_runs_session_sequence", "session_id", "sequence", unique=True),
+        Index("uq_agent_runs_source_message", "message_id", unique=True),
+        Index("one_active_run_per_session", "session_id", unique=True, postgresql_where=text("status IN ('running', 'stopping')")),
     )
     run_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(String)
-    status: Mapped[str] = mapped_column(String, default="created")
+    message_id: Mapped[str] = mapped_column(String, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="queued")
     request_json: Mapped[str] = mapped_column(Text, default="{}")
     response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -47,29 +64,12 @@ class AgentRunModel(Base):
     cancellation_external_effect_status: Mapped[str] = mapped_column(
         String, default="none"
     )
+    display_cutoff_session_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    execution_generation: Mapped[int] = mapped_column(Integer, default=0)
+    execution_lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
+    execution_lease_until: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
-
-
-class AgentCommandModel(Base):
-    __tablename__ = "agent_commands"
-    __table_args__ = (
-        Index("idx_agent_commands_status_queued", "status", "queued_at"),
-        UniqueConstraint("command_type", "idempotency_key", name="uq_agent_commands_idempotency"),
-    )
-    command_id: Mapped[str] = mapped_column(String, primary_key=True)
-    session_id: Mapped[str] = mapped_column(String)
-    run_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    command_type: Mapped[str] = mapped_column(String)
-    schema_version: Mapped[int] = mapped_column(Integer, default=1)
-    idempotency_key: Mapped[str] = mapped_column(String)
-    payload_json: Mapped[str] = mapped_column(Text, default="{}")
-    status: Mapped[str] = mapped_column(String, default="queued")
-    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    queued_at: Mapped[str] = mapped_column(String)
-    started_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class AgentPlanModel(Base):

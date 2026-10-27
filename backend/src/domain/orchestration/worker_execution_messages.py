@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
-
-from pydantic import BaseModel, ConfigDict
 
 
 class WorkerExecutionEntryType(StrEnum):
@@ -25,20 +23,25 @@ class WorkerLLMRole(StrEnum):
     ASSISTANT = "assistant"
 
 
-class WorkerToolCallContent(BaseModel):
+@dataclass(frozen=True, slots=True)
+class WorkerToolCallContent:
     """Worker assistant 回复中的一个规范化工具调用。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str
     name: str
     arguments: dict[str, Any]
 
+    def __post_init__(self) -> None:
+        """确保工具调用具备稳定身份、名称和对象参数。"""
+        if not self.id.strip() or not self.name.strip():
+            raise ValueError("worker_tool_call_identity_required")
+        if not isinstance(self.arguments, dict):
+            raise ValueError("worker_tool_call_arguments_invalid")
 
-class WorkerToolResultContent(BaseModel):
+
+@dataclass(frozen=True, slots=True)
+class WorkerToolResultContent:
     """Worker 工具回执中模型可见的结果部分。"""
-
-    model_config = ConfigDict(extra="allow", frozen=True)
 
     status: str
     output: Any = None
@@ -46,16 +49,34 @@ class WorkerToolResultContent(BaseModel):
     duration_ms: int | None = None
     result_ref: str | None = None
     truncated: bool | None = None
+    extra_fields: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """确保工具结果的状态和可选耗时有效。"""
+        if not self.status.strip():
+            raise ValueError("worker_tool_result_status_required")
+        if self.duration_ms is not None and self.duration_ms < 0:
+            raise ValueError("worker_tool_result_duration_invalid")
+        if not isinstance(self.extra_fields, dict):
+            raise ValueError("worker_tool_result_extra_fields_invalid")
 
 
-class WorkerExecutionMessageContent(BaseModel):
+@dataclass(frozen=True, slots=True)
+class WorkerExecutionMessageContent:
     """Worker 消息正文及其结构化工具信息。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     content: Any = None
     tool_calls: tuple[WorkerToolCallContent, ...] = ()
     tool_result: WorkerToolResultContent | None = None
+
+    def __post_init__(self) -> None:
+        """确保工具调用和回执均已转换成领域类型。"""
+        if any(not isinstance(call, WorkerToolCallContent) for call in self.tool_calls):
+            raise ValueError("worker_execution_tool_calls_invalid")
+        if self.tool_result is not None and not isinstance(
+            self.tool_result, WorkerToolResultContent
+        ):
+            raise ValueError("worker_execution_tool_result_invalid")
 
 
 @dataclass(frozen=True, slots=True)

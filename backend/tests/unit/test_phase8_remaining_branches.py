@@ -8,12 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from application.runs import RunExecutionService, RunQueryService
-from workers import CommandConsumer
+from application.runs import RunQueryService
+from workers import RunConsumer
 from application.sessions import SessionNotFoundError
 from bootstrap import create_app
 from bootstrap.lifespan import lifespan
-from domain.events import ApplicationEvent
 from domain.runs import CommandType, RunCommand, RunStartPayload, RunSummary
 from domain.sessions import Session
 from fastapi.testclient import TestClient
@@ -40,7 +39,7 @@ async def test_lifespan_context_manager_resources_and_failed_cleanup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_query_and_command_consumer_error_paths() -> None:
+async def test_run_query_and_consumer_error_paths() -> None:
     class Sessions:
         async def get(self, key): return Session.create(session_id="s", title="s", now=NOW) if key == "s" else None
     class Runs:
@@ -51,16 +50,16 @@ async def test_run_query_and_command_consumer_error_paths() -> None:
     with pytest.raises(SessionNotFoundError): await service.list_for_session("missing")
     with pytest.raises(LookupError): await service.get("missing")
     class Queue:
-        def __init__(self): self.claimed = False
-        async def claim_next_command(self):
-            if self.claimed: return None
-            self.claimed = True
-            return RunCommand(
-                "c", CommandType.RUN_START, "s", "r",
-                RunStartPayload(message="hello", message_id="m"), NOW
-            )
+        pass
     class Execution:
         async def execute(self, command): raise RuntimeError("fail")
         async def fail(self, command, error): self.error = error
-    consumer = CommandConsumer(Queue(), Execution(), poll_interval=0.001)
-    task = asyncio.create_task(consumer.run()); await asyncio.sleep(0.005); consumer._stop.set(); await asyncio.wait_for(task, timeout=1)
+        error = None
+    consumer = RunConsumer(Queue(), Execution(), poll_interval=0.001)
+    await consumer._execute_run(
+        RunCommand(
+            "c", CommandType.RUN_START, "s", "r",
+            RunStartPayload(message="hello", message_id="m"), NOW
+        )
+    )
+    assert consumer._execution.error["code"] == "run_execution_failed"

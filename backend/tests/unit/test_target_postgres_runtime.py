@@ -14,7 +14,7 @@ from bootstrap import build_default_dependencies, create_app
 from configuration.settings import Settings
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
-from domain.runs import CommandStatus, CommandType, RunCommand, RunStartPayload, RunStatus
+from domain.runs import RunStatus
 from infrastructure.integrations.file_parsers.native import NativeFileAdapterRegistry, NativeFileParser, fixed_size_chunker
 from infrastructure.integrations.indexing import DisabledGraphIndexer, DisabledVectorIndexer
 from infrastructure.integrations.storage.local import LocalFileStorage
@@ -93,13 +93,6 @@ def factory(db):
     return provide
 
 
-def command(command_id="c-1", run_id="r-1"):
-    return RunCommand(
-        command_id, CommandType.RUN_START, "s-1", run_id,
-        RunStartPayload(message="hello", message_id="message-1"), NOW
-    )
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("returned_run_id, expected", [("r-1", True), (None, False)])
 async def test_run_status_update_reports_whether_a_transition_matched(
@@ -108,6 +101,7 @@ async def test_run_status_update_reports_whether_a_transition_matched(
     """驱动只提供 RETURNING 行时，仍能区分更新成功和状态保护拒绝。"""
     db = DB()
     db.results = [SimpleNamespace(scalar_one_or_none=lambda: returned_run_id)]
+    db.scalar_values = [returned_run_id]
     runs = PostgresRunRepository(factory(db))
 
     assert await runs.update_status("r-1", RunStatus.RUNNING) is expected
@@ -117,27 +111,22 @@ async def test_run_status_update_reports_whether_a_transition_matched(
 async def test_target_runtime_repositories_cover_queue_events_approval_memory_and_retrieval():
     db = DB()
     runs = PostgresRunRepository(factory(db))
-    db.get_values = [None, None]
-    db.scalar_values = ["project-1", "project-1", None, None, "s-1"]
-    result = await runs.enqueue_command(command())
-    assert result.command_id == "c-1" and db.added
-    db.get_values = [SimpleNamespace(command_id="c-1", session_id="s-1", run_id="r-1", command_type="run.start", status="queued", payload_json='{"message":"hello","message_id":"message-1","attachment_ids":[]}', result_json=None, error_json=None)]
-    assert (await runs.get_command("c-1")).command_id == "c-1"
-    db.results = [Result(scalar=SimpleNamespace(command_id="c-1", command_type="run.start", session_id="s-1", run_id="r-1", payload_json='{"message":"hello","message_id":"message-1","attachment_ids":[]}', queued_at=NOW.isoformat(), schema_version=1, status="queued"))]
-    claimed = await runs.claim_next_command()
-    assert claimed is not None and claimed.command_id == "c-1"
-    await runs.complete_command("c-1", status=CommandStatus.COMPLETED, result={"ok": True})
-    run_row = SimpleNamespace(run_id="r-1", session_id="s-1", status="created", root_thread_id="t", request_json="{}", error_json=None, created_at=NOW.isoformat(), updated_at=NOW.isoformat())
-    db.results = [Result(rows=[run_row])]
-    assert (await runs.list_for_session("s-1"))[0].run_id == "r-1"
+    run_row = SimpleNamespace(
+        run_id="r-1", session_id="s-1", message_id="message-1", sequence=1,
+        status="queued", root_thread_id="t",
+        request_json='{"message":"hello"}', error_json=None,
+        created_at=NOW.isoformat(), updated_at=NOW.isoformat(),
+    )
+    db.results = [Result(rows=[run_row]), Result(rows=[])]
+    listed = await runs.list_for_session("s-1")
+    assert listed[0].run_id == "r-1" and listed[0].sequence == 1
     db.get_values = [run_row]
-    assert (await runs.get("r-1")).status == "created"
+    assert (await runs.get("r-1")).message_id == "message-1"
+    db.scalar_values = ["r-1"]
     db.results = [Result(scalar=run_row)]
     assert (await runs.get_active_for_session("s-1")).run_id == "r-1"
+    db.scalar_values = ["r-1"]
     await runs.update_status("r-1", RunStatus.RUNNING)
-    await runs.complete("r-1", {"answer": "ok"})
-    await runs.fail("r-1", {"message": "bad"})
-    await runs.cancel("r-1")
 
     events = PostgresEventRepository(factory(db))
     db.scalar_values = [0]

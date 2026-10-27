@@ -118,7 +118,7 @@ function AppContent() {
     const demoSession: Session = {
       id: sessionId,
       title: "演示 · 客户反馈整理",
-      status: "running",
+      active_run_id: runId,
       created_at: new Date(now - 8 * 60_000).toISOString(),
       updated_at: new Date(now).toISOString(),
     }
@@ -194,15 +194,14 @@ function AppContent() {
 
     return () => timers.forEach((timer) => window.clearTimeout(timer))
   }, [demoMode])
-  const sendEvent = useCallback(async (type: string, sessionId: string | null, data: Record<string, unknown> = {}): Promise<string | null> => {
-    if (type !== ClientEventType.USER_COMMAND) return sessionId
+  const sendEvent = useCallback(async (type: string, sessionId: string | null, data: Record<string, unknown> = {}): Promise<{ sessionId: string; messageId: string; runId: string; sequence: number; status: string } | null> => {
+    if (type !== ClientEventType.USER_COMMAND) return null
     const draftId = typeof data.draft_id === "string" ? data.draft_id : null
     const projectId = typeof data.project_id === "string" ? data.project_id : undefined
-    const result = await apiClient.submitRun(sessionId, {
+    const requestId = typeof data.request_id === "string" ? data.request_id : ""
+    const result = await apiClient.submitRun(sessionId, requestId, {
       project_id: projectId,
       message: String(data.message || ""),
-      ...(data.message_id ? { message_id: String(data.message_id) } : {}),
-      ...(data.command_id ? { command_id: String(data.command_id) } : {}),
       attachment_ids: Array.isArray(data.attachment_ids) ? data.attachment_ids.map(String) : [],
     })
     if (!sessionId) {
@@ -220,7 +219,13 @@ function AppContent() {
       }
     }
     void refreshSessions().catch(() => undefined)
-    return result.session_id
+    return {
+      sessionId: result.session_id,
+      messageId: result.message_id,
+      runId: result.run_id,
+      sequence: result.sequence,
+      status: result.status,
+    }
   }, [addSession, refreshSessions, setActiveSession, setDrafts])
 
   const handleCreateProject = useCallback(async () => {
@@ -276,7 +281,7 @@ function AppContent() {
       const session: Session = {
         id: value.id,
         title: value.title,
-        status: value.status as Session["status"],
+        active_run_id: value.active_run_id,
         created_at: value.created_at,
         updated_at: value.updated_at ?? value.created_at,
         project_id: value.project_id,

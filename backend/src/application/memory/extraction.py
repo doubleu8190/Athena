@@ -17,7 +17,6 @@ from domain.memory import (
     MemoryCandidate,
     MemoryCandidateSnapshot,
     MemoryFact,
-    MemoryFactExtractionOutput,
     MemoryFactExtractionSnapshot,
     MemoryListRequest,
     MemoryOperationsPort,
@@ -32,6 +31,13 @@ from domain.memory import (
 
 from application.memory.fact_policy import FactCardinality, cardinality_for
 from application.memory.ports import MemoryFactExtractor, MemoryResolver, MemoryWriteTrigger
+from shared.contracts.memory import (
+    MemoryFactExtractionOutputSchema,
+    MemoryFactSchema,
+    MemoryResolutionProposalSchema,
+    memory_domain_to_schema,
+    memory_schema_to_domain,
+)
 
 _PROMPT_ROOT = Path(__file__).resolve().parents[3] / "prompt"
 _PERSONAL_CATEGORIES = {"preference", "profile"}
@@ -125,7 +131,7 @@ def _record_fact(record: MemoryRecord) -> MemoryFact | None:
         return None
     if isinstance(value, MemoryFact):
         return value
-    return MemoryFact.model_validate(value)
+    return memory_schema_to_domain(MemoryFactSchema.model_validate(value))
 
 
 def _is_active_and_valid(record: MemoryRecord, *, now: datetime) -> bool:
@@ -215,7 +221,7 @@ class LLMFactExtractor(MemoryFactExtractor):
                 {"role": "user", "content": prompt},
             ]
         )
-        output = _typed_response(value, MemoryFactExtractionOutput)
+        output = _typed_response(value, MemoryFactExtractionOutputSchema)
         candidates = [
             candidate
             for proposal in output.atomic_facts
@@ -599,7 +605,12 @@ class LLMMemoryResolver(MemoryResolver):
         """解析同一事实键的不同值，并拒绝越界或不完整目标。"""
         fact = candidate.fact
         structured_candidate = (
-            "(无结构化事实)" if fact is None else fact.model_dump_json()
+            "(无结构化事实)"
+            if fact is None
+            else json.dumps(
+                memory_domain_to_schema(fact).model_dump(mode="json"),
+                ensure_ascii=False,
+            )
         )
         cardinality = (
             FactCardinality.UNKNOWN.value
@@ -628,7 +639,8 @@ class LLMMemoryResolver(MemoryResolver):
                 {"role": "user", "content": prompt},
             ]
         )
-        proposal = _typed_response(value, MemoryResolutionProposal)
+        proposal_schema = _typed_response(value, MemoryResolutionProposalSchema)
+        proposal = memory_schema_to_domain(proposal_schema)
         targets = {item.id: item for item in existing}
         target = targets.get(proposal.target_memory_id or "")
         if proposal.action == "DEFER":

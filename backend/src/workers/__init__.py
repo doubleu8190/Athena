@@ -1,6 +1,6 @@
 """后台任务入口。"""
 
-from .command_consumer import CommandConsumer
+from .run_consumer import RunConsumer
 from .knowledge_document_worker import KnowledgeDocumentWorker
 from .lifecycle import WorkerSupervisor
 from .worker_job_dispatcher import WorkerJobDispatcher
@@ -10,7 +10,7 @@ from .memory_worker import MemoryWorker
 from .approval_expiry_worker import ApprovalExpiryWorker
 
 __all__ = [
-    "CommandConsumer",
+    "RunConsumer",
     "KnowledgeDocumentWorker",
     "MemoryWorker",
     "ApprovalExpiryWorker",

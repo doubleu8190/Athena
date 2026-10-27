@@ -27,12 +27,13 @@ from domain.orchestration import (
     WorkerTaskTerminalEvent,
 )
 from infrastructure.persistence.postgres.models import (
-    AgentCommandModel,
+    AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    IdempotencyReceiptModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
     OrchestrationOutboxModel,
@@ -42,6 +43,8 @@ from infrastructure.persistence.postgres.models import (
     RoundTaskModel,
     TaskExecutionModel,
     WorkerJobModel,
+    ProjectModel,
+    SessionModel,
 )
 from infrastructure.persistence.postgres.repositories.orchestration_command_repository import (
     PlanCommandRejected,
@@ -91,7 +94,10 @@ async def test_stop_racing_continue_or_revise_cancels_all_worker_jobs(
             schema_created = True
 
         tables = [
-            AgentCommandModel.__table__,
+            ProjectModel.__table__,
+            SessionModel.__table__,
+            AgentEventModel.__table__,
+            IdempotencyReceiptModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -116,10 +122,32 @@ async def test_stop_racing_continue_or_revise_cancels_all_worker_jobs(
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session, session.begin():
             session.add(
+                ProjectModel(
+                    id=f"project-{run_id}",
+                    name="Stop and review race",
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                )
+            )
+            session.add(
+                SessionModel(
+                    id=session_id,
+                    project_id=f"project-{run_id}",
+                    title="Stop and review race",
+                    active_run_id=run_id,
+                    last_run_sequence=1,
+                    created_at=now.isoformat(),
+                    updated_at=now.isoformat(),
+                    last_activity_at=now.isoformat(),
+                )
+            )
+            session.add(
                 AgentRunModel(
                     run_id=run_id,
                     session_id=session_id,
-                    status="created",
+                    message_id=f"message-{run_id}",
+                    sequence=1,
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),
@@ -233,10 +261,17 @@ async def test_stop_racing_continue_or_revise_cancels_all_worker_jobs(
                 return None, str(exc)
 
         review_result, stop_result = await asyncio.gather(
-            apply_review(), PostgresRunRepository(session_factory).cancel(run_id)
+            apply_review(),
+            PostgresRunRepository(session_factory).stop_active(
+                session_id,
+                request_id=f"stop-{run_id}",
+                expected_run_id=run_id,
+                displayed_session_seq=0,
+            ),
         )
         review_receipt, review_rejection = review_result
-        assert stop_result is not None and stop_result.status.value == "cancelling"
+        stop_receipt, replayed = stop_result
+        assert not replayed and stop_receipt.status.value == "stopping"
         assert (review_receipt is None) == (review_rejection is not None)
 
         async with session_factory() as session:
@@ -260,7 +295,7 @@ async def test_stop_racing_continue_or_revise_cancels_all_worker_jobs(
             version_count = await session.scalar(
                 select(func.count()).select_from(PlanVersionModel)
             )
-        assert run is not None and run.status == "cancelling"
+        assert run is not None and run.status == "stopping"
         assert plan_row is not None and plan_row.status == "cancelling"
         assert accepted_review_count == int(review_receipt is not None)
         assert len(rounds_after) == 1 + int(review_receipt is not None)

@@ -116,7 +116,7 @@ class PostgresApprovalRepository(ApprovalRepository):
                 now = self._now()
                 if (
                     run is None
-                    or run.status not in {"created", "running"}
+                    or run.status != "running"
                     or (hint.plan_id is not None and plan is None)
                     or (
                         plan is not None

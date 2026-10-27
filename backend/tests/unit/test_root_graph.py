@@ -57,7 +57,7 @@ class _RequestPreparation:
             update={"message_id": request.message_id or "message-1"}
         )
 
-    async def load_history(self, *, session_id, exclude_message_id):
+    async def load_history(self, *, session_id, exclude_message_id, before_sequence=None):
         return []
 
     async def load_attachments(self, *, session_id, attachment_ids):

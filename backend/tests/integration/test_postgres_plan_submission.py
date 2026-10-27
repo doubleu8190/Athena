@@ -40,6 +40,8 @@ from infrastructure.persistence.postgres.models import (
     PlanVersionModel,
     RoundTaskModel,
     RootResumeJobModel,
+    ProjectModel,
+    SessionModel,
     TaskExecutionModel,
     WorkerJobModel,
 )
@@ -92,6 +94,8 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
             schema_created = True
 
         tables = [
+            ProjectModel.__table__,
+            SessionModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -115,11 +119,23 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session, session.begin():
+            session.add(ProjectModel(
+                id=f"project-{run_id}", name="Plan submission",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=f"project-{run_id}", title="Plan submission",
+                active_run_id=run_id, last_run_sequence=1,
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+                last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
+                    message_id="message:" + str(run_id),
+                    sequence=1,
                     session_id=session_id,
-                    status="created",
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),
@@ -311,6 +327,21 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
             async def get(self, _run_id):
                 return type("Run", (), {"status": "completed"})()
 
+            async def acquire_execution_lease(
+                self, _run_id, *, owner, lease_seconds
+            ):
+                return 7
+
+            async def renew_execution_lease(
+                self, _run_id, *, owner, generation, lease_seconds
+            ):
+                return True
+
+            async def release_execution_lease(
+                self, _run_id, *, owner, generation
+            ):
+                return True
+
         execution = Execution()
         await RootResumeDispatcher(
             resume_jobs_repo,
@@ -415,6 +446,8 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
             schema_created = True
 
         tables = [
+            ProjectModel.__table__,
+            SessionModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -436,11 +469,23 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session, session.begin():
+            session.add(ProjectModel(
+                id=f"project-{run_id}", name="Plan submission",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=f"project-{run_id}", title="Plan submission",
+                active_run_id=run_id, last_run_sequence=1,
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+                last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
+                    message_id="message:" + str(run_id),
+                    sequence=1,
                     session_id=session_id,
-                    status="created",
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),

@@ -194,7 +194,7 @@ export interface OrchestrationPlan {
 export interface Session {
   id: string
   title: string
-  status: "idle" | "running" | "interrupted" | "completed"
+  active_run_id?: string | null
   created_at: string
   updated_at: string
   project_id?: string | null
@@ -225,6 +225,8 @@ export interface ChatDraft {
 export interface SessionRunSummary {
   run_id: string
   session_id: string
+  message_id: string
+  sequence: number
   status: string
   root_thread_id: string
   error?: unknown
@@ -426,7 +428,7 @@ export type { ApplicationEventType }
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error"
 
-export type AgentStatus = "idle" | "thinking" | "running" | "cancelling" | "paused" | "waiting_approval" | "completed" | "error"
+export type AgentStatus = "idle" | "queued" | "thinking" | "running" | "cancelling" | "paused" | "waiting_approval" | "completed" | "error"
 
 export interface AppState {
   connectionStatus: ConnectionStatus
@@ -443,7 +445,7 @@ export interface AppState {
 export interface CreateSessionResponse {
   id: string
   title: string
-  status: string
+  active_run_id: string | null
   created_at: string
   updated_at?: string
   project_id: string
@@ -451,13 +453,11 @@ export interface CreateSessionResponse {
 }
 
 export interface SubmitRunResponse {
-  command_id: string
   session_id: string
-  run_id: string | null
-  message_id: string | null
-  attachment_ids: string[]
+  run_id: string
+  message_id: string
+  sequence: number
   status: string
-  deduplicated: boolean
 }
 
 export interface ListSessionsResponse {

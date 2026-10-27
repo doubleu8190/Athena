@@ -39,7 +39,6 @@ from domain.orchestration import (
 from domain.tools import ToolExecutionRequest, ToolExecutionResult
 from infrastructure.persistence.postgres.checkpointer import PostgresCheckpointer
 from infrastructure.persistence.postgres.models import (
-    AgentCommandModel,
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
@@ -50,7 +49,9 @@ from infrastructure.persistence.postgres.models import (
     OrchestrationOutboxModel,
     PlanRoundModel,
     PlanVersionModel,
+    ProjectModel,
     RootResumeJobModel,
+    SessionModel,
     RoundTaskModel,
     TaskExecutionModel,
     WorkerJobModel,
@@ -349,7 +350,8 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             schema_created = True
 
         tables = [
-            AgentCommandModel.__table__,
+            ProjectModel.__table__,
+            SessionModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -374,11 +376,23 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         async with session_factory() as session, session.begin():
+            session.add(ProjectModel(
+                id=f"project-{run_id}", name="Worker checkpoint restart",
+                created_at=now.isoformat(), updated_at=now.isoformat(),
+            ))
+            session.add(SessionModel(
+                id=session_id, project_id=f"project-{run_id}",
+                title="Worker checkpoint restart", active_run_id=run_id,
+                last_run_sequence=1, created_at=now.isoformat(),
+                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+            ))
             session.add(
                 AgentRunModel(
                     run_id=run_id,
+                    message_id="message:" + str(run_id),
+                    sequence=1,
                     session_id=session_id,
-                    status="created",
+                    status="running",
                     root_thread_id=f"run:{run_id}",
                     created_at=now.isoformat(),
                     updated_at=now.isoformat(),

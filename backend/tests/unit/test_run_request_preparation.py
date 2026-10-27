@@ -122,6 +122,7 @@ async def test_prepare_rejects_non_ready_attachment() -> None:
             request=request_state(
                 session_id="session-1",
                 run_id="run-1",
+                message_id="message-1",
                 user_message="use file",
                 attachment_ids=["attachment-1"],
             )
@@ -139,6 +140,7 @@ async def test_prepare_rejects_attachment_from_another_session() -> None:
             request=request_state(
                 session_id="session-1",
                 run_id="run-1",
+                message_id="message-1",
                 user_message="use file",
                 attachment_ids=["attachment-1"],
             )
@@ -146,8 +148,12 @@ async def test_prepare_rejects_attachment_from_another_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_persists_message_idempotently_and_loads_references() -> None:
-    service, messages, _ = make_service()
+async def test_prepare_validates_persisted_source_message_and_loads_references() -> None:
+    source = Message(
+        "message-1", "session-1", MessageRole.USER, "summarize", NOW,
+        run_id="run-1",
+    )
+    service, messages, _ = make_service(messages=Messages([source]))
     request = request_state(
         session_id="session-1",
         run_id="run-1",
@@ -160,8 +166,9 @@ async def test_prepare_persists_message_idempotently_and_loads_references() -> N
     second = await service.prepare(request=request)
 
     assert first == second
-    assert len(messages.saved) == 1
-    assert messages.saved[0].role is MessageRole.USER
+    assert messages.saved == []
+    assert first.message_id == "message-1"
+    assert messages.values["message-1"].role is MessageRole.USER
     assert first.attachment_refs[0].status == "ready"
 
 

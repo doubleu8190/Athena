@@ -23,6 +23,8 @@ from domain.retrieval.trace_contracts import (
     RetrievalChannelTrace,
     RetrievalHitTrace,
 )
+from shared.contracts.memory import memory_domain_to_schema
+from shared.contracts.retrieval import RetrievalHitTraceSchema
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
 from application.runs.context.protocols import ContextProvider
@@ -343,7 +345,9 @@ class MemoryContextProvider(ContextProvider):
                             "memory_total_count": group.total_member_count,
                             "memory_complete": group.complete,
                             "fact_cardinality": group.cardinality.value,
-                            "memory_fact_identity": group.identity.model_dump(mode="json"),
+                            "memory_fact_identity": memory_domain_to_schema(
+                                group.identity
+                            ).model_dump(mode="json"),
                             "memory_group_member_value": group.member_value,
                         },
                     )
@@ -416,7 +420,7 @@ class MemoryContextProvider(ContextProvider):
                         )
                     )
                 hits = tuple(
-                    RetrievalHitTrace.model_validate(hit)
+                    RetrievalHitTraceSchema.model_validate(hit).to_domain()
                     for hit in candidate.metadata.get("hits", [])
                 )
                 single_hit = hits[0] if len(hits) == 1 else None
@@ -454,7 +458,7 @@ class MemoryContextProvider(ContextProvider):
                 if candidate.source_id in trace_by_id:
                     continue
                 hits = tuple(
-                    RetrievalHitTrace.model_validate(hit)
+                    RetrievalHitTraceSchema.model_validate(hit).to_domain()
                     for hit in candidate.metadata.get("hits", [])
                 )
                 trace_by_id[candidate.source_id] = RetrievalCandidateTrace(

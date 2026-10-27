@@ -91,12 +91,20 @@ class RunExecutionService:
             return None
 
         if outcome.root_wait is not None:
-            await self._arm_root_wait(run_id, outcome.root_wait, invocation.lease)
-            await self._publish(
-                invocation,
-                EventType.RUN_ROOT_SUSPENDED,
-                payload=self._run_payload(invocation, "waiting"),
-            )
+            payload = self._run_payload(invocation, "waiting")
+            await self._arm_root_wait(run_id, outcome.root_wait, invocation.lease, payload)
+            if self._lifecycle.writes_root_wait_event:
+                # 非空序号只用于唤醒订阅者；订阅者从数据库按顺序补读。
+                await self._events.publish_realtime(ApplicationEvent(
+                    event_type=EventType.RUN_ROOT_SUSPENDED,
+                    durability=EventDurability.DURABLE,
+                    session_id=invocation.session_id,
+                    session_seq=0,
+                    run_id=run_id,
+                    payload=payload,
+                ))
+            else:
+                await self._publish(invocation, EventType.RUN_ROOT_SUSPENDED, payload=payload)
             return None
         if outcome.error is not None:
             await self.fail(invocation, outcome.error)
@@ -127,7 +135,8 @@ class RunExecutionService:
         return result
 
     async def _arm_root_wait(
-        self, run_id: str, root_wait: RootWaitCheckpoint, lease: LeaseGrant
+        self, run_id: str, root_wait: RootWaitCheckpoint, lease: LeaseGrant,
+        wait_payload: dict[str, object],
     ) -> None:
         if root_wait.run_id != run_id:
             raise ValueError("root_wait_run_identity_mismatch")
@@ -139,6 +148,7 @@ class RunExecutionService:
             interrupt_id=root_wait.interrupt_id,
             checkpoint_id=root_wait.checkpoint_id,
             lease=lease,
+            wait_payload=wait_payload,
         ):
             raise RuntimeError("root_wait_checkpoint_not_armed")
 

@@ -75,6 +75,7 @@ class RunSubmissionPort(Protocol):
 class RunLifecyclePort(Protocol):
     """Run state transitions and atomic stop acceptance."""
 
+    writes_root_wait_event: bool
     writes_cancellation_events_to_outbox: bool
     writes_terminal_artifacts_to_outbox: bool
 
@@ -128,6 +129,7 @@ class RunLifecyclePort(Protocol):
         interrupt_id: str,
         checkpoint_id: str,
         lease: LeaseGrant,
+        wait_payload: dict[str, object] | None = None,
     ) -> bool: ...
 
 

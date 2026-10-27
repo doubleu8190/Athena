@@ -25,6 +25,7 @@ NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 class Lifecycle:
     writes_cancellation_events_to_outbox = False
     writes_terminal_artifacts_to_outbox = False
+    writes_root_wait_event = False
 
     def __init__(self) -> None:
         self.status_updates = []
@@ -68,6 +69,10 @@ class Events:
         self.items: list[ApplicationEvent] = []
 
     async def publish(self, event):
+        self.items.append(event)
+        return event
+
+    async def publish_realtime(self, event):
         self.items.append(event)
         return event
 
@@ -132,6 +137,24 @@ async def test_root_wait_keeps_run_open_and_arms_checkpoint():
     assert lifecycle.failed == []
     assert lifecycle.waits[0][0] == "run-1"
     assert events.items[-1].event_type == EventType.RUN_ROOT_SUSPENDED
+
+
+@pytest.mark.asyncio
+async def test_transactional_root_wait_wakes_subscribers_without_republishing():
+    lifecycle, events = Lifecycle(), Events()
+    lifecycle.writes_root_wait_event = True
+    checkpoint = RootWaitCheckpoint(
+        "run-1", "plan-1", "round-1", 1, "interrupt-1", "checkpoint-1"
+    )
+    service = RunExecutionService(
+        lifecycle, Executor(CommandExecutionResult(root_wait=checkpoint)), events
+    )
+
+    await service.execute(invocation())
+
+    assert lifecycle.waits[0][1]["wait_payload"]["status"] == "waiting"
+    assert events.items[-1].event_type == EventType.RUN_ROOT_SUSPENDED
+    assert events.items[-1].session_seq == 0
 
 
 @pytest.mark.asyncio

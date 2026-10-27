@@ -22,6 +22,7 @@ from infrastructure.persistence.postgres.checkpointer import PostgresCheckpointe
 from infrastructure.persistence.postgres.graph_thread_lock import PostgresGraphThreadLock
 from infrastructure.persistence.postgres.repositories.lease_center import PostgresLeaseCenter
 from infrastructure.persistence.postgres.models import (
+    AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     Base,
@@ -102,6 +103,7 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                 lambda sync_connection: Base.metadata.create_all(
                     sync_connection,
                     tables=[
+                        AgentEventModel.__table__,
                         ExecutionLeaseModel.__table__,
                         ProjectModel.__table__,
                         SessionModel.__table__,

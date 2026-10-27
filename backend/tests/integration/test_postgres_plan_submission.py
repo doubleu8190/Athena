@@ -28,6 +28,7 @@ from domain.orchestration import (
     WorkerTaskTerminalEvent,
 )
 from infrastructure.persistence.postgres.models import (
+    AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     AgentTaskModel,
@@ -97,6 +98,7 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
 
         tables = [
 
+            AgentEventModel.__table__,
             ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,

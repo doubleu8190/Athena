@@ -331,6 +331,46 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
             )
         assert operation_count == 1
 
+        # 完成事务持有操作行时并发重复领取，验证两者不会反向等待租约。
+        racing_request = replace(
+            concurrent_request,
+            tool_call_id="worker:task-1:2:0:2",
+            operation_key="athena:run-1:task-1:2:0:2",
+            logical_operation_key="athena:run-1:task-1:logical:0:2",
+        )
+        assert (await repository.claim(racing_request, args_hash=args_hash)).status == ToolOperationClaimStatus.ACQUIRED
+        completion_locked = asyncio.Event()
+        allow_completion = asyncio.Event()
+
+        class PausedLeaseCenter(PostgresLeaseCenter):
+            async def assert_current_in_transaction(self, session, grant):
+                if asyncio.current_task().get_name() == "complete-operation":
+                    completion_locked.set()
+                    await allow_completion.wait()
+                await super().assert_current_in_transaction(session, grant)
+
+        racing_repository = PostgresWorkerToolOperationRepository(
+            session_factory, lease_center=PausedLeaseCenter(session_factory)
+        )
+        completion = asyncio.create_task(
+            racing_repository.complete(
+                racing_request, args_hash=args_hash,
+                result=ToolExecutionResult(status="success", output="created"),
+            ),
+            name="complete-operation",
+        )
+        await asyncio.wait_for(completion_locked.wait(), timeout=5)
+        duplicate = asyncio.create_task(
+            racing_repository.claim(racing_request, args_hash=args_hash)
+        )
+        await asyncio.sleep(0.2)
+        allow_completion.set()
+        completed, duplicate_claim = await asyncio.wait_for(
+            asyncio.gather(completion, duplicate), timeout=5
+        )
+        assert completed is True
+        assert duplicate_claim.status == ToolOperationClaimStatus.COMPLETED
+
         # 模拟该调用已进入外部执行但 Worker 在写回结果前崩溃，再由新代际接管。
         async with session_factory() as session, session.begin():
             task = await session.get(AgentTaskModel, "task-1")

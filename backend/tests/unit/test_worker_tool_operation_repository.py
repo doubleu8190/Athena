@@ -297,7 +297,7 @@ async def test_operation_claim_rejects_a_stale_fencing_token():
         async def assert_current_in_transaction(self, _session, grant):
             raise LeaseLostError(grant.key)
 
-    session = Session([*active_chain()])
+    session = Session([*active_chain(), None])
     repository = PostgresWorkerToolOperationRepository(
         factory(session), clock=lambda: fixed_now, lease_center=StaleLeaseCenter()
     )

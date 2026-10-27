@@ -165,6 +165,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
 
     writes_cancellation_events_to_outbox = True
     writes_terminal_artifacts_to_outbox = True
+    writes_root_wait_event = True
 
     def __init__(
         self,
@@ -636,6 +637,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         interrupt_id: str,
         checkpoint_id: str,
         lease: LeaseGrant,
+        wait_payload: dict[str, object] | None = None,
     ) -> bool:
         """原子记录 Root 检查点并释放当前执行权。"""
         if lease.key != LeaseKey("root_execution", run_id):
@@ -669,6 +671,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     or not checkpoint_id
                 ):
                     return False
+                # 会话事件序号锁必须在租约锁之前获取，保证事件与释放原子提交。
+                await session.scalar(
+                    select(func.pg_advisory_xact_lock(func.hashtextextended(session_id, 0)))
+                )
                 try:
                     await self._leases.assert_current_in_transaction(session, lease)
                 except LeaseLostError:
@@ -686,6 +692,23 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 row.root_wait_interrupt_id = interrupt_id
                 row.root_wait_checkpoint_id = checkpoint_id
                 row.updated_at = _now()
+                max_seq = int(await session.scalar(
+                    select(func.max(AgentEventModel.session_seq)).where(
+                        AgentEventModel.session_id == session_id
+                    )
+                ) or 0)
+                session.add(AgentEventModel(
+                    session_id=session_id,
+                    session_seq=max_seq + 1,
+                    run_id=run_id,
+                    event_type="run.root_suspended",
+                    durability="durable",
+                    payload_json=json.dumps(wait_payload or {
+                        "activity_id": f"run:{run_id}", "activity_type": "run",
+                        "name": "run", "status": "waiting",
+                    }, ensure_ascii=False),
+                    occurred_at=_now(),
+                ))
                 if not await self._leases.finish_in_transaction(session, lease):
                     raise LeaseLostError(lease.key)
                 return True

@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from domain.approval import ApprovalDecision, ApprovalRepository, ApprovalRequest
+from domain.leases import LeaseGrant
 from domain.configuration import ProviderQueryPort, SettingsQueryPort
 from domain.memory.query_ports import MemoryQueryPort
 from domain.retrieval.query_ports import RetrievalPort
@@ -184,6 +185,7 @@ class InMemoryRunStore(
 ):
     writes_cancellation_events_to_outbox = False
     writes_terminal_artifacts_to_outbox = False
+    writes_root_wait_event = False
 
     def __init__(self, sessions=None, messages=None, events=None) -> None:
         self.sessions = sessions
@@ -387,6 +389,8 @@ class InMemoryRunStore(
         plan_version: int,
         interrupt_id: str,
         checkpoint_id: str,
+        lease: LeaseGrant,
+        wait_payload: dict[str, object] | None = None,
     ) -> bool:
         run = self.runs.get(run_id)
         if (

@@ -13,7 +13,9 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from domain.events import ApplicationEvent, EventDurability, EventType
 from infrastructure.persistence.postgres.models import (
+    AgentEventModel,
     AgentPlanModel,
     AgentRunModel,
     Base,
@@ -29,6 +31,9 @@ from infrastructure.persistence.postgres.repositories.root_resume_job_repository
 )
 from infrastructure.persistence.postgres.repositories.run_repository import (
     PostgresRunRepository,
+)
+from infrastructure.persistence.postgres.repositories.event_repository import (
+    PostgresEventRepository,
 )
 from tests.fakes.leases import LeaseCenter, lease_grant
 from workers.root_resume_dispatcher import RootResumeDispatcher
@@ -68,6 +73,7 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             schema_created = True
 
         tables = [
+            AgentEventModel.__table__,
 
             ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
@@ -199,6 +205,25 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             run_id, owner="root-wait-arm", lease_seconds=30
         )
         assert root_grant is not None
+        finish = run_repository._leases.finish_in_transaction
+
+        async def fail_finish(_session, _grant):
+            raise RuntimeError("simulated failure")
+
+        run_repository._leases.finish_in_transaction = fail_finish
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            await run_repository.arm_root_wait(
+                run_id, plan_id=plan_id, round_id=round_id, plan_version=1,
+                interrupt_id="interrupt-4", checkpoint_id="checkpoint-4",
+                lease=root_grant,
+            )
+        run_repository._leases.finish_in_transaction = finish
+        async with app_a_sessions() as session:
+            run = await session.get(AgentRunModel, run_id)
+            assert run.root_wait_checkpoint_id is None
+            assert (await session.scalars(select(AgentEventModel))).all() == []
+            root_lease = await session.get(ExecutionLeaseModel, ("root_execution", run_id))
+            assert root_lease.state == "active"
         assert await run_repository.arm_root_wait(
             run_id,
             plan_id=plan_id,
@@ -208,6 +233,26 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             checkpoint_id="checkpoint-4",
             lease=root_grant,
         )
+        replacement = await run_repository.acquire_execution_lease(
+            run_id, owner="resumed-root", lease_seconds=30
+        )
+        assert replacement is not None
+        assert replacement.fencing_token > root_grant.fencing_token
+        assert not await run_repository.arm_root_wait(
+            run_id, plan_id=plan_id, round_id=round_id, plan_version=1,
+            interrupt_id="interrupt-4", checkpoint_id="checkpoint-4",
+            lease=root_grant,
+        )
+        events = PostgresEventRepository(app_b_sessions)
+        await events.publish(ApplicationEvent(
+            event_type=EventType.RUN_RESUMED, durability=EventDurability.DURABLE,
+            session_id=session_id, run_id=run_id,
+        ))
+        persisted = await events.list_events_between(session_id)
+        assert [event.event_type for event in persisted] == [
+            EventType.RUN_ROOT_SUSPENDED, EventType.RUN_RESUMED,
+        ]
+        assert await run_repository.release_execution_lease(replacement)
         armed_lease = await owner_repository.claim_next(
             lease.worker_id, lease_seconds=30
         )

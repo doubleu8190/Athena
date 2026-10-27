@@ -151,16 +151,6 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
                         ToolOperationClaimStatus.REJECTED,
                         reason="worker_operation_lease_not_active",
                     )
-                try:
-                    await self._leases.assert_current_in_transaction(
-                        session, request.lease
-                    )
-                except Exception:
-                    return ToolOperationClaim(
-                        ToolOperationClaimStatus.REJECTED,
-                        reason="worker_operation_lease_not_active",
-                    )
-
                 existing_attempt = await session.get(
                     WorkerToolOperationModel,
                     request.operation_key,
@@ -187,6 +177,16 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
                         .with_for_update()
                     )
                 ).all()
+                # 先锁业务记录再锁租约，与 complete 保持一致，避免循环等待。
+                try:
+                    await self._leases.assert_current_in_transaction(
+                        session, request.lease
+                    )
+                except LeaseLostError:
+                    return ToolOperationClaim(
+                        ToolOperationClaimStatus.REJECTED,
+                        reason="worker_operation_lease_not_active",
+                    )
                 if operations:
                     if any(
                         not _matches_logical_operation(

@@ -17,6 +17,7 @@ from infrastructure.persistence.postgres.models import (
     AgentPlanModel,
     AgentRunModel,
     Base,
+    ExecutionLeaseModel,
     PlanRoundModel,
     PlanVersionModel,
     ProjectModel,
@@ -29,6 +30,7 @@ from infrastructure.persistence.postgres.repositories.root_resume_job_repository
 from infrastructure.persistence.postgres.repositories.run_repository import (
     PostgresRunRepository,
 )
+from tests.fakes.leases import LeaseCenter, lease_grant
 from workers.root_resume_dispatcher import RootResumeDispatcher
 
 
@@ -66,6 +68,8 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -190,13 +194,19 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             repo_a if lease.worker_id == "app-a-root-resumer" else repo_b
         )
         assert await owner_repository.retry(lease, delay_seconds=0)
-        assert await PostgresRunRepository(app_a_sessions).arm_root_wait(
+        run_repository = PostgresRunRepository(app_a_sessions)
+        root_grant = await run_repository.acquire_execution_lease(
+            run_id, owner="root-wait-arm", lease_seconds=30
+        )
+        assert root_grant is not None
+        assert await run_repository.arm_root_wait(
             run_id,
             plan_id=plan_id,
             round_id=round_id,
             plan_version=1,
             interrupt_id="interrupt-4",
             checkpoint_id="checkpoint-4",
+            lease=root_grant,
         )
         armed_lease = await owner_repository.claim_next(
             lease.worker_id, lease_seconds=30
@@ -232,17 +242,7 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             async def acquire_execution_lease(
                 self, _run_id, *, owner, lease_seconds
             ):
-                return 5
-
-            async def renew_execution_lease(
-                self, _run_id, *, owner, generation, lease_seconds
-            ):
-                return True
-
-            async def release_execution_lease(
-                self, _run_id, *, owner, generation
-            ):
-                return True
+                return lease_grant("root_execution", _run_id, owner_id=owner)
 
         execution = Execution()
         dispatcher = RootResumeDispatcher(
@@ -251,6 +251,7 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             execution,
             Runs(),
             worker_id=lease.worker_id,
+            lease_center=LeaseCenter(),
         )
         await dispatcher._resume(armed_lease)
         assert len(execution.commands) == 1
@@ -261,10 +262,15 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
 
         async with app_a_sessions() as session:
             job = await session.get(RootResumeJobModel, job_id)
+            execution_lease = await session.get(
+                ExecutionLeaseModel, ("root_resume", job_id)
+            )
         assert job is not None
         assert job.status == "completed"
-        assert job.lease_owner is None
-        assert job.lease_until is None
+        assert execution_lease is not None
+        assert execution_lease.state == "released"
+        assert execution_lease.owner_id is None
+        assert execution_lease.lease_until is None
         assert job.attempt == 2
     finally:
         await app_b_engine.dispose()

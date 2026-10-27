@@ -17,6 +17,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from application.orchestration.worker_tools import WorkerToolExecutor
+from domain.leases import LeaseGrant, LeaseKey
 from domain.tools import (
     ToolExecutionRequest,
     ToolExecutionResult,
@@ -27,6 +28,7 @@ from infrastructure.persistence.postgres.models import (
     AgentRunModel,
     AgentTaskModel,
     Base,
+    ExecutionLeaseModel,
     PlanRoundModel,
     PlanVersionModel,
     RoundTaskModel,
@@ -35,6 +37,9 @@ from infrastructure.persistence.postgres.models import (
 )
 from infrastructure.persistence.postgres.repositories.worker_tool_operation_repository import (
     PostgresWorkerToolOperationRepository,
+)
+from infrastructure.persistence.postgres.repositories.lease_center import (
+    PostgresLeaseCenter,
 )
 
 
@@ -102,6 +107,8 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
             created_schema = True
 
         core_tables = [
+
+            ExecutionLeaseModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -206,7 +213,6 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
                         attempt=1,
                         worker_thread_id="task:task-1:exec:1",
                         status="completed",
-                        fencing_token=1,
                         cancellation_epoch=0,
                         created_at=now - timedelta(minutes=1),
                         updated_at=now - timedelta(minutes=1),
@@ -218,14 +224,23 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
                         attempt=2,
                         worker_thread_id="task:task-1:exec:2",
                         status="running",
-                        lease_owner="integration-worker",
-                        lease_until=now + timedelta(minutes=1),
-                        fencing_token=2,
                         cancellation_epoch=0,
                         created_at=now,
                         updated_at=now,
                     ),
                 ]
+            )
+            session.add(
+                ExecutionLeaseModel(
+                    resource_type="worker_execution",
+                    resource_id="execution-2",
+                    owner_id="integration-worker",
+                    fencing_token=2,
+                    state="active",
+                    lease_until=now + timedelta(minutes=1),
+                    created_at=now,
+                    updated_at=now,
+                )
             )
 
         async with session_factory() as session, session.begin():
@@ -265,7 +280,12 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
             operation_key="athena:run-1:task-1:2:0:0",
             logical_operation_key="athena:run-1:task-1:logical:0:0",
             execution_id="execution-2",
-            fencing_token=2,
+            lease=LeaseGrant(
+                key=LeaseKey("worker_execution", "execution-2"),
+                owner_id="integration-worker",
+                fencing_token=2,
+                lease_until=now + timedelta(minutes=1),
+            ),
             cancellation_epoch=0,
         )
 
@@ -316,11 +336,15 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
             task = await session.get(AgentTaskModel, "task-1")
             round_task = await session.get(RoundTaskModel, ("round-1", "task-1"))
             previous_execution = await session.get(TaskExecutionModel, "execution-2")
+            previous_lease = await session.get(
+                ExecutionLeaseModel, ("worker_execution", "execution-2")
+            )
             assert task is not None
             assert round_task is not None
             assert previous_execution is not None
+            assert previous_lease is not None
             previous_execution.status = "failed"
-            previous_execution.lease_until = now - timedelta(seconds=1)
+            previous_lease.lease_until = now - timedelta(seconds=1)
             task.execution_generation = 3
             task.active_execution_id = "execution-3"
             round_task.active_execution_id = "execution-3"
@@ -332,15 +356,18 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
                     attempt=3,
                     worker_thread_id="task:task-1:exec:3",
                     status="running",
-                    lease_owner="recovered-worker",
-                    lease_until=now + timedelta(minutes=1),
-                    fencing_token=3,
                     cancellation_epoch=0,
                     created_at=now + timedelta(seconds=1),
                     updated_at=now + timedelta(seconds=1),
                 )
             )
 
+        recovered_lease = await PostgresLeaseCenter(session_factory).acquire(
+            LeaseKey("worker_execution", "execution-3"),
+            owner_id="recovered-worker",
+            lease_seconds=60,
+        )
+        assert recovered_lease is not None
         tools = _UncertaintyToolService()
         executor = WorkerToolExecutor(tools, operation_ledger=repository)
         recovered_result = await executor(
@@ -351,7 +378,15 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
                 "session_id": "session-1",
                 "task": {"task_id": "task-1", "allowed_tools": ["write_file"]},
                 "execution_id": "execution-3",
-                "fencing_token": 3,
+                "lease": {
+                    "key": {
+                        "resource_type": recovered_lease.key.resource_type,
+                        "resource_id": recovered_lease.key.resource_id,
+                    },
+                    "owner_id": recovered_lease.owner_id,
+                    "fencing_token": recovered_lease.fencing_token,
+                    "lease_until": recovered_lease.lease_until.isoformat(),
+                },
                 "cancellation_epoch": 0,
                 "execution_generation": 3,
             },

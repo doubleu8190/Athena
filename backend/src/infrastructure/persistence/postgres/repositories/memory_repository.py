@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.orm import aliased
 
+from domain.leases import LeaseGrant
 from domain.memory import (
     MemoryListRequest,
     MemoryFact,
@@ -34,6 +35,7 @@ from domain.memory.suppression import (
     PROJECT_TURN_SUPPRESSION_FINGERPRINT,
     source_suppression_lock_id,
 )
+from .lease_center import PostgresLeaseCenter
 from domain.memory.repository_ports import MemoryRepositoryPort
 from shared.contracts.memory import MemoryRecordMetadataSchema, memory_schema_to_domain
 
@@ -429,9 +431,13 @@ def _is_unexpired(row: MemoryModel, *, now: datetime) -> bool:
 
 class PostgresMemoryRepository(MemoryRepositoryPort):
     def __init__(
-        self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
+        self,
+        session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+        *,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
         self._session_factory = session_factory
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
     async def initialize(self) -> None:
         return None
@@ -716,6 +722,24 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         return related
 
     async def create_memory(self, command: MemoryWriteCommand) -> str:
+        """创建人工记忆；后台来源必须走带租约的独立入口。"""
+        return await self._create_memory(command, lease=None)
+
+    async def create_memory_from_worker(
+        self, command: MemoryWriteCommand, *, lease: LeaseGrant
+    ) -> str:
+        """在后台记忆 grant 下创建或幂等恢复事实记忆。"""
+        source_turn_id = str(command.metadata.get("source_turn_id") or "")
+        if (
+            lease.key.resource_type != "memory_processing"
+            or lease.key.resource_id != source_turn_id
+        ):
+            raise ValueError("memory_processing_lease_mismatch")
+        return await self._create_memory(command, lease=lease)
+
+    async def _create_memory(
+        self, command: MemoryWriteCommand, *, lease: LeaseGrant | None
+    ) -> str:
         """Create once per operation key; duplicate enqueues stay idempotent."""
         key = (
             command.operation_key
@@ -774,6 +798,12 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                         )
                         if current_ids != tuple(sorted(command.expected_memory_ids)):
                             raise MemoryStateChangedError("memory_fact_group_changed")
+                if lease is not None:
+                    await self._leases.assert_current_in_transaction(
+                        session, lease
+                    )
+                elif command.metadata.get("source") in {"extraction", "episode_reusable_learning"}:
+                    raise ValueError("background_memory_write_requires_lease")
                 await session.execute(
                     pg_insert(MemoryModel)
                     .values(
@@ -836,6 +866,52 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         metadata=None,
         operation_key=None,
         expected_memory_ids: tuple[str, ...] | None = None,
+    ):
+        """人工修订记忆，不接受可选的后台 grant。"""
+        return await self._revise(
+            memory_id,
+            content,
+            metadata=metadata,
+            operation_key=operation_key,
+            expected_memory_ids=expected_memory_ids,
+            lease=None,
+        )
+
+    async def revise_from_worker(
+        self,
+        memory_id: str,
+        content: str,
+        *,
+        metadata=None,
+        operation_key=None,
+        expected_memory_ids: tuple[str, ...] | None = None,
+        lease: LeaseGrant,
+    ):
+        """在记忆处理 grant 下修订后台提取的事实。"""
+        source_turn_id = str((metadata or {}).get("source_turn_id") or "")
+        if (
+            lease.key.resource_type != "memory_processing"
+            or lease.key.resource_id != source_turn_id
+        ):
+            raise ValueError("memory_processing_lease_mismatch")
+        return await self._revise(
+            memory_id,
+            content,
+            metadata=metadata,
+            operation_key=operation_key,
+            expected_memory_ids=expected_memory_ids,
+            lease=lease,
+        )
+
+    async def _revise(
+        self,
+        memory_id: str,
+        content: str,
+        *,
+        metadata=None,
+        operation_key=None,
+        expected_memory_ids: tuple[str, ...] | None = None,
+        lease=None,
     ):
         """Insert a new immutable revision and supersede the previous row."""
         metadata_payload = metadata or {}
@@ -918,6 +994,10 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                     return new_id
                 if old.status != MemoryStatus.ACTIVE.value:
                     return None
+                if lease is not None:
+                    await self._leases.assert_current_in_transaction(session, lease)
+                elif metadata_payload.get("source") == "extraction":
+                    raise ValueError("background_memory_write_requires_lease")
                 old.status = MemoryStatus.SUPERSEDED.value
                 session.add(
                     MemoryModel(
@@ -968,11 +1048,50 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         *,
         operation_id: str,
     ) -> None:
+        """人工维护关系；后台关系写入使用 grant 绑定入口。"""
+        await self._add_relation(
+            source_memory_id,
+            target_memory_id,
+            kind,
+            operation_id=operation_id,
+            lease=None,
+        )
+
+    async def add_relation_from_worker(
+        self,
+        source_memory_id: str,
+        target_memory_id: str,
+        kind: str,
+        *,
+        operation_id: str,
+        lease: LeaseGrant,
+    ) -> None:
+        """在源记忆轮次的当前 grant 下保存后台关系。"""
+        if lease.key.resource_type != "memory_processing":
+            raise ValueError("memory_processing_lease_required")
+        await self._add_relation(
+            source_memory_id,
+            target_memory_id,
+            kind,
+            operation_id=operation_id,
+            lease=lease,
+        )
+
+    async def _add_relation(
+        self,
+        source_memory_id: str,
+        target_memory_id: str,
+        kind: str,
+        *,
+        operation_id: str,
+        lease=None,
+    ) -> None:
         """幂等保存替代或矛盾关系，并校验两端记忆存在。"""
         if kind not in {"supersedes", "contradicts"}:
             raise ValueError("memory_relation_kind_invalid")
         if source_memory_id == target_memory_id:
             raise ValueError("memory_relation_self_reference")
+        worker_source_memory_id = source_memory_id
         if kind == "contradicts":
             source_memory_id, target_memory_id = sorted(
                 (source_memory_id, target_memory_id)
@@ -982,6 +1101,25 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         ).hexdigest()
         async with self._session_factory() as session:
             async with session.begin():
+                if lease is not None:
+                    locked = (
+                        await session.scalars(
+                        select(MemoryModel)
+                        .where(MemoryModel.id.in_(
+                            (source_memory_id, target_memory_id)
+                        ))
+                        .order_by(MemoryModel.id)
+                        .with_for_update()
+                        )
+                    ).all()
+                    source = next(
+                        (row for row in locked if row.id == worker_source_memory_id), None
+                    )
+                    if source is None or source.source_turn_id != lease.key.resource_id:
+                        raise ValueError("memory_relation_source_turn_mismatch")
+                    await self._leases.assert_current_in_transaction(session, lease)
+                elif operation_id.startswith("memop_"):
+                    raise ValueError("background_memory_relation_requires_lease")
                 await session.execute(
                     pg_insert(MemoryRelationModel)
                     .values(

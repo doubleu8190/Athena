@@ -77,7 +77,7 @@ class RoundTaskModel(Base):
 
 
 class TaskExecutionModel(Base):
-    """保存 Task 的独立执行尝试和租约。"""
+    """保存 Task 的业务执行尝试和执行结果。"""
     __tablename__ = "task_executions"
     __table_args__ = (
         ForeignKeyConstraint(
@@ -87,7 +87,6 @@ class TaskExecutionModel(Base):
         ),
         UniqueConstraint("task_id", "attempt", name="uq_task_execution_attempt"),
         UniqueConstraint("worker_thread_id", name="uq_task_execution_thread"),
-        Index("idx_task_executions_lease", "status", "lease_until"),
     )
 
     execution_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -96,9 +95,6 @@ class TaskExecutionModel(Base):
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     worker_thread_id: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, default="queued")
-    lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
     cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)
     result_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     error_json: Mapped[dict[str, Any] | None] = mapped_column(_JSON_DOCUMENT, nullable=True)
@@ -167,8 +163,6 @@ class OrchestrationOutboxModel(Base):
     status: Mapped[str] = mapped_column(String, default="pending")
     attempt: Mapped[int] = mapped_column(Integer, default=0)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -197,7 +191,6 @@ class WorkerJobModel(Base):
     __table_args__ = (
         UniqueConstraint("dedupe_key", name="uq_worker_jobs_dedupe"),
         Index("idx_worker_jobs_ready", "status", "available_at"),
-        Index("idx_worker_jobs_lease", "status", "lease_until"),
     )
 
     job_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -209,8 +202,6 @@ class WorkerJobModel(Base):
     status: Mapped[str] = mapped_column(String, default="pending")
     attempt: Mapped[int] = mapped_column(Integer, default=0)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -232,8 +223,6 @@ class RootResumeJobModel(Base):
     status: Mapped[str] = mapped_column(String, default="pending")
     attempt: Mapped[int] = mapped_column(Integer, default=0)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

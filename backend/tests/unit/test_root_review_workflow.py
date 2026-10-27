@@ -15,6 +15,7 @@ from domain.orchestration import (
     ReviewContext,
     ReviewDecision,
 )
+from tests.fakes.leases import lease_context, lease_grant
 
 
 def context() -> ReviewContext:
@@ -31,6 +32,9 @@ def context() -> ReviewContext:
 def state():
     return {
         "request": {"run_id": "run-1", "session_id": "session-1"},
+        "execution_lease": lease_context(
+            lease_grant("root_execution", "run-1")
+        ),
         "root_wait": {
             "type": "round_wait",
             "run_id": "run-1",

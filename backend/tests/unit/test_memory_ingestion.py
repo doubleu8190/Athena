@@ -29,6 +29,7 @@ from domain.runs import (
     RunStartPayload,
     RunStatus,
 )
+from tests.fakes.leases import lease_grant
 
 
 class Memory:
@@ -45,7 +46,17 @@ class Memory:
             self.items[key] = MemoryRecord(key, command.content, dict(command.metadata))
         return key
 
-    async def revise(self, memory_id: str, content: str, **kwargs) -> str | None:
+    async def create_memory_from_worker(
+        self, command: MemoryWriteCommand, *, lease
+    ) -> str:
+        key = command.operation_key
+        if key not in self.items:
+            self.items[key] = MemoryRecord(key, command.content, dict(command.metadata))
+        return key
+
+    async def revise_from_worker(
+        self, memory_id: str, content: str, *, lease, **kwargs
+    ) -> str | None:
         value = self.items.get(memory_id)
         if value is None:
             return None
@@ -78,7 +89,7 @@ class Vectors:
     def __init__(self) -> None:
         self.items: list[tuple[str, str]] = []
 
-    async def index(self, memory_id: str, content: str) -> None:
+    async def index(self, memory_id: str, content: str, *, lease) -> None:
         self.items.append((memory_id, content))
 async def test_explicit_preferences_are_extracted_and_indexed() -> None:
     memory, vectors = Memory(), Vectors()
@@ -96,7 +107,8 @@ async def test_explicit_preferences_are_extracted_and_indexed() -> None:
             "session-1",
             "我喜欢苹果，也擅长 Java、Python、Golang",
             "好的",
-        )
+        ),
+        lease=lease_grant("memory_processing", "turn-1"),
     )
     assert written == 2
     assert {item.content for item in memory.items.values()} == {
@@ -145,13 +157,13 @@ class Lifecycle:
     writes_cancellation_events_to_outbox = False
     writes_terminal_artifacts_to_outbox = False
 
-    async def update_status(self, *args):
+    async def update_status(self, *args, **kwargs):
         return True
 
-    async def complete(self, *args):
+    async def complete(self, *args, **kwargs):
         return True
 
-    async def fail(self, *args):
+    async def fail(self, *args, **kwargs):
         return True
 
     async def arm_root_wait(self, *args, **kwargs):
@@ -192,6 +204,7 @@ async def test_completed_run_enqueues_memory_without_blocking_answer() -> None:
         "run-1",
         RunStartPayload(message="我喜欢苹果", message_id="message-1"),
         datetime.now(timezone.utc),
+        lease=lease_grant("root_execution", "run-1"),
     )
     await service.execute(command)
     assert jobs.items == [

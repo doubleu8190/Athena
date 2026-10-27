@@ -15,6 +15,7 @@ from domain.runs import (
     RunStartPayload,
 )
 from application.orchestration.langgraph import LangGraphRunExecutor
+from tests.fakes.leases import lease_grant
 
 
 def _command(run_id: str = "run-1") -> RunCommand:
@@ -25,6 +26,7 @@ def _command(run_id: str = "run-1") -> RunCommand:
         run_id=run_id,
         payload=RunStartPayload(message="hello", message_id="message-1"),
         issued_at=datetime.now(timezone.utc),
+        lease=lease_grant("root_execution", run_id),
     )
 
 
@@ -126,6 +128,7 @@ async def test_resume_uses_only_checkpoint_resume_identity() -> None:
             )
         ),
         issued_at=datetime.now(timezone.utc),
+            lease=lease_grant("root_execution", "run-1"),
     )
 
     await executor.execute(command)

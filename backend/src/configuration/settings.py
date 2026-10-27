@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     postgres_create_schema: bool = True
     workers_enabled: bool = False
     worker_job_lease_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
+    root_execution_lease_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
+    document_ingestion_lease_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
+    memory_processing_lease_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_max_tool_rounds: int = Field(default=4, ge=1, le=20)
     worker_max_tool_calls_per_round: int = Field(default=8, ge=1, le=32)

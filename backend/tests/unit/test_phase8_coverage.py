@@ -11,6 +11,7 @@ import pytest
 
 from application.approval import ApprovalService
 from application.files import IngestionService
+from tests.fakes.leases import LeaseCenter, lease_grant
 from application.knowledge import KnowledgeBaseService
 from application.memory import MemoryService
 from application.tools import MCPService, ToolQueryService, ToolService
@@ -114,21 +115,22 @@ async def test_ingestion_and_knowledge_error_branches() -> None:
         async def save(self, value): self.value = value; return value
 
     class Chunks:
-        async def replace_for_attachment(self, key, values): self.values = values
+        _leases = LeaseCenter()
+        async def replace_for_attachment(self, key, values, *, lease): self.values = values
 
     class Parser:
         async def parse(self, value): return ParsedDocument("hello", FileMetadata(), adapter_name="parsed", adapter_version="2", capabilities=("text",))
 
     class Index:
-        async def index_attachment(self, attachment, chunks): self.indexed = True
+        async def index_attachment(self, attachment, chunks, *, lease): self.indexed = True
         async def delete_attachment(self, key): self.deleted = key
 
     def chunker(text): return [FileChunk("c", "pending", 0, text, 1, FileLocator(), FileMetadata())]
-    service = IngestionService(Attachments(), Chunks(), Parser(), Index(), Index(), chunker=chunker, clock=lambda: NOW)
-    result = await service.process_attachment("a")
+    service = IngestionService(Attachments(), Chunks(), Parser(), Index(), Index(), chunker=chunker, clock=lambda: NOW, lease_center=LeaseCenter())
+    result = await service.process_attachment("a", lease=lease_grant("document_ingestion", "a"))
     assert result["status"] == "ready"
     await service.delete_indexes("a")
-    with pytest.raises(LookupError): await service.process_attachment("missing")
+    with pytest.raises(LookupError): await service.process_attachment("missing", lease=lease_grant("document_ingestion", "missing"))
 
     class Bases:
         async def get(self, key): return None

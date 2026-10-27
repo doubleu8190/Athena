@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from application.orchestration.protocols import RootGraphPort
 from domain.runs import (
@@ -13,7 +14,9 @@ from domain.runs import (
     RunCommand,
     RunResumePayload,
 )
+from domain.leases import LeaseCenterPort, LeaseLostError
 from shared.logging import get_logger
+from workers.lease_guard import LeaseGuard
 
 logger = get_logger(__name__)
 
@@ -32,6 +35,7 @@ class RootResumeDispatcher:
         lease_seconds: float = 60.0,
         poll_interval: float = 0.25,
         retry_delay: float = 0.5,
+        lease_center: LeaseCenterPort | None = None,
     ) -> None:
         if not worker_id.strip() or lease_seconds <= 0:
             raise ValueError("worker identity and positive lease are required")
@@ -39,6 +43,7 @@ class RootResumeDispatcher:
         self._graph = graph
         self._execution = execution
         self._runs = runs
+        self._leases = lease_center or getattr(jobs, "_leases")
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._poll_interval = poll_interval
@@ -94,6 +99,21 @@ class RootResumeDispatcher:
                     pass
 
     async def _resume(self, lease: Any) -> None:
+        try:
+            await LeaseGuard(
+                self._leases,
+                [lease.lease],
+                lease_seconds=self._lease_seconds,
+            ).run(self._resume_claimed(lease))
+        except LeaseLostError:
+            logger.warning(
+                "root_resume_job_lease_lost",
+                job_id=lease.job_id,
+                run_id=lease.run_id,
+            )
+            await self._leases.acknowledge_stopped(lease.lease)
+
+    async def _resume_claimed(self, lease: Any) -> None:
         interrupt_id = lease.interrupt_id
         checkpoint_id = lease.checkpoint_id
         if not interrupt_id or not checkpoint_id:
@@ -127,16 +147,28 @@ class RootResumeDispatcher:
                 await self._jobs.retry(lease, delay_seconds=self._retry_delay)
                 return
             interrupt_id, checkpoint_id = recovered
-            if not await arm_root_wait(
+            recovery_grant = await self._runs.acquire_execution_lease(
                 lease.run_id,
-                plan_id=lease.plan_id,
-                round_id=lease.round_id,
-                plan_version=lease.plan_version,
-                interrupt_id=interrupt_id,
-                checkpoint_id=checkpoint_id,
-            ):
+                owner=f"root-resume-recovery:{self._worker_id}:{uuid4().hex}",
+                lease_seconds=self._lease_seconds,
+            )
+            if recovery_grant is None:
                 await self._jobs.retry(lease, delay_seconds=self._retry_delay)
                 return
+            try:
+                if not await arm_root_wait(
+                    lease.run_id,
+                    plan_id=lease.plan_id,
+                    round_id=lease.round_id,
+                    plan_version=lease.plan_version,
+                    interrupt_id=interrupt_id,
+                    checkpoint_id=checkpoint_id,
+                    lease=recovery_grant,
+                ):
+                    await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+                    return
+            finally:
+                await self._leases.acknowledge_stopped(recovery_grant)
         try:
             has_pending = await self._graph.has_pending_round_wait(
                 run_id=lease.run_id,
@@ -158,13 +190,13 @@ class RootResumeDispatcher:
             await self._jobs.retry(lease, delay_seconds=self._retry_delay)
             return
 
-        lease_owner = f"root-resume:{self._worker_id}:{lease.job_id}"
-        execution_generation = await self._runs.acquire_execution_lease(
+        lease_owner = f"root-resume:{self._worker_id}:{uuid4().hex}"
+        execution_grant = await self._runs.acquire_execution_lease(
             lease.run_id,
             owner=lease_owner,
             lease_seconds=self._lease_seconds,
         )
-        if execution_generation is None:
+        if execution_grant is None:
             current = await self._runs.get(lease.run_id)
             status = str(getattr(getattr(current, "status", None), "value", ""))
             if status in {"stopping", "cancelled", "completed", "failed"}:
@@ -190,32 +222,27 @@ class RootResumeDispatcher:
                 ),
             ),
             issued_at=datetime.now(timezone.utc),
-            execution_generation=execution_generation,
-            lease_owner=lease_owner,
-        )
-        invocation = asyncio.create_task(
-            self._execution.execute(command),
-            name=f"athena-root-resume-call:{lease.run_id}",
-        )
-        lease_lost = asyncio.Event()
-        heartbeat = asyncio.create_task(
-            self._maintain_lease(lease, invocation, lease_lost),
-            name=f"athena-root-resume-heartbeat:{lease.job_id}",
-        )
-        execution_heartbeat = asyncio.create_task(
-            self._maintain_run_execution_lease(command, invocation),
-            name=f"athena-run-execution-heartbeat:{lease.run_id}",
+            lease=execution_grant,
         )
         try:
-            await invocation
+            await LeaseGuard(
+                self._leases,
+                [execution_grant],
+                lease_seconds=self._lease_seconds,
+            ).run(self._execution.execute(command))
+        except LeaseLostError:
+            logger.warning(
+                "root_resume_execution_lease_lost",
+                job_id=lease.job_id,
+                run_id=lease.run_id,
+            )
+            await self._jobs.retry(lease, delay_seconds=self._retry_delay)
+            return
         except asyncio.CancelledError:
             await self._execution.fail(
-                command,
-                {"code": "root_resume_lease_lost" if lease_lost.is_set() else "root_execution_interrupted"},
+                command, {"code": "root_execution_interrupted"},
             )
-            if not lease_lost.is_set():
-                raise
-            return
+            raise
         except Exception as exc:
             logger.error(
                 "root_checkpoint_resume_failed",
@@ -228,17 +255,7 @@ class RootResumeDispatcher:
             )
             return
         finally:
-            heartbeat.cancel()
-            execution_heartbeat.cancel()
-            await asyncio.gather(heartbeat, execution_heartbeat, return_exceptions=True)
-            await self._runs.release_execution_lease(
-                lease.run_id,
-                owner=lease_owner,
-                generation=execution_generation,
-            )
-
-        if lease_lost.is_set():
-            return
+            await self._leases.acknowledge_stopped(execution_grant)
         try:
             run = await self._runs.get(lease.run_id)
             raw_status = getattr(run, "status", None)
@@ -254,60 +271,6 @@ class RootResumeDispatcher:
                 exc_info=True,
             )
             await self._jobs.retry(lease, delay_seconds=self._retry_delay)
-
-    async def _maintain_lease(
-        self, lease: Any, invocation: asyncio.Task[Any], lease_lost: asyncio.Event
-    ) -> None:
-        current = lease
-        interval = max(0.1, self._lease_seconds / 3)
-        while not invocation.done():
-            await asyncio.sleep(interval)
-            try:
-                renewed = await self._jobs.renew(
-                    current, lease_seconds=self._lease_seconds
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.error(
-                    "root_resume_lease_renewal_failed",
-                    job_id=lease.job_id,
-                    exc_info=True,
-                )
-                renewed = None
-            if renewed is None:
-                lease_lost.set()
-                invocation.cancel()
-                return
-            current = renewed
-
-    async def _maintain_run_execution_lease(
-        self, command: RunCommand, invocation: asyncio.Task[Any]
-    ) -> None:
-        if not command.run_id or not command.lease_owner:
-            return
-        interval = max(0.1, self._lease_seconds / 3)
-        while not invocation.done():
-            await asyncio.sleep(interval)
-            try:
-                renewed = await self._runs.renew_execution_lease(
-                    command.run_id,
-                    owner=command.lease_owner,
-                    generation=command.execution_generation,
-                    lease_seconds=self._lease_seconds,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.error(
-                    "root_execution_lease_renewal_failed",
-                    run_id=command.run_id,
-                    exc_info=True,
-                )
-                continue
-            if not renewed:
-                await self._execution.interrupt(command.run_id)
-                return
 
     def _on_task_done(self, task: asyncio.Task[None]) -> None:
         self._inflight.discard(task)

@@ -32,19 +32,6 @@ class MemoryRunEvidenceSnapshotModel(Base):
     created_at: Mapped[str] = mapped_column(String)
 
 
-class MemoryJobScopeSnapshotModel(Base):
-    """记忆作业入队时冻结的会话项目绑定。"""
-
-    __tablename__ = "memory_job_scope_snapshots"
-
-    turn_id: Mapped[str] = mapped_column(String, primary_key=True)
-    session_id: Mapped[str] = mapped_column(String, nullable=False)
-    project_id: Mapped[str | None] = mapped_column(
-        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=True
-    )
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
 class MemoryEpisodeModel(Base):
     """来源轮次唯一的任务回顾及其结构化验证边界。"""
 
@@ -142,7 +129,6 @@ class MemoryRelationModel(Base):
 
 __all__ = [
     "MemoryExtractionSnapshotModel",
-    "MemoryJobScopeSnapshotModel",
     "MemoryEpisodeModel",
     "MemoryEpisodeProjectBindingModel",
     "MemoryModel",

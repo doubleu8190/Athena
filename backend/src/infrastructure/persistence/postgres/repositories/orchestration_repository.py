@@ -28,6 +28,7 @@ from ..models import (
     PlanVersionModel,
     RoundTaskModel,
     TaskExecutionModel,
+    ExecutionLeaseModel,
 )
 from .task_execution_results import load_task_execution_outputs
 
@@ -95,7 +96,9 @@ def _bounded_text(value: object | None, limit: int) -> str | None:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def _execution_snapshot(execution: TaskExecutionModel) -> dict[str, object]:
+def _execution_snapshot(
+    execution: TaskExecutionModel, lease: ExecutionLeaseModel | None
+) -> dict[str, object]:
     error: dict[str, object] | None = None
     if isinstance(execution.error_json, Mapping):
         error = {
@@ -108,9 +111,9 @@ def _execution_snapshot(execution: TaskExecutionModel) -> dict[str, object]:
         "attempt": execution.attempt,
         "worker_thread_id": execution.worker_thread_id,
         "status": execution.status,
-        "fencing_token": execution.fencing_token,
+        "fencing_token": lease.fencing_token if lease is not None else 0,
         "cancellation_epoch": execution.cancellation_epoch,
-        "lease_until": execution.lease_until,
+        "lease_until": lease.lease_until if lease is not None else None,
         "result_ref": execution.result_ref,
         "error": error,
         "created_at": execution.created_at,
@@ -196,6 +199,20 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                     )
                 ).scalars().all() if round_ids else []
 
+                leases = (
+                    await session.execute(
+                        select(ExecutionLeaseModel).where(
+                            ExecutionLeaseModel.resource_type == "worker_execution",
+                            ExecutionLeaseModel.resource_id.in_(
+                                [execution.execution_id for execution in executions]
+                            ),
+                        )
+                    )
+                ).scalars().all() if executions else []
+                leases_by_execution = {
+                    row.resource_id: row for row in leases
+                }
+
                 executions_by_member: dict[tuple[str, str], list[TaskExecutionModel]] = {}
                 for execution in executions:
                     executions_by_member.setdefault(
@@ -212,7 +229,10 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                             "active_execution_id": member.active_execution_id,
                             "terminal_at": member.terminal_at,
                             "executions": [
-                                _execution_snapshot(execution)
+                                _execution_snapshot(
+                                    execution,
+                                    leases_by_execution.get(execution.execution_id),
+                                )
                                 for execution in executions_by_member.get(
                                     (member.round_id, member.task_id), []
                                 )

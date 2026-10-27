@@ -16,6 +16,7 @@ from domain.runs import (
     RunStartPayload,
     RunStatus,
 )
+from tests.fakes.leases import lease_grant
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -32,19 +33,19 @@ class Lifecycle:
         self.waits = []
         self.complete_result = True
 
-    async def update_status(self, run_id, status):
+    async def update_status(self, run_id, status, *, lease):
         self.status_updates.append((run_id, status))
         return True
 
-    async def complete(self, run_id, result):
+    async def complete(self, run_id, result, *, lease):
         self.completed.append((run_id, result))
         return self.complete_result
 
-    async def fail(self, run_id, error):
+    async def fail(self, run_id, error, *, lease):
         self.failed.append((run_id, error))
         return True
 
-    async def arm_root_wait(self, run_id, **values):
+    async def arm_root_wait(self, run_id, *, lease, **values):
         self.waits.append((run_id, values))
         return True
 
@@ -79,6 +80,7 @@ def invocation() -> RunCommand:
         "run-1",
         RunStartPayload(message="hello", message_id="message-1"),
         NOW,
+        lease=lease_grant("root_execution", "run-1"),
     )
 
 

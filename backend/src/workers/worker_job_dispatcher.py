@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from application.orchestration import WorkerApprovalService
 from application.orchestration.protocols import GraphThreadLock, WorkerExecutor
+from domain.leases import LeaseCenterPort, LeaseLostError
 from domain.orchestration import (
     TaskExecution,
     TaskResult,
@@ -20,6 +21,7 @@ from domain.orchestration import (
     WorkerTaskTerminalEvent,
 )
 from shared.logging import get_logger
+from workers.lease_guard import LeaseGuard
 
 logger = get_logger(__name__)
 
@@ -41,6 +43,7 @@ class WorkerJobDispatcher:
         poll_interval: float = 0.25,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        lease_center: LeaseCenterPort | None = None,
     ) -> None:
         """保存依赖和运行参数；执行器调用始终在数据库事务之外。"""
         if not worker_id.strip():
@@ -48,6 +51,7 @@ class WorkerJobDispatcher:
         if lease_seconds <= 0 or max_concurrency < 1 or poll_interval <= 0:
             raise ValueError("worker lease, concurrency, and polling must be positive")
         self._jobs = jobs
+        self._leases = lease_center or getattr(jobs, "_leases")
         self._worker = worker
         self._task_events = task_events
         self._approval_service = approval_service
@@ -119,6 +123,17 @@ class WorkerJobDispatcher:
 
     async def _execute(self, lease: WorkerJobLease) -> None:
         """运行已领取的 Worker，并将审批或终态交给对应边界处理。"""
+        try:
+            await LeaseGuard(
+                self._leases,
+                [lease.lease],
+                lease_seconds=self._lease_seconds,
+            ).run(self._execute_with_lease(lease))
+        except LeaseLostError:
+            await self._acknowledge_lost_lease(lease)
+
+    async def _execute_with_lease(self, lease: WorkerJobLease) -> None:
+        """保持同一 grant 覆盖图调用、审批记录和终态事务。"""
         result = await self._run_with_lease(lease)
         if result is None:
             await self._acknowledge_lost_lease(lease)
@@ -153,71 +168,39 @@ class WorkerJobDispatcher:
             upstream_results=lease.upstream_results,
             execution_id=lease.execution_id,
             worker_thread_id=lease.worker_thread_id,
-            fencing_token=lease.fencing_token,
+            lease=lease.lease,
             cancellation_epoch=lease.cancellation_epoch,
         )
-        worker_call = self._run_worker(lease, execution)
-        worker_task = asyncio.create_task(
-            worker_call,
-            name=f"athena-worker-graph:{lease.worker_thread_id}",
-        )
-        lease_lost = asyncio.Event()
-        heartbeat = asyncio.create_task(
-            self._maintain_lease(lease, worker_task, lease_lost),
-            name=f"athena-worker-heartbeat:{lease.execution_id}",
-        )
-        result: TaskResult | None = None
         try:
-            try:
-                timeout_scope = asyncio.timeout(lease.task.timeout_seconds)
-                async with timeout_scope:
-                    result = await worker_task
-            except TimeoutError as exc:
-                if timeout_scope.expired():
-                    worker_task.cancel()
-                    await asyncio.gather(worker_task, return_exceptions=True)
-                    result = TaskResult(
-                        task_id=lease.task_id,
-                        status=TaskStatus.FAILED,
-                        error={
-                            "code": "task_timeout",
-                            "timeout_seconds": lease.task.timeout_seconds,
-                        },
-                        retryable=True,
-                    )
-                else:
-                    result = TaskResult(
-                        task_id=lease.task_id,
-                        status=TaskStatus.FAILED,
-                        error={
-                            "code": "worker_execution_failed",
-                            "message": str(exc) or type(exc).__name__,
-                        },
-                        retryable=True,
-                    )
-            except asyncio.CancelledError:
-                if not lease_lost.is_set():
-                    raise
-            except Exception as exc:
-                logger.error(
-                    "worker_execution_failed",
-                    execution_id=lease.execution_id,
-                    exc_info=True,
-                )
-                result = TaskResult(
-                    task_id=lease.task_id,
-                    status=TaskStatus.FAILED,
-                    error={
-                        "code": "worker_execution_failed",
-                        "message": str(exc) or type(exc).__name__,
-                    },
-                    retryable=True,
-                )
-        finally:
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
-
-        return None if lease_lost.is_set() else result
+            async with asyncio.timeout(lease.task.timeout_seconds):
+                return await self._run_worker(lease, execution)
+        except TimeoutError:
+            return TaskResult(
+                task_id=lease.task_id,
+                status=TaskStatus.FAILED,
+                error={
+                    "code": "task_timeout",
+                    "timeout_seconds": lease.task.timeout_seconds,
+                },
+                retryable=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "worker_execution_failed",
+                execution_id=lease.execution_id,
+                exc_info=True,
+            )
+            return TaskResult(
+                task_id=lease.task_id,
+                status=TaskStatus.FAILED,
+                error={
+                    "code": "worker_execution_failed",
+                    "message": str(exc) or type(exc).__name__,
+                },
+                retryable=True,
+            )
 
     async def _acknowledge_lost_lease(self, lease: WorkerJobLease) -> None:
         """通知队列租约已失效，避免提交旧 Worker 的终态结果。"""
@@ -275,7 +258,7 @@ class WorkerJobDispatcher:
             round_id=lease.round_id,
             task_id=lease.task_id,
             execution_id=lease.execution_id,
-            fencing_token=lease.fencing_token,
+            lease=lease.lease,
             cancellation_epoch=lease.cancellation_epoch,
             status=result.status,
             result={
@@ -306,7 +289,9 @@ class WorkerJobDispatcher:
         """Recover a saved approval interrupt before starting a reclaimed Job."""
         if self._thread_lock is not None:
             async with self._thread_lock.hold(lease.worker_thread_id):
+                await self._leases.assert_current(lease.lease)
                 return await self._invoke_worker(lease, execution)
+        await self._leases.assert_current(lease.lease)
         return await self._invoke_worker(lease, execution)
 
     async def _invoke_worker(
@@ -323,36 +308,6 @@ class WorkerJobDispatcher:
                 approval_batch=pending,
             )
         return await self._worker.execute(execution)
-
-    async def _maintain_lease(
-        self,
-        lease: WorkerJobLease,
-        worker_task: asyncio.Task[TaskResult],
-        lease_lost: asyncio.Event,
-    ) -> None:
-        """续租失败时中止当前调用，避免失去所有权后继续工作。"""
-        current = lease
-        interval = max(0.1, self._lease_seconds / 3)
-        while not worker_task.done():
-            await asyncio.sleep(interval)
-            try:
-                renewed = await self._jobs.renew_lease(
-                    current, lease_seconds=self._lease_seconds
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.error(
-                    "worker_lease_renewal_failed",
-                    execution_id=lease.execution_id,
-                    exc_info=True,
-                )
-                renewed = None
-            if renewed is None:
-                lease_lost.set()
-                worker_task.cancel()
-                return
-            current = renewed
 
     def _terminal_result(self, result: TaskResult, task_id: str) -> TaskResult:
         """校验 Worker 终态；未实现的审批中断安全失败。"""

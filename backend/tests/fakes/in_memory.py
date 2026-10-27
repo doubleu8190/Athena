@@ -65,6 +65,7 @@ from domain.runs import (
     RunStatus,
     RunSummary,
 )
+from .leases import lease_grant
 from domain.sessions import Message, MessageRepository, MessageRole, Session, SessionRepository
 from shared.contracts.memory import MemoryFactSchema, memory_schema_to_domain
 from domain.tools import (
@@ -258,6 +259,7 @@ class InMemoryRunStore(
             run_id=run_id,
             payload=persisted_payload,
             issued_at=now,
+            lease=lease_grant("root_execution", run_id),
         )
         result = RunEnqueueResult(session_id, run_id, payload.message_id, sequence, RunStatus.QUEUED, False)
         self.receipts[receipt_key] = (parameter_hash, result)
@@ -296,7 +298,7 @@ class InMemoryRunStore(
         active_id = (await self.sessions.get(session_id)).active_run_id if self.sessions else None
         return self.runs.get(active_id) if active_id else None
 
-    async def claim_next_run(self) -> RunCommand | None:
+    async def claim_next_run(self, *, lease_seconds: float = 60.0) -> RunCommand | None:
         if self.sessions is None:
             return None
         sessions = await self.sessions.list_sessions()
@@ -306,18 +308,19 @@ class InMemoryRunStore(
             queued = next((run for run in self.list_for_session_sync(session.id) if run.status == RunStatus.QUEUED), None)
             if queued is None:
                 continue
-            generation = 1
-            owner = f"run-consumer:{queued.run_id}"
             self.runs[queued.run_id] = replace(queued, status=RunStatus.RUNNING, updated_at=datetime.now(timezone.utc))
             await self.sessions.save(replace(session, active_run_id=queued.run_id))
             command = self.invocations[queued.run_id]
             claimed = replace(
                 command,
-                execution_generation=generation,
-                lease_owner=owner,
+                lease=lease_grant("root_execution", queued.run_id),
             )
             self.invocations[queued.run_id] = claimed
-            self.leases[queued.run_id] = (owner, generation, datetime.now(timezone.utc) + timedelta(seconds=60))
+            self.leases[queued.run_id] = (
+                claimed.lease.owner_id,
+                claimed.lease.fencing_token,
+                claimed.lease.lease_until,
+            )
             return claimed
         return None
 
@@ -994,6 +997,8 @@ class InMemoryEventStore(EventPort):
         values = self.items.setdefault(event.session_id, []); event = replace(event, session_seq=len(values) + 1); values.append(event)
         for queue in self.subscribers.get(event.session_id, []): queue.put_nowait(event)
         return event
+    async def publish_with_lease(self, event: ApplicationEvent, *, lease) -> ApplicationEvent:
+        return await self.publish(event)
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
         for queue in self.subscribers.get(event.session_id, []): queue.put_nowait(event)
         return event
@@ -1029,6 +1034,8 @@ class InMemoryEventStore(EventPort):
 class InMemoryEventPublisher(EventPort):
     def __init__(self, store: InMemoryEventStore) -> None: self.store = store
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish(event)
+    async def publish_with_lease(self, event: ApplicationEvent, *, lease) -> ApplicationEvent:
+        return await self.store.publish_with_lease(event, lease=lease)
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent: return await self.store.publish_realtime(event)
     async def list_events_between(self, session_id: str, after: int = 0, upto: int | None = None, limit: int = 256) -> list[ApplicationEvent]:
         """把历史查询转交给共享的内存事件库。"""

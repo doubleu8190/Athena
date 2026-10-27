@@ -7,6 +7,9 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from domain.sessions import Session
@@ -24,6 +27,7 @@ from infrastructure.persistence.postgres.models import (
     ProjectModel,
     SessionModel,
     MCPServerModel,
+    MemoryModel,
     ToolModel,
 )
 from infrastructure.persistence.postgres.repositories import (
@@ -36,26 +40,47 @@ from infrastructure.persistence.postgres.repositories import (
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_session_repository_against_postgresql() -> None:
-    """在隔离测试数据库中验证 Session CRUD 和软删除。"""
+@pytest_asyncio.fixture
+async def isolated_engine():
+    """为每个测试建立独立 schema，避免解析到 public 中的同名表。"""
     if not DATABASE_URL:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-    engine = create_async_engine(DATABASE_URL)
+    schema = f"postgres_persistence_{uuid4().hex}"
+    url = make_url(DATABASE_URL)
+    if url.drivername in {"postgres", "postgresql"}:
+        url = url.set(drivername="postgresql+psycopg")
+    admin = create_async_engine(url)
+    engine = create_async_engine(
+        url.update_query_dict({"options": f"-c search_path={schema},public"})
+    )
+    created = False
+    try:
+        async with admin.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            created = True
+        async with engine.begin() as connection:
+            await connection.run_sync(lambda sync: Base.metadata.create_all(
+                sync,
+                tables=[ProjectModel.__table__, SessionModel.__table__, MessageModel.__table__,
+                        ToolModel.__table__, MCPServerModel.__table__, MemoryModel.__table__],
+                checkfirst=False,
+            ))
+        yield engine
+    finally:
+        await engine.dispose()
+        if created:
+            async with admin.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await admin.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_session_repository_against_postgresql(isolated_engine) -> None:
+    """在隔离测试数据库中验证 Session CRUD 和软删除。"""
+    engine = isolated_engine
     session_id = f"integration-session-{uuid4().hex}"
     try:
-        async with engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync_connection: Base.metadata.create_all(
-                    sync_connection,
-                    tables=[
-                        ProjectModel.__table__,
-                        SessionModel.__table__,
-                        MessageModel.__table__,
-                    ],
-                )
-            )
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repository = PostgresSessionRepository(factory)
         from datetime import datetime, timezone
@@ -92,21 +117,12 @@ async def test_session_repository_against_postgresql() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_tool_and_mcp_repositories_against_postgresql() -> None:
+async def test_tool_and_mcp_repositories_against_postgresql(isolated_engine) -> None:
     """在 PostgreSQL 中验证工具治理和 MCP 配置的目标 repository。"""
-    if not DATABASE_URL:
-        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-    engine = create_async_engine(DATABASE_URL)
+    engine = isolated_engine
     tool_name = f"integration-tool-{uuid4().hex}"
     server_name = f"integration-server-{uuid4().hex}"
     try:
-        async with engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync_connection: Base.metadata.create_all(
-                    sync_connection,
-                    tables=[ToolModel.__table__, MCPServerModel.__table__],
-                )
-            )
         factory = async_sessionmaker(engine, expire_on_commit=False)
         tools = PostgresToolConfigRepository(factory)
         servers = PostgresMCPServerRepository(factory)
@@ -148,26 +164,17 @@ async def test_tool_and_mcp_repositories_against_postgresql() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_memory_access_and_expiration_against_postgresql() -> None:
+async def test_memory_access_and_expiration_against_postgresql(isolated_engine) -> None:
     """验证真实 PostgreSQL 并发访问累加及两种期限过滤；未配置数据库时跳过。"""
-    if not DATABASE_URL:
-        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
     import asyncio
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import delete, update
     from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
-    from infrastructure.persistence.postgres.models import MemoryModel
     from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository
 
-    engine = create_async_engine(DATABASE_URL)
+    engine = isolated_engine
     factory = async_sessionmaker(engine, expire_on_commit=False)
     repository = PostgresMemoryRepository(factory)
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: Base.metadata.create_all(
-                sync_connection, tables=[MemoryModel.__table__]
-            )
-        )
     prefix = f"memory-test-{uuid4().hex}"
     ids = [f"{prefix}-{suffix}" for suffix in ("active", "ttl", "validity")]
     try:

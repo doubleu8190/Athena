@@ -23,8 +23,8 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    ExecutionLeaseModel,
     IdempotencyReceiptModel,
-    MemoryJobScopeSnapshotModel,
     MemoryProcessingJobModel,
     ProjectModel,
     MemoryRunEvidenceSnapshotModel,
@@ -88,6 +88,8 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             SessionModel.__table__,
             MessageModel.__table__,
             AgentRunModel.__table__,
@@ -106,7 +108,6 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             AgentEventModel.__table__,
             IdempotencyReceiptModel.__table__,
             MemoryProcessingJobModel.__table__,
-            MemoryJobScopeSnapshotModel.__table__,
             ProjectModel.__table__,
             MemoryRunEvidenceSnapshotModel.__table__,
             MemorySourceSuppressionModel.__table__,
@@ -163,8 +164,10 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             writes_cancellation_events_to_outbox = False
             writes_terminal_artifacts_to_outbox = True
 
-            async def update_status(self, target_run_id, status):
-                return await repository.update_status(target_run_id, status)
+            async def update_status(self, target_run_id, status, **lease):
+                return await repository.update_status(
+                    target_run_id, status, **lease
+                )
 
             async def complete(self, target_run_id, result, **lease):
                 assert await repository.complete(target_run_id, result, **lease)
@@ -227,15 +230,31 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
         assert first_memory_attempt is not None
         assert isinstance(first_memory_attempt, ClaimedMemoryJob)
         assert first_memory_attempt.attempt == 1
-        await memory_jobs.recover()
+        async with session_factory() as session, session.begin():
+            memory_lease = await session.get(
+                ExecutionLeaseModel,
+                ("memory_processing", run_id),
+            )
+            assert memory_lease is not None
+            memory_lease.lease_until = datetime.now(timezone.utc) - timedelta(
+                seconds=1
+            )
         recovered_memory_attempt = await memory_jobs.claim_next_job()
         assert recovered_memory_attempt is not None
         assert isinstance(recovered_memory_attempt, ClaimedMemoryJob)
-        assert recovered_memory_attempt.attempt == 2
-        await memory_jobs.mark_succeeded(run_id)
+        assert recovered_memory_attempt.attempt == 1
+        assert (
+            recovered_memory_attempt.lease.fencing_token
+            == first_memory_attempt.lease.fencing_token + 1
+        )
+        await memory_jobs.mark_succeeded(
+            run_id, lease=recovered_memory_attempt.lease
+        )
 
         assert await repository.complete(
-            run_id, {"content": "I will keep reports concise."}
+            run_id,
+            {"content": "I will keep reports concise."},
+            lease=invocation.lease,
         ) is False
         async with session_factory() as session:
             answer_events = (

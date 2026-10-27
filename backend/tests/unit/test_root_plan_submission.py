@@ -7,6 +7,7 @@ import pytest
 from application.orchestration.root_workflow import RootWorkflow
 from application.orchestration.plan_versions import deferred_version_review_decision
 from domain.orchestration import OrchestrationCommandType, ReviewAction, ReviewContext
+from tests.fakes.leases import lease_context, lease_grant
 
 
 class CommandHandler:
@@ -45,6 +46,9 @@ def _plan_state(*, run_id="run-42", tasks=None, edges=None, tools=None):
             "session_id": "session-9",
             "user_message": "Prepare a report with evidence.",
         },
+        "execution_lease": lease_context(
+            lease_grant("root_execution", run_id)
+        ),
         "worker_tools": tools or [
             {"name": "read_local_file"},
             {"name": "exec_shell"},

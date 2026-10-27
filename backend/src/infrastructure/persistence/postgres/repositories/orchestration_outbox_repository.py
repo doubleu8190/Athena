@@ -1,51 +1,37 @@
-"""Orchestration Outbox 的 PostgreSQL 租约与投递回执。"""
+"""Orchestration Outbox 的 PostgreSQL 租约和投递回执。"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from domain.leases import LeaseKey, LeaseLostError
 from domain.orchestration import (
     OrchestrationOutboxLease,
     OrchestrationOutboxRepository,
 )
-
-from ..models import AgentRunModel, OrchestrationOutboxModel
+from ..models import AgentRunModel, ExecutionLeaseModel, OrchestrationOutboxModel
+from .lease_center import PostgresLeaseCenter
 
 
 _USER_EVENT_TYPES = (
-    "PlanCreated",
-    "PlanAccepted",
-    "PlanRevised",
-    "PlanCompleted",
-    "PlanFailed",
-    "ApprovalRequested",
-    "ApprovalResolved",
-    "ApprovalCancelled",
-    "TaskStarted",
-    "TaskRetrying",
-    "TaskCompleted",
-    "TaskFailed",
-    "TaskCancelled",
-    "RoundStarted",
-    "RoundCompleted",
-    "PlanCancelling",
-    "PlanCancelled",
-    "RunStopping",
-    "RunCancelled",
-    "RunAnswerCompleted",
-    "RunCompleted",
-    "RunFailed",
+    "PlanCreated", "PlanAccepted", "PlanRevised", "PlanCompleted", "PlanFailed",
+    "ApprovalRequested", "ApprovalResolved", "ApprovalCancelled", "TaskStarted",
+    "TaskRetrying", "TaskCompleted", "TaskFailed", "TaskCancelled", "RoundStarted",
+    "RoundCompleted", "PlanCancelling", "PlanCancelled", "RunStopping",
+    "RunCancelled", "RunAnswerCompleted", "RunCompleted", "RunFailed",
 )
 
 
 class PostgresOrchestrationOutboxRepository(OrchestrationOutboxRepository):
-    """通过短事务领取事件，并用 lease owner 防止旧 Dispatcher 确认。"""
+    """领取持久事件，并在事务内确认发布或安排重试。"""
 
     def __init__(
         self,
@@ -54,34 +40,27 @@ class PostgresOrchestrationOutboxRepository(OrchestrationOutboxRepository):
         ],
         *,
         clock: Callable[[], datetime] | None = None,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
+        """保存数据库会话工厂、可选时钟和共享租约中心。"""
         self._session_factory = session_factory
         self._clock = clock
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
     async def claim_next_event(
         self, worker_id: str, *, lease_seconds: float
     ) -> OrchestrationOutboxLease | None:
-        """独占领取一个待投递事件或租约已过期的事件。"""
-        if not worker_id.strip():
-            raise ValueError("worker_id is required")
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be positive")
-
+        """领取待投递事件；过期执行权由租约中心原子接管。"""
+        if not worker_id.strip() or lease_seconds <= 0:
+            raise ValueError("worker identity and positive lease are required")
         async with self._session_factory() as session:
             async with session.begin():
                 now = await self._now(session)
-                eligible = or_(
-                    and_(
-                        OrchestrationOutboxModel.status == "pending",
-                        OrchestrationOutboxModel.available_at <= now,
-                    ),
-                    and_(
-                        OrchestrationOutboxModel.status == "processing",
-                        or_(
-                            OrchestrationOutboxModel.lease_until.is_(None),
-                            OrchestrationOutboxModel.lease_until <= now,
-                        ),
-                    ),
+                eligible_lease = or_(
+                    ExecutionLeaseModel.resource_id.is_(None),
+                    ExecutionLeaseModel.lease_until.is_(None),
+                    ExecutionLeaseModel.lease_until <= now,
+                    ExecutionLeaseModel.state == "released",
                 )
                 row = (
                     await session.execute(
@@ -95,9 +74,20 @@ class PostgresOrchestrationOutboxRepository(OrchestrationOutboxRepository):
                             AgentRunModel.run_id
                             == OrchestrationOutboxModel.correlation_id,
                         )
+                        .outerjoin(
+                            ExecutionLeaseModel,
+                            and_(
+                                ExecutionLeaseModel.resource_type
+                                == "orchestration_outbox",
+                                ExecutionLeaseModel.resource_id
+                                == OrchestrationOutboxModel.message_id,
+                            ),
+                        )
                         .where(
                             OrchestrationOutboxModel.event_type.in_(_USER_EVENT_TYPES),
-                            eligible,
+                            OrchestrationOutboxModel.status == "pending",
+                            OrchestrationOutboxModel.available_at <= now,
+                            eligible_lease,
                         )
                         .order_by(
                             OrchestrationOutboxModel.available_at,
@@ -111,13 +101,16 @@ class PostgresOrchestrationOutboxRepository(OrchestrationOutboxRepository):
                 ).first()
                 if row is None:
                     return None
-
                 outbox, session_id, run_id = row
-                lease_until = now + timedelta(seconds=lease_seconds)
-                outbox.status = "processing"
+                grant = await self._leases.acquire_in_transaction(
+                    session,
+                    LeaseKey("orchestration_outbox", outbox.message_id),
+                    owner_id=uuid4().hex,
+                    lease_seconds=lease_seconds,
+                )
+                if grant is None:
+                    return None
                 outbox.attempt = int(outbox.attempt or 0) + 1
-                outbox.lease_owner = worker_id
-                outbox.lease_until = lease_until
                 return OrchestrationOutboxLease(
                     message_id=outbox.message_id,
                     worker_id=worker_id,
@@ -130,64 +123,69 @@ class PostgresOrchestrationOutboxRepository(OrchestrationOutboxRepository):
                     occurred_at=outbox.occurred_at,
                     payload=dict(outbox.payload_json or {}),
                     attempt=outbox.attempt,
-                    lease_until=lease_until,
+                    lease=grant,
                 )
 
     async def mark_event_published(
         self, lease: OrchestrationOutboxLease
     ) -> bool:
-        """仅允许未过期的当前所有者确认投递。"""
+        """校验当前授权后，在同一事务确认发布并释放租约。"""
+        if lease.lease.key != LeaseKey("orchestration_outbox", lease.message_id):
+            raise ValueError("orchestration_outbox_lease_mismatch")
         async with self._session_factory() as session:
             async with session.begin():
                 now = await self._now(session)
-                result = await session.execute(
-                    update(OrchestrationOutboxModel)
-                    .where(
-                        OrchestrationOutboxModel.message_id == lease.message_id,
-                        OrchestrationOutboxModel.status == "processing",
-                        OrchestrationOutboxModel.lease_owner == lease.worker_id,
-                        OrchestrationOutboxModel.lease_until > now,
-                    )
-                    .values(
-                        status="published",
-                        published_at=now,
-                        lease_owner=None,
-                        lease_until=None,
-                    )
+                outbox = await session.get(
+                    OrchestrationOutboxModel,
+                    lease.message_id,
+                    with_for_update=True,
                 )
-        return bool(result.rowcount)
+                if outbox is None or outbox.status != "pending":
+                    return False
+                await self._leases.assert_current_in_transaction(session, lease.lease)
+                outbox.status = "published"
+                outbox.published_at = now
+                if not await self._leases.finish_in_transaction(
+                    session, lease.lease
+                ):
+                    raise LeaseLostError(lease.lease.key)
+                return True
 
     async def retry_event(
         self, lease: OrchestrationOutboxLease, *, delay_seconds: float
     ) -> bool:
-        """失败后释放租约并延迟重试，不丢弃编排事实。"""
+        """保留事件并安排退避时间，同时释放当前投递执行权。"""
+        if lease.lease.key != LeaseKey("orchestration_outbox", lease.message_id):
+            raise ValueError("orchestration_outbox_lease_mismatch")
         if delay_seconds < 0:
             raise ValueError("delay_seconds cannot be negative")
         async with self._session_factory() as session:
             async with session.begin():
                 now = await self._now(session)
-                result = await session.execute(
-                    update(OrchestrationOutboxModel)
-                    .where(
-                        OrchestrationOutboxModel.message_id == lease.message_id,
-                        OrchestrationOutboxModel.status == "processing",
-                        OrchestrationOutboxModel.lease_owner == lease.worker_id,
-                    )
-                    .values(
-                        status="pending",
-                        available_at=now + timedelta(seconds=delay_seconds),
-                        lease_owner=None,
-                        lease_until=None,
-                    )
+                outbox = await session.get(
+                    OrchestrationOutboxModel,
+                    lease.message_id,
+                    with_for_update=True,
                 )
-        return bool(result.rowcount)
+                if outbox is None or outbox.status != "pending":
+                    return False
+                await self._leases.assert_current_in_transaction(session, lease.lease)
+                outbox.available_at = now + timedelta(seconds=delay_seconds)
+                if not await self._leases.finish_in_transaction(
+                    session, lease.lease
+                ):
+                    raise LeaseLostError(lease.lease.key)
+                return True
 
     async def _now(self, session: AsyncSession) -> datetime:
+        """读取并规范化数据库 UTC 时钟。"""
         value: Any = (
             self._clock()
             if self._clock is not None
             else await session.scalar(select(func.clock_timestamp()))
         )
+        if value is None:
+            raise RuntimeError("database_clock_unavailable")
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)

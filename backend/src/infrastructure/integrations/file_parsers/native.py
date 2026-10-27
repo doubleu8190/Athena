@@ -6,6 +6,7 @@ parsers can implement the same port and be selected by the bootstrap registry.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from io import BytesIO
@@ -59,6 +60,11 @@ class NativeFileParser(DocumentParserPort):
 
     async def parse(self, attachment: Attachment) -> ParsedDocument:
         data = await self._storage.read(attachment.storage_key)
+        return await asyncio.to_thread(self._parse_bytes, attachment, data)
+
+    @staticmethod
+    def _parse_bytes(attachment: Attachment, data: bytes) -> ParsedDocument:
+        """在线程中执行 PDF、Office 和文本解析，避免阻塞租约心跳。"""
         filename = getattr(attachment, "filename", "")
         suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
         metadata: dict[str, object] = {"encoding": "utf-8"}

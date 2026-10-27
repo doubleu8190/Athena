@@ -7,6 +7,8 @@ from enum import StrEnum
 from math import isfinite
 from typing import Any, Mapping
 
+from domain.leases import LeaseGrant
+
 
 class PlanStatus(StrEnum):
     CREATED = "created"
@@ -87,7 +89,7 @@ class TaskExecution:
     upstream_results: Mapping[str, "TaskResult"] = field(default_factory=dict)
     execution_id: str | None = None
     worker_thread_id: str | None = None
-    fencing_token: int | None = None
+    lease: LeaseGrant | None = None
     cancellation_epoch: int = 0
 
 

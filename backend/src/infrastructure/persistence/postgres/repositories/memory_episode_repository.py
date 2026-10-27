@@ -22,6 +22,7 @@ from domain.memory import (
     MemoryEpisodeSummary,
     MemorySourceReference,
 )
+from domain.leases import LeaseGrant, LeaseKey
 from domain.memory.suppression import (
     EPISODE_SUPPRESSION_FINGERPRINT,
     PROJECT_SUPPRESSION_FINGERPRINT,
@@ -48,6 +49,7 @@ from ..models import (
     TaskExecutionResultModel,
     WorkerExecutionMessageModel,
 )
+from .lease_center import PostgresLeaseCenter
 
 
 def _now() -> str:
@@ -121,6 +123,8 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
         session_factory: Callable[
             [], AbstractAsyncContextManager[AsyncSession]
         ],
+        *,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
         """保存异步数据库会话工厂。
 
@@ -129,6 +133,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
         异常：不主动抛出业务异常。
         """
         self._session_factory = session_factory
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
     async def get_by_turn(self, turn_id: str) -> MemoryEpisode | None:
         """按来源轮次读取回顾。
@@ -154,13 +159,15 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
             )
         return None if row is None else _to_domain(row, project_id=project_id)
 
-    async def create_if_absent(self, episode: MemoryEpisode) -> MemoryEpisode | None:
+    async def create_if_absent(self, episode: MemoryEpisode, *, lease: LeaseGrant) -> MemoryEpisode | None:
         """按 turn_id 首写胜出保存回顾并核对冻结来源指纹。
 
         参数：episode 是已校验摘要、程序解析来源和输入指纹组成的记录。
         返回：已保存或并发胜出的回顾。
         异常：同一轮次出现不同来源指纹，或数据库校验失败时抛出。
         """
+        if lease.key != LeaseKey("memory_processing", episode.turn_id):
+            raise ValueError("memory_processing_lease_mismatch")
         values = {
             "episode_id": episode.episode_id,
             "turn_id": episode.turn_id,
@@ -199,6 +206,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
                 )
                 if suppressed is not None:
                     return None
+                await self._leases.assert_current_in_transaction(session, lease)
                 inserted_id = await session.scalar(
                     pg_insert(MemoryEpisodeModel)
                     .values(**values)

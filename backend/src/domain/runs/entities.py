@@ -7,6 +7,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from domain.leases import LeaseGrant
+
 from .payloads import RunCommandPayload, RunResumePayload, RunStartPayload
 
 
@@ -50,8 +52,7 @@ class RunCommand:
     payload: RunCommandPayload
     issued_at: datetime
     schema_version: int = 1
-    execution_generation: int = 0
-    lease_owner: str | None = None
+    lease: LeaseGrant | None = None
 
     def __post_init__(self) -> None:
         """Reject commands whose concrete payload does not match their type."""
@@ -60,6 +61,12 @@ class RunCommand:
             raise ValueError(
                 f"{self.command_type.value} requires {expected_payload.__name__}"
             )
+        if self.run_id is not None and (
+            self.lease is None
+            or self.lease.key.resource_type != "root_execution"
+            or self.lease.key.resource_id != self.run_id
+        ):
+            raise ValueError("run_command_requires_matching_root_lease")
 
 
 def _payload_type_for(command_type: CommandType) -> type[RunCommandPayload]:

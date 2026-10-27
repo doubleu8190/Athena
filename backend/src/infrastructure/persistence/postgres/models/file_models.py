@@ -57,6 +57,7 @@ class AttachmentModel(Base):
     capabilities_json: Mapped[str] = mapped_column(Text, default="[]")
     parsed_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active_index_revision_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
     deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -70,6 +71,7 @@ class FileChunkModel(Base):
         Index(
             "uq_file_chunk_attachment_ordinal_active",
             "attachment_id",
+            "index_revision_id",
             "ordinal",
             unique=True,
             postgresql_where="deleted_time IS NULL",
@@ -79,6 +81,7 @@ class FileChunkModel(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
+    index_revision_id: Mapped[str | None] = mapped_column(String, nullable=True)
     ordinal: Mapped[int] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)

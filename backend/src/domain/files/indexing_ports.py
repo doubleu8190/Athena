@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Protocol
+from domain.leases import LeaseGrant
 
 from .entities import Attachment, FileChunk
 
@@ -10,7 +11,7 @@ from .entities import Attachment, FileChunk
 class VectorIndexerPort(Protocol):
     """附件向量索引写入能力。"""
 
-    async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk]) -> None: ...
+    async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk], *, lease: LeaseGrant) -> None: ...
     async def delete_attachment(self, attachment_id: str) -> None: ...
 
 
@@ -29,7 +30,7 @@ class FileVectorSearchPort(Protocol):
 class GraphIndexerPort(Protocol):
     """附件图索引写入能力。"""
 
-    async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk]) -> None: ...
+    async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk], *, lease: LeaseGrant) -> None: ...
     async def delete_attachment(self, attachment_id: str) -> None: ...
 
 

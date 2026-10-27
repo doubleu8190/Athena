@@ -40,6 +40,7 @@ from domain.orchestration import (
     OrchestrationCommandRepository,
     PlanCommandRejected,
 )
+from .lease_center import PostgresLeaseCenter
 from ..models import (
     AgentPlanModel,
     AgentRunModel,
@@ -80,6 +81,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         *,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
         """保存数据库会话工厂和可替换的时间、ID 来源。
 
@@ -91,6 +93,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         self._session_factory = session_factory
         self._id_factory = id_factory or (lambda: uuid4().hex)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
     async def submit_plan(
         self,
@@ -123,6 +126,9 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                 )
                 if prior_receipt is not None:
                     return prior_receipt
+                await self._leases.assert_current_in_transaction(
+                    session, command.lease
+                )
 
                 round_snapshot, receipt, task_rows = await self._insert_initial_plan_rows(
                     session,
@@ -336,7 +342,6 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                 round_id=round_snapshot.round_id,
                 attempt=1,
                 worker_thread_id=worker_thread_id,
-                fencing_token=1,
                 status=ExecutionStatus.QUEUED,
             )
             session.add(
@@ -356,7 +361,6 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                     attempt=attempt.attempt,
                     worker_thread_id=attempt.worker_thread_id,
                     status=attempt.status.value,
-                    fencing_token=attempt.fencing_token,
                     cancellation_epoch=0,
                     created_at=now,
                     updated_at=now,
@@ -505,6 +509,9 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                     return prior_receipt
                 rows = await self._lock_review_rows(
                     session, command=command, run=run
+                )
+                await self._leases.assert_current_in_transaction(
+                    session, command.lease
                 )
 
                 if decision.action == ReviewAction.FINISH:
@@ -959,7 +966,6 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                     attempt=attempt,
                     worker_thread_id=worker_thread_id,
                     status=ExecutionStatus.QUEUED.value,
-                    fencing_token=attempt,
                     cancellation_epoch=0,
                     created_at=now,
                     updated_at=now,

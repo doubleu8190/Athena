@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
+from domain.leases import LeaseGrant
 from .contracts import MemoryExecutionEvidence, MemoryFact
 
 
@@ -157,7 +158,6 @@ class CompletedTurn:
     completed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     execution_evidence: MemoryExecutionEvidence | None = None
     project_id: str | None = None
-    project_binding_frozen: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +166,7 @@ class ClaimedMemoryJob:
 
     turn: CompletedTurn
     attempt: int
+    lease: LeaseGrant
 
 
 @dataclass(frozen=True, slots=True)

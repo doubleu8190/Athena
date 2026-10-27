@@ -43,6 +43,7 @@ class RootGraphState(TypedDict, total=False):
     response: dict[str, Any]
     result: dict[str, Any]
     resume_value: dict[str, Any]
+    execution_lease: dict[str, Any]
     status: str
     waiting: bool
     error: dict[str, Any]

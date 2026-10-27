@@ -31,6 +31,7 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    ExecutionLeaseModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
     OrchestrationOutboxModel,
@@ -56,6 +57,7 @@ from infrastructure.persistence.postgres.repositories.orchestration_repository i
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
 )
+from tests.fakes.leases import acquire_postgres_lease
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -88,6 +90,8 @@ async def test_blocked_continue_returns_explicit_error_then_finish_cancels_pendi
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -142,6 +146,9 @@ async def test_blocked_continue_returns_explicit_error_then_finish_cancels_pendi
             id_factory=lambda: f"generated-{next(ids)}",
             clock=lambda: now,
         )
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
         plan = Plan(
             plan_id=plan_id,
             goal="Complete B only after prerequisite A succeeds",
@@ -158,6 +165,7 @@ async def test_blocked_continue_returns_explicit_error_then_finish_cancels_pendi
                 idempotency_key=f"submit:{run_id}",
                 correlation_id=run_id,
                 occurred_at=now,
+                lease=root_lease,
                 plan_id=plan_id,
                 scope_key=run_id,
                 plan_version=1,
@@ -183,7 +191,7 @@ async def test_blocked_continue_returns_explicit_error_then_finish_cancels_pendi
             round_id=submitted.round_id,
             task_id="task-a",
             execution_id=lease.execution_id,
-            fencing_token=lease.fencing_token,
+            lease=lease.lease,
             cancellation_epoch=lease.cancellation_epoch,
             status=TaskStatus.FAILED,
             result={"error": "prerequisite unavailable"},
@@ -217,6 +225,7 @@ async def test_blocked_continue_returns_explicit_error_then_finish_cancels_pendi
             "scope_key": run_id,
             "plan_version": 1,
             "round_id": submitted.round_id,
+            "lease": root_lease,
         }
         with pytest.raises(PlanCommandRejected) as rejection:
             await commands.apply_review_decision(

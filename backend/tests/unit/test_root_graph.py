@@ -29,7 +29,17 @@ from application.runs.context import (
     ProviderResult,
 )
 from application.runs.request_contracts import RootRequestState
-from application.orchestration.langgraph import build_root_graph, invoke_root_graph
+from application.orchestration.langgraph import build_root_graph
+from application.orchestration.langgraph import invoke_root_graph as _invoke_root_graph
+from tests.fakes.leases import lease_context, lease_grant
+
+
+async def invoke_root_graph(graph, **kwargs):
+    """Attach a synthetic root grant to direct graph unit invocations."""
+    kwargs.setdefault(
+        "lease", lease_grant("root_execution", str(kwargs["run_id"]))
+    )
+    return await _invoke_root_graph(graph, **kwargs)
 from domain.memory import MemoryRecord
 
 
@@ -328,6 +338,7 @@ async def test_root_workflow_loads_plan_results_once_and_renders_response() -> N
     dependencies.plan_loader = load_plan
     workflow = RootWorkflow(dependencies)
     state = {
+        "execution_lease": lease_context(lease_grant("root_execution", "run-1")),
         "request": {
             "run_id": "run-1",
             "session_id": "session-1",

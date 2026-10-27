@@ -32,6 +32,7 @@ from infrastructure.persistence.postgres.options import PostgresOptions
 from workers import WorkerSupervisor
 from workers import KnowledgeDocumentWorker
 from bootstrap.check import check_app
+from tests.fakes.leases import LeaseCenter, lease_grant
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -78,6 +79,9 @@ class DB:
     async def execute(self, _statement):
         return self.results.pop(0) if self.results else Result()
 
+    async def scalars(self, statement):
+        return await self.execute(statement)
+
     async def get(self, _model, _key, **_kwargs):
         return self.get_values.pop(0) if self.get_values else None
 
@@ -100,17 +104,22 @@ async def test_run_status_update_reports_whether_a_transition_matched(
 ) -> None:
     """驱动只提供 RETURNING 行时，仍能区分更新成功和状态保护拒绝。"""
     db = DB()
-    db.results = [SimpleNamespace(scalar_one_or_none=lambda: returned_run_id)]
-    db.scalar_values = [returned_run_id]
-    runs = PostgresRunRepository(factory(db))
+    db.scalar_values = [
+        "s-1",
+        SimpleNamespace(active_run_id="r-1"),
+    ]
+    db.get_values = [SimpleNamespace(status="running" if expected else "queued")]
+    runs = PostgresRunRepository(factory(db), lease_center=LeaseCenter())
 
-    assert await runs.update_status("r-1", RunStatus.RUNNING) is expected
+    assert await runs.update_status(
+        "r-1", RunStatus.RUNNING, lease=lease_grant("root_execution", "r-1")
+    ) is expected
 
 
 @pytest.mark.asyncio
 async def test_target_runtime_repositories_cover_queue_events_approval_memory_and_retrieval():
     db = DB()
-    runs = PostgresRunRepository(factory(db))
+    runs = PostgresRunRepository(factory(db), lease_center=LeaseCenter())
     run_row = SimpleNamespace(
         run_id="r-1", session_id="s-1", message_id="message-1", sequence=1,
         status="queued", root_thread_id="t",
@@ -125,8 +134,11 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     db.scalar_values = ["r-1"]
     db.results = [Result(scalar=run_row)]
     assert (await runs.get_active_for_session("s-1")).run_id == "r-1"
-    db.scalar_values = ["r-1"]
-    await runs.update_status("r-1", RunStatus.RUNNING)
+    db.scalar_values = ["s-1", SimpleNamespace(active_run_id="r-1")]
+    db.get_values = [SimpleNamespace(status="running")]
+    await runs.update_status(
+        "r-1", RunStatus.RUNNING, lease=lease_grant("root_execution", "r-1")
+    )
 
     events = PostgresEventRepository(factory(db))
     db.scalar_values = [0]
@@ -266,12 +278,10 @@ async def test_postgres_orchestration_outbox_claims_and_acknowledges_lease():
         payload_json={"cancellation_epoch": 3},
         status="pending",
         attempt=0,
-        lease_owner=None,
-        lease_until=None,
     )
     db.results = [Result(rows=[(outbox, "s-1", "r-1")])]
     repository = PostgresOrchestrationOutboxRepository(
-        factory(db), clock=lambda: NOW
+        factory(db), clock=lambda: NOW, lease_center=LeaseCenter()
     )
 
     lease = await repository.claim_next_event(
@@ -287,9 +297,10 @@ async def test_postgres_orchestration_outbox_claims_and_acknowledges_lease():
 
     claim_sql = str(db.statements[0].compile(dialect=postgresql.dialect()))
     assert "JOIN agent_runs ON agent_runs.run_id = orchestration_outbox.correlation_id" in claim_sql
-    assert outbox.status == "processing"
-    assert outbox.lease_owner == "dispatcher-1"
+    assert outbox.status == "pending"
+    db.get_values = [outbox]
     assert await repository.mark_event_published(lease)
+    assert outbox.status == "published"
 
 
 @pytest.mark.asyncio
@@ -311,12 +322,19 @@ async def test_target_file_parser_and_document_job_queue():
     await NativeFileParser(storage).parse(SimpleNamespace(filename="data.csv", storage_key=blob.storage_key, adapter_name="csv", adapter_version="1", capabilities=("text",)))
     values = fixed_size_chunker(max_characters=5)("hello world")
     assert [value.ordinal for value in values] == [0, 1, 2]
-    await DisabledVectorIndexer().index_attachment(attachment, values)
+    from tests.fakes.leases import lease_grant
+    await DisabledVectorIndexer().index_attachment(
+        attachment, values, lease=lease_grant("document_ingestion", "a")
+    )
     await DisabledGraphIndexer().delete_attachment("a")
     with pytest.raises(ValueError):
         fixed_size_chunker(max_characters=0)
     await DisabledVectorIndexer().delete_attachment("a")
-    await DisabledGraphIndexer().index_attachment(attachment, values)
+    await DisabledGraphIndexer().index_attachment(
+        attachment,
+        values,
+        lease=lease_grant("document_ingestion", "a"),
+    )
     await storage.cleanup_unreferenced({blob.storage_key})
     orphan = root / "orphan"
     orphan.write_bytes(b"x")
@@ -364,15 +382,22 @@ async def test_target_file_parser_and_document_job_queue():
     jobs = PostgresDocumentJobRepository(factory(db))
     db.results = [Result(scalar=None)]
     assert await jobs.enqueue("a-1")
-    db.results = [Result(scalar=SimpleNamespace(job_id="j", attachment_id="a-1", status="queued", attempt=0, available_at="2000-01-01"))]
-    claimed = await jobs.claim_next()
+    jobs = PostgresDocumentJobRepository(factory(db), lease_center=LeaseCenter())
+    job_row = SimpleNamespace(job_id="j", attachment_id="a-1", status="queued", attempt=0, available_at=NOW)
+    attachment_row = SimpleNamespace(deleted_time=None, status="uploaded", error_message=None, updated_at=None)
+    db.results = [Result(rows=[job_row]), Result(scalar=attachment_row)]
+    db.scalar_values = [attachment_row]
+    claimed = await jobs.claim_next(lease_seconds=60)
     assert claimed["attachment_id"] == "a-1"
-    await jobs.mark_succeeded("j", {"chunks": 1})
-    await jobs.mark_failed("j", "bad", retry=False)
+    db.scalar_values = [job_row, attachment_row]
+    await jobs.mark_succeeded("j", {"chunks": 1, "index_revision_id": "rev-1"}, lease=claimed["lease"])
+    job_row.status = "running"
+    db.scalar_values = [job_row, attachment_row]
+    await jobs.mark_failed("j", "bad", retry=False, lease=claimed["lease"])
     await jobs.cancel("a-1")
-    db.results = [Result(scalar=SimpleNamespace(job_id="j", attachment_id="a-1", status="failed", attempt=1, available_at="2000-01-01"))]
+    db.results = [Result(scalar=SimpleNamespace(job_id="j", attachment_id="a-1", status="failed", attempt=1, available_at=NOW))]
     assert await jobs.enqueue("a-1")
-    db.results = [Result(scalar=None)]
+    db.results = [Result(rows=[])]
     assert await jobs.claim_next() is None
 
 
@@ -440,7 +465,7 @@ async def test_document_worker_run_and_stop_when_queue_is_empty():
         async def mark_failed(self, *args, **kwargs): pass
     class Ingest:
         async def process(self, attachment_id): return {}
-    worker = KnowledgeDocumentWorker(Queue(), Ingest())
+    worker = KnowledgeDocumentWorker(Queue(), Ingest(), lease_center=LeaseCenter())
     task = asyncio.create_task(worker.run(poll_interval=0.001))
     await asyncio.sleep(0.005)
     worker.stop()

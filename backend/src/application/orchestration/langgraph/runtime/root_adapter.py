@@ -14,6 +14,7 @@ from application.orchestration.protocols import (
     RootWorkflowPort,
 )
 from application.orchestration.dependencies import RootWorkflowDependencies
+from domain.leases import LeaseCenterPort, LeaseGrant
 from domain.runs import RoundCompletedResumeValue
 
 from .protocols import CheckpointerProvider
@@ -30,11 +31,13 @@ class LangGraphRootGraph(RootGraphPort):
         dependencies: RootWorkflowDependencies,
         checkpointer: CheckpointerProvider,
         thread_lock: GraphThreadLock,
+        lease_center: LeaseCenterPort,
     ) -> None:
         self._workflow = workflow
         self._dependencies = dependencies
         self._checkpointer = checkpointer
         self._thread_lock = thread_lock
+        self._leases = lease_center
         self._graph: CompiledStateGraph[Any, Any, Any, Any] | None = None
 
     def _compiled_graph(self) -> CompiledStateGraph[Any, Any, Any, Any]:
@@ -52,6 +55,7 @@ class LangGraphRootGraph(RootGraphPort):
         *,
         session_id: str,
         run_id: str,
+        lease: LeaseGrant,
         user_message: str,
         message_id: str = "",
         run_sequence: int = 1,
@@ -64,6 +68,7 @@ class LangGraphRootGraph(RootGraphPort):
                 self._compiled_graph(),
                 session_id=session_id,
                 run_id=run_id,
+                lease=lease,
                 user_message=user_message,
                 message_id=message_id,
                 run_sequence=run_sequence,
@@ -73,6 +78,7 @@ class LangGraphRootGraph(RootGraphPort):
             )
 
         async with self._thread_lock.hold(f"run:{run_id}"):
+            await self._leases.assert_current(lease)
             return await invoke()
 
     async def has_pending_round_wait(

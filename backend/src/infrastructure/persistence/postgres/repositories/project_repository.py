@@ -25,7 +25,6 @@ from ..models import (
     MemoryEpisodeModel,
     MemoryEpisodeProjectBindingModel,
     MemoryExtractionSnapshotModel,
-    MemoryJobScopeSnapshotModel,
     MemoryModel,
     MemoryProcessingJobModel,
     ProjectModel,
@@ -186,7 +185,6 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                 session_ids = list((await session.scalars(
                     select(SessionModel.id).where(
                         SessionModel.project_id == project_id,
-                        SessionModel.deleted_time.is_(None),
                     )
                 )).all())
                 active_run = (
@@ -280,6 +278,15 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                     turn_ids.update(
                         (
                             await session.scalars(
+                                select(MemoryProcessingJobModel.turn_id).where(
+                                    MemoryProcessingJobModel.session_id.in_(session_ids)
+                                )
+                            )
+                        ).all()
+                    )
+                    turn_ids.update(
+                        (
+                            await session.scalars(
                                 select(AgentRunModel.run_id).where(
                                     AgentRunModel.session_id.in_(session_ids)
                                 )
@@ -287,16 +294,6 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                         ).all()
                     )
 
-                scope_turn_ids = list(
-                    (
-                        await session.scalars(
-                            select(MemoryJobScopeSnapshotModel.turn_id).where(
-                                MemoryJobScopeSnapshotModel.project_id == project_id
-                            )
-                        )
-                    ).all()
-                )
-                turn_ids.update(scope_turn_ids)
                 for turn_id in sorted(turn_ids):
                     await session.execute(
                         select(
@@ -333,11 +330,6 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                     turn_filter = MemoryProcessingJobModel.turn_id.in_(turn_ids)
                     await session.execute(
                         sql_delete(MemoryProcessingJobModel).where(turn_filter)
-                    )
-                    await session.execute(
-                        sql_delete(MemoryJobScopeSnapshotModel).where(
-                            MemoryJobScopeSnapshotModel.turn_id.in_(turn_ids)
-                        )
                     )
                     await session.execute(
                         sql_delete(MemoryExtractionSnapshotModel).where(

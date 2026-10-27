@@ -13,7 +13,7 @@ from uuid import uuid4
 import pytest
 from langgraph.errors import NodeCancelledError
 from psycopg.conninfo import make_conninfo
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -37,6 +37,7 @@ from domain.orchestration import (
     WorkerTaskTerminalEvent,
 )
 from domain.tools import ToolExecutionRequest, ToolExecutionResult
+from tests.fakes.leases import acquire_postgres_lease, lease_grant
 from infrastructure.persistence.postgres.checkpointer import PostgresCheckpointer
 from infrastructure.persistence.postgres.models import (
     AgentPlanModel,
@@ -44,6 +45,7 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    ExecutionLeaseModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
     OrchestrationOutboxModel,
@@ -227,6 +229,7 @@ async def test_worker_approval_resumes_after_postgres_checkpointer_restart(
             execution_generation=1,
             execution_id="execution-1",
             worker_thread_id="task:task-1:exec:1",
+            lease=lease_grant("worker_execution", "execution-1"),
         )
 
         first_checkpointer = PostgresCheckpointer(
@@ -350,6 +353,8 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -412,6 +417,9 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             session_id=session_id,
             run_id=run_id,
         )
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
         submitted = await command_repository.submit_plan(
             OrchestrationCommand(
                 message_id=f"submit:{run_id}",
@@ -419,6 +427,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
                 idempotency_key=f"submit:{run_id}",
                 correlation_id=run_id,
                 occurred_at=now,
+                lease=root_lease,
                 plan_id=plan_id,
                 scope_key=run_id,
                 plan_version=1,
@@ -449,7 +458,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             execution_generation=first_lease.attempt,
             execution_id=first_lease.execution_id,
             worker_thread_id=first_lease.worker_thread_id,
-            fencing_token=first_lease.fencing_token,
+            lease=first_lease.lease,
             cancellation_epoch=first_lease.cancellation_epoch,
         )
 
@@ -515,7 +524,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             execution_generation=resumed_lease.attempt,
             execution_id=resumed_lease.execution_id,
             worker_thread_id=resumed_lease.worker_thread_id,
-            fencing_token=resumed_lease.fencing_token,
+            lease=resumed_lease.lease,
             cancellation_epoch=resumed_lease.cancellation_epoch,
         )
         class CrashAfterOperationCommit:
@@ -588,6 +597,16 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
         checkpointers.append(final_checkpointer)
         await final_checkpointer.start()
         recovery_time = now + timedelta(seconds=61)
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                update(ExecutionLeaseModel)
+                .where(
+                    ExecutionLeaseModel.resource_type == resumed_lease.lease.key.resource_type,
+                    ExecutionLeaseModel.resource_id == resumed_lease.lease.key.resource_id,
+                    ExecutionLeaseModel.fencing_token == resumed_lease.lease.fencing_token,
+                )
+                .values(lease_until=func.clock_timestamp() - text("INTERVAL '1 second'"))
+            )
         final_jobs = PostgresWorkerJobRepository(
             session_factory, clock=lambda: recovery_time
         )
@@ -598,7 +617,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
         assert final_lease.job_type == "resume_worker"
         assert final_lease.execution_id == first_lease.execution_id
         assert final_lease.worker_thread_id == first_lease.worker_thread_id
-        assert final_lease.fencing_token > resumed_lease.fencing_token
+        assert final_lease.lease.fencing_token > resumed_lease.lease.fencing_token
         final_execution = TaskExecution(
             plan_id=plan_id,
             run_id=run_id,
@@ -607,7 +626,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             execution_generation=final_lease.attempt,
             execution_id=final_lease.execution_id,
             worker_thread_id=final_lease.worker_thread_id,
-            fencing_token=final_lease.fencing_token,
+            lease=final_lease.lease,
             cancellation_epoch=final_lease.cancellation_epoch,
         )
         final_agent = _WorkerAgent()
@@ -654,7 +673,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
                 round_id=submitted.round_id,
                 task_id=task_id,
                 execution_id=final_lease.execution_id,
-                fencing_token=final_lease.fencing_token,
+                lease=final_lease.lease,
                 cancellation_epoch=final_lease.cancellation_epoch,
                 status=TaskStatus.COMPLETED,
                 result={

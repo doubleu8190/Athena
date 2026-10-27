@@ -1,10 +1,10 @@
 # 数据库表结构与使用情况审查
 
-> 审查范围：当前工作区的 PostgreSQL SQLAlchemy ORM 模型、`backend/src` 和 `frontend/src` 的直接引用，以及 2026-10-26 配置的本机 `athena` 数据库只读核验。数据库统计仅覆盖该本机实例。
+> 审查范围：2026-10-26 工作区的 PostgreSQL SQLAlchemy ORM 模型、`backend/src` 和 `frontend/src` 的直接引用，以及同日配置的本机 `athena` 数据库只读核验。2026-10-27 已移除 `MemoryJobScopeSnapshotModel`；本次没有重建数据库，因此旧表仍留在本机 schema 中。
 
 ## 结论
 
-- ORM 当前定义 **53 张表、563 个映射字段**。
+- 审查时 ORM 定义 **53 张表、563 个映射字段**；移除 `MemoryJobScopeSnapshotModel` 后当前 ORM 定义 52 张表、559 个映射字段。
 - 本机 `public` schema 清理后有 57 张基础表：53 张来自 ORM，另有 4 张由 LangGraph PostgreSQL checkpointer 管理。
 - 旧版 SQL 重建脚本已移除；当前 schema 由 PostgreSQL ORM 模型定义。
 - 本次移除了两张没有应用代码消费者的代码索引表，以及 7 个未使用字段；`backend/scripts/prune_unused_postgres_objects.sql` 已在本机数据库执行。

@@ -17,6 +17,7 @@ from application.orchestration.agents.worker_agent import ConfiguredWorkerAgent
 from application.orchestration.langgraph.runtime.worker_executor import LangGraphWorkerExecutor
 from application.orchestration.worker_workflow import WorkerWorkflow
 from domain.orchestration import Task, TaskExecution
+from tests.fakes.leases import lease_grant
 from infrastructure.integrations.llm.embedding_provider import EmbeddingProvider
 from infrastructure.integrations.llm.llm_provider import ConfiguredLLMProvider
 from infrastructure.integrations.llm.options import (
@@ -319,8 +320,11 @@ async def test_neo4j_adapter_health_projection_and_close():
     driver = Driver()
     adapter = Neo4jGraphAdapter(driver)
     assert await adapter.health()
-    chunk = SimpleNamespace(id="c", content="text")
-    await adapter.index_attachment(SimpleNamespace(id="a"), [chunk])
+    chunk = SimpleNamespace(id="c", content="text", index_revision_id="revision-1")
+    await adapter.index_attachment(
+        SimpleNamespace(id="a"), [chunk],
+        lease=lease_grant("document_ingestion", "a"),
+    )
     await adapter.delete_attachment("a")
     await adapter.close()
     assert driver.closed

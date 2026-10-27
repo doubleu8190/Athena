@@ -42,15 +42,17 @@ class Neo4jResource(GraphSearchPort):
         return self.adapter is not None and await self.adapter.health()
 
     async def query_context(
-        self, query: str, *, limit: int = 12
+        self, query: str, *, limit: int = 12, after_id: str | None = None
     ) -> list[dict[str, object]]:
         """Expose graph retrieval as a capability-level port."""
         if self.adapter is None:
             return []
-        return await self.adapter.query_context(query, limit=limit)
+        return await self.adapter.query_context(query, limit=limit, after_id=after_id)
 
-    async def search_nodes(self, query: str, *, limit: int = 12) -> list[dict[str, object]]:
-        return await self.query_context(query, limit=limit)
+    async def search_nodes(
+        self, query: str, *, limit: int = 12, after_id: str | None = None
+    ) -> list[dict[str, object]]:
+        return await self.query_context(query, limit=limit, after_id=after_id)
 
 
 __all__ = ["Neo4jResource"]

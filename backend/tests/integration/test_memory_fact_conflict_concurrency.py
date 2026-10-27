@@ -24,14 +24,17 @@ from domain.memory import (
     MemorySourceReference,
     MemoryStateChangedError,
 )
+from domain.leases import LeaseGrant
 from infrastructure.persistence.postgres.models import (
     Base,
+    ExecutionLeaseModel,
     MemoryModel,
     MemoryRelationModel,
     MemorySourceSuppressionModel,
 )
 from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository
 from shared.contracts.memory import MemoryResolutionProposalSchema
+from tests.fakes.leases import acquire_postgres_lease
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -68,7 +71,9 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
     class FixedExtractor:
         """按轮次返回固定候选，隔离并发写入行为与模型抽取质量。"""
 
-        async def extract(self, turn: CompletedTurn) -> list[MemoryCandidate]:
+        async def extract(
+            self, turn: CompletedTurn, *, lease: LeaseGrant
+        ) -> list[MemoryCandidate]:
             """返回给定完成轮次对应的结构化事实候选。
 
             参数：turn 是待处理的合成用户轮次。
@@ -157,6 +162,7 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
                 lambda sync: Base.metadata.create_all(
                     sync,
                     tables=[
+                        ExecutionLeaseModel.__table__,
                         MemoryModel.__table__,
                         MemoryRelationModel.__table__,
                         MemorySourceSuppressionModel.__table__,
@@ -165,9 +171,18 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
                 )
             )
 
+        leases = {
+            turn_id: await acquire_postgres_lease(
+                factory, "memory_processing", turn_id
+            )
+            for turn_id in source_turn_ids
+        }
+
         outcomes = await asyncio.gather(
             *(
-                workflows[turn_id].process_completed_turn(turns[turn_id])
+                workflows[turn_id].process_completed_turn(
+                    turns[turn_id], lease=leases[turn_id]
+                )
                 for turn_id in source_turn_ids
             ),
             return_exceptions=True,
@@ -179,7 +194,7 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
         failed_index = outcomes.index(failures[0])
         failed_turn_id = source_turn_ids[failed_index]
         assert await workflows[failed_turn_id].process_completed_turn(
-            turns[failed_turn_id]
+            turns[failed_turn_id], lease=leases[failed_turn_id]
         ) == 1
 
         page = await repository.list_memories(MemoryListRequest(limit=20))

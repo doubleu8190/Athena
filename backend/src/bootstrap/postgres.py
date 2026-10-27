@@ -139,6 +139,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationOutboxRepository,
     PostgresPlanLoader,
     PostgresEvaluationRepository,
+    PostgresLeaseCenter,
 )
 from infrastructure.evaluation.retrieval_target import EmbeddingRetrievalTarget
 from infrastructure.evaluation import EvaluationEventPublisher, load_dataset
@@ -176,17 +177,18 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     checkpointer = PostgresCheckpointer(settings.postgres_conn_string)
     graph_thread_lock = PostgresGraphThreadLock(settings.postgres_conn_string)
     session_factory = postgres.session
+    lease_center = PostgresLeaseCenter(session_factory)
     sessions = PostgresSessionRepository(session_factory)
     session_memory_settings = PostgresSessionMemorySettingsRepository(session_factory)
     projects = PostgresProjectRepository(session_factory)
     messages = PostgresMessageRepository(session_factory)
-    runs = PostgresRunRepository(session_factory)
+    runs = PostgresRunRepository(session_factory, lease_center=lease_center)
     events = PostgresEventRepository(session_factory)
     approvals = PostgresApprovalRepository(session_factory)
-    memory = PostgresMemoryRepository(session_factory)
-    memory_jobs = PostgresMemoryJobRepository(session_factory)
-    memory_operations = PostgresMemoryOperationsRepository(session_factory)
-    memory_episodes = PostgresMemoryEpisodeRepository(session_factory)
+    memory = PostgresMemoryRepository(session_factory, lease_center=lease_center)
+    memory_jobs = PostgresMemoryJobRepository(session_factory, lease_center=lease_center)
+    memory_operations = PostgresMemoryOperationsRepository(session_factory, lease_center=lease_center)
+    memory_episodes = PostgresMemoryEpisodeRepository(session_factory, lease_center=lease_center)
     retrieval = PostgresRetrievalRepository(session_factory)
     evaluation_repository = PostgresEvaluationRepository(session_factory)
     evaluation_progress = EvaluationProgressHub()
@@ -194,22 +196,27 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     mcp_repository = PostgresMCPServerRepository(session_factory)
     orchestration_repository = PostgresOrchestrationRepository(session_factory)
     orchestration_command_repository = PostgresOrchestrationCommandRepository(
-        session_factory
+        session_factory, lease_center=lease_center
     )
     orchestration_event_repository = PostgresOrchestrationEventRepository(
         session_factory,
         max_attempts=settings.worker_max_attempts,
+        lease_center=lease_center,
     )
-    worker_job_repository = PostgresWorkerJobRepository(session_factory)
+    worker_job_repository = PostgresWorkerJobRepository(
+        session_factory, lease_center=lease_center
+    )
     worker_tool_operation_repository = PostgresWorkerToolOperationRepository(
-        session_factory
+        session_factory, lease_center=lease_center
     )
     worker_execution_message_repository = PostgresWorkerExecutionMessageRepository(
-        session_factory
+        session_factory, lease_center=lease_center
     )
-    root_resume_job_repository = PostgresRootResumeJobRepository(session_factory)
+    root_resume_job_repository = PostgresRootResumeJobRepository(
+        session_factory, lease_center=lease_center
+    )
     orchestration_outbox_repository = PostgresOrchestrationOutboxRepository(
-        session_factory
+        session_factory, lease_center=lease_center
     )
     orchestration_command_handler = OrchestrationCommandHandler(
         orchestration_command_repository
@@ -252,8 +259,12 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             connection_timeout_seconds=settings.neo4j_connection_timeout_seconds,
         )
     )
-    file_vectors = PostgresFileVectorIndex(session_factory, embedding)
-    memory_vectors = PostgresMemoryVectorIndex(session_factory, embedding)
+    file_vectors = PostgresFileVectorIndex(
+        session_factory, embedding, lease_center=lease_center
+    )
+    memory_vectors = PostgresMemoryVectorIndex(
+        session_factory, embedding, lease_center=lease_center
+    )
     sandbox = DockerSandbox(
         SandboxOptions(
             docker_binary=settings.sandbox_docker_binary,
@@ -267,14 +278,18 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         )
     )
     mcp = PostgresMCPAdapter(mcp_repository)
-    attachments = PostgresAttachmentRepository(session_factory)
+    attachments = PostgresAttachmentRepository(
+        session_factory, lease_center=lease_center
+    )
     knowledge = PostgresKnowledgeBaseRepository(session_factory)
-    documents = PostgresKnowledgeDocumentRepository(session_factory)
-    jobs = PostgresDocumentJobRepository(session_factory)
+    documents = PostgresKnowledgeDocumentRepository(
+        session_factory, lease_center=lease_center
+    )
+    jobs = PostgresDocumentJobRepository(session_factory, lease_center=lease_center)
     storage = LocalFileStorage(settings.files_path, settings.file_max_upload_bytes)
     adapters = NativeFileAdapterRegistry()
     parser = NativeFileParser(storage)
-    chunks = PostgresFileChunkRepository(session_factory)
+    chunks = PostgresFileChunkRepository(session_factory, lease_center=lease_center)
     ingestion = IngestionService(
         attachments,
         # Ingestion uses the same attachment table for its chunk owner; the
@@ -284,6 +299,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         file_vectors,
         OptionalNeo4jFileIndexer(neo4j),
         chunker=fixed_size_chunker(max_characters=settings.file_chunk_tokens * 4),
+        lease_center=lease_center,
     )
     settings_queries = ConfiguredSettingsQueries(
         PublicConfiguration(
@@ -364,6 +380,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             neo4j,
             limit=settings.graph_path_limit,
             timeout_seconds=settings.graph_timeout_seconds,
+            active_revision_filter=chunks.filter_active_index_revisions,
         ),
     }
     context_service = ContextAcquisitionService(
@@ -442,6 +459,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         thread_lock=graph_thread_lock,
         poll_interval=settings.worker_job_poll_interval_seconds,
         id_factory=ids,
+        lease_center=lease_center,
     )
     dependencies = RootWorkflowDependencies(
         context_acquisition=context_service,
@@ -477,6 +495,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         dependencies=dependencies,
         checkpointer=checkpointer,
         thread_lock=graph_thread_lock,
+        lease_center=lease_center,
     )
 
     root_run_executor = LangGraphRunExecutor(root_graph)
@@ -551,15 +570,21 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             memory_jobs,
             runs,
         )
-        run_worker = RunConsumer(runs, run_execution)
+        run_worker = RunConsumer(
+            runs,
+            run_execution,
+            lease_center=lease_center,
+            lease_seconds=settings.root_execution_lease_seconds,
+        )
         root_resume_dispatcher = RootResumeDispatcher(
             root_resume_job_repository,
             root_graph,
             run_execution,
             runs,
             worker_id=f"root-resume-dispatcher:{ids()}",
-            lease_seconds=settings.worker_job_lease_seconds,
+            lease_seconds=settings.root_execution_lease_seconds,
             poll_interval=settings.worker_job_poll_interval_seconds,
+            lease_center=lease_center,
         )
         orchestration_outbox_dispatcher = OrchestrationOutboxDispatcher(
             orchestration_outbox_repository,
@@ -567,13 +592,26 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             worker_id=f"orchestration-outbox:{ids()}",
             lease_seconds=settings.worker_job_lease_seconds,
             poll_interval=settings.worker_job_poll_interval_seconds,
+            lease_center=lease_center,
         )
         approval_expiry_worker = ApprovalExpiryWorker(
             approval_service,
             poll_interval=settings.worker_job_poll_interval_seconds,
         )
-        document_worker = KnowledgeDocumentWorker(jobs, ingestion)
-        memory_worker = MemoryWorker(memory_jobs, memory_workflow)
+        document_worker = KnowledgeDocumentWorker(
+            jobs,
+            ingestion,
+            max_attempts=settings.worker_max_attempts,
+            lease_seconds=settings.document_ingestion_lease_seconds,
+            lease_center=lease_center,
+        )
+        memory_worker = MemoryWorker(
+            memory_jobs,
+            memory_workflow,
+            max_attempts=settings.worker_max_attempts,
+            lease_seconds=settings.memory_processing_lease_seconds,
+            lease_center=lease_center,
+        )
         resources.append(
             WorkerSupervisor(
                 (

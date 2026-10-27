@@ -14,6 +14,7 @@ from application.orchestration.answer_generation import (
 from application.orchestration.root_decision import RootMessage
 from domain.events import ApplicationEvent
 from domain.integrations import LLMStreamEnd, LLMStreamEvent, LLMTextDelta
+from tests.fakes.leases import lease_grant
 
 
 class Events:
@@ -31,11 +32,15 @@ class Events:
             self.first_delta.set()
         return event
 
+    async def publish_with_lease(self, event: ApplicationEvent, *, lease) -> ApplicationEvent:
+        return await self.publish(event)
+
 
 def inputs() -> AnswerGenerationInput:
     """无参数，返回最小合法正文输入，不主动抛出异常。"""
     return AnswerGenerationInput(
         session_id="s", run_id="r", message_id="m", kind="final",
+        execution_lease=lease_grant("root_execution", "r"),
         instructions="按资料回答", messages=(RootMessage(role="user", content="问题"),),
     )
 

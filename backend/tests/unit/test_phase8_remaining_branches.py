@@ -15,6 +15,8 @@ from bootstrap import create_app
 from bootstrap.lifespan import lifespan
 from domain.runs import CommandType, RunCommand, RunStartPayload, RunSummary
 from domain.sessions import Session
+from tests.fakes.leases import lease_grant
+from tests.fakes.leases import LeaseCenter
 from fastapi.testclient import TestClient
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -50,16 +52,20 @@ async def test_run_query_and_consumer_error_paths() -> None:
     with pytest.raises(SessionNotFoundError): await service.list_for_session("missing")
     with pytest.raises(LookupError): await service.get("missing")
     class Queue:
-        pass
+        async def finalize_stop(self, _run_id):
+            return False
     class Execution:
         async def execute(self, command): raise RuntimeError("fail")
         async def fail(self, command, error): self.error = error
         error = None
-    consumer = RunConsumer(Queue(), Execution(), poll_interval=0.001)
+    consumer = RunConsumer(
+        Queue(), Execution(), poll_interval=0.001, lease_center=LeaseCenter()
+    )
     await consumer._execute_run(
         RunCommand(
             "c", CommandType.RUN_START, "s", "r",
-            RunStartPayload(message="hello", message_id="m"), NOW
+            RunStartPayload(message="hello", message_id="m"), NOW,
+            lease=lease_grant("root_execution", "r"),
         )
     )
     assert consumer._execution.error["code"] == "run_execution_failed"

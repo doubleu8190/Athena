@@ -17,6 +17,7 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    ExecutionLeaseModel,
     PlanRoundModel,
     PlanVersionModel,
     RoundTaskModel,
@@ -53,6 +54,7 @@ async def test_run_snapshot_and_plan_version_read_postgres_facts() -> None:
             await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
             schema_created = True
         required_tables = [
+            ExecutionLeaseModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -149,10 +151,19 @@ async def test_run_snapshot_and_plan_version_read_postgres_facts() -> None:
                     attempt=1,
                     worker_thread_id="worker-thread-read-1",
                     status="completed",
-                    fencing_token=3,
                     cancellation_epoch=2,
                     result_ref="result-read-1",
                     error_json={"code": "old", "message": "safe", "stack": "private"},
+                    created_at=now,
+                    updated_at=now,
+                ))
+                session.add(ExecutionLeaseModel(
+                    resource_type="worker_execution",
+                    resource_id="execution-read-1",
+                    owner_id=None,
+                    fencing_token=3,
+                    state="released",
+                    lease_until=None,
                     created_at=now,
                     updated_at=now,
                 ))

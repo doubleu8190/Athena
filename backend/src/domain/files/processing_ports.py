@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Protocol
+from domain.leases import LeaseGrant
 
 from .entities import AdapterInfo, Attachment, FileMetadata
 
@@ -25,9 +26,9 @@ class DocumentJobPort(Protocol):
 class DocumentJobQueue(Protocol):
     """文档处理 worker 使用的任务领取和完成能力。"""
 
-    async def claim_next(self, *, max_attempts: int = 5) -> dict[str, object] | None: ...
-    async def mark_succeeded(self, job_id: str, result: dict[str, object]) -> None: ...
-    async def mark_failed(self, job_id: str, error: str, *, retry: bool) -> None: ...
+    async def claim_next(self, *, max_attempts: int = 5, lease_seconds: float = 60.0) -> dict[str, object] | None: ...
+    async def mark_succeeded(self, job_id: str, result: dict[str, object], *, lease: LeaseGrant) -> None: ...
+    async def mark_failed(self, job_id: str, error: str, *, retry: bool, lease: LeaseGrant) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -45,6 +45,8 @@ class LangGraphRunExecutor(RunExecutorPort):
     async def execute(self, command: RunCommand) -> CommandExecutionResult:
         if not command.run_id:
             return CommandExecutionResult(error={"code": "run_id_required"})
+        if command.lease is None:
+            raise RuntimeError("root_execution_lease_missing")
         if isinstance(command.payload, RunStartPayload):
             user_message = command.payload.message
             message_id = command.payload.message_id
@@ -71,6 +73,7 @@ class LangGraphRunExecutor(RunExecutorPort):
             value = await self._graph.invoke(
                 session_id=command.session_id,
                 run_id=command.run_id,
+                lease=command.lease,
                 user_message=user_message,
                 message_id=message_id,
                 run_sequence=run_sequence,

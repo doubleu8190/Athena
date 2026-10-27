@@ -19,11 +19,11 @@ from infrastructure.persistence.postgres.models import (
     AgentPlanModel,
     AgentRunModel,
     Base,
+    ExecutionLeaseModel,
     IdempotencyReceiptModel,
     MemoryEpisodeModel,
     MemoryEpisodeProjectBindingModel,
     MemoryExtractionSnapshotModel,
-    MemoryJobScopeSnapshotModel,
     MemoryModel,
     MemoryProcessingJobModel,
     ProjectModel,
@@ -75,6 +75,8 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
     runs = PostgresRunRepository(factory)
 
     tables = [
+
+        ExecutionLeaseModel.__table__,
         SessionModel.__table__,
         ProjectModel.__table__,
         SessionMemorySettingsModel.__table__,
@@ -91,7 +93,6 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
         MemoryProcessingJobModel.__table__,
         MemoryEpisodeModel.__table__,
         MemoryEpisodeProjectBindingModel.__table__,
-        MemoryJobScopeSnapshotModel.__table__,
         MemoryExtractionSnapshotModel.__table__,
         MemoryRunEvidenceSnapshotModel.__table__,
         MemoryWriteOperationModel.__table__,
@@ -171,12 +172,6 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                         status="active",
                         validity_status="valid",
                     ),
-                    MemoryJobScopeSnapshotModel(
-                        turn_id=legacy_turn_id,
-                        session_id=session_id,
-                        project_id=project_id,
-                        created_at=now,
-                    ),
                     MemoryExtractionSnapshotModel(
                         turn_id=legacy_turn_id,
                         snapshot_json="[]",
@@ -237,9 +232,9 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
         invocation = await runs.claim_next_run()
         assert invocation is not None and invocation.run_id == run_id
         async with factory() as session:
-            start_snapshot = await session.get(MemoryJobScopeSnapshotModel, run_id)
-            assert start_snapshot is not None
-            assert start_snapshot.project_id == project_id
+            saved_session = await session.get(SessionModel, session_id)
+            assert saved_session is not None
+            assert saved_session.project_id == project_id
 
         with pytest.raises(ValueError, match="project_busy"):
             await projects.delete(project_id)
@@ -254,6 +249,7 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                     "last_chunk_id": 1,
                 },
             },
+            lease=invocation.lease,
         )
         assert completed is True
         assert await projects.delete(project_id) is True
@@ -265,8 +261,6 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
             deleted_session = await session.get(SessionModel, session_id)
             assert deleted_session is not None
             assert deleted_session.deleted_time is not None
-            assert await session.get(MemoryJobScopeSnapshotModel, run_id) is None
-            assert await session.get(MemoryJobScopeSnapshotModel, legacy_turn_id) is None
             assert await session.get(MemoryProcessingJobModel, legacy_turn_id) is None
             assert await session.get(MemoryExtractionSnapshotModel, legacy_turn_id) is None
             assert await session.get(MemoryRunEvidenceSnapshotModel, legacy_turn_id) is None

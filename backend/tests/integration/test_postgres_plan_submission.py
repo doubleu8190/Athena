@@ -33,6 +33,7 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    ExecutionLeaseModel,
     OrchestrationInboxModel,
     OrchestrationCommandModel,
     OrchestrationOutboxModel,
@@ -62,6 +63,7 @@ from infrastructure.persistence.postgres.repositories.worker_job_repository impo
     PostgresWorkerJobRepository,
 )
 from workers.root_resume_dispatcher import RootResumeDispatcher
+from tests.fakes.leases import acquire_postgres_lease
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -94,6 +96,8 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -155,12 +159,16 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
             Task(task_id=task_id, title=task_id, objective=f"Complete {task_id}")
             for task_id in plan.task_ids
         ]
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
         submit = OrchestrationCommand(
             message_id=f"submit:{run_id}",
             command_type=OrchestrationCommandType.SUBMIT_PLAN,
             idempotency_key=f"submit:{run_id}",
             correlation_id=run_id,
             occurred_at=now,
+            lease=root_lease,
             plan_id=plan_id,
             scope_key=run_id,
             plan_version=1,
@@ -215,7 +223,7 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
                 round_id=round_id,
                 task_id=task_id,
                 execution_id=lease.execution_id,
-                fencing_token=lease.fencing_token,
+                lease=lease.lease,
                 cancellation_epoch=lease.cancellation_epoch,
                 status=TaskStatus.COMPLETED,
                 result={"output": {"task": task_id}},
@@ -291,13 +299,20 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
         assert early_claim is not None
         assert early_claim.interrupt_id is None
         assert await resume_jobs_repo.retry(early_claim, delay_seconds=0)
-        assert await PostgresRunRepository(session_factory).arm_root_wait(
+        run_repository = PostgresRunRepository(session_factory)
+        assert await run_repository.release_execution_lease(root_lease)
+        root_grant = await run_repository.acquire_execution_lease(
+            run_id, owner="root-wait-arm", lease_seconds=60
+        )
+        assert root_grant is not None
+        assert await run_repository.arm_root_wait(
             run_id,
             plan_id=plan_id,
             round_id=round_id,
             plan_version=1,
             interrupt_id="interrupt-root-review",
             checkpoint_id="checkpoint-root-review",
+            lease=root_grant,
         )
         ready_claim = await resume_jobs_repo.claim_next("root-app", lease_seconds=60)
         assert ready_claim is not None
@@ -323,31 +338,12 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
                 self.calls += 1
                 return {"content": "review complete"}
 
-        class Runs:
-            async def get(self, _run_id):
-                return type("Run", (), {"status": "completed"})()
-
-            async def acquire_execution_lease(
-                self, _run_id, *, owner, lease_seconds
-            ):
-                return 7
-
-            async def renew_execution_lease(
-                self, _run_id, *, owner, generation, lease_seconds
-            ):
-                return True
-
-            async def release_execution_lease(
-                self, _run_id, *, owner, generation
-            ):
-                return True
-
         execution = Execution()
         await RootResumeDispatcher(
             resume_jobs_repo,
             Graph(),
             execution,
-            Runs(),
+            run_repository,
             worker_id="root-app",
         )._resume(ready_claim)
         assert execution.calls == 1
@@ -358,12 +354,17 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
             id_factory=lambda: f"review-{next(review_ids)}",
             clock=lambda: now,
         )
+        review_lease = await run_repository.acquire_execution_lease(
+            run_id, owner="root-review", lease_seconds=60
+        )
+        assert review_lease is not None
         review_command = OrchestrationCommand(
             message_id=f"continue:{run_id}:round-1",
             command_type=OrchestrationCommandType.CONTINUE_PLAN,
             idempotency_key=f"continue:{run_id}:round-1",
             correlation_id=run_id,
             occurred_at=now,
+            lease=review_lease,
             plan_id=plan_id,
             scope_key=run_id,
             plan_version=1,
@@ -446,6 +447,8 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -505,12 +508,16 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
             Task(task_id=task_id, title=task_id, objective=f"Complete {task_id}")
             for task_id in plan.task_ids
         ]
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
         command = OrchestrationCommand(
             message_id=f"submit:{run_id}",
             command_type=OrchestrationCommandType.SUBMIT_PLAN,
             idempotency_key=f"submit-plan:{run_id}",
             correlation_id=run_id,
             occurred_at=now,
+            lease=root_lease,
             plan_id=plan_id,
             scope_key=run_id,
             plan_version=1,
@@ -585,6 +592,7 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
             idempotency_key=f"review:{plan_id}:round-1",
             correlation_id=run_id,
             occurred_at=now,
+            lease=root_lease,
             plan_id=plan_id,
             scope_key=run_id,
             plan_version=1,

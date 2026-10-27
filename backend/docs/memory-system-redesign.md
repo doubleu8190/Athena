@@ -203,7 +203,7 @@ Memory Provider 会从当前作用域下最多 80 条有效事实实时派生 L0
 | 现有 `memories` | 保留版本/有效性；增加 scope、subject、kind、topic_key、严格类型的 payload、source_refs 与验证信息。fact/decision/procedure 用判别联合表达，content 是展示/检索文本 |
 | 新增 `memory_episodes` | 冻结任务输入的回顾：scope、source set/fingerprint、revision、typed summary、coverage、source_refs；不复制完整工具日志 |
 | 新增 `memory_run_evidence_snapshots` | 每个 Run 首次领取记忆作业时冻结有限任务终态、最新执行代次、工具回执状态和 source_refs；重试复用相同 fingerprint |
-| 新增 `memory_job_scope_snapshots` | 每轮作业入队时冻结 `session_id` 对应的项目绑定；新绑定只影响后续作业 |
+| 复用 `sessions.project_id` | 会话创建后项目归属固定；记忆作业从所属会话读取项目范围，无需逐轮保存重复快照 |
 | 派生 L0/L1（首版不持久化） | 从当前有效、已过滤范围的事实实时生成概览/主题入口；模型调用前重建，以来源记录作为唯一事实源。若后续实测需要降低读取成本，再引入带 generation 和来源版本的 `memory_views` |
 | 新增 `memory_project_spaces` 与绑定表 | 为明确项目绑定提供稳定 ID 和名称；不自动识别或合并项目，也不是多用户权限表。global/session 继续由结构化事实 scope 表达 |
 | 复用草案的 `memory_write_operations` / `memory_relations` | 所有候选、决策、幂等回执、投影状态，以及替代/矛盾关系；不另建一套经验审计表 |

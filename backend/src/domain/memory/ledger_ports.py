@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from domain.leases import LeaseGrant
 from .contracts import (
     MemoryCandidateSnapshot,
     MemoryEpisode,
@@ -25,28 +26,32 @@ class MemoryOperationsPort(Protocol):
         ...
 
     async def save_extraction_snapshot(
-        self, snapshot: MemoryFactExtractionSnapshot
+        self, snapshot: MemoryFactExtractionSnapshot, *, lease: LeaseGrant
     ) -> MemoryFactExtractionSnapshot:
         """保存或返回并发处理时胜出的冻结结果。"""
         ...
 
     async def begin_operation(
-        self, operation_id: str, turn_id: str, candidate: MemoryCandidateSnapshot
+        self, operation_id: str, turn_id: str, candidate: MemoryCandidateSnapshot,
+        *, lease: LeaseGrant
     ) -> MemoryWriteOperation:
         """读取或创建单候选写入回执。"""
         ...
 
     async def record_decision(
-        self, operation_id: str, decision: MemoryResolutionProposal
+        self, operation_id: str, decision: MemoryResolutionProposal,
+        *, lease: LeaseGrant
     ) -> MemoryWriteOperation:
         """在写入记忆前持久化已校验的解析决定。"""
         ...
 
-    async def clear_pending_decision(self, operation_id: str) -> None:
+    async def clear_pending_decision(
+        self, operation_id: str, *, lease: LeaseGrant
+    ) -> None:
         """目标并发变化后清除仍未提交的失效决定。"""
         ...
 
-    async def skip_pending_turn(self, turn_id: str) -> int:
+    async def skip_pending_turn(self, turn_id: str, *, lease: LeaseGrant) -> int:
         """按当前设置关闭尚未提交的该轮候选操作。"""
         ...
 
@@ -58,6 +63,7 @@ class MemoryOperationsPort(Protocol):
         decision: MemoryResolutionProposal,
         result_memory_id: str | None,
         projection_status: str,
+        lease: LeaseGrant,
     ) -> MemoryWriteOperation:
         """完成操作回执并保存写入及向量投影状态。"""
         ...
@@ -70,7 +76,9 @@ class MemoryEpisodeRepositoryPort(Protocol):
         """按来源轮次读取已有回顾；不存在时返回 None。"""
         ...
 
-    async def create_if_absent(self, episode: MemoryEpisode) -> MemoryEpisode | None:
+    async def create_if_absent(
+        self, episode: MemoryEpisode, *, lease: LeaseGrant
+    ) -> MemoryEpisode | None:
         """首次写入同轮回顾并返回持久化版本。"""
         ...
 

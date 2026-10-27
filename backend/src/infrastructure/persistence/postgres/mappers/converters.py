@@ -178,6 +178,7 @@ def attachment_model_to_domain(row: AttachmentModel) -> Attachment:
         deleted_time=(
             datetime.fromisoformat(row.deleted_time) if row.deleted_time else None
         ),
+        active_index_revision_id=getattr(row, "active_index_revision_id", None),
     )
 
 
@@ -204,6 +205,7 @@ def attachment_domain_to_model(value: Attachment) -> AttachmentModel:
         created_at=value.created_at.isoformat(),
         updated_at=value.updated_at.isoformat(),
         deleted_time=value.deleted_time.isoformat() if value.deleted_time else None,
+        active_index_revision_id=value.active_index_revision_id,
     )
 
 
@@ -218,6 +220,7 @@ def file_chunk_model_to_domain(row: FileChunkModel) -> FileChunk:
         locator=FileLocator(_load_json_dict(row.locator_json)),
         metadata=FileMetadata(_load_json_dict(row.metadata_json)),
         native_score=row.native_score,
+        index_revision_id=getattr(row, "index_revision_id", None),
     )
 
 
@@ -232,6 +235,7 @@ def file_chunk_domain_to_model(value: FileChunk) -> FileChunkModel:
         locator_json=json.dumps(value.locator.values, ensure_ascii=False),
         metadata_json=json.dumps(value.metadata.values, ensure_ascii=False),
         native_score=value.native_score,
+        index_revision_id=value.index_revision_id,
     )
 
 

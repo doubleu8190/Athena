@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
+from domain.leases import LeaseGrant
 
 from domain.integrations import LLMPort
 from domain.memory import (
@@ -190,15 +191,15 @@ class LLMFactExtractor(MemoryFactExtractor):
         self._settings = settings
         self._prompt_root = prompt_root or _PROMPT_ROOT
 
-    async def extract(self, turn: CompletedTurn) -> list[MemoryCandidate]:
+    async def extract(self, turn: CompletedTurn, *, lease: LeaseGrant) -> list[MemoryCandidate]:
         """提取并返回轮次候选；已存在冻结清单时不重复调用模型。"""
         if self._operations is not None:
             saved = await self._operations.get_extraction_snapshot(turn.turn_id)
             if saved is not None:
                 return [candidate.to_candidate() for candidate in saved.candidates]
 
-        project_id = turn.project_id if turn.project_binding_frozen else None
-        if not turn.project_binding_frozen and self._settings is not None:
+        project_id = turn.project_id
+        if project_id is None and self._settings is not None:
             project_id = (await self._settings.get(turn.session_id)).project_id
         existing = await self._existing_text(turn.session_id, project_id=project_id)
         prompt = _fill(
@@ -235,7 +236,7 @@ class LLMFactExtractor(MemoryFactExtractor):
                     for candidate in candidates
                 ),
             )
-            saved = await self._operations.save_extraction_snapshot(snapshot)
+            saved = await self._operations.save_extraction_snapshot(snapshot, lease=lease)
             return [candidate.to_candidate() for candidate in saved.candidates]
         return candidates
 

@@ -12,6 +12,8 @@ from domain.tools import (
     ToolExecutionResult,
     ToolOperationClaimStatus,
 )
+from domain.leases import LeaseLostError
+from tests.fakes.leases import LeaseCenter, lease_grant
 from infrastructure.persistence.postgres.models import WorkerToolOperationModel
 from infrastructure.persistence.postgres.repositories.worker_tool_operation_repository import (
     PostgresWorkerToolOperationRepository,
@@ -71,12 +73,12 @@ def request() -> ToolExecutionRequest:
         operation_key="operation-1",
         logical_operation_key="athena:run-1:task-1:logical:0:0",
         execution_id="execution-1",
-        fencing_token=4,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=4),
         cancellation_epoch=2,
     )
 
 
-def active_chain(*, fencing_token=4, execution_id="execution-1"):
+def active_chain(*, execution_id="execution-1"):
     now = datetime(2026, 10, 22, tzinfo=timezone.utc)
     return [
         SimpleNamespace(
@@ -116,9 +118,7 @@ def active_chain(*, fencing_token=4, execution_id="execution-1"):
             task_id="task-1",
             round_id="round-1",
             status="running",
-            fencing_token=fencing_token,
             cancellation_epoch=2,
-            lease_until=now + timedelta(seconds=10),
         ),
     ]
 
@@ -128,7 +128,7 @@ async def test_operation_claim_persists_once_and_replays_its_result():
     fixed_now = datetime(2026, 10, 22, tzinfo=timezone.utc)
     first_session = Session([*active_chain(), None])
     repository = PostgresWorkerToolOperationRepository(
-        factory(first_session), clock=lambda: fixed_now
+        factory(first_session), clock=lambda: fixed_now, lease_center=LeaseCenter()
     )
 
     claim = await repository.claim(request(), args_hash="args-hash")
@@ -163,7 +163,7 @@ async def test_operation_claim_persists_once_and_replays_its_result():
     )
     replay_session = Session([*active_chain(), completed])
     replay_repository = PostgresWorkerToolOperationRepository(
-        factory(replay_session), clock=lambda: fixed_now
+        factory(replay_session), clock=lambda: fixed_now, lease_center=LeaseCenter()
     )
 
     replay = await replay_repository.claim(request(), args_hash="args-hash")
@@ -203,11 +203,12 @@ async def test_operation_claim_replays_completed_effect_across_execution_attempt
         operation_key="operation-2",
         tool_call_id="worker:task-1:2:0:0",
         execution_id="execution-2",
+        lease=lease_grant("worker_execution", "execution-2", fencing_token=5),
     )
     session = Session([*active_chain(execution_id="execution-2"), None])
     session.operation_rows = [first_attempt]
     repository = PostgresWorkerToolOperationRepository(
-        factory(session), clock=lambda: fixed_now
+        factory(session), clock=lambda: fixed_now, lease_center=LeaseCenter()
     )
 
     claim = await repository.claim(retry, args_hash="args-hash")
@@ -240,7 +241,7 @@ async def test_operation_claim_rejects_changed_arguments_for_a_logical_call():
     session = Session([*active_chain(), None])
     session.operation_rows = [previous]
     repository = PostgresWorkerToolOperationRepository(
-        factory(session), clock=lambda: now
+        factory(session), clock=lambda: now, lease_center=LeaseCenter()
     )
 
     claim = await repository.claim(request(), args_hash="new-args-hash")
@@ -275,9 +276,10 @@ async def test_operation_claim_fails_closed_when_prior_attempt_is_incomplete():
         operation_key="operation-2",
         tool_call_id="worker:task-1:2:0:0",
         execution_id="execution-2",
+        lease=lease_grant("worker_execution", "execution-2", fencing_token=5),
     )
     repository = PostgresWorkerToolOperationRepository(
-        factory(session), clock=lambda: now
+        factory(session), clock=lambda: now, lease_center=LeaseCenter()
     )
 
     claim = await repository.claim(retry, args_hash="args-hash")
@@ -290,9 +292,14 @@ async def test_operation_claim_fails_closed_when_prior_attempt_is_incomplete():
 @pytest.mark.asyncio
 async def test_operation_claim_rejects_a_stale_fencing_token():
     fixed_now = datetime(2026, 10, 22, tzinfo=timezone.utc)
-    session = Session([*active_chain(fencing_token=5)])
+
+    class StaleLeaseCenter(LeaseCenter):
+        async def assert_current_in_transaction(self, _session, grant):
+            raise LeaseLostError(grant.key)
+
+    session = Session([*active_chain()])
     repository = PostgresWorkerToolOperationRepository(
-        factory(session), clock=lambda: fixed_now
+        factory(session), clock=lambda: fixed_now, lease_center=StaleLeaseCenter()
     )
 
     claim = await repository.claim(request(), args_hash="args-hash")
@@ -322,7 +329,7 @@ async def test_operation_completion_persists_the_tool_outcome():
     )
     session = Session([operation])
     repository = PostgresWorkerToolOperationRepository(
-        factory(session), clock=lambda: now
+        factory(session), clock=lambda: now, lease_center=LeaseCenter()
     )
 
     saved = await repository.complete(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Protocol
+from domain.leases import LeaseGrant
 
 from domain.memory import (
     CompletedTurn,
@@ -17,7 +18,7 @@ class MemoryWriteTrigger(Protocol):
 
 
 class MemoryFactExtractor(Protocol):
-    async def extract(self, turn: CompletedTurn) -> list[MemoryCandidate]: ...
+    async def extract(self, turn: CompletedTurn, *, lease: LeaseGrant) -> list[MemoryCandidate]: ...
 
 
 class MemoryEpisodeSummarizer(Protocol):

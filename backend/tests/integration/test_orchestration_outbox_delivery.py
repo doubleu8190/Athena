@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -19,6 +19,7 @@ from infrastructure.persistence.postgres.models import (
     AgentEventModel,
     AgentRunModel,
     Base,
+    ExecutionLeaseModel,
     OrchestrationOutboxModel,
 )
 from infrastructure.persistence.postgres.repositories import (
@@ -183,6 +184,8 @@ async def test_outbox_replay_after_publish_before_ack_persists_one_event() -> No
             schema_created = True
 
         required_tables = [
+
+            ExecutionLeaseModel.__table__,
             AgentRunModel.__table__,
             AgentEventModel.__table__,
             OrchestrationOutboxModel.__table__,
@@ -237,12 +240,10 @@ async def test_outbox_replay_after_publish_before_ack_persists_one_event() -> No
             PostgresEventRepository(session_factory),
             worker_id="dispatcher-before-crash",
             lease_seconds=5,
+            lease_center=outbox_repository._leases,
         )
 
-        with pytest.raises(
-            RuntimeError, match="simulated crash before outbox acknowledgement"
-        ):
-            await dispatcher_before_crash.dispatch_once()
+        assert await dispatcher_before_crash.dispatch_once() is True
 
         async with session_factory() as session:
             persisted_events = (
@@ -257,10 +258,19 @@ async def test_outbox_replay_after_publish_before_ack_persists_one_event() -> No
             "orchestration-outbox:run-cancelled-message-1"
         )
         assert outbox_row is not None
-        assert outbox_row.status == "processing"
+        assert outbox_row.status == "pending"
 
         # 让旧租约自然过期，模拟重启后的新 Dispatcher 重新领取。
         current_time[0] = now + timedelta(seconds=6)
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                update(ExecutionLeaseModel)
+                .where(
+                    ExecutionLeaseModel.resource_type == "orchestration_outbox",
+                    ExecutionLeaseModel.resource_id == "run-cancelled-message-1",
+                )
+                .values(lease_until=func.clock_timestamp() - text("INTERVAL '1 second'"))
+            )
         dispatcher_after_restart = OrchestrationOutboxDispatcher(
             outbox_repository,
             PostgresEventRepository(session_factory),

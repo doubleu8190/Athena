@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from domain.orchestration import TaskStatus, WorkerTaskTerminalEvent
+from tests.fakes.leases import LeaseCenter, lease_grant
 from infrastructure.persistence.postgres.models import OrchestrationOutboxModel
 from infrastructure.persistence.postgres.repositories.orchestration_event_repository import (
     PostgresOrchestrationEventRepository,
@@ -82,7 +83,7 @@ async def test_worker_terminal_transaction_persists_task_event_before_round_barr
         round_id="round-1",
         task_id="task-1",
         execution_id="execution-1",
-        fencing_token=3,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=3),
         cancellation_epoch=0,
         status=status,
         result=result,
@@ -146,9 +147,6 @@ async def test_worker_terminal_transaction_persists_task_event_before_round_barr
         round_id="round-1",
         status="running",
         cancellation_epoch=0,
-        fencing_token=3,
-        lease_owner="worker-1",
-        lease_until=NOW + timedelta(seconds=30),
         attempt=1,
         result_ref=None,
         result_json=None,
@@ -157,13 +155,11 @@ async def test_worker_terminal_transaction_persists_task_event_before_round_barr
     )
     job = SimpleNamespace(
         status="running",
-        lease_owner="worker-1",
-        lease_until=NOW + timedelta(seconds=30),
         updated_at=None,
     )
     session = Session([None, inbox, run, plan, round_row, task, round_task, execution, job])
     repository = PostgresOrchestrationEventRepository(
-        factory(session), clock=lambda: NOW
+        factory(session), clock=lambda: NOW, lease_center=LeaseCenter()
     )
 
     receipt = await repository.apply_worker_terminal_event(event)

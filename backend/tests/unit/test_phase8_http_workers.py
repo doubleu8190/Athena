@@ -26,6 +26,7 @@ from domain.files import Attachment, AttachmentStatus, FileChunk, FileLocator, F
 from domain.memory import ClaimedMemoryJob, CompletedTurn, MemoryCandidate, MemoryResolution, ResolutionAction
 from domain.sessions import Session
 from domain.approval import ApprovalDecision, ApprovalRequest
+from tests.fakes.leases import LeaseCenter, lease_grant
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -72,34 +73,41 @@ def test_file_and_knowledge_controller_error_mappings() -> None:
 async def test_document_worker_and_memory_worker_success_failure_paths() -> None:
     class Queue:
         def __init__(self, job): self.job = job; self.calls = []
-        async def claim_next(self, **kwargs): job, self.job = self.job, None; return job
-        async def mark_succeeded(self, *args): self.calls.append(("ok", args))
+        async def claim_next(self, **kwargs):
+            job, self.job = self.job, None
+            if job is not None:
+                job["lease"] = lease_grant("document_ingestion", str(job["attachment_id"]))
+            return job
+        async def mark_succeeded(self, *args, **kwargs): self.calls.append(("ok", args, kwargs))
         async def mark_failed(self, *args, **kwargs): self.calls.append(("fail", args, kwargs))
     class Ingest:
-        async def process_attachment(self, key): return {"attachment_id": key}
+        _leases = LeaseCenter()
+        async def process_attachment(self, key, *, lease): return {"attachment_id": key}
     queue = Queue({"job_id": "j", "attachment_id": "a", "attempt": 1})
-    worker = KnowledgeDocumentWorker(queue, Ingest(), max_attempts=2)
+    worker = KnowledgeDocumentWorker(queue, Ingest(), max_attempts=2, lease_center=LeaseCenter())
     assert await worker.process_one() is True and queue.calls[0][0] == "ok"
     assert await worker.process_one() is False
     class Bad:
-        async def process_attachment(self, key): raise RuntimeError("bad")
+        _leases = LeaseCenter()
+        async def process_attachment(self, key, *, lease): raise RuntimeError("bad")
     queue = Queue({"job_id": "j", "attachment_id": "a", "attempt": 2})
     assert await KnowledgeDocumentWorker(queue, Bad(), max_attempts=2).process_one()
     assert queue.calls[0][0] == "fail" and queue.calls[0][2]["retry"] is False
 
     class Jobs:
-        def __init__(self): self.items = [ClaimedMemoryJob(CompletedTurn("t", "s", "", ""), 1)]; self.calls=[]
-        async def recover(self): self.calls.append("recover")
-        async def claim_next_job(self):
+        def __init__(self):
+            self._leases = LeaseCenter()
+            self.items = [ClaimedMemoryJob(CompletedTurn("t", "s", "", ""), 1, lease_grant("memory_processing", "t"))]; self.calls=[]
+        async def claim_next_job(self, *, lease_seconds):
             if self.items: return self.items.pop(0)
             return None
-        async def mark_succeeded(self, key): self.calls.append(("ok", key))
+        async def mark_succeeded(self, key, *, lease): self.calls.append(("ok", key))
         async def mark_failed(self, *args, **kwargs): self.calls.append(("fail", args))
     class Workflow:
-        async def process_completed_turn(self, turn): return 1
-    jobs = Jobs(); memory_worker = MemoryWorker(jobs, Workflow(), poll_interval=0.001)
+        async def process_completed_turn(self, turn, *, lease): return 1
+    jobs = Jobs(); memory_worker = MemoryWorker(jobs, Workflow(), poll_interval=0.001, lease_center=jobs._leases)
     task = asyncio.create_task(memory_worker.run()); await asyncio.sleep(0.01); memory_worker.stop(); await task
-    assert jobs.calls[0] == "recover" and ("ok", "t") in jobs.calls
+    assert ("ok", "t") in jobs.calls
 
 
 @pytest.mark.asyncio
@@ -109,20 +117,21 @@ async def test_memory_workflow_create_update_and_skip_paths() -> None:
         def __init__(self, value): self.value=value
         def should_process(self, turn): return self.value
     class Extractor:
-        async def extract(self, turn): return [candidate]
+        async def extract(self, turn, *, lease): return [candidate]
     class Resolver:
         def __init__(self, action): self.action=action
         async def resolve(self, values): return [MemoryResolution(self.action, candidate, "m-1", "updated")]
     class Memory:
         def __init__(self): self.calls=[]
-        async def create_memory(self, command): self.calls.append(("add", command)); return "m"
-        async def revise(self, *args, **kwargs): self.calls.append(("revise", args)); return "m2"
+        async def create_memory_from_worker(self, command, *, lease): self.calls.append(("add", command)); return "m"
+        async def revise_from_worker(self, *args, **kwargs): self.calls.append(("revise", args)); return "m2"
     turn = CompletedTurn("t", "s", "u", "a")
     memory = Memory()
-    assert await MemoryWriteWorkflow(memory, Trigger(False), Extractor(), Resolver(ResolutionAction.CREATE)).process_completed_turn(turn) == 0
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.CREATE)).process_completed_turn(turn) == 1
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.UPDATE)).process_completed_turn(turn) == 1
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.IGNORE)).process_completed_turn(turn) == 0
+    grant = lease_grant("memory_processing", "t")
+    assert await MemoryWriteWorkflow(memory, Trigger(False), Extractor(), Resolver(ResolutionAction.CREATE)).process_completed_turn(turn, lease=grant) == 0
+    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.CREATE)).process_completed_turn(turn, lease=grant) == 1
+    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.UPDATE)).process_completed_turn(turn, lease=grant) == 1
+    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.IGNORE)).process_completed_turn(turn, lease=grant) == 0
     assert [item[0] for item in memory.calls] == ["add", "revise"]
 
 

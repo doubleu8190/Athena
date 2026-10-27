@@ -7,6 +7,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from domain.leases import LeaseGrant
+
 
 class RiskLevel(StrEnum):
     """工具风险等级。"""
@@ -85,7 +87,7 @@ class ToolExecutionRequest:
     operation_key: str | None = None
     logical_operation_key: str | None = None
     execution_id: str | None = None
-    fencing_token: int | None = None
+    lease: LeaseGrant | None = None
     cancellation_epoch: int | None = None
 
 

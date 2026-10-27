@@ -10,10 +10,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import DateTime, cast, func, select, update
+from sqlalchemy import DateTime, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from domain.leases import LeaseGrant, LeaseKey, LeaseLostError
 from domain.runs import (
     CommandType,
     RunCommand,
@@ -38,10 +39,12 @@ from ..models import (
     MemoryProcessingJobModel,
     MessageModel,
     OrchestrationOutboxModel,
+    PlanRoundModel,
     RoundTaskModel,
     RootResumeJobModel,
     SessionMemorySettingsModel,
     SessionModel,
+    ExecutionLeaseModel,
     TaskExecutionModel,
     WorkerJobModel,
 )
@@ -49,6 +52,7 @@ from .memory_suppression import (
     ensure_writable_run_scope,
     project_scope_is_writable,
 )
+from .lease_center import PostgresLeaseCenter
 from ..mappers.converters import session_domain_to_model
 from ..idempotency import execute_idempotent
 
@@ -163,9 +167,13 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
     writes_terminal_artifacts_to_outbox = True
 
     def __init__(
-        self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
+        self,
+        session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+        *,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
         self._session_factory = session_factory
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
     async def enqueue_run(
         self,
@@ -214,7 +222,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         raise ValueError("session_not_found")
                     if project_id is not None and session_row.project_id != project_id:
                         raise ValueError("session_project_mismatch")
-                    writable, _ = await ensure_writable_run_scope(
+                    writable = await ensure_writable_run_scope(
                         db, session_id=session_id, turn_id=run_id, now=now_iso
                     )
                     if not writable:
@@ -368,8 +376,12 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 )
             )
 
-    async def claim_next_run(self) -> RunCommand | None:
+    async def claim_next_run(
+        self, *, lease_seconds: float = 60.0
+    ) -> RunCommand | None:
         """Claim the oldest queued Run for one locked, idle Session."""
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
         async with self._session_factory() as db:
@@ -425,21 +437,25 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     return None
                 run.status = RunStatus.RUNNING.value
                 run.updated_at = now_iso
-                run.execution_generation = int(run.execution_generation or 0) + 1
-                lease_owner = f"run-consumer:{uuid4().hex}"
-                run.execution_lease_owner = lease_owner
-                run.execution_lease_until = (now + timedelta(seconds=60)).isoformat()
+                lease = await self._leases.acquire_in_transaction(
+                    db,
+                    LeaseKey("root_execution", run.run_id),
+                    owner_id=uuid4().hex,
+                    lease_seconds=lease_seconds,
+                )
+                if lease is None:
+                    run.status = RunStatus.QUEUED.value
+                    return None
                 candidate_session.active_run_id = run.run_id
                 return RunCommand(
-                    command_id=f"run:{run.run_id}:generation:{run.execution_generation}",
+                    command_id=f"run:{run.run_id}:token:{lease.fencing_token}",
                     command_type=CommandType.RUN_START,
                     session_id=run.session_id,
                     run_id=run.run_id,
                     payload=payload,
                     issued_at=datetime.fromisoformat(run.created_at),
                     schema_version=1,
-                    execution_generation=run.execution_generation,
-                    lease_owner=lease_owner,
+                    lease=lease,
                 )
 
     async def list_for_session(self, session_id: str) -> list[RunSummary]:
@@ -570,46 +586,45 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             ).scalar_one_or_none()
         return None if row is None else self._run(row)
 
-    async def update_status(self, run_id: str, status: RunStatus | str) -> bool:
+    async def update_status(
+        self, run_id: str, status: RunStatus | str, *, lease: LeaseGrant
+    ) -> bool:
         """仅从可运行状态推进 Run，禁止迟到的启动覆盖取消。"""
+        if lease.key != LeaseKey("root_execution", run_id):
+            return False
         if str(status) == RunStatus.RUNNING.value:
             async with self._session_factory() as session:
-                return await session.scalar(
-                    select(AgentRunModel.run_id)
-                    .join(SessionModel, SessionModel.id == AgentRunModel.session_id)
-                    .where(
-                        AgentRunModel.run_id == run_id,
-                        AgentRunModel.status == RunStatus.RUNNING.value,
-                        SessionModel.active_run_id == run_id,
+                async with session.begin():
+                    session_id = await session.scalar(
+                        select(AgentRunModel.session_id).where(
+                            AgentRunModel.run_id == run_id
+                        )
                     )
-                ) is not None
-        if str(status) not in {RunStatus.COMPLETED.value, RunStatus.FAILED.value}:
-            return False
-        async with self._session_factory() as session:
-            async with session.begin():
-                session_id = await session.scalar(
-                    select(AgentRunModel.session_id).where(
-                        AgentRunModel.run_id == run_id
+                    if session_id is None:
+                        return False
+                    session_row = await session.scalar(
+                        select(SessionModel)
+                        .where(SessionModel.id == session_id)
+                        .with_for_update()
                     )
-                )
-                if session_id is None:
-                    return False
-                session_row = await session.scalar(
-                    select(SessionModel)
-                    .where(SessionModel.id == session_id)
-                    .with_for_update()
-                )
-                run = await session.get(AgentRunModel, run_id, with_for_update=True)
-                if (
-                    session_row is None
-                    or session_row.active_run_id != run_id
-                    or run.status != RunStatus.RUNNING.value
-                ):
-                    return False
-                run.status = str(status)
-                run.updated_at = _now()
-                session_row.active_run_id = None
-                return True
+                    run = await session.get(
+                        AgentRunModel, run_id, with_for_update=True
+                    )
+                    if (
+                        session_row is None
+                        or session_row.active_run_id != run_id
+                        or run is None
+                        or run.status != RunStatus.RUNNING.value
+                    ):
+                        return False
+                    try:
+                        await self._leases.assert_current_in_transaction(
+                            session, lease
+                        )
+                    except LeaseLostError:
+                        return False
+                    return True
+        return False
 
     async def arm_root_wait(
         self,
@@ -620,8 +635,11 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         plan_version: int,
         interrupt_id: str,
         checkpoint_id: str,
+        lease: LeaseGrant,
     ) -> bool:
-        """Record a checkpointed Root wait only for its current Round generation."""
+        """原子记录 Root 检查点并释放当前执行权。"""
+        if lease.key != LeaseKey("root_execution", run_id):
+            return False
         async with self._session_factory() as session:
             async with session.begin():
                 session_id = await session.scalar(
@@ -651,6 +669,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     or not checkpoint_id
                 ):
                     return False
+                try:
+                    await self._leases.assert_current_in_transaction(session, lease)
+                except LeaseLostError:
+                    return False
 
                 if (
                     row.root_wait_round_id != round_id
@@ -664,22 +686,24 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 row.root_wait_interrupt_id = interrupt_id
                 row.root_wait_checkpoint_id = checkpoint_id
                 row.updated_at = _now()
+                if not await self._leases.finish_in_transaction(session, lease):
+                    raise LeaseLostError(lease.key)
                 return True
 
     async def complete(
-        self, run_id: str, result: dict[str, object], *,
-        owner: str | None = None, generation: int | None = None,
+        self, run_id: str, result: dict[str, object], *, lease: LeaseGrant,
     ) -> bool:
         return await self._finish(
             run_id, RunStatus.COMPLETED, response=result,
-            owner=owner, generation=generation,
+            lease=lease,
         )
 
     async def fail(
-        self, run_id: str, error: dict[str, object], *,
-        owner: str | None = None, generation: int | None = None,
+        self, run_id: str, error: dict[str, object], *, lease: LeaseGrant,
     ) -> bool:
         """记录失败并撤销工作，保留会话执行权直到所有调用停止。"""
+        if lease.key != LeaseKey("root_execution", run_id):
+            return False
         now = datetime.now(timezone.utc)
         async with self._session_factory() as db:
             async with db.begin():
@@ -696,10 +720,22 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     session_row is None or run is None
                     or session_row.active_run_id != run_id
                     or run.status != RunStatus.RUNNING.value
-                    or not self._owns_execution_lease(run, owner, generation, datetime.now(timezone.utc))
                 ):
                     return False
-                await self._begin_failure_locked(db, run, error, now)
+                plan = await db.scalar(
+                    select(AgentPlanModel)
+                    .where(AgentPlanModel.run_id == run_id)
+                    .with_for_update()
+                )
+                try:
+                    await self._leases.assert_current_in_transaction(db, lease)
+                except LeaseLostError:
+                    return False
+                await self._begin_failure_locked(
+                    db, run, error, now, root_execution_lease=lease
+                )
+                if not await self._leases.finish_in_transaction(db, lease):
+                    raise LeaseLostError(lease.key)
         # 无执行中的调用或 Worker 时可立即完成；否则由调用端或 Worker 收尾。
         await self.finalize_stop(run_id)
         return True
@@ -710,14 +746,22 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         recovered: list[str] = []
         async with self._session_factory() as db:
             async with db.begin():
+                db_now = await db.scalar(select(func.clock_timestamp()))
+                if db_now is None:
+                    raise RuntimeError("database_clock_unavailable")
+                now = db_now.astimezone(timezone.utc)
                 sessions = (await db.scalars(
                     select(SessionModel)
                     .join(AgentRunModel, AgentRunModel.run_id == SessionModel.active_run_id)
+                    .join(
+                        ExecutionLeaseModel,
+                        (ExecutionLeaseModel.resource_type == "root_execution")
+                        & (ExecutionLeaseModel.resource_id == AgentRunModel.run_id),
+                    )
                     .where(
                         AgentRunModel.status == RunStatus.RUNNING.value,
-                        AgentRunModel.execution_lease_owner.is_not(None),
-                        AgentRunModel.execution_lease_until.is_not(None),
-                        AgentRunModel.execution_lease_until <= now.isoformat(),
+                        ExecutionLeaseModel.state.in_(("active", "revoked")),
+                        ExecutionLeaseModel.lease_until <= now,
                     )
                     .order_by(SessionModel.id)
                     .with_for_update(of=SessionModel, skip_locked=True)
@@ -725,15 +769,36 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 )).all()
                 for session_row in sessions:
                     run = await db.get(AgentRunModel, session_row.active_run_id, with_for_update=True)
+                    if run is None or run.status != RunStatus.RUNNING.value:
+                        continue
+                    plan = await db.scalar(
+                        select(AgentPlanModel)
+                        .where(AgentPlanModel.run_id == run.run_id)
+                        .with_for_update()
+                    )
+                    lease_row = await db.get(
+                        ExecutionLeaseModel,
+                        ("root_execution", run.run_id),
+                        with_for_update=True,
+                    )
                     if (
-                        run is None or run.status != RunStatus.RUNNING.value
-                        or run.execution_lease_owner is None
-                        or run.execution_lease_until is None
-                        or datetime.fromisoformat(run.execution_lease_until) > now
+                        lease_row is None
+                        or lease_row.state not in {"active", "revoked"}
+                        or lease_row.lease_until is None
+                        or lease_row.lease_until > now
                     ):
                         continue
                     await self._begin_failure_locked(
                         db, run, {"code": "root_execution_lease_expired"}, now
+                    )
+                    await self._leases.acknowledge_stopped_in_transaction(
+                        db,
+                        LeaseGrant(
+                            LeaseKey("root_execution", run.run_id),
+                            lease_row.owner_id or "expired",
+                            lease_row.fencing_token,
+                            lease_row.lease_until,
+                        ),
                     )
                     recovered.append(run.run_id)
         for run_id in recovered:
@@ -743,6 +808,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
     async def _begin_failure_locked(
         self, db: AsyncSession, run: AgentRunModel,
         error: dict[str, object], now: datetime,
+        *, root_execution_lease: LeaseGrant | None = None,
     ) -> None:
         """在 Session、Run 锁内保存失败原因并启动同一套取消栅栏。"""
         run.error_json = json.dumps(error, ensure_ascii=False)
@@ -750,31 +816,24 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             select(AgentPlanModel).where(AgentPlanModel.run_id == run.run_id).with_for_update()
         )
         if plan is None or plan.status in {"completed", "failed", "cancelled"}:
-            await self._begin_stop_without_active_plan(db, run.run_id, run, plan, now)
+            await self._begin_stop_without_active_plan(
+                db,
+                run.run_id,
+                run,
+                plan,
+                now,
+                root_execution_lease=root_execution_lease,
+            )
         else:
             await self._begin_plan_cancellation(
                 db, run.run_id, run, plan, reason="ROOT_EXECUTION_FAILED",
                 now=now, active_execution_count=0,
+                root_execution_lease=root_execution_lease,
             )
-
-    @staticmethod
-    def _owns_execution_lease(
-        run: AgentRunModel, owner: str | None, generation: int | None, now: datetime,
-    ) -> bool:
-        """校验调用端的租约和代次，拒绝失去执行权的迟到结果。"""
-        if owner is None and generation is None:
-            return True
-        return (
-            owner is not None and generation is not None
-            and run.execution_lease_owner == owner
-            and run.execution_generation == generation
-            and run.execution_lease_until is not None
-            and datetime.fromisoformat(run.execution_lease_until) > now
-        )
 
     async def acquire_execution_lease(
         self, run_id: str, *, owner: str, lease_seconds: float
-    ) -> int | None:
+    ) -> LeaseGrant | None:
         if not owner.strip() or lease_seconds <= 0:
             raise ValueError("execution_lease_owner_and_duration_required")
         now = datetime.now(timezone.utc)
@@ -796,96 +855,62 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     or run.status != RunStatus.RUNNING.value
                 ):
                     return None
-                # 过期租约代表调用异常退出，必须先失败收尾，不能自动重放。
-                if run.execution_lease_owner is not None or run.execution_lease_until is not None:
+                plan = await db.scalar(
+                    select(AgentPlanModel)
+                    .where(AgentPlanModel.run_id == run_id)
+                    .with_for_update()
+                )
+                if (
+                    plan is None
+                    or plan.status != "waiting_review"
+                    or plan.active_round_id is None
+                ):
                     return None
-                run.execution_generation = int(run.execution_generation or 0) + 1
-                run.execution_lease_owner = owner
-                run.execution_lease_until = (
-                    now + timedelta(seconds=lease_seconds)
-                ).isoformat()
+                completed_round = await db.scalar(
+                    select(PlanRoundModel)
+                    .where(PlanRoundModel.round_id == plan.active_round_id)
+                    .with_for_update()
+                )
+                if (
+                    completed_round is None
+                    or completed_round.plan_id != plan.plan_id
+                    or completed_round.status != "completed"
+                    or completed_round.plan_version != plan.current_version
+                ):
+                    return None
+                grant = await self._leases.acquire_in_transaction(
+                    db,
+                    LeaseKey("root_execution", run_id),
+                    owner_id=owner,
+                    lease_seconds=lease_seconds,
+                )
+                if grant is None:
+                    return None
                 run.updated_at = now.isoformat()
-                return run.execution_generation
+                return grant
 
     async def renew_execution_lease(
         self,
-        run_id: str,
+        lease: LeaseGrant,
         *,
-        owner: str,
-        generation: int,
         lease_seconds: float,
     ) -> bool:
-        now = datetime.now(timezone.utc)
-        async with self._session_factory() as db:
-            async with db.begin():
-                session_id = await db.scalar(
-                    select(AgentRunModel.session_id).where(
-                        AgentRunModel.run_id == run_id
-                    )
-                )
-                if session_id is None:
-                    return False
-                session_row = await db.scalar(
-                    select(SessionModel)
-                    .where(SessionModel.id == session_id)
-                    .with_for_update()
-                )
-                run = await db.get(AgentRunModel, run_id, with_for_update=True)
-                if (
-                    session_row is None
-                    or session_row.active_run_id != run_id
-                    or run is None
-                    or run.status != RunStatus.RUNNING.value
-                    or run.execution_lease_owner != owner
-                    or run.execution_generation != generation
-                    or not run.execution_lease_until
-                    or datetime.fromisoformat(run.execution_lease_until) <= now
-                ):
-                    return False
-                run.execution_lease_until = (
-                    now + timedelta(seconds=lease_seconds)
-                ).isoformat()
-                run.updated_at = now.isoformat()
-                return True
+        return await self._leases.renew(lease, lease_seconds=lease_seconds) is not None
 
     async def release_execution_lease(
-        self, run_id: str, *, owner: str, generation: int
+        self, lease: LeaseGrant
     ) -> bool:
-        async with self._session_factory() as db:
-            async with db.begin():
-                session_id = await db.scalar(
-                    select(AgentRunModel.session_id).where(
-                        AgentRunModel.run_id == run_id
-                    )
-                )
-                if session_id is None:
-                    return False
-                session_row = await db.scalar(
-                    select(SessionModel)
-                    .where(SessionModel.id == session_id)
-                    .with_for_update()
-                )
-                run = await db.get(AgentRunModel, run_id, with_for_update=True)
-                if (
-                    session_row is None
-                    or session_row.active_run_id != run_id
-                    or run is None
-                    or run.execution_lease_owner != owner
-                    or run.execution_generation != generation
-                    or not run.execution_lease_until
-                    or datetime.fromisoformat(run.execution_lease_until) <= datetime.now(timezone.utc)
-                ):
-                    return False
-                run.execution_lease_owner = None
-                run.execution_lease_until = None
-                return True
+        return await self._leases.finish(lease)
 
     async def finalize_stop(self, run_id: str, *, failed: bool = False) -> bool:
         """Finalize a stopped Root after its caller confirms the invocation ended."""
-        now = datetime.now(timezone.utc)
-        now_iso = now.isoformat()
         async with self._session_factory() as db:
             async with db.begin():
+                now = await db.scalar(select(func.clock_timestamp()))
+                if now is None:
+                    raise RuntimeError("database_clock_unavailable")
+                now = now.astimezone(timezone.utc)
+                now_iso = now.isoformat()
                 session_id = await db.scalar(
                     select(AgentRunModel.session_id).where(AgentRunModel.run_id == run_id)
                 )
@@ -905,15 +930,32 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 ):
                     return False
                 plan = await db.scalar(
-                    select(AgentPlanModel).where(AgentPlanModel.run_id == run_id)
+                    select(AgentPlanModel)
+                    .where(AgentPlanModel.run_id == run_id)
+                    .with_for_update()
                 )
-                lease_until = (
-                    datetime.fromisoformat(run.execution_lease_until)
-                    if run.execution_lease_until
-                    else None
+                lease_row = await db.get(
+                    ExecutionLeaseModel,
+                    ("root_execution", run_id),
+                    with_for_update=True,
                 )
-                if lease_until is not None and lease_until > now:
+                if (
+                    lease_row is not None
+                    and lease_row.state in {"active", "revoked"}
+                    and lease_row.lease_until is not None
+                    and lease_row.lease_until > now
+                ):
                     return False
+                if lease_row is not None and lease_row.owner_id is not None:
+                    await self._leases.acknowledge_stopped_in_transaction(
+                        db,
+                        LeaseGrant(
+                            LeaseKey("root_execution", run_id),
+                            lease_row.owner_id,
+                            lease_row.fencing_token,
+                            lease_row.lease_until,
+                        ),
+                    )
                 if plan is not None and plan.status not in {"completed", "failed", "cancelled"}:
                     # Worker reconciliation owns the terminal transition while workers
                     # still hold leases; it clears active_run_id with the plan result.
@@ -922,8 +964,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 terminal = RunStatus.FAILED if failed else RunStatus.CANCELLED
                 run.status = terminal.value
                 run.updated_at = now_iso
-                run.execution_lease_owner = None
-                run.execution_lease_until = None
                 session_row.active_run_id = None
                 await self._enqueue_memory_job(db, run, assistant_text="", now_iso=now_iso)
                 self._add_completion_outbox(
@@ -1059,6 +1099,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         run: AgentRunModel,
         plan: AgentPlanModel | None,
         now: datetime,
+        *, root_execution_lease: LeaseGrant | None = None,
     ) -> RunCancellationResult:
         """Set the stop fence and revoke pending work while retaining the pointer."""
         now_iso = now.isoformat()
@@ -1071,6 +1112,9 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         run.updated_at = now_iso
         await self._cancel_root_resume_jobs(session, run_id, now)
         await self._cancel_pending_approvals(session, run_id=run_id, plan=None, now=now)
+        await self._revoke_run_leases(
+            session, run_id, root_execution_lease=root_execution_lease
+        )
         session.add(
             OrchestrationOutboxModel(
                 message_id=uuid4().hex,
@@ -1108,6 +1152,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         reason: str,
         now: datetime,
         active_execution_count: int,
+        root_execution_lease: LeaseGrant | None = None,
     ) -> RunCancellationResult:
         """在 Run 锁内推进 Plan 取消并撤销尚未开始的工作。"""
         now_iso = now.isoformat()
@@ -1143,6 +1188,9 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         )
         await self._cancel_pending_approvals(session, run_id=run_id, plan=plan, now=now)
         await self._cancel_root_resume_jobs(session, run_id, now)
+        await self._revoke_run_leases(
+            session, run_id, root_execution_lease=root_execution_lease
+        )
         for event_type, scope in (
             ("PlanCancelling", f"plan:{plan.plan_id}"),
             ("RunStopping", f"run:{run_id}"),
@@ -1300,8 +1348,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             .values(
                 status="cancelled",
                 cancellation_epoch=cancellation_epoch,
-                lease_owner=None,
-                lease_until=None,
                 updated_at=now,
             )
         )
@@ -1325,8 +1371,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             )
             .values(
                 status="cancelled",
-                lease_owner=None,
-                lease_until=None,
                 updated_at=now,
             )
         )
@@ -1407,11 +1451,60 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             )
             .values(
                 status="cancelled",
-                lease_owner=None,
-                lease_until=None,
                 updated_at=now,
             )
         )
+
+    async def _revoke_run_leases(
+        self,
+        session: AsyncSession,
+        run_id: str,
+        *,
+        root_execution_lease: LeaseGrant | None = None,
+    ) -> None:
+        """按资源 key 顺序撤销取消范围内仍活跃的执行授权。"""
+        worker_execution_ids = select(TaskExecutionModel.execution_id).join(
+            AgentTaskModel, AgentTaskModel.task_id == TaskExecutionModel.task_id
+        ).where(AgentTaskModel.run_id == run_id)
+        resume_job_ids = select(RootResumeJobModel.job_id).where(
+            RootResumeJobModel.run_id == run_id
+        )
+        keys = [
+            ("root_execution", run_id),
+            ("root_resume", resume_job_ids),
+            ("worker_execution", worker_execution_ids),
+        ]
+        predicates = [
+            (ExecutionLeaseModel.resource_type == resource_type)
+            & (ExecutionLeaseModel.resource_id.in_(resource_ids)
+               if not isinstance(resource_ids, str)
+               else ExecutionLeaseModel.resource_id == resource_ids)
+            for resource_type, resource_ids in keys
+        ]
+        rows = (
+            await session.scalars(
+                select(ExecutionLeaseModel)
+                .where(or_(*predicates))
+                .order_by(
+                    ExecutionLeaseModel.resource_type,
+                    ExecutionLeaseModel.resource_id,
+                )
+                .with_for_update()
+            )
+        ).all()
+        for row in rows:
+            if (
+                root_execution_lease is not None
+                and row.resource_type == root_execution_lease.key.resource_type
+                and row.resource_id == root_execution_lease.key.resource_id
+                and row.fencing_token == root_execution_lease.fencing_token
+            ):
+                continue
+            await self._leases.revoke_in_transaction(
+                session,
+                LeaseKey(row.resource_type, row.resource_id),
+                expected_token=row.fencing_token,
+            )
 
     async def _enqueue_memory_job(
         self,
@@ -1421,7 +1514,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         assistant_text: str,
         now_iso: str,
     ) -> None:
-        """在 Run 终态事务内排队记忆作业并冻结当时的项目绑定。"""
+        """在 Run 终态事务内排队记忆作业。"""
         request = _run_start_payload_or_none(getattr(run, "request_json", "{}"))
         user_text = request.message.strip() if request is not None else ""
         if not user_text:
@@ -1429,7 +1522,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         memory_settings = await session.get(SessionMemorySettingsModel, run.session_id)
         if memory_settings is not None and not memory_settings.generate_memories:
             return
-        writable, project_id = await ensure_writable_run_scope(
+        writable = await ensure_writable_run_scope(
             session,
             session_id=run.session_id,
             turn_id=run.run_id,
@@ -1461,9 +1554,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         *,
         response: dict[str, object] | None = None,
         error: dict[str, object] | None = None,
-        owner: str | None = None,
-        generation: int | None = None,
+        lease: LeaseGrant,
     ) -> bool:
+        if lease.key != LeaseKey("root_execution", run_id):
+            return False
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
         async with self._session_factory() as session:
@@ -1481,6 +1575,17 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     .with_for_update()
                 )
                 run = await session.get(AgentRunModel, run_id, with_for_update=True)
+                resume_jobs = (
+                    await session.scalars(
+                        select(RootResumeJobModel)
+                        .where(
+                            RootResumeJobModel.run_id == run_id,
+                            RootResumeJobModel.status.in_(("pending", "running")),
+                        )
+                        .order_by(RootResumeJobModel.job_id)
+                        .with_for_update()
+                    )
+                ).all()
                 allowed_states = (
                     {RunStatus.RUNNING.value}
                     if status == RunStatus.COMPLETED
@@ -1491,13 +1596,14 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     or run is None
                     or session_row.active_run_id != run_id
                     or run.status not in allowed_states
-                    or not self._owns_execution_lease(run, owner, generation, datetime.now(timezone.utc))
                 ):
+                    return False
+                try:
+                    await self._leases.assert_current_in_transaction(session, lease)
+                except LeaseLostError:
                     return False
                 run.status = status.value
                 run.updated_at = now_iso
-                run.execution_lease_owner = None
-                run.execution_lease_until = None
                 if response is not None:
                     run.response_json = json.dumps(response, ensure_ascii=False)
                 if error is not None:
@@ -1505,21 +1611,11 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 session_row.active_run_id = None
                 changed = True
                 if changed:
-                    await session.execute(
-                        update(RootResumeJobModel)
-                        .where(
-                            RootResumeJobModel.run_id == run_id,
-                            RootResumeJobModel.status.in_(("pending", "running")),
+                    for resume_job in resume_jobs:
+                        resume_job.status = (
+                            "cancelled" if status == RunStatus.CANCELLED else "completed"
                         )
-                        .values(
-                            status=(
-                                "cancelled" if status == RunStatus.CANCELLED else "completed"
-                            ),
-                            lease_owner=None,
-                            lease_until=None,
-                            updated_at=now_iso,
-                        )
-                    )
+                        resume_job.updated_at = now
                     if status == RunStatus.COMPLETED and response is not None:
                         run = await session.get(AgentRunModel, run_id)
                         if run is not None:
@@ -1606,7 +1702,9 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                                 payload_json={"error": error or {"code": "run_failed"}},
                                 now=now,
                             )
-        return changed
+                if not await self._leases.finish_in_transaction(session, lease):
+                    raise LeaseLostError(lease.key)
+                return changed
 
     @staticmethod
     def _add_completion_outbox(

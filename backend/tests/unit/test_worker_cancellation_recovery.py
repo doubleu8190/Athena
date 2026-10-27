@@ -14,6 +14,7 @@ from domain.orchestration import (
     TaskStatus,
     WorkerJobLease,
 )
+from tests.fakes.leases import LeaseCenter, lease_grant
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
 )
@@ -103,7 +104,7 @@ class ReconcileSession:
             return Result(scalar=self.plan)
         if self.execute_count == 3:
             return Result(rows=self.expired_rows)
-        if self.execute_count == 4 + 4 * len(self.expired_rows):
+        if self.execute_count == 4 + 3 * len(self.expired_rows):
             return Result(scalar=0)
         return Result()
 
@@ -146,9 +147,8 @@ def cancellation_lease() -> WorkerJobLease:
         session_id="session-1",
         attempt=1,
         worker_thread_id="task:task-1:exec:1",
-        fencing_token=7,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=7),
         cancellation_epoch=3,
-        lease_until=NOW + timedelta(seconds=10),
         task=Task("task-1", "Task", "Do task"),
     )
 
@@ -217,7 +217,7 @@ async def test_worker_claim_commits_task_started_outbox_with_execution_lease(
         execution_id="execution-1",
     )
     repository = PostgresWorkerJobRepository(
-        factory(session), clock=lambda: NOW
+        factory(session), clock=lambda: NOW, lease_center=LeaseCenter()
     )
 
     async def lock_chain(*_args, **_kwargs):
@@ -300,14 +300,13 @@ async def test_worker_acknowledges_only_its_fenced_cancellation():
         run, plan, round_row, task, round_task, execution, job,
     ])
     repository = PostgresWorkerJobRepository(
-        factory(session), clock=lambda: NOW
+        factory(session), clock=lambda: NOW, lease_center=LeaseCenter()
     )
 
     accepted = await repository.acknowledge_cancelled(cancellation_lease())
 
     assert accepted is True
     assert job.status == execution.status == task.status == round_task.status == "cancelled"
-    assert job.lease_owner is execution.lease_owner is None
     assert round_row.terminal_task_count == 1
     event = next(
         item for item in session.added if isinstance(item, OrchestrationOutboxModel)
@@ -383,10 +382,15 @@ async def test_reconciler_persists_task_cancelled_when_worker_lease_expires():
                 "Task",
                 "Do task",
                 1,
+                "worker-owner",
+                7,
+                NOW - timedelta(seconds=1),
             )
         ],
     )
-    repository = PostgresWorkerJobRepository(factory(session), clock=lambda: NOW)
+    repository = PostgresWorkerJobRepository(
+        factory(session), clock=lambda: NOW, lease_center=LeaseCenter()
+    )
 
     receipts = await repository.reconcile_cancellations()
 
@@ -424,6 +428,10 @@ async def test_dispatcher_acknowledges_cancellation_after_lease_fence_fails():
         async def pending_interrupt(self, _execution):
             return None
 
+    class LostLeaseCenter(LeaseCenter):
+        async def renew(self, _grant, *, lease_seconds):
+            return None
+
     class EventHandler:
         pass
 
@@ -437,6 +445,7 @@ async def test_dispatcher_acknowledges_cancellation_after_lease_fence_fails():
         max_concurrency=1,
         approval_service=AcceptingWorkerApprovalService(),
         thread_lock=NoopGraphThreadLock(),
+        lease_center=LostLeaseCenter(),
     )
 
     await asyncio.wait_for(dispatcher._execute(cancellation_lease()), timeout=1)

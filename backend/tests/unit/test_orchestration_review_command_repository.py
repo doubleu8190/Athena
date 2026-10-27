@@ -18,6 +18,7 @@ from domain.orchestration import (
     Task,
     TaskStatus,
 )
+from tests.fakes.leases import LeaseCenter, lease_grant
 from infrastructure.persistence.postgres.models import (
     AgentPlanModel,
     AgentTaskModel,
@@ -104,6 +105,7 @@ def command(command_type=OrchestrationCommandType.CONTINUE_PLAN):
         scope_key="run-1",
         plan_version=1,
         round_id="round-1",
+        lease=lease_grant("root_execution", "run-1"),
     )
 
 
@@ -133,6 +135,7 @@ def submit_plan_request():
         plan_id="plan-1",
         scope_key="run-1",
         plan_version=1,
+        lease=lease_grant("root_execution", "run-1"),
     )
     return submit_command, plan, tasks
 
@@ -142,7 +145,8 @@ async def test_submit_plan_atomically_creates_first_round_executions_and_jobs():
     session = Session()
     id_counter = count()
     repository = PostgresOrchestrationCommandRepository(
-        factory(session), id_factory=lambda: f"generated-{next(id_counter)}"
+        factory(session), id_factory=lambda: f"generated-{next(id_counter)}",
+        lease_center=LeaseCenter(),
     )
     run = SimpleNamespace(
         run_id="run-1",
@@ -303,7 +307,8 @@ async def test_continue_decision_freezes_all_ready_tasks_and_is_idempotent():
     session = Session()
     id_counter = count()
     repository = PostgresOrchestrationCommandRepository(
-        factory(session), id_factory=lambda: f"generated-{next(id_counter)}"
+        factory(session), id_factory=lambda: f"generated-{next(id_counter)}",
+        lease_center=LeaseCenter(),
     )
     plan, _round, _a, task_b = setup_continue_session(session)
     review_command = command()
@@ -365,7 +370,8 @@ async def test_replan_writes_new_immutable_version_and_reuses_completed_task():
     session = Session()
     id_counter = count()
     repository = PostgresOrchestrationCommandRepository(
-        factory(session), id_factory=lambda: f"generated-{next(id_counter)}"
+        factory(session), id_factory=lambda: f"generated-{next(id_counter)}",
+        lease_center=LeaseCenter(),
     )
     run, plan, round_row = persisted_chain()
     version = SimpleNamespace(dag_json=version_document())
@@ -418,7 +424,9 @@ async def test_replan_writes_new_immutable_version_and_reuses_completed_task():
 @pytest.mark.asyncio
 async def test_finish_decision_records_terminal_plan_outbox():
     session = Session()
-    repository = PostgresOrchestrationCommandRepository(factory(session))
+    repository = PostgresOrchestrationCommandRepository(
+        factory(session), lease_center=LeaseCenter()
+    )
     run, plan, round_row = persisted_chain()
     version = SimpleNamespace(dag_json=version_document())
     session.get_values = [run, plan, round_row, version]

@@ -17,6 +17,7 @@ from tests.fakes.worker_runtime import (
     AcceptingWorkerApprovalService,
     NoopGraphThreadLock,
 )
+from tests.fakes.leases import LeaseCenter, lease_grant
 
 
 @pytest.mark.asyncio
@@ -60,6 +61,7 @@ async def test_worker_timeout_cancels_graph_and_reports_retryable_timeout():
         max_concurrency=1,
         approval_service=AcceptingWorkerApprovalService(),
         thread_lock=NoopGraphThreadLock(),
+        lease_center=LeaseCenter(),
     )
     lease = WorkerJobLease(
         job_id="job-1",
@@ -73,9 +75,8 @@ async def test_worker_timeout_cancels_graph_and_reports_retryable_timeout():
         session_id="session-1",
         attempt=1,
         worker_thread_id="task:task-1:exec:1",
-        fencing_token=1,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=1),
         cancellation_epoch=0,
-        lease_until=datetime.now(timezone.utc),
         task=Task("task-1", "bounded", "finish promptly", timeout_seconds=0.01),
     )
 

@@ -21,6 +21,7 @@ from domain.files import (
     StoredBlob,
 )
 from domain.knowledge import KnowledgeBase
+from tests.fakes.leases import LeaseCenter, lease_grant
 from fastapi.testclient import TestClient
 from io import BytesIO
 
@@ -218,7 +219,10 @@ class Parser:
 
 
 class Chunks:
-    async def replace_for_attachment(self, attachment_id, values):
+    def __init__(self):
+        self._leases = LeaseCenter()
+
+    async def replace_for_attachment(self, attachment_id, values, *, lease):
         self.values = values
 
     async def list_by_attachment(self, attachment_id):
@@ -230,7 +234,7 @@ class Indexer:
         self.fail = fail
         self.calls = 0
 
-    async def index_attachment(self, attachment, chunks):
+    async def index_attachment(self, attachment, chunks, *, lease):
         self.calls += 1
         if self.fail:
             raise RuntimeError("index failed")
@@ -276,20 +280,33 @@ async def test_ingestion_marks_ready_and_worker_retries_failures() -> None:
         chunker=lambda text: [FileChunk("chunk-1", "attachment-1", 0, text, 2, {}, {})],
         clock=lambda: NOW,
     )
-    result = await ingestion.process_attachment("attachment-1")
+    grant = lease_grant("document_ingestion", "attachment-1")
+    result = await ingestion.process_attachment("attachment-1", lease=grant)
     assert result["status"] == "ready"
-    assert repository.value.status is AttachmentStatus.READY
 
     class Queue:
         def __init__(self): self.succeeded = []; self.failed = []
-        async def claim_next(self, *, max_attempts): return {"job_id": "job-1", "attachment_id": "attachment-1", "attempt": 1}
-        async def mark_succeeded(self, job_id, result): self.succeeded.append(result)
-        async def mark_failed(self, job_id, error, *, retry): self.failed.append(retry)
+        async def claim_next(self, *, max_attempts, lease_seconds):
+            return {
+                "job_id": "job-1",
+                "attachment_id": "attachment-1",
+                "attempt": 1,
+                "lease": grant,
+            }
+        async def mark_succeeded(self, job_id, result, *, lease):
+            self.succeeded.append(result)
+            repository.value = replace(
+                repository.value,
+                status=AttachmentStatus.READY,
+                active_index_revision_id=result["index_revision_id"],
+            )
+        async def mark_failed(self, job_id, error, *, retry, lease): self.failed.append(retry)
 
     queue = Queue()
     worker = KnowledgeDocumentWorker(queue, ingestion, max_attempts=3)
     assert await worker.process_one()
     assert queue.succeeded
+    assert repository.value.status is AttachmentStatus.READY
 
 
 @pytest.mark.asyncio
@@ -310,11 +327,20 @@ async def test_upload_to_worker_end_to_end_reaches_ready() -> None:
     )
     repository = AttachmentRepository()
     repository.value = created
-    queue = type("Queue", (), {
-        "claim_next": lambda self, *, max_attempts: _claim(created.id),
-        "mark_succeeded": lambda self, job_id, result: _mark_success(result),
-        "mark_failed": lambda self, job_id, error, *, retry: _mark_failure(error),
-    })()
+    class Queue:
+        def __init__(self):
+            self.succeeded = []
+
+        async def claim_next(self, *, max_attempts, lease_seconds):
+            return await _claim(created.id)
+
+        async def mark_succeeded(self, job_id, result, *, lease):
+            self.succeeded.append(result)
+
+        async def mark_failed(self, job_id, error, *, retry, lease):
+            return await _mark_failure(error)
+
+    queue = Queue()
     indexer = Indexer()
     ingestion = IngestionService(
         repository,
@@ -326,11 +352,16 @@ async def test_upload_to_worker_end_to_end_reaches_ready() -> None:
     )
     worker = KnowledgeDocumentWorker(queue, ingestion, max_attempts=3)
     assert await worker.process_one()
-    assert repository.value.status is AttachmentStatus.READY
+    assert queue.succeeded[0]["index_revision_id"]
 
 
 async def _claim(attachment_id: str):
-    return {"job_id": "job-e2e", "attachment_id": attachment_id, "attempt": 1}
+    return {
+        "job_id": "job-e2e",
+        "attachment_id": attachment_id,
+        "attempt": 1,
+        "lease": lease_grant("document_ingestion", attachment_id),
+    }
 
 
 async def _mark_success(result):

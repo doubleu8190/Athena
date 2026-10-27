@@ -24,6 +24,7 @@ from shared import dumps, loads, new_id, now_utc
 from workers import MemoryWorker as DurableMemoryWorker
 from infrastructure.integrations.pgvector import PostgresFileVectorIndex, PostgresMemoryVectorIndex
 from tests.fakes.embedding import _EchoEmbedder
+from tests.fakes.leases import LeaseCenter, lease_grant
 
 
 class _ContextEvents:
@@ -304,16 +305,21 @@ async def test_neo4j_resource_lifecycle(monkeypatch):
 @pytest.mark.asyncio
 async def test_durable_memory_worker_success_and_failure():
     class Jobs:
-        def __init__(self): self.values = [ClaimedMemoryJob(CompletedTurn("t", "", ""), 1)]; self.calls=[]
-        async def recover(self): self.calls.append("recover")
-        async def claim_next_job(self): return self.values.pop(0) if self.values else None
-        async def mark_succeeded(self, key): self.calls.append(("ok", key))
+        def __init__(self):
+            self._leases = LeaseCenter()
+            self.values = [ClaimedMemoryJob(
+                CompletedTurn("t", "", ""), 1,
+                lease_grant("memory_processing", "t"),
+            )]
+            self.calls=[]
+        async def claim_next_job(self, *, lease_seconds): return self.values.pop(0) if self.values else None
+        async def mark_succeeded(self, key, *, lease): self.calls.append(("ok", key))
         async def mark_failed(self, *args, **kwargs): self.calls.append(("fail", args))
     class Workflow:
-        async def process_completed_turn(self, value): return None
-    jobs = Jobs(); worker = DurableMemoryWorker(jobs, Workflow(), poll_interval=0.001)
+        async def process_completed_turn(self, value, *, lease): return None
+    jobs = Jobs(); worker = DurableMemoryWorker(jobs, Workflow(), poll_interval=0.001, lease_center=jobs._leases)
     task = asyncio.create_task(worker.run()); await asyncio.sleep(0.005); worker.stop(); await task
-    assert "recover" in jobs.calls and ("ok", "t") in jobs.calls
+    assert ("ok", "t") in jobs.calls
 
 
 @pytest.mark.asyncio
@@ -362,16 +368,23 @@ async def test_target_pgvector_indexers_cover_index_delete_query():
         async def __aexit__(self, *_args): return False
         def begin(self): return self
         async def execute(self, statement): return Result()
+        async def scalar(self, statement):
+            return SimpleNamespace(deleted_time=None, source_turn_id="t")
+        async def scalars(self, statement):
+            return SimpleNamespace(all=lambda: [])
     from contextlib import asynccontextmanager
     @asynccontextmanager
     async def factory(): yield Session()
     class Embed:
         async def embed_documents(self, values): return [[1.0, 2.0] for _ in values]
         async def embed_query(self, value): return [1.0, 2.0]
-    file_index = PostgresFileVectorIndex(factory, Embed())
-    chunk = SimpleNamespace(id="c", content="text")
-    await file_index.index_attachment(SimpleNamespace(id="a"), [chunk]); await file_index.delete_attachment("a")
+    file_index = PostgresFileVectorIndex(factory, Embed(), lease_center=LeaseCenter())
+    chunk = SimpleNamespace(id="c", attachment_id="a", content="text", index_revision_id="revision-1")
+    await file_index.index_attachment(
+        SimpleNamespace(id="a"), [chunk],
+        lease=lease_grant("document_ingestion", "a"),
+    ); await file_index.delete_attachment("a")
     assert (await file_index.query("q"))[0]["chunk_id"] == "c"
-    memory_index = PostgresMemoryVectorIndex(factory, Embed())
-    await memory_index.index("m", "memory")
+    memory_index = PostgresMemoryVectorIndex(factory, Embed(), lease_center=LeaseCenter())
+    await memory_index.index("m", "memory", lease=lease_grant("memory_processing", "t"))
     assert (await memory_index.query("q"))[0]["memory_id"] == "c"

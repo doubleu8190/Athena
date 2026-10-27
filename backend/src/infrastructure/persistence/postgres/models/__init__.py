@@ -34,7 +34,6 @@ from .memory_models import (
     MemoryExtractionSnapshotModel,
     MemoryEpisodeModel,
     MemoryEpisodeProjectBindingModel,
-    MemoryJobScopeSnapshotModel,
     MemoryModel,
     MemoryRelationModel,
     MemoryRunEvidenceSnapshotModel,
@@ -64,6 +63,7 @@ from .orchestration_models import (
 )
 from .tool_operation_models import WorkerToolOperationModel
 from .worker_execution_message_models import WorkerExecutionMessageModel
+from .lease_models import ExecutionLeaseModel
 
 __all__ = [
     "AttachmentModel",
@@ -91,7 +91,6 @@ __all__ = [
     "MemoryExtractionSnapshotModel",
     "MemoryEpisodeModel",
     "MemoryEpisodeProjectBindingModel",
-    "MemoryJobScopeSnapshotModel",
     "MemoryRunEvidenceSnapshotModel",
     "MemorySourceSuppressionModel",
     "MemoryRelationModel",
@@ -112,6 +111,7 @@ __all__ = [
     "WorkerJobModel",
     "WorkerToolOperationModel",
     "WorkerExecutionMessageModel",
+    "ExecutionLeaseModel",
     "EvalCaseAttemptModel",
     "EvalCaseModel",
     "EvalDatasetModel",

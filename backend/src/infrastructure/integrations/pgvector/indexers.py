@@ -8,22 +8,47 @@ from sqlalchemy import DateTime, cast, func, or_, select, update
 
 from domain.files import Attachment, FileChunk, FileVectorSearchPort, VectorIndexerPort
 from domain.memory import MemoryVectorSearchPort
-from infrastructure.persistence.postgres.models import FileChunkModel, MemoryModel
+from domain.leases import LeaseGrant, LeaseKey
+from infrastructure.persistence.postgres.models import AttachmentModel, FileChunkModel, MemoryModel
+from infrastructure.persistence.postgres.repositories.lease_center import PostgresLeaseCenter
 
 
 class PostgresFileVectorIndex(VectorIndexerPort, FileVectorSearchPort):
-    def __init__(self, session_factory, embedder) -> None:
+    def __init__(self, session_factory, embedder, *, lease_center: PostgresLeaseCenter | None = None) -> None:
         self._session_factory = session_factory
         self._embedder = embedder
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
-    async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk]) -> None:
+    async def index_attachment(self, attachment: Attachment, chunks: list[FileChunk], *, lease: LeaseGrant) -> None:
+        if lease.key != LeaseKey("document_ingestion", attachment.id):
+            raise ValueError("document_ingestion_lease_mismatch")
+        if any(chunk.attachment_id != attachment.id for chunk in chunks):
+            raise ValueError("document_chunk_attachment_mismatch")
         vectors = await self._embedder.embed_documents([item.content for item in chunks])
         async with self._session_factory() as session:
             async with session.begin():
+                attachment_row = await session.scalar(
+                    select(AttachmentModel).where(AttachmentModel.id == attachment.id).with_for_update()
+                )
+                if attachment_row is None or attachment_row.deleted_time is not None:
+                    raise LookupError("attachment_deleted")
+                chunk_ids = [chunk.id for chunk in chunks]
+                if chunk_ids:
+                    await session.scalars(
+                        select(FileChunkModel)
+                        .where(FileChunkModel.id.in_(chunk_ids))
+                        .order_by(FileChunkModel.id)
+                        .with_for_update()
+                    )
+                await self._leases.assert_current_in_transaction(session, lease)
                 for chunk, vector in zip(chunks, vectors):
                     await session.execute(
                         update(FileChunkModel)
-                        .where(FileChunkModel.id == chunk.id)
+                        .where(
+                            FileChunkModel.id == chunk.id,
+                            FileChunkModel.attachment_id == attachment.id,
+                            FileChunkModel.index_revision_id == chunk.index_revision_id,
+                        )
                         .values(embedding=vector)
                     )
 
@@ -46,9 +71,13 @@ class PostgresFileVectorIndex(VectorIndexerPort, FileVectorSearchPort):
         vector = await self._embedder.embed_query(text)
         async with self._session_factory() as session:
             distance = FileChunkModel.embedding.cosine_distance(vector).label("distance")
-            statement = select(FileChunkModel, distance).where(
+            statement = select(FileChunkModel, distance).join(
+                AttachmentModel, AttachmentModel.id == FileChunkModel.attachment_id
+            ).where(
                 FileChunkModel.embedding.is_not(None),
                 FileChunkModel.deleted_time.is_(None),
+                FileChunkModel.index_revision_id == AttachmentModel.active_index_revision_id,
+                AttachmentModel.deleted_time.is_(None),
             )
             if attachment_ids:
                 statement = statement.where(FileChunkModel.attachment_id.in_(attachment_ids))
@@ -60,17 +89,33 @@ class PostgresFileVectorIndex(VectorIndexerPort, FileVectorSearchPort):
 
 
 class PostgresMemoryVectorIndex(MemoryVectorSearchPort):
-    def __init__(self, session_factory, embedder) -> None:
+    def __init__(self, session_factory, embedder, *, lease_center: PostgresLeaseCenter | None = None) -> None:
         self._session_factory = session_factory
         self._embedder = embedder
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
-    async def index(self, memory_id: str, content: str) -> None:
+    async def index(self, memory_id: str, content: str, *, lease: LeaseGrant) -> None:
         vector = await self._embedder.embed_query(content)
         async with self._session_factory() as session:
             async with session.begin():
-                await session.execute(
-                    update(MemoryModel).where(MemoryModel.id == memory_id).values(embedding=vector)
+                memory = await session.scalar(
+                    select(MemoryModel)
+                    .where(MemoryModel.id == memory_id)
+                    .with_for_update()
                 )
+                if (
+                    memory is None
+                    or lease.key.resource_type != "memory_processing"
+                    or memory.source_turn_id != lease.key.resource_id
+                ):
+                    raise ValueError("memory_processing_lease_mismatch")
+                await self._leases.assert_current_in_transaction(session, lease)
+                if memory is not None:
+                    await session.execute(
+                        update(MemoryModel)
+                        .where(MemoryModel.id == memory_id)
+                        .values(embedding=vector)
+                    )
 
     async def query(
         self, text: str, limit: int = 10, *, session_id: str | None = None

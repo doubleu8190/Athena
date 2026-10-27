@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Protocol
+from domain.leases import LeaseGrant
 
 from .entities import Attachment, FileChunk
 
@@ -22,8 +23,9 @@ class AttachmentRepository(Protocol):
 class FileChunkRepository(Protocol):
     """文件分块持久化能力。"""
 
-    async def replace_for_attachment(self, attachment_id: str, chunks: list[FileChunk]) -> None: ...
+    async def replace_for_attachment(self, attachment_id: str, chunks: list[FileChunk], *, lease: LeaseGrant) -> None: ...
     async def list_by_attachment(self, attachment_id: str) -> list[FileChunk]: ...
+    async def filter_active_index_revisions(self, candidates: list[dict[str, object]]) -> list[dict[str, object]]: ...
 
 
 __all__ = ["AttachmentRepository", "FileChunkRepository"]

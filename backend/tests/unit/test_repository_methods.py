@@ -16,6 +16,7 @@ from domain.sessions import Message, MessageRole, Session
 from domain.tools import (
     JsonSchema, MCPServer, MCPServerConfig, RiskLevel, ToolConfig, ToolExecutionMode,
 )
+from tests.fakes.leases import LeaseCenter, lease_grant
 from infrastructure.persistence.postgres.repositories.file_artifact_repository import (
     PostgresAdapterRegistryRepository, PostgresFileArtifactRepository,
 )
@@ -175,17 +176,27 @@ async def test_file_and_knowledge_repositories_cover_versions_and_cleanup():
     db.results = [Result(rows=[attachment_row(value)])]
     assert len(await ar.list_by_knowledge_base("kb-1")) == 1
     assert await ar.save(value) == value
-    db.results = [Result(scalar="a-1")]
+    db.results = [
+        Result(scalar=None),
+        Result(scalar=attachment_row(value)),
+        Result(scalar="a-1"),
+        Result(scalar=None),
+    ]
     assert await ar.soft_delete("a-1", session_id="s-1")
 
-    chunks = PostgresFileChunkRepository(factory(db))
+    chunks = PostgresFileChunkRepository(factory(db), lease_center=LeaseCenter())
     chunk = FileChunk("c-1", "a-1", 0, "hello", 1, FileLocator(), FileMetadata())
-    await chunks.replace_for_attachment("a-1", [chunk])
+    db.results = [Result(scalar=attachment_row(value))]
+    await chunks.replace_for_attachment(
+        "a-1", [chunk], lease=lease_grant("document_ingestion", "a-1")
+    )
     db.results = [Result(rows=[SimpleNamespace(id="c-1", attachment_id="a-1", ordinal=0,
         content="hello", token_count=1, locator_json="{}", metadata_json="{}", native_score=None)])]
     assert (await chunks.list_by_attachment("a-1"))[0].id == "c-1"
 
-    docs = PostgresKnowledgeDocumentRepository(factory(db)); doc = attachment(knowledge=True)
+    docs = PostgresKnowledgeDocumentRepository(
+        factory(db), lease_center=LeaseCenter()
+    ); doc = attachment(knowledge=True)
     assert await docs.create(doc) == doc
     db.results = [Result(scalar=attachment_row(doc))]
     assert (await docs.get("a-1", knowledge_base_id="kb-1")).id == "a-1"
@@ -195,7 +206,14 @@ async def test_file_and_knowledge_repositories_cover_versions_and_cleanup():
     assert len(await docs.list_versions("a-1", knowledge_base_id="kb-1")) == 1
     db.results = [Result(scalar=attachment_row(doc))]
     assert await docs.latest_for_filename("a.txt", knowledge_base_id="kb-1")
-    db.results = [Result(scalar="a-1"), Result()]
+    db.results = [
+        Result(scalar=None),
+        Result(scalar=attachment_row(doc)),
+        Result(scalar="a-1"),
+        Result(scalar=None),
+        Result(),
+        Result(),
+    ]
     assert await docs.soft_delete("a-1", knowledge_base_id="kb-1")
 
 

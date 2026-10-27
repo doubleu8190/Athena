@@ -10,7 +10,7 @@ from itertools import count
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -24,6 +24,7 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    ExecutionLeaseModel,
     OrchestrationCommandModel,
     OrchestrationOutboxModel,
     OrchestrationInboxModel,
@@ -45,6 +46,8 @@ from infrastructure.persistence.postgres.repositories.orchestration_command_repo
 from infrastructure.persistence.postgres.repositories.orchestration_event_repository import (
     PostgresOrchestrationEventRepository,
 )
+from domain.leases import LeaseGrant
+from tests.fakes.leases import acquire_postgres_lease
 from domain.orchestration import (
     OrchestrationCommand,
     OrchestrationCommandType,
@@ -88,6 +91,8 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
             schema_created = True
 
         required_tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -125,7 +130,7 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
         claims = [claim for claim in (first_claim, second_claim) if claim is not None]
         assert len(claims) == 1
         current_lease = claims[0]
-        assert current_lease.fencing_token == 8
+        assert current_lease.lease.fencing_token == 8
         assert current_lease.attempt == 1
         assert current_lease.worker_id in {"worker-a", "worker-b"}
         assert current_lease.task.allowed_tools == ("exec_shell",)
@@ -133,8 +138,12 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
         previous_lease = replace(
             current_lease,
             worker_id="crashed-worker",
-            fencing_token=7,
-            lease_until=now - timedelta(seconds=1),
+            lease=LeaseGrant(
+                key=current_lease.lease.key,
+                owner_id="crashed-worker",
+                fencing_token=7,
+                lease_until=now - timedelta(seconds=1),
+            ),
         )
         assert (
             await repository.renew_lease(previous_lease, lease_seconds=60)
@@ -143,14 +152,18 @@ async def test_expired_worker_lease_is_reclaimed_once_with_new_fence() -> None:
         async with session_factory() as session:
             execution = await session.get(TaskExecutionModel, "execution-1")
             job = await session.get(WorkerJobModel, "job-1")
+            lease_row = await session.get(
+                ExecutionLeaseModel, ("worker_execution", "execution-1")
+            )
 
         assert execution is not None
         assert job is not None
-        assert execution.lease_owner == current_lease.worker_id
-        assert execution.fencing_token == 8
+        assert lease_row is not None
+        assert lease_row.owner_id == current_lease.lease.owner_id
+        assert lease_row.fencing_token == 8
+        assert lease_row.state == "active"
         assert execution.attempt == 1
-        assert job.lease_owner == current_lease.worker_id
-        assert job.attempt == 2
+        assert job.attempt == 1
     finally:
         await test_engine.dispose()
         if schema_created:
@@ -191,6 +204,8 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
             schema_created = True
 
         required_tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -344,7 +359,6 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
                         attempt=1,
                         worker_thread_id=f"thread-execution-{index}-{run_id}",
                         status="queued",
-                        fencing_token=0,
                         cancellation_epoch=0,
                         created_at=now,
                         updated_at=now,
@@ -444,6 +458,8 @@ async def test_worker_terminal_commit_with_lost_receipt_is_deduplicated() -> Non
             schema_created = True
 
         required_tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -485,7 +501,7 @@ async def test_worker_terminal_commit_with_lost_receipt_is_deduplicated() -> Non
             round_id=lease.round_id,
             task_id=lease.task_id,
             execution_id=lease.execution_id,
-            fencing_token=lease.fencing_token,
+            lease=lease.lease,
             cancellation_epoch=lease.cancellation_epoch,
             status=TaskStatus.COMPLETED,
             result={"output": {"summary": "finished"}},
@@ -583,6 +599,8 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
             schema_created = True
 
         required_tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentRunModel.__table__,
@@ -649,12 +667,16 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
             session_id=session_id,
             run_id=run_id,
         )
+        root_lease = await acquire_postgres_lease(
+            first_sessions, "root_execution", run_id
+        )
         command = OrchestrationCommand(
             message_id=f"submit:{run_id}",
             command_type=OrchestrationCommandType.SUBMIT_PLAN,
             idempotency_key=f"submit:{run_id}",
             correlation_id=run_id,
             occurred_at=now,
+            lease=root_lease,
             plan_id=plan_id,
             scope_key=run_id,
             plan_version=1,
@@ -680,6 +702,16 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
         # 重启后的 app 只读取 PostgreSQL 状态，并接管已经过期的租约。
         await first_app_engine.dispose()
         restarted_at = now + timedelta(seconds=6)
+        async with restarted_sessions() as session, session.begin():
+            await session.execute(
+                update(ExecutionLeaseModel)
+                .where(
+                    ExecutionLeaseModel.resource_type == old_lease.lease.key.resource_type,
+                    ExecutionLeaseModel.resource_id == old_lease.lease.key.resource_id,
+                    ExecutionLeaseModel.fencing_token == old_lease.lease.fencing_token,
+                )
+                .values(lease_until=func.clock_timestamp() - text("INTERVAL '1 second'"))
+            )
         restarted_jobs = PostgresWorkerJobRepository(
             restarted_sessions, clock=lambda: restarted_at
         )
@@ -689,7 +721,7 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
         assert reclaimed is not None
         assert reclaimed.execution_id == old_lease.execution_id
         assert reclaimed.attempt == old_lease.attempt
-        assert reclaimed.fencing_token == old_lease.fencing_token + 1
+        assert reclaimed.lease.fencing_token == old_lease.lease.fencing_token + 1
 
         events = PostgresOrchestrationEventRepository(
             restarted_sessions,
@@ -715,7 +747,7 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
                 round_id=submitted.round_id,
                 task_id="task-retry",
                 execution_id=lease.execution_id,
-                fencing_token=lease.fencing_token,
+                lease=lease.lease,
                 cancellation_epoch=lease.cancellation_epoch,
                 status=status,
                 result={"attempt": lease.attempt},
@@ -911,9 +943,6 @@ async def _seed_expired_worker_job(
                 attempt=1,
                 worker_thread_id="task:task-1:exec:1",
                 status="running",
-                lease_owner="crashed-worker",
-                lease_until=expired_at,
-                fencing_token=7,
                 cancellation_epoch=0,
                 created_at=now - timedelta(minutes=1),
                 updated_at=expired_at,
@@ -930,7 +959,17 @@ async def _seed_expired_worker_job(
                 status="running",
                 attempt=1,
                 available_at=now - timedelta(minutes=1),
-                lease_owner="crashed-worker",
+                created_at=now - timedelta(minutes=1),
+                updated_at=expired_at,
+            )
+        )
+        session.add(
+            ExecutionLeaseModel(
+                resource_type="worker_execution",
+                resource_id="execution-1",
+                owner_id="crashed-worker",
+                fencing_token=7,
+                state="active",
                 lease_until=expired_at,
                 created_at=now - timedelta(minutes=1),
                 updated_at=expired_at,

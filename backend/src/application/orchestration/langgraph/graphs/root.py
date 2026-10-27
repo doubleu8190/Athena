@@ -26,6 +26,8 @@ from application.orchestration.root_decision import (
     PlanningFeedback,
 )
 from domain.runs import RoundCompletedResumeValue
+from domain.leases import LeaseGrant
+from shared.serialization import json_value
 from shared.contracts.runs import RoundCompletedResumeValueSchema
 from application.runs.request_contracts import RootRequestState
 from shared import get_logger
@@ -443,6 +445,7 @@ async def invoke_root_graph(
     *,
     session_id: str,
     run_id: str,
+    lease: LeaseGrant,
     user_message: str = "",
     message_id: str = "",
     run_sequence: int = 1,
@@ -459,6 +462,7 @@ async def invoke_root_graph(
     if not run_id:
         raise ValueError("run_id is required")
     state: RootGraphState = {
+        "execution_lease": json_value(lease),
         "request": {
             "session_id": session_id,
             "run_id": run_id,
@@ -493,6 +497,7 @@ async def invoke_root_graph(
         )
         result = await graph.ainvoke(
             Command(
+                update={"execution_lease": json_value(lease)},
                 resume=RoundCompletedResumeValueSchema.from_domain(
                     resume_value
                 ).model_dump(mode="json")

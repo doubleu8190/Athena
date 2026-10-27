@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -28,6 +28,7 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    ExecutionLeaseModel,
     IdempotencyReceiptModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
@@ -54,6 +55,7 @@ from infrastructure.persistence.postgres.repositories.worker_job_repository impo
 from infrastructure.persistence.postgres.repositories.worker_tool_operation_repository import (
     PostgresWorkerToolOperationRepository,
 )
+from tests.fakes.leases import acquire_postgres_lease
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -86,6 +88,7 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
             await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
             schema_created = True
         tables = [
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentEventModel.__table__,
@@ -149,6 +152,9 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
                 )
             )
 
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
         submitted = await PostgresOrchestrationCommandRepository(
             session_factory,
             id_factory=lambda: f"command-{uuid4().hex}",
@@ -160,6 +166,7 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
                 idempotency_key=f"submit:{run_id}",
                 correlation_id=run_id,
                 occurred_at=now,
+                lease=root_lease,
                 plan_id=plan_id,
                 scope_key=run_id,
                 plan_version=1,
@@ -220,7 +227,15 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
             "execution_id": lease.execution_id,
             "worker_thread_id": lease.worker_thread_id,
             "execution_generation": lease.attempt,
-            "fencing_token": lease.fencing_token,
+            "lease": {
+                "key": {
+                    "resource_type": lease.lease.key.resource_type,
+                    "resource_id": lease.lease.key.resource_id,
+                },
+                "owner_id": lease.lease.owner_id,
+                "fencing_token": lease.lease.fencing_token,
+                "lease_until": lease.lease.lease_until.isoformat(),
+            },
             "cancellation_epoch": lease.cancellation_epoch,
             "task": {
                 "task_id": lease.task_id,
@@ -248,6 +263,15 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
         assert not replayed
         assert cancellation.status.value == "stopping"
         assert cancellation.external_effect_status == "unknown"
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                update(ExecutionLeaseModel)
+                .where(
+                    ExecutionLeaseModel.resource_type == "root_execution",
+                    ExecutionLeaseModel.resource_id == run_id,
+                )
+                .values(lease_until=func.clock_timestamp() - text("INTERVAL '1 second'"))
+            )
         await PostgresWorkerJobRepository(
             session_factory, clock=lambda: now + timedelta(seconds=61)
         ).reconcile_cancellations()

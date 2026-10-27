@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
 
+from domain.leases import LeaseGrant
 from .entities import PlanStatus, Task, TaskResult, TaskStatus
 
 
@@ -119,17 +120,14 @@ class ReviewContext:
 
 @dataclass(frozen=True, slots=True)
 class TaskAttempt:
-    """带独立栅栏身份的一次 Task 执行尝试。"""
+    """一次带业务 attempt 序号的 Task 执行尝试。"""
 
     execution_id: str
     task_id: str
     round_id: str
     attempt: int
     worker_thread_id: str
-    fencing_token: int
     status: ExecutionStatus = ExecutionStatus.QUEUED
-    lease_owner: str | None = None
-    lease_until: datetime | None = None
     cancellation_epoch: int = 0
 
 
@@ -218,6 +216,7 @@ class OrchestrationCommand:
     plan_id: str
     scope_key: str
     payload: Mapping[str, Any] = field(default_factory=dict)
+    lease: LeaseGrant | None = None
     plan_version: int | None = None
     round_id: str | None = None
     task_id: str | None = None
@@ -237,6 +236,12 @@ class OrchestrationCommand:
             raise ValueError("plan_id is required")
         if not self.scope_key.strip():
             raise ValueError("scope_key is required")
+        if (
+            self.lease is None
+            or self.lease.key.resource_type != "root_execution"
+            or self.lease.key.resource_id != self.correlation_id
+        ):
+            raise ValueError("orchestration_command_requires_root_lease")
         if self.schema_version != 1:
             raise ValueError("unsupported orchestration command schema_version")
 
@@ -284,7 +289,7 @@ class WorkerTaskTerminalEvent:
     round_id: str
     task_id: str
     execution_id: str
-    fencing_token: int
+    lease: LeaseGrant
     cancellation_epoch: int
     status: TaskStatus
     result: Mapping[str, Any] = field(default_factory=dict)
@@ -306,8 +311,11 @@ class WorkerTaskTerminalEvent:
                 raise ValueError(f"{name} is required")
         if self.plan_version < 1:
             raise ValueError("plan_version must be positive")
-        if self.fencing_token < 1:
-            raise ValueError("fencing_token must be positive")
+        if (
+            self.lease.key.resource_type != "worker_execution"
+            or self.lease.key.resource_id != self.execution_id
+        ):
+            raise ValueError("worker terminal event lease identity mismatch")
         if self.cancellation_epoch < 0:
             raise ValueError("cancellation_epoch cannot be negative")
         if self.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
@@ -355,7 +363,7 @@ class OrchestrationOutboxLease:
     occurred_at: datetime
     payload: Mapping[str, Any]
     attempt: int
-    lease_until: datetime
+    lease: LeaseGrant
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,9 +381,8 @@ class WorkerJobLease:
     session_id: str
     attempt: int
     worker_thread_id: str
-    fencing_token: int
+    lease: LeaseGrant
     cancellation_epoch: int
-    lease_until: datetime
     task: Task
     upstream_results: Mapping[str, TaskResult] = field(default_factory=dict)
     job_type: str = "execute"

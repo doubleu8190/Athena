@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.serialization import json_value
+from domain.leases import LeaseLostError
 from domain.orchestration import (
     WorkerExecutionEntryType,
     WorkerExecutionMessage,
@@ -21,6 +22,7 @@ from domain.orchestration import (
 from shared.contracts.worker_messages import WorkerExecutionMessageContentSchema
 
 from ..models import WorkerExecutionMessageModel
+from .lease_center import PostgresLeaseCenter
 
 
 class PostgresWorkerExecutionMessageRepository(WorkerExecutionMessageRepository):
@@ -31,8 +33,11 @@ class PostgresWorkerExecutionMessageRepository(WorkerExecutionMessageRepository)
         session_factory: Callable[
             [], AbstractAsyncContextManager[AsyncSession]
         ],
+        *,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
         self._session_factory = session_factory
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
     async def append(
         self, message: WorkerExecutionMessageAppend
@@ -70,6 +75,12 @@ class PostgresWorkerExecutionMessageRepository(WorkerExecutionMessageRepository)
                     )
                     or 0
                 ) + 1
+                try:
+                    await self._leases.assert_current_in_transaction(
+                        session, message.lease
+                    )
+                except LeaseLostError as error:
+                    raise ValueError("worker_execution_lease_lost") from error
                 row = WorkerExecutionMessageModel(
                     message_id=message.message_id,
                     session_id=message.session_id,

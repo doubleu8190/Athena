@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from domain.leases import LeaseGrant
 from domain.sessions import Session
 
 from .entities import (
@@ -19,13 +20,17 @@ from .payloads import RunStartPayload
 class RunQueuePort(Protocol):
     """Claim the FIFO head of an unlocked session queue."""
 
-    async def claim_next_run(self) -> RunCommand | None: ...
+    async def claim_next_run(
+        self, *, lease_seconds: float = 60.0
+    ) -> RunCommand | None: ...
 
 
 class RunConsumerPort(Protocol):
     """Persistence methods needed by the asynchronous Run consumer."""
 
-    async def claim_next_run(self) -> RunCommand | None:
+    async def claim_next_run(
+        self, *, lease_seconds: float = 60.0
+    ) -> RunCommand | None:
         """领取最早的可执行 Run；没有空闲会话时返回 None。"""
 
     async def reconcile_expired_execution_leases(self) -> int:
@@ -35,16 +40,14 @@ class RunConsumerPort(Protocol):
         """按 ID 查询 Run；不存在时返回 None。"""
 
     async def release_execution_lease(
-        self, run_id: str, *, owner: str, generation: int
+        self, lease: LeaseGrant
     ) -> bool:
         """释放指定执行代次持有的租约；租约已变化时返回 False。"""
 
     async def renew_execution_lease(
         self,
-        run_id: str,
+        lease: LeaseGrant,
         *,
-        owner: str,
-        generation: int,
         lease_seconds: float,
     ) -> bool:
         """续期当前 Root 调用的租约；执行权已变化时返回 False。"""
@@ -75,33 +78,33 @@ class RunLifecyclePort(Protocol):
     writes_cancellation_events_to_outbox: bool
     writes_terminal_artifacts_to_outbox: bool
 
-    async def update_status(self, run_id: str, status: RunStatus | str) -> bool: ...
+    async def update_status(
+        self, run_id: str, status: RunStatus | str, *, lease: LeaseGrant
+    ) -> bool: ...
 
     async def complete(
         self, run_id: str, result: dict[str, object], *,
-        owner: str | None = None, generation: int | None = None,
+        lease: LeaseGrant,
     ) -> bool: ...
 
     async def fail(
         self, run_id: str, error: dict[str, object], *,
-        owner: str | None = None, generation: int | None = None,
+        lease: LeaseGrant,
     ) -> bool: ...
 
     async def acquire_execution_lease(
         self, run_id: str, *, owner: str, lease_seconds: float
-    ) -> int | None: ...
+    ) -> LeaseGrant | None: ...
 
     async def renew_execution_lease(
         self,
-        run_id: str,
+        lease: LeaseGrant,
         *,
-        owner: str,
-        generation: int,
         lease_seconds: float,
     ) -> bool: ...
 
     async def release_execution_lease(
-        self, run_id: str, *, owner: str, generation: int
+        self, lease: LeaseGrant
     ) -> bool: ...
 
     async def stop_active(
@@ -124,6 +127,7 @@ class RunLifecyclePort(Protocol):
         plan_version: int,
         interrupt_id: str,
         checkpoint_id: str,
+        lease: LeaseGrant,
     ) -> bool: ...
 
 

@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, AsyncContextManager, Protocol
 
+from domain.leases import LeaseGrant
 from domain.orchestration import (
     CommandReceipt,
     OrchestrationCommand,
@@ -60,6 +61,7 @@ class RootGraphPort(Protocol):
         *,
         session_id: str,
         run_id: str,
+        lease: LeaseGrant,
         user_message: str,
         message_id: str = "",
         run_sequence: int = 1,

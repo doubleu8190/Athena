@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from domain.leases import LeaseGrant
 from .entities import ClaimedMemoryJob, MemoryJobStatus
 
 
@@ -35,10 +36,13 @@ class MemoryJobPort(Protocol):
 class MemoryJobQueue(Protocol):
     """记忆 worker 使用的任务领取和完成能力。"""
 
-    async def recover(self) -> None: ...
-    async def claim_next_job(self) -> ClaimedMemoryJob | None: ...
-    async def mark_succeeded(self, turn_id: str) -> None: ...
-    async def mark_failed(self, turn_id: str, error: str, *, retry: bool) -> None: ...
+    async def claim_next_job(
+        self, *, lease_seconds: float = 60.0
+    ) -> ClaimedMemoryJob | None: ...
+    async def mark_succeeded(self, turn_id: str, *, lease: LeaseGrant) -> None: ...
+    async def mark_failed(
+        self, turn_id: str, error: str, *, retry: bool, lease: LeaseGrant
+    ) -> None: ...
 
 
 __all__ = ["MemoryJobPort", "MemoryJobQueue", "MemoryJobStatusPort"]

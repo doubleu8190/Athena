@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from domain.leases import LeaseCenterPort, LeaseLostError
 
 from application.runs.execution_service import RunExecutionService
 from backend.src.shared.logging import get_logger
 from domain.runs import RunCommand, RunConsumerPort
+from workers.lease_guard import LeaseGuard
 
 logger = get_logger(__name__)
 
@@ -21,6 +23,7 @@ class RunConsumer:
         *,
         poll_interval: float = 0.25,
         lease_seconds: float = 60.0,
+        lease_center: LeaseCenterPort | None = None,
     ) -> None:
         """创建 Run 消费器。
 
@@ -30,6 +33,7 @@ class RunConsumer:
         异常：不主动抛出业务异常。
         """
         self._queue = queue
+        self._leases = lease_center or getattr(queue, "_leases")
         self._execution = execution
         self._poll_interval = poll_interval
         self._lease_seconds = lease_seconds
@@ -59,7 +63,9 @@ class RunConsumer:
         while not self._stop.is_set():
             try:
                 await self._queue.reconcile_expired_execution_leases()
-                invocation = await self._queue.claim_next_run()
+                invocation = await self._queue.claim_next_run(
+                    lease_seconds=self._lease_seconds
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -81,14 +87,16 @@ class RunConsumer:
 
     async def _execute_run(self, invocation: RunCommand) -> None:
         """执行一次 Root 调用并回收租约或完成停止收尾。"""
-        heartbeat: asyncio.Task[None] | None = None
         try:
-            if invocation.run_id and invocation.lease_owner:
-                heartbeat = asyncio.create_task(
-                    self._maintain_execution_lease(invocation),
-                    name=f"athena-run-lease:{invocation.run_id}",
-                )
-            await self._execution.execute(invocation)
+            if invocation.lease is None:
+                raise RuntimeError("root_execution_lease_missing")
+            await LeaseGuard(
+                self._leases,
+                [invocation.lease],
+                lease_seconds=self._lease_seconds,
+            ).run(self._execution.execute(invocation))
+        except LeaseLostError:
+            logger.warning("Root execution lease lost", run_id=invocation.run_id)
         except asyncio.CancelledError:
             if invocation.run_id:
                 await self._execution.fail(
@@ -103,42 +111,10 @@ class RunConsumer:
                 {"code": "run_execution_failed", "message": str(exc) or type(exc).__name__},
             )
         finally:
-            if heartbeat is not None:
-                heartbeat.cancel()
-                await asyncio.gather(heartbeat, return_exceptions=True)
-            if invocation.run_id and invocation.lease_owner:
-                await self._queue.release_execution_lease(
-                    invocation.run_id,
-                    owner=invocation.lease_owner,
-                    generation=invocation.execution_generation,
-                )
-            if invocation.run_id and invocation.lease_owner:
+            if invocation.lease is not None:
+                await self._leases.acknowledge_stopped(invocation.lease)
+            if invocation.run_id:
                 await self._queue.finalize_stop(invocation.run_id)
-
-    async def _maintain_execution_lease(self, invocation: RunCommand) -> None:
-        """定期续期当前调用租约，丢失执行权后中断 Root。"""
-        run_id = invocation.run_id
-        owner = invocation.lease_owner
-        if run_id is None or owner is None:
-            return
-        interval = max(0.1, self._lease_seconds / 3)
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                alive = await self._queue.renew_execution_lease(
-                    run_id,
-                    owner=owner,
-                    generation=invocation.execution_generation,
-                    lease_seconds=self._lease_seconds,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.error("Run execution lease renewal failed", run_id=run_id, exc_info=True)
-                continue
-            if not alive:
-                await self._execution.interrupt(run_id)
-                return
 
 
 __all__ = ["RunConsumer"]

@@ -8,7 +8,9 @@ from typing import Protocol
 class GraphSearchPort(Protocol):
     """按查询文本搜索图索引节点。"""
 
-    async def search_nodes(self, query: str, *, limit: int = 12) -> list[dict[str, object]]: ...
+    async def search_nodes(
+        self, query: str, *, limit: int = 12, after_id: str | None = None
+    ) -> list[dict[str, object]]: ...
 
 
 GraphContextQueryPort = GraphSearchPort

@@ -9,7 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from domain.approval import ApprovalDecision
 from application.orchestration.langgraph.graphs.worker import (
     build_worker_graph,
-    invoke_worker_graph,
+    invoke_worker_graph as _invoke_worker_graph,
 )
 from application.orchestration.langgraph.runtime.worker_executor import (
     LangGraphWorkerExecutor,
@@ -39,8 +39,25 @@ from tests.fakes.worker_runtime import (
     AcceptingWorkerApprovalService,
     NoopGraphThreadLock,
 )
+from tests.fakes.leases import LeaseCenter, lease_context, lease_grant
 from infrastructure.persistence.postgres.models import OrchestrationOutboxModel
 from workers.worker_job_dispatcher import WorkerJobDispatcher
+
+
+async def invoke_worker_graph(graph, *, execution, **kwargs):
+    """Attach a synthetic worker grant to direct graph unit invocations."""
+    execution = dict(execution)
+    execution.setdefault(
+        "lease",
+        lease_context(
+            lease_grant(
+                "worker_execution",
+                str(execution["execution_id"]),
+                fencing_token=int(execution.get("fencing_token", 1)),
+            )
+        ),
+    )
+    return await _invoke_worker_graph(graph, execution=execution, **kwargs)
 
 
 class ToolService:
@@ -207,8 +224,9 @@ async def test_approval_resume_uses_refreshed_worker_lease_fence():
             self.fencing_tokens = []
 
         async def claim(self, _request, *, args_hash):
-            self.fencing_tokens.append(_request.fencing_token)
-            if _request.fencing_token != 8:
+            token = _request.lease.fencing_token
+            self.fencing_tokens.append(token)
+            if token != 8:
                 return ToolOperationClaim(
                     ToolOperationClaimStatus.REJECTED,
                     reason="worker_operation_lease_not_active",
@@ -263,7 +281,7 @@ async def test_approval_resume_uses_refreshed_worker_lease_fence():
 
     assert ledger.fencing_tokens == [8]
     assert len(tools.executed) == 1
-    assert tools.executed[0].fencing_token == 8
+    assert tools.executed[0].lease.fencing_token == 8
     assert finished["status"] == "completed"
 
 
@@ -290,9 +308,8 @@ async def test_worker_approval_request_persists_interrupt_identity_and_notifies(
         session_id="session-1",
         attempt=1,
         worker_thread_id="task:task-1:exec:1",
-        fencing_token=3,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=3),
         cancellation_epoch=0,
-        lease_until=SimpleNamespace(),
         task=Task("task-1", "write", "write a file"),
     )
     request = {
@@ -401,9 +418,8 @@ async def test_worker_approval_request_writes_outbox_in_execution_transaction(
         session_id="session-1",
         attempt=1,
         worker_thread_id="task:task-1:exec:1",
-        fencing_token=3,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=3),
         cancellation_epoch=0,
-        lease_until=SimpleNamespace(),
         task=Task("task-1", "write", "write a file"),
     )
     run = SimpleNamespace(run_id="run-1", session_id="session-1", status="running", cancellation_epoch=0)
@@ -421,7 +437,9 @@ async def test_worker_approval_request_writes_outbox_in_execution_transaction(
         yield session
 
     repository = PostgresWorkerJobRepository(
-        provide_session, clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)
+        provide_session,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+        lease_center=LeaseCenter(),
     )
 
     async def lock_chain(_session, _lease):
@@ -572,6 +590,7 @@ async def test_reclaimed_worker_job_registers_checkpointed_approval_without_rein
         max_concurrency=1,
         approval_service=approvals,
         thread_lock=NoopGraphThreadLock(),
+        lease_center=LeaseCenter(),
     )
     lease = WorkerJobLease(
         job_id="job-1",
@@ -585,9 +604,8 @@ async def test_reclaimed_worker_job_registers_checkpointed_approval_without_rein
         session_id="session-1",
         attempt=1,
         worker_thread_id="task:task-1:exec:1",
-        fencing_token=2,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=2),
         cancellation_epoch=0,
-        lease_until=datetime.now(timezone.utc),
         task=Task("task-1", "write", "write a report"),
     )
 
@@ -640,6 +658,7 @@ async def test_resume_worker_job_resumes_same_checkpoint_and_reports_task_termin
         max_concurrency=1,
         approval_service=AcceptingWorkerApprovalService(),
         thread_lock=NoopGraphThreadLock(),
+        lease_center=LeaseCenter(),
         id_factory=lambda: "terminal-event-1",
         clock=lambda: datetime(2026, 10, 22, tzinfo=timezone.utc),
     )
@@ -663,9 +682,8 @@ async def test_resume_worker_job_resumes_same_checkpoint_and_reports_task_termin
         session_id="session-1",
         attempt=1,
         worker_thread_id="task:task-1:exec:1",
-        fencing_token=4,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=4),
         cancellation_epoch=0,
-        lease_until=datetime(2026, 10, 22, tzinfo=timezone.utc),
         task=Task("task-1", "write", "write a report"),
         job_type="resume_worker",
         approval_id="approval-1",
@@ -739,6 +757,7 @@ async def test_worker_tool_operation_ledger_replays_completed_result_without_ree
         "task": {"task_id": "task-1", "allowed_tools": ["write_file"]},
         "execution_id": "execution-1",
         "fencing_token": 3,
+        "lease": lease_context(lease_grant("worker_execution", "execution-1", fencing_token=3)),
         "cancellation_epoch": 0,
         "execution_generation": 1,
     }
@@ -753,6 +772,7 @@ async def test_worker_tool_operation_ledger_replays_completed_result_without_ree
         **execution,
         "execution_id": "execution-2",
         "fencing_token": 4,
+        "lease": lease_context(lease_grant("worker_execution", "execution-2", fencing_token=4)),
         "execution_generation": 2,
     }
     retry_replay = await executor(
@@ -776,7 +796,7 @@ async def test_worker_tool_operation_ledger_replays_completed_result_without_ree
         == ledger.claimed[2].logical_operation_key
     )
     assert tools.executed[0].operation_key
-    assert tools.executed[0].fencing_token == 3
+    assert tools.executed[0].lease.fencing_token == 3
 
 
 @pytest.mark.asyncio
@@ -822,6 +842,7 @@ async def test_worker_tool_operation_with_unknown_prior_outcome_fails_closed():
             "task": {"task_id": "task-1", "allowed_tools": ["write_file"]},
             "execution_id": "execution-1",
             "fencing_token": 3,
+            "lease": lease_context(lease_grant("worker_execution", "execution-1", fencing_token=3)),
             "cancellation_epoch": 0,
             "execution_generation": 1,
         },

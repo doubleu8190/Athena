@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from domain.leases import LeaseLostError
 from domain.orchestration import TaskEventReceipt, WorkerTaskTerminalEvent, TaskEventRepository
 from ..models import (
     AgentPlanModel,
@@ -29,6 +30,7 @@ from ..models import (
     TaskExecutionResultModel,
     WorkerJobModel,
 )
+from .lease_center import PostgresLeaseCenter
 from .task_execution_results import strict_result_json
 
 
@@ -65,6 +67,7 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
         max_attempts: int = 3,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
         """保存数据库会话工厂和可替换的时间、ID 来源。"""
         if max_attempts < 1:
@@ -73,6 +76,7 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
         self._max_attempts = max_attempts
         self._id_factory = id_factory or (lambda: uuid4().hex)
         self._clock = clock
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
     async def apply_worker_terminal_event(
         self, event: WorkerTaskTerminalEvent
@@ -122,6 +126,13 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
                     rows.job,
                     now,
                 )
+                if rejection is None:
+                    try:
+                        await self._leases.assert_current_in_transaction(
+                            session, event.lease
+                        )
+                    except LeaseLostError:
+                        rejection = "worker_lease_lost"
                 if rejection is not None:
                     receipt = self._rejected_receipt(event, rows.round, rejection)
                     _mark_processed(inbox, receipt, now)
@@ -149,6 +160,10 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
                     retry_scheduled=retry_scheduled,
                     now=now,
                 )
+                if not await self._leases.finish_in_transaction(
+                    session, event.lease
+                ):
+                    raise LeaseLostError(event.lease.key)
                 receipt = TaskEventReceipt(
                     message_id=event.message_id,
                     accepted=True,
@@ -252,8 +267,7 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
             WorkerJobModel,
             (WorkerJobModel.execution_id == event.execution_id)
             & WorkerJobModel.job_type.in_(("execute", "resume_worker"))
-            & (WorkerJobModel.status == "running")
-            & (WorkerJobModel.lease_owner == event.worker_id),
+            & (WorkerJobModel.status == "running"),
         )
         return _TerminalEventRows(
             run, plan, round_row, task, round_task, execution, job
@@ -334,12 +348,8 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
             execution.result_ref = None
             execution.result_json = result_document
         execution.error_json = dict(event.error) if event.error is not None else None
-        execution.lease_owner = None
-        execution.lease_until = None
         execution.updated_at = now
         job.status = "completed"
-        job.lease_owner = None
-        job.lease_until = None
         job.updated_at = now
 
         retry_scheduled = (
@@ -567,7 +577,6 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
                 attempt=attempt,
                 worker_thread_id=worker_thread_id,
                 status="queued",
-                fencing_token=1,
                 cancellation_epoch=event.cancellation_epoch,
                 created_at=now,
                 updated_at=now,
@@ -667,20 +676,6 @@ def _rejection_reason(
         return "execution_not_running"
     if job.status != "running":
         return "worker_job_not_running"
-    if (
-        job.lease_owner != event.worker_id
-        or execution.lease_owner != event.worker_id
-    ):
-        return "worker_lease_owner_mismatch"
-    if (
-        job.lease_until is None
-        or execution.lease_until is None
-        or job.lease_until <= now
-        or execution.lease_until <= now
-    ):
-        return "worker_lease_expired"
-    if execution.fencing_token != event.fencing_token:
-        return "stale_fencing_token"
     if any(
         epoch != event.cancellation_epoch
         for epoch in (
@@ -711,7 +706,6 @@ def _event_document(event: WorkerTaskTerminalEvent) -> dict[str, Any]:
         "round_id": event.round_id,
         "task_id": event.task_id,
         "execution_id": event.execution_id,
-        "fencing_token": event.fencing_token,
         "cancellation_epoch": event.cancellation_epoch,
         "status": event.status.value,
         "result": dict(event.result),

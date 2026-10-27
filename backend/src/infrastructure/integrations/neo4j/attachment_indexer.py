@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from domain.files import Attachment, FileChunk, GraphIndexerPort
+from domain.leases import LeaseGrant
 
 from .resource import Neo4jResource
 
@@ -15,18 +16,18 @@ class OptionalNeo4jFileIndexer(GraphIndexerPort):
         """保存 Neo4j 生命周期资源；资源未启动时跳过索引操作。"""
         self._resource = resource
 
-    async def index_attachment(self, attachment: Attachment, chunks: Sequence[FileChunk]) -> None:
+    async def index_attachment(self, attachment: Attachment, chunks: Sequence[FileChunk], *, lease: LeaseGrant) -> None:
         """将附件及其分块写入已启动的 Neo4j adapter。"""
         if self._resource.adapter is not None:
-            await self._resource.adapter.index_attachment(attachment, chunks)
+            await self._resource.adapter.index_attachment(attachment, chunks, lease=lease)
 
     async def delete_attachment(self, attachment_id: str) -> None:
         """删除附件对应的 Neo4j 派生节点。"""
         if self._resource.adapter is not None:
             await self._resource.adapter.delete_attachment(attachment_id)
 
-    async def index(self, attachment: Attachment, chunks: Sequence[FileChunk]) -> None:
-        return await self.index_attachment(attachment, chunks)
+    async def index(self, attachment: Attachment, chunks: Sequence[FileChunk], *, lease: LeaseGrant) -> None:
+        return await self.index_attachment(attachment, chunks, lease=lease)
 
     async def delete(self, attachment_id: str) -> None:
         return await self.delete_attachment(attachment_id)

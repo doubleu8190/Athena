@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Protocol
+from domain.leases import LeaseGrant
 
 from .entities import ApplicationEvent
 
@@ -11,6 +12,12 @@ from .entities import ApplicationEvent
 class EventPort(Protocol):
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
         """持久化事件并通知当前订阅者。"""
+        ...
+
+    async def publish_with_lease(
+        self, event: ApplicationEvent, *, lease: LeaseGrant
+    ) -> ApplicationEvent:
+        """在持久化事务内验证执行租约后发布事件。"""
         ...
 
     async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:

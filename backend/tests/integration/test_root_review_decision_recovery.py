@@ -22,6 +22,7 @@ from infrastructure.persistence.postgres.models import (
     AgentRunModel,
     AgentTaskModel,
     Base,
+    ExecutionLeaseModel,
     OrchestrationCommandModel,
     OrchestrationOutboxModel,
     PlanRoundModel,
@@ -30,6 +31,7 @@ from infrastructure.persistence.postgres.models import (
 from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationCommandRepository,
 )
+from tests.fakes.leases import acquire_postgres_lease, lease_context
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -76,6 +78,7 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
             schema_created = True
 
         tables = [
+            ExecutionLeaseModel.__table__,
             AgentRunModel.__table__,
             AgentPlanModel.__table__,
             AgentTaskModel.__table__,
@@ -90,6 +93,10 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
                     sync_connection, tables=tables
                 )
             )
+
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
 
         async with session_factory() as session, session.begin():
             session.add(
@@ -231,6 +238,7 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
         )
         state = {
             "request": {"run_id": run_id, "session_id": session_id},
+            "execution_lease": lease_context(root_lease),
             "root_wait": {
                 "type": "round_wait",
                 "run_id": run_id,

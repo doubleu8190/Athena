@@ -6,11 +6,13 @@ import asyncio
 from typing import Any
 
 from domain.events import ApplicationEvent, EventDurability, EventType, EventPort
+from domain.leases import LeaseCenterPort, LeaseLostError
 from domain.orchestration import (
     OrchestrationOutboxLease,
     OrchestrationOutboxRepository,
 )
 from shared.logging import get_logger
+from workers.lease_guard import LeaseGuard
 
 logger = get_logger(__name__)
 
@@ -52,10 +54,12 @@ class OrchestrationOutboxDispatcher:
         worker_id: str,
         lease_seconds: float = 30.0,
         poll_interval: float = 0.5,
+        lease_center: LeaseCenterPort | None = None,
     ) -> None:
         if not worker_id.strip() or lease_seconds <= 0 or poll_interval <= 0:
             raise ValueError("worker identity, lease, and polling must be positive")
         self._outbox = outbox
+        self._leases = lease_center or getattr(outbox, "_leases")
         self._events = events
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
@@ -105,22 +109,50 @@ class OrchestrationOutboxDispatcher:
         if lease is None:
             return False
         try:
-            event = _application_event(lease)
-            await self._events.publish(event)
+            async def publish_and_acknowledge() -> bool:
+                try:
+                    event = _application_event(lease)
+                    await self._events.publish_with_lease(event, lease=lease.lease)
+                except asyncio.CancelledError:
+                    raise
+                except LeaseLostError:
+                    raise
+                except Exception:
+                    delay = min(30.0, 0.5 * (2 ** min(lease.attempt - 1, 6)))
+                    await self._outbox.retry_event(lease, delay_seconds=delay)
+                    logger.error(
+                        "orchestration_outbox_delivery_failed",
+                        message_id=lease.message_id,
+                        attempt=lease.attempt,
+                        exc_info=True,
+                    )
+                    return False
+                return await self._outbox.mark_event_published(lease)
+
+            published = await LeaseGuard(
+                self._leases,
+                [lease.lease],
+                lease_seconds=self._lease_seconds,
+            ).run(publish_and_acknowledge())
+        except LeaseLostError:
+            logger.warning(
+                "orchestration_outbox_lease_lost_during_delivery",
+                message_id=lease.message_id,
+            )
+            await self._leases.acknowledge_stopped(lease.lease)
+            return True
         except asyncio.CancelledError:
             raise
         except Exception:
-            delay = min(30.0, 0.5 * (2 ** min(lease.attempt - 1, 6)))
-            await self._outbox.retry_event(lease, delay_seconds=delay)
             logger.error(
-                "orchestration_outbox_delivery_failed",
+                "orchestration_outbox_delivery_commit_failed",
                 message_id=lease.message_id,
                 attempt=lease.attempt,
                 exc_info=True,
             )
             return True
 
-        if not await self._outbox.mark_event_published(lease):
+        if not published:
             logger.warning(
                 "orchestration_outbox_lease_expired_before_acknowledgement",
                 message_id=lease.message_id,

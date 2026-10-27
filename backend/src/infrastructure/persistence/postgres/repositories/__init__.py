@@ -41,6 +41,7 @@ from .orchestration_outbox_repository import (
     PostgresOrchestrationOutboxRepository,
 )
 from .evaluation_repository import PostgresEvaluationRepository
+from .lease_center import PostgresLeaseCenter
 
 __all__ = [
     "PostgresAttachmentRepository",
@@ -77,4 +78,5 @@ __all__ = [
     "PostgresRootResumeJobRepository",
     "PostgresOrchestrationOutboxRepository",
     "PostgresEvaluationRepository",
+    "PostgresLeaseCenter",
 ]

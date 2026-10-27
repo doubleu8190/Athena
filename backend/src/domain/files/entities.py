@@ -67,6 +67,7 @@ class Attachment:
     created_at: datetime
     updated_at: datetime
     deleted_time: datetime | None = None
+    active_index_revision_id: str | None = None
 
     def to_attachment_reference(self) -> AttachmentRef:
         """生成供消息使用的轻量附件引用。"""
@@ -91,6 +92,7 @@ class FileChunk:
     locator: FileLocator
     metadata: FileMetadata
     native_score: float | None = None
+    index_revision_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,15 +11,25 @@ from langgraph.types import Command
 
 from application.orchestration.langgraph.graphs.root import (
     _wait_for_plan_completion_node,
-    invoke_root_graph,
+    invoke_root_graph as _invoke_root_graph,
 )
+from tests.fakes.leases import lease_grant
 from application.orchestration.langgraph.graphs.state import RootGraphState
 from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
 from domain.orchestration import PlanStatus
+from tests.fakes.leases import LeaseCenter, lease_grant
 from infrastructure.persistence.postgres.repositories.orchestration_repository import (
     PostgresPlanLoader,
 )
 from workers.root_resume_dispatcher import RootResumeDispatcher
+
+
+async def invoke_root_graph(graph, **kwargs):
+    """Attach a synthetic root grant to direct graph unit invocations."""
+    kwargs.setdefault(
+        "lease", lease_grant("root_execution", str(kwargs["run_id"]))
+    )
+    return await _invoke_root_graph(graph, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -72,6 +82,7 @@ async def test_root_wait_node_interrupts_and_rechecks_after_resume():
         dependencies=None,
         checkpointer=Checkpointer(),
         thread_lock=ThreadLock(),
+        lease_center=LeaseCenter(),
     )
     adapter._graph = graph
     identity = {
@@ -224,23 +235,27 @@ async def test_resume_exception_fails_run_instead_of_replaying_checkpoint():
             self.releases = []
 
         async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
-            return 3
+            return lease_grant("root_execution", _run_id, owner_id=owner)
 
         async def release_execution_lease(self, run_id, *, owner, generation):
             self.releases.append((run_id, owner, generation))
             return True
 
     jobs, execution, runs = Jobs(), Execution(), Runs()
-    dispatcher = RootResumeDispatcher(jobs, Graph(), execution, runs, worker_id="resumer")
+    dispatcher = RootResumeDispatcher(
+        jobs, Graph(), execution, runs, worker_id="resumer",
+        lease_center=LeaseCenter(),
+    )
     lease = SimpleNamespace(job_id="job", run_id="run", session_id="session", plan_id="plan",
         round_id="round", plan_version=1, root_wait_generation=1,
-        interrupt_id="interrupt", checkpoint_id="checkpoint")
+        interrupt_id="interrupt", checkpoint_id="checkpoint",
+        lease=lease_grant("root_resume", "job"))
 
     await dispatcher._resume(lease)
 
     assert execution.failures[0][1]["code"] == "root_checkpoint_resume_failed"
     assert jobs.retries == []
-    assert runs.releases[0][2] == 3
+    assert not runs.releases
 
 
 @pytest.mark.asyncio
@@ -280,6 +295,7 @@ async def test_root_resume_dispatcher_retries_until_matching_interrupt_exists():
         Execution(),
         Runs(),
         worker_id="root-resumer-1",
+        lease_center=LeaseCenter(),
     )
     lease = SimpleNamespace(
         job_id="resume-1",
@@ -292,7 +308,7 @@ async def test_root_resume_dispatcher_retries_until_matching_interrupt_exists():
         interrupt_id="interrupt-1",
         checkpoint_id="checkpoint-1",
         worker_id="root-resumer-1",
-        lease_until=datetime.now(timezone.utc),
+        lease=lease_grant("root_resume", "resume-1"),
     )
 
     await dispatcher._resume(lease)
@@ -362,7 +378,7 @@ async def test_root_resume_recovers_checkpoint_identity_before_dispatch():
             self.status = "running"
 
         async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
-            return 4
+            return lease_grant("root_execution", _run_id, owner_id=owner)
 
         async def renew_execution_lease(self, _run_id, **_kwargs):
             return True
@@ -387,6 +403,7 @@ async def test_root_resume_recovers_checkpoint_identity_before_dispatch():
         execution,
         runs,
         worker_id="root-resumer-1",
+        lease_center=LeaseCenter(),
     )
     lease = SimpleNamespace(
         job_id="resume-unarmed",
@@ -399,23 +416,31 @@ async def test_root_resume_recovers_checkpoint_identity_before_dispatch():
         interrupt_id=None,
         checkpoint_id=None,
         worker_id="root-resumer-1",
-        lease_until=datetime.now(timezone.utc),
+        lease=lease_grant("root_resume", "resume-unarmed"),
     )
 
     await dispatcher._resume(lease)
 
-    assert runs.armed == [
-        (
-            "run-1",
-            {
-                "plan_id": "plan-1",
-                "round_id": "round-1",
-                "plan_version": 1,
-                "interrupt_id": "interrupt-recovered",
-                "checkpoint_id": "checkpoint-recovered",
-            },
+    assert len(runs.armed) == 1
+    armed_run_id, armed_identity = runs.armed[0]
+    assert armed_run_id == "run-1"
+    assert {
+        key: armed_identity[key]
+        for key in (
+            "plan_id",
+            "round_id",
+            "plan_version",
+            "interrupt_id",
+            "checkpoint_id",
         )
-    ]
+    } == {
+        "plan_id": "plan-1",
+        "round_id": "round-1",
+        "plan_version": 1,
+        "interrupt_id": "interrupt-recovered",
+        "checkpoint_id": "checkpoint-recovered",
+    }
+    assert armed_identity["lease"].key.resource_id == "run-1"
     assert execution.command.payload.resume_value.interrupt_id == (
         "interrupt-recovered"
     )
@@ -464,7 +489,7 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
         status = "running"
 
         async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
-            return 4
+            return lease_grant("root_execution", _run_id, owner_id=owner)
 
         async def renew_execution_lease(self, _run_id, **_kwargs):
             return True
@@ -483,6 +508,7 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
         execution,
         runs,
         worker_id="root-resumer-1",
+        lease_center=LeaseCenter(),
     )
     lease = SimpleNamespace(
         job_id="resume-1",
@@ -495,7 +521,7 @@ async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
         interrupt_id="interrupt-1",
         checkpoint_id="checkpoint-1",
         worker_id="root-resumer-1",
-        lease_until=datetime.now(timezone.utc),
+        lease=lease_grant("root_resume", "resume-1"),
     )
 
     await dispatcher._resume(lease)

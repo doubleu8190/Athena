@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from domain.leases import LeaseKey, LeaseLostError
 from domain.tools import (
     ToolExecutionRequest,
     ToolExecutionResult,
@@ -26,7 +27,9 @@ from ..models import (
     RoundTaskModel,
     TaskExecutionModel,
     WorkerToolOperationModel,
+    ExecutionLeaseModel,
 )
+from .lease_center import PostgresLeaseCenter
 
 
 class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
@@ -39,8 +42,10 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
         ],
         *,
         clock: Callable[[], datetime] | None = None,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
         self._session_factory = session_factory
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     async def claim(
@@ -58,7 +63,9 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
             or not request.plan_id
             or not request.task_id
             or not request.execution_id
-            or request.fencing_token is None
+            or request.lease is None
+            or request.lease.key.resource_type != "worker_execution"
+            or request.lease.key.resource_id != request.execution_id
             or request.cancellation_epoch is None
         ):
             return ToolOperationClaim(
@@ -136,13 +143,19 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
                     or round_task.status != "running"
                     or execution.task_id != task.task_id
                     or execution.status != "running"
-                    or execution.fencing_token != request.fencing_token
                     or execution.cancellation_epoch != request.cancellation_epoch
                     or run.cancellation_epoch != request.cancellation_epoch
                     or plan.cancellation_epoch != request.cancellation_epoch
-                    or execution.lease_until is None
-                    or _utc(execution.lease_until) <= now
                 ):
+                    return ToolOperationClaim(
+                        ToolOperationClaimStatus.REJECTED,
+                        reason="worker_operation_lease_not_active",
+                    )
+                try:
+                    await self._leases.assert_current_in_transaction(
+                        session, request.lease
+                    )
+                except Exception:
                     return ToolOperationClaim(
                         ToolOperationClaimStatus.REJECTED,
                         reason="worker_operation_lease_not_active",
@@ -246,6 +259,15 @@ class PostgresWorkerToolOperationRepository(WorkerToolOperationLedger):
                 if row.status == "completed":
                     return row.result_json == _result_document(result)
                 if row.status != "executing":
+                    return False
+                if (request.lease is None or not request.execution_id
+                        or request.lease.key != LeaseKey("worker_execution", request.execution_id)):
+                    return False
+                try:
+                    await self._leases.assert_current_in_transaction(
+                        session, request.lease
+                    )
+                except LeaseLostError:
                     return False
                 row.status = "completed"
                 row.result_json = _result_document(result)

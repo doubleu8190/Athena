@@ -17,13 +17,20 @@ from domain.events import (
     EventPort,
 )
 from domain.runs import RunStatus
+from domain.leases import LeaseGrant, LeaseKey
 
 from ..models import (
     AgentEventModel,
     AgentRunModel,
+    OrchestrationOutboxModel,
 )
+from .lease_center import PostgresLeaseCenter
 
 _SUBSCRIBER_QUEUE_SIZE = 256
+_EXECUTION_OUTPUT_EVENTS = frozenset({
+    "message.started", "message.delta", "message.completed", "stream.snapshot",
+    "thinking.started", "thinking.summary", "thinking.completed",
+})
 
 
 def _json(value: Any, default: Any) -> Any:
@@ -107,22 +114,38 @@ class PostgresEventRepository(
         self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     ) -> None:
         self._session_factory = session_factory
+        self._leases = PostgresLeaseCenter(session_factory)
         self._subscribers: dict[str, list[asyncio.Queue[ApplicationEvent]]] = {}
 
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
+        if str(event.event_type) in _EXECUTION_OUTPUT_EVENTS:
+            raise ValueError("execution_event_requires_lease")
+        return await self._publish(event, lease=None)
+
+    async def publish_with_lease(
+        self, event: ApplicationEvent, *, lease: LeaseGrant
+    ) -> ApplicationEvent:
+        """以当前 Root 或 Outbox grant 保护持久事件写入。"""
+        if lease.key.resource_type == "root_execution":
+            if not event.run_id or lease.key != LeaseKey("root_execution", event.run_id):
+                raise ValueError("root_execution_lease_mismatch")
+        elif lease.key.resource_type == "orchestration_outbox":
+            if event.transition_id != f"orchestration-outbox:{lease.key.resource_id}":
+                raise ValueError("orchestration_outbox_lease_mismatch")
+        else:
+            raise ValueError("event_lease_resource_invalid")
+        return await self._publish(event, lease=lease)
+
+    async def _publish(
+        self, event: ApplicationEvent, *, lease: LeaseGrant | None
+    ) -> ApplicationEvent:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
                     event_type = str(event.event_type)
-                    output_start_events = {
-                        "message.started",
-                        "message.delta",
-                        "stream.snapshot",
-                        "thinking.started",
-                        "thinking.summary",
-                        "thinking.completed",
-                    }
-                    if event_type in output_start_events or event_type == "message.completed":
+                    run = None
+                    output_start_events = _EXECUTION_OUTPUT_EVENTS - {"message.completed"}
+                    if event_type in _EXECUTION_OUTPUT_EVENTS:
                         run = await session.scalar(
                             select(AgentRunModel)
                             .where(AgentRunModel.run_id == event.run_id)
@@ -140,6 +163,28 @@ class PostgresEventRepository(
                         ):
                             raise ValueError("answer_stream_run_not_running")
 
+                    if lease is not None:
+                        if lease.key.resource_type == "orchestration_outbox":
+                            if run is None:
+                                run = await session.get(
+                                    AgentRunModel, event.run_id, with_for_update=True
+                                )
+                            if run is None or run.session_id != event.session_id:
+                                raise ValueError("orchestration_outbox_session_mismatch")
+                            outbox = await session.get(
+                                OrchestrationOutboxModel, lease.key.resource_id,
+                                with_for_update=True,
+                            )
+                            if (outbox is None or outbox.status != "pending"
+                                    or outbox.correlation_id != event.run_id):
+                                raise ValueError("orchestration_outbox_event_mismatch")
+                        await session.scalar(
+                            select(func.pg_advisory_xact_lock(
+                                func.hashtextextended(event.session_id, 0)
+                            ))
+                        )
+                        await self._leases.assert_current_in_transaction(session, lease)
+
                     existing = await self._get_transition_event(session, event)
                     if existing is not None:
                         value = _event_from_model(existing)
@@ -147,13 +192,12 @@ class PostgresEventRepository(
                     else:
                         # MAX(session_seq) + 1 必须按会话串行化；否则并发发布
                         # 会同时读取相同最大值，并争用同一个主键。
-                        await session.scalar(
-                            select(
-                                func.pg_advisory_xact_lock(
+                        if lease is None:
+                            await session.scalar(
+                                select(func.pg_advisory_xact_lock(
                                     func.hashtextextended(event.session_id, 0)
-                                )
+                                ))
                             )
-                        )
                         max_seq = (
                             await session.scalar(
                                 select(func.max(AgentEventModel.session_seq)).where(
@@ -183,6 +227,8 @@ class PostgresEventRepository(
                         if value.transition_id is not None:
                             await session.flush()
         except IntegrityError:
+            if lease is not None:
+                raise
             if event.transition_id is None:
                 raise
             async with self._session_factory() as session:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from uuid import uuid4
+import asyncio
 
 from domain.files import (
     Attachment,
@@ -16,6 +18,7 @@ from domain.files import (
     ParsedDocument,
     VectorIndexerPort,
 )
+from domain.leases import LeaseCenterPort, LeaseGrant, LeaseKey
 
 
 class IngestionService:
@@ -31,6 +34,7 @@ class IngestionService:
         *,
         chunker: Callable[[str], list[FileChunk]],
         clock: Callable[[], datetime] | None = None,
+        lease_center: LeaseCenterPort | None = None,
     ) -> None:
         self._attachments = attachments
         self._chunks = chunks
@@ -39,45 +43,50 @@ class IngestionService:
         self._graph_indexer = graph_indexer
         self._chunker = chunker
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._leases = lease_center or getattr(chunks, "_leases")
 
-    async def process_attachment(self, attachment_id: str) -> dict[str, int | str]:
+    async def process_attachment(
+        self, attachment_id: str, *, lease: LeaseGrant
+    ) -> dict[str, object]:
+        if lease.key != LeaseKey("document_ingestion", attachment_id):
+            raise ValueError("document_ingestion_lease_mismatch")
+        await self._leases.assert_current(lease)
         attachment = await self._attachments.get(attachment_id)
         if attachment is None:
             raise LookupError(attachment_id)
-        processing = self._with_status(attachment, AttachmentStatus.PROCESSING)
-        await self._attachments.save(processing)
-        try:
-            parsed = await self._parser.parse(processing)
-            values = self._chunker(parsed.text)
-            values = [
-                __import__("dataclasses").replace(value, attachment_id=attachment_id)
-                for value in values
-            ]
-            await self._chunks.replace_for_attachment(attachment_id, values)
-            await self._vector_indexer.index_attachment(processing, values)
-            if self._graph_indexer is not None:
-                await self._graph_indexer.index_attachment(processing, values)
-            ready = self._with_status(
-                processing,
-                AttachmentStatus.READY,
-                metadata=parsed.metadata,
-                adapter_name=parsed.adapter_name or processing.adapter_name,
-                adapter_version=parsed.adapter_version or processing.adapter_version,
-                capabilities=parsed.capabilities or processing.capabilities,
+        if attachment.status is AttachmentStatus.DELETED:
+            raise LookupError("attachment_deleted")
+        parsed = await self._parser.parse(attachment)
+        revision_id = str(uuid4())
+        parsed_chunks = await asyncio.to_thread(self._chunker, parsed.text)
+        from dataclasses import replace
+
+        values = [
+            replace(
+                value,
+                id=str(uuid4()),
+                attachment_id=attachment_id,
+                index_revision_id=revision_id,
             )
-            await self._attachments.save(ready)
-            return {"attachment_id": attachment_id, "chunks": len(values), "status": ready.status.value}
-        except Exception as exc:
-            failed = self._with_status(processing, AttachmentStatus.FAILED, error_message=str(exc))
-            await self._attachments.save(failed)
-            raise
+            for value in parsed_chunks
+        ]
+        await self._chunks.replace_for_attachment(attachment_id, values, lease=lease)
+        await self._vector_indexer.index_attachment(attachment, values, lease=lease)
+        if self._graph_indexer is not None:
+            await self._leases.assert_current(lease)
+            await self._graph_indexer.index_attachment(attachment, values, lease=lease)
+        return {
+            "attachment_id": attachment_id,
+            "chunks": len(values),
+            "status": AttachmentStatus.READY.value,
+            "index_revision_id": revision_id,
+            "_parsed_metadata": parsed.metadata.values,
+            "_adapter_name": parsed.adapter_name or attachment.adapter_name,
+            "_adapter_version": parsed.adapter_version or attachment.adapter_version,
+            "_capabilities": list(parsed.capabilities or attachment.capabilities),
+        }
 
     async def delete_indexes(self, attachment_id: str) -> None:
         await self._vector_indexer.delete_attachment(attachment_id)
         if self._graph_indexer is not None:
             await self._graph_indexer.delete_attachment(attachment_id)
-
-    def _with_status(self, value: Attachment, status: AttachmentStatus, **changes) -> Attachment:
-        from dataclasses import replace
-
-        return replace(value, status=status, updated_at=self._clock(), **changes)

@@ -29,6 +29,7 @@ from infrastructure.persistence.postgres.models import (
     AgentTaskModel,
     ApprovalRecordModel,
     Base,
+    ExecutionLeaseModel,
     IdempotencyReceiptModel,
     OrchestrationCommandModel,
     OrchestrationInboxModel,
@@ -57,6 +58,7 @@ from infrastructure.persistence.postgres.repositories.run_repository import (
 from infrastructure.persistence.postgres.repositories.worker_job_repository import (
     PostgresWorkerJobRepository,
 )
+from tests.fakes.leases import acquire_postgres_lease
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -92,6 +94,8 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentEventModel.__table__,
@@ -153,12 +157,16 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
             Task(task_id=task_id, title=task_id, objective=f"Complete {task_id}")
             for task_id in plan.task_ids
         ]
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
         command = OrchestrationCommand(
             message_id=f"submit:{run_id}",
             command_type=OrchestrationCommandType.SUBMIT_PLAN,
             idempotency_key=f"submit:{run_id}",
             correlation_id=run_id,
             occurred_at=now,
+            lease=root_lease,
             plan_id=plan_id,
             scope_key=run_id,
             plan_version=1,
@@ -361,6 +369,8 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentEventModel.__table__,
@@ -419,12 +429,16 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
             session_id=session_id,
             run_id=run_id,
         )
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
         command = OrchestrationCommand(
             message_id=f"submit:{run_id}",
             command_type=OrchestrationCommandType.SUBMIT_PLAN,
             idempotency_key=f"submit:{run_id}",
             correlation_id=run_id,
             occurred_at=now,
+            lease=root_lease,
             plan_id=plan_id,
             scope_key=run_id,
             plan_version=1,
@@ -455,7 +469,7 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
             round_id=submitted.round_id,
             task_id="task-only",
             execution_id=lease.execution_id,
-            fencing_token=lease.fencing_token,
+            lease=lease.lease,
             cancellation_epoch=lease.cancellation_epoch,
             status=TaskStatus.COMPLETED,
             result={"answer": "completed"},
@@ -541,6 +555,8 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
             schema_created = True
 
         tables = [
+
+            ExecutionLeaseModel.__table__,
             ProjectModel.__table__,
             SessionModel.__table__,
             AgentEventModel.__table__,
@@ -604,6 +620,9 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
             session_id=session_id,
             run_id=run_id,
         )
+        root_lease = await acquire_postgres_lease(
+            session_factory, "root_execution", run_id
+        )
         submitted = await command_repository.submit_plan(
             OrchestrationCommand(
                 message_id=f"submit:{run_id}",
@@ -611,6 +630,7 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
                 idempotency_key=f"submit:{run_id}",
                 correlation_id=run_id,
                 occurred_at=now,
+                lease=root_lease,
                 plan_id=plan_id,
                 scope_key=run_id,
                 plan_version=1,
@@ -667,7 +687,7 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
                 round_id=submitted.round_id,
                 task_id=task_id,
                 execution_id=lease.execution_id,
-                fencing_token=lease.fencing_token,
+                lease=lease.lease,
                 cancellation_epoch=lease.cancellation_epoch,
                 status=TaskStatus.COMPLETED,
                 result={"answer": f"{task_id} complete"},

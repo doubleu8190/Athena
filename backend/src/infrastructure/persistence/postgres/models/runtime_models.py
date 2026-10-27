@@ -65,9 +65,6 @@ class AgentRunModel(Base):
         String, default="none"
     )
     display_cutoff_session_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    execution_generation: Mapped[int] = mapped_column(Integer, default=0)
-    execution_lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
-    execution_lease_until: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
 

@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from shared.logging import get_logger
+from domain.leases import LeaseGrant
+from application.orchestration.lease_context import lease_grant_from_context
 from domain.orchestration import (
     CommandReceipt,
     OrchestrationCommand,
@@ -212,7 +214,7 @@ async def _load_or_create_review_decision(
 
 
 def _review_command(
-    identity: _ReviewIdentity, decision: ReviewDecision
+    identity: _ReviewIdentity, decision: ReviewDecision, lease: LeaseGrant
 ) -> OrchestrationCommand:
     """将审查动作绑定到唯一 Round 和幂等键。"""
     command_type = {
@@ -229,6 +231,7 @@ def _review_command(
         plan_id=identity.plan_id,
         scope_key=identity.run_id,
         payload={"action": decision.action.value, "reason": decision.reason},
+        lease=lease,
         plan_version=identity.plan_version,
         round_id=identity.round_id,
         causation_id=identity.interrupt_id,
@@ -278,6 +281,7 @@ async def _apply_review_decision_with_fallback(
     context: ReviewContext | None,
     request: Mapping[str, Any],
     worker_tools: tuple[RootWorkerTool, ...],
+    lease: LeaseGrant,
 ) -> tuple[ReviewDecision, CommandReceipt]:
     """应用审查动作，并对阻塞的 Continue 执行一次有界恢复。
     Args:
@@ -300,7 +304,7 @@ async def _apply_review_decision_with_fallback(
         _validate_review_tools(decision, available_tools)
     try:
         receipt = await handler.apply_review_decision(
-            _review_command(identity, decision), decision
+            _review_command(identity, decision, lease), decision
         )
         return decision, receipt
     except PlanCommandRejected as error:
@@ -335,7 +339,7 @@ async def _apply_review_decision_with_fallback(
         )
     try:
         receipt = await handler.apply_review_decision(
-            _review_command(identity, replacement), replacement
+            _review_command(identity, replacement, lease), replacement
         )
     except PlanCommandRejected as error:
         if error.code != "BLOCKED_DEPENDENCIES":
@@ -346,7 +350,7 @@ async def _apply_review_decision_with_fallback(
             final_status="failed",
         )
         receipt = await handler.apply_review_decision(
-            _review_command(identity, replacement), replacement
+            _review_command(identity, replacement, lease), replacement
         )
     return replacement, receipt
 
@@ -1313,6 +1317,7 @@ class RootWorkflow(RootWorkflowPort):
             raise RuntimeError("root_orchestration_command_handler_not_configured")
         if not run_id:
             raise ValueError("run_id is required for SubmitPlan")
+        lease = lease_grant_from_context({"lease": state.get("execution_lease")})
         command = OrchestrationCommand(
             message_id=f"root-submit-plan:{run_id}",
             command_type=OrchestrationCommandType.SUBMIT_PLAN,
@@ -1323,6 +1328,7 @@ class RootWorkflow(RootWorkflowPort):
             scope_key=run_id,
             plan_version=1,
             payload={"source": "root_agent"},
+            lease=lease,
         )
         # Plan、Round、Worker Job 和 Outbox 仍由原命令处理器在同一事务提交。
         await deps.orchestration_command_handler.submit_plan(
@@ -1392,7 +1398,13 @@ class RootWorkflow(RootWorkflowPort):
             deps, identity, request, state
         )
         decision, receipt = await _apply_review_decision_with_fallback(
-            deps, identity, decision, context, request, worker_tools
+            deps,
+            identity,
+            decision,
+            context,
+            request,
+            worker_tools,
+            lease_grant_from_context({"lease": state.get("execution_lease")}),
         )
         return {
             "review_action": decision.action.value,
@@ -1441,6 +1453,9 @@ class RootWorkflow(RootWorkflowPort):
             AnswerGenerationInput(
                 session_id=request.session_id,
                 run_id=request.run_id,
+                execution_lease=lease_grant_from_context(
+                    {"lease": state.get("execution_lease")}
+                ),
                 message_id=request.message_id,
                 kind=answer_input.kind,
                 instructions=answer_input.instructions,

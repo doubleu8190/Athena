@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
+from domain.leases import LeaseGrant, LeaseKey
 
 from domain.memory import (
     MemoryCandidateSnapshot,
@@ -26,6 +27,7 @@ from shared.contracts.memory import (
 )
 
 from ..models import MemoryExtractionSnapshotModel, MemoryWriteOperationModel
+from .lease_center import PostgresLeaseCenter
 
 
 def _now() -> str:
@@ -41,9 +43,12 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
         session_factory: Callable[
             [], AbstractAsyncContextManager[AsyncSession]
         ],
+        *,
+        lease_center: PostgresLeaseCenter | None = None,
     ) -> None:
         """保存数据库会话工厂。"""
         self._session_factory = session_factory
+        self._leases = lease_center or PostgresLeaseCenter(session_factory)
 
     async def get_extraction_snapshot(
         self, turn_id: str
@@ -58,9 +63,11 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
         )
 
     async def save_extraction_snapshot(
-        self, snapshot: MemoryFactExtractionSnapshot
+        self, snapshot: MemoryFactExtractionSnapshot, *, lease: LeaseGrant
     ) -> MemoryFactExtractionSnapshot:
         """以 turn_id 首写胜出方式保存提取结果并返回最终快照。"""
+        if lease.key != LeaseKey("memory_processing", snapshot.turn_id):
+            raise ValueError("memory_processing_lease_mismatch")
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(
@@ -72,11 +79,14 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                     )
                     .on_conflict_do_nothing(index_elements=["turn_id"])
                 )
-                row = await session.get(
-                    MemoryExtractionSnapshotModel, snapshot.turn_id
+                row = await session.scalar(
+                    select(MemoryExtractionSnapshotModel)
+                    .where(MemoryExtractionSnapshotModel.turn_id == snapshot.turn_id)
+                    .with_for_update()
                 )
                 if row is None:
                     raise RuntimeError("memory_extraction_snapshot_not_saved")
+                await self._leases.assert_current_in_transaction(session, lease)
                 return memory_schema_to_domain(
                     MemoryFactExtractionSnapshotSchema.model_validate_json(
                         row.snapshot_json
@@ -84,9 +94,12 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 )
 
     async def begin_operation(
-        self, operation_id: str, turn_id: str, candidate: MemoryCandidateSnapshot
+        self, operation_id: str, turn_id: str, candidate: MemoryCandidateSnapshot,
+        *, lease: LeaseGrant,
     ) -> MemoryWriteOperation:
         """创建或读取同一候选的写入回执。"""
+        if lease.key != LeaseKey("memory_processing", turn_id):
+            raise ValueError("memory_processing_lease_mismatch")
         candidate_json = memory_domain_to_schema(candidate).model_dump_json()
         async with self._session_factory() as session:
             async with session.begin():
@@ -103,9 +116,14 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                     )
                     .on_conflict_do_nothing(index_elements=["operation_id"])
                 )
-                row = await session.get(MemoryWriteOperationModel, operation_id)
+                row = await session.scalar(
+                    select(MemoryWriteOperationModel)
+                    .where(MemoryWriteOperationModel.operation_id == operation_id)
+                    .with_for_update()
+                )
                 if row is None:
                     raise RuntimeError("memory_write_operation_not_saved")
+                await self._leases.assert_current_in_transaction(session, lease)
                 stored_candidate = memory_schema_to_domain(
                     MemoryCandidateSnapshotSchema.model_validate_json(
                         row.candidate_json
@@ -123,6 +141,7 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
         decision: MemoryResolutionProposal,
         result_memory_id: str | None,
         projection_status: str,
+        lease: LeaseGrant,
     ) -> MemoryWriteOperation:
         """记录候选决策与结果；已完成回执不被重试覆盖。"""
         if status not in {"applied", "ignored", "deferred", "rejected", "skipped"}:
@@ -138,6 +157,9 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 )
                 if row is None:
                     raise ValueError("memory_write_operation_not_found")
+                if lease.key != LeaseKey("memory_processing", row.turn_id):
+                    raise ValueError("memory_processing_lease_mismatch")
+                await self._leases.assert_current_in_transaction(session, lease)
                 candidate = memory_schema_to_domain(
                     MemoryCandidateSnapshotSchema.model_validate_json(
                         row.candidate_json
@@ -155,7 +177,8 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 return self._operation(row, candidate)
 
     async def record_decision(
-        self, operation_id: str, decision: MemoryResolutionProposal
+        self, operation_id: str, decision: MemoryResolutionProposal,
+        *, lease: LeaseGrant,
     ) -> MemoryWriteOperation:
         """在产生记忆副作用前保存已经校验的决策。"""
         decision_json = memory_domain_to_schema(decision).model_dump_json()
@@ -168,6 +191,9 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 )
                 if row is None:
                     raise ValueError("memory_write_operation_not_found")
+                if lease.key != LeaseKey("memory_processing", row.turn_id):
+                    raise ValueError("memory_processing_lease_mismatch")
+                await self._leases.assert_current_in_transaction(session, lease)
                 if row.status == "pending":
                     if row.decision_json not in {None, decision_json}:
                         raise ValueError("memory_write_operation_decision_changed")
@@ -180,7 +206,9 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 )
                 return self._operation(row, candidate)
 
-    async def clear_pending_decision(self, operation_id: str) -> None:
+    async def clear_pending_decision(
+        self, operation_id: str, *, lease: LeaseGrant
+    ) -> None:
         """清除因目标版本并发变化而失效的待提交决策。"""
         async with self._session_factory() as session:
             async with session.begin():
@@ -191,27 +219,36 @@ class PostgresMemoryOperationsRepository(MemoryOperationsPort):
                 )
                 if row is None:
                     raise ValueError("memory_write_operation_not_found")
+                if lease.key != LeaseKey("memory_processing", row.turn_id):
+                    raise ValueError("memory_processing_lease_mismatch")
+                await self._leases.assert_current_in_transaction(session, lease)
                 if row.status == "pending":
                     row.decision_json = None
                     row.updated_at = _now()
 
-    async def skip_pending_turn(self, turn_id: str) -> int:
+    async def skip_pending_turn(self, turn_id: str, *, lease: LeaseGrant) -> int:
         """将设置关闭时尚未提交的操作终结为 skipped。"""
+        if lease.key != LeaseKey("memory_processing", turn_id):
+            raise ValueError("memory_processing_lease_mismatch")
         async with self._session_factory() as session:
             async with session.begin():
-                result = await session.execute(
-                    update(MemoryWriteOperationModel)
-                    .where(
-                        MemoryWriteOperationModel.turn_id == turn_id,
-                        MemoryWriteOperationModel.status == "pending",
+                rows = (
+                    await session.scalars(
+                        select(MemoryWriteOperationModel)
+                        .where(
+                            MemoryWriteOperationModel.turn_id == turn_id,
+                            MemoryWriteOperationModel.status == "pending",
+                        )
+                        .order_by(MemoryWriteOperationModel.operation_id)
+                        .with_for_update()
                     )
-                    .values(
-                        status="skipped",
-                        projection_status="not_required",
-                        updated_at=_now(),
-                    )
-                )
-        return int(result.rowcount or 0)
+                ).all()
+                await self._leases.assert_current_in_transaction(session, lease)
+                for row in rows:
+                    row.status = "skipped"
+                    row.projection_status = "not_required"
+                    row.updated_at = _now()
+                return len(rows)
 
     @staticmethod
     def _operation(

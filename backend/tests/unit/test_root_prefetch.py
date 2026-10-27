@@ -6,13 +6,14 @@ import asyncio
 import json
 
 import pytest
+from tests.fakes.leases import lease_grant
 from pydantic import ValidationError
 from domain.memory import MemoryRecord
 
 from application.orchestration import RootWorkflow
 from application.orchestration.answer_generation import AnswerGenerationInput, AnswerGenerationService
 from application.orchestration.root_decision import AnswerIntent, ContextRequest, RootMessage
-from application.orchestration.langgraph import invoke_root_graph
+from tests.unit.test_root_graph import invoke_root_graph
 from application.runs.context import (
     ContextAcquisitionService, ContextItem, ContextQueryOutcome,
     MemoryQuery, ProviderResult,
@@ -246,6 +247,7 @@ def test_answer_model_receives_failure_summary_within_existing_input_budget() ->
     service = AnswerGenerationService(TokenCounter(), _Events(), prompt="按事实回答", input_budget_tokens=4000)
     inputs = AnswerGenerationInput(
         session_id="s", run_id="r", message_id="m", kind="clarification", instructions="说明暂时无法确认",
+        execution_lease=lease_grant("root_execution", "r"),
         messages=(RootMessage(role="user", content="我喜欢什么水果？"),),
         context_queries=(ContextQueryOutcome(stage="prefetch", query=MemoryQuery(provider="memory", query="水果"), status="timeout", result_count=0),),
     )

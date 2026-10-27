@@ -7,6 +7,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from domain.leases import LeaseGrant
+
 
 class WorkerExecutionEntryType(StrEnum):
     """Worker 执行轨迹中的记录种类。"""
@@ -90,6 +92,7 @@ class WorkerExecutionMessageAppend:
     task_id: str
     execution_id: str
     execution_generation: int
+    lease: LeaseGrant
     invocation_id: str
     entry_type: WorkerExecutionEntryType
     role: WorkerLLMRole | None
@@ -101,6 +104,11 @@ class WorkerExecutionMessageAppend:
 
     def __post_init__(self) -> None:
         """验证执行身份与记录种类的角色约束。"""
+        if (
+            self.lease.key.resource_type != "worker_execution"
+            or self.lease.key.resource_id != self.execution_id
+        ):
+            raise ValueError("worker_message_lease_identity_mismatch")
         identity_values = (
             self.message_id,
             self.session_id,

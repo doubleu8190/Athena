@@ -12,6 +12,7 @@ from tests.fakes.worker_runtime import (
     AcceptingWorkerApprovalService,
     NoopGraphThreadLock,
 )
+from tests.fakes.leases import LeaseCenter, lease_grant
 
 
 @pytest.mark.asyncio
@@ -71,9 +72,8 @@ async def test_dispatcher_stop_cancels_inflight_graph_without_waiting_for_task_t
         session_id="session-1",
         attempt=1,
         worker_thread_id="task:task-1:exec:1",
-        fencing_token=1,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=1),
         cancellation_epoch=0,
-        lease_until=datetime.now(timezone.utc),
         task=Task("task-1", "long task", "keep working", timeout_seconds=3600),
     )
     jobs = Jobs()
@@ -88,6 +88,7 @@ async def test_dispatcher_stop_cancels_inflight_graph_without_waiting_for_task_t
         poll_interval=0.01,
         approval_service=AcceptingWorkerApprovalService(),
         thread_lock=NoopGraphThreadLock(),
+        lease_center=LeaseCenter(),
     )
 
     await dispatcher.start()
@@ -141,9 +142,8 @@ async def test_dispatcher_holds_thread_lock_for_graph_invocation():
         session_id="session-1",
         attempt=1,
         worker_thread_id="task:task-1:exec:1",
-        fencing_token=1,
+        lease=lease_grant("worker_execution", "execution-1", fencing_token=1),
         cancellation_epoch=0,
-        lease_until=datetime.now(timezone.utc),
         task=Task("task-1", "locked task", "verify exclusive invocation"),
     )
     lock = Lock()
@@ -156,6 +156,7 @@ async def test_dispatcher_holds_thread_lock_for_graph_invocation():
         max_concurrency=1,
         approval_service=AcceptingWorkerApprovalService(),
         thread_lock=lock,
+        lease_center=LeaseCenter(),
     )
     execution = TaskExecution(
         plan_id=lease.plan_id,
@@ -165,7 +166,7 @@ async def test_dispatcher_holds_thread_lock_for_graph_invocation():
         execution_generation=lease.attempt,
         execution_id=lease.execution_id,
         worker_thread_id=lease.worker_thread_id,
-        fencing_token=lease.fencing_token,
+        lease=lease.lease,
         cancellation_epoch=lease.cancellation_epoch,
     )
 

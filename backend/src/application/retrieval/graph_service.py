@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, Callable
 
 from domain.retrieval import GraphContextQueryPort
 from domain.retrieval.trace_contracts import (
@@ -28,10 +28,12 @@ class GraphContextProvider(ContextProvider):
         *,
         limit: int = 12,
         timeout_seconds: float = 5.0,
+        active_revision_filter: Callable[[list[dict[str, object]]], Any] | None = None,
     ) -> None:
         self._query_port = query_port
         self._limit = limit
         self._timeout_seconds = timeout_seconds
+        self._active_revision_filter = active_revision_filter
 
     async def retrieve_context(
         self,
@@ -47,7 +49,24 @@ class GraphContextProvider(ContextProvider):
         limit = min(self._limit, plan.max_items)
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                rows = await self._query_port.search_nodes(query, limit=limit)
+                rows: list[dict[str, object]] = []
+                cursor: str | None = None
+                batch_size = max(32, limit)
+                while len(rows) < limit:
+                    batch = await self._query_port.search_nodes(
+                        query, limit=batch_size, after_id=cursor
+                    )
+                    if not batch:
+                        break
+                    eligible = (
+                        await self._active_revision_filter(batch)
+                        if self._active_revision_filter is not None else batch
+                    )
+                    rows.extend(eligible[:limit - len(rows)])
+                    next_cursor = str(batch[-1].get("id") or "")
+                    if len(batch) < batch_size or not next_cursor or next_cursor == cursor:
+                        break
+                    cursor = next_cursor
             traces: list[RetrievalCandidateTrace] = []
             items: list[ContextItem] = []
             for rank, row in enumerate(rows, 1):

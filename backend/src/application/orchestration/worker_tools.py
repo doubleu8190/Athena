@@ -12,6 +12,7 @@ from typing import Any, Literal, cast
 
 from application.common.responses import ToolResponse
 from application.tools.service import ToolService
+from application.orchestration.lease_context import lease_grant_from_context
 
 from backend.src.application.orchestration.root_decision import RootWorkerTool
 from domain.tools import (
@@ -315,11 +316,7 @@ class WorkerToolExecutor:
             operation_key=operation_key,
             logical_operation_key=logical_operation_key,
             execution_id=str(execution.get("execution_id", "")) or None,
-            fencing_token=(
-                int(execution["fencing_token"])
-                if execution.get("fencing_token") is not None
-                else None
-            ),
+            lease=lease_grant_from_context(execution),
             cancellation_epoch=(
                 int(execution["cancellation_epoch"])
                 if execution.get("cancellation_epoch") is not None

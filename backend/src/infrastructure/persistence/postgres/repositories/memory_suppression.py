@@ -13,7 +13,6 @@ from domain.memory.suppression import (
 )
 
 from ..models import (
-    MemoryJobScopeSnapshotModel,
     ProjectModel,
     MemorySourceSuppressionModel,
     SessionModel,
@@ -111,47 +110,24 @@ async def ensure_writable_run_scope(
     session_id: str,
     turn_id: str,
     now: str,
-) -> tuple[bool, str | None]:
-    """Freeze a Run's first project binding and enforce all forget markers.
+) -> bool:
+    """Resolve the immutable session project and enforce all forget markers.
 
-    Callers serialize binding updates with a row lock on the parent session.
     The project advisory lock is always acquired before the turn lock, matching
     the project-forget transaction's lock order.
     """
-    snapshot = await session.get(MemoryJobScopeSnapshotModel, turn_id)
-    if snapshot is not None:
-        project_id = snapshot.project_id
-    else:
-        project_id = await session.scalar(
-            select(SessionModel.project_id).where(
-                SessionModel.id == session_id,
-                SessionModel.deleted_time.is_(None),
-            )
-        )
-
+    project_id = await session.scalar(
+        select(SessionModel.project_id).where(SessionModel.id == session_id)
+    )
+    if project_id is None:
+        await record_project_turn_suppression(session, turn_id, now=now)
+        return False
     if not await project_scope_is_writable(session, project_id):
         await record_project_turn_suppression(session, turn_id, now=now)
-        return False, None
+        return False
     if not await project_turn_is_writable(session, turn_id):
-        return False, None
-
-    if snapshot is None:
-        await session.execute(
-            pg_insert(MemoryJobScopeSnapshotModel)
-            .values(
-                turn_id=turn_id,
-                session_id=session_id,
-                project_id=project_id,
-                created_at=now,
-            )
-            .on_conflict_do_nothing(index_elements=["turn_id"])
-        )
-        snapshot = await session.get(
-            MemoryJobScopeSnapshotModel, turn_id, populate_existing=True
-        )
-        if snapshot is not None:
-            project_id = snapshot.project_id
-    return True, project_id
+        return False
+    return True
 
 
 __all__ = [

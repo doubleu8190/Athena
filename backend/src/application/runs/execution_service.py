@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from time import perf_counter
+from domain.leases import LeaseGrant
 
 from application.runs.ports import RunExecutorPort
 from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
@@ -54,7 +55,11 @@ class RunExecutionService:
     async def _execute_run(
         self, invocation: RunCommand, run_id: str
     ) -> dict[str, object] | None:
-        if not await self._lifecycle.update_status(run_id, RunStatus.RUNNING):
+        if invocation.lease is None:
+            raise RuntimeError("root_execution_lease_missing")
+        if not await self._lifecycle.update_status(
+            run_id, RunStatus.RUNNING, lease=invocation.lease
+        ):
             return None
         if run_id not in self._run_started:
             self._run_started[run_id] = (datetime.now(timezone.utc), perf_counter())
@@ -86,7 +91,7 @@ class RunExecutionService:
             return None
 
         if outcome.root_wait is not None:
-            await self._arm_root_wait(run_id, outcome.root_wait)
+            await self._arm_root_wait(run_id, outcome.root_wait, invocation.lease)
             await self._publish(
                 invocation,
                 EventType.RUN_ROOT_SUSPENDED,
@@ -98,11 +103,9 @@ class RunExecutionService:
             return None
 
         result = outcome.result or {}
-        lease = (
-            {"owner": invocation.lease_owner, "generation": invocation.execution_generation}
-            if invocation.lease_owner is not None else {}
-        )
-        if not await self._lifecycle.complete(run_id, result, **lease):
+        if invocation.lease is None:
+            raise RuntimeError("root_execution_lease_missing")
+        if not await self._lifecycle.complete(run_id, result, lease=invocation.lease):
             current = await self._run_query.get(run_id) if self._run_query else None
             status = current.status if current is not None else "unknown"
             if status == RunStatus.STOPPING.value:
@@ -124,7 +127,7 @@ class RunExecutionService:
         return result
 
     async def _arm_root_wait(
-        self, run_id: str, root_wait: RootWaitCheckpoint
+        self, run_id: str, root_wait: RootWaitCheckpoint, lease: LeaseGrant
     ) -> None:
         if root_wait.run_id != run_id:
             raise ValueError("root_wait_run_identity_mismatch")
@@ -135,6 +138,7 @@ class RunExecutionService:
             plan_version=root_wait.plan_version,
             interrupt_id=root_wait.interrupt_id,
             checkpoint_id=root_wait.checkpoint_id,
+            lease=lease,
         ):
             raise RuntimeError("root_wait_checkpoint_not_armed")
 
@@ -142,11 +146,11 @@ class RunExecutionService:
         run_id = invocation.run_id
         if run_id is None:
             return
-        lease = (
-            {"owner": invocation.lease_owner, "generation": invocation.execution_generation}
-            if invocation.lease_owner is not None else {}
+        if invocation.lease is None:
+            raise RuntimeError("root_execution_lease_missing")
+        changed = await self._lifecycle.fail(
+            run_id, error, lease=invocation.lease
         )
-        changed = await self._lifecycle.fail(run_id, error, **lease)
         if changed and not self._lifecycle.writes_terminal_artifacts_to_outbox:
             await self._publish(
                 invocation,

@@ -35,6 +35,7 @@ from application.memory.ports import (
     MemoryWriteTrigger,
 )
 from shared.contracts.memory import memory_domain_to_schema
+from domain.leases import LeaseGrant
 
 
 class MemoryWriteWorkflow:
@@ -71,23 +72,27 @@ class MemoryWriteWorkflow:
         self._episode_summarizer = episode_summarizer
         self._episodes = episodes
 
-    async def process_completed_turn(self, turn: CompletedTurn) -> int:
+    async def process_completed_turn(
+        self, turn: CompletedTurn, *, lease: LeaseGrant
+    ) -> int:
         """顺序提交事实候选并保存可追溯任务回顾。
 
         参数：turn 是已完成轮次及可选的冻结执行证据。
         返回：本次新建或修订的事实记忆数量；episode 单独持久化，不计入该数量。
         异常：提取、决策、并发复核或 episode 保存失败时向上传播。
         """
+        if lease.key.resource_type != "memory_processing" or lease.key.resource_id != turn.turn_id:
+            raise ValueError("memory_processing_lease_mismatch")
         if not await self._generation_enabled(turn.session_id):
             if self._operations is not None:
-                await self._operations.skip_pending_turn(turn.turn_id)
+                await self._operations.skip_pending_turn(turn.turn_id, lease=lease)
             return 0
         if not self._trigger.should_process(turn):
             return 0
-        candidates = await self._extractor.extract(turn)
+        candidates = await self._extractor.extract(turn, lease=lease)
         if not await self._generation_enabled(turn.session_id):
             if self._operations is not None:
-                await self._operations.skip_pending_turn(turn.turn_id)
+                await self._operations.skip_pending_turn(turn.turn_id, lease=lease)
             return 0
         written = 0
         for candidate in candidates:
@@ -96,7 +101,7 @@ class MemoryWriteWorkflow:
             saved_decision: MemoryResolutionProposal | None = None
             if self._operations is not None:
                 operation = await self._operations.begin_operation(
-                    operation_id, turn.turn_id, candidate_snapshot
+                    operation_id, turn.turn_id, candidate_snapshot, lease=lease
                 )
                 if operation.status != "pending":
                     continue
@@ -117,6 +122,7 @@ class MemoryWriteWorkflow:
                         ),
                         result_memory_id=None,
                         projection_status="not_required",
+                        lease=lease,
                     )
                 continue
 
@@ -128,7 +134,7 @@ class MemoryWriteWorkflow:
                 decision = _decision_contract(resolution)
                 if self._operations is not None:
                     operation = await self._operations.record_decision(
-                        operation_id, decision
+                        operation_id, decision, lease=lease
                     )
                     if operation.decision is None:
                         raise RuntimeError("memory_write_decision_not_saved")
@@ -145,6 +151,7 @@ class MemoryWriteWorkflow:
                         decision=decision,
                         result_memory_id=None,
                         projection_status="not_required",
+                        lease=lease,
                     )
                 continue
             try:
@@ -152,12 +159,13 @@ class MemoryWriteWorkflow:
                     resolution,
                     turn=turn,
                     operation_id=operation_id,
+                    lease=lease,
                 )
             except MemorySuppressedError:
                 status, memory_id, projection_status = "skipped", None, "not_required"
             except MemoryStateChangedError:
                 if self._operations is not None:
-                    await self._operations.clear_pending_decision(operation_id)
+                    await self._operations.clear_pending_decision(operation_id, lease=lease)
                 raise
             if self._operations is not None:
                 await self._operations.complete_operation(
@@ -166,13 +174,14 @@ class MemoryWriteWorkflow:
                     decision=decision,
                     result_memory_id=memory_id,
                     projection_status=projection_status,
+                    lease=lease,
                 )
             if status == "applied":
                 written += 1
-        await self._write_episode(turn)
+        await self._write_episode(turn, lease=lease)
         return written
 
-    async def _write_episode(self, turn: CompletedTurn) -> None:
+    async def _write_episode(self, turn: CompletedTurn, *, lease: LeaseGrant) -> None:
         """仅用冻结 Run 证据创建同轮唯一的任务回顾。
 
         参数：turn 是记忆作业领取时恢复的完成轮次。
@@ -194,8 +203,8 @@ class MemoryWriteWorkflow:
                 raise ValueError("memory_episode_source_fingerprint_conflict")
             episode = existing
         else:
-            project_id = turn.project_id if turn.project_binding_frozen else None
-            if not turn.project_binding_frozen and self._settings is not None:
+            project_id = turn.project_id
+            if project_id is None and self._settings is not None:
                 project_id = (await self._settings.get(turn.session_id)).project_id
 
             proposal = await self._episode_summarizer.summarize(turn)
@@ -230,12 +239,12 @@ class MemoryWriteWorkflow:
                 source_fingerprint=evidence.source_fingerprint,
                 created_at=turn.completed_at.astimezone(timezone.utc).isoformat(),
             )
-            episode = await self._episodes.create_if_absent(proposed_episode)
+            episode = await self._episodes.create_if_absent(proposed_episode, lease=lease)
             if episode is None:
                 return
-        await self._write_reusable_learnings(episode)
+        await self._write_reusable_learnings(episode, lease=lease)
 
-    async def _write_reusable_learnings(self, episode: MemoryEpisode) -> None:
+    async def _write_reusable_learnings(self, episode: MemoryEpisode, *, lease: LeaseGrant) -> None:
         """Persist evidence-linked reusable procedures through idempotent write receipts."""
         for learning in episode.summary.reusable_learnings:
             content = f"procedure: {learning.strip()}"
@@ -258,7 +267,7 @@ class MemoryWriteWorkflow:
             saved_decision = decision
             if self._operations is not None:
                 operation = await self._operations.begin_operation(
-                    operation_id, episode.turn_id, candidate
+                    operation_id, episode.turn_id, candidate, lease=lease
                 )
                 if operation.status != "pending":
                     continue
@@ -286,12 +295,13 @@ class MemoryWriteWorkflow:
                 ],
             }
             try:
-                memory_id = await self._memory.create_memory(
+                memory_id = await self._memory.create_memory_from_worker(
                     MemoryWriteCommand(
                         content=candidate.content,
                         metadata=metadata,
                         operation_key=operation_id,
-                    )
+                    ),
+                    lease=lease,
                 )
             except MemorySuppressedError:
                 if self._operations is not None:
@@ -301,9 +311,10 @@ class MemoryWriteWorkflow:
                         decision=saved_decision,
                         result_memory_id=None,
                         projection_status="not_required",
+                        lease=lease,
                     )
                 continue
-            indexed = await self._index(memory_id, candidate.content)
+            indexed = await self._index(memory_id, candidate.content, lease=lease)
             projection_status = (
                 "not_required"
                 if self._vector_index is None
@@ -316,6 +327,7 @@ class MemoryWriteWorkflow:
                     decision=saved_decision,
                     result_memory_id=memory_id,
                     projection_status=projection_status,
+                    lease=lease,
                 )
 
     async def _generation_enabled(self, session_id: str) -> bool:
@@ -330,6 +342,7 @@ class MemoryWriteWorkflow:
         *,
         turn: CompletedTurn,
         operation_id: str,
+        lease: LeaseGrant,
     ) -> tuple[str, str | None, str]:
         """提交单条决策，随后建立关系并更新检索投影。"""
         candidate = resolution.candidate
@@ -348,27 +361,29 @@ class MemoryWriteWorkflow:
         ).model_dump(mode="json", exclude_none=True)
 
         if resolution.action is ResolutionAction.CREATE:
-            memory_id = await self._memory.create_memory(
+            memory_id = await self._memory.create_memory_from_worker(
                 MemoryWriteCommand(
                     content=candidate.content,
                     metadata=metadata,
                     operation_key=operation_id,
                     expected_memory_ids=resolution.expected_memory_ids,
-                )
+                ),
+                lease=lease,
             )
         elif resolution.action is ResolutionAction.REVISE:
             if not resolution.target_memory_id:
                 raise ValueError("memory_revision_target_required")
-            memory_id = await self._memory.revise(
+            memory_id = await self._memory.revise_from_worker(
                 resolution.target_memory_id,
                 resolution.final_content or candidate.content,
                 metadata=metadata,
                 operation_key=operation_id,
                 expected_memory_ids=resolution.expected_memory_ids,
+                lease=lease,
             )
             if memory_id is None:
                 if self._operations is not None:
-                    await self._operations.clear_pending_decision(operation_id)
+                    await self._operations.clear_pending_decision(operation_id, lease=lease)
                 raise RuntimeError("memory_revision_target_changed")
         elif resolution.action is ResolutionAction.IGNORE:
             if resolution.target_memory_id is None:
@@ -382,13 +397,14 @@ class MemoryWriteWorkflow:
         if resolution.relation is not None:
             if resolution.target_memory_id is None:
                 raise ValueError("memory_relation_target_required")
-            await self._memory.add_relation(
+            await self._memory.add_relation_from_worker(
                 memory_id,
                 resolution.target_memory_id,
                 resolution.relation,
                 operation_id=operation_id,
+                lease=lease,
             )
-        indexed = await self._index(memory_id, candidate.content)
+        indexed = await self._index(memory_id, candidate.content, lease=lease)
         projection_status = (
             "not_required"
             if self._vector_index is None
@@ -396,12 +412,12 @@ class MemoryWriteWorkflow:
         )
         return "applied", memory_id, projection_status
 
-    async def _index(self, memory_id: str, content: str) -> bool:
+    async def _index(self, memory_id: str, content: str, *, lease: LeaseGrant) -> bool:
         """构建向量投影；失败会留在写入回执中以便修复。"""
         if self._vector_index is None:
             return True
         try:
-            await self._vector_index.index(memory_id, content)
+            await self._vector_index.index(memory_id, content, lease=lease)
         except Exception:
             return False
         return True

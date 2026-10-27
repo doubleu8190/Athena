@@ -15,6 +15,7 @@ from domain.orchestration import (
     ReviewAction,
     ReviewDecision,
 )
+from tests.fakes.leases import lease_grant
 
 
 class ReviewCommandRepository:
@@ -46,6 +47,7 @@ def command(command_type: OrchestrationCommandType) -> OrchestrationCommand:
         scope_key="run-1",
         plan_version=4,
         round_id="round-1",
+        lease=lease_grant("root_execution", "run-1"),
     )
 
 
@@ -73,6 +75,7 @@ def submission():
         plan_id=plan.plan_id,
         scope_key="run-1",
         plan_version=1,
+        lease=lease_grant("root_execution", "run-1"),
     )
     return submit_command, plan, [task]
 

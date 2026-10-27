@@ -22,7 +22,6 @@ from infrastructure.persistence.postgres.models import (
     Base,
     IdempotencyReceiptModel,
     MessageModel,
-    MemoryJobScopeSnapshotModel,
     MemorySourceSuppressionModel,
     ProjectModel,
     SessionModel,
@@ -54,7 +53,6 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         AgentRunModel.__table__,
         AgentEventModel.__table__,
         IdempotencyReceiptModel.__table__,
-        MemoryJobScopeSnapshotModel.__table__,
         MemorySourceSuppressionModel.__table__,
     ]
     created = False
@@ -112,8 +110,10 @@ async def test_concurrent_first_message_retries_reuse_one_session_and_run(
     assert saved.title == "整理记忆系统"
     async with session_factory() as session:
         for model in (
-            SessionModel, MessageModel, AgentRunModel, IdempotencyReceiptModel,
-            MemoryJobScopeSnapshotModel,
+            SessionModel,
+            MessageModel,
+            AgentRunModel,
+            IdempotencyReceiptModel,
         ):
             assert await session.scalar(select(func.count()).select_from(model)) == 1
 
@@ -153,7 +153,9 @@ async def test_rejected_first_run_rolls_back_the_new_session(
 
     async with session_factory() as session:
         for model in (
-            SessionModel, MessageModel, AgentRunModel, IdempotencyReceiptModel,
-            MemoryJobScopeSnapshotModel,
+            SessionModel,
+            MessageModel,
+            AgentRunModel,
+            IdempotencyReceiptModel,
         ):
             assert await session.scalar(select(func.count()).select_from(model)) == 0

@@ -13,6 +13,7 @@ from application.orchestration.agents.llm_activity import (
     invoke_llm_with_activity,
 )
 from application.orchestration.worker_tools import worker_tool_manifest
+from application.orchestration.lease_context import lease_grant_from_context
 from application.tools.service import ToolService
 
 from domain.events.ports import EventPort
@@ -235,6 +236,7 @@ def _transcript_message(
         task_id=_task_id(execution),
         execution_id=str(execution.get("execution_id", "")),
         execution_generation=int(execution.get("execution_generation", 0)),
+        lease=lease_grant_from_context(execution),
         invocation_id=invocation_id,
         entry_type=entry_type,
         role=role,

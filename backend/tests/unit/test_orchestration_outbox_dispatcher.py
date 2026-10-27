@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from domain.orchestration import OrchestrationOutboxLease
+from tests.fakes.leases import LeaseCenter, lease_grant
 from workers.orchestration_outbox_dispatcher import OrchestrationOutboxDispatcher
 
 
@@ -33,7 +34,7 @@ def lease(
         payload=payload
         or {"cancellation_epoch": 4, "external_effect_status": "unknown"},
         attempt=attempt,
-        lease_until=NOW,
+        lease=lease_grant("orchestration_outbox", "message-1"),
     )
 
 
@@ -67,13 +68,16 @@ class Events:
         self.values.append(event)
         return event
 
+    async def publish_with_lease(self, event, *, lease):
+        return await self.publish(event)
+
 
 @pytest.mark.asyncio
 async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
     outbox = Outbox(lease())
     events = Events()
     dispatcher = OrchestrationOutboxDispatcher(
-        outbox, events, worker_id="dispatcher-1"
+        outbox, events, worker_id="dispatcher-1", lease_center=LeaseCenter()
     )
 
     assert await dispatcher.dispatch_once() is True
@@ -225,7 +229,7 @@ async def test_dispatcher_maps_durable_plan_and_round_events(
     outbox = Outbox(lease(event_type=event_type, payload=payload))
     events = Events()
     dispatcher = OrchestrationOutboxDispatcher(
-        outbox, events, worker_id="dispatcher-1"
+        outbox, events, worker_id="dispatcher-1", lease_center=LeaseCenter()
     )
 
     assert await dispatcher.dispatch_once() is True
@@ -245,7 +249,7 @@ async def test_dispatcher_retries_failed_event_with_bounded_backoff():
     outbox = Outbox(lease(attempt=3, event_type="PlanCancelling"))
     events = Events(error=RuntimeError("event store unavailable"))
     dispatcher = OrchestrationOutboxDispatcher(
-        outbox, events, worker_id="dispatcher-1"
+        outbox, events, worker_id="dispatcher-1", lease_center=LeaseCenter()
     )
 
     assert await dispatcher.dispatch_once() is True
@@ -256,7 +260,7 @@ async def test_dispatcher_retries_failed_event_with_bounded_backoff():
 @pytest.mark.asyncio
 async def test_dispatcher_returns_false_when_outbox_is_empty():
     dispatcher = OrchestrationOutboxDispatcher(
-        Outbox(None), Events(), worker_id="dispatcher-1"
+        Outbox(None), Events(), worker_id="dispatcher-1", lease_center=LeaseCenter()
     )
 
     assert await dispatcher.dispatch_once() is False

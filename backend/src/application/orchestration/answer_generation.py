@@ -17,6 +17,7 @@ from application.runs.context.contracts import ContextItem, ContextQueryOutcome
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.events.ports import EventPort
 from domain.integrations import LLMPort, LLMStreamEnd, LLMTextDelta
+from domain.leases import LeaseGrant, LeaseLostError
 from shared import get_logger
 from .root_decision import RootMessage
 
@@ -29,6 +30,7 @@ class AnswerGenerationInput(BaseModel):
 
     session_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
+    execution_lease: LeaseGrant
     message_id: str = Field(min_length=1)
     kind: Literal["final", "clarification"]
     instructions: str = Field(min_length=1)
@@ -238,7 +240,7 @@ class AnswerGenerationService:
             )
         except asyncio.CancelledError:
             raise
-        except AnswerGenerationError:
+        except (AnswerGenerationError, LeaseLostError):
             raise
         except Exception as error:
             raise AnswerGenerationError("answer_generation_failed", str(error)) from error
@@ -345,7 +347,7 @@ class AnswerGenerationService:
         payload: dict[str, Any],
     ) -> None:
         """发布必须成功持久化的正文事件。"""
-        await self._events.publish(
+        await self._events.publish_with_lease(
             ApplicationEvent(
                 event_type=event_type,
                 durability=EventDurability.DURABLE,
@@ -358,7 +360,8 @@ class AnswerGenerationService:
                 is_complete=False,
                 transition_id=transition_id,
                 payload=payload,
-            )
+            ),
+            lease=inputs.execution_lease,
         )
 
 

@@ -20,10 +20,12 @@ from application.orchestration.langgraph.graphs.state import RootGraphState
 from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
 from infrastructure.persistence.postgres.checkpointer import PostgresCheckpointer
 from infrastructure.persistence.postgres.graph_thread_lock import PostgresGraphThreadLock
+from infrastructure.persistence.postgres.repositories.lease_center import PostgresLeaseCenter
 from infrastructure.persistence.postgres.models import (
     AgentPlanModel,
     AgentRunModel,
     Base,
+    ExecutionLeaseModel,
     PlanRoundModel,
     PlanVersionModel,
     ProjectModel,
@@ -100,6 +102,7 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                 lambda sync_connection: Base.metadata.create_all(
                     sync_connection,
                     tables=[
+                        ExecutionLeaseModel.__table__,
                         ProjectModel.__table__,
                         SessionModel.__table__,
                         AgentRunModel.__table__,
@@ -242,6 +245,7 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
             dependencies=None,
             checkpointer=restarted_checkpointer,
             thread_lock=PostgresGraphThreadLock(checkpoint_connection_string),
+            lease_center=PostgresLeaseCenter(session_factory),
         )
         root_graph._graph = compiled_graph
         root_jobs = PostgresRootResumeJobRepository(session_factory, clock=lambda: now)
@@ -263,6 +267,7 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                     session_id=session_id,
                     run_id=run_id,
                     user_message="",
+                    lease=command.lease,
                     resume_value=RoundCompletedResumeValueSchema.from_domain(
                         command.payload.resume_value
                     ).model_dump(mode="json"),

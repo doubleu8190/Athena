@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from backend.src.application.orchestration.protocols import WorkerWorkflowPort
+from application.orchestration.lease_context import lease_grant_from_context
 from domain.orchestration import (
     WorkerExecutionEntryType,
     WorkerExecutionMessageAppend,
@@ -398,6 +399,7 @@ class WorkerWorkflow(WorkerWorkflowPort):
                     task_id=task_id,
                     execution_id=execution_id,
                     execution_generation=generation,
+                    lease=lease_grant_from_context(execution),
                     invocation_id=invocation_id,
                     entry_type=WorkerExecutionEntryType.TOOL_RESULT,
                     role=None,

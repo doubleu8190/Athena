@@ -13,7 +13,7 @@
 | 项目绑定单独存于 `session_memory_project_bindings` | `infrastructure/persistence/postgres/models/memory_models.py` | 项目升级为聊天容器后，应收敛为一处归属来源 |
 | 发送回调启动 HTTP 请求后立即返回布尔值 | `App.tsx` 的 `sendEvent`、`Chat.tsx` 的 `handleSend` | UI 会在 HTTP 请求失败前清空输入，草稿流程不能沿用这个成功判定 |
 | 附件上传和附件类型查询都需要已有的会话 ID | `Chat.tsx`、`interfaces/http/controllers/files_controller.py` | 草稿聊天必须先获得会话 ID，才能上传附件 |
-| 用户消息在请求准备阶段落库，随后发布 `message.persisted` | `application/runs/request_preparation.py` | 自动命名应以这个实际落库边界为起点 |
+| 用户消息在请求准备阶段落库，随后发布 `message.persisted` | `application/runs/request_preparation.py` | 标题从首次提交的文本同步确定，不再依赖消息落库后的后台任务 |
 | 记忆任务已有项目范围快照及遗忘抑制机制 | `memory_suppression.py`、`memory_job_repository.py` | 改造须保留旧任务不能向已删除项目重新写入的保证 |
 
 现有手动改名、聊天历史、附件处理、Root/Worker 执行和会话 SSE 均继续作为本次改造的基础。
@@ -25,11 +25,11 @@
 3. `Session.project_id` 是会话当前归属的唯一来源，创建后不可修改；首期不提供跨项目移动聊天。
 4. `SessionMemorySettings` 只控制 `use_memories` 和 `generate_memories`；读取记忆范围由会话所属项目推导。
 5. 点击新聊天先进入草稿；首次发送或上传附件时创建持久会话。
-6. 自动标题依据第一条成功持久化的用户消息生成一次；手动标题始终优先。
+6. 首次发送时按用户文本确定会话标题；手动改名始终优先。
 7. 项目支持创建、重命名、删除；聊天沿用重命名和删除，并按项目展示。
 8. 本期不扩展项目文件共享、项目专属工具、多人权限、聊天全文搜索或跨项目移动。
 
-沿用本项目开发阶段直接调整目标结构的约定，不安排旧 API 兼容和历史数据迁移。本文不执行数据库变更；实施切换时须根据当时的开发数据状态应用目标结构，不能把 `create_all` 当成已有字段的修改工具。
+沿用本项目开发阶段直接调整目标结构的约定，不安排旧 API 兼容和历史数据迁移。移除已有数据库字段时须重建本地开发数据库；`create_all` 只补建缺失对象，不会移除旧列或旧表。
 
 ## 3. 用户界面
 
@@ -68,23 +68,23 @@
 ```mermaid
 flowchart LR
     P[选择或创建项目] --> D[新聊天草稿]
-    D -->|首次发送或上传附件| C[幂等创建会话]
-    C -->|失败| D
-    C -->|成功并固定 session_id| S[持久会话]
-    S --> U[上传附件或提交消息]
-    U -->|请求失败| R[保留文本和附件并允许重试]
-    U -->|请求接受| M[等待消息落库和执行事件]
-    M --> T[首条消息触发后台命名]
+    D -->|首次发送| U[POST /api/runs，session_id 为空]
+    D -->|先上传附件| C[幂等创建会话]
+    U -->|同一事务创建会话并入队命令| S[持久会话]
+    C --> S
+    S -->|上传附件或后续发送| M[继续使用已有会话]
+    U -->|请求失败| R[保留文本并允许使用同一命令 ID 重试]
+    M -->|请求接受| E[等待消息落库和执行事件]
 ```
 
-`ensureSession(draft_id)` 负责创建草稿对应的会话：
+普通文字聊天不预先调用会话创建接口。首次发送时，`POST /api/runs` 接收 `session_id: null`、`project_id` 和稳定的 `command_id`；后端在同一事务中创建会话并入队首条运行，响应返回实际 `session_id`。相同命令 ID 的并发请求会串行化并复用已创建会话。HTTP 接受后，前端把草稿切换为返回的持久会话；失败时保留文本和原命令身份供重试。
 
-- 同一草稿的发送、粘贴上传和文件选择共享一个创建中的 Promise。
-- 会话创建使用稳定的幂等键；网络超时重试返回相同会话。
-- 创建成功后立即固定会话 ID，后续提交失败仍重试该会话，不能再次创建。
-- 进入持久会话时保留原草稿文本和附件；不能让现有会话切换 effect 清空它们。
+`ensureSession(draft_id)` 仅用于附件先上传的流程，因为上传接口需要会话 ID：
+
+- 同一草稿的上传共享一个创建中的 Promise，并使用稳定的创建请求 ID。
+- 会话创建成功后固定会话 ID，之后的附件上传或消息发送都使用该会话。
 - 上传过程中切换聊天，响应只更新原会话的附件，不污染当前会话。
-- 上传附件已构成持久操作，因此可能出现“只有附件、尚无消息”的聊天；此时保留“新聊天”标题，用户可以手动删除。
+- 上传附件已构成持久操作，因此可能出现“只有附件、尚无消息”的聊天；会话标题取附件名，用户可以手动删除。
 
 当前支持附件类型的查询需要会话 ID。新增与会话无关的类型查询接口供草稿使用，复用原有类型来源；文件类型仍由上传服务最终校验。上传文件前调用 `ensureSession`。
 
@@ -97,7 +97,7 @@ flowchart LR
 - 项目存在非终态 Run 或未结束的启动命令时返回 `409 project_busy`，提示先停止运行，再删除；本期不增加自动停止后级联删除的流程。
 - 项目删除事务需要锁定项目，并与创建聊天、提交 Run 使用相同的并发校验边界，防止检查后又出现新的运行。
 - 项目有效性检查必须进入实际创建会话、启动命令入队的事务；仅在 Controller 提前查询一次不足以防止删除竞争。实施时统一项目锁、会话锁和既有遗忘锁的获取顺序，并覆盖相反执行次序的并发用例。
-- 项目与聊天采用逻辑删除，保留现有恢复/引用需要的行；项目遗忘抑制标记和旧作业清理继续生效，后台命名也必须停止写入。
+- 项目与聊天采用逻辑删除，保留现有恢复/引用需要的行；项目遗忘抑制标记和旧作业清理继续生效。
 - 删除后保留同名新建能力，新建项目获得新的 ID，旧队列不会写入新项目。
 - 当前“遗忘项目空间”会删除空间，不能直接作为一个普通分组删除按钮使用；它的记忆清理逻辑应纳入上述项目删除用例。首期不额外提供“清空记忆后继续沿用同一项目 ID”的操作。
 
@@ -110,8 +110,6 @@ flowchart LR
 | `projects` | `id, name, created_at, updated_at, deleted_time` | 统一项目目录，由现有 `MemoryProjectSpace` 提升而来，替换其原表 |
 | `sessions` | 新增必填 `project_id` 外键 | 一段聊天只属于一个项目，物理删除使用 RESTRICT |
 | `sessions` | 新增 `creation_request_id` 唯一键 | 草稿会话创建在超时重试时保持幂等 |
-| `sessions` | 新增 `title_source` | `placeholder / fallback / generated / manual`，区分命名来源 |
-| `sessions` | 新增 `title_revision`，初始为 0 | 防止自动生成、手动改名和旧事件互相覆盖 |
 | `sessions` | 新增 `last_activity_at` | 将消息活动排序与元数据修改分开 |
 | `session_memory_settings` | 保留两个布尔开关 | 不再持久化或返回可编辑的项目归属 |
 | `session_memory_project_bindings` | 移除 | 归属集中到 `sessions.project_id` |
@@ -124,61 +122,37 @@ flowchart LR
 
 记忆事实的 `scope_kind/scope_id`、任务回顾项目快照和 Run 记忆作业项目快照继续保留。它们记录事实和证据产生时的范围；所有项目外键统一引用 `projects.id`。新增会话归属不会将个人/global 记忆自动变成项目记忆。
 
-### 4.2 自动标题任务
+### 4.2 会话标题
 
-新增一张小型持久任务表 `session_title_jobs`，每个会话最多一条任务：
+标题是会话创建时写入的普通字段，不新增标题来源、revision、任务表或后台 Worker。新聊天首次发送时，后端根据这次请求的用户文本提取标题；先上传附件的流程使用附件文件名生成标题。创建完成后标题保持稳定，用户可通过现有改名接口手动修改。
 
-| 字段 | 用途 |
-| --- | --- |
-| `session_id` 主键、`source_message_id` | 固定本次命名依据的第一条用户消息，正文从消息表读取 |
-| `expected_title_revision` | 任务仅能替换它开始时对应的回退标题 |
-| `status` | `queued / running / completed / failed / cancelled` |
-| `attempt, available_at, lease_expires_at` | 有界重试、崩溃恢复和任务租约；attempt 同时作为旧领取者提交校验条件 |
-| `created_at, updated_at, error_code` | 运行诊断，错误字段只保存受控错误码 |
-
-使用独立任务的原因是：标题生成需要异步调用 LLM、进程重启后继续处理，而且不受 `generate_memories` 开关影响。复用现有 PostgreSQL 任务领取模式，不引入消息中间件或通用任务平台。
-
-## 5. 自动命名流程
+## 5. 首次命名流程
 
 ### 5.1 触发和事务
 
-1. 创建会话时标题为“新聊天”，来源为 `placeholder`。
-2. 第一条用户消息保存时，在同一事务中锁定会话、写入消息、保存回退标题，并插入该会话唯一的标题任务。
-3. 重复处理同一消息或后续消息不再创建任务。并发消息以数据库首次成功提交的用户消息为准。
-4. 用户已手动命名时直接保留标题，不创建命名任务。
-5. 回退标题更新与任务入队必须原子提交。不能在消息保存后仅启动一个无持久记录的后台协程。
+1. 草稿首次发送时，前端向 `POST /api/runs` 提交空 `session_id`、目标 `project_id`、消息和稳定的 `command_id`。
+2. 后端从首条用户文本提取标题，并在命令事务中创建 Session、校验项目仍可写、写入运行命令和 Run。任一校验或入队失败，整个事务回滚，不留下空会话。
+3. 相同 `command_id` 的请求先通过 PostgreSQL advisory lock 串行化；重试直接返回已存在命令的 `session_id`，不会再创建会话。
+4. 已有会话继续走同一 `POST /api/runs` 请求，只需传现有 `session_id`。
+5. 附件必须先上传时，前端仍以稳定的草稿 ID 调用会话创建接口，标题使用附件文件名；随后普通消息请求传入该会话 ID。
 
-实施落点为消息持久化端口及其 PostgreSQL 仓储，`RunRequestPreparationService.prepare` 调用该端口。事务不调用 LLM；正常消息处理不等待标题生成。
-
-### 5.2 生成规则和失败回退
-
-- 使用第一条用户消息中的真实文本，保留任务对象和目标，去掉“请帮我”等泛化开头。
-- 中文建议 8–20 字，英文建议 3–10 个词；自动标题最终上限为 48 个 Unicode 字符。
-- 输入限定为首条文本的前 2,000 字符及其附件文件名，不加载整个历史、其他项目记忆或附件正文。
-- 附件发送若使用系统补充的通用文本，标题依据附件文件名，例如“分析架构设计.pdf”；不能把通用补全文本当作用户意图。
-- 无法概括时回退到首句前 32 个字符；没有可用文本则使用附件名，均无内容才保持“新聊天”。
-- 通过现有配置的 LLM Provider 生成结构化结果；不增加用户必须配置的第二套模型入口。
-- 每次生成超时 8 秒，最多调用 3 次，失败后分别等待 5 秒、30 秒再尝试；最终失败保留回退标题，不影响聊天 Run。
-- 超时覆盖 Provider 自身重试，标题 Worker 的生命周期停止须取消在途调用；这组限制不修改正常聊天请求的超时策略。
-- 提示词要求仅生成标题；输出去除外围引号、换行并检查长度，空结果或无效结构视为本次失败。
+标题规则是确定性的轻量文本处理，不调用 LLM：压缩空白，去掉“请帮我”“麻烦”等常见开头，取第一句并截断到 48 个字符。系统补充的“请处理附件”统一标题为“附件分析”。首条用户文本为空时使用“新聊天”。
 
 示例：
 
-| 首次输入 | 建议标题 |
+| 首次输入 | 规则提取的标题 |
 | --- | --- |
-| 请参考 Codex，重新设计现在的记忆系统 | 记忆系统重新设计 |
-| PostgreSQL 启动后查询一直超时，帮我排查 | 排查 PostgreSQL 查询超时 |
-| 对比 Raft 日志复制和快照恢复流程 | Raft 复制与快照恢复对比 |
+| 请参考 Codex，重新设计现在的记忆系统 | 参考 Codex，重新设计现在的记忆系统 |
+| PostgreSQL 启动后查询一直超时，帮我排查 | PostgreSQL 启动后查询一直超时，帮我排查 |
+| 对比 Raft 日志复制和快照恢复流程 | 对比 Raft 日志复制和快照恢复流程 |
 | 仅上传 `部署方案.pdf` | 分析部署方案.pdf |
 
-### 5.3 并发、重启和手动命名
+### 5.2 并发、失败和手动命名
 
-- Worker 领取任务时使用行锁和租约，过期任务可以重新领取；旧领取者须匹配当前 attempt 才能提交。
-- 提交自动标题使用条件更新：会话及项目有效、来源仍为 `fallback`、revision 等于任务预期值。成功后来源变为 `generated`，revision 加一。
-- 手动改名始终只更新标题相关列，来源改为 `manual`、revision 加一，并取消未完成任务。
-- 其他业务保存会话状态时不得回写旧标题。需调整当前 `SessionRepository.save` 的整对象更新方式，分离改名和运行状态更新。
-- 删除会话或项目后，排队任务取消；正在调用 LLM 的任务提交时再次校验有效性。
-- 生成一次后不根据后续消息反复改名，首期不提供重新生成按钮。
+- 会话创建、项目可写校验和首条命令入队在同一数据库事务中；事务失败不会留下半成品。
+- 命令 ID 锁让相同请求的并发重试返回同一个会话。前端在收到接受响应前保留输入，并沿用原命令 ID 重试。
+- 首条消息标题只在创建 Session 时确定；后续消息不会自动改名。
+- 手动改名使用现有 `PATCH /api/sessions/{id}`，不需要 revision 竞争控制或取消标题任务。
 
 ## 6. HTTP 与事件契约
 
@@ -190,41 +164,23 @@ flowchart LR
 | `POST /api/projects` | 请求 `{name}`，返回统一 Project |
 | `PATCH /api/projects/{id}` | 请求 `{name}`，只修改项目名称 |
 | `DELETE /api/projects/{id}` | 执行第 3.3 节的完整项目删除语义 |
-| `POST /api/sessions` | 请求 `{project_id}`，要求 `Idempotency-Key`；创建“新聊天”并返回 Session |
+| `POST /api/sessions` | 请求 `{project_id, title?}`，要求稳定的 `Idempotency-Key`；供附件上传前持久化草稿会话 |
+| `POST /api/runs` | 请求 `{session_id, project_id?, message, command_id, message_id?, attachment_ids}`；session_id 为空时在命令事务中创建会话，返回最终 `session_id` |
 | `GET /api/sessions?project_id=...` | 按项目查询未删除聊天；省略参数时供现有管理页面查询全部 |
-| `GET /api/sessions/{id}` | 返回带项目归属和标题元数据的 Session |
+| `GET /api/sessions/{id}` | 返回带项目归属的 Session |
 | `PATCH /api/sessions/{id}` | 请求 `{title}`，执行手动命名 |
 | `GET/PUT /api/sessions/{id}/memory-settings` | 仅含两个开关，项目归属从 Session 读取 |
 | `GET /api/knowledge-bases/attachment-types` | 草稿查询附件类型；复用当前类型来源 |
 
-`/api/memory-projects` 由统一项目接口替换，其前端调用与路由一并调整，避免保留两个项目目录。现有消息、附件上传、运行提交、审批和会话事件流地址保持使用。
+`/api/memory-projects` 由统一项目接口替换，其前端调用与路由一并调整，避免保留两个项目目录。运行提交统一使用 `POST /api/runs`；消息、附件上传、审批和会话事件流继续使用各自接口。
 
-Session 响应新增 `project_id, title_source, title_revision, last_activity_at, title_pending`。`title_pending` 从标题任务状态投影，标明是否还有后台命名工作，不在 sessions 中重复保存。
+Session 响应包含 `project_id` 和 `last_activity_at`；标题只保留 `title` 字段。`POST /api/runs` 响应新增最终的 `session_id`，前端据此从草稿切换到持久聊天。
 
 同一幂等键重复创建时返回原会话；键已用于另一项目时返回 `409 idempotency_conflict`；原会话已删除时返回 `409 session_deleted`，不能复活。无效或已删除项目返回 404，缺少项目参数返回 422。
 
-### 6.2 标题事件及恢复
+### 6.2 标题读取与同步
 
-新增持久事件 `session.updated`，载荷包含：
-
-```json
-{
-  "session_id": "...",
-  "project_id": "...",
-  "title": "记忆系统重新设计",
-  "title_source": "generated",
-  "title_revision": 2,
-  "updated_at": "...",
-  "title_pending": false
-}
-```
-
-- 回退命名、生成命名和手动命名均产生事件，使用稳定的 `session:{id}:title:{revision}` transition ID。
-- 标题更新、任务完成和事件记录在同一 PostgreSQL 事务提交；复用现有 `agent_events`，为事件仓储增加事务内写入能力，提交后通知现有 SSE 通道。
-- 事件作为会话元数据更新，不呈现为助手消息或执行步骤。
-- 前端按 `title_revision` 拒绝旧标题，不因重复 SSE 或晚到的 GET 响应覆盖新标题。该 revision 只管理标题字段；任务失败后 `title_pending` 可以在标题 revision 不变的情况下从 true 变成 false，前端需正常接收最新任务状态。
-- 当前只有活动聊天订阅 SSE。可见列表中存在 `title_pending=true` 时，每 3 秒批量刷新该项目的会话列表，所有任务结束后停止；页面隐藏时暂停，重新可见时刷新一次。
-- 项目切换、项目展开和页面恢复焦点时重新校验目录，避免增加全局 SSE。
+创建会话后的命令响应提供 `session_id`。前端据此读取 Session 并刷新项目聊天列表；标题不走单独 SSE 事件，也不做标题任务轮询。手动改名仍通过 Session API 返回的最新 `title` 同步列表。
 
 ## 7. 模块与文件落点
 
@@ -233,18 +189,15 @@ Session 响应新增 `project_id, title_source, title_revision, last_activity_at
 | 层次 | 修改或新增位置 | 职责 |
 | --- | --- | --- |
 | 项目领域/用例 | 新增 `backend/src/domain/projects/`、`application/projects/` | 由现有 MemoryProjectSpace 提升为 Project，定义创建、重命名、删除 |
-| 会话领域/用例 | `domain/sessions/entities.py`、`application/sessions/service.py`、`application/common/responses.py` | 必填项目归属、创建幂等、标题来源和字段级改名 |
-| 命名用例 | 新增 `application/sessions/title_service.py`、`title_worker.py` 及端口 | 有界生成、任务领取和命名提交；LLM 调用通过既有 Provider |
-| 提示词 | 新增 `backend/prompt/session_title.md` | 首条消息生成标题的输出要求 |
-| 持久化 | `models/session_models.py`、`models/memory_models.py`、`repositories/session_repository.py`、`message_repository.py` | 统一项目表、删除绑定表、原子首消息和命名入队 |
-| 持久化 | 调整现有 `memory_project_space_repository.py`，新增标题任务仓储 | 项目生命周期和后台命名任务 |
+| 会话领域/用例 | `domain/sessions/entities.py`、`application/sessions/service.py`、`application/common/responses.py` | 项目归属、创建幂等和手动改名 |
+| 持久化 | `models/session_models.py`、`models/memory_models.py`、`repositories/session_repository.py`、`run_repository.py` | 统一项目表、删除绑定表，并原子创建首条会话与运行命令 |
 | 记忆范围 | `application/memory/`、`application/orchestration/root_workflow.py`、`repositories/memory_suppression.py`、Run/Worker 仓储 | 通过 Session 解析项目，保留开关、范围快照与遗忘约束 |
 | 接口 | 新增项目 Controller/DTO；修改 `sessions_controller.py`、`dto/sessions.py`、`query_controller.py`、文件 Controller | 统一项目 API、调整 Session 响应、移除记忆设置里的绑定操作 |
-| 生命周期 | `bootstrap/postgres.py`、`bootstrap/app.py`，沿用 `bootstrap/lifespan.py` 协议 | 注入项目服务与标题 Worker，停止时释放任务和 Provider 资源 |
-| 前端协调 | `frontend/src/App.tsx`、`store/chatStore.ts` | 项目/会话选择、草稿持有、幂等创建和真实请求结果 |
+| 生命周期 | `bootstrap/postgres.py`、`bootstrap/app.py`，沿用 `bootstrap/lifespan.py` 协议 | 注入项目服务并管理现有 Worker |
+| 前端协调 | `frontend/src/App.tsx`、`store/chatStore.ts` | 项目/会话选择、草稿持有、空 session_id 首发和真实请求结果 |
 | 前端展示 | `Sidebar.tsx`，新增 `ProjectPicker.tsx` 及草稿协调 hook | 项目树、选择/创建项目、项目菜单及单次会话创建 |
 | 聊天输入 | `Chat.tsx`、`api/client.ts` | 草稿可输入可上传、显式目标会话提交、失败恢复输入 |
-| 元数据更新 | `hooks/useSessionEventStream.ts`、`types/events.ts`、`types/index.ts` | Session 新字段、标题 revision 与 SSE 投影 |
+| 元数据更新 | `types/index.ts`、`api/client.ts`、`App.tsx` | Session 标题和新建会话响应的前端投影 |
 | 管理页面 | `pages/SessionDetailView.tsx`、`ctx/SessionPicker.tsx` | 显示项目、移除可编辑记忆绑定、兼顾全部会话查询 |
 
 前端会话对象只维护一份；项目分组由 `project_id` 派生。`activeProjectId` 与 `activeSessionId` 分别表示当前项目和已持久化聊天，草稿另有身份，不用虚假的 session ID 模拟持久会话。
@@ -255,8 +208,8 @@ Session 响应新增 `project_id, title_source, title_revision, last_activity_at
 | --- | --- | --- |
 | P1 项目与会话归属 | 统一 Project，调整 Session/设置/快照读取，项目 API 和创建幂等 | API 可创建项目及其聊天；读写记忆范围由会话归属决定，无第二套绑定 |
 | P2 项目侧栏与草稿 | 项目树、项目选择器、草稿、附件类型接口、异步发送结果 | 可以从空库创建项目、开始聊天并上传附件；失败后可重试且不会重复创建 |
-| P3 首轮自动命名 | 首消息事务、回退标题、持久任务、LLM Worker、手动命名条件更新 | 自动标题不阻塞主回复，重启可恢复，手动改名不可覆盖 |
-| P4 同步与完整验收 | 标题事件、可见列表刷新、项目删除、管理页与移动端检查 | 刷新/切换/重连不丢归属和标题，删除后无旧任务重新写入 |
+| P3 首轮标题 | 空 session_id 提交、会话和运行命令事务、命令 ID 幂等、首条文本标题 | 首次发送只请求一次；重试复用同一 session；手动改名正常 |
+| P4 同步与完整验收 | 项目删除、管理页和移动端检查 | 刷新/切换后项目归属和标题从 API 恢复 |
 
 阶段可分别审阅，但完整交付须包含 P1–P4。切换目标数据结构与前后端接口应作为同一次开发版本变更，不向用户留下项目可创建但聊天无法归属的中间状态。
 
@@ -271,25 +224,25 @@ Session 响应新增 `project_id, title_source, title_revision, last_activity_at
 | 上传附件后尚未发送 | 附件绑定正确会话，可继续输入，上传状态正常显示 |
 | 发送或上传失败 | 原文本和附件选择可恢复，重试不串到当前其他聊天 |
 | HTTP 仅返回接受 | 页面等待真实消息持久化与 Run 事件，不伪造已经完成 |
-| 首条消息落库 | 立即可查到回退标题和一条标题任务；后续消息不再排队 |
-| 真实 LLM 可用 | 后台标题反映首条请求主题，聊天回复和执行继续进行 |
-| LLM 超时或结构错误 | 有界重试后保留回退标题，不使聊天 Run 失败 |
-| 命名期间手动改名 | 手动标题持久化，晚到的自动结果和旧事件均不能覆盖 |
-| Worker 领取后重启或租约过期 | 任务可恢复，旧领取者不能覆盖新处理结果 |
+| 首次发送 | 返回一个会话 ID；会话标题取首条文本，Session 与 Run 命令一并提交 |
+| 相同 command_id 并发或重试 | 所有响应复用同一会话，不新增空聊天 |
+| 首条文本包含客套语或多句话 | 标题去掉常见客套前缀，取首句并限制长度 |
+| 先上传附件 | 会话先以文件名命名，附件与后续消息都绑定同一会话 |
+| 手动改名 | 手动标题保存并在列表刷新后保持 |
 | 关闭记忆生成或读取 | 命名照常工作；两个记忆开关分别生效 |
 | 同一项目不同聊天 | 可召回项目级记忆，各聊天历史和执行记录仍独立 |
 | 不同项目 | 不能读取另一项目的项目级记忆、回顾和目录；global 记忆沿用既有规则 |
 | 改项目名称、生成标题或只查看聊天 | ID、归属、记忆范围和最近活动排序不被改写 |
-| 刷新、切换项目、SSE 重连 | 归属和标题从服务端恢复，旧响应不覆盖新 revision |
+| 刷新、切换项目、SSE 重连 | 归属和标题从服务端恢复 |
 | 删除有活动 Run/待启动命令的项目 | 返回 409，项目和会话仍可访问 |
-| 删除无活动执行的项目 | 聊天不再列出，相关项目记忆不可召回，旧标题/记忆作业不能恢复数据 |
+| 删除无活动执行的项目 | 聊天不再列出，相关项目记忆不可召回，旧记忆作业不能恢复数据 |
 | 重新创建同名项目 | 获得新 ID，旧项目数据和作业不进入新空间 |
 | 桌面和手机端 | 项目树、长标题、重命名、抽屉和管理页面入口均可操作 |
 
-验证使用必要的领域/接口测试和真实 PostgreSQL 并发检查，重点覆盖创建幂等、首消息原子入队、标题条件更新和删除竞争。前端执行 typecheck/build，并通过真实浏览器及已配置的真实 LLM 走通创建项目 → 草稿 → 附件 → 首次聊天 → 自动标题 → 手动改名 → 切换/刷新流程。构建通过不能替代这条运行验收。
+验证应覆盖领域/接口行为和真实 PostgreSQL 并发边界，重点检查创建幂等、首条命令原子入队和项目删除竞争。前端执行 typecheck/build，并通过浏览器走通创建项目 → 草稿 → 附件/首次发送 → 自动标题 → 手动改名 → 切换/刷新流程。构建通过不能替代运行验收。
 
 ## 10. 实施准备结论
 
-当前业务行为、代码边界和接口变化已明确，可以按上述顺序开始实施。实际实施前须重新检查工作区改动；当前存在尚未提交的记忆系统修改，项目归属调整应基于这些代码继续收敛，避免覆盖已有工作。
+当前工作树已实现项目聊天、草稿首条发送时创建会话，以及基于首条文本的确定性标题。首次发送经 `POST /api/runs` 入队；附件先上传时仍会提前创建会话。
 
-本次交付为方案文档及索引，不代表功能已实现；未运行应用测试，也未修改数据库。
+收敛版本已在随机隔离 schema 中通过两项真实 PostgreSQL 回归：并发首次发送只生成一条会话和 Run，命令校验失败后新会话回滚；重复命令也不会覆盖手动标题。受控 API 的浏览器检查验证了失败后的输入恢复、不同聊天的重试 ID 隔离、返回原聊天重试时保留原 ID，以及提交期间禁用输入和附件上传。浏览器附件检查受 Chrome 扩展本地文件访问权限限制，尚未完成真实附件上传和真实 LLM 的完整端到端验收。

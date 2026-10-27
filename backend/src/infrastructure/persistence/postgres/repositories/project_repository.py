@@ -30,7 +30,6 @@ from ..models import (
     MemoryModel,
     MemoryProcessingJobModel,
     ProjectModel,
-    SessionTitleJobModel,
     MemoryRunEvidenceSnapshotModel,
     MemorySourceSuppressionModel,
     MemoryWriteOperationModel,
@@ -212,21 +211,6 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                 )
                 if active_run is not None or active_command is not None:
                     raise ValueError("project_busy")
-
-                if session_ids:
-                    await session.execute(
-                        update(SessionTitleJobModel)
-                        .where(
-                            SessionTitleJobModel.session_id.in_(session_ids),
-                            SessionTitleJobModel.status.in_(("queued", "running")),
-                        )
-                        .values(
-                            status="cancelled",
-                            lease_expires_at=None,
-                            claimed_by=None,
-                            updated_at=now,
-                        )
-                    )
 
                 await session.execute(
                     pg_insert(MemorySourceSuppressionModel)

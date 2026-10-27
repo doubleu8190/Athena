@@ -26,11 +26,11 @@ FastAPI 根路径为 `/api`，默认监听 `http://127.0.0.1:8000`。JSON 请求
 
 ### `POST /api/sessions`
 
-请求 `{"title":"New Session"}`。名称默认 `New Session`，返回 Session：`id/title/status/run_id/created_at/updated_at/compression_summary/last_compressed_message_id/last_summarized_message_id`。
+请求 `{"project_id":"project-id","title":"可选标题"}`，并通过 `Idempotency-Key` 提供稳定创建请求 ID。主要供先上传附件的草稿创建会话使用；返回 Session。
 
 ### `GET /api/sessions`
 
-返回全部未删除会话，后端按最近更新时间排序。
+返回全部未删除会话，可传 `project_id` 限定项目；后端按最近聊天活动排序。
 
 ### `GET /api/sessions/{session_id}`
 
@@ -84,17 +84,19 @@ FastAPI 根路径为 `/api`，默认监听 `http://127.0.0.1:8000`。JSON 请求
 链路 payload 只返回活动标识、状态、关联 ID、耗时、计数和安全错误摘要；
 完整 prompt、工具参数、工具输出和 traceback 不通过该接口返回。
 
-### `POST /api/sessions/{session_id}/runs`（202）
+### `POST /api/runs`（202）
 
 JSON 请求：
 
 ```json
-{"message":"用户问题", "command_id":"cmd-client-id", "attachment_ids":["file-id"]}
+{"session_id":null,"project_id":"project-id","message":"用户问题","command_id":"cmd-client-id","message_id":"message-id","attachment_ids":[]}
 ```
 
-也接受 multipart 字段 `message`、`command_id`、多个 `files`；上传文件会先保存为附件再入队。返回：`command_id/run_id/message_id/attachment_ids/status="queued"/deduplicated`。
+首次发送时 `session_id` 为空，必须提供 `project_id`。后端在同一事务中创建会话、根据首条消息确定标题并入队运行命令；响应包含实际 `session_id`、`command_id`、`run_id`、`message_id`、附件 ID 和状态。相同 `command_id` 重试返回原会话。
 
-校验：会话不存在 404；文件名为空或包含 NUL 为 400；不支持类型 415；超过 `FILE_MAX_UPLOAD_BYTES` 为 413；活跃运行或 run/command id 冲突为 409。相同 command_id 和相同 payload 返回 `deduplicated=true`，不同 payload 返回 `command_id_conflict`。
+已有聊天发送时传入现有 `session_id`，`project_id` 可省略。
+
+校验：已有会话不存在或项目不存在为 404；新会话缺少项目、命令 ID 为空、消息为空且没有附件为 422；会话与项目不匹配或会话已有活动运行时为 409。重复 `command_id` 返回已有命令和会话。
 
 ### `POST /api/sessions/{session_id}/cancel`（202）
 

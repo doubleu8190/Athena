@@ -29,11 +29,12 @@ function AppContent() {
   const [apiBase] = useState("")
   const initializedSessions = useRef(false)
   const createPromises = useRef(new Map<string, Promise<Session>>())
-  const titleWatchUntil = useRef(0)
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<ChatDraft[]>([])
   const [activeDraft, setActiveDraft] = useState<ChatDraft | null>(null)
+  const activeDraftRef = useRef(activeDraft)
+  activeDraftRef.current = activeDraft
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false)
   const demoMode = useState(() => new URLSearchParams(window.location.search).get("demo") === "execution")[0]
   const [authState, setAuthState] = useState<"loading" | "authenticated" | "unauthenticated">(demoMode ? "authenticated" : "loading")
@@ -79,19 +80,7 @@ function AppContent() {
           apiClient.listProjects(),
           apiClient.listSessions(),
         ])
-        const emptyDefaultSessions = await Promise.all(listedSessions.map(async (session) => {
-          if (session.title_source !== "placeholder" && session.title !== "New Session" && session.title !== "新聊天") return false
-          try {
-            const [messages, attachments] = await Promise.all([
-              apiClient.getMessages(session.id),
-              apiClient.listAttachments(session.id),
-            ])
-            return messages.length === 0 && attachments.length === 0
-          } catch {
-            return false
-          }
-        }))
-        const list = listedSessions.filter((_, index) => !emptyDefaultSessions[index])
+        const list = listedSessions
         setProjects(listedProjects)
         setSessions(list)
         const current = useChatStore.getState().activeSessionId
@@ -116,35 +105,8 @@ function AppContent() {
       apiClient.listProjects(),
     ])
     setProjects(currentProjects)
-    const currentById = new Map(useChatStore.getState().sessions.map((session) => [session.id, session]))
-    const merged = incoming.map((remote) => {
-      const current = currentById.get(remote.id)
-      if (!current || (current.title_revision ?? 0) <= (remote.title_revision ?? 0)) return remote
-      return {
-        ...remote,
-        title: current.title,
-        title_source: current.title_source,
-        title_revision: current.title_revision,
-      }
-    })
-    setSessions(merged)
+    setSessions(incoming)
   }, [setSessions])
-
-  useEffect(() => {
-    if (demoMode || authState !== "authenticated") return
-    const refreshIfNeeded = () => {
-      if (document.visibilityState === "hidden") return
-      const pending = useChatStore.getState().sessions.some((session) => session.title_pending)
-      if (!pending && Date.now() > titleWatchUntil.current) return
-      void refreshSessions().catch(() => undefined)
-    }
-    const timer = window.setInterval(refreshIfNeeded, 3000)
-    document.addEventListener("visibilitychange", refreshIfNeeded)
-    return () => {
-      window.clearInterval(timer)
-      document.removeEventListener("visibilitychange", refreshIfNeeded)
-    }
-  }, [authState, demoMode, refreshSessions])
 
   useSessionEventStream(demoMode || authState !== "authenticated" ? null : activeSessionId, apiBase)
 
@@ -232,17 +194,34 @@ function AppContent() {
 
     return () => timers.forEach((timer) => window.clearTimeout(timer))
   }, [demoMode])
-  const sendEvent = useCallback(async (type: string, sessionId: string, data: Record<string, unknown> = {}): Promise<void> => {
-    if (type !== ClientEventType.USER_COMMAND) return
-    await apiClient.submitRun(sessionId, {
+  const sendEvent = useCallback(async (type: string, sessionId: string | null, data: Record<string, unknown> = {}): Promise<string | null> => {
+    if (type !== ClientEventType.USER_COMMAND) return sessionId
+    const draftId = typeof data.draft_id === "string" ? data.draft_id : null
+    const projectId = typeof data.project_id === "string" ? data.project_id : undefined
+    const result = await apiClient.submitRun(sessionId, {
+      project_id: projectId,
       message: String(data.message || ""),
       ...(data.message_id ? { message_id: String(data.message_id) } : {}),
       ...(data.command_id ? { command_id: String(data.command_id) } : {}),
       attachment_ids: Array.isArray(data.attachment_ids) ? data.attachment_ids.map(String) : [],
     })
-    titleWatchUntil.current = Date.now() + 60_000
+    if (!sessionId) {
+      const targetSessionId = result.session_id
+      setDrafts((current) => current.filter((draft) => draft.id !== draftId))
+      if (draftId && activeDraftRef.current?.id === draftId) {
+        setActiveSession(targetSessionId)
+        setActiveProjectId(projectId ?? null)
+        setActiveDraft(null)
+      }
+      try {
+        addSession(await apiClient.getSession(targetSessionId))
+      } catch {
+        // 响应已确定会话 ID；详情读取失败时由侧栏刷新补齐显示字段。
+      }
+    }
     void refreshSessions().catch(() => undefined)
-  }, [refreshSessions])
+    return result.session_id
+  }, [addSession, refreshSessions, setActiveSession, setDrafts])
 
   const handleCreateProject = useCallback(async () => {
     const name = window.prompt("项目名称")?.trim()
@@ -290,10 +269,10 @@ function AppContent() {
     setActiveView("chat")
   }, [setActiveSession, setActiveView, setDrafts])
 
-  const ensureSession = useCallback((draftId: string, projectId: string): Promise<string> => {
+  const ensureSession = useCallback((draftId: string, projectId: string, title?: string): Promise<string> => {
     const inFlight = createPromises.current.get(draftId)
     if (inFlight) return inFlight.then((session) => session.id)
-    const creation = apiClient.createSession(projectId, draftId).then((value) => {
+    const creation = apiClient.createSession(projectId, draftId, title).then((value) => {
       const session: Session = {
         id: value.id,
         title: value.title,
@@ -301,14 +280,11 @@ function AppContent() {
         created_at: value.created_at,
         updated_at: value.updated_at ?? value.created_at,
         project_id: value.project_id,
-        title_source: value.title_source,
-        title_revision: value.title_revision,
         last_activity_at: value.last_activity_at,
-        title_pending: value.title_pending,
       }
       addSession(session)
       setDrafts((current) => current.filter((draft) => draft.id !== draftId))
-      if (activeDraft?.id === draftId) {
+      if (activeDraftRef.current?.id === draftId) {
         setActiveProjectId(projectId)
         setActiveSession(session.id)
         setActiveDraft(null)
@@ -323,7 +299,7 @@ function AppContent() {
         throw error
       })
       .finally(() => createPromises.current.delete(draftId))
-  }, [activeDraft, addSession, setActiveSession, setDrafts])
+  }, [addSession, setActiveSession, setDrafts])
 
   const handleDeleteSession = useCallback(
     async (sessionId: string) => {
@@ -410,9 +386,6 @@ function AppContent() {
       useChatStore.getState().updateSession(sessionId, {
         title: updated.title,
         updated_at: updated.updated_at,
-        title_source: updated.title_source,
-        title_revision: updated.title_revision,
-        title_pending: updated.title_pending,
       })
     } catch (error) {
       useChatStore.getState().setError(error instanceof Error ? error.message : "Session rename failed")

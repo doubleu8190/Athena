@@ -125,7 +125,6 @@ function Sidebar({
               <button type="button" onClick={() => onSelectSession(session.id)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left" aria-current={isActive ? "page" : undefined} title={session.title}>
                 <MessageSquare className={`h-3.5 w-3.5 flex-shrink-0 ${isActive ? "text-athena-accent" : isCompleted ? "text-athena-success" : ""}`} />
                 <span className="truncate text-sm">{session.title || "未命名聊天"}</span>
-                {session.title_pending && <span className="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-athena-accent" title="正在生成标题" />}
                 {isRunning && <span className="h-2 w-2 flex-shrink-0 animate-pulse rounded-full bg-athena-accent" title="运行中" />}
                 {isCompleted && !isActive && <CheckCircle className="h-3.5 w-3.5 flex-shrink-0 text-athena-success" />}
               </button>

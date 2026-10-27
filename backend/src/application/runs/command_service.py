@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 import hashlib
+import re
 from typing import Any
 
 from application.sessions import SessionNotFoundError
@@ -21,7 +22,7 @@ from domain.runs import (
     RunStatus,
     RunSummary,
 )
-from domain.sessions import SessionRepository
+from domain.sessions import Session, SessionRepository
 
 from application.common.responses import CommandEnqueueResponse, CommandStatusResponse
 from application.runs.responses import RunCancellationResponse
@@ -63,18 +64,56 @@ class RunCommandService:
 
     async def submit(
         self,
-        session_id: str,
+        session_id: str | None,
         *,
+        project_id: str | None = None,
         command_id: str,
         message: str,
         attachment_ids: Sequence[str] = (),
         message_id: str | None = None,
     ) -> CommandEnqueueResponse:
-        """提交一次消息运行；命令端口负责并发安全和幂等落库。"""
-        if await self._sessions.get(session_id) is None:
-            raise SessionNotFoundError(session_id)
+        """提交消息运行，并在草稿首次发送时原子创建会话。
+
+        参数：
+            session_id: 已有会话 ID；为 None 或空白时创建新会话。
+            project_id: 新会话所属项目；创建新会话时必填。
+            command_id: 客户端生成且重试时保持不变的命令 ID。
+            message: 用户消息正文。
+            attachment_ids: 已上传到目标会话的附件 ID。
+            message_id: 可选的稳定用户消息 ID。
+        返回值：
+            包含最终 session_id、run_id 和命令状态的入队结果。
+        异常：
+            ValueError: 命令身份、消息内容或新会话项目不合法。
+            SessionNotFoundError: 已有会话不存在。
+            CommandRejectedError: 会话与项目不匹配或入队被持久层拒绝。
+        """
         if not command_id.strip():
             raise ValueError("command_id is required")
+        if not message.strip() and not attachment_ids:
+            raise ValueError("message_or_attachment_required")
+
+        session_id = session_id.strip() if session_id is not None else None
+        if session_id == "":
+            session_id = None
+        new_session: Session | None = None
+        if session_id is None:
+            if project_id is None or not project_id.strip():
+                raise ValueError("project_id_required")
+            now = self._clock()
+            new_session = Session.create(
+                session_id=self._id_factory(),
+                title=_session_title(message),
+                now=now,
+                project_id=project_id,
+            )
+            session_id = new_session.id
+        else:
+            session = await self._sessions.get(session_id)
+            if session is None:
+                raise SessionNotFoundError(session_id)
+            if project_id is not None and session.project_id != project_id:
+                raise CommandRejectedError("session_project_mismatch")
 
         actual_message_id = message_id or self._id_factory()
         command = RunCommand(
@@ -90,7 +129,9 @@ class RunCommandService:
             issued_at=self._clock(),
         )
         try:
-            result = await self._commands.enqueue_command(command)
+            result = await self._commands.enqueue_command(
+                command, new_session=new_session
+            )
         except CommandRejectedError:
             raise
         except ValueError as exc:
@@ -223,12 +264,33 @@ def _enqueue_response(value: CommandEnqueueResult) -> CommandEnqueueResponse:
     """将命令入队领域结果转换为只读应用响应。"""
     return CommandEnqueueResponse(
         command_id=value.command_id,
+        session_id=value.session_id,
         run_id=value.run_id,
         message_id=value.message_id,
         attachment_ids=tuple(value.attachment_ids),
         status=value.status,
         deduplicated=value.deduplicated,
     )
+
+
+def _session_title(message: str) -> str:
+    """从首条用户消息提取简短、稳定的会话标题。"""
+    content = re.sub(r"\s+", " ", message).strip()
+    if content.lower() in {
+        "please process the attached files.",
+        "please process the attached files",
+        "请处理附件。",
+        "请处理附件",
+    }:
+        return "附件分析"
+    content = re.sub(
+        r"^(请帮我|请帮忙|请|帮我|麻烦你|麻烦|please help me|please|help me)[，,：:\s]*",
+        "",
+        content,
+        flags=re.IGNORECASE,
+    )
+    first_sentence = re.split(r"[。！？!?；;]", content, maxsplit=1)[0].strip()
+    return (first_sentence or content)[:48] or "新聊天"
 
 
 def _cancel_idempotency_key(value: str | None, default_scope: str) -> str:

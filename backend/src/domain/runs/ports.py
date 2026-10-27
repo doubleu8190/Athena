@@ -13,6 +13,7 @@ from .entities import (
     RunStatus,
     RunSummary,
 )
+from domain.sessions import Session
 
 
 class CommandQueuePort(Protocol):
@@ -70,7 +71,9 @@ class RunLifecyclePort(Protocol):
 class CommandStorePort(Protocol):
     """命令持久化和幂等入队能力。"""
 
-    async def enqueue_command(self, command: RunCommand) -> CommandEnqueueResult: ...
+    async def enqueue_command(
+        self, command: RunCommand, *, new_session: Session | None = None
+    ) -> CommandEnqueueResult: ...
 
     async def get_command(self, command_id: str) -> CommandStatusRecord | None: ...
 

@@ -10,9 +10,9 @@ import { ClientEventType } from "../types/events"
 import type { ApprovalRequest, ExecutionTimelineEntry, Message, SupportedAttachmentTypes } from "../types"
 
 interface ChatProps {
-  sendEvent: (type: string, sessionId: string, data?: Record<string, unknown>) => Promise<void>
+  sendEvent: (type: string, sessionId: string | null, data?: Record<string, unknown>) => Promise<string | null>
   draft: { id: string; projectId: string } | null
-  ensureSession: (draftId: string, projectId: string) => Promise<string>
+  ensureSession: (draftId: string, projectId: string, title?: string) => Promise<string>
   onOpenSessions?: () => void
   demoMode?: boolean
 }
@@ -25,6 +25,12 @@ type ChatFeedItem =
 function isSupportedAttachment(file: File, supportedTypes: SupportedAttachmentTypes): boolean {
   const filename = file.name.toLowerCase()
   return supportedTypes.extensions.some((extension) => filename.endsWith(extension.toLowerCase()))
+}
+
+function _attachmentTitle(files: File[]): string {
+  const first = files[0]?.name.trim() || "附件"
+  const suffix = files.length > 1 ? `等${files.length}个文件` : ""
+  return `分析${first}${suffix}`.slice(0, 120)
 }
 
 function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = false }: ChatProps) {
@@ -76,11 +82,13 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const loadingSessionIdRef = useRef<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const pendingSendRef = useRef<{ fingerprint: string; messageId: string; commandId: string } | null>(null)
+  const pendingSendsRef = useRef(new Map<string, { fingerprint: string; messageId: string; commandId: string }>())
   const composerDraftsRef = useRef<Map<string, string>>(new Map())
   const queuedFilesByTargetRef = useRef<Map<string, File[]>>(new Map())
   const latestInputRef = useRef(input)
   const composerKey = activeSessionId ?? draft?.id ?? "none"
+  const composerKeyRef = useRef(composerKey)
+  composerKeyRef.current = composerKey
   const previousComposerKeyRef = useRef(composerKey)
   const hasPendingSelectedAttachments = selectedAttachmentIds.some((id) => {
     const item = attachments.find((attachment) => attachment.id === id)
@@ -277,41 +285,47 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     const text = input.trim()
     if ((!text && selectedAttachmentIds.length === 0) || (!activeSessionId && !draft) || isSending || isUploading || hasPendingSelectedAttachments) return
 
+    const targetComposerId = activeSessionId ?? draft!.id
     setIsSending(true)
     const fingerprint = JSON.stringify([text, selectedAttachmentIds])
-    if (pendingSendRef.current?.fingerprint !== fingerprint) {
-      pendingSendRef.current = {
+    if (pendingSendsRef.current.get(targetComposerId)?.fingerprint !== fingerprint) {
+      pendingSendsRef.current.set(targetComposerId, {
         fingerprint,
         messageId: crypto.randomUUID(),
         commandId: `cmd_${crypto.randomUUID()}`,
-      }
+      })
     }
-    const pending = pendingSendRef.current!
+    const pending = pendingSendsRef.current.get(targetComposerId)!
     try {
-      const sessionId = activeSessionId ?? await ensureSession(draft!.id, draft!.projectId)
-      composerDraftsRef.current.set(sessionId, input)
-      await sendEvent(ClientEventType.USER_COMMAND, sessionId, {
+      composerDraftsRef.current.set(targetComposerId, input)
+      const sessionId = await sendEvent(ClientEventType.USER_COMMAND, activeSessionId, {
+        ...(draft ? { draft_id: draft.id, project_id: draft.projectId } : {}),
         message: text || "Please process the attached files.",
         message_id: pending.messageId,
         command_id: pending.commandId,
         attachment_ids: selectedAttachmentIds,
       })
-      pendingSendRef.current = null
-      setInput("")
-      composerDraftsRef.current.set(sessionId, "")
-      setSelectedAttachmentIds([])
-      setAgentStatus("running")
-      clearThinking()
-      clearError()
+      composerDraftsRef.current.set(targetComposerId, "")
+      if (sessionId) composerDraftsRef.current.set(sessionId, "")
+      pendingSendsRef.current.delete(targetComposerId)
+      const currentComposerId = composerKeyRef.current
+      if (currentComposerId === targetComposerId || currentComposerId === sessionId) {
+        setInput("")
+        setSelectedAttachmentIds([])
+        setAgentStatus("running")
+        clearThinking()
+        clearError()
+      }
     } catch (error) {
-      setError(error instanceof Error ? error.message : "消息发送失败，请重试。")
+      if (composerKeyRef.current === targetComposerId) {
+        setError(error instanceof Error ? error.message : "消息发送失败，请重试。")
+      }
     }
     setIsSending(false)
   }, [
     input,
     activeSessionId,
     draft,
-    ensureSession,
     isSending,
     setAgentStatus,
     setError,
@@ -324,7 +338,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   ])
 
   const uploadFiles = useCallback(async (files: File[]) => {
-    if ((!activeSessionId && !draft) || files.length === 0 || isUploading) return
+    if ((!activeSessionId && !draft) || files.length === 0 || isUploading || isSending) return
     if (!supportedAttachmentTypes) {
       setError("Supported file types are still loading. Please try again.")
       if (fileInputRef.current) fileInputRef.current.value = ""
@@ -343,7 +357,11 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     clearError()
     let sessionId = activeSessionId
     try {
-      sessionId = sessionId ?? await ensureSession(draft!.id, draft!.projectId)
+      sessionId = sessionId ?? await ensureSession(
+        draft!.id,
+        draft!.projectId,
+        _attachmentTitle(files),
+      )
       if (initialTarget !== sessionId) {
         queuedFilesByTargetRef.current.delete(initialTarget)
         queuedFilesByTargetRef.current.set(sessionId, files)
@@ -361,7 +379,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     } catch (err) {
       const target = sessionId ?? initialTarget
       queuedFilesByTargetRef.current.set(target, files)
-      if (useChatStore.getState().activeSessionId === target || (!sessionId && draft?.id === target)) {
+      if (composerKeyRef.current === target) {
         setQueuedFiles(files)
         setError(err instanceof Error ? err.message : "附件上传失败；文件仍保留，可重试。")
       }
@@ -369,7 +387,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       setIsUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ""
     }
-  }, [activeSessionId, draft, ensureSession, input, clearError, isUploading, setError, supportedAttachmentTypes, upsertAttachment])
+  }, [activeSessionId, draft, ensureSession, input, clearError, isUploading, isSending, setError, supportedAttachmentTypes, upsertAttachment])
 
   const filesFromClipboard = useCallback((clipboardData: DataTransfer): File[] => {
     const fromItems = Array.from(clipboardData.items ?? [])
@@ -402,7 +420,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
 
   useEffect(() => {
     const handleDocumentPaste = (event: ClipboardEvent) => {
-      if ((!activeSessionId && !draft) || isUploading || !event.clipboardData) return
+      if ((!activeSessionId && !draft) || isUploading || isSending || !event.clipboardData) return
       const target = event.target
       const targetNode = target instanceof Node ? target : null
       const pastedInsideChat = targetNode !== null && rootRef.current?.contains(targetNode)
@@ -416,7 +434,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
 
     document.addEventListener("paste", handleDocumentPaste)
     return () => document.removeEventListener("paste", handleDocumentPaste)
-  }, [activeSessionId, draft, handlePasteUpload, isUploading])
+  }, [activeSessionId, draft, handlePasteUpload, isUploading, isSending])
 
   const handleDeleteAttachment = useCallback(async (fileId: string) => {
     if (!activeSessionId) return
@@ -755,7 +773,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={(!activeSessionId && !draft) || isUploading || !supportedAttachmentTypes}
+              disabled={(!activeSessionId && !draft) || isUploading || isSending || !supportedAttachmentTypes}
               title={
                   !activeSessionId && !draft
                   ? "请先选择项目或聊天"
@@ -779,7 +797,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
                     ? "向 Athena 发送消息…（Enter 发送，Shift+Enter 换行）"
                     : "请选择或创建会话开始聊天"
                 }
-                disabled={!activeSessionId && !draft}
+                disabled={(!activeSessionId && !draft) || isSending}
                 aria-label="向 Athena 发送消息"
                 rows={1}
                 className="block w-full bg-athena-bg border border-athena-border rounded-lg px-4 py-3 pr-12 text-athena-text placeholder:text-athena-muted focus:outline-none focus:border-athena-accent transition-colors resize-none leading-5"

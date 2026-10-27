@@ -96,9 +96,6 @@ function SessionDetailView() {
       setSession(updated)
       useChatStore.getState().updateSession(session.id, {
         title: updated.title,
-        title_source: updated.title_source,
-        title_revision: updated.title_revision,
-        title_pending: updated.title_pending,
       })
       setEditing(false)
     } catch (e) {

@@ -135,11 +135,11 @@ def test_run_controller_maps_all_command_errors() -> None:
         async def get(self, key): return RunSummary("r", "s", "running", "t") if key == "r" else None
         async def get_active_for_session(self, key): return None
     class Commands:
-        async def enqueue_command(self, command): raise ValueError("session_busy")
+        async def enqueue_command(self, command, *, new_session=None): raise ValueError("session_busy")
         async def get_command(self, key): return None
     service = RunCommandService(Sessions(), Commands(), Runs(), id_factory=lambda: "id", clock=lambda: NOW)
     client = TestClient(create_app(run_command_factory=lambda: service))
-    assert client.post("/api/sessions/s/runs", json={"command_id": "c", "message": "x"}).status_code == 409
+    assert client.post("/api/runs", json={"session_id": "s", "command_id": "c", "message": "x"}).status_code == 409
     assert client.post("/api/sessions/missing/cancel").status_code == 404
     assert client.post("/api/runs/missing/cancel").status_code == 404
     assert client.get("/api/commands/missing").status_code == 404

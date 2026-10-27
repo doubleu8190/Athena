@@ -39,7 +39,7 @@ class RunRepo:
 
 class CommandRepo:
     def __init__(self, *, result=True): self.result = result; self.values = {}
-    async def enqueue_command(self, value):
+    async def enqueue_command(self, value, *, new_session=None):
         if isinstance(self.result, Exception): raise self.result
         if isinstance(self.result, str): raise ValueError(self.result)
         self.values[value.command_id] = CommandStatusRecord(value.command_id, value.session_id, value.run_id, value.command_type, CommandStatus.QUEUED)
@@ -55,17 +55,23 @@ def make_run_service(commands=None, sessions=None):
 async def test_run_command_service_validation_bool_and_cancel_paths() -> None:
     with pytest.raises(SessionMissing): await make_run_service().submit("missing", command_id="c", message="x")
     with pytest.raises(ValueError): await make_run_service().submit("s", command_id=" ", message="x")
-    commands = CommandRepo(result=CommandEnqueueResult("c", "r", "m", (), CommandStatus.QUEUED, False))
+    commands = CommandRepo(result=CommandEnqueueResult(
+        "c", "s", "r", "m", (), CommandStatus.QUEUED, False
+    ))
     service = make_run_service(commands)
     accepted = await service.submit("s", command_id="c", message="x")
     assert accepted.deduplicated is False
-    commands = CommandRepo(result=CommandEnqueueResult("c", "r", "m", (), CommandStatus.QUEUED, True))
+    commands = CommandRepo(result=CommandEnqueueResult(
+        "c", "s", "r", "m", (), CommandStatus.QUEUED, True
+    ))
     service = make_run_service(commands)
     accepted = await service.submit("s", command_id="c", message="x")
     assert accepted.deduplicated is True
     commands = CommandRepo(result="session_busy")
     with pytest.raises(CommandRejectedError): await make_run_service(commands).submit("s", command_id="c", message="x")
-    cancel_commands = CommandRepo(result=CommandEnqueueResult("c", "r", None, (), CommandStatus.QUEUED, False))
+    cancel_commands = CommandRepo(result=CommandEnqueueResult(
+        "c", "s", "r", None, (), CommandStatus.QUEUED, False
+    ))
     accepted = await make_run_service(cancel_commands).cancel_session("s")
     assert accepted.status == "cancelling"
 

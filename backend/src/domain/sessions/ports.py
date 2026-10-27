@@ -49,12 +49,6 @@ class MessageRepository(Protocol):
         """保存消息并返回消息 ID。"""
         ...
 
-    async def save_user_message_with_title(
-        self, message: Message, *, fallback_title: str
-    ) -> bool:
-        """原子保存用户消息、活动时间及首条消息标题任务。"""
-        ...
-
     async def get(self, message_id: str) -> Message | None:
         """按 ID 查询消息，不存在或已删除时返回 None。"""
         ...

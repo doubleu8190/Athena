@@ -123,7 +123,7 @@ NEO4J_PASSWORD=...
 
 ## 5. 用户请求的完整行为
 
-1. 前端向 `POST /api/sessions/{session_id}/runs` 发送 JSON，或以 multipart 同时上传附件。
+1. 前端向 `POST /api/runs` 发送 JSON；新聊天传 `session_id: null` 和 `project_id`，已有聊天传现有 `session_id`。附件先上传时会先创建会话，再绑定附件。
 2. Gateway 校验会话、文件类型和命令字段，生成 `message_id`/`run_id`，以 `command_id` 做幂等入队，返回 HTTP 202。
 3. CommandConsumer 领取 `run.start`，原子获取每个会话唯一运行锁，创建 `run:{run_id}` checkpoint。
 4. Root graph 持久化用户消息，执行任务理解。若需要澄清，直接持久化澄清问题并结束；否则规划上下文并并发获取各 provider。

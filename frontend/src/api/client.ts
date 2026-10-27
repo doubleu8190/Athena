@@ -3,6 +3,7 @@
  */
 import type {
   CreateSessionResponse,
+  SubmitRunResponse,
   Session,
   SessionMemorySettings,
   Project,
@@ -302,17 +303,23 @@ class ApiClient {
     return `${this.baseUrl}/api/evaluations/runs/${encodeURIComponent(runId)}/events`
   }
 
-  /** 提交异步 Agent 运行命令。
-   * @param sessionId 目标会话 ID，必须非空。
-   * @param payload 用户消息和可选附件/幂等命令 ID。
-   * @returns Promise 包含命令 ID、运行 ID及排队状态。
-   * @throws Error 当会话不存在、命令冲突或会话不可并行运行时抛出。
-   */
-  async submitRun(sessionId: string, payload: { message: string; message_id?: string; attachment_ids?: string[]; command_id?: string }): Promise<{ command_id: string; run_id?: string; message_id: string; attachment_ids: string[]; status: string; deduplicated?: boolean }> {
+  /** 提交消息并在首次发送时由后端创建会话。 */
+  async submitRun(
+    sessionId: string | null,
+    payload: {
+      project_id?: string
+      message: string
+      message_id?: string
+      attachment_ids?: string[]
+      command_id?: string
+    },
+  ): Promise<SubmitRunResponse> {
     const commandId = payload.command_id || `cmd_${crypto.randomUUID()}`
-    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/runs`, {
+    return this.request<SubmitRunResponse>("/api/runs", {
       method: "POST",
       body: JSON.stringify({
+        session_id: sessionId,
+        project_id: payload.project_id,
         message: payload.message,
         message_id: payload.message_id,
         command_id: commandId,

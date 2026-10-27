@@ -6,12 +6,12 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.sessions import Session, SessionRepository
 
-from ..models import ProjectModel, SessionModel, SessionTitleJobModel
+from ..models import ProjectModel, SessionModel
 from ..mappers.converters import session_domain_to_model, session_model_to_domain
 
 
@@ -78,39 +78,20 @@ class PostgresSessionRepository(SessionRepository):
     async def get(self, session_id: str) -> Session | None:
         """查询未删除会话。"""
         async with self._session_factory() as db:
-            result = await db.execute(
-                select(
-                    SessionModel,
-                    exists(
-                        select(SessionTitleJobModel.session_id).where(
-                            SessionTitleJobModel.session_id == SessionModel.id,
-                            SessionTitleJobModel.status.in_(("queued", "running")),
-                        )
-                    ).label("title_pending"),
-                ).where(
+            row = await db.scalar(
+                select(SessionModel).where(
                     SessionModel.id == session_id,
                     SessionModel.deleted_time.is_(None),
                 )
             )
-            result_row = result.one_or_none()
-        if result_row is None:
-            return None
-        return _to_session(result_row[0], title_pending=result_row[1])
+        return None if row is None else session_model_to_domain(row)
 
     async def list_sessions(
         self, *, project_id: str | None = None
     ) -> list[Session]:
         """按项目及最近聊天活动列出未删除会话。"""
         async with self._session_factory() as db:
-            statement = select(
-                SessionModel,
-                exists(
-                    select(SessionTitleJobModel.session_id).where(
-                        SessionTitleJobModel.session_id == SessionModel.id,
-                        SessionTitleJobModel.status.in_(("queued", "running")),
-                    )
-                ).label("title_pending"),
-            ).where(SessionModel.deleted_time.is_(None))
+            statement = select(SessionModel).where(SessionModel.deleted_time.is_(None))
             if project_id is not None:
                 statement = statement.where(SessionModel.project_id == project_id)
             result = await db.execute(
@@ -119,8 +100,8 @@ class PostgresSessionRepository(SessionRepository):
                     SessionModel.id.desc(),
                 )
             )
-            rows = result.all()
-        return [_to_session(row, title_pending=pending) for row, pending in rows]
+            rows = result.scalars().all()
+        return [session_model_to_domain(row) for row in rows]
 
     async def save(self, session: Session) -> Session:
         """更新会话业务字段并返回传入领域实体。"""
@@ -144,7 +125,7 @@ class PostgresSessionRepository(SessionRepository):
         return session
 
     async def rename(self, session: Session) -> Session:
-        """只更新标题来源和版本，避免旧快照覆盖并发的 Run 状态。"""
+        """只更新会话标题，避免旧快照覆盖并发的 Run 状态。"""
         async with self._session_factory() as db:
             async with db.begin():
                 row = await db.scalar(
@@ -158,22 +139,7 @@ class PostgresSessionRepository(SessionRepository):
                 if row is None:
                     raise LookupError("session_not_found")
                 row.title = session.title
-                row.title_source = "manual"
-                row.title_revision += 1
                 row.updated_at = session.updated_at.isoformat()
-                job = await db.scalar(
-                    select(SessionTitleJobModel)
-                    .where(
-                        SessionTitleJobModel.session_id == session.id,
-                        SessionTitleJobModel.status.in_(("queued", "running")),
-                    )
-                    .with_for_update()
-                )
-                if job is not None:
-                    job.status = "cancelled"
-                    job.lease_expires_at = None
-                    job.claimed_by = None
-                    job.updated_at = session.updated_at.isoformat()
                 await db.flush()
                 return session_model_to_domain(row)
 
@@ -192,19 +158,6 @@ class PostgresSessionRepository(SessionRepository):
                 )
                 if session_row is None:
                     return False
-                await db.execute(
-                    update(SessionTitleJobModel)
-                    .where(
-                        SessionTitleJobModel.session_id == session_id,
-                        SessionTitleJobModel.status.in_(("queued", "running")),
-                    )
-                    .values(
-                        status="cancelled",
-                        lease_expires_at=None,
-                        claimed_by=None,
-                        updated_at=deleted_at,
-                    )
-                )
                 result = await db.execute(
                     update(SessionModel)
                     .where(
@@ -217,26 +170,6 @@ class PostgresSessionRepository(SessionRepository):
                     .returning(SessionModel.id)
                 )
         return result.scalar_one_or_none() is not None
-
-
-def _to_session(row: SessionModel, *, title_pending: bool) -> Session:
-    value = session_model_to_domain(row)
-    return Session(
-        id=value.id,
-        title=value.title,
-        status=value.status,
-        run_id=value.run_id,
-        created_at=value.created_at,
-        updated_at=value.updated_at,
-        compression_summary=value.compression_summary,
-        last_compressed_message_id=value.last_compressed_message_id,
-        last_summarized_message_id=value.last_summarized_message_id,
-        project_id=value.project_id,
-        title_source=value.title_source,
-        title_revision=value.title_revision,
-        last_activity_at=value.last_activity_at,
-        title_pending=title_pending,
-    )
 
 
 __all__ = ["PostgresSessionRepository"]

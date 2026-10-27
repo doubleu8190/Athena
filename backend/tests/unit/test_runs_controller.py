@@ -48,7 +48,7 @@ class Commands:
     def __init__(self) -> None:
         self.items: dict[str, CommandStatusRecord] = {}
 
-    async def enqueue_command(self, command):
+    async def enqueue_command(self, command, *, new_session=None):
         self.items[command.command_id] = CommandStatusRecord(
             command_id=command.command_id,
             session_id=command.session_id,
@@ -58,6 +58,7 @@ class Commands:
         )
         return CommandEnqueueResult(
             command_id=command.command_id,
+            session_id=command.session_id,
             run_id=command.run_id,
             message_id=(
                 command.payload.message_id
@@ -93,12 +94,18 @@ def test_run_command_routes_preserve_contract() -> None:
     client = make_client()
 
     submitted = client.post(
-        "/api/sessions/session-1/runs",
-        json={"command_id": "command-1", "message": "hello"},
+        "/api/runs",
+        json={
+            "session_id": None,
+            "project_id": "project-1",
+            "command_id": "command-1",
+            "message": "hello",
+        },
     )
     assert submitted.status_code == 202
     assert submitted.json()["status"] == "queued"
     assert submitted.json()["deduplicated"] is False
+    assert submitted.json()["session_id"] == "message-1"
 
     command_id = submitted.json()["command_id"]
     status = client.get(f"/api/commands/{command_id}")
@@ -124,8 +131,8 @@ def test_run_command_routes_preserve_contract() -> None:
 def test_run_command_routes_map_missing_resources() -> None:
     client = make_client()
     assert client.post(
-        "/api/sessions/missing/runs",
-        json={"command_id": "command-1", "message": "hello"},
+        "/api/runs",
+        json={"session_id": "missing", "command_id": "command-1", "message": "hello"},
     ).status_code == 404
     assert client.post("/api/runs/missing/cancel").status_code == 404
     assert client.get("/api/commands/missing").status_code == 404

@@ -377,7 +377,7 @@ async def test_target_file_parser_and_document_job_queue():
 def test_postgres_dependency_graph_is_explicit(monkeypatch):
     monkeypatch.setenv("ATHENA_DATABASE_BACKEND", "postgres")
     graph = build_default_dependencies()
-    assert len(graph.resources) == 7
+    assert len(graph.resources) == 6
     app = create_app(dependencies=graph)
     assert "/api/sessions" in app.openapi()["paths"]
     assert graph.provider("memory_service_factory") is not None

@@ -140,8 +140,5 @@ def _to_response(value: Session) -> SessionResponse:
         created_at=value.created_at,
         updated_at=value.updated_at,
         project_id=value.project_id,
-        title_source=value.title_source,
-        title_revision=value.title_revision,
         last_activity_at=value.last_activity_at,
-        title_pending=value.title_pending,
     )

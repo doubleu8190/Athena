@@ -280,7 +280,7 @@ Reconciler 低频、索引化、分批处理：
 
 | 接口 | 新行为 |
 |---|---|
-| `POST /api/sessions/{session_id}/runs` | 保持异步提交和 command_id 幂等，进入新 Root 入口 |
+| `POST /api/runs` | 异步提交和 command_id 幂等；session_id 为空时与首个 Run 一并创建会话 |
 | `POST /api/runs/{run_id}/cancel` | 接受 Idempotency-Key；返回 run_id、CANCELLING/原终态、already_terminal；不等待 Worker 全部退出 |
 | `POST /api/approvals/{approval_id}/decision` | 校验 APPROVE/REJECT 决定；202 仅表示决定已记录和恢复作业已创建 |
 | `GET /api/runs/{run_id}/orchestration`（拟新增） | 当前 Plan/version/round、冻结成员、Task/Execution、审批和取消事实的查询快照 |

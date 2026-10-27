@@ -19,7 +19,6 @@ from .run_repository import PostgresRunRepository
 from .mcp_repository import PostgresMCPServerRepository
 from .message_repository import PostgresMessageRepository
 from .session_repository import PostgresSessionRepository
-from .session_title_job_repository import PostgresSessionTitleJobRepository
 from .session_memory_settings_repository import PostgresSessionMemorySettingsRepository
 from .tool_repository import PostgresToolConfigRepository
 from .orchestration_repository import PostgresOrchestrationRepository, PostgresPlanLoader
@@ -63,7 +62,6 @@ __all__ = [
     "PostgresMCPServerRepository",
     "PostgresMessageRepository",
     "PostgresSessionRepository",
-    "PostgresSessionTitleJobRepository",
     "PostgresSessionMemorySettingsRepository",
     "PostgresToolConfigRepository",
     "PostgresOrchestrationRepository",

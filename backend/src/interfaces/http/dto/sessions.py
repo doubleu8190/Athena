@@ -43,10 +43,7 @@ class SessionResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     project_id: str | None = None
-    title_source: str = "manual"
-    title_revision: int = 0
     last_activity_at: datetime | None = None
-    title_pending: bool = False
 
     @classmethod
     def from_application(cls, session: ApplicationSessionResponse) -> "SessionResponse":
@@ -58,10 +55,7 @@ class SessionResponse(BaseModel):
             created_at=session.created_at,
             updated_at=session.updated_at,
             project_id=session.project_id,
-            title_source=session.title_source,
-            title_revision=session.title_revision,
             last_activity_at=session.last_activity_at,
-            title_pending=session.title_pending,
         )
 
 

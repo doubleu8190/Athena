@@ -23,6 +23,8 @@ class RunListResponse(BaseModel):
 
 
 class SubmitRunRequest(BaseModel):
+    session_id: str | None = None
+    project_id: str | None = None
     message: str = ""
     command_id: str = Field(min_length=1)
     message_id: str | None = Field(default=None, min_length=1)
@@ -31,6 +33,7 @@ class SubmitRunRequest(BaseModel):
 
 class SubmitRunResponse(BaseModel):
     command_id: str
+    session_id: str
     run_id: str | None = None
     message_id: str | None = None
     attachment_ids: list[str] = Field(default_factory=list)
@@ -41,6 +44,7 @@ class SubmitRunResponse(BaseModel):
     def from_application(cls, value: CommandEnqueueResponse) -> "SubmitRunResponse":
         return cls(
             command_id=value.command_id,
+            session_id=value.session_id,
             run_id=value.run_id,
             message_id=value.message_id,
             attachment_ids=list(value.attachment_ids),

@@ -101,6 +101,7 @@ def test_invalid_persisted_payload_fails_at_deserialization() -> None:
 def test_postgres_command_result_uses_validated_payload_fields() -> None:
     row = SimpleNamespace(
         command_id="command-1",
+        session_id="session-1",
         run_id="run-1",
         command_type=CommandType.RUN_START.value,
         payload_json=(

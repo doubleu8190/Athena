@@ -135,16 +135,16 @@ async def test_session_and_message_repositories_cover_crud_and_attachment_reader
     session_row = SimpleNamespace(
         id="s-1", title="Title", status="idle", run_id=None,
         created_at=now().isoformat(), updated_at=now().isoformat(),
-        project_id="project-1", title_source="manual", title_revision=0,
+        project_id="project-1",
         last_activity_at=now().isoformat(), compression_summary=None,
         last_compressed_message_id=None, last_summarized_message_id=None,
     )
-    db.results = [Result(rows=[(session_row, False)])]
+    db.results = [Result(scalar=session_row)]
     assert (await repo.get("s-1")).id == "s-1"
-    db.results = [Result(rows=[(session_row, False)])]
+    db.results = [Result(rows=[session_row])]
     assert len(await repo.list_sessions()) == 1
     assert await repo.save(value) == value
-    db.results = [Result(scalar=session_row), Result(), Result(scalar="s-1")]
+    db.results = [Result(scalar=session_row), Result(scalar="s-1")]
     assert await repo.delete("s-1")
 
     messages = DB()

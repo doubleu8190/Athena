@@ -82,15 +82,16 @@ def build_runs_router(
     def service() -> RunCommandService:
         return command_service_factory()
 
-    @router.post("/sessions/{session_id}/runs", status_code=202)
+    @router.post("/runs", status_code=202)
     async def submit_run(
-        session_id: str,
         request: SubmitRunRequest,
         commands: RunCommandService = Depends(service),
     ) -> SubmitRunResponse:
+        """提交消息；空会话 ID 由用例在命令事务中创建项目聊天。"""
         try:
             value = await commands.submit(
-                session_id,
+                request.session_id,
+                project_id=request.project_id,
                 command_id=request.command_id,
                 message=request.message,
                 message_id=request.message_id,
@@ -103,7 +104,12 @@ def build_runs_router(
                 404
                 if exc.code in {"session_not_found", "project_not_found"}
                 else 409
-                if exc.code in {"command_id_conflict", "run_id_conflict", "session_busy"}
+                if exc.code in {
+                    "command_id_conflict",
+                    "run_id_conflict",
+                    "session_busy",
+                    "session_project_mismatch",
+                }
                 else 400
             )
             raise HTTPException(status_code=status, detail=exc.code) from exc

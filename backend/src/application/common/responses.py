@@ -20,10 +20,7 @@ class SessionResponse:
     created_at: datetime
     updated_at: datetime
     project_id: str | None = None
-    title_source: str = "manual"
-    title_revision: int = 0
     last_activity_at: datetime | None = None
-    title_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +96,7 @@ class RunTimelineResponse:
 @dataclass(frozen=True, slots=True)
 class CommandEnqueueResponse:
     command_id: str
+    session_id: str
     run_id: str | None
     message_id: str | None
     attachment_ids: tuple[str, ...]

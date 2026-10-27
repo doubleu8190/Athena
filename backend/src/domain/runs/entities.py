@@ -126,6 +126,7 @@ class CommandEnqueueResult:
     """命令入队后的稳定结果，包含幂等复用信息。"""
 
     command_id: str
+    session_id: str
     run_id: str | None
     message_id: str | None
     attachment_ids: tuple[str, ...]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
-import re
 
 from application.runs.request_contracts import (
     RootAttachment,
@@ -20,36 +19,6 @@ from domain.sessions import Message, MessageRepository, MessageRole, SessionRepo
 from shared import get_logger
 
 logger = get_logger(__name__)
-
-_GENERIC_ATTACHMENT_MESSAGES = {
-    "please process the attached files.",
-    "please process the attached files",
-    "请处理附件。",
-    "请处理附件",
-}
-
-
-def _fallback_title(message: Message) -> str:
-    """从首条文本或附件文件名生成一个可读的即时标题。"""
-    content = re.sub(r"\s+", " ", message.content).strip()
-    if content.lower() in _GENERIC_ATTACHMENT_MESSAGES:
-        content = ""
-    content = re.sub(
-        r"^(请帮我|请帮忙|请|帮我|麻烦你|麻烦|please help me|please|help me)[，,：:\s]*",
-        "",
-        content,
-        flags=re.IGNORECASE,
-    )
-    if content:
-        first_sentence = re.split(r"[。！？!?；;]", content, maxsplit=1)[0].strip()
-        return (first_sentence or content)[:32] or "新聊天"
-    if message.attachments:
-        filename = message.attachments[0].filename.strip()
-        if len(message.attachments) > 1:
-            filename = f"{filename}等{len(message.attachments)}个文件"
-        return f"分析{filename}"[:48]
-    return "新聊天"
-
 
 class RunRequestPreparationService:
     """准备运行请求并提供 Root Graph 所需的持久化查询。"""
@@ -133,10 +102,7 @@ class RunRequestPreparationService:
                 run_id=request.run_id or None,
                 attachments=tuple(attachment_values),
             )
-            await self._messages.save_user_message_with_title(
-                user_message,
-                fallback_title=_fallback_title(user_message),
-            )
+            await self._messages.save(user_message)
             logger.info(f"用户消息保存成功。", user_message=user_message.content)
         if self._events is not None:
             await self._events.publish(

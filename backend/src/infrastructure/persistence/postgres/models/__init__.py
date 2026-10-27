@@ -12,7 +12,6 @@ from .session_models import (
     MessageModel,
     SessionMemorySettingsModel,
     SessionModel,
-    SessionTitleJobModel,
 )
 from .project_models import ProjectModel
 from .tool_models import MCPServerModel, ToolModel
@@ -76,7 +75,6 @@ __all__ = [
     "MCPServerModel",
     "MessageModel",
     "SessionModel",
-    "SessionTitleJobModel",
     "SessionMemorySettingsModel",
     "ProjectModel",
     "ToolModel",

@@ -196,7 +196,7 @@ flowchart LR
 
 ### 4.1 用户提交请求
 
-1. 前端 `apiClient.submitRun()` 向 `POST /api/sessions/{session_id}/runs` 发送 JSON 或 multipart/form-data。
+1. 前端 `apiClient.submitRun()` 向 `POST /api/runs` 发送 JSON；草稿首次发送时 `session_id` 为空，后端在命令事务中创建会话。已有会话继续传现有 `session_id`。
 2. Gateway 创建带 `command_id`、`run_id` 和 `message_id` 的异步命令并返回 `202`。
 3. `CommandConsumer` 从数据库领取命令，检查会话运行状态和幂等键。
 4. LangGraph 以 `run_id` 建立 checkpoint 身份，首次执行创建初始 `AgentState`，中断执行则从 PostgreSQL checkpoint 恢复。

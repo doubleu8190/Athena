@@ -29,6 +29,7 @@ from domain.runs import (
     parse_run_command_payload,
 )
 from domain.runs.ports import CommandQueuePort, CommandStorePort, RunLifecyclePort
+from domain.sessions import Session
 
 from ..models import (
     AgentCommandModel,
@@ -47,7 +48,11 @@ from ..models import (
     TaskExecutionModel,
     WorkerJobModel,
 )
-from .memory_suppression import ensure_writable_run_scope
+from .memory_suppression import (
+    ensure_writable_run_scope,
+    project_scope_is_writable,
+)
+from ..mappers.converters import session_domain_to_model
 
 
 def _now() -> str:
@@ -141,13 +146,48 @@ class PostgresRunRepository(
     ) -> None:
         self._session_factory = session_factory
 
-    async def enqueue_command(self, command: RunCommand) -> CommandEnqueueResult:
+    async def enqueue_command(
+        self, command: RunCommand, *, new_session: Session | None = None
+    ) -> CommandEnqueueResult:
+        """幂等地入队命令，并将新会话与首条运行写入同一事务。
+
+        参数：
+            command: 已校验的运行命令。
+            new_session: 首次发送时待创建的会话；已有会话提交时为 None。
+        返回值：
+            命令队列中的稳定结果，重复命令会返回原 session_id。
+        异常：
+            ValueError: 项目、会话或运行作用域不可写，或命令参数不匹配。
+        """
         async with self._session_factory() as session:
             async with session.begin():
+                # 相同命令 ID 的并发请求先串行化，避免各自创建会话后再争抢命令主键。
+                await session.execute(
+                    select(
+                        func.pg_advisory_xact_lock(
+                            func.hashtextextended(
+                                f"agent-command:{command.command_id}", 0
+                            )
+                        )
+                    )
+                )
                 existing = await session.get(AgentCommandModel, command.command_id)
                 if existing is not None:
                     return self._result(existing, True)
                 now = command.issued_at.isoformat()
+                if new_session is not None:
+                    if (
+                        not isinstance(command.payload, RunStartPayload)
+                        or new_session.id != command.session_id
+                        or new_session.project_id is None
+                    ):
+                        raise ValueError("new_session_command_invalid")
+                    if not await project_scope_is_writable(
+                        session, new_session.project_id
+                    ):
+                        raise ValueError("project_not_found")
+                    session.add(session_domain_to_model(new_session))
+                    await session.flush()
                 if isinstance(command.payload, RunStartPayload):
                     writable, _ = await ensure_writable_run_scope(
                         session,
@@ -203,12 +243,13 @@ class PostgresRunRepository(
                         )
                     )
             return CommandEnqueueResult(
-                command.command_id,
-                command.run_id,
-                _message_id(command.payload),
-                _attachment_ids(command.payload),
-                CommandStatus.QUEUED,
-                False,
+                command_id=command.command_id,
+                session_id=command.session_id,
+                run_id=command.run_id,
+                message_id=_message_id(command.payload),
+                attachment_ids=_attachment_ids(command.payload),
+                status=CommandStatus.QUEUED,
+                deduplicated=False,
             )
 
     async def get_command(self, command_id: str) -> CommandStatusRecord | None:
@@ -1176,12 +1217,13 @@ class PostgresRunRepository(
             CommandType(row.command_type), row.payload_json
         )
         return CommandEnqueueResult(
-            row.command_id,
-            row.run_id,
-            _message_id(payload),
-            _attachment_ids(payload),
-            row.status,
-            deduplicated,
+            command_id=row.command_id,
+            session_id=row.session_id,
+            run_id=row.run_id,
+            message_id=_message_id(payload),
+            attachment_ids=_attachment_ids(payload),
+            status=row.status,
+            deduplicated=deduplicated,
         )
 
     @staticmethod

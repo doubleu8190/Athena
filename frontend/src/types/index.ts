@@ -198,10 +198,7 @@ export interface Session {
   created_at: string
   updated_at: string
   project_id?: string | null
-  title_source?: "placeholder" | "fallback" | "generated" | "manual"
-  title_revision?: number
   last_activity_at?: string | null
-  title_pending?: boolean
   last_message?: string
   message_count?: number
 }
@@ -450,10 +447,17 @@ export interface CreateSessionResponse {
   created_at: string
   updated_at?: string
   project_id: string
-  title_source?: Session["title_source"]
-  title_revision?: number
   last_activity_at?: string | null
-  title_pending?: boolean
+}
+
+export interface SubmitRunResponse {
+  command_id: string
+  session_id: string
+  run_id: string | null
+  message_id: string | null
+  attachment_ids: string[]
+  status: string
+  deduplicated: boolean
 }
 
 export interface ListSessionsResponse {

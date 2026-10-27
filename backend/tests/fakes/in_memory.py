@@ -124,14 +124,6 @@ class InMemoryMessageRepository(MessageRepository):
         self.items[message.id] = message
         return message.id
 
-    async def save_user_message_with_title(self, message: Message, *, fallback_title: str) -> bool:
-        first = not any(
-            item.session_id == message.session_id and item.role.value == "user"
-            for item in self.items.values()
-        )
-        self.items[message.id] = message
-        return first
-
     async def get(self, message_id: str) -> Message | None:
         return self.items.get(message_id)
 
@@ -180,17 +172,37 @@ class InMemoryRunStore(
         self.runs: dict[str, RunSummary] = {}
         self.root_waits: dict[str, dict[str, object]] = {}
 
-    async def enqueue_command(self, command: RunCommand) -> CommandEnqueueResult:
+    async def enqueue_command(
+        self, command: RunCommand, *, new_session: Session | None = None
+    ) -> CommandEnqueueResult:
         message_id, attachment_ids = _command_message_fields(command.payload)
         existing = self.command_status.get(command.command_id)
         if existing is not None:
-            return CommandEnqueueResult(command.command_id, command.run_id, message_id, attachment_ids, existing.status, True)
+            return CommandEnqueueResult(
+                command_id=command.command_id,
+                session_id=existing.session_id,
+                run_id=existing.run_id,
+                message_id=message_id,
+                attachment_ids=attachment_ids,
+                status=existing.status,
+                deduplicated=True,
+            )
+        if new_session is not None and new_session.id != command.session_id:
+            raise ValueError("new_session_command_invalid")
         self.commands[command.command_id] = command
         self.command_status[command.command_id] = CommandStatusRecord(command.command_id, command.session_id, command.run_id, command.command_type, CommandStatus.QUEUED)
         if command.run_id:
             now = datetime.now(timezone.utc)
             self.runs.setdefault(command.run_id, RunSummary(command.run_id, command.session_id, RunStatus.CREATED, f"thread-{command.run_id}", created_at=now, updated_at=now))
-        return CommandEnqueueResult(command.command_id, command.run_id, message_id, attachment_ids, CommandStatus.QUEUED, False)
+        return CommandEnqueueResult(
+            command_id=command.command_id,
+            session_id=command.session_id,
+            run_id=command.run_id,
+            message_id=message_id,
+            attachment_ids=attachment_ids,
+            status=CommandStatus.QUEUED,
+            deduplicated=False,
+        )
 
     async def get_command(self, command_id: str) -> CommandStatusRecord | None:
         return self.command_status.get(command_id)

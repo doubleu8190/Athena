@@ -56,8 +56,6 @@ def session_model_to_domain(row: SessionModel) -> Session:
         run_id=row.run_id,
         created_at=datetime.fromisoformat(row.created_at),
         updated_at=datetime.fromisoformat(row.updated_at),
-        title_source=row.title_source,
-        title_revision=row.title_revision,
         last_activity_at=(
             datetime.fromisoformat(row.last_activity_at)
             if row.last_activity_at is not None
@@ -79,8 +77,6 @@ def session_domain_to_model(value: Session) -> SessionModel:
         run_id=value.run_id,
         created_at=value.created_at.isoformat(),
         updated_at=value.updated_at.isoformat(),
-        title_source=value.title_source,
-        title_revision=value.title_revision,
         last_activity_at=(
             value.last_activity_at.isoformat()
             if value.last_activity_at is not None

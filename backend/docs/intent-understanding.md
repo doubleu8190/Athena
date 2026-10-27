@@ -30,7 +30,7 @@ flowchart TD
     C --> D[后台 worker 复用知识库解析与索引流程]
     D --> E[附件状态 READY]
     E --> F[前端提交消息与 attachment_ids]
-    F --> G[POST /api/sessions/{id}/runs]
+    F --> G[POST /api/runs]
     G --> H[创建异步命令\ncommand_id/run_id/message_id]
     H --> I[CommandConsumer 领取命令]
     I --> J[LangGraph 主图]
@@ -62,13 +62,13 @@ flowchart TD
 前端 `frontend/src/api/client.ts` 的 `submitRun()` 向：
 
 ```text
-POST /api/sessions/{session_id}/runs
+POST /api/runs
 ```
 
 发送：
 
 - 附件选择后单独以 `multipart/form-data` 调用 `POST /api/sessions/{session_id}/attachments`，服务器创建文件处理任务并返回附件信息；
-- 消息提交使用 JSON，包含 `message`、可选 `command_id` 和已就绪附件的 `attachment_ids`。
+- 消息提交使用 JSON，包含 `session_id`、新聊天所需的 `project_id`、`message`、稳定的 `command_id` 和已就绪附件的 `attachment_ids`。新聊天首次发送时 `session_id` 为空，后端创建会话并在响应中返回实际 ID。
 
 后端不在这个 HTTP 请求中同步执行意图识别，而是返回 `202 Accepted`，并生成或传递：
 

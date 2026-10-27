@@ -29,10 +29,7 @@ class Session:
     last_compressed_message_id: str | None = None
     last_summarized_message_id: str | None = None
     project_id: str | None = None
-    title_source: str = "manual"
-    title_revision: int = 0
     last_activity_at: datetime | None = None
-    title_pending: bool = False
 
     @classmethod
     def create(
@@ -57,10 +54,6 @@ class Session:
             created_at=now,
             updated_at=now,
             project_id=project_id,
-            title_source=(
-                "placeholder" if normalized_title in {"New Session", "新聊天"} else "manual"
-            ),
-            title_revision=0,
             last_activity_at=now,
         )
 
@@ -82,7 +75,5 @@ class Session:
             last_compressed_message_id=self.last_compressed_message_id,
             last_summarized_message_id=self.last_summarized_message_id,
             project_id=self.project_id,
-            title_source="manual",
-            title_revision=self.title_revision + 1,
             last_activity_at=self.last_activity_at,
         )

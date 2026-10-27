@@ -101,6 +101,19 @@ def command(command_id="c-1", run_id="r-1"):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("returned_run_id, expected", [("r-1", True), (None, False)])
+async def test_run_status_update_reports_whether_a_transition_matched(
+    returned_run_id: str | None, expected: bool
+) -> None:
+    """驱动只提供 RETURNING 行时，仍能区分更新成功和状态保护拒绝。"""
+    db = DB()
+    db.results = [SimpleNamespace(scalar_one_or_none=lambda: returned_run_id)]
+    runs = PostgresRunRepository(factory(db))
+
+    assert await runs.update_status("r-1", RunStatus.RUNNING) is expected
+
+
+@pytest.mark.asyncio
 async def test_target_runtime_repositories_cover_queue_events_approval_memory_and_retrieval():
     db = DB()
     runs = PostgresRunRepository(factory(db))

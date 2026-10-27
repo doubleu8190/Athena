@@ -356,7 +356,11 @@ class PostgresRunRepository(
             return await self._summaries(session, list(rows))
 
     async def list_recent(
-        self, *, limit: int, offset: int, session_id: str | None = None,
+        self,
+        *,
+        limit: int,
+        offset: int,
+        session_id: str | None = None,
     ) -> tuple[list[RunSummary], int]:
         """分页读取未删除会话的运行，按提交时间从新到旧排列。
 
@@ -375,22 +379,38 @@ class PostgresRunRepository(
         if session_id is not None:
             conditions.append(AgentRunModel.session_id == session_id)
         async with self._session_factory() as session:
-            total = int((await session.execute(
-                select(func.count()).select_from(AgentRunModel)
-                .join(SessionModel, SessionModel.id == AgentRunModel.session_id)
-                .where(*conditions)
-            )).scalar_one())
-            rows = (await session.execute(
-                select(AgentRunModel)
-                .join(SessionModel, SessionModel.id == AgentRunModel.session_id)
-                .where(*conditions)
-                .order_by(AgentRunModel.created_at.desc(), AgentRunModel.run_id.desc())
-                .limit(limit).offset(offset)
-            )).scalars().all()
+            total = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(AgentRunModel)
+                        .join(SessionModel, SessionModel.id == AgentRunModel.session_id)
+                        .where(*conditions)
+                    )
+                ).scalar_one()
+            )
+            rows = (
+                (
+                    await session.execute(
+                        select(AgentRunModel)
+                        .join(SessionModel, SessionModel.id == AgentRunModel.session_id)
+                        .where(*conditions)
+                        .order_by(
+                            AgentRunModel.created_at.desc(), AgentRunModel.run_id.desc()
+                        )
+                        .limit(limit)
+                        .offset(offset)
+                    )
+                )
+                .scalars()
+                .all()
+            )
             return await self._summaries(session, list(rows)), total
 
     async def _summaries(
-        self, session: AsyncSession, rows: list[AgentRunModel],
+        self,
+        session: AsyncSession,
+        rows: list[AgentRunModel],
     ) -> list[RunSummary]:
         """批量补齐实际执行起点，避免将排队时间计入执行耗时。
 
@@ -407,14 +427,21 @@ class PostgresRunRepository(
         if not rows:
             return []
         # Resume 不能重置执行起点；旧记录也直接从持久化事件恢复。
-        starts = (await session.execute(
-            select(AgentEventModel.run_id, func.min(cast(AgentEventModel.occurred_at, DateTime(timezone=True))))
-            .where(
-                AgentEventModel.run_id.in_([row.run_id for row in rows]),
-                AgentEventModel.event_type.in_(("run.started", "run.resumed")),
+        starts = (
+            await session.execute(
+                select(
+                    AgentEventModel.run_id,
+                    func.min(
+                        cast(AgentEventModel.occurred_at, DateTime(timezone=True))
+                    ),
+                )
+                .where(
+                    AgentEventModel.run_id.in_([row.run_id for row in rows]),
+                    AgentEventModel.event_type.in_(("run.started", "run.resumed")),
+                )
+                .group_by(AgentEventModel.run_id)
             )
-            .group_by(AgentEventModel.run_id)
-        )).all()
+        ).all()
         run_id_to_started_at = {run_id: started_at for run_id, started_at in starts}
         return [self._run(row, run_id_to_started_at.get(row.run_id)) for row in rows]
 
@@ -458,6 +485,7 @@ class PostgresRunRepository(
         )
         async with self._session_factory() as session:
             async with session.begin():
+                # ORM 的 RETURNING 结果不要求提供 rowcount，用返回的 Run ID 判断是否命中。
                 result = await session.execute(
                     update(AgentRunModel)
                     .where(
@@ -465,8 +493,9 @@ class PostgresRunRepository(
                         AgentRunModel.status.in_(active_states),
                     )
                     .values(status=str(status), updated_at=_now())
+                    .returning(AgentRunModel.run_id)
                 )
-        return bool(result.rowcount)
+        return result.scalar_one_or_none() is not None
 
     async def arm_root_wait(
         self,
@@ -601,9 +630,7 @@ class PostgresRunRepository(
         run.cancellation_epoch = int(run.cancellation_epoch or 0) + 1
         run.cancellation_external_effect_status = external_effect_status
         run.updated_at = now_iso
-        await self._enqueue_memory_job(
-            session, run, assistant_text="", now_iso=now_iso
-        )
+        await self._enqueue_memory_job(session, run, assistant_text="", now_iso=now_iso)
         await self._cancel_root_resume_jobs(session, run_id, now)
         await self._cancel_pending_approvals(session, run_id=run_id, plan=None, now=now)
         await session.execute(
@@ -1059,7 +1086,9 @@ class PostgresRunRepository(
                                 assistant_message_id = f"assistant:{run_id}"
                                 stream = _answer_stream_metadata(response)
                                 if stream["message_id"] != assistant_message_id:
-                                    raise ValueError("answer_stream_message_id_mismatch")
+                                    raise ValueError(
+                                        "answer_stream_message_id_mismatch"
+                                    )
                                 started_at = str(stream["started_at"])
                                 await session.execute(
                                     pg_insert(MessageModel)
@@ -1174,7 +1203,9 @@ class PostgresRunRepository(
                             )
                             .values(
                                 status=CommandStatus.FAILED.value,
-                                error_json=json.dumps(error or {"code": "run_failed"}, ensure_ascii=False),
+                                error_json=json.dumps(
+                                    error or {"code": "run_failed"}, ensure_ascii=False
+                                ),
                                 completed_at=now_iso,
                             )
                         )

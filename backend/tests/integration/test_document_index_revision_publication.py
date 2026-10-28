@@ -248,8 +248,12 @@ async def test_document_claim_skips_more_than_32_active_leases(document_revision
 async def test_document_writes_reject_another_attachments_lease(document_revision_store) -> None:
     """有效 grant 只能用于其所属附件的分块和向量。"""
     store = document_revision_store
-    lease = await PostgresLeaseCenter(store.sessions).acquire(
-        LeaseKey("document_ingestion", "other-attachment"),
+    center = PostgresLeaseCenter(store.sessions)
+    key = LeaseKey("document_ingestion", "other-attachment")
+    async with store.sessions() as session, session.begin():
+        await center.ensure_in_transaction(session, key)
+    lease = await center.acquire(
+        key,
         owner_id="other", lease_seconds=60,
     )
     assert lease is not None

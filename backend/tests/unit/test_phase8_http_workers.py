@@ -97,7 +97,7 @@ async def test_document_worker_and_memory_worker_success_failure_paths() -> None
     class Jobs:
         def __init__(self):
             self._leases = LeaseCenter()
-            self.items = [ClaimedMemoryJob(CompletedTurn("t", "s", "", ""), 1, lease_grant("memory_processing", "t"))]; self.calls=[]
+            self.items = [ClaimedMemoryJob(CompletedTurn("t", "s", "", "", project_id="project-1"), 1, lease_grant("memory_processing", "t"))]; self.calls=[]
         async def claim_next_job(self, *, lease_seconds):
             if self.items: return self.items.pop(0)
             return None
@@ -109,30 +109,6 @@ async def test_document_worker_and_memory_worker_success_failure_paths() -> None
     task = asyncio.create_task(memory_worker.run()); await asyncio.sleep(0.01); memory_worker.stop(); await task
     assert ("ok", "t") in jobs.calls
 
-
-@pytest.mark.asyncio
-async def test_memory_workflow_create_update_and_skip_paths() -> None:
-    candidate = MemoryCandidate("fact", "t", "preference", "general", 0.9)
-    class Trigger:
-        def __init__(self, value): self.value=value
-        def should_process(self, turn): return self.value
-    class Extractor:
-        async def extract(self, turn, *, lease): return [candidate]
-    class Resolver:
-        def __init__(self, action): self.action=action
-        async def resolve(self, values): return [MemoryResolution(self.action, candidate, "m-1", "updated")]
-    class Memory:
-        def __init__(self): self.calls=[]
-        async def create_memory_from_worker(self, command, *, lease): self.calls.append(("add", command)); return "m"
-        async def revise_from_worker(self, *args, **kwargs): self.calls.append(("revise", args)); return "m2"
-    turn = CompletedTurn("t", "s", "u", "a")
-    memory = Memory()
-    grant = lease_grant("memory_processing", "t")
-    assert await MemoryWriteWorkflow(memory, Trigger(False), Extractor(), Resolver(ResolutionAction.CREATE)).process_completed_turn(turn, lease=grant) == 0
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.CREATE)).process_completed_turn(turn, lease=grant) == 1
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.UPDATE)).process_completed_turn(turn, lease=grant) == 1
-    assert await MemoryWriteWorkflow(memory, Trigger(True), Extractor(), Resolver(ResolutionAction.IGNORE)).process_completed_turn(turn, lease=grant) == 0
-    assert [item[0] for item in memory.calls] == ["add", "revise"]
 
 
 def test_approval_controller_maps_conflicts_and_serializes_history() -> None:

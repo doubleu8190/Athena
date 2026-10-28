@@ -5,7 +5,7 @@ from .query_service import MemoryQueryService
 from .episode_retrieval_service import MemoryEpisodeContextProvider
 from .workflow import MemoryWriteWorkflow
 from .settings_service import SessionMemorySettingsService
-from .extraction import DefaultMemoryWriteTrigger, LLMFactExtractor, LLMMemoryResolver
+from .extraction import DefaultMemoryWriteTrigger, LLMFactExtractor, MemoryFactResolver
 from .episode_summarizer import LLMMemoryEpisodeSummarizer
 from .episode_service import MemoryEpisodeManagementService
 from .job_service import MemoryJobManagementService
@@ -16,7 +16,7 @@ __all__ = [
     "DefaultMemoryWriteTrigger",
     "LLMFactExtractor",
     "LLMMemoryEpisodeSummarizer",
-    "LLMMemoryResolver",
+    "MemoryFactResolver",
     "MemoryEpisodeContextProvider",
     "MemoryEpisodeManagementService",
     "MemoryJobManagementService",

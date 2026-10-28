@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from application.runs import RunRejectedError, RunService
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.leases import LeaseKey, LeaseLostError
-from domain.runs import RunStatus
+from domain.runs import RunStatus, RunStartPayload
 from infrastructure.persistence.postgres.models import (
     AgentEventModel,
     AgentPlanModel,
@@ -647,16 +647,12 @@ async def test_failed_root_waits_for_live_worker_before_next_run(
         await session.flush()
         session.add(WorkerJobModel(job_id="job-failure", dedupe_key="job-failure", job_type="execute", execution_id="execution-failure",
             status="running", available_at=now, created_at=now, updated_at=now))
-        session.add(ExecutionLeaseModel(
-            resource_type="worker_execution",
-            resource_id="execution-failure",
-            owner_id="worker",
-            fencing_token=1,
-            state="active",
-            lease_until=now + timedelta(minutes=5),
-            created_at=now,
-            updated_at=now,
-        ))
+        worker_grant = await PostgresLeaseCenter(session_factory).acquire_in_transaction(
+            session, LeaseKey("worker_execution", "execution-failure"),
+            owner_id="worker", lease_seconds=300,
+        )
+        assert worker_grant is not None
+
 
     if expired_root:
         async with session_factory() as session, session.begin():
@@ -697,3 +693,33 @@ async def test_failed_root_waits_for_live_worker_before_next_run(
         assert job.status == "cancelled" and len(events) == 1
     next_invocation = await repository.claim_next_run()
     assert next_invocation is not None and next_invocation.run_id == second.run_id
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_lease_pagination_preserves_session_fifo(session_factory) -> None:
+    """租约 ID 的字典序不能改变会话内的提交顺序。"""
+    class OneKeyLeaseCenter(PostgresLeaseCenter):
+        async def claimable_keys_in_transaction(
+            self, session, resource_type, *, limit, after_resource_id=None
+        ):
+            """每页只返回一个 ID，稳定复现批次分隔两条同会话 Run。"""
+            return await super().claimable_keys_in_transaction(
+                session, resource_type, limit=1, after_resource_id=after_resource_id
+            )
+
+    repository = PostgresRunRepository(
+        session_factory, lease_center=OneKeyLeaseCenter(session_factory)
+    )
+    first = await _service(repository).submit(
+        None, project_id="project-1", request_id="fifo-first", message="first"
+    )
+    later_id = "0-later"
+    assert later_id < first.run_id
+    await repository.enqueue_run(
+        request_id="fifo-later", parameters={"message": "later"},
+        session_id=first.session_id, project_id="project-1", run_id=later_id,
+        payload=RunStartPayload(message="later", message_id="later-message"),
+    )
+    claimed = await repository.claim_next_run()
+    assert claimed is not None and claimed.run_id == first.run_id

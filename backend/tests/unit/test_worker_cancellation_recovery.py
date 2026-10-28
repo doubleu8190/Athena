@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from domain.leases import LeaseKey, LeaseRecord
 from domain.orchestration import (
     RunCancellationReceipt,
     Task,
@@ -95,6 +96,9 @@ class ReconcileSession:
 
     async def get(self, model, _key, **_kwargs):
         return self.run if model.__name__ == "AgentRunModel" else None
+
+    async def scalars(self, _statement):
+        return Result(rows=[row[1] for row in self.expired_rows])
 
     async def execute(self, _statement):
         self.execute_count += 1
@@ -382,14 +386,23 @@ async def test_reconciler_persists_task_cancelled_when_worker_lease_expires():
                 "Task",
                 "Do task",
                 1,
-                "worker-owner",
-                7,
-                NOW - timedelta(seconds=1),
             )
         ],
     )
     repository = PostgresWorkerJobRepository(
-        factory(session), clock=lambda: NOW, lease_center=LeaseCenter()
+        factory(session),
+        clock=lambda: NOW,
+        lease_center=LeaseCenter(
+            records=[
+                LeaseRecord(
+                    key=LeaseKey("worker_execution", "execution-1"),
+                    state="active",
+                    owner_id="worker-owner",
+                    fencing_token=7,
+                    lease_until=NOW - timedelta(seconds=1),
+                )
+            ]
+        ),
     )
 
     receipts = await repository.reconcile_cancellations()

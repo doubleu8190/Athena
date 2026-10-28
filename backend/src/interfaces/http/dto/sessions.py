@@ -26,13 +26,11 @@ class SessionMemorySettingsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     use_memories: bool
-    generate_memories: bool
 
 
 class SessionMemorySettingsResponse(BaseModel):
     session_id: str
     use_memories: bool
-    generate_memories: bool
 
 
 class SessionResponse(BaseModel):

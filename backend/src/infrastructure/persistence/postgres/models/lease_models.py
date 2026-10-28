@@ -16,17 +16,17 @@ class ExecutionLeaseModel(Base):
     __tablename__ = "execution_leases"
     __table_args__ = (
         CheckConstraint(
-            "state IN ('active', 'revoked', 'released')",
+            "state IN ('pending', 'active', 'revoked', 'released', 'completed')",
             name="ck_execution_leases_state",
         ),
         CheckConstraint(
-            "(state = 'released' AND owner_id IS NULL AND lease_until IS NULL) "
+            "(state IN ('pending', 'released', 'completed') AND owner_id IS NULL AND lease_until IS NULL) "
             "OR (state IN ('active', 'revoked') AND owner_id IS NOT NULL "
             "AND lease_until IS NOT NULL)",
             name="ck_execution_leases_owner_state",
         ),
         CheckConstraint(
-            "fencing_token >= 0", name="ck_execution_leases_token_nonnegative"
+            "fencing_token IS NULL OR fencing_token >= 0", name="ck_execution_leases_token_nonnegative"
         ),
         Index("idx_execution_leases_expiry", "state", "lease_until"),
     )
@@ -34,8 +34,8 @@ class ExecutionLeaseModel(Base):
     resource_type: Mapped[str] = mapped_column(String, primary_key=True)
     resource_id: Mapped[str] = mapped_column(String, primary_key=True)
     owner_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    fencing_token: Mapped[int] = mapped_column(BigInteger, default=0)
-    state: Mapped[str] = mapped_column(String, default="released")
+    fencing_token: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    state: Mapped[str] = mapped_column(String, default="pending")
     lease_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

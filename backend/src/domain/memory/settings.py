@@ -1,4 +1,4 @@
-"""会话级记忆读写开关。"""
+"""会话级记忆读取设置。"""
 
 from __future__ import annotations
 
@@ -7,11 +7,10 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class SessionMemorySettings:
-    """分别控制本会话读取历史记忆和生成新记忆。"""
+    """控制本会话是否读取历史记忆。"""
 
     session_id: str
     use_memories: bool = True
-    generate_memories: bool = True
     project_id: str | None = None
 
 

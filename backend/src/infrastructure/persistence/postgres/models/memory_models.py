@@ -49,6 +49,7 @@ class MemoryEpisodeModel(Base):
     episode_id: Mapped[str] = mapped_column(String, primary_key=True)
     turn_id: Mapped[str] = mapped_column(String, nullable=False)
     session_id: Mapped[str] = mapped_column(String, nullable=False)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_fts: Mapped[str] = mapped_column(
         TSVECTOR,
@@ -58,41 +59,6 @@ class MemoryEpisodeModel(Base):
     source_refs_json: Mapped[str] = mapped_column(Text, nullable=False)
     source_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
-class MemoryEpisodeProjectBindingModel(Base):
-    """冻结 episode 首次提交时所属的项目空间。"""
-
-    __tablename__ = "memory_episode_project_bindings"
-    __table_args__ = (Index("idx_memory_episode_project_bindings_project", "project_id"),)
-
-    episode_id: Mapped[str] = mapped_column(
-        ForeignKey("memory_episodes.episode_id", ondelete="CASCADE"), primary_key=True
-    )
-    project_id: Mapped[str] = mapped_column(
-        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False
-    )
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
-class MemoryWriteOperationModel(Base):
-    """单候选写入的幂等回执和投影状态。"""
-
-    __tablename__ = "memory_write_operations"
-    __table_args__ = (
-        Index("idx_memory_write_operations_turn", "turn_id"),
-        Index("idx_memory_write_operations_status", "status", "updated_at"),
-    )
-
-    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    turn_id: Mapped[str] = mapped_column(String)
-    candidate_json: Mapped[str] = mapped_column(Text)
-    decision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String, default="pending")
-    result_memory_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    projection_status: Mapped[str] = mapped_column(String, default="pending")
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
 
 
 class MemorySourceSuppressionModel(Base):
@@ -130,10 +96,8 @@ class MemoryRelationModel(Base):
 __all__ = [
     "MemoryExtractionSnapshotModel",
     "MemoryEpisodeModel",
-    "MemoryEpisodeProjectBindingModel",
     "MemoryModel",
     "MemoryRelationModel",
     "MemoryRunEvidenceSnapshotModel",
     "MemorySourceSuppressionModel",
-    "MemoryWriteOperationModel",
 ]

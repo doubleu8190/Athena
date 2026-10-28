@@ -687,7 +687,7 @@ function executionEvent(
     parentId,
     kind: "worker",
     name: `Execution attempt ${execution.attempt}`,
-    summary: `${execution.status} · fence ${execution.fencing_token}`,
+    summary: `${execution.status}${execution.fencing_token === null ? "" : ` · fence ${execution.fencing_token}`}`,
     status: snapshotStatus(execution.status),
     duration: "—",
     time: formatTimestamp(execution.created_at),

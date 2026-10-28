@@ -16,7 +16,6 @@ from domain.leases import LeaseGrant, LeaseKey, LeaseLostError
 
 from ..models import (
     AttachmentModel,
-    ExecutionLeaseModel,
     KnowledgeDocumentJobModel,
 )
 from .lease_center import PostgresLeaseCenter
@@ -56,6 +55,9 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
                         existing.available_at = now
                         existing.updated_at = now
                         existing.error_json = None
+                        await self._leases.schedule_in_transaction(
+                            session, LeaseKey("document_ingestion", attachment_id)
+                        )
                         return True
                     return False
                 session.add(
@@ -68,6 +70,9 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
                         created_at=now,
                         updated_at=now,
                     )
+                )
+                await self._leases.ensure_in_transaction(
+                    session, LeaseKey("document_ingestion", attachment_id)
                 )
         return True
 
@@ -90,15 +95,10 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
                 )
                 if attachment is None:
                     return
-                lease = await session.scalar(
-                    select(ExecutionLeaseModel)
-                    .where(
-                        ExecutionLeaseModel.resource_type == "document_ingestion",
-                        ExecutionLeaseModel.resource_id == attachment_id,
-                    )
-                    .with_for_update()
+                lease = await self._leases.get_in_transaction(
+                    session, LeaseKey("document_ingestion", attachment_id)
                 )
-                if lease is not None and lease.state == "active":
+                if lease is not None and lease.state == "active" and lease.fencing_token is not None:
                     await self._leases.revoke_in_transaction(
                         session,
                         LeaseKey("document_ingestion", attachment_id),
@@ -111,72 +111,84 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
         """原子领取业务作业并获取附件级文档租约。"""
         async with self._session_factory() as session:
             async with session.begin():
-                candidates = (
-                    await session.scalars(
-                        select(KnowledgeDocumentJobModel)
-                        .where(
-                            KnowledgeDocumentJobModel.status.in_(("queued", "running")),
-                            KnowledgeDocumentJobModel.attempt <= max_attempts,
-                            KnowledgeDocumentJobModel.available_at <= _now(),
-                            ~select(ExecutionLeaseModel.resource_id).where(
-                                ExecutionLeaseModel.resource_type == "document_ingestion",
-                                ExecutionLeaseModel.resource_id == KnowledgeDocumentJobModel.attachment_id,
-                                ExecutionLeaseModel.state.in_(("active", "revoked")),
-                                ExecutionLeaseModel.lease_until > func.clock_timestamp(),
-                            ).exists(),
-                        )
-                        .order_by(
-                            KnowledgeDocumentJobModel.available_at,
-                            KnowledgeDocumentJobModel.job_id,
-                        )
-                        .with_for_update(skip_locked=True)
-                        .limit(32)
-                    )
-                ).all()
-                for row in candidates:
-                    attachment = await session.scalar(
-                        select(AttachmentModel)
-                        .where(AttachmentModel.id == row.attachment_id)
-                        .with_for_update()
-                    )
-                    if attachment is None or attachment.deleted_time is not None:
-                        row.status = "cancelled"
-                        row.updated_at = _now()
-                        continue
-                    grant = await self._leases.acquire_in_transaction(
+                after_resource_id: str | None = None
+                while True:
+                    claimable = await self._leases.claimable_keys_in_transaction(
                         session,
-                        LeaseKey("document_ingestion", row.attachment_id),
-                        owner_id=uuid4().hex,
-                        lease_seconds=lease_seconds,
+                        "document_ingestion",
+                        limit=128,
+                        after_resource_id=after_resource_id,
                     )
-                    if grant is None:
-                        continue
-                    if row.attempt >= max_attempts:
-                        row.status = "failed"
-                        row.error_json = json.dumps(
-                            {"message": "maximum document ingestion attempts reached"},
-                            ensure_ascii=False,
+                    if not claimable:
+                        return None
+                    claimable_ids = [key.resource_id for key in claimable]
+                    candidates = (
+                        await session.scalars(
+                            select(KnowledgeDocumentJobModel)
+                            .where(
+                                KnowledgeDocumentJobModel.attachment_id.in_(claimable_ids),
+                                KnowledgeDocumentJobModel.status.in_(("queued", "running")),
+                                KnowledgeDocumentJobModel.attempt <= max_attempts,
+                                KnowledgeDocumentJobModel.available_at <= _now(),
+                            )
+                            .order_by(
+                                KnowledgeDocumentJobModel.available_at,
+                                KnowledgeDocumentJobModel.job_id,
+                            )
+                            .with_for_update(skip_locked=True)
+                            .limit(len(claimable_ids))
                         )
+                    ).all()
+                    for row in candidates:
+                        attachment = await session.scalar(
+                            select(AttachmentModel)
+                            .where(AttachmentModel.id == row.attachment_id)
+                            .with_for_update()
+                        )
+                        if attachment is None or attachment.deleted_time is not None:
+                            row.status = "cancelled"
+                            row.updated_at = _now()
+                            await self._leases.complete_unclaimed_in_transaction(
+                                session,
+                                LeaseKey("document_ingestion", row.attachment_id),
+                            )
+                            continue
+                        grant = await self._leases.acquire_in_transaction(
+                            session,
+                            LeaseKey("document_ingestion", row.attachment_id),
+                            owner_id=uuid4().hex,
+                            lease_seconds=lease_seconds,
+                        )
+                        if grant is None:
+                            continue
+                        if row.attempt >= max_attempts:
+                            row.status = "failed"
+                            row.error_json = json.dumps(
+                                {"message": "maximum document ingestion attempts reached"},
+                                ensure_ascii=False,
+                            )
+                            row.updated_at = _now()
+                            attachment.status = AttachmentStatus.FAILED.value
+                            attachment.error_message = "maximum document ingestion attempts reached"
+                            attachment.updated_at = _now()
+                            if not await self._leases.finish_in_transaction(
+                                session, grant, completed=True
+                            ):
+                                raise LeaseLostError(grant.key)
+                            continue
+                        row.status = "running"
+                        row.attempt += 1
                         row.updated_at = _now()
-                        attachment.status = AttachmentStatus.FAILED.value
-                        attachment.error_message = "maximum document ingestion attempts reached"
+                        attachment.status = AttachmentStatus.PROCESSING.value
+                        attachment.error_message = None
                         attachment.updated_at = _now()
-                        if not await self._leases.finish_in_transaction(session, grant):
-                            raise LeaseLostError(grant.key)
-                        continue
-                    row.status = "running"
-                    row.attempt += 1
-                    row.updated_at = _now()
-                    attachment.status = AttachmentStatus.PROCESSING.value
-                    attachment.error_message = None
-                    attachment.updated_at = _now()
-                    return {
-                        "job_id": row.job_id,
-                        "attachment_id": row.attachment_id,
-                        "attempt": row.attempt,
-                        "lease": grant,
-                    }
-        return None
+                        return {
+                            "job_id": row.job_id,
+                            "attachment_id": row.attachment_id,
+                            "attempt": row.attempt,
+                            "lease": grant,
+                        }
+                    after_resource_id = claimable[-1].resource_id
 
     async def mark_succeeded(
         self, job_id: str, result: Mapping[str, object], *, lease: LeaseGrant
@@ -233,7 +245,7 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
                 )
                 job.error_json = None
                 job.updated_at = _now()
-                if not await self._leases.finish_in_transaction(session, lease):
+                if not await self._leases.finish_in_transaction(session, lease, completed=True):
                     raise LeaseLostError(lease.key)
 
     async def mark_failed(
@@ -279,7 +291,9 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
                     attachment.error_message = error
                 job.updated_at = _now()
                 attachment.updated_at = _now()
-                if not await self._leases.finish_in_transaction(session, lease):
+                if not await self._leases.finish_in_transaction(
+                    session, lease, completed=job.status in {"failed", "cancelled"}
+                ):
                     raise LeaseLostError(lease.key)
 
 

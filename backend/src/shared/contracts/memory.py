@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
-from typing import TYPE_CHECKING, Annotated, Literal, overload
+from typing import Annotated, Literal, overload
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from domain.memory.contracts import (
-    MemoryCandidateSnapshot as DomainMemoryCandidateSnapshot,
+    MemoryCandidate as DomainMemoryCandidate,
     MemoryEpisode as DomainMemoryEpisode,
     MemoryEpisodeProposal as DomainMemoryEpisodeProposal,
     MemoryEpisodeSummary as DomainMemoryEpisodeSummary,
@@ -17,15 +17,10 @@ from domain.memory.contracts import (
     MemoryFactIdentity as DomainMemoryFactIdentity,
     MemoryFactExtractionSnapshot as DomainMemoryFactExtractionSnapshot,
     MemoryRecordMetadata as DomainMemoryRecordMetadata,
-    MemoryResolutionProposal as DomainMemoryResolutionProposal,
     MemorySourceReference as DomainMemorySourceReference,
     MemoryTaskOutcomeEvidence as DomainMemoryTaskOutcomeEvidence,
     MemoryToolOutcomeEvidence as DomainMemoryToolOutcomeEvidence,
-    MemoryWriteOperation as DomainMemoryWriteOperation,
 )
-
-if TYPE_CHECKING:
-    from domain.memory.entities import MemoryCandidate
 
 
 class MemorySourceReferenceSchema(BaseModel):
@@ -144,7 +139,6 @@ class MemoryEpisodeSummarySchema(BaseModel):
     outcome: Literal["completed", "partial", "failed", "cancelled", "unknown"]
     result: str = Field(min_length=1, max_length=1500)
     attempts: str = Field(default="", max_length=1000)
-    verification_scope: str = Field(default="", max_length=500)
     reusable_learnings: tuple[Annotated[str, Field(max_length=200)], ...] = Field(
         default=(), max_length=8
     )
@@ -186,7 +180,9 @@ class MemoryEpisodeSchema(BaseModel):
     project_id: str | None = Field(default=None, min_length=1)
     content: str = Field(min_length=1, max_length=8000)
     summary: MemoryEpisodeSummarySchema
-    source_refs: tuple[MemorySourceReferenceSchema, ...] = Field(min_length=1, max_length=80)
+    source_refs: tuple[MemorySourceReferenceSchema, ...] = Field(
+        min_length=1, max_length=80
+    )
     source_fingerprint: str = Field(min_length=64, max_length=64)
     created_at: str
 
@@ -209,6 +205,7 @@ class MemoryFactProposalSchema(BaseModel):
         "unresolved",
         "other",
     ]
+    scope_kind: Literal["global", "project"]
     confidence: float = Field(ge=0.0, le=1.0)
     polarity: Literal["affirmed", "negated"] = "affirmed"
     claim_intent: Literal["assert", "correct", "retract"] = "assert"
@@ -244,12 +241,11 @@ class MemoryFactExtractionSnapshotSchema(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal[1] = 1
     turn_id: str = Field(min_length=1)
-    candidates: tuple["MemoryCandidateSnapshotSchema", ...]
+    candidates: tuple["MemoryCandidateSchema", ...]
 
 
-class MemoryCandidateSnapshotSchema(BaseModel):
+class MemoryCandidateSchema(BaseModel):
     """可稳定写入作业快照的单条候选。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -260,65 +256,9 @@ class MemoryCandidateSnapshotSchema(BaseModel):
     category: str = "fact"
     confidence: float = Field(ge=0.6, le=1.0)
     session_id: str = ""
-    fact: MemoryFactSchema | None = None
-
-    @classmethod
-    def from_candidate(cls, candidate: MemoryCandidate) -> "MemoryCandidateSnapshotSchema":
-        """将领域候选转为可持久化的严格快照。"""
-        return cls(
-            content=candidate.content,
-            source_turn_id=candidate.source_turn_id,
-            memory_type=candidate.memory_type,
-            category=candidate.category,
-            confidence=candidate.confidence,
-            session_id=candidate.session_id,
-            fact=(memory_domain_to_schema(candidate.fact) if candidate.fact is not None else None),
-        )
-
-    def to_candidate(self) -> MemoryCandidate:
-        """恢复冻结快照对应的领域候选。"""
-        from domain.memory.entities import MemoryCandidate
-
-        return MemoryCandidate(
-            content=self.content,
-            source_turn_id=self.source_turn_id,
-            memory_type=self.memory_type,
-            category=self.category,
-            confidence=self.confidence,
-            session_id=self.session_id,
-            fact=(memory_schema_to_domain(self.fact) if self.fact is not None else None),
-        )
-
+    fact: MemoryFactSchema
 
 MemoryFactExtractionSnapshotSchema.model_rebuild()
-
-
-class MemoryResolutionProposalSchema(BaseModel):
-    """模型针对一个候选提出的动作；目标 ID 必须由程序复核。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    action: Literal["CREATE", "REVISE", "IGNORE", "DEFER"]
-    target_memory_id: str | None = None
-    relation: Literal["supersedes", "contradicts"] | None = None
-    reason_code: str | None = Field(default=None, max_length=80)
-    expected_memory_ids: tuple[str, ...] = ()
-
-
-class MemoryWriteOperationSchema(BaseModel):
-    """单个候选的可恢复处理回执。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    operation_id: str = Field(min_length=1)
-    turn_id: str = Field(min_length=1)
-    candidate: MemoryCandidateSnapshotSchema
-    status: Literal[
-        "pending", "applied", "ignored", "deferred", "rejected", "skipped"
-    ]
-    decision: MemoryResolutionProposalSchema | None = None
-    result_memory_id: str | None = None
-    projection_status: Literal["not_required", "pending", "ready", "failed"]
 
 
 class MemoryRecordMetadataSchema(BaseModel):
@@ -340,12 +280,12 @@ _SCHEMA_TO_DOMAIN = {
     MemoryEpisodeProposalSchema: DomainMemoryEpisodeProposal,
     MemoryEpisodeSchema: DomainMemoryEpisode,
     MemoryFactExtractionSnapshotSchema: DomainMemoryFactExtractionSnapshot,
-    MemoryCandidateSnapshotSchema: DomainMemoryCandidateSnapshot,
-    MemoryResolutionProposalSchema: DomainMemoryResolutionProposal,
-    MemoryWriteOperationSchema: DomainMemoryWriteOperation,
+    MemoryCandidateSchema: DomainMemoryCandidate,
     MemoryRecordMetadataSchema: DomainMemoryRecordMetadata,
 }
-_DOMAIN_TO_SCHEMA = {domain_type: schema_type for schema_type, domain_type in _SCHEMA_TO_DOMAIN.items()}
+_DOMAIN_TO_SCHEMA = {
+    domain_type: schema_type for schema_type, domain_type in _SCHEMA_TO_DOMAIN.items()
+}
 
 
 @overload
@@ -406,20 +346,8 @@ def memory_schema_to_domain(
 
 @overload
 def memory_schema_to_domain(
-    value: MemoryCandidateSnapshotSchema,
-) -> DomainMemoryCandidateSnapshot: ...
-
-
-@overload
-def memory_schema_to_domain(
-    value: MemoryResolutionProposalSchema,
-) -> DomainMemoryResolutionProposal: ...
-
-
-@overload
-def memory_schema_to_domain(
-    value: MemoryWriteOperationSchema,
-) -> DomainMemoryWriteOperation: ...
+    value: MemoryCandidateSchema,
+) -> DomainMemoryCandidate: ...
 
 
 @overload
@@ -464,7 +392,10 @@ def memory_domain_to_schema(value: object) -> BaseModel:
         values[item.name] = _domain_value_to_schema_value(getattr(value, item.name))
     if isinstance(value, DomainMemoryRecordMetadata):
         values.update(
-            {key: _domain_value_to_schema_value(item) for key, item in value.extra_fields.items()}
+            {
+                key: _domain_value_to_schema_value(item)
+                for key, item in value.extra_fields.items()
+            }
         )
     return schema_type.model_validate(values)
 
@@ -483,22 +414,20 @@ def _domain_value_to_schema_value(value: object) -> object:
 
 
 __all__ = [
-    'MemoryCandidateSnapshotSchema',
-    'MemoryEpisodeSchema',
-    'MemoryEpisodeProposalSchema',
-    'MemoryEpisodeSummarySchema',
-    'MemoryExecutionEvidenceSchema',
-    'MemoryFactSchema',
-    'MemoryFactIdentitySchema',
-    'MemoryFactExtractionOutputSchema',
-    'MemoryFactExtractionSnapshotSchema',
-    'MemoryFactProposalSchema',
-    'MemoryRecordMetadataSchema',
-    'MemoryResolutionProposalSchema',
-    'MemorySourceReferenceSchema',
-    'MemoryTaskOutcomeEvidenceSchema',
-    'MemoryToolOutcomeEvidenceSchema',
-    'MemoryWriteOperationSchema',
-    'memory_domain_to_schema',
-    'memory_schema_to_domain',
+    "MemoryCandidateSchema",
+    "MemoryEpisodeSchema",
+    "MemoryEpisodeProposalSchema",
+    "MemoryEpisodeSummarySchema",
+    "MemoryExecutionEvidenceSchema",
+    "MemoryFactSchema",
+    "MemoryFactIdentitySchema",
+    "MemoryFactExtractionOutputSchema",
+    "MemoryFactExtractionSnapshotSchema",
+    "MemoryFactProposalSchema",
+    "MemoryRecordMetadataSchema",
+    "MemorySourceReferenceSchema",
+    "MemoryTaskOutcomeEvidenceSchema",
+    "MemoryToolOutcomeEvidenceSchema",
+    "memory_domain_to_schema",
+    "memory_schema_to_domain",
 ]

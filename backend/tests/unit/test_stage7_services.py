@@ -28,19 +28,8 @@ from domain.tools import (
     ToolExecutionResult,
     ToolExecutionMode,
 )
+from tests.fakes.memory_pipeline import Memory, Embedder, dependencies, candidate
 from tests.fakes.leases import LeaseCenter, lease_grant
-
-
-class MemoryPort:
-    def __init__(self):
-        self.writes = []
-
-    async def create_memory_from_worker(self, command, *, lease):
-        self.writes.append(command)
-        return "m-1"
-
-    async def revise(self, *args, **kwargs):
-        return "m-2"
 
 
 class Trigger:
@@ -50,7 +39,7 @@ class Trigger:
 
 class Extractor:
     async def extract(self, turn, *, lease):
-        return [MemoryCandidate("pref: python", turn.turn_id)]
+        return [candidate(turn.turn_id)]
 
 
 class Resolver:
@@ -60,21 +49,21 @@ class Resolver:
 
 @pytest.mark.asyncio
 async def test_memory_workflow_writes_resolved_candidates() -> None:
-    memory = MemoryPort()
-    workflow = MemoryWriteWorkflow(memory, Trigger(), Extractor(), Resolver())
+    memory = Memory()
+    workflow = MemoryWriteWorkflow(memory, Trigger(), Extractor(), Resolver(), Embedder(), **dependencies())
     written = await workflow.process_completed_turn(
-        CompletedTurn("t-1", "s-1", "remember python"),
+        CompletedTurn("t-1", "s-1", "remember python", project_id="project-1"),
         lease=lease_grant("memory_processing", "t-1"),
     )
     assert written == 1
-    assert memory.writes[0].metadata["source_turn_id"] == "t-1"
+    assert next(iter(memory.items.values())).metadata["source_turn_id"] == "t-1"
 
 
 class Jobs:
     def __init__(self):
         self._leases = LeaseCenter()
         self.values = [ClaimedMemoryJob(
-            CompletedTurn("t-1", "s-1", "remember"), 1,
+            CompletedTurn("t-1", "s-1", "remember", project_id="project-1"), 1,
             lease_grant("memory_processing", "t-1"),
         )]
         self.done = []
@@ -93,7 +82,7 @@ class Jobs:
 async def test_memory_worker_recovers_and_stops() -> None:
     jobs = Jobs()
     worker = MemoryWorker(
-        jobs, MemoryWriteWorkflow(MemoryPort(), Trigger(), Extractor(), Resolver()),
+        jobs, MemoryWriteWorkflow(Memory(), Trigger(), Extractor(), Resolver(), Embedder(), **dependencies()),
         poll_interval=0.001, lease_center=jobs._leases,
     )
     task = __import__("asyncio").create_task(worker.run())

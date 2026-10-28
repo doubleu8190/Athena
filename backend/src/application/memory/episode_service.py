@@ -22,7 +22,7 @@ class MemoryEpisodeManagementService:
         )
 
     async def forget(self, episode_id: str) -> bool:
-        """遗忘任务回顾，阻止相同回合重建回顾与 procedure。"""
+        """遗忘任务回顾，阻止相同轮次重建回顾。"""
         return await self._repository.forget(episode_id)
 
 

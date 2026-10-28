@@ -14,6 +14,7 @@ from bootstrap import build_default_dependencies, create_app
 from configuration.settings import Settings
 from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
+from domain.leases import LeaseKey
 from domain.runs import RunStatus
 from infrastructure.integrations.file_parsers.native import NativeFileAdapterRegistry, NativeFileParser, fixed_size_chunker
 from infrastructure.integrations.indexing import DisabledGraphIndexer, DisabledVectorIndexer
@@ -173,7 +174,7 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     assert cancelled_history[0].status.value == "cancelled"
 
     memory = PostgresMemoryRepository(factory(db))
-    mem_row = SimpleNamespace(id="m-1", content="hello memory", metadata_json='{"x":1}', source_kind="chat", status="active", created_at=NOW.isoformat(), expires_at=None, last_accessed_at=None, access_count=0, last_observed_at=NOW.isoformat(), valid_until=None, validity_status="valid")
+    mem_row = SimpleNamespace(logical_memory_id="m-1", revision=1, session_id="s-1", source_turn_id=None, memory_type="fact", category="fact", confidence=1.0, id="m-1", content="hello memory", metadata_json='{"x":1}', source_kind="chat", status="active", created_at=NOW.isoformat(), expires_at=None, last_accessed_at=None, access_count=0, last_observed_at=NOW.isoformat(), valid_until=None, validity_status="valid")
     db.results = [Result(rows=[(mem_row, 1.0)])]
     assert (await memory.search(MemorySearchRequest("hello")))[0].id == "m-1"
     db.results = [Result(rows=[mem_row])]
@@ -281,7 +282,10 @@ async def test_postgres_orchestration_outbox_claims_and_acknowledges_lease():
     )
     db.results = [Result(rows=[(outbox, "s-1", "r-1")])]
     repository = PostgresOrchestrationOutboxRepository(
-        factory(db), clock=lambda: NOW, lease_center=LeaseCenter()
+        factory(db), clock=lambda: NOW,
+        lease_center=LeaseCenter(
+            candidate_keys=[LeaseKey("orchestration_outbox", "message-1")]
+        ),
     )
 
     lease = await repository.claim_next_event(
@@ -382,7 +386,12 @@ async def test_target_file_parser_and_document_job_queue():
     jobs = PostgresDocumentJobRepository(factory(db))
     db.results = [Result(scalar=None)]
     assert await jobs.enqueue("a-1")
-    jobs = PostgresDocumentJobRepository(factory(db), lease_center=LeaseCenter())
+    jobs = PostgresDocumentJobRepository(
+        factory(db),
+        lease_center=LeaseCenter(
+            candidate_keys=[LeaseKey("document_ingestion", "a-1")]
+        ),
+    )
     job_row = SimpleNamespace(job_id="j", attachment_id="a-1", status="queued", attempt=0, available_at=NOW)
     attachment_row = SimpleNamespace(deleted_time=None, status="uploaded", error_message=None, updated_at=None)
     db.results = [Result(rows=[job_row]), Result(scalar=attachment_row)]

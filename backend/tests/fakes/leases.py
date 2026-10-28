@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from domain.leases import LeaseGrant, LeaseKey
+from domain.leases import LeaseGrant, LeaseKey, LeaseRecord
 
 
 def lease_grant(
@@ -43,11 +43,13 @@ async def acquire_postgres_lease(session_factory, resource_type, resource_id):
         PostgresLeaseCenter,
     )
 
-    grant = await PostgresLeaseCenter(session_factory).acquire(
-        LeaseKey(resource_type, resource_id),
-        owner_id=f"integration-test:{uuid4().hex}",
-        lease_seconds=900,
-    )
+    leases = PostgresLeaseCenter(session_factory)
+    key = LeaseKey(resource_type, resource_id)
+    async with session_factory() as session:
+        async with session.begin():
+            await leases.ensure_in_transaction(session, key)
+            grant = await leases.acquire_in_transaction(session, key,
+                owner_id=f"integration-test:{uuid4().hex}", lease_seconds=900)
     if grant is None:
         raise AssertionError("test lease was unexpectedly unavailable")
     return grant
@@ -55,6 +57,18 @@ async def acquire_postgres_lease(session_factory, resource_type, resource_id):
 
 class LeaseCenter:
     """A permissive LeaseCenter fake for tests that focus on business behavior."""
+
+    def __init__(self, candidate_keys=(), records=()):
+        self._candidate_keys = tuple(candidate_keys)
+        self._records = {record.key: record for record in records}
+
+    async def ensure_in_transaction(self, _session, key):
+        """为当前测试队列初始化待领取租约。"""
+        self._records.setdefault(key, LeaseRecord(key=key, state="pending", owner_id=None, fencing_token=None, lease_until=None))
+
+    async def schedule_in_transaction(self, _session, key):
+        """将测试任务重新置为可领取状态。"""
+        self._records[key] = LeaseRecord(key=key, state="pending", owner_id=None, fencing_token=None, lease_until=None)
 
     async def acquire(self, key, *, owner_id, lease_seconds):
         return lease_grant(key.resource_type, key.resource_id, owner_id=owner_id)
@@ -68,22 +82,105 @@ class LeaseCenter:
     async def acquire_in_transaction(
         self, _session, key, *, owner_id, lease_seconds
     ):
-        return lease_grant(key.resource_type, key.resource_id, owner_id=owner_id)
+        grant = lease_grant(key.resource_type, key.resource_id, owner_id=owner_id)
+        self._records[key] = LeaseRecord(
+            key=key,
+            state="active",
+            owner_id=grant.owner_id,
+            fencing_token=grant.fencing_token,
+            lease_until=grant.lease_until,
+        )
+        return grant
+
+    async def claimable_keys_in_transaction(
+        self, _session, resource_type, *, limit, after_resource_id=None
+    ):
+        return self._claimable_keys(
+            resource_type,
+            limit=limit,
+            after_resource_id=after_resource_id,
+        )
+
+    async def claimable_keys(
+        self, resource_type, *, limit, after_resource_id=None
+    ):
+        return self._claimable_keys(
+            resource_type,
+            limit=limit,
+            after_resource_id=after_resource_id,
+        )
+
+    async def get(self, key):
+        return self._records.get(key)
+
+    def _claimable_keys(self, resource_type, *, limit, after_resource_id):
+        keys = [
+            key
+            for key in self._candidate_keys
+            if key.resource_type == resource_type
+            and (after_resource_id is None or key.resource_id > after_resource_id)
+        ]
+        return keys[:limit]
 
     async def assert_current_in_transaction(self, _session, _grant):
         return None
 
-    async def finish_in_transaction(self, _session, _grant):
+    async def finish_in_transaction(self, _session, _grant, *, completed=False):
+        await self._release_record(_grant, completed=completed)
         return True
 
-    async def acknowledge_stopped_in_transaction(self, _session, _grant):
+    async def acknowledge_stopped_in_transaction(
+        self, _session, _grant, *, completed=False
+    ):
+        await self._release_record(_grant, completed=completed)
         return True
 
-    async def finish(self, grant):
+    async def complete_unclaimed_in_transaction(self, _session, _key):
+        self._records.pop(_key, None)
+        return True
+
+    async def get_in_transaction(self, _session, key):
+        return self._records.get(key)
+
+    async def get_many_in_transaction(self, _session, resource_type, resource_ids):
+        return {
+            resource_id: record
+            for resource_id in resource_ids
+            if (record := self._records.get(LeaseKey(resource_type, resource_id)))
+            is not None
+        }
+
+    async def revoke_in_transaction(
+        self, _session, key, *, expected_token
+    ):
+        record = self._records.get(key)
+        if record is None or record.fencing_token != expected_token:
+            return False
+        self._records[key] = LeaseRecord(
+            key=record.key,
+            state="revoked",
+            owner_id=record.owner_id,
+            fencing_token=record.fencing_token,
+            lease_until=record.lease_until,
+        )
+        return True
+
+    async def finish(self, grant, *, completed=False):
+        await self._release_record(grant, completed=completed)
         return True
 
     async def revoke(self, key, *, expected_token):
         return True
 
-    async def acknowledge_stopped(self, grant):
+    async def acknowledge_stopped(self, grant, *, completed=False):
+        await self._release_record(grant, completed=completed)
         return True
+
+    async def _release_record(self, grant, *, completed):
+        self._records[grant.key] = LeaseRecord(
+            key=grant.key,
+            state="completed" if completed else "released",
+            owner_id=None,
+            fencing_token=grant.fencing_token,
+            lease_until=None,
+        )

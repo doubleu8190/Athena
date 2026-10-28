@@ -87,6 +87,8 @@
 - **`sessions`** (10): `id, title, status, run_id, created_at, updated_at, compression_summary, last_compressed_message_id, last_summarized_message_id, deleted_time`
 - **`session_memory_settings`** (4): `session_id, use_memories, generate_memories, updated_at`
 
+该字段清单记录的是 2026-10-26 的数据库审计快照。当前产品已移除会话级记忆生成开关，对应字段已从 ORM 移除。2026-10-28 盘点本机 `athena` 开发库时，52 张 public 表均无数据；随后从空的 `session_memory_settings` 表中删除了旧列。`create_all` 不会自动删除其他数据库中的旧列。
+
 ### `memory_models.py`
 
 - **`memory_extraction_snapshots`** (3): `turn_id, snapshot_json, created_at`

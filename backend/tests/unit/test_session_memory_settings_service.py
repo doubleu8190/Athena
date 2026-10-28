@@ -59,9 +59,7 @@ async def test_update_preserves_project_binding_from_session(
 ) -> None:
     service, settings = service_parts
 
-    result = await service.update(
-        "session-1", use_memories=False, generate_memories=True
-    )
+    result = await service.update("session-1", use_memories=False)
 
     assert result.project_id == "project-1"
     assert result.use_memories is False

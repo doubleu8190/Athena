@@ -89,33 +89,9 @@ class PostgresFileVectorIndex(VectorIndexerPort, FileVectorSearchPort):
 
 
 class PostgresMemoryVectorIndex(MemoryVectorSearchPort):
-    def __init__(self, session_factory, embedder, *, lease_center: PostgresLeaseCenter | None = None) -> None:
+    def __init__(self, session_factory, embedder) -> None:
         self._session_factory = session_factory
         self._embedder = embedder
-        self._leases = lease_center or PostgresLeaseCenter(session_factory)
-
-    async def index(self, memory_id: str, content: str, *, lease: LeaseGrant) -> None:
-        vector = await self._embedder.embed_query(content)
-        async with self._session_factory() as session:
-            async with session.begin():
-                memory = await session.scalar(
-                    select(MemoryModel)
-                    .where(MemoryModel.id == memory_id)
-                    .with_for_update()
-                )
-                if (
-                    memory is None
-                    or lease.key.resource_type != "memory_processing"
-                    or memory.source_turn_id != lease.key.resource_id
-                ):
-                    raise ValueError("memory_processing_lease_mismatch")
-                await self._leases.assert_current_in_transaction(session, lease)
-                if memory is not None:
-                    await session.execute(
-                        update(MemoryModel)
-                        .where(MemoryModel.id == memory_id)
-                        .values(embedding=vector)
-                    )
 
     async def query(
         self, text: str, limit: int = 10, *, session_id: str | None = None

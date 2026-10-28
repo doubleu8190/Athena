@@ -308,7 +308,7 @@ async def test_durable_memory_worker_success_and_failure():
         def __init__(self):
             self._leases = LeaseCenter()
             self.values = [ClaimedMemoryJob(
-                CompletedTurn("t", "", ""), 1,
+                CompletedTurn("t", "", "", project_id="project-1"), 1,
                 lease_grant("memory_processing", "t"),
             )]
             self.calls=[]
@@ -385,6 +385,5 @@ async def test_target_pgvector_indexers_cover_index_delete_query():
         lease=lease_grant("document_ingestion", "a"),
     ); await file_index.delete_attachment("a")
     assert (await file_index.query("q"))[0]["chunk_id"] == "c"
-    memory_index = PostgresMemoryVectorIndex(factory, Embed(), lease_center=LeaseCenter())
-    await memory_index.index("m", "memory", lease=lease_grant("memory_processing", "t"))
+    memory_index = PostgresMemoryVectorIndex(factory, Embed())
     assert (await memory_index.query("q"))[0]["memory_id"] == "c"

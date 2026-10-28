@@ -1,4 +1,4 @@
-"""记忆提取快照和写入回执端口。"""
+"""记忆提取快照和任务回顾端口。"""
 
 from __future__ import annotations
 
@@ -6,18 +6,15 @@ from typing import Protocol
 
 from domain.leases import LeaseGrant
 from .contracts import (
-    MemoryCandidateSnapshot,
     MemoryEpisode,
     MemoryFactExtractionSnapshot,
-    MemoryResolutionProposal,
     MemorySourceReference,
-    MemoryWriteOperation,
 )
 from .entities import MemoryEpisodeSearchRequest
 
 
-class MemoryOperationsPort(Protocol):
-    """保管冻结提取清单与可恢复的逐候选操作。"""
+class MemorySnapshotPort(Protocol):
+    """保管轮次的冻结事实提取清单。"""
 
     async def get_extraction_snapshot(
         self, turn_id: str
@@ -31,42 +28,6 @@ class MemoryOperationsPort(Protocol):
         """保存或返回并发处理时胜出的冻结结果。"""
         ...
 
-    async def begin_operation(
-        self, operation_id: str, turn_id: str, candidate: MemoryCandidateSnapshot,
-        *, lease: LeaseGrant
-    ) -> MemoryWriteOperation:
-        """读取或创建单候选写入回执。"""
-        ...
-
-    async def record_decision(
-        self, operation_id: str, decision: MemoryResolutionProposal,
-        *, lease: LeaseGrant
-    ) -> MemoryWriteOperation:
-        """在写入记忆前持久化已校验的解析决定。"""
-        ...
-
-    async def clear_pending_decision(
-        self, operation_id: str, *, lease: LeaseGrant
-    ) -> None:
-        """目标并发变化后清除仍未提交的失效决定。"""
-        ...
-
-    async def skip_pending_turn(self, turn_id: str, *, lease: LeaseGrant) -> int:
-        """按当前设置关闭尚未提交的该轮候选操作。"""
-        ...
-
-    async def complete_operation(
-        self,
-        operation_id: str,
-        *,
-        status: str,
-        decision: MemoryResolutionProposal,
-        result_memory_id: str | None,
-        projection_status: str,
-        lease: LeaseGrant,
-    ) -> MemoryWriteOperation:
-        """完成操作回执并保存写入及向量投影状态。"""
-        ...
 
 
 class MemoryEpisodeRepositoryPort(Protocol):
@@ -89,7 +50,7 @@ class MemoryEpisodeRepositoryPort(Protocol):
         ...
 
     async def forget(self, episode_id: str) -> bool:
-        """记录来源抑制并移除回顾及其派生经验。"""
+        """记录来源抑制并移除回顾。"""
         ...
 
     async def search(
@@ -117,5 +78,5 @@ class MemoryEpisodeRepositoryPort(Protocol):
 
 __all__ = [
     "MemoryEpisodeRepositoryPort",
-    "MemoryOperationsPort",
+    "MemorySnapshotPort",
 ]

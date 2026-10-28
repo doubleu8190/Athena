@@ -143,7 +143,6 @@ def build_sessions_router(
             return SessionMemorySettingsResponse(
                 session_id=value.session_id,
                 use_memories=value.use_memories,
-                generate_memories=value.generate_memories,
             )
 
         @router.put(
@@ -159,7 +158,6 @@ def build_sessions_router(
                 value = await settings.update(
                     session_id,
                     use_memories=request.use_memories,
-                    generate_memories=request.generate_memories,
                 )
             except LookupError as exc:
                 detail = str(exc)
@@ -169,7 +167,6 @@ def build_sessions_router(
             return SessionMemorySettingsResponse(
                 session_id=value.session_id,
                 use_memories=value.use_memories,
-                generate_memories=value.generate_memories,
             )
 
     @router.get("/{session_id}/messages", response_model=list[MessageResponse])

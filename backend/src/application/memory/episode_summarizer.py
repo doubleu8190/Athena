@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 
 from domain.integrations import LLMPort
 from domain.memory import CompletedTurn, MemoryEpisodeProposal
+from shared import read_system_prompt, render_prompt_template
 from shared.contracts.memory import (
     MemoryEpisodeProposalSchema,
     memory_domain_to_schema,
     memory_schema_to_domain,
 )
-
-
-_PROMPT_ROOT = Path(__file__).resolve().parents[3] / "prompt"
 
 
 class LLMMemoryEpisodeSummarizer:
@@ -31,7 +27,7 @@ class LLMMemoryEpisodeSummarizer:
         异常：不主动抛出业务异常。
         """
         self._llm = llm
-        self._prompt_root = prompt_root or _PROMPT_ROOT
+        self._prompt_root = prompt_root
 
     async def summarize(self, turn: CompletedTurn) -> MemoryEpisodeProposal:
         """根据用户目标、最终答复和冻结执行证据生成回顾。
@@ -43,44 +39,26 @@ class LLMMemoryEpisodeSummarizer:
         evidence = turn.execution_evidence
         if evidence is None:
             return MemoryEpisodeProposal(retain=False)
-        prompt = (self._prompt_root / "episode_summarization.md").read_text(
-            encoding="utf-8"
+        prompt_template = (
+            read_system_prompt("episode_summarization.md")
+            if self._prompt_root is None
+            else (self._prompt_root / "episode_summarization.md").read_text(
+                encoding="utf-8"
+            )
         )
         values = {
             "user_request": turn.user_text,
             "assistant_response": turn.assistant_text,
             "execution_evidence": memory_domain_to_schema(evidence).model_dump_json(),
         }
-        prompt = re.sub(
-            r"\{(user_request|assistant_response|execution_evidence)\}",
-            lambda match: values[match.group(1)],
-            prompt,
-        )
+        prompt = render_prompt_template(prompt_template, values)
         value = await self._llm.invoke_structured(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Summarize durable task history from supplied persisted evidence. "
-                        "Keep execution status separate from verification claims. "
-                        "Return only the requested structured output."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
+            [{"role": "system", "content": prompt}],
             MemoryEpisodeProposalSchema,
         )
-        if isinstance(value, MemoryEpisodeProposal):
-            return value
-        if isinstance(value, MemoryEpisodeProposalSchema):
-            return memory_schema_to_domain(value)
-        if isinstance(value, str):
-            serialized = value
-        else:
-            serialized = json.dumps(value, ensure_ascii=False)
-        return memory_schema_to_domain(
-            MemoryEpisodeProposalSchema.model_validate_json(serialized)
-        )
+        if not isinstance(value, MemoryEpisodeProposalSchema):
+            raise TypeError("memory_episode_proposal_schema_required")
+        return memory_schema_to_domain(value)
 
 
 __all__ = ["LLMMemoryEpisodeSummarizer"]

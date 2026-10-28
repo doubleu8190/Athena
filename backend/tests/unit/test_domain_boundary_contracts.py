@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from domain.memory import (
-    MemoryCandidateSnapshot,
+    MemoryCandidate,
     MemoryEpisodeProposal,
     MemoryEpisodeSummary,
     MemoryExecutionEvidence,
@@ -61,7 +61,7 @@ def test_memory_snapshot_round_trips_through_boundary_schema() -> None:
     snapshot = MemoryFactExtractionSnapshot(
         turn_id="run-1",
         candidates=(
-            MemoryCandidateSnapshot(
+            MemoryCandidate(
                 content="fruit_preference: 苹果",
                 source_turn_id="run-1",
                 confidence=0.9,

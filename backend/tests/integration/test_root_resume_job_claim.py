@@ -313,7 +313,7 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
         assert job is not None
         assert job.status == "completed"
         assert execution_lease is not None
-        assert execution_lease.state == "released"
+        assert execution_lease.state == "completed"
         assert execution_lease.owner_id is None
         assert execution_lease.lease_until is None
         assert job.attempt == 2

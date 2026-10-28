@@ -13,7 +13,7 @@ class OrchestrationExecutionResponse(BaseModel):
     attempt: int
     worker_thread_id: str
     status: str
-    fencing_token: int
+    fencing_token: int | None = None
     cancellation_epoch: int
     lease_until: datetime | None = None
     result_ref: str | None = None

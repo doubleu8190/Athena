@@ -963,15 +963,13 @@ async def _seed_expired_worker_job(
                 updated_at=expired_at,
             )
         )
-        session.add(
-            ExecutionLeaseModel(
-                resource_type="worker_execution",
-                resource_id="execution-1",
-                owner_id="crashed-worker",
-                fencing_token=7,
-                state="active",
-                lease_until=expired_at,
-                created_at=now - timedelta(minutes=1),
-                updated_at=expired_at,
+        # TaskExecution 插入触发器已创建 pending 行；夹具将其置为过期授权。
+        await session.execute(
+            update(ExecutionLeaseModel).where(
+                ExecutionLeaseModel.resource_type == "worker_execution",
+                ExecutionLeaseModel.resource_id == "execution-1",
+            ).values(
+                owner_id="crashed-worker", fencing_token=7, state="active",
+                lease_until=expired_at, updated_at=expired_at,
             )
         )

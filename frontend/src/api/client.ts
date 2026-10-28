@@ -171,7 +171,7 @@ class ApiClient {
 
   async updateSessionMemorySettings(
     sessionId: string,
-    settings: Pick<SessionMemorySettings, "use_memories" | "generate_memories">,
+    settings: Pick<SessionMemorySettings, "use_memories">,
   ): Promise<SessionMemorySettings> {
     return this.request<SessionMemorySettings>(
       `/api/sessions/${encodeURIComponent(sessionId)}/memory-settings`,

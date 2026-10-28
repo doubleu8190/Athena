@@ -19,15 +19,17 @@
 | 知识文档处理 | `document_ingestion` | `attachment_id` |
 | 记忆处理 | `memory_processing` | `turn_id` |
 
-租约记录保存唯一 owner、单调递增的 fencing token、状态及 UTC 到期时间。每次新授予都递增 token，包括同一 Worker 的重新领取。释放保留记录和 token，首版不自动清理。数据库时钟是租约时间的唯一来源。
+业务作业入队时，PostgreSQL 在同一事务为对应资源预建租约记录。新记录状态为 `pending`，`owner_id`、`fencing_token` 和 `lease_until` 均为 `NULL`。这些入队触发器由 `PostgresLeaseCenter` 安装和维护，业务仓储不读写租约 ORM。
 
-状态为 `active`、`revoked`、`released`。正常结束只释放执行权；业务成功或失败由业务事务决定。撤销立即阻断续租和正常提交，但保留当前 owner、token 与到期时间，以便退出确认和取消收敛。退出确认必须匹配当前代次；新的授权产生后，旧执行不能确认或释放新租约。
+租约记录保存唯一 owner、单调递增的 fencing token、状态及 UTC 到期时间。首次成功授予时 token 从 `NULL` 变成 `1`，之后每次新授予都递增，包括同一 Worker 的重新领取。释放保留 token；业务工作最终完成时状态改为 `completed`，以便候选扫描跳过终态资源。数据库时钟是租约时间的唯一来源。
+
+状态为 `pending`、`active`、`revoked`、`released`、`completed`。租约中心先枚举 `pending`、`released` 和已过期资源作为候选，业务仓储按现有锁顺序检查业务状态，再由中心用条件更新和 `RETURNING` 原子授予；只有成功修改行的 Worker 获得 grant。失败重试会释放租约，终态处理会标记完成，业务重排队时中心保留 token 并重新打开资源。撤销立即阻断续租和正常提交，但保留当前 owner、token 与到期时间，以便退出确认和取消收敛。退出确认必须匹配当前代次；新的授权产生后，旧执行不能确认或释放新租约。
 
 ## 接口与事务
 
 领域定义不依赖 SQLAlchemy 的 `LeaseKey`、`LeaseGrant`、`ClaimedWork[T]` 和 `LeaseLostError`。`LeaseCenter` 提供 `acquire`、`renew`、`assert_current`、`finish`、`revoke` 和 `acknowledge_stopped`。PostgreSQL 实现支持在调用方现有事务内执行；单独事务只用于心跳等不涉及业务状态的续租。
 
-队列仓储仍选择可执行任务。它在同一事务中锁定业务记录、调用租约中心、更新业务状态并返回 `ClaimedWork`。结果提交也在同一事务中验证 grant、更新业务结果并结束租约。租约校验成功后不再获取其它业务锁；多资源租约按 key 排序获取。
+队列仓储只接收租约中心分页返回的候选资源 ID，再在同一事务中锁定业务记录、请求中心 CAS 授权、更新业务状态并返回 `ClaimedWork`。分页会继续越过延迟重试、审批等待和 Root 挂起等当前不可执行的业务记录，避免较早的租约候选挡住后续任务。结果提交也在同一事务中验证 grant、更新业务结果并结束租约。租约校验成功后不再获取其它业务锁；多资源租约按 key 排序获取。除 `PostgresLeaseCenter` 外，应用仓储不得导入或查询 `ExecutionLeaseModel`。
 
 公共 `LeaseGuard` 以 TTL 三分之一的间隔续租。续租失败、异常或超时会取消本地调用并阻止其正常结果写入。Root Resume 同时维护 Resume 作业和 Root Run 两个 grant。Root/Worker 继续使用 PostgreSQL Graph thread 独占锁，取得锁后再次校验租约；租约到期不表示旧进程已退出。
 
@@ -39,7 +41,7 @@ Root TTL 默认 60 秒，知识文档和记忆 TTL 默认 60 秒，其它调用�
 - **Root**：start 与 resume 使用同一 `root_execution` 租约。纯 fencing 用途的 Root `execution_generation` 改由 grant token 承担；attempt、消息执行代际和 `root_wait_generation` 保留。正常挂起释放租约；异常过期沿用失败收敛，不自动重放 Root。取消等待退出确认或到期后收敛。
 - **Root Resume**：继续保留检查点身份和版本校验；租约归中心管理。检查点未就绪时原子安排重试并释放当前 grant。
 - **Outbox**：继续保留待投递、已发布、attempt、退避时间和稳定 transition ID，移除租约状态。持久事件写入校验 grant；发布确认和租约结束在一个事务内完成，崩溃重放仍按 transition ID 去重。
-- **记忆**：移除启动时把所有 `processing` 作业重新排队的逻辑，仅接管到期 grant。后台提取快照、候选决策、事实、关系、episode 和向量写入校验 grant；保留 operation key 幂等性。人工管理使用独立的未绑定接口。
+- **记忆**：移除启动时把所有 `processing` 作业重新排队的逻辑，仅接管到期 grant。提取快照和 episode 写入校验 grant；事实、关系和向量在同一事务内校验并提交，通过稳定 operation key 保证幂等，不再持久化逐候选决策回执。人工管理使用独立的未绑定接口。
 - **知识文档**：移除无租约恢复不了的 `running` 队列状态；过期可接管，达到既有最大尝试数后失败。删除、取消或失去 grant 后，旧执行不能发布解析结果或覆盖附件终态。
 
 ## 文档索引版本

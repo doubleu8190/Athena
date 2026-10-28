@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections import Counter
 from datetime import datetime, timezone
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -13,7 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from application.memory.extraction import DefaultMemoryWriteTrigger, LLMMemoryResolver
+from application.memory.extraction import DefaultMemoryWriteTrigger, MemoryFactResolver
 from application.memory.workflow import MemoryWriteWorkflow
 from domain.memory import (
     CompletedTurn,
@@ -23,6 +24,8 @@ from domain.memory import (
     MemoryResolution,
     MemorySourceReference,
     MemoryStateChangedError,
+    MemoryWriteCommand,
+    ResolutionAction,
 )
 from domain.leases import LeaseGrant
 from infrastructure.persistence.postgres.models import (
@@ -33,7 +36,7 @@ from infrastructure.persistence.postgres.models import (
     MemorySourceSuppressionModel,
 )
 from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository
-from shared.contracts.memory import MemoryResolutionProposalSchema
+from tests.fakes.memory_pipeline import Embedder, dependencies
 from tests.fakes.leases import acquire_postgres_lease
 
 
@@ -82,25 +85,6 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
             """
             return [candidates[turn.turn_id]]
 
-    class ConflictLLM:
-        """对已有单值事实给出保守的矛盾保留决策。"""
-
-        async def invoke(self, messages: list[object], **kwargs: object) -> object:
-            """把已有事实 ID 作为目标，要求保留新旧两个值。
-
-            参数：messages 是解析提示词；kwargs 是调用方模型选项。
-            返回：含目标 ID 和 contradicts 关系的结构化决策。
-            异常：事实列表为空时抛出 AssertionError。
-            """
-            page = await repository.list_memories(MemoryListRequest(limit=20))
-            assert page.items
-            return MemoryResolutionProposalSchema(
-                action="CREATE",
-                target_memory_id=page.items[0].id,
-                relation="contradicts",
-                reason_code="ambiguous_conflicting_assertions",
-            )
-
     class SnapshotBarrierResolver:
         """让两份空事实组快照同时进入提交阶段。"""
 
@@ -111,7 +95,7 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
             返回：无。
             异常：不主动抛出业务异常。
             """
-            self._resolver = LLMMemoryResolver(ConflictLLM(), repository)
+            self._resolver = MemoryFactResolver(repository)
             self._lock = asyncio.Lock()
             self._empty_snapshot_count = 0
             self._both_empty_snapshots_ready = asyncio.Event()
@@ -141,6 +125,8 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
             DefaultMemoryWriteTrigger(),
             FixedExtractor(),
             shared_resolver,
+            Embedder(),
+            **dependencies(),
         )
         for turn_id in source_turn_ids
     }
@@ -148,6 +134,7 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
         turn_id: CompletedTurn(
             turn_id=turn_id,
             session_id=session_id,
+            project_id="project-1",
             user_text=f"请记住：默认时区是{candidates[turn_id].fact.fact_value}。",
         )
         for turn_id in source_turn_ids
@@ -231,6 +218,39 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
                 )
             ).all()
             assert len(persisted) == 1
+        # 关系失败必须回滚新版本和旧版本状态，向量不能单独落库。
+        target = active_facts[0]
+        turn_id = source_turn_ids[0]
+        corrected = replace(candidates[turn_id], content="timezone: Asia/Tokyo",
+            fact=replace(candidates[turn_id].fact, fact_value="Asia/Tokyo", claim_intent="correct"))
+        invalid_relation = MemoryResolution(ResolutionAction.REVISE, corrected,
+            target_memory_id=target.id, relation="invalid",
+            expected_memory_ids=tuple(sorted(item.id for item in active_facts)))
+        with pytest.raises(ValueError, match="memory_relation_kind_invalid"):
+            await repository.apply_resolution(invalid_relation, operation_id="rollback-check",
+                embedding=[1.0] + [0.0] * 1023, lease=leases[turn_id])
+        assert await repository.get("rollback-check") is None
+        assert (await repository.get(target.id)).status.value == "active"
+        async with factory() as session:
+            rows = (await session.scalars(select(MemoryModel))).all()
+            assert len(rows) == 2
+            assert all(row.embedding is not None for row in rows)
+            assert all("session_id" not in __import__("json").loads(row.metadata_json) for row in rows)
+        # 重放已提交候选不会重新决策或创建关系。
+        for turn_id in source_turn_ids:
+            assert await workflows[turn_id].process_completed_turn(turns[turn_id], lease=leases[turn_id]) == 0
+
+        # 只修改正文时应保留有效管理属性，而不是把索引列清成空值。
+        manual_id = await repository.create_memory(MemoryWriteCommand(
+            "管理条目", {"session_id": session_id, "type": "note", "category": "other", "confidence": 0.8},
+            operation_key="manual-note",
+        ))
+        revision_id = await repository.revise(manual_id, "修订后的管理条目")
+        revised = await repository.get(revision_id)
+        assert revised.metadata["type"] == "note"
+        assert revised.metadata["category"] == "other"
+        assert revised.metadata["confidence"] == 0.8
+
     finally:
         await engine.dispose()
         if created:

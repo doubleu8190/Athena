@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+import re
 import tempfile
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _PROMPT_ROOT = _PROJECT_ROOT / "backend" / "prompt"
+_PROMPT_PLACEHOLDER_PATTERN = re.compile(
+    r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}"
+)
 
 
 def _resolve_file_path(directory: Path, file_path: str | Path) -> Path:
@@ -115,9 +120,27 @@ def read_system_prompt(file_name: str, *, encoding: str = "utf-8") -> str:
     return _resolve_file_path(_PROMPT_ROOT, file_name).read_text(encoding=encoding)
 
 
+def render_prompt_template(template: str, values: Mapping[str, str]) -> str:
+    """替换提示词模板中指定的单层或双层大括号占位符。
+
+    Args:
+        template (str): 完整提示词模板；未提供值的占位符及 JSON 示例保持不变。
+        values (Mapping[str, str]): 占位符名称到替换文本的映射；名称不含大括号。
+    Returns:
+        str: 将模板中已提供的占位符替换一次后的文本；替换内容不会再次展开。
+    Raises:
+        不主动抛出业务异常。
+    """
+    return _PROMPT_PLACEHOLDER_PATTERN.sub(
+        lambda match: values.get(match.group(1) or match.group(2), match.group(0)),
+        template,
+    )
+
+
 __all__ = [
     "read_project_file",
     "read_system_prompt",
     "read_temp_file",
+    "render_prompt_template",
     "write_temp_file",
 ]

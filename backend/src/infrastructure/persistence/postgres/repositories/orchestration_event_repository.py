@@ -160,8 +160,9 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
                     retry_scheduled=retry_scheduled,
                     now=now,
                 )
+                # 重试会创建新的 execution_id；本次终态执行始终关闭自己的资源。
                 if not await self._leases.finish_in_transaction(
-                    session, event.lease
+                    session, event.lease, completed=True
                 ):
                     raise LeaseLostError(event.lease.key)
                 receipt = TaskEventReceipt(

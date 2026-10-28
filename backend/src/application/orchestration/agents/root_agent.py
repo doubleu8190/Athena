@@ -18,7 +18,7 @@ from domain.orchestration import (
     ReviewContext,
     ReviewDecision,
 )
-from shared import get_logger, read_system_prompt
+from shared import get_logger, read_system_prompt, render_prompt_template
 
 from ..protocols import RootAgent
 from .llm_activity import (
@@ -162,18 +162,18 @@ class ConfiguredRootAgent(RootAgent):
             if inputs.planning_feedback is not None
             else "无。"
         )
-        system_prompt = prompt_template or self._system_prompt
-        for placeholder, value in (
-            ("{{RESOURCE_CATALOG}}", json.dumps(context_catalog, ensure_ascii=False)),
-            (
-                "{{REFERENCE_CONTEXT}}",
-                self._render_context(inputs.context_items)
-                if inputs.context_items
-                else "当前没有检索参考资料。",
-            ),
-            ("{{PLANNING_FEEDBACK}}", planning_feedback),
-        ):
-            system_prompt = system_prompt.replace(placeholder, value)
+        system_prompt = render_prompt_template(
+            prompt_template or self._system_prompt,
+            {
+                "RESOURCE_CATALOG": json.dumps(context_catalog, ensure_ascii=False),
+                "REFERENCE_CONTEXT": (
+                    self._render_context(inputs.context_items)
+                    if inputs.context_items
+                    else "当前没有检索参考资料。"
+                ),
+                "PLANNING_FEEDBACK": planning_feedback,
+            },
+        )
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(

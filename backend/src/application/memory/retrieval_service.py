@@ -233,9 +233,7 @@ class MemoryContextProvider(ContextProvider):
 
             fact_group_cache: dict[tuple[str, str, str, str], list[MemoryRecord]] = {}
             facts_by_candidate: dict[str, MemoryFact] = {}
-            fact_requests: dict[
-                tuple[str, str, str, str], tuple[MemoryFact, str]
-            ] = {}
+            fact_requests: dict[tuple[str, str, str, str], MemoryFact] = {}
             for candidate in fused:
                 record = record_by_id[candidate.source_id]
                 fact = record_fact(record)
@@ -248,10 +246,7 @@ class MemoryContextProvider(ContextProvider):
                     fact.fact_key,
                 )
                 facts_by_candidate[candidate.source_id] = fact
-                fact_requests.setdefault(
-                    identity,
-                    (fact, str(record.metadata.get("session_id") or session_id)),
-                )
+                fact_requests.setdefault(identity, fact)
             if fact_requests:
                 fact_identities = tuple(fact_requests)
                 group_query_limit = asyncio.Semaphore(4)
@@ -259,12 +254,9 @@ class MemoryContextProvider(ContextProvider):
                 async def fetch_fact_group(
                     identity: tuple[str, str, str, str]
                 ) -> list[MemoryRecord]:
-                    fact, source_session_id = fact_requests[identity]
+                    fact = fact_requests[identity]
                     async with group_query_limit:
-                        return await self._repository.list_fact_group(
-                            fact,
-                            session_id=source_session_id,
-                        )
+                        return await self._repository.list_fact_group(fact)
 
                 async with asyncio.timeout(
                     _remaining_timeout(started, self._timeout_seconds)

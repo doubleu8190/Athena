@@ -19,7 +19,7 @@ from domain.approval import ApprovalDecision, ApprovalRequest
 from domain.files import (
     AdapterInfo, Attachment, AttachmentStatus, FileChunk, FileLocator, FileMetadata, ParsedDocument, StoredBlob,
 )
-from domain.memory import MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
+from domain.memory import MemoryPage, MemoryListRequest, MemorySearchRequest, MemoryWriteCommand
 from domain.tools import (
     JsonSchema, MCPServerConfig, RiskLevel, ToolConfig, ToolExecutionMode,
 )
@@ -45,7 +45,7 @@ async def test_approval_recovery_and_memory_lifecycle_branches() -> None:
     class Memory:
         async def initialize(self): self.initialized = True
         async def search(self, value): return []
-        async def list_memories(self, value): return SimpleNamespace()
+        async def list_memories(self, value): return MemoryPage((), 0, {})
         async def get(self, value): return None
         async def revisions(self, value): return []
         async def create_memory(self, value): return "m"

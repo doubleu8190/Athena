@@ -13,7 +13,7 @@ from application.memory import (
     DefaultMemoryWriteTrigger,
     LLMFactExtractor,
     LLMMemoryEpisodeSummarizer,
-    LLMMemoryResolver,
+    MemoryFactResolver,
     MemoryEpisodeManagementService,
     MemoryService,
     SessionMemorySettingsService,
@@ -118,7 +118,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresKnowledgeDocumentRepository,
     PostgresMCPServerRepository,
     PostgresMemoryJobRepository,
-    PostgresMemoryOperationsRepository,
+    PostgresMemorySnapshotRepository,
     PostgresMemoryEpisodeRepository,
     PostgresProjectRepository,
     PostgresMemoryRepository,
@@ -187,7 +187,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     approvals = PostgresApprovalRepository(session_factory)
     memory = PostgresMemoryRepository(session_factory, lease_center=lease_center)
     memory_jobs = PostgresMemoryJobRepository(session_factory, lease_center=lease_center)
-    memory_operations = PostgresMemoryOperationsRepository(session_factory, lease_center=lease_center)
+    memory_snapshots = PostgresMemorySnapshotRepository(session_factory, lease_center=lease_center)
     memory_episodes = PostgresMemoryEpisodeRepository(session_factory, lease_center=lease_center)
     retrieval = PostgresRetrievalRepository(session_factory)
     evaluation_repository = PostgresEvaluationRepository(session_factory)
@@ -262,9 +262,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     file_vectors = PostgresFileVectorIndex(
         session_factory, embedding, lease_center=lease_center
     )
-    memory_vectors = PostgresMemoryVectorIndex(
-        session_factory, embedding, lease_center=lease_center
-    )
+    memory_vectors = PostgresMemoryVectorIndex(session_factory, embedding)
     sandbox = DockerSandbox(
         SandboxOptions(
             docker_binary=settings.sandbox_docker_binary,
@@ -328,19 +326,15 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     llm_provider = ConfiguredLLMProvider(llm_options)
     memory_extractor = LLMFactExtractor(
         llm_provider,
-        memory,
-        operations=memory_operations,
-        settings=session_memory_settings,
+        snapshots=memory_snapshots,
     )
-    memory_resolver = LLMMemoryResolver(llm_provider, memory)
+    memory_resolver = MemoryFactResolver(memory)
     memory_workflow = MemoryWriteWorkflow(
         memory,
         DefaultMemoryWriteTrigger(),
         memory_extractor,
         memory_resolver,
-        memory_vectors,
-        operations=memory_operations,
-        settings=session_memory_settings,
+        embedding,
         episode_summarizer=LLMMemoryEpisodeSummarizer(llm_provider),
         episodes=memory_episodes,
     )

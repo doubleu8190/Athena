@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -22,14 +23,12 @@ from infrastructure.persistence.postgres.models import (
     ExecutionLeaseModel,
     IdempotencyReceiptModel,
     MemoryEpisodeModel,
-    MemoryEpisodeProjectBindingModel,
     MemoryExtractionSnapshotModel,
     MemoryModel,
     MemoryProcessingJobModel,
     ProjectModel,
     MemoryRunEvidenceSnapshotModel,
     MemorySourceSuppressionModel,
-    MemoryWriteOperationModel,
     MessageModel,
     OrchestrationOutboxModel,
     PlanRoundModel,
@@ -43,6 +42,11 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresRunRepository,
 )
 
+
+from domain.memory import MemoryFactExtractionSnapshot, MemoryResolution, MemorySuppressedError, ResolutionAction
+from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository, PostgresMemoryEpisodeRepository, PostgresMemorySnapshotRepository
+from tests.fakes.memory_pipeline import candidate
+from tests.fakes.leases import acquire_postgres_lease
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 
@@ -66,7 +70,7 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
     project_id = f"project-{uuid4().hex}"
     session_id = f"session-{uuid4().hex}"
     run_id = f"run-{uuid4().hex}"
-    legacy_turn_id = f"legacy-turn-{uuid4().hex}"
+    previous_turn_id = f"previous-turn-{uuid4().hex}"
     operation_id = f"operation-{uuid4().hex}"
     memory_id = f"memory-{uuid4().hex}"
     now = datetime.now(timezone.utc).isoformat()
@@ -92,10 +96,8 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
         MemoryModel.__table__,
         MemoryProcessingJobModel.__table__,
         MemoryEpisodeModel.__table__,
-        MemoryEpisodeProjectBindingModel.__table__,
         MemoryExtractionSnapshotModel.__table__,
         MemoryRunEvidenceSnapshotModel.__table__,
-        MemoryWriteOperationModel.__table__,
         MemorySourceSuppressionModel.__table__,
     ]
     try:
@@ -142,7 +144,7 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                 [
                     MemoryProcessingJobModel(
                         job_id=f"job-{uuid4().hex}",
-                        turn_id=legacy_turn_id,
+                        turn_id=previous_turn_id,
                         session_id=session_id,
                         user_text="old project work",
                         assistant_text="old result",
@@ -156,7 +158,7 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                         id=memory_id,
                         logical_memory_id=memory_id,
                         session_id=session_id,
-                        content="project-only fact",
+                        content="project_decision: Keep current project",
                         metadata_json=json.dumps(
                             {
                                 "scope_kind": "project",
@@ -165,6 +167,13 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                                 "fact": {
                                     "scope_kind": "project",
                                     "scope_id": project_id,
+                                    "subject_key": f"project:{project_id}",
+                                    "fact_key": "project_decision",
+                                    "fact_value": "Keep current project",
+                                    "confidence": 1.0,
+                                    "asserted_at": now,
+                                    "source_refs": [{"source_type": "turn", "source_id": run_id,
+                                        "excerpt": "Keep current project", "observed_at": now}],
                                 },
                             }
                         ),
@@ -173,33 +182,25 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                         validity_status="valid",
                     ),
                     MemoryExtractionSnapshotModel(
-                        turn_id=legacy_turn_id,
-                        snapshot_json="[]",
+                        turn_id=previous_turn_id,
+                        snapshot_json=json.dumps({"turn_id": previous_turn_id, "candidates": []}),
                         created_at=now,
                     ),
                     MemoryRunEvidenceSnapshotModel(
-                        turn_id=legacy_turn_id,
-                        source_fingerprint="test-fingerprint",
+                        turn_id=previous_turn_id,
+                        source_fingerprint="a" * 64,
                         snapshot_json="{}",
                         created_at=now,
                     ),
-                    MemoryWriteOperationModel(
-                        operation_id=operation_id,
-                        turn_id=legacy_turn_id,
-                        candidate_json="{}",
-                        status="pending",
-                        projection_status="pending",
-                        created_at=now,
-                        updated_at=now,
-                    ),
                     MemoryEpisodeModel(
                         episode_id=f"episode-{uuid4().hex}",
-                        turn_id=legacy_turn_id,
+                        turn_id=previous_turn_id,
                         session_id=session_id,
-                        content="old project episode",
-                        summary_json="{}",
-                        source_refs_json="[]",
-                        source_fingerprint="test-fingerprint",
+                        project_id=project_id,
+                        content="previous project episode",
+                        summary_json=json.dumps({"title": "项目回顾", "goal": "Keep current project", "outcome": "completed", "result": "project episode persisted"}),
+                        source_refs_json=json.dumps([{"source_type": "run", "source_id": previous_turn_id, "excerpt": "project completed", "observed_at": now}]),
+                        source_fingerprint="a" * 64,
                         created_at=now,
                     ),
                 ]
@@ -207,16 +208,15 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
             await session.flush()
             episode_id = await session.scalar(
                 select(MemoryEpisodeModel.episode_id).where(
-                    MemoryEpisodeModel.turn_id == legacy_turn_id
+                    MemoryEpisodeModel.turn_id == previous_turn_id
                 )
             )
-            session.add(
-                MemoryEpisodeProjectBindingModel(
-                    episode_id=episode_id,
-                    project_id=project_id,
-                    created_at=now,
-                )
-            )
+
+
+        episodes = PostgresMemoryEpisodeRepository(factory)
+        saved_episode = await episodes.get_by_turn(previous_turn_id)
+        assert saved_episode.project_id == project_id
+        assert (await episodes.list_recent(limit=10, offset=0))[1] == 1
 
         await runs.enqueue_run(
             request_id=f"request-{uuid4().hex}",
@@ -261,17 +261,16 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
             deleted_session = await session.get(SessionModel, session_id)
             assert deleted_session is not None
             assert deleted_session.deleted_time is not None
-            assert await session.get(MemoryProcessingJobModel, legacy_turn_id) is None
-            assert await session.get(MemoryExtractionSnapshotModel, legacy_turn_id) is None
-            assert await session.get(MemoryRunEvidenceSnapshotModel, legacy_turn_id) is None
-            assert await session.get(MemoryWriteOperationModel, operation_id) is None
+            assert await session.get(MemoryProcessingJobModel, previous_turn_id) is None
+            assert await session.get(MemoryExtractionSnapshotModel, previous_turn_id) is None
+            assert await session.get(MemoryRunEvidenceSnapshotModel, previous_turn_id) is None
             forgotten_memory = await session.get(MemoryModel, memory_id)
             assert forgotten_memory is not None
             assert forgotten_memory.status == "deleted"
             assert forgotten_memory.deleted_time is not None
             episode = await session.scalar(
                 select(MemoryEpisodeModel).where(
-                    MemoryEpisodeModel.turn_id == legacy_turn_id
+                    MemoryEpisodeModel.turn_id == previous_turn_id
                 )
             )
             assert episode is None
@@ -290,7 +289,7 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                 ).all()
             )
             assert ("project", project_id) in suppressions
-            assert ("project_turn", legacy_turn_id) in suppressions
+            assert ("project_turn", previous_turn_id) in suppressions
             assert ("project_turn", run_id) in suppressions
             run = await session.get(AgentRunModel, run_id)
             assert run is not None
@@ -300,6 +299,29 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                 await session.get(MemoryProcessingJobModel, run_id) is None
             )
             assert await session.get(AgentRunModel, run_id) is not None
+        # 已领取/迟到的写入不能恢复项目事实，也不能把同源内容写入全局。
+        memory = PostgresMemoryRepository(factory)
+        grant = await acquire_postgres_lease(factory, "memory_processing", run_id)
+        original = candidate(run_id)
+        for scope in ("project", "global"):
+            fact = replace(original.fact, scope_kind=scope,
+                scope_id=project_id if scope == "project" else "global",
+                subject_key=f"project:{project_id}" if scope == "project" else "user:self")
+            late = replace(original, session_id=session_id, fact=fact)
+            with pytest.raises(MemorySuppressedError):
+                await memory.apply_resolution(MemoryResolution(ResolutionAction.CREATE, late),
+                    operation_id=f"late-{scope}", embedding=[1.0] + [0.0] * 1023, lease=grant)
+            assert await memory.get(f"late-{scope}") is None
+        snapshots = PostgresMemorySnapshotRepository(factory)
+        with pytest.raises(MemorySuppressedError):
+            await snapshots.save_extraction_snapshot(
+                MemoryFactExtractionSnapshot(turn_id=run_id, candidates=(original,)),
+                lease=grant,
+            )
+        assert await snapshots.get_extraction_snapshot(run_id) is None
+        assert await episodes.create_if_absent(replace(saved_episode,
+            episode_id="late-episode", turn_id=run_id), lease=grant) is None
+
     finally:
         await engine.dispose()
         if created:

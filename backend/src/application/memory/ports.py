@@ -18,7 +18,9 @@ class MemoryWriteTrigger(Protocol):
 
 
 class MemoryFactExtractor(Protocol):
-    async def extract(self, turn: CompletedTurn, *, lease: LeaseGrant) -> list[MemoryCandidate]: ...
+    async def extract(
+        self, turn: CompletedTurn, *, lease: LeaseGrant
+    ) -> list[MemoryCandidate]: ...
 
 
 class MemoryEpisodeSummarizer(Protocol):

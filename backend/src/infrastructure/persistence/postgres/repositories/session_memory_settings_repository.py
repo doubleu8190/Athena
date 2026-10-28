@@ -1,4 +1,4 @@
-"""PostgreSQL 会话级记忆开关仓储。"""
+"""PostgreSQL 会话级记忆读取设置仓储。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from ..models import SessionMemorySettingsModel, SessionModel
 
 
 class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
-    """使用独立新表保存会话记忆读取和生成偏好。"""
+    """使用独立表保存会话记忆读取偏好。"""
 
     def __init__(
         self,
@@ -27,7 +27,7 @@ class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
         self._session_factory = session_factory
 
     async def get(self, session_id: str) -> SessionMemorySettings:
-        """读取设置；首次读取沿用现有行为并默认开启两个开关。"""
+        """读取设置；首次读取默认允许使用记忆。"""
         async with self._session_factory() as session:
             row = await session.get(SessionMemorySettingsModel, session_id)
             project_id = await session.scalar(
@@ -41,14 +41,13 @@ class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
         return SessionMemorySettings(
             session_id=row.session_id,
             use_memories=row.use_memories,
-            generate_memories=row.generate_memories,
             project_id=project_id,
         )
 
     async def save(
         self, settings: SessionMemorySettings
     ) -> SessionMemorySettings:
-        """原子写入两项设置，避免并发 PUT 产生半更新。"""
+        """原子写入读取设置，避免并发 PUT 覆盖其他设置。"""
         now = datetime.now(timezone.utc).isoformat()
         async with self._session_factory() as session:
             async with session.begin():
@@ -67,14 +66,12 @@ class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
                     .values(
                         session_id=settings.session_id,
                         use_memories=settings.use_memories,
-                        generate_memories=settings.generate_memories,
                         updated_at=now,
                     )
                     .on_conflict_do_update(
                         index_elements=["session_id"],
                         set_={
                             "use_memories": settings.use_memories,
-                            "generate_memories": settings.generate_memories,
                             "updated_at": now,
                         },
                     )
@@ -90,7 +87,6 @@ class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
         return SessionMemorySettings(
             session_id=settings.session_id,
             use_memories=settings.use_memories,
-            generate_memories=settings.generate_memories,
             project_id=project_id,
         )
 

@@ -1,4 +1,4 @@
-"""会话级记忆设置用例。"""
+"""会话级记忆读取设置用例。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from domain.sessions import SessionRepository
 
 
 class SessionMemorySettingsService:
-    """验证会话存在后读取或保存两项独立的记忆开关。"""
+    """验证会话存在后读取或保存记忆读取设置。"""
 
     def __init__(
         self,
@@ -27,7 +27,6 @@ class SessionMemorySettingsService:
         return SessionMemorySettings(
             session_id=value.session_id,
             use_memories=value.use_memories,
-            generate_memories=value.generate_memories,
             project_id=session.project_id,
         )
 
@@ -36,9 +35,8 @@ class SessionMemorySettingsService:
         session_id: str,
         *,
         use_memories: bool,
-        generate_memories: bool,
     ) -> SessionMemorySettings:
-        """完整替换读取和生成开关。"""
+        """保存记忆读取设置。"""
         session = await self._sessions.get(session_id)
         if session is None:
             raise LookupError("session_not_found")
@@ -46,13 +44,11 @@ class SessionMemorySettingsService:
             SessionMemorySettings(
                 session_id=session_id,
                 use_memories=use_memories,
-                generate_memories=generate_memories,
             )
         )
         return SessionMemorySettings(
             session_id=saved.session_id,
             use_memories=saved.use_memories,
-            generate_memories=saved.generate_memories,
             project_id=session.project_id,
         )
 

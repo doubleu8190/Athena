@@ -56,7 +56,7 @@ class MemoryWorker:
                         await self._jobs.mark_failed(
                             turn.turn_id,
                             str(exc),
-                            retry=job.attempt < self._max_attempts,
+                            retry=not isinstance(exc, ValueError) and job.attempt < self._max_attempts,
                             lease=job.lease,
                         )
                         return

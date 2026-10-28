@@ -206,7 +206,6 @@ export interface Session {
 export interface SessionMemorySettings {
   session_id: string
   use_memories: boolean
-  generate_memories: boolean
   project_id?: string | null
 }
 
@@ -283,7 +282,7 @@ export interface OrchestrationExecutionSnapshot {
   attempt: number
   worker_thread_id: string
   status: string
-  fencing_token: number
+  fencing_token: number | null
   cancellation_epoch: number
   lease_until?: string | null
   result_ref?: string | null
@@ -680,7 +679,6 @@ export interface MemoryEpisodeEntry {
     outcome: "completed" | "partial" | "failed" | "cancelled" | "unknown"
     result: string
     attempts: string
-    verification_scope: string
     reusable_learnings: string[]
     unresolved: string[]
   }

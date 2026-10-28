@@ -42,12 +42,11 @@ from ..models import (
     PlanRoundModel,
     RoundTaskModel,
     RootResumeJobModel,
-    SessionMemorySettingsModel,
     SessionModel,
-    ExecutionLeaseModel,
     TaskExecutionModel,
     WorkerJobModel,
 )
+from .memory_job_repository import enqueue_memory_job_in_transaction
 from .memory_suppression import (
     ensure_writable_run_scope,
     project_scope_is_writable,
@@ -387,77 +386,96 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         now_iso = now.isoformat()
         async with self._session_factory() as db:
             async with db.begin():
-                candidate_session = (
-                    await db.execute(
-                        select(SessionModel)
-                        .where(
-                            SessionModel.deleted_time.is_(None),
-                            SessionModel.active_run_id.is_(None),
-                            select(AgentRunModel.run_id)
+                after_resource_id: str | None = None
+                while True:
+                    claimable_roots = await self._leases.claimable_keys_in_transaction(
+                        db,
+                        "root_execution",
+                        limit=512,
+                        after_resource_id=after_resource_id,
+                    )
+                    if not claimable_roots:
+                        return None
+                    claimable_run_ids = [key.resource_id for key in claimable_roots]
+                    candidate_session = (
+                        await db.execute(
+                            select(SessionModel)
                             .where(
-                                AgentRunModel.session_id == SessionModel.id,
+                                SessionModel.deleted_time.is_(None),
+                                SessionModel.active_run_id.is_(None),
+                                select(AgentRunModel.run_id)
+                                .where(
+                                    AgentRunModel.session_id == SessionModel.id,
+                                    AgentRunModel.status == RunStatus.QUEUED.value,
+                                )
+                                .order_by(AgentRunModel.sequence)
+                                .limit(1)
+                                .scalar_subquery()
+                                .in_(claimable_run_ids),
+                            )
+                            .order_by(SessionModel.last_activity_at, SessionModel.id)
+                            .with_for_update(skip_locked=True)
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if candidate_session is None:
+                        after_resource_id = claimable_roots[-1].resource_id
+                        continue
+                    run = (
+                        await db.execute(
+                            select(AgentRunModel)
+                            .where(
+                                AgentRunModel.session_id == candidate_session.id,
                                 AgentRunModel.status == RunStatus.QUEUED.value,
                             )
-                            .exists(),
+                            .order_by(AgentRunModel.sequence)
+                            .with_for_update()
+                            .limit(1)
                         )
-                        .order_by(SessionModel.last_activity_at, SessionModel.id)
-                        .with_for_update(skip_locked=True)
-                        .limit(1)
-                    )
-                ).scalar_one_or_none()
-                if candidate_session is None:
-                    return None
-                run = (
-                    await db.execute(
-                        select(AgentRunModel)
-                        .where(
-                            AgentRunModel.session_id == candidate_session.id,
-                            AgentRunModel.status == RunStatus.QUEUED.value,
+                    ).scalar_one_or_none()
+                    if run is None:
+                        after_resource_id = claimable_roots[-1].resource_id
+                        continue
+                    payload = _run_start_payload_or_none(run.request_json)
+                    if payload is None:
+                        run.status = RunStatus.FAILED.value
+                        run.error_json = json.dumps({"code": "run_request_missing"})
+                        run.updated_at = now_iso
+                        await self._leases.complete_unclaimed_in_transaction(
+                            db, LeaseKey("root_execution", run.run_id)
                         )
-                        .order_by(AgentRunModel.sequence)
-                        .with_for_update()
-                        .limit(1)
-                    )
-                ).scalar_one_or_none()
-                if run is None:
-                    return None
-                payload = _run_start_payload_or_none(run.request_json)
-                if payload is None:
-                    run.status = RunStatus.FAILED.value
-                    run.error_json = json.dumps({"code": "run_request_missing"})
+                        self._add_completion_outbox(
+                            db,
+                            run=run,
+                            message_id=f"run-final:{run.run_id}:failed",
+                            event_type="RunFailed",
+                            dedupe_key=f"run:{run.run_id}:failed",
+                            payload_json={"error": {"code": "run_request_missing"}},
+                            now=now,
+                        )
+                        return None
+                    run.status = RunStatus.RUNNING.value
                     run.updated_at = now_iso
-                    self._add_completion_outbox(
+                    lease = await self._leases.acquire_in_transaction(
                         db,
-                        run=run,
-                        message_id=f"run-final:{run.run_id}:failed",
-                        event_type="RunFailed",
-                        dedupe_key=f"run:{run.run_id}:failed",
-                        payload_json={"error": {"code": "run_request_missing"}},
-                        now=now,
+                        LeaseKey("root_execution", run.run_id),
+                        owner_id=uuid4().hex,
+                        lease_seconds=lease_seconds,
                     )
-                    return None
-                run.status = RunStatus.RUNNING.value
-                run.updated_at = now_iso
-                lease = await self._leases.acquire_in_transaction(
-                    db,
-                    LeaseKey("root_execution", run.run_id),
-                    owner_id=uuid4().hex,
-                    lease_seconds=lease_seconds,
-                )
-                if lease is None:
-                    run.status = RunStatus.QUEUED.value
-                    return None
-                candidate_session.active_run_id = run.run_id
-                return RunCommand(
-                    command_id=f"run:{run.run_id}:token:{lease.fencing_token}",
-                    command_type=CommandType.RUN_START,
-                    session_id=run.session_id,
-                    run_id=run.run_id,
-                    payload=payload,
-                    issued_at=datetime.fromisoformat(run.created_at),
-                    schema_version=1,
-                    lease=lease,
-                )
+                    if lease is None:
+                        run.status = RunStatus.QUEUED.value
+                        return None
+                    candidate_session.active_run_id = run.run_id
+                    return RunCommand(
+                        command_id=f"run:{run.run_id}:token:{lease.fencing_token}",
+                        command_type=CommandType.RUN_START,
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        payload=payload,
+                        issued_at=datetime.fromisoformat(run.created_at),
+                        schema_version=1,
+                        lease=lease,
+                    )
 
     async def list_for_session(self, session_id: str) -> list[RunSummary]:
         async with self._session_factory() as session:
@@ -757,7 +775,9 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 await self._begin_failure_locked(
                     db, run, error, now, root_execution_lease=lease
                 )
-                if not await self._leases.finish_in_transaction(db, lease):
+                if not await self._leases.finish_in_transaction(
+                    db, lease, completed=True
+                ):
                     raise LeaseLostError(lease.key)
         # 无执行中的调用或 Worker 时可立即完成；否则由调用端或 Worker 收尾。
         await self.finalize_stop(run_id)
@@ -773,18 +793,16 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 if db_now is None:
                     raise RuntimeError("database_clock_unavailable")
                 now = db_now.astimezone(timezone.utc)
+                expired = await self._leases.expired_keys_in_transaction(
+                    db, "root_execution", limit=128
+                )
+                expired_ids = [key.resource_id for key in expired]
                 sessions = (await db.scalars(
                     select(SessionModel)
                     .join(AgentRunModel, AgentRunModel.run_id == SessionModel.active_run_id)
-                    .join(
-                        ExecutionLeaseModel,
-                        (ExecutionLeaseModel.resource_type == "root_execution")
-                        & (ExecutionLeaseModel.resource_id == AgentRunModel.run_id),
-                    )
                     .where(
+                        AgentRunModel.run_id.in_(expired_ids),
                         AgentRunModel.status == RunStatus.RUNNING.value,
-                        ExecutionLeaseModel.state.in_(("active", "revoked")),
-                        ExecutionLeaseModel.lease_until <= now,
                     )
                     .order_by(SessionModel.id)
                     .with_for_update(of=SessionModel, skip_locked=True)
@@ -799,10 +817,8 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         .where(AgentPlanModel.run_id == run.run_id)
                         .with_for_update()
                     )
-                    lease_row = await db.get(
-                        ExecutionLeaseModel,
-                        ("root_execution", run.run_id),
-                        with_for_update=True,
+                    lease_row = await self._leases.get_in_transaction(
+                        db, LeaseKey("root_execution", run.run_id)
                     )
                     if (
                         lease_row is None
@@ -819,9 +835,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         LeaseGrant(
                             LeaseKey("root_execution", run.run_id),
                             lease_row.owner_id or "expired",
-                            lease_row.fencing_token,
+                            lease_row.fencing_token or 0,
                             lease_row.lease_until,
                         ),
+                        completed=True,
                     )
                     recovered.append(run.run_id)
         for run_id in recovered:
@@ -957,10 +974,8 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     .where(AgentPlanModel.run_id == run_id)
                     .with_for_update()
                 )
-                lease_row = await db.get(
-                    ExecutionLeaseModel,
-                    ("root_execution", run_id),
-                    with_for_update=True,
+                lease_row = await self._leases.get_in_transaction(
+                    db, LeaseKey("root_execution", run_id)
                 )
                 if (
                     lease_row is not None
@@ -975,9 +990,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         LeaseGrant(
                             LeaseKey("root_execution", run_id),
                             lease_row.owner_id,
-                            lease_row.fencing_token,
+                            lease_row.fencing_token or 0,
                             lease_row.lease_until,
                         ),
+                        completed=True,
                     )
                 if plan is not None and plan.status not in {"completed", "failed", "cancelled"}:
                     # Worker reconciliation owns the terminal transition while workers
@@ -1492,40 +1508,35 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         resume_job_ids = select(RootResumeJobModel.job_id).where(
             RootResumeJobModel.run_id == run_id
         )
-        keys = [
-            ("root_execution", run_id),
-            ("root_resume", resume_job_ids),
-            ("worker_execution", worker_execution_ids),
-        ]
-        predicates = [
-            (ExecutionLeaseModel.resource_type == resource_type)
-            & (ExecutionLeaseModel.resource_id.in_(resource_ids)
-               if not isinstance(resource_ids, str)
-               else ExecutionLeaseModel.resource_id == resource_ids)
-            for resource_type, resource_ids in keys
-        ]
-        rows = (
-            await session.scalars(
-                select(ExecutionLeaseModel)
-                .where(or_(*predicates))
-                .order_by(
-                    ExecutionLeaseModel.resource_type,
-                    ExecutionLeaseModel.resource_id,
-                )
-                .with_for_update()
+        resume_ids = list((await session.scalars(resume_job_ids)).all())
+        execution_ids = list((await session.scalars(worker_execution_ids)).all())
+        records = [
+            await self._leases.get_in_transaction(
+                session, LeaseKey("root_execution", run_id)
             )
-        ).all()
-        for row in rows:
+        ]
+        records.extend((await self._leases.get_many_in_transaction(
+            session, "root_resume", resume_ids
+        )).values())
+        records.extend((await self._leases.get_many_in_transaction(
+            session, "worker_execution", execution_ids
+        )).values())
+        for row in sorted(
+            (record for record in records if record is not None),
+            key=lambda record: (record.key.resource_type, record.key.resource_id),
+        ):
             if (
                 root_execution_lease is not None
-                and row.resource_type == root_execution_lease.key.resource_type
-                and row.resource_id == root_execution_lease.key.resource_id
+                and row.key.resource_type == root_execution_lease.key.resource_type
+                and row.key.resource_id == root_execution_lease.key.resource_id
                 and row.fencing_token == root_execution_lease.fencing_token
             ):
                 continue
+            if row.fencing_token is None or row.state != "active":
+                continue
             await self._leases.revoke_in_transaction(
                 session,
-                LeaseKey(row.resource_type, row.resource_id),
+                row.key,
                 expected_token=row.fencing_token,
             )
 
@@ -1542,33 +1553,8 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         user_text = request.message.strip() if request is not None else ""
         if not user_text:
             return
-        memory_settings = await session.get(SessionMemorySettingsModel, run.session_id)
-        if memory_settings is not None and not memory_settings.generate_memories:
-            return
-        writable = await ensure_writable_run_scope(
-            session,
-            session_id=run.session_id,
-            turn_id=run.run_id,
-            now=now_iso,
-        )
-        if not writable:
-            return
-        await session.execute(
-            pg_insert(MemoryProcessingJobModel)
-            .values(
-                job_id=f"memjob_{uuid4().hex}",
-                turn_id=run.run_id,
-                session_id=run.session_id,
-                user_text=user_text,
-                assistant_text=assistant_text,
-                status="queued",
-                attempt=0,
-                available_at=now_iso,
-                created_at=now_iso,
-                updated_at=now_iso,
-            )
-            .on_conflict_do_nothing(index_elements=["turn_id"])
-        )
+        await enqueue_memory_job_in_transaction(session, turn_id=run.run_id,
+            session_id=run.session_id, user_text=user_text, assistant_text=assistant_text, now=now_iso)
 
     async def _finish(
         self,
@@ -1725,7 +1711,9 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                                 payload_json={"error": error or {"code": "run_failed"}},
                                 now=now,
                             )
-                if not await self._leases.finish_in_transaction(session, lease):
+                if not await self._leases.finish_in_transaction(
+                    session, lease, completed=True
+                ):
                     raise LeaseLostError(lease.key)
                 return changed
 

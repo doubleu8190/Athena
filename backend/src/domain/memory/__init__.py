@@ -19,16 +19,15 @@ from .entities import (
 )
 from .job_ports import MemoryJobPort, MemoryJobQueue, MemoryJobStatusPort
 from .repository_ports import MemoryRepositoryPort
-from .retrieval_ports import MemoryVectorIndexPort, MemoryVectorSearchPort
+from .retrieval_ports import MemoryVectorSearchPort
 from .ledger_ports import (
     MemoryEpisodeRepositoryPort,
-    MemoryOperationsPort,
+    MemorySnapshotPort,
 )
 from .settings import SessionMemorySettings
 from .settings_ports import SessionMemorySettingsPort
 from .errors import MemoryStateChangedError, MemorySuppressedError
 from .contracts import (
-    MemoryCandidateSnapshot,
     MemoryEpisode,
     MemoryEpisodeProposal,
     MemoryEpisodeSummary,
@@ -39,9 +38,7 @@ from .contracts import (
     MemoryToolOutcomeEvidence,
     MemoryFactExtractionSnapshot,
     MemoryRecordMetadata,
-    MemoryResolutionProposal,
     MemorySourceReference,
-    MemoryWriteOperation,
 )
 
 __all__ = [
@@ -49,7 +46,6 @@ __all__ = [
     "MemoryPage",
     "MemoryRelationRecord",
     "MemoryRepositoryPort",
-    "MemoryVectorIndexPort",
     "MemoryVectorSearchPort",
     "MemoryRecord",
     "MemorySearchRequest",
@@ -63,7 +59,6 @@ __all__ = [
     "MemoryCandidate",
     "MemoryResolution",
     "ResolutionAction",
-    "MemoryCandidateSnapshot",
     "MemoryExecutionEvidence",
     "MemoryFact",
     "MemoryFactIdentity",
@@ -71,10 +66,8 @@ __all__ = [
     "MemoryToolOutcomeEvidence",
     "MemoryFactExtractionSnapshot",
     "MemoryRecordMetadata",
-    "MemoryResolutionProposal",
     "MemorySourceReference",
-    "MemoryWriteOperation",
-    "MemoryOperationsPort",
+    "MemorySnapshotPort",
     "MemoryEpisodeRepositoryPort",
     "MemoryEpisode",
     "MemoryEpisodeProposal",

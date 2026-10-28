@@ -622,7 +622,7 @@ class InMemoryMemoryPort(MemoryRepositoryPort):
     async def list_memories(self, request: MemoryListRequest) -> MemoryPage:
         values = list(self.items.values())[request.offset:request.offset + request.limit]
         return MemoryPage(tuple(values), len(self.items), {"total": len(self.items), "expired": 0, "recent": len(self.items)})
-    async def list_fact_group(self, fact: MemoryFact, *, session_id: str) -> list[MemoryRecord]:
+    async def list_fact_group(self, fact: MemoryFact) -> list[MemoryRecord]:
         identity = (fact.scope_kind, fact.scope_id, fact.subject_key, fact.fact_key)
         now = datetime.now(timezone.utc)
         matches = []
@@ -681,7 +681,7 @@ class InMemoryMemoryPort(MemoryRepositoryPort):
                 observed_at=now,
             ),),
         )
-        return await self.list_fact_group(seed, session_id=identity.scope_id)
+        return await self.list_fact_group(seed)
     async def get(self, memory_id: str) -> MemoryRecord | None: return self.items.get(memory_id)
     async def revisions(self, memory_id: str) -> list[MemoryRecord]:
         value = self.items.get(memory_id)
@@ -796,7 +796,7 @@ class InMemoryMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
         """
         return self.items.get(turn_id)
 
-    async def create_if_absent(self, episode: MemoryEpisode) -> MemoryEpisode | None:
+    async def create_if_absent(self, episode: MemoryEpisode, *, lease: LeaseGrant) -> MemoryEpisode | None:
         """保存首次回顾并返回同轮次胜出的记录。
 
         参数：episode 是已完成来源校验的任务回顾。

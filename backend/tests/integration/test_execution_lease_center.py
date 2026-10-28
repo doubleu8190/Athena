@@ -57,6 +57,11 @@ async def lease_centers():
 
         sessions_a = async_sessionmaker(engine_a, expire_on_commit=False)
         sessions_b = async_sessionmaker(engine_b, expire_on_commit=False)
+        center = PostgresLeaseCenter(sessions_a)
+        async with sessions_a() as session, session.begin():
+            for resource_id in ("shared-resource", "resource-left", "resource-right",
+                "takeover-resource", "revoked-resource", "transaction-resource"):
+                await center.ensure_in_transaction(session, LeaseKey("sample_worker", resource_id))
         yield (
             PostgresLeaseCenter(sessions_a),
             PostgresLeaseCenter(sessions_b),

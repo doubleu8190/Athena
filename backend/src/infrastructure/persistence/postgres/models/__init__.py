@@ -33,12 +33,10 @@ from .runtime_models import (
 from .memory_models import (
     MemoryExtractionSnapshotModel,
     MemoryEpisodeModel,
-    MemoryEpisodeProjectBindingModel,
     MemoryModel,
     MemoryRelationModel,
     MemoryRunEvidenceSnapshotModel,
     MemorySourceSuppressionModel,
-    MemoryWriteOperationModel,
 )
 from .evaluation_models import (
     EvalCaseAttemptModel,
@@ -90,11 +88,9 @@ __all__ = [
     "MemoryProcessingJobModel",
     "MemoryExtractionSnapshotModel",
     "MemoryEpisodeModel",
-    "MemoryEpisodeProjectBindingModel",
     "MemoryRunEvidenceSnapshotModel",
     "MemorySourceSuppressionModel",
     "MemoryRelationModel",
-    "MemoryWriteOperationModel",
     "RetrievalCandidateModel",
     "RetrievalRunModel",
     "StepModel",

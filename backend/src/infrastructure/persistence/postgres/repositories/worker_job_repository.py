@@ -23,7 +23,7 @@ from domain.orchestration import (
     WorkerJobRepository,
 )
 from domain.runs import RunStartPayload
-from domain.leases import LeaseGrant, LeaseKey, LeaseLostError
+from domain.leases import LeaseGrant, LeaseKey, LeaseLostError, LeaseRecord
 from shared.contracts.runs import RunStartPayloadSchema
 from ..models import (
     AgentPlanModel,
@@ -37,12 +37,11 @@ from ..models import (
     RoundTaskModel,
     RootResumeJobModel,
     SessionModel,
-    SessionMemorySettingsModel,
     TaskExecutionModel,
     WorkerJobModel,
-    ExecutionLeaseModel,
 )
 from .task_execution_results import load_task_execution_outputs
+from .memory_job_repository import enqueue_memory_job_in_transaction
 from .memory_suppression import ensure_writable_run_scope
 from .lease_center import PostgresLeaseCenter
 
@@ -94,18 +93,30 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         async with self._session_factory() as session:
             async with session.begin():
                 now = await self._now(session)
-                candidates = await self._candidate_rows(session, now)
-                for candidate in candidates:
-                    lease = await self._claim_candidate(
+                after_resource_id: str | None = None
+                while True:
+                    claimable = await self._leases.claimable_keys_in_transaction(
                         session,
-                        candidate,
-                        worker_id=worker_id,
-                        now=now,
-                        lease_seconds=lease_seconds,
+                        "worker_execution",
+                        limit=self._candidate_limit * 4,
+                        after_resource_id=after_resource_id,
                     )
-                    if lease is not None:
-                        return lease
-        return None
+                    if not claimable:
+                        return None
+                    candidates = await self._candidate_rows(
+                        session, now, {key.resource_id for key in claimable}
+                    )
+                    for candidate in candidates:
+                        lease = await self._claim_candidate(
+                            session,
+                            candidate,
+                            worker_id=worker_id,
+                            now=now,
+                            lease_seconds=lease_seconds,
+                        )
+                        if lease is not None:
+                            return lease
+                    after_resource_id = claimable[-1].resource_id
 
     async def renew_lease(
         self, lease: WorkerJobLease, *, lease_seconds: float
@@ -320,7 +331,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                     return False
 
                 if not await self._leases.acknowledge_stopped_in_transaction(
-                    session, lease.lease
+                    session, lease.lease, completed=True
                 ):
                     return False
 
@@ -409,7 +420,9 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        root_lease = await session.get(ExecutionLeaseModel, ("root_execution", run_id))
+        root_lease = await self._leases.get_in_transaction(
+            session, LeaseKey("root_execution", run_id)
+        )
         if (
             root_lease is not None
             and root_lease.state in {"active", "revoked"}
@@ -423,7 +436,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             run.updated_at = now.isoformat()
             if root_lease is not None:
                 await self._leases.acknowledge_stopped_in_transaction(
-                    session, _lease_grant_from_model(root_lease)
+                    session, _lease_grant_from_record(root_lease), completed=True
                 )
             if session_row.active_run_id == run.run_id:
                 session_row.active_run_id = None
@@ -492,6 +505,31 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
     ) -> None:
         """隔离租约已过期的取消执行并记录对应任务事件。"""
         # 只有租约到期后才能确认 Worker 已失去所有权并安全完成取消。
+        cancelled_execution_ids = list((await session.scalars(
+            select(TaskExecutionModel.execution_id)
+            .join(WorkerJobModel, WorkerJobModel.execution_id == TaskExecutionModel.execution_id)
+            .join(AgentTaskModel, AgentTaskModel.task_id == TaskExecutionModel.task_id)
+            .where(
+                AgentTaskModel.plan_id == plan.plan_id,
+                WorkerJobModel.status == "cancel_requested",
+            )
+        )).all())
+        lease_by_execution = await self._leases.get_many_in_transaction(
+            session, "worker_execution", cancelled_execution_ids
+        )
+        lease_by_execution = {
+            execution_id: record
+            for execution_id, record in lease_by_execution.items()
+            if record.state in {"pending", "released"}
+            or (
+                record.state in {"active", "revoked"}
+                and record.lease_until is not None
+                and record.lease_until <= now
+            )
+        }
+        execution_ids = list(lease_by_execution)
+        if not execution_ids:
+            return
         expired_rows = (
             await session.execute(
                 select(
@@ -502,20 +540,10 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                     AgentTaskModel.title,
                     AgentTaskModel.objective,
                     TaskExecutionModel.attempt,
-                    ExecutionLeaseModel.owner_id,
-                    ExecutionLeaseModel.fencing_token,
-                    ExecutionLeaseModel.lease_until,
                 )
                 .join(
                     TaskExecutionModel,
                     WorkerJobModel.execution_id == TaskExecutionModel.execution_id,
-                )
-                .outerjoin(
-                    ExecutionLeaseModel,
-                    and_(
-                        ExecutionLeaseModel.resource_type == "worker_execution",
-                        ExecutionLeaseModel.resource_id == TaskExecutionModel.execution_id,
-                    ),
                 )
                 .join(
                     AgentTaskModel,
@@ -529,12 +557,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 .where(
                     AgentTaskModel.plan_id == plan.plan_id,
                     WorkerJobModel.status == "cancel_requested",
-                    or_(
-                        ExecutionLeaseModel.resource_id.is_(None),
-                        ExecutionLeaseModel.lease_until.is_(None),
-                        ExecutionLeaseModel.lease_until <= now,
-                        ExecutionLeaseModel.state == "released",
-                    ),
+                    TaskExecutionModel.execution_id.in_(execution_ids),
                 )
             )
         ).all()
@@ -546,10 +569,11 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             title,
             objective,
             attempt,
-            lease_owner,
-            lease_token,
-            lease_until,
         ) in expired_rows:
+            lease_record = lease_by_execution.get(execution_id)
+            lease_owner = lease_record.owner_id if lease_record else None
+            lease_token = lease_record.fencing_token if lease_record else None
+            lease_until = lease_record.lease_until if lease_record else now
             await session.execute(
                 update(WorkerJobModel)
                 .where(
@@ -611,6 +635,11 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                         fencing_token=lease_token,
                         lease_until=lease_until,
                     ),
+                    completed=True,
+                )
+            else:
+                await self._leases.complete_unclaimed_in_transaction(
+                    session, LeaseKey("worker_execution", execution_id)
                 )
 
     async def _finalize_cancellation(
@@ -742,34 +771,9 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         user_text = request.message.strip()
         if not user_text:
             return
-        memory_settings = await session.get(SessionMemorySettingsModel, run.session_id)
-        if memory_settings is not None and not memory_settings.generate_memories:
-            return
         now_iso = now.isoformat()
-        writable = await ensure_writable_run_scope(
-            session,
-            session_id=run.session_id,
-            turn_id=run.run_id,
-            now=now_iso,
-        )
-        if not writable:
-            return
-        await session.execute(
-            pg_insert(MemoryProcessingJobModel)
-            .values(
-                job_id=f"memjob_{uuid4().hex}",
-                turn_id=run.run_id,
-                session_id=run.session_id,
-                user_text=user_text,
-                assistant_text="",
-                status="queued",
-                attempt=0,
-                available_at=now_iso,
-                created_at=now_iso,
-                updated_at=now_iso,
-            )
-            .on_conflict_do_nothing(index_elements=["turn_id"])
-        )
+        await enqueue_memory_job_in_transaction(session, turn_id=run.run_id,
+            session_id=run.session_id, user_text=user_text, assistant_text="", now=now_iso)
 
     def _cancellation_outbox(
         self,
@@ -854,21 +858,16 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         )
         return _utc(value)
 
-    async def _candidate_rows(self, session: AsyncSession, now: datetime):
+    async def _candidate_rows(
+        self, session: AsyncSession, now: datetime, claimable_ids: set[str]
+    ):
         """读取未锁定候选 ID；实际领取仍按 Run 到 Job 顺序加锁复核。"""
         ready_job = and_(
             WorkerJobModel.status == "pending",
             WorkerJobModel.available_at <= now,
         )
-        expired_job = and_(
-            WorkerJobModel.status == "running",
-            or_(
-                ExecutionLeaseModel.resource_id.is_(None),
-                ExecutionLeaseModel.lease_until.is_(None),
-                ExecutionLeaseModel.lease_until <= now,
-                ExecutionLeaseModel.state == "released",
-            ),
-        )
+        if not claimable_ids:
+            return []
         statement = (
             select(
                 WorkerJobModel.job_id,
@@ -890,19 +889,13 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             .join(AgentPlanModel, AgentTaskModel.plan_id == AgentPlanModel.plan_id)
             .join(AgentRunModel, AgentPlanModel.run_id == AgentRunModel.run_id)
             .join(PlanRoundModel, TaskExecutionModel.round_id == PlanRoundModel.round_id)
-            .outerjoin(
-                ExecutionLeaseModel,
-                and_(
-                    ExecutionLeaseModel.resource_type == "worker_execution",
-                    ExecutionLeaseModel.resource_id == TaskExecutionModel.execution_id,
-                ),
-            )
             .where(
+                TaskExecutionModel.execution_id.in_(claimable_ids),
                 WorkerJobModel.job_type.in_(("execute", "resume_worker")),
-                or_(ready_job, expired_job),
+                or_(ready_job, WorkerJobModel.status == "running"),
             )
             .order_by(WorkerJobModel.available_at, WorkerJobModel.created_at)
-            .limit(self._candidate_limit)
+            .limit(len(claimable_ids))
         )
         rows = (await session.execute(statement)).all()
         return [_Candidate(*row) for row in rows]
@@ -1265,12 +1258,12 @@ def _owns_lease(lease, run, plan, round_row, task, round_task, execution, job) -
     )
 
 
-def _lease_grant_from_model(row: ExecutionLeaseModel) -> LeaseGrant:
+def _lease_grant_from_record(row: LeaseRecord) -> LeaseGrant:
     """从当前中心记录恢复退出确认需要的 owner 和 fencing 代次。"""
-    if row.owner_id is None or row.lease_until is None:
+    if row.owner_id is None or row.lease_until is None or row.fencing_token is None:
         raise ValueError("execution_lease_has_no_active_owner")
     return LeaseGrant(
-        key=LeaseKey(row.resource_type, row.resource_id),
+        key=row.key,
         owner_id=row.owner_id,
         fencing_token=row.fencing_token,
         lease_until=row.lease_until,

@@ -103,15 +103,12 @@ function SessionDetailView() {
     }
   }
 
-  const updateMemorySettings = async (
-    update: Partial<Pick<SessionMemorySettings, "use_memories" | "generate_memories">>,
-  ) => {
+  const updateMemorySettings = async (useMemories: boolean) => {
     if (!sessionId || !memorySettings || memorySettingsSaving) return
     setMemorySettingsSaving(true)
     try {
       const saved = await apiClient.updateSessionMemorySettings(sessionId, {
-        use_memories: update.use_memories ?? memorySettings.use_memories,
-        generate_memories: update.generate_memories ?? memorySettings.generate_memories,
+        use_memories: useMemories,
       })
       setMemorySettings(saved)
       setMemorySettingsError(null)
@@ -232,21 +229,9 @@ function SessionDetailView() {
                   </div>
                   <Toggle
                     checked={memorySettings?.use_memories ?? true}
-                    onChange={(checked) => updateMemorySettings({ use_memories: checked })}
+                    onChange={updateMemorySettings}
                     disabled={!memorySettings || memorySettingsSaving}
                     label="使用已有记忆"
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-4 py-4">
-                  <div>
-                    <div className="text-sm font-medium">从本会话生成记忆</div>
-                    <div className="text-xs text-athena-muted mt-1">Worker 处理时会读取当前开关；已跳过的轮次不会因重新开启自动补写，也不会删除已保存记忆。</div>
-                  </div>
-                  <Toggle
-                    checked={memorySettings?.generate_memories ?? true}
-                    onChange={(checked) => updateMemorySettings({ generate_memories: checked })}
-                    disabled={!memorySettings || memorySettingsSaving}
-                    label="从本会话生成记忆"
                   />
                 </div>
                 {memorySettingsError ? (

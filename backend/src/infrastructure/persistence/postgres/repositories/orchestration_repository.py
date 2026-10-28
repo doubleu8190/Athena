@@ -28,8 +28,9 @@ from ..models import (
     PlanVersionModel,
     RoundTaskModel,
     TaskExecutionModel,
-    ExecutionLeaseModel,
 )
+from domain.leases import LeaseRecord
+from .lease_center import PostgresLeaseCenter
 from .task_execution_results import load_task_execution_outputs
 
 
@@ -97,7 +98,7 @@ def _bounded_text(value: object | None, limit: int) -> str | None:
 
 
 def _execution_snapshot(
-    execution: TaskExecutionModel, lease: ExecutionLeaseModel | None
+    execution: TaskExecutionModel, lease: LeaseRecord | None
 ) -> dict[str, object]:
     error: dict[str, object] | None = None
     if isinstance(execution.error_json, Mapping):
@@ -111,7 +112,7 @@ def _execution_snapshot(
         "attempt": execution.attempt,
         "worker_thread_id": execution.worker_thread_id,
         "status": execution.status,
-        "fencing_token": lease.fencing_token if lease is not None else 0,
+        "fencing_token": lease.fencing_token if lease is not None else None,
         "cancellation_epoch": execution.cancellation_epoch,
         "lease_until": lease.lease_until if lease is not None else None,
         "result_ref": execution.result_ref,
@@ -126,6 +127,7 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
 
     def __init__(self, session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]) -> None:
         self._session_factory = session_factory
+        self._leases = PostgresLeaseCenter(session_factory)
 
     async def get_plan_status(self, plan_id: str) -> PlanStatus | None:
         async with self._session_factory() as session:
@@ -199,19 +201,10 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                     )
                 ).scalars().all() if round_ids else []
 
-                leases = (
-                    await session.execute(
-                        select(ExecutionLeaseModel).where(
-                            ExecutionLeaseModel.resource_type == "worker_execution",
-                            ExecutionLeaseModel.resource_id.in_(
-                                [execution.execution_id for execution in executions]
-                            ),
-                        )
-                    )
-                ).scalars().all() if executions else []
-                leases_by_execution = {
-                    row.resource_id: row for row in leases
-                }
+                leases_by_execution = await self._leases.get_many_in_transaction(
+                    session, "worker_execution",
+                    [execution.execution_id for execution in executions],
+                )
 
                 executions_by_member: dict[tuple[str, str], list[TaskExecutionModel]] = {}
                 for execution in executions:

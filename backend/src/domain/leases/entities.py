@@ -40,6 +40,17 @@ class LeaseGrant:
 
 
 @dataclass(frozen=True, slots=True)
+class LeaseRecord:
+    """租约中心向调用方公开的资源状态。"""
+
+    key: LeaseKey
+    state: str
+    owner_id: str | None
+    fencing_token: int | None
+    lease_until: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class ClaimedWork(Generic[_WorkPayload]):
     """把队列中的业务内容与对应的执行授权绑定。"""
 

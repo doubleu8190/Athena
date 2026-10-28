@@ -15,7 +15,6 @@ from domain.knowledge import KnowledgeDocumentRepository
 
 from ..models import (
     AttachmentModel,
-    ExecutionLeaseModel,
     FileArtifactModel,
     FileChunkModel,
     KnowledgeDocumentJobModel,
@@ -74,15 +73,10 @@ class PostgresKnowledgeDocumentRepository(KnowledgeDocumentRepository):
                             )
                         ).all()
                         for old in old_rows:
-                            lease = await db.scalar(
-                                select(ExecutionLeaseModel)
-                                .where(
-                                    ExecutionLeaseModel.resource_type == "document_ingestion",
-                                    ExecutionLeaseModel.resource_id == old.id,
-                                )
-                                .with_for_update()
+                            lease = await self._leases.get_in_transaction(
+                                db, LeaseKey("document_ingestion", old.id)
                             )
-                            if lease is not None and lease.state == "active":
+                            if lease is not None and lease.state == "active" and lease.fencing_token is not None:
                                 await self._leases.revoke_in_transaction(
                                     db,
                                     LeaseKey("document_ingestion", old.id),
@@ -223,15 +217,10 @@ class PostgresKnowledgeDocumentRepository(KnowledgeDocumentRepository):
                 )
                 if result.scalar_one_or_none() is None:
                     return False
-                lease = await db.scalar(
-                    select(ExecutionLeaseModel)
-                    .where(
-                        ExecutionLeaseModel.resource_type == "document_ingestion",
-                        ExecutionLeaseModel.resource_id == attachment_id,
-                    )
-                    .with_for_update()
+                lease = await self._leases.get_in_transaction(
+                    db, LeaseKey("document_ingestion", attachment_id)
                 )
-                if lease is not None and lease.state == "active":
+                if lease is not None and lease.state == "active" and lease.fencing_token is not None:
                     await self._leases.revoke_in_transaction(
                         db,
                         LeaseKey("document_ingestion", attachment_id),

@@ -40,8 +40,6 @@ class MemoryService:
     async def list_memories(self, request: MemoryListRequest) -> MemoryPageResponse:
         """分页列出记忆。"""
         value = await self._port.list_memories(request)
-        if not hasattr(value, "items"):
-            return MemoryPageResponse((), 0, {})
         return MemoryPageResponse(tuple(_to_response(item) for item in value.items), value.total, dict(value.stats))
 
     async def get(self, memory_id: str) -> MemoryResponse | None:

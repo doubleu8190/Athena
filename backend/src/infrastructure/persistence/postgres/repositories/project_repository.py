@@ -23,14 +23,12 @@ from shared.contracts.memory import MemoryRecordMetadataSchema, memory_schema_to
 from ..models import (
     AgentRunModel,
     MemoryEpisodeModel,
-    MemoryEpisodeProjectBindingModel,
     MemoryExtractionSnapshotModel,
     MemoryModel,
     MemoryProcessingJobModel,
     ProjectModel,
     MemoryRunEvidenceSnapshotModel,
     MemorySourceSuppressionModel,
-    MemoryWriteOperationModel,
     SessionModel,
 )
 
@@ -261,13 +259,8 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                             MemoryEpisodeModel.episode_id,
                             MemoryEpisodeModel.turn_id,
                         )
-                        .join(
-                            MemoryEpisodeProjectBindingModel,
-                            MemoryEpisodeProjectBindingModel.episode_id
-                            == MemoryEpisodeModel.episode_id,
-                        )
                         .where(
-                            MemoryEpisodeProjectBindingModel.project_id == project_id
+                            MemoryEpisodeModel.project_id == project_id
                         )
                     )
                 ).all()
@@ -339,11 +332,6 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                     await session.execute(
                         sql_delete(MemoryRunEvidenceSnapshotModel).where(
                             MemoryRunEvidenceSnapshotModel.turn_id.in_(turn_ids)
-                        )
-                    )
-                    await session.execute(
-                        sql_delete(MemoryWriteOperationModel).where(
-                            MemoryWriteOperationModel.turn_id.in_(turn_ids)
                         )
                     )
                 if episode_ids:

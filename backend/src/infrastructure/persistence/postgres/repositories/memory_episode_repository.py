@@ -10,8 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, cast, delete as sql_delete, func, or_, select
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import delete as sql_delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +18,6 @@ from domain.memory import (
     MemoryEpisode,
     MemoryEpisodeRepositoryPort,
     MemoryEpisodeSearchRequest,
-    MemoryEpisodeSummary,
     MemorySourceReference,
 )
 from domain.leases import LeaseGrant, LeaseKey
@@ -40,8 +38,6 @@ from ..models import (
     AgentTaskModel,
     AgentRunModel,
     MemoryEpisodeModel,
-    MemoryEpisodeProjectBindingModel,
-    MemoryModel,
     MemorySourceSuppressionModel,
     MessageModel,
     SessionModel,
@@ -148,16 +144,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
                     MemoryEpisodeModel.turn_id == turn_id
                 )
             )
-            project_id = (
-                None
-                if row is None
-                else await session.scalar(
-                    select(MemoryEpisodeProjectBindingModel.project_id).where(
-                        MemoryEpisodeProjectBindingModel.episode_id == row.episode_id
-                    )
-                )
-            )
-        return None if row is None else _to_domain(row, project_id=project_id)
+        return None if row is None else _to_domain(row, project_id=row.project_id)
 
     async def create_if_absent(self, episode: MemoryEpisode, *, lease: LeaseGrant) -> MemoryEpisode | None:
         """按 turn_id 首写胜出保存回顾并核对冻结来源指纹。
@@ -172,6 +159,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
             "episode_id": episode.episode_id,
             "turn_id": episode.turn_id,
             "session_id": episode.session_id,
+            "project_id": episode.project_id,
             "content": episode.content,
             "summary_json": memory_domain_to_schema(episode.summary).model_dump_json(),
             "source_refs_json": json.dumps(
@@ -222,20 +210,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
                     raise RuntimeError("memory_episode_not_saved")
                 if row.source_fingerprint != episode.source_fingerprint:
                     raise ValueError("memory_episode_source_fingerprint_conflict")
-                if inserted_id is not None and episode.project_id is not None:
-                    session.add(
-                        MemoryEpisodeProjectBindingModel(
-                            episode_id=episode.episode_id,
-                            project_id=episode.project_id,
-                            created_at=episode.created_at or _now(),
-                        )
-                    )
-                project_id = await session.scalar(
-                    select(MemoryEpisodeProjectBindingModel.project_id).where(
-                        MemoryEpisodeProjectBindingModel.episode_id == row.episode_id
-                    )
-                )
-                return _to_domain(row, project_id=project_id)
+                return _to_domain(row, project_id=row.project_id)
 
     async def list_recent(
         self, *, limit: int, offset: int, session_id: str | None = None
@@ -263,12 +238,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
                 await session.execute(
                     select(
                         MemoryEpisodeModel,
-                        MemoryEpisodeProjectBindingModel.project_id,
-                    )
-                    .outerjoin(
-                        MemoryEpisodeProjectBindingModel,
-                        MemoryEpisodeProjectBindingModel.episode_id
-                        == MemoryEpisodeModel.episode_id,
+                        MemoryEpisodeModel.project_id,
                     )
                     .join(SessionModel, SessionModel.id == MemoryEpisodeModel.session_id)
                     .where(*conditions)
@@ -283,7 +253,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
         )
 
     async def forget(self, episode_id: str) -> bool:
-        """Suppress a source turn and atomically remove its episode and procedures."""
+        """抑制来源轮次并删除任务回顾。"""
         async with self._session_factory() as session:
             async with session.begin():
                 hint = await session.get(MemoryEpisodeModel, episode_id)
@@ -309,23 +279,6 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
                     )
                     .on_conflict_do_nothing()
                 )
-                episode_id_field = cast(MemoryModel.metadata_json, JSONB)[
-                    "episode_id"
-                ].astext
-                derived_rows = (
-                    await session.scalars(
-                        select(MemoryModel)
-                        .where(
-                            episode_id_field == episode_id,
-                            MemoryModel.status == "active",
-                            MemoryModel.deleted_time.is_(None),
-                        )
-                        .with_for_update()
-                    )
-                ).all()
-                for derived in derived_rows:
-                    derived.status = "deleted"
-                    derived.deleted_time = _now()
                 await session.execute(
                     sql_delete(MemoryEpisodeModel).where(
                         MemoryEpisodeModel.episode_id == episode_id
@@ -356,25 +309,17 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
             text_query = text_query.op("||")(query)
         text_rank = func.ts_rank_cd(MemoryEpisodeModel.content_fts, text_query)
         scope_conditions = [
-            and_(
-                MemoryEpisodeModel.session_id == session_id,
-                MemoryEpisodeProjectBindingModel.episode_id.is_(None),
-            )
+            MemoryEpisodeModel.session_id == session_id
         ]
         if request.project_id:
             scope_conditions.append(
-                MemoryEpisodeProjectBindingModel.project_id == request.project_id
+                MemoryEpisodeModel.project_id == request.project_id
             )
         async with self._session_factory() as session:
             statement = (
                 select(
                     MemoryEpisodeModel,
-                    MemoryEpisodeProjectBindingModel.project_id,
-                )
-                .outerjoin(
-                    MemoryEpisodeProjectBindingModel,
-                    MemoryEpisodeProjectBindingModel.episode_id
-                    == MemoryEpisodeModel.episode_id,
+                    MemoryEpisodeModel.project_id,
                 )
                 .join(
                     SessionModel,
@@ -438,25 +383,17 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
             return ()
         async with self._session_factory() as session:
             scope_conditions = [
-                and_(
-                    MemoryEpisodeModel.session_id == session_id,
-                    MemoryEpisodeProjectBindingModel.episode_id.is_(None),
-                )
+                MemoryEpisodeModel.session_id == session_id
             ]
             if project_id is not None:
                 scope_conditions.append(
-                    MemoryEpisodeProjectBindingModel.project_id == project_id
+                    MemoryEpisodeModel.project_id == project_id
                 )
             episode_row = (
                 await session.execute(
                     select(
                         MemoryEpisodeModel,
-                        MemoryEpisodeProjectBindingModel.project_id,
-                    )
-                    .outerjoin(
-                        MemoryEpisodeProjectBindingModel,
-                        MemoryEpisodeProjectBindingModel.episode_id
-                        == MemoryEpisodeModel.episode_id,
+                        MemoryEpisodeModel.project_id,
                     )
                     .join(
                         SessionModel,
@@ -503,7 +440,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
 
 
 def _to_domain(
-    row: MemoryEpisodeModel, *, project_id: str | None = None
+    row: MemoryEpisodeModel, *, project_id: str
 ) -> MemoryEpisode:
     """严格恢复 ORM 行中的回顾摘要和来源。
 

@@ -43,7 +43,7 @@ class SessionModel(Base):
 
 
 class SessionMemorySettingsModel(Base):
-    """会话级记忆读取与生成开关，独立于既有 sessions 表。"""
+    """会话级记忆读取设置，独立于既有 sessions 表。"""
 
     __tablename__ = "session_memory_settings"
 
@@ -51,7 +51,6 @@ class SessionMemorySettingsModel(Base):
         ForeignKey("sessions.id", ondelete="CASCADE"), primary_key=True
     )
     use_memories: Mapped[bool] = mapped_column(Boolean, default=True)
-    generate_memories: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[str] = mapped_column(String)
 
 

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from .entities import MemoryCandidate
+from typing import Literal
 
 
 _FACT_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -203,7 +200,6 @@ class MemoryEpisodeSummary:
     outcome: Literal["completed", "partial", "failed", "cancelled", "unknown"]
     result: str
     attempts: str = ""
-    verification_scope: str = ""
     reusable_learnings: tuple[str, ...] = ()
     unresolved: tuple[str, ...] = ()
 
@@ -214,7 +210,7 @@ class MemoryEpisodeSummary:
         if self.outcome not in {"completed", "partial", "failed", "cancelled", "unknown"}:
             raise ValueError("memory_episode_outcome_invalid")
         _required_text(self.result, "memory_episode_result", 1500)
-        if len(self.attempts) > 1000 or len(self.verification_scope) > 500:
+        if len(self.attempts) > 1000:
             raise ValueError("memory_episode_summary_field_too_long")
         if len(self.reusable_learnings) > 8 or any(
             not isinstance(item, str) or len(item) > 200
@@ -258,7 +254,7 @@ class MemoryEpisode:
     source_refs: tuple[MemorySourceReference, ...]
     source_fingerprint: str
     created_at: str
-    project_id: str | None = None
+    project_id: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
         """校验回顾身份、正文和可追溯来源。"""
@@ -268,8 +264,7 @@ class MemoryEpisode:
             (self.session_id, "memory_episode_session_id"),
         ):
             _required_text(value, name)
-        if self.project_id is not None:
-            _required_text(self.project_id, "memory_episode_project_id")
+        _required_text(self.project_id, "memory_episode_project_id")
         _required_text(self.content, "memory_episode_content", 8000)
         if not isinstance(self.summary, MemoryEpisodeSummary):
             raise ValueError("memory_episode_summary_invalid")
@@ -287,109 +282,35 @@ class MemoryFactExtractionSnapshot:
     """一次轮次的冻结提取清单；空列表也表示已成功提取。"""
 
     turn_id: str
-    candidates: tuple[MemoryCandidateSnapshot, ...]
-    schema_version: Literal[1] = 1
+    candidates: tuple[MemoryCandidate, ...]
 
     def __post_init__(self) -> None:
         """校验冻结清单版本和轮次身份。"""
         _required_text(self.turn_id, "memory_snapshot_turn_id")
-        if self.schema_version != 1:
-            raise ValueError("memory_snapshot_schema_version_invalid")
-        if any(not isinstance(candidate, MemoryCandidateSnapshot) for candidate in self.candidates):
+        if any(not isinstance(candidate, MemoryCandidate) for candidate in self.candidates):
             raise ValueError("memory_snapshot_candidates_invalid")
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryCandidateSnapshot:
-    """可稳定写入作业快照的单条候选。"""
+class MemoryCandidate:
+    """有明确来源的不可变事实候选，同时用于提取快照。"""
 
     content: str
     source_turn_id: str
-    confidence: float
     memory_type: str = "fact"
     category: str = "fact"
+    confidence: float = 0.8
     session_id: str = ""
-    fact: MemoryFact | None = None
+    fact: MemoryFact = field(kw_only=True)
 
     def __post_init__(self) -> None:
-        """校验候选正文、来源轮次和事实阈值。"""
+        """校验候选正文和置信度；非法内容抛出 ValueError。"""
         _required_text(self.content, "memory_candidate_content", 600)
         _required_text(self.source_turn_id, "memory_candidate_source_turn_id")
         if not 0.6 <= self.confidence <= 1.0:
             raise ValueError("memory_candidate_confidence_invalid")
-        if self.fact is not None and not isinstance(self.fact, MemoryFact):
-            raise ValueError("memory_candidate_fact_invalid")
-
-    @classmethod
-    def from_candidate(cls, candidate: MemoryCandidate) -> MemoryCandidateSnapshot:
-        """将领域候选复制为可恢复的快照类型。"""
-        return cls(
-            content=candidate.content,
-            source_turn_id=candidate.source_turn_id,
-            memory_type=candidate.memory_type,
-            category=candidate.category,
-            confidence=candidate.confidence,
-            session_id=candidate.session_id,
-            fact=candidate.fact,
-        )
-
-    def to_candidate(self) -> MemoryCandidate:
-        """根据冻结快照恢复领域候选。"""
-        from .entities import MemoryCandidate
-
-        return MemoryCandidate(
-            content=self.content,
-            source_turn_id=self.source_turn_id,
-            memory_type=self.memory_type,
-            category=self.category,
-            confidence=self.confidence,
-            session_id=self.session_id,
-            fact=self.fact,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryResolutionProposal:
-    """模型针对一个候选提出的动作；目标 ID 必须由程序复核。"""
-
-    action: Literal["CREATE", "REVISE", "IGNORE", "DEFER"]
-    target_memory_id: str | None = None
-    relation: Literal["supersedes", "contradicts"] | None = None
-    reason_code: str | None = None
-    expected_memory_ids: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        """校验决策动作及可选关系类型。"""
-        if self.action not in {"CREATE", "REVISE", "IGNORE", "DEFER"}:
-            raise ValueError("memory_resolution_action_invalid")
-        if self.relation not in {None, "supersedes", "contradicts"}:
-            raise ValueError("memory_resolution_relation_invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryWriteOperation:
-    """单个候选的可恢复处理回执。"""
-
-    operation_id: str
-    turn_id: str
-    candidate: MemoryCandidateSnapshot
-    status: Literal["pending", "applied", "ignored", "deferred", "rejected", "skipped"]
-    projection_status: Literal["not_required", "pending", "ready", "failed"]
-    decision: MemoryResolutionProposal | None = None
-    result_memory_id: str | None = None
-
-    def __post_init__(self) -> None:
-        """校验写入回执身份和状态组合。"""
-        _required_text(self.operation_id, "memory_operation_id")
-        _required_text(self.turn_id, "memory_operation_turn_id")
-        if not isinstance(self.candidate, MemoryCandidateSnapshot):
-            raise ValueError("memory_operation_candidate_invalid")
-        if self.status not in {
-            "pending", "applied", "ignored", "deferred", "rejected", "skipped"
-        }:
-            raise ValueError("memory_operation_status_invalid")
-        if self.projection_status not in {"not_required", "pending", "ready", "failed"}:
-            raise ValueError("memory_operation_projection_status_invalid")
+        if not isinstance(self.fact, MemoryFact):
+            raise ValueError("memory_candidate_fact_required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,7 +329,7 @@ class MemoryRecordMetadata:
 
 
 __all__ = [
-    "MemoryCandidateSnapshot",
+    "MemoryCandidate",
     "MemoryEpisode",
     "MemoryEpisodeProposal",
     "MemoryEpisodeSummary",
@@ -417,9 +338,7 @@ __all__ = [
     "MemoryFactIdentity",
     "MemoryFactExtractionSnapshot",
     "MemoryRecordMetadata",
-    "MemoryResolutionProposal",
     "MemorySourceReference",
     "MemoryTaskOutcomeEvidence",
     "MemoryToolOutcomeEvidence",
-    "MemoryWriteOperation",
 ]

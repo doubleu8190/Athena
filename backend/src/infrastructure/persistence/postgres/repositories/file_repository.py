@@ -17,7 +17,7 @@ from domain.files import (
 )
 from domain.files.entities import AttachmentStatus
 from domain.leases import LeaseGrant, LeaseKey
-from ..models import ExecutionLeaseModel, FileChunkModel, KnowledgeDocumentJobModel
+from ..models import FileChunkModel, KnowledgeDocumentJobModel
 
 from ..models import AttachmentModel
 from ..mappers.converters import (
@@ -140,15 +140,10 @@ class PostgresAttachmentRepository(AttachmentRepository):
                         updated_at=deleted_at,
                     )
                 )
-                lease = await db.scalar(
-                    select(ExecutionLeaseModel)
-                    .where(
-                        ExecutionLeaseModel.resource_type == "document_ingestion",
-                        ExecutionLeaseModel.resource_id == attachment_id,
-                    )
-                    .with_for_update()
+                lease = await self._leases.get_in_transaction(
+                    db, LeaseKey("document_ingestion", attachment_id)
                 )
-                if lease is not None and lease.state == "active":
+                if lease is not None and lease.state == "active" and lease.fencing_token is not None:
                     await self._leases.revoke_in_transaction(
                         db,
                         LeaseKey("document_ingestion", attachment_id),

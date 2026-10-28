@@ -13,7 +13,7 @@ from .memory_repository import PostgresMemoryRepository
 from .memory_episode_repository import PostgresMemoryEpisodeRepository
 from .project_repository import PostgresProjectRepository
 from .memory_job_repository import PostgresMemoryJobRepository
-from .memory_operations_repository import PostgresMemoryOperationsRepository
+from .memory_snapshot_repository import PostgresMemorySnapshotRepository
 from .retrieval_repository import PostgresRetrievalRepository
 from .run_repository import PostgresRunRepository
 from .mcp_repository import PostgresMCPServerRepository
@@ -57,7 +57,7 @@ __all__ = [
     "PostgresMemoryEpisodeRepository",
     "PostgresProjectRepository",
     "PostgresMemoryJobRepository",
-    "PostgresMemoryOperationsRepository",
+    "PostgresMemorySnapshotRepository",
     "PostgresRetrievalRepository",
     "PostgresRunRepository",
     "PostgresMCPServerRepository",

@@ -27,7 +27,6 @@ from ..models import (
     RoundTaskModel,
     TaskExecutionModel,
     WorkerToolOperationModel,
-    ExecutionLeaseModel,
 )
 from .lease_center import PostgresLeaseCenter
 

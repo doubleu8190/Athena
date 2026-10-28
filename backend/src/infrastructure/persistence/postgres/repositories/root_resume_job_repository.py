@@ -15,7 +15,6 @@ from domain.leases import LeaseGrant, LeaseKey, LeaseLostError
 from ..models import (
     AgentPlanModel,
     AgentRunModel,
-    ExecutionLeaseModel,
     PlanRoundModel,
     RootResumeJobModel,
 )
@@ -65,104 +64,111 @@ class PostgresRootResumeJobRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 now = await self._now(session)
-                lease_ready = or_(
-                    ExecutionLeaseModel.resource_id.is_(None),
-                    ExecutionLeaseModel.lease_until.is_(None),
-                    ExecutionLeaseModel.lease_until <= now,
-                    ExecutionLeaseModel.state == "released",
-                )
-                candidates = (
-                    await session.execute(
-                        select(RootResumeJobModel.job_id)
-                        .outerjoin(
-                            ExecutionLeaseModel,
-                            and_(
-                                ExecutionLeaseModel.resource_type == "root_resume",
-                                ExecutionLeaseModel.resource_id
-                                == RootResumeJobModel.job_id,
-                            ),
-                        )
-                        .where(
-                            or_(
-                                and_(
-                                    RootResumeJobModel.status == "pending",
-                                    RootResumeJobModel.available_at <= now,
-                                ),
-                                and_(
+                after_resource_id: str | None = None
+                while True:
+                    claimable = await self._leases.claimable_keys_in_transaction(
+                        session,
+                        "root_resume",
+                        limit=256,
+                        after_resource_id=after_resource_id,
+                    )
+                    if not claimable:
+                        return None
+                    claimable_ids = [key.resource_id for key in claimable]
+                    candidates = (
+                        await session.execute(
+                            select(RootResumeJobModel.job_id)
+                            .where(
+                                RootResumeJobModel.job_id.in_(claimable_ids),
+                                or_(
+                                    and_(
+                                        RootResumeJobModel.status == "pending",
+                                        RootResumeJobModel.available_at <= now,
+                                    ),
                                     RootResumeJobModel.status == "running",
-                                    lease_ready,
                                 ),
                             )
+                            .order_by(
+                                RootResumeJobModel.available_at,
+                                RootResumeJobModel.created_at,
+                            )
+                            .limit(len(claimable_ids))
                         )
-                        .order_by(
-                            RootResumeJobModel.available_at,
-                            RootResumeJobModel.created_at,
+                    ).scalars().all()
+                    for job_id in candidates:
+                        hint = await session.get(RootResumeJobModel, job_id)
+                        if hint is None:
+                            continue
+                        run = await session.get(
+                            AgentRunModel, hint.run_id, with_for_update=True
                         )
-                        .limit(64)
-                    )
-                ).scalars().all()
-                for job_id in candidates:
-                    hint = await session.get(RootResumeJobModel, job_id)
-                    if hint is None:
-                        continue
-                    run = await session.get(
-                        AgentRunModel, hint.run_id, with_for_update=True
-                    )
-                    plan = await session.get(
-                        AgentPlanModel, hint.plan_id, with_for_update=True
-                    )
-                    round_row = await session.get(
-                        PlanRoundModel, hint.round_id, with_for_update=True
-                    )
-                    job = (
-                        await session.execute(
-                            select(RootResumeJobModel)
-                            .where(RootResumeJobModel.job_id == job_id)
-                            .with_for_update(skip_locked=True)
+                        plan = await session.get(
+                            AgentPlanModel, hint.plan_id, with_for_update=True
                         )
-                    ).scalar_one_or_none()
-                    if any(row is None for row in (run, plan, round_row, job)):
-                        continue
-                    assert run is not None and plan is not None
-                    assert round_row is not None and job is not None
-                    if (
-                        run.status != "running"
-                        or plan.status != "waiting_review"
-                        or plan.active_round_id != job.round_id
-                        or round_row.status != "completed"
-                        or round_row.plan_version != plan.current_version
-                        or run.root_wait_generation != job.root_wait_generation
-                        or run.root_wait_round_id != job.round_id
-                        or run.root_wait_plan_version != round_row.plan_version
-                    ):
-                        job.status = "completed"
+                        round_row = await session.get(
+                            PlanRoundModel, hint.round_id, with_for_update=True
+                        )
+                        job = (
+                            await session.execute(
+                                select(RootResumeJobModel)
+                                .where(RootResumeJobModel.job_id == job_id)
+                                .with_for_update(skip_locked=True)
+                            )
+                        ).scalar_one_or_none()
+                        if job is None:
+                            await self._leases.complete_unclaimed_in_transaction(
+                                session, LeaseKey("root_resume", job_id)
+                            )
+                            continue
+                        if any(row is None for row in (run, plan, round_row)):
+                            job.status = "completed"
+                            job.updated_at = now
+                            await self._leases.complete_unclaimed_in_transaction(
+                                session, LeaseKey("root_resume", job.job_id)
+                            )
+                            continue
+                        assert run is not None and plan is not None and round_row is not None
+                        if (
+                            run.status != "running"
+                            or plan.status != "waiting_review"
+                            or plan.active_round_id != job.round_id
+                            or round_row.status != "completed"
+                            or round_row.plan_version != plan.current_version
+                            or run.root_wait_generation != job.root_wait_generation
+                            or run.root_wait_round_id != job.round_id
+                            or run.root_wait_plan_version != round_row.plan_version
+                        ):
+                            job.status = "completed"
+                            job.updated_at = now
+                            await self._leases.complete_unclaimed_in_transaction(
+                                session, LeaseKey("root_resume", job.job_id)
+                            )
+                            continue
+                        grant = await self._leases.acquire_in_transaction(
+                            session,
+                            LeaseKey("root_resume", job.job_id),
+                            owner_id=uuid4().hex,
+                            lease_seconds=lease_seconds,
+                        )
+                        if grant is None:
+                            continue
+                        job.status = "running"
+                        job.attempt += 1
                         job.updated_at = now
-                        continue
-                    grant = await self._leases.acquire_in_transaction(
-                        session,
-                        LeaseKey("root_resume", job.job_id),
-                        owner_id=uuid4().hex,
-                        lease_seconds=lease_seconds,
-                    )
-                    if grant is None:
-                        continue
-                    job.status = "running"
-                    job.attempt += 1
-                    job.updated_at = now
-                    return RootResumeLease(
-                        job_id=job.job_id,
-                        run_id=run.run_id,
-                        session_id=run.session_id,
-                        plan_id=plan.plan_id,
-                        round_id=round_row.round_id,
-                        plan_version=round_row.plan_version,
-                        root_wait_generation=job.root_wait_generation,
-                        interrupt_id=run.root_wait_interrupt_id,
-                        checkpoint_id=run.root_wait_checkpoint_id,
-                        worker_id=worker_id,
-                        lease=grant,
-                    )
-        return None
+                        return RootResumeLease(
+                            job_id=job.job_id,
+                            run_id=run.run_id,
+                            session_id=run.session_id,
+                            plan_id=plan.plan_id,
+                            round_id=round_row.round_id,
+                            plan_version=round_row.plan_version,
+                            root_wait_generation=job.root_wait_generation,
+                            interrupt_id=run.root_wait_interrupt_id,
+                            checkpoint_id=run.root_wait_checkpoint_id,
+                            worker_id=worker_id,
+                            lease=grant,
+                        )
+                    after_resource_id = claimable[-1].resource_id
 
     async def renew(
         self, lease: RootResumeLease, *, lease_seconds: float
@@ -195,9 +201,7 @@ class PostgresRootResumeJobRepository:
                     seconds=max(0, delay_seconds)
                 )
                 job.updated_at = now
-                if not await self._leases.finish_in_transaction(
-                    session, lease.lease
-                ):
+                if not await self._leases.finish_in_transaction(session, lease.lease):
                     raise LeaseLostError(lease.lease.key)
                 return True
 
@@ -217,7 +221,7 @@ class PostgresRootResumeJobRepository:
                 job.status = "completed"
                 job.updated_at = now
                 if not await self._leases.finish_in_transaction(
-                    session, lease.lease
+                    session, lease.lease, completed=True
                 ):
                     raise LeaseLostError(lease.lease.key)
                 return True

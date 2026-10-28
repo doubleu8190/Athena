@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any
 
 from domain.leases import LeaseGrant
-from .contracts import MemoryExecutionEvidence, MemoryFact
+from .contracts import MemoryExecutionEvidence, MemoryCandidate
 
 
 class MemoryStatus(StrEnum):
@@ -157,7 +157,7 @@ class CompletedTurn:
     assistant_text: str = ""
     completed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     execution_evidence: MemoryExecutionEvidence | None = None
-    project_id: str | None = None
+    project_id: str = field(kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,28 +183,13 @@ class MemoryJobStatus:
     available_at: str
 
 
-@dataclass(frozen=True, slots=True)
-class MemoryCandidate:
-    """事实提取器产生的候选记忆。"""
-
-    content: str
-    source_turn_id: str
-    memory_type: str = "fact"
-    category: str = "fact"
-    confidence: float = 0.8
-    session_id: str = ""
-    fact: MemoryFact | None = None
-
-
 class ResolutionAction(StrEnum):
     """候选记忆的持久化动作。"""
 
     CREATE = "create"
     REVISE = "revise"
-    UPDATE = "revise"
-    SUPERSEDE = "revise"
     IGNORE = "ignore"
-    DEFER = "defer"
+    SKIP = "skip"
 
 
 @dataclass(frozen=True, slots=True)

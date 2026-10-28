@@ -38,11 +38,9 @@ from ..models import (
     AgentTaskModel,
     MemoryProcessingJobModel,
     MemoryRunEvidenceSnapshotModel,
-    SessionMemorySettingsModel,
     SessionModel,
     TaskExecutionModel,
     WorkerExecutionMessageModel,
-    ExecutionLeaseModel,
 )
 from .lease_center import PostgresLeaseCenter
 from .memory_suppression import ensure_writable_run_scope, project_scope_is_writable
@@ -52,6 +50,23 @@ logger = get_logger(__name__)
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+async def enqueue_memory_job_in_transaction(
+    session: AsyncSession, *, turn_id: str, session_id: str,
+    user_text: str, assistant_text: str, now: str,
+) -> bool:
+    """在调用方事务内创建唯一轮次作业；空输入或已遗忘范围返回 False。"""
+    if not user_text.strip() or not await ensure_writable_run_scope(
+        session, session_id=session_id, turn_id=turn_id, now=now,
+    ):
+        return False
+    inserted = await session.scalar(pg_insert(MemoryProcessingJobModel).values(
+        job_id=f"memjob_{uuid.uuid4().hex}", turn_id=turn_id, session_id=session_id,
+        user_text=user_text, assistant_text=assistant_text, status="queued", attempt=0,
+        available_at=now, created_at=now, updated_at=now,
+    ).on_conflict_do_nothing(index_elements=["turn_id"]).returning(MemoryProcessingJobModel.job_id))
+    return inserted is not None
 
 
 class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatusPort):
@@ -143,7 +158,9 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                     SessionModel.deleted_time.is_(None),
                 )
             )
-            if project_id is not None and not await project_scope_is_writable(session, project_id):
+            if project_id is not None and not await project_scope_is_writable(
+                session, project_id
+            ):
                 return False
             active_session_id = await session.scalar(
                 select(SessionModel.id)
@@ -154,9 +171,6 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                 .with_for_update()
             )
             if active_session_id is None:
-                return False
-            settings = await session.get(SessionMemorySettingsModel, session_id)
-            if settings is not None and not settings.generate_memories:
                 return False
             now = _now()
             writable = await ensure_writable_run_scope(
@@ -179,23 +193,17 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                     existing.attempt = 0
                     existing.available_at = now
                     existing.updated_at = now
+                    await self._leases.schedule_in_transaction(
+                        session, LeaseKey("memory_processing", turn_id)
+                    )
                     await session.commit()
                     return True
                 await session.commit()
                 return False
-            session.add(
-                MemoryProcessingJobModel(
-                    job_id=f"memjob_{uuid.uuid4().hex}",
-                    turn_id=turn_id,
-                    session_id=session_id,
-                    user_text=user_text,
-                    assistant_text=assistant_text,
-                    status="queued",
-                    attempt=0,
-                    available_at=now,
-                    created_at=now,
-                    updated_at=now,
-                )
+            await enqueue_memory_job_in_transaction(session, turn_id=turn_id,
+                session_id=session_id, user_text=user_text, assistant_text=assistant_text, now=now)
+            await self._leases.ensure_in_transaction(
+                session, LeaseKey("memory_processing", turn_id)
             )
             await session.commit()
             return True
@@ -213,30 +221,34 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
             raise ValueError("lease_seconds must be positive")
         async with self._session_factory() as session:
             async with session.begin():
-                    now = _now()
-                    candidates = (
-                        await session.scalars(
-                            select(MemoryProcessingJobModel)
-                            .where(
-                                or_(
-                                    and_(
-                                        MemoryProcessingJobModel.status == "queued",
-                                        MemoryProcessingJobModel.available_at <= now,
-                                    ),
-                                    MemoryProcessingJobModel.status == "processing",
+                now = _now()
+                after_resource_id: str | None = None
+                while True:
+                    claimable = await self._leases.claimable_keys_in_transaction(
+                        session,
+                        "memory_processing",
+                        limit=128,
+                        after_resource_id=after_resource_id,
+                    )
+                    if not claimable:
+                        return None
+                    candidate_ids = [key.resource_id for key in claimable]
+                    candidates = (await session.scalars(
+                        select(MemoryProcessingJobModel)
+                        .where(
+                            MemoryProcessingJobModel.turn_id.in_(candidate_ids),
+                            or_(
+                                and_(
+                                    MemoryProcessingJobModel.status == "queued",
+                                    MemoryProcessingJobModel.available_at <= now,
                                 ),
-                                ~select(ExecutionLeaseModel.resource_id).where(
-                                    ExecutionLeaseModel.resource_type == "memory_processing",
-                                    ExecutionLeaseModel.resource_id == MemoryProcessingJobModel.turn_id,
-                                    ExecutionLeaseModel.state.in_(("active", "revoked")),
-                                    ExecutionLeaseModel.lease_until > func.clock_timestamp(),
-                                ).exists(),
-                            )
-                            .order_by(MemoryProcessingJobModel.created_at)
-                            .with_for_update(skip_locked=True)
-                            .limit(32)
+                                MemoryProcessingJobModel.status == "processing",
+                            ),
                         )
-                    ).all()
+                        .order_by(MemoryProcessingJobModel.created_at)
+                        .with_for_update(skip_locked=True)
+                        .limit(len(candidate_ids))
+                    )).all()
                     for row in candidates:
                         project_id = await session.scalar(
                             select(SessionModel.project_id).where(
@@ -246,7 +258,13 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                         if project_id is None:
                             logger.warning(
                                 "memory_job_session_missing",
-                                extra={"turn_id": row.turn_id, "session_id": row.session_id},
+                                extra={
+                                    "turn_id": row.turn_id,
+                                    "session_id": row.session_id,
+                                },
+                            )
+                            await self._leases.complete_unclaimed_in_transaction(
+                                session, LeaseKey("memory_processing", row.turn_id)
                             )
                             await session.delete(row)
                             continue
@@ -257,6 +275,13 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                             lease_seconds=lease_seconds,
                         )
                         if grant is None:
+                            logger.info(
+                                "memory_job_lease_conflict",
+                                extra={
+                                    "turn_id": row.turn_id,
+                                    "session_id": row.session_id,
+                                },
+                            )
                             continue
                         execution_evidence = await _load_or_freeze_execution_evidence(
                             session,
@@ -280,7 +305,7 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                             attempt=row.attempt,
                             lease=grant,
                         )
-                    return None
+                    after_resource_id = claimable[-1].resource_id
 
     async def mark_succeeded(self, turn_id: str, *, lease: LeaseGrant) -> None:
         if lease.key != LeaseKey("memory_processing", turn_id):
@@ -298,7 +323,9 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                 row.status = "succeeded"
                 row.error_json = None
                 row.updated_at = _now()
-                if not await self._leases.finish_in_transaction(session, lease):
+                if not await self._leases.finish_in_transaction(
+                    session, lease, completed=True
+                ):
                     raise LeaseLostError(lease.key)
 
     async def mark_failed(
@@ -335,7 +362,9 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                     ).isoformat()
                 else:
                     row.status = "failed"
-                if not await self._leases.finish_in_transaction(session, lease):
+                if not await self._leases.finish_in_transaction(
+                    session, lease, completed=not (retry and row.attempt < self._max_attempts)
+                ):
                     raise LeaseLostError(lease.key)
 
 
@@ -356,6 +385,7 @@ async def _load_or_freeze_execution_evidence(
     """
     frozen_row = await session.get(MemoryRunEvidenceSnapshotModel, turn_id)
     if frozen_row is not None:
+        # 重试时优先获取上次执行任务时收集的证据
         evidence = memory_schema_to_domain(
             MemoryExecutionEvidenceSchema.model_validate_json(frozen_row.snapshot_json)
         )
@@ -363,6 +393,7 @@ async def _load_or_freeze_execution_evidence(
             raise RuntimeError("memory_run_evidence_fingerprint_mismatch")
         return evidence
 
+    # 执行到这一步，说明是第一次执行此轮任务，因此需要开始构建证据
     total_task_count = int(
         await session.scalar(
             select(func.count())

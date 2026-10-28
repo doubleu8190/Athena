@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from application.memory import MemoryWriteWorkflow
 from workers import MemoryWorker
 from application.tools import MCPService, ToolService
 from domain.approval import ApprovalDecision
+from domain.leases import LeaseLostError
 from domain.memory import (
     ClaimedMemoryJob,
     CompletedTurn,
@@ -32,11 +34,6 @@ from tests.fakes.memory_pipeline import Memory, Embedder, dependencies, candidat
 from tests.fakes.leases import LeaseCenter, lease_grant
 
 
-class Trigger:
-    def should_process(self, turn):
-        return True
-
-
 class Extractor:
     async def extract(self, turn, *, lease):
         return [candidate(turn.turn_id)]
@@ -50,7 +47,7 @@ class Resolver:
 @pytest.mark.asyncio
 async def test_memory_workflow_writes_resolved_candidates() -> None:
     memory = Memory()
-    workflow = MemoryWriteWorkflow(memory, Trigger(), Extractor(), Resolver(), Embedder(), **dependencies())
+    workflow = MemoryWriteWorkflow(memory, Extractor(), Resolver(), Embedder(), **dependencies())
     written = await workflow.process_completed_turn(
         CompletedTurn("t-1", "s-1", "remember python", project_id="project-1"),
         lease=lease_grant("memory_processing", "t-1"),
@@ -82,7 +79,7 @@ class Jobs:
 async def test_memory_worker_recovers_and_stops() -> None:
     jobs = Jobs()
     worker = MemoryWorker(
-        jobs, MemoryWriteWorkflow(Memory(), Trigger(), Extractor(), Resolver(), Embedder(), **dependencies()),
+        jobs, MemoryWriteWorkflow(Memory(), Extractor(), Resolver(), Embedder(), **dependencies()),
         poll_interval=0.001, lease_center=jobs._leases,
     )
     task = __import__("asyncio").create_task(worker.run())
@@ -91,6 +88,61 @@ async def test_memory_worker_recovers_and_stops() -> None:
     worker.stop()
     await task
     assert jobs.done == ["t-1"]
+
+
+@pytest.mark.asyncio
+async def test_memory_worker_acknowledges_lost_lease_and_continues() -> None:
+    class LeaseCenterWithAcknowledgements(LeaseCenter):
+        def __init__(self):
+            super().__init__()
+            self.acknowledged = []
+
+        async def acknowledge_stopped(self, grant, *, completed=False):
+            self.acknowledged.append(grant)
+            return True
+
+    class TwoJobs(Jobs):
+        def __init__(self, leases):
+            self._leases = leases
+            self.values = [
+                ClaimedMemoryJob(
+                    CompletedTurn("t-lost", "s-1", "first", project_id="project-1"),
+                    1,
+                    lease_grant("memory_processing", "t-lost"),
+                ),
+                ClaimedMemoryJob(
+                    CompletedTurn("t-next", "s-1", "next", project_id="project-1"),
+                    1,
+                    lease_grant("memory_processing", "t-next"),
+                ),
+            ]
+            self.done = []
+
+    class Workflow:
+        async def process_completed_turn(self, turn, *, lease):
+            if turn.turn_id == "t-lost":
+                raise LeaseLostError(lease.key)
+
+    leases = LeaseCenterWithAcknowledgements()
+    jobs = TwoJobs(leases)
+    worker = MemoryWorker(
+        jobs, Workflow(), poll_interval=0.001, lease_center=leases
+    )
+    task = asyncio.create_task(worker.run())
+    for _ in range(1000):
+        if jobs.done:
+            break
+        await asyncio.sleep(0.001)
+    else:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        pytest.fail("worker did not process the job after losing the first lease")
+    worker.stop()
+    await task
+
+    assert len(leases.acknowledged) == 1
+    assert leases.acknowledged[0].key.resource_id == "t-lost"
+    assert jobs.done == ["t-next"]
 
 
 class ApprovalRepository:

@@ -257,7 +257,7 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                         )
                         if project_id is None:
                             logger.warning(
-                                "memory_job_session_missing",
+                                "没找到session隶属的项目，可能已被删除，跳过记忆作业。",
                                 extra={
                                     "turn_id": row.turn_id,
                                     "session_id": row.session_id,
@@ -391,6 +391,7 @@ async def _load_or_freeze_execution_evidence(
         )
         if evidence.source_fingerprint != frozen_row.source_fingerprint:
             raise RuntimeError("memory_run_evidence_fingerprint_mismatch")
+        logger.info("发现已有执行证据，使用缓存数据。", extra={"turn_id": turn_id})
         return evidence
 
     # 执行到这一步，说明是第一次执行此轮任务，因此需要开始构建证据

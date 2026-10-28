@@ -23,7 +23,7 @@ from domain.memory import (
 )
 
 from application.memory.fact_policy import FactCardinality, cardinality_for
-from application.memory.ports import MemoryFactExtractor, MemoryResolver, MemoryWriteTrigger
+from application.memory.ports import MemoryFactExtractor, MemoryResolver
 from shared import read_system_prompt, render_prompt_template
 from shared.contracts.memory import (
     MemoryFactExtractionOutputSchema,
@@ -61,15 +61,6 @@ def _record_fact(record: MemoryRecord) -> MemoryFact | None:
     if isinstance(value, MemoryFact):
         return value
     return memory_schema_to_domain(MemoryFactSchema.model_validate(value))
-
-
-class DefaultMemoryWriteTrigger(MemoryWriteTrigger):
-    """处理有正文且格式正确的已完成用户轮次。"""
-
-    def should_process(self, turn: CompletedTurn) -> bool:
-        """判断轮次是否包含值得交给提取器处理的用户输入。"""
-        text = turn.user_text.strip()
-        return bool(text) and not text.startswith("/") and len(text) <= 20_000
 
 
 class LLMFactExtractor(MemoryFactExtractor):
@@ -248,4 +239,4 @@ class MemoryFactResolver(MemoryResolver):
             target_memory_id=target.id, relation="contradicts")
 
 
-__all__ = ["DefaultMemoryWriteTrigger", "LLMFactExtractor", "MemoryFactResolver"]
+__all__ = ["LLMFactExtractor", "MemoryFactResolver"]

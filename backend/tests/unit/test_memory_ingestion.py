@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import pytest
 
 from application.memory import (
-    DefaultMemoryWriteTrigger,
     LLMFactExtractor,
     MemoryFactResolver,
     MemoryWriteWorkflow,
@@ -55,7 +54,6 @@ async def test_explicit_preferences_are_extracted_and_indexed() -> None:
     llm = LLM()
     workflow = MemoryWriteWorkflow(
         memory,
-        DefaultMemoryWriteTrigger(),
         LLMFactExtractor(llm, snapshots=Snapshots()),
         MemoryFactResolver(memory),
         vectors,

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from application.memory import DefaultMemoryWriteTrigger, LLMFactExtractor, MemoryFactResolver, MemoryWriteWorkflow
+from application.memory import LLMFactExtractor, MemoryFactResolver, MemoryWriteWorkflow
 from domain.memory import (
     CompletedTurn, MemoryEpisodeProposal, MemoryEpisodeSummary, MemoryExecutionEvidence,
     MemoryTaskOutcomeEvidence, ResolutionAction,
@@ -32,7 +32,7 @@ async def test_retry_reuses_extraction_and_skips_committed_candidate_before_reso
                 raise RuntimeError("embedding temporarily unavailable")
             return await super().embed_query(text)
     memory, llm, embedder = Memory(), LLM(), FlakyEmbedder()
-    workflow = MemoryWriteWorkflow(memory, DefaultMemoryWriteTrigger(),
+    workflow = MemoryWriteWorkflow(memory,
         LLMFactExtractor(llm, snapshots=Snapshots()), MemoryFactResolver(memory), embedder, **dependencies())
     turn = CompletedTurn("turn-1", "session-1", "我的时区 UTC；项目使用 Python", project_id="project-1")
     lease = lease_grant("memory_processing", turn.turn_id)
@@ -66,7 +66,7 @@ async def test_fact_failure_does_not_block_episode_or_promote_procedures():
                 source_ref_ids=(turn.turn_id,))
     memory, summarizer = Memory(), Summarizer()
     dep = dependencies()
-    workflow = MemoryWriteWorkflow(memory, DefaultMemoryWriteTrigger(), Extractor(),
+    workflow = MemoryWriteWorkflow(memory, Extractor(),
         MemoryFactResolver(memory), Embedder(), episodes=dep["episodes"], episode_summarizer=summarizer)
     fact = candidate().fact
     source = replace(fact.source_refs[0], source_type="run")
@@ -82,8 +82,10 @@ async def test_fact_failure_does_not_block_episode_or_promote_procedures():
     assert episode.summary.reusable_learnings == ("切流前检查健康状态",)
     assert summarizer.calls == 1
     assert memory.items == {}
-    # 命令型输入不提取事实，但不阻止回顾路径。
-    assert await workflow.process_completed_turn(replace(turn, user_text="/deploy"), lease=lease) == 0
+    # 命令形式也直接进入提取；提取失败仍复用已保存的回顾。
+    with pytest.raises(ValueError, match="invalid fact proposal"):
+        await workflow.process_completed_turn(replace(turn, user_text="/deploy"), lease=lease)
+    assert summarizer.calls == 1
 
 
 @pytest.mark.asyncio
@@ -105,3 +107,40 @@ async def test_rules_distinguish_corrections_conflicts_and_unknown_keys():
         decision = (await resolver.resolve([correction]))[0]
         assert decision.action is ResolutionAction.REVISE
         assert decision.target_memory_id == f"old-{key}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_text",
+    ["/deploy", "/Users/example/project 使用 PostgreSQL", "项目说明" * 5_001],
+    ids=["command", "absolute-path", "long-message"],
+)
+async def test_completed_turn_enters_extraction_without_text_filter(user_text: str) -> None:
+    """斜杠开头和超过两万字符的输入都交给提取模型判断。"""
+    class LLM:
+        def __init__(self) -> None:
+            """记录模型实际收到的完整提示词。"""
+            self.prompts: list[str] = []
+
+        async def invoke_structured(self, messages, schema):
+            """返回空候选，表示本轮没有需要持久化的事实。"""
+            self.prompts.append(messages[0]["content"])
+            return schema.model_validate_json('{"atomic_facts":[]}')
+
+    llm = LLM()
+    memory = Memory()
+    snapshots = Snapshots()
+    workflow = MemoryWriteWorkflow(
+        memory,
+        LLMFactExtractor(llm, snapshots=snapshots),
+        MemoryFactResolver(memory),
+        Embedder(),
+        **dependencies(),
+    )
+    turn = CompletedTurn("turn-1", "session-1", user_text, project_id="project-1")
+    assert await workflow.process_completed_turn(
+        turn, lease=lease_grant("memory_processing", turn.turn_id)
+    ) == 0
+    assert len(llm.prompts) == 1
+    assert user_text in llm.prompts[0]
+    assert (await snapshots.get_extraction_snapshot(turn.turn_id)).candidates == ()

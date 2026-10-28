@@ -10,7 +10,6 @@ from application.events import EventStreamService
 from application.files import AttachmentService, IngestionService
 from application.knowledge import KnowledgeBaseQueryService, KnowledgeBaseService
 from application.memory import (
-    DefaultMemoryWriteTrigger,
     LLMFactExtractor,
     LLMMemoryEpisodeSummarizer,
     MemoryFactResolver,
@@ -331,7 +330,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     memory_resolver = MemoryFactResolver(memory)
     memory_workflow = MemoryWriteWorkflow(
         memory,
-        DefaultMemoryWriteTrigger(),
         memory_extractor,
         memory_resolver,
         embedding,

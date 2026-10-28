@@ -14,7 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from application.memory.extraction import DefaultMemoryWriteTrigger, MemoryFactResolver
+from application.memory.extraction import MemoryFactResolver
 from application.memory.workflow import MemoryWriteWorkflow
 from domain.memory import (
     CompletedTurn,
@@ -122,7 +122,6 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
     workflows = {
         turn_id: MemoryWriteWorkflow(
             repository,
-            DefaultMemoryWriteTrigger(),
             FixedExtractor(),
             shared_resolver,
             Embedder(),

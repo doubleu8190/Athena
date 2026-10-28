@@ -25,10 +25,8 @@ from application.memory.ports import (
     MemoryEpisodeSummarizer,
     MemoryFactExtractor,
     MemoryResolver,
-    MemoryWriteTrigger,
 )
 from shared.contracts.memory import memory_domain_to_schema
-
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +45,6 @@ class MemoryWriteWorkflow:
     def __init__(
         self,
         memory: MemoryRepositoryPort,
-        trigger: MemoryWriteTrigger,
         extractor: MemoryFactExtractor,
         resolver: MemoryResolver,
         embedder: MemoryEmbedder,
@@ -57,7 +54,6 @@ class MemoryWriteWorkflow:
     ) -> None:
         """保存完整生产依赖；事实和向量必须共同提交，回顾使用独立仓储。"""
         self._memory = memory
-        self._trigger = trigger
         self._extractor = extractor
         self._resolver = resolver
         self._embedder = embedder
@@ -79,8 +75,7 @@ class MemoryWriteWorkflow:
         errors: list[Exception] = []
         written = 0
         try:
-            if self._trigger.should_process(turn):
-                written = await self._write_facts(turn, lease=lease)
+            written = await self._write_facts(turn, lease=lease)
         except LeaseLostError:
             raise
         except MemorySuppressedError:
@@ -112,12 +107,15 @@ class MemoryWriteWorkflow:
                 ResolutionAction.IGNORE,
                 ResolutionAction.SKIP,
             }:
-                logger.info("memory_candidate_skipped", extra={
-                    "turn_id": turn.turn_id,
-                    "operation_id": operation_id,
-                    "action": resolution.action.value,
-                    "reason_code": resolution.reason_code,
-                })
+                logger.info(
+                    "memory_candidate_skipped",
+                    extra={
+                        "turn_id": turn.turn_id,
+                        "operation_id": operation_id,
+                        "action": resolution.action.value,
+                        "reason_code": resolution.reason_code,
+                    },
+                )
                 continue
             # 模型和 embedding 调用均发生在数据库事务外，避免持锁等待远端。
             embedding = await self._embedder.embed_query(candidate.content)
@@ -159,7 +157,9 @@ class MemoryWriteWorkflow:
             source_refs_by_id = {
                 reference.source_id: reference for reference in evidence.source_refs
             }
-            unknown_source_ids = set(proposal.source_ref_ids).difference(source_refs_by_id)
+            unknown_source_ids = set(proposal.source_ref_ids).difference(
+                source_refs_by_id
+            )
             if unknown_source_ids:
                 raise ValueError("memory_episode_source_reference_invalid")
 
@@ -172,7 +172,8 @@ class MemoryWriteWorkflow:
                 source_refs_by_id[source_id] for source_id in proposal.source_ref_ids
             )
             proposed_episode = MemoryEpisode(
-                episode_id="episode_" + hashlib.sha256(turn.turn_id.encode()).hexdigest()[:32],
+                episode_id="episode_"
+                + hashlib.sha256(turn.turn_id.encode()).hexdigest()[:32],
                 turn_id=turn.turn_id,
                 session_id=turn.session_id,
                 project_id=project_id,
@@ -182,7 +183,9 @@ class MemoryWriteWorkflow:
                 source_fingerprint=evidence.source_fingerprint,
                 created_at=turn.completed_at.astimezone(timezone.utc).isoformat(),
             )
-            episode = await self._episodes.create_if_absent(proposed_episode, lease=lease)
+            episode = await self._episodes.create_if_absent(
+                proposed_episode, lease=lease
+            )
             if episode is None:
                 return
 
@@ -244,7 +247,6 @@ def _episode_content(summary: MemoryEpisodeSummary) -> str:
     if summary.unresolved:
         lines.append("遗留问题：" + "；".join(summary.unresolved))
     return "\n".join(lines)[:8000]
-
 
 
 __all__ = ["MemoryWriteWorkflow"]

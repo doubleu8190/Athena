@@ -13,10 +13,6 @@ from domain.memory import (
 )
 
 
-class MemoryWriteTrigger(Protocol):
-    def should_process(self, turn: CompletedTurn) -> bool: ...
-
-
 class MemoryFactExtractor(Protocol):
     async def extract(
         self, turn: CompletedTurn, *, lease: LeaseGrant
@@ -37,5 +33,4 @@ __all__ = [
     "MemoryEpisodeSummarizer",
     "MemoryFactExtractor",
     "MemoryResolver",
-    "MemoryWriteTrigger",
 ]

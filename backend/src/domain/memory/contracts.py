@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Literal
 
 
 _FACT_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+class FactCardinality(StrEnum):
+    """描述同一事实键允许并存的值数量。"""
+
+    SINGLE = "single"
+    SET = "set"
+    UNKNOWN = "unknown"
 
 
 def _required_text(value: str, field_name: str, maximum: int | None = None) -> None:
@@ -46,6 +55,7 @@ class MemoryFact:
     subject_key: str
     fact_key: str
     fact_value: str | None
+    cardinality: FactCardinality
     confidence: float
     asserted_at: str
     source_refs: tuple[MemorySourceReference, ...]
@@ -64,6 +74,8 @@ class MemoryFact:
         _required_text(self.fact_key, "memory_fact_key", 30)
         if not _FACT_KEY_PATTERN.fullmatch(self.fact_key):
             raise ValueError("memory_fact_key_invalid")
+        if not isinstance(self.cardinality, FactCardinality):
+            raise ValueError("memory_fact_cardinality_invalid")
         if self.fact_value is not None:
             _required_text(self.fact_value, "memory_fact_value", 500)
         if self.retracts_value is not None:

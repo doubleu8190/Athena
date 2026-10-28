@@ -28,13 +28,13 @@
 | --- | --- |
 | `scope_kind / scope_id` | global/global 或 session/当前会话 ID，由程序约束 |
 | `subject_key` | `user:self`、有来源支持的 `project:athena` 等主体 |
-| `fact_key / fact_value / polarity` | 规范属性、原子值、affirmed/negated；集合拆成独立成员 |
+| `fact_key / fact_value / polarity / cardinality` | 语义属性、原子值、affirmed/negated，以及 single/set/unknown 基数；集合拆成独立成员 |
 | `claim_intent` | assert/correct/retract，须有原文证据 |
 | `evidence` | 用户消息 ID、引文、原始时间；采纳方案须附用户确认及被确认内容 |
 | `valid_from / valid_until` | 明确的适用时间，不由模型猜测 |
 | `confidence` | 提取可靠度，沿用 0.6 下限，不作为事实真值概率 |
 
-新增小型 `fact_policy.py`，维护规范 key、确定的别名和取值规则：single 属性的不同当前值可能冲突；set 属性允许不同成员并存，只将同成员的肯定/否定视为冲突；没有规则时为 unknown，禁止仅凭 key 相同覆盖。
+提取模型为每条事实给出 `cardinality`：single 属性的不同当前值可能冲突；set 属性允许不同成员并存，只将同成员的肯定/否定视为冲突；unknown 表示基数尚未确定。同组存在唯一明确基数时按该基数处理；明确基数互相冲突时跳过，不按 `fact_key` 白名单推断基数。唯一的未知记录可以根据后续同值声明或明确更正修订。
 
 例如，“喜欢苹果”和“也喜欢梨”并存；“喜欢”不能升级成“最喜欢”。旧 `preferred_fruit` 语义不足时不强制归类。模型建议的别名不自动写入全局规则。
 
@@ -56,7 +56,7 @@
 ### 2.3 判定顺序与边界
 
 1. 校验原文证据，对本批候选去重并识别更正链；未被用户采纳的助手建议不形成事实。
-2. 按 scope、subject、规范 key 跨来源会话精确查询，再用确定别名和有界向量查询补充；同时查询矛盾关系。
+2. 按 scope、subject、fact_key 查询有效事实组；基数从候选与组内事实读取，不根据 key 名称、别名或向量相似度推断。
 3. 使用规则处理无旧事实、等价重复和集合追加；只有需要语义判断时调用 Resolver。
 4. 明确更正才允许 REVISE；确认矛盾但不能替代时 CREATE + contradicts；关系本身不清时 DEFER。
 
@@ -155,7 +155,7 @@ embedding 失败保留事实和回执，标记投影失败；重试或显式修�
 
 | 阶段 | 工作与主要代码位置 |
 | --- | --- |
-| P1：事实与决策 | `domain/memory/entities.py`；新增 `contracts.py`、`application/memory/fact_policy.py`；更新提取/判定 prompt |
+| P1：事实与决策 | `domain/memory/contracts.py`；更新事实 schema、提取/判定 prompt |
 | P2：持久化与并发 | `models/runtime_models.py`、导出与仓储；操作/关系模型、候选清单、唯一约束和统一提交 |
 | P3：写入接线 | `memory/extraction.py`、`workflow.py`、ports、worker、两条 Run 入队路径、bootstrap；同步响应转换与 fake |
 | P4：读取保护 | `memory/retrieval_service.py`、pgvector、context contracts/service、Root 窗口、正文、prompts、settings/bootstrap |

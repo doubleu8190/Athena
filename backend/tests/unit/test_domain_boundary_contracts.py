@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from domain.memory import (
+    FactCardinality,
     MemoryCandidate,
     MemoryEpisodeProposal,
     MemoryEpisodeSummary,
@@ -28,6 +30,7 @@ from domain.retrieval.trace_contracts import (
 from shared.contracts.memory import (
     MemoryEpisodeProposalSchema,
     MemoryFactSchema,
+    MemoryFactProposalSchema,
     memory_domain_to_schema,
     memory_schema_to_domain,
 )
@@ -43,6 +46,7 @@ def _fact() -> MemoryFact:
         subject_key="session:session-1",
         fact_key="fruit_preference",
         fact_value="苹果",
+        cardinality=FactCardinality.SINGLE,
         confidence=0.9,
         asserted_at="2026-10-27T00:00:00+00:00",
         source_refs=(
@@ -125,6 +129,7 @@ def test_memory_business_invariants_are_checked_without_pydantic() -> None:
             subject_key="session:session-1",
             fact_key="fruit_preference",
             fact_value="苹果",
+            cardinality=FactCardinality.SINGLE,
             confidence=0.9,
             asserted_at="2026-10-27T00:00:00+00:00",
             claim_intent="retract",
@@ -140,6 +145,35 @@ def test_memory_business_invariants_are_checked_without_pydantic() -> None:
 
     with pytest.raises(ValueError):
         MemoryFactSchema.model_validate({"scope_kind": "unknown"})
+
+
+def test_fact_proposal_requires_a_valid_cardinality() -> None:
+    proposal = MemoryFactProposalSchema.model_validate_json(
+        """
+        {
+          "key": "custom_attribute",
+          "value": "blue",
+          "category": "fact",
+          "scope_kind": "project",
+          "cardinality": "unknown",
+          "confidence": 0.9
+        }
+        """
+    )
+    assert proposal.cardinality is FactCardinality.UNKNOWN
+
+    with pytest.raises(ValidationError):
+        MemoryFactProposalSchema.model_validate_json(
+            """
+            {
+              "key": "custom_attribute",
+              "value": "blue",
+              "category": "fact",
+              "scope_kind": "project",
+              "confidence": 0.9
+            }
+            """
+        )
 
 
 def test_episode_schema_converts_llm_output_to_domain_proposal() -> None:

@@ -2,8 +2,9 @@
 from dataclasses import replace
 
 from domain.memory import (
-    MemoryCandidate, MemoryEpisodeProposal, MemoryFact, MemoryRecord, MemoryStatus,
-    MemorySourceReference, MemoryWriteCommand, MemoryStateChangedError, ResolutionAction,
+    FactCardinality, MemoryCandidate, MemoryEpisodeProposal, MemoryFact,
+    MemoryRecord, MemoryStatus, MemorySourceReference, MemoryWriteCommand,
+    MemoryStateChangedError, ResolutionAction,
 )
 from shared.contracts.memory import memory_domain_to_schema
 from tests.fakes.in_memory import InMemoryMemoryPort, InMemoryMemoryEpisodeRepository
@@ -59,11 +60,20 @@ class Memory(InMemoryMemoryPort):
         return True
 
 
-def candidate(turn_id="turn-1", value="Python", key="preferred_language", *, intent="assert", polarity="affirmed"):
+def candidate(
+    turn_id="turn-1",
+    value="Python",
+    key="preferred_language",
+    *,
+    intent="assert",
+    polarity="affirmed",
+    cardinality: FactCardinality = FactCardinality.UNKNOWN,
+):
     """构造明确个人偏好的结构化事实候选。"""
     observed = "2026-10-28T00:00:00+00:00"
     fact = MemoryFact(scope_kind="global", scope_id="global", subject_key="user:self",
         fact_key=key, fact_value=value, claim_intent=intent, polarity=polarity,
+        cardinality=cardinality,
         confidence=1.0, asserted_at=observed,
         source_refs=(MemorySourceReference(source_type="turn", source_id=turn_id,
             excerpt=f"我的偏好是 {value}", observed_at=observed),))

@@ -12,6 +12,7 @@ from domain.leases import LeaseGrant
 from domain.integrations import LLMPort
 from domain.memory import (
     CompletedTurn,
+    FactCardinality,
     MemoryCandidate,
     MemoryFact,
     MemoryFactExtractionSnapshot,
@@ -23,7 +24,6 @@ from domain.memory import (
     ResolutionAction,
 )
 
-from application.memory.fact_policy import FactCardinality, cardinality_for
 from application.memory.ports import MemoryFactExtractor, MemoryResolver
 from shared import read_system_prompt, render_prompt_template
 from shared.contracts.memory import (
@@ -162,6 +162,7 @@ class LLMFactExtractor(MemoryFactExtractor):
             subject_key=subject_key,
             fact_key=proposal.key,
             fact_value=proposal.value,
+            cardinality=proposal.cardinality,
             retracts_value=proposal.retracts_value,
             polarity=proposal.polarity,
             claim_intent=proposal.claim_intent,
@@ -248,7 +249,20 @@ class MemoryFactResolver(MemoryResolver):
     ) -> MemoryResolution:
         """根据候选意图和已存事实选择动作；歧义只跳过，不覆盖。"""
         fact = candidate.fact
-        cardinality = cardinality_for(fact.fact_key)
+        stored_facts = [(item, _record_fact(item)) for item in existing]
+        known_cardinalities = {
+            stored.cardinality
+            for _, stored in stored_facts
+            if stored is not None and stored.cardinality is not FactCardinality.UNKNOWN
+        }
+        if fact.cardinality is not FactCardinality.UNKNOWN:
+            known_cardinalities.add(fact.cardinality)
+        cardinality_consistent = len(known_cardinalities) <= 1
+        cardinality = (
+            next(iter(known_cardinalities))
+            if len(known_cardinalities) == 1
+            else FactCardinality.UNKNOWN
+        )
         equivalent = [item for item in existing if _same_fact_value(item, candidate)]
 
         if fact.claim_intent == "retract":
@@ -266,6 +280,28 @@ class MemoryFactResolver(MemoryResolver):
                 relation="supersedes",
             )
 
+        if not cardinality_consistent:
+            return MemoryResolution(
+                ResolutionAction.SKIP,
+                candidate,
+                reason_code="fact_cardinality_disagreement",
+            )
+
+        # 唯一的未知记录可以由后续明确的同值或更正证据替代。
+        if (
+            len(stored_facts) == 1
+            and stored_facts[0][1] is not None
+            and stored_facts[0][1].cardinality is FactCardinality.UNKNOWN
+            and fact.cardinality is not FactCardinality.UNKNOWN
+            and (equivalent or fact.claim_intent == "correct")
+        ):
+            return MemoryResolution(
+                ResolutionAction.REVISE,
+                candidate,
+                target_memory_id=stored_facts[0][0].id,
+                relation="supersedes",
+            )
+
         # 集合中的不同成员可以共存，只处理同成员的相反极性。
         targets = existing
         if cardinality is FactCardinality.SET:
@@ -278,12 +314,14 @@ class MemoryFactResolver(MemoryResolver):
             ]
             if not targets:
                 if equivalent:
+                    # 如果集合中已经存在相同记忆了，就忽略新候选
                     return MemoryResolution(
                         ResolutionAction.IGNORE,
                         candidate,
                         target_memory_id=equivalent[0].id,
                     )
                 if fact.claim_intent == "correct":
+                    # 如果集合中没有相同ID的记忆需要纠正，就跳过新候选
                     return MemoryResolution(
                         ResolutionAction.SKIP,
                         candidate,
@@ -291,6 +329,7 @@ class MemoryFactResolver(MemoryResolver):
                     )
                 return MemoryResolution(ResolutionAction.CREATE, candidate)
             if equivalent:
+                # 如果集合中同时存在相同记忆和不同极性的记忆，就跳过新候选
                 return MemoryResolution(
                     ResolutionAction.SKIP,
                     candidate,

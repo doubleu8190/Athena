@@ -7,11 +7,101 @@ import json
 import pytest
 
 from application.memory.retrieval_service import MemoryContextProvider
+from application.memory.fact_groups import build_fact_context_group
 from application.orchestration.agents.root_agent import ConfiguredRootAgent
 from application.orchestration.root_decision import AnswerIntent, RootAgentInput, RootMessage
 from application.runs.context import ContextAcquisitionService, ContextBundle, ContextItem, ContextPlan
-from domain.memory import MemoryRecord, MemorySearchRequest
+from domain.memory import FactCardinality, MemoryRecord, MemorySearchRequest
 from domain.retrieval.trace_contracts import RetrievalCandidateSelection
+from shared.contracts.memory import memory_domain_to_schema
+from tests.fakes.memory_pipeline import candidate
+
+
+def _fact_record(memory_id: str, value: str, cardinality: FactCardinality) -> MemoryRecord:
+    item = candidate(
+        turn_id=memory_id,
+        key="custom_attribute",
+        value=value,
+        cardinality=cardinality,
+    )
+    return MemoryRecord(
+        memory_id,
+        item.content,
+        {"fact": memory_domain_to_schema(item.fact).model_dump(mode="json")},
+    )
+
+
+def test_context_fact_group_uses_declared_cardinality_and_detects_disagreement() -> None:
+    single_first = _fact_record("single-1", "blue", FactCardinality.SINGLE)
+    single_second = _fact_record("single-2", "green", FactCardinality.SINGLE)
+    single_group = build_fact_context_group(
+        single_first, [single_first, single_second]
+    )
+    assert single_group is not None
+    assert single_group.conflicted
+    assert single_group.member_ids == ("single-1", "single-2")
+
+    set_first = _fact_record("set-1", "blue", FactCardinality.SET)
+    set_second = _fact_record("set-2", "green", FactCardinality.SET)
+    set_group = build_fact_context_group(set_first, [set_first, set_second])
+    assert set_group is not None
+    assert not set_group.conflicted
+    assert set_group.member_ids == ("set-1",)
+
+    mixed_group = build_fact_context_group(
+        single_first, [single_first, set_second]
+    )
+    assert mixed_group is not None
+    assert mixed_group.cardinality is FactCardinality.UNKNOWN
+    assert not mixed_group.conflicted
+    assert mixed_group.member_ids == ("single-1",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_final_validation_keeps_the_original_set_member(replacement: bool) -> None:
+    """命中成员失效后仅能使用相同成员的有效记录。"""
+    apple = _fact_record("apple", "苹果", FactCardinality.SET)
+    pear = _fact_record("pear", "梨", FactCardinality.SET)
+    records = [pear]
+    if replacement:
+        records.append(_fact_record("new-apple", "苹果", FactCardinality.SET))
+    group = build_fact_context_group(apple, [apple, pear])
+    assert group is not None
+
+    class Repository:
+        async def list_fact_group_by_identity(self, identity):
+            return records
+
+    service = ContextAcquisitionService({}, None, None, memory_repository=Repository())
+    item = ContextItem(
+        provider="memory",
+        content=apple.content,
+        source_id=apple.id,
+        metadata={
+            "memory_fact_identity": memory_domain_to_schema(group.identity).model_dump(mode="json"),
+            "fact_cardinality": "set",
+            "memory_group_member_value": "苹果",
+        },
+    )
+    validated = await service._validate_memory_item(item)
+    if replacement:
+        assert validated is not None
+        assert validated.source_id == "new-apple"
+        assert "苹果" in validated.content
+    else:
+        assert validated is None
+
+
+def test_context_fact_group_uses_known_cardinality_alongside_unknown() -> None:
+    """已有未知声明不妨碍根据明确声明识别事实组冲突。"""
+    unknown = _fact_record("unknown", "blue", FactCardinality.UNKNOWN)
+    single = _fact_record("single", "green", FactCardinality.SINGLE)
+    group = build_fact_context_group(unknown, [unknown, single])
+    assert group is not None
+    assert group.cardinality is FactCardinality.SINGLE
+    assert group.conflicted
+    assert set(group.member_ids) == {"unknown", "single"}
 
 
 class MemoryRepository:
@@ -159,7 +249,8 @@ async def test_final_memory_validation_preserves_typed_conflicting_fact_group() 
             f"timezone-{index}", f"timezone: {value}",
             {"fact": {
                 "scope_kind": "global", "scope_id": "global", "subject_key": "user",
-                "fact_key": "timezone", "fact_value": value, "confidence": 0.9,
+                "fact_key": "timezone", "fact_value": value, "cardinality": "single",
+                "confidence": 0.9,
                 "asserted_at": "2026-01-01T00:00:00+00:00",
                 "source_refs": [{"source_type": "turn", "source_id": f"turn-{index}",
                     "excerpt": value, "observed_at": "2026-01-01T00:00:00+00:00"}],

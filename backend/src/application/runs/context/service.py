@@ -35,7 +35,6 @@ from .contracts import (
 )
 from .protocols import ContextProvider
 from application.memory.fact_groups import build_fact_context_group, record_fact
-from application.memory.fact_policy import cardinality_for
 from application.memory.index_views import build_memory_index_item
 from shared.contracts.memory import (
     MemoryFactIdentitySchema,
@@ -421,22 +420,30 @@ class ContextAcquisitionService:
 
         related = await repository.list_fact_group_by_identity(identity)
         related = [record for record in related if _memory_record_is_current(record)]
-        member_value = item.metadata.get("memory_group_member_value")
-        cardinality = str(item.metadata.get("fact_cardinality") or "")
-        if not cardinality:
-            cardinality = cardinality_for(identity.fact_key).value
-        if cardinality == "set" and isinstance(member_value, str):
-            related = [
-                record
-                for record in related
-                if (fact := record_fact(record)) is not None
-                and fact.fact_value == member_value
-            ]
         if not related:
             return None
         seed = next((record for record in related if record.id == item.source_id), None)
         if seed is None:
-            seed = related[0]
+            cardinality = item.metadata.get("fact_cardinality")
+            if cardinality == "set":
+                member_value = item.metadata.get("memory_group_member_value")
+                if not isinstance(member_value, str):
+                    return None
+                seed = next(
+                    (
+                        record
+                        for record in related
+                        if (fact := record_fact(record)) is not None
+                        and fact.fact_value == member_value
+                    ),
+                    None,
+                )
+                if seed is None:
+                    return None
+            elif cardinality == "unknown":
+                return None
+            else:
+                seed = related[0]
         group = build_fact_context_group(seed, related)
         if group is None:
             return None

@@ -18,6 +18,7 @@ from application.memory.extraction import MemoryFactResolver
 from application.memory.workflow import MemoryWriteWorkflow
 from domain.memory import (
     CompletedTurn,
+    FactCardinality,
     MemoryCandidate,
     MemoryFact,
     MemoryListRequest,
@@ -258,6 +259,69 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
         await base_engine.dispose()
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_unknown_cardinality_promotion_persists_in_postgres() -> None:
+    """同值明确声明修订未知记录，后续冲突使用持久化的明确基数。"""
+    if not DATABASE_URL:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+    schema = f"memory_cardinality_{uuid4().hex}"
+    url = make_url(DATABASE_URL)
+    if url.drivername in {"postgres", "postgresql"}:
+        url = url.set(drivername="postgresql+psycopg")
+    base_engine = create_async_engine(url)
+    engine = create_async_engine(
+        url.update_query_dict({"options": f"-c search_path={schema},public"})
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    repository = PostgresMemoryRepository(factory)
+    resolver = MemoryFactResolver(repository)
+    created = False
+    try:
+        async with base_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            created = True
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync: Base.metadata.create_all(
+                    sync,
+                    tables=[
+                        ExecutionLeaseModel.__table__,
+                        MemoryModel.__table__,
+                        MemoryRelationModel.__table__,
+                        MemorySourceSuppressionModel.__table__,
+                    ],
+                )
+            )
+        now = datetime.now(timezone.utc).isoformat()
+        initial = _candidate("turn-unknown", "session-1", "UTC", now)
+        initial = replace(initial, fact=replace(initial.fact, cardinality=FactCardinality.UNKNOWN))
+        known = _candidate("turn-known", "session-1", "UTC", now)
+        for value, operation in [(initial, "unknown"), (known, "known")]:
+            lease = await acquire_postgres_lease(factory, "memory_processing", value.source_turn_id)
+            resolution = (await resolver.resolve([value]))[0]
+            assert resolution.action is (
+                ResolutionAction.CREATE if operation == "unknown" else ResolutionAction.REVISE
+            )
+            await repository.apply_resolution(
+                resolution, operation_id=operation, embedding=[1.0] + [0.0] * 1023, lease=lease
+            )
+        assert (await repository.get("unknown")).status.value == "superseded"
+        records = await repository.list_fact_group(known.fact)
+        assert [record.id for record in records] == ["known"]
+        assert records[0].metadata["fact"]["cardinality"] == "single"
+        conflict = _candidate("turn-conflict", "session-1", "Asia/Shanghai", now)
+        resolution = (await resolver.resolve([conflict]))[0]
+        assert resolution.action is ResolutionAction.CREATE
+        assert resolution.relation == "contradicts"
+    finally:
+        await engine.dispose()
+        if created:
+            async with base_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await base_engine.dispose()
+
+
 def _candidate(
     turn_id: str,
     session_id: str,
@@ -277,6 +341,7 @@ def _candidate(
         subject_key="user:self",
         fact_key="timezone",
         fact_value=value,
+        cardinality=FactCardinality.SINGLE,
         confidence=0.95,
         asserted_at=observed_at,
         source_refs=(

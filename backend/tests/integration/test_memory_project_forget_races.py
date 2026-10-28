@@ -170,6 +170,7 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                                     "subject_key": f"project:{project_id}",
                                     "fact_key": "project_decision",
                                     "fact_value": "Keep current project",
+                                    "cardinality": "single",
                                     "confidence": 1.0,
                                     "asserted_at": now,
                                     "source_refs": [{"source_type": "turn", "source_id": run_id,

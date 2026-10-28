@@ -26,6 +26,8 @@
 - 用户采纳助手方案 → 提取被采纳的方案，confidence 上限 0.9（因为是间接陈述）
 - 新信息明确更正已有记忆 → 只输出新值，并令 `claim_intent=correct`；不要把旧值拼入新 value
 - 用户撤回已有记忆且没有替代值 → value 为 `null`，令 `claim_intent=retract`
+- 每条事实都要判断 `cardinality`：同一主体和范围内该属性只能有一个当前值时用 `single`；多个不同成员可以同时成立时用 `set`；语义不足以判断时用 `unknown`
+- cardinality 依据事实含义判断，不根据 key 名称或 key 是否复数推断；不要因为一个事实键没见过就默认它是 `single` 或 `set`
 
 ## 生命周期边界
 
@@ -54,7 +56,7 @@
 - unresolved — 未解决的问题或待办
 - other — 其他
 
-集合型属性使用稳定的复数 key，每个成员单独输出，例如 `liked_fruit: 苹果` 和 `liked_fruit: 梨` 可以同时成立。不要把 `liked_fruit` 改写成单值的 `favorite_fruit`；“最喜欢”才使用单值 key。只使用当前对话表达的语义，不因旧记忆 key 相似而合并。
+`set` 属性的每个成员单独输出，并对同一属性使用稳定的 key。只使用当前对话表达的语义，不因旧记忆 key 相似而合并。
 
 ## 置信度
 
@@ -68,8 +70,8 @@
 最多 20 条；key 使用小写 snake_case、≤30 字符；value ≤ 500 字符；confidence 为 0.6 到 1.0。
 
 输出纯 JSON（无 markdown 围栏）:
-{{"atomic_facts": [{{"key": "...", "value": "...", "category": "...", "scope_kind": "project", "confidence": 0.8, "polarity": "affirmed", "claim_intent": "assert"}}]}}
-撤回示例字段：`{{"key":"preferred_language","value":null,"retracts_value":"Rust","category":"preference","confidence":1.0,"polarity":"affirmed","claim_intent":"retract"}}`。`retracts_value` 必须明确指向用户当前撤回的值；不确定目标时不输出撤回候选。
+{{"atomic_facts": [{{"key": "...", "value": "...", "category": "...", "scope_kind": "project", "cardinality": "unknown", "confidence": 0.8, "polarity": "affirmed", "claim_intent": "assert"}}]}}
+`cardinality` 必须是 `single`、`set` 或 `unknown`，包括更正和撤回候选。撤回示例字段：`{{"key":"preferred_language","value":null,"retracts_value":"Rust","category":"preference","scope_kind":"global","cardinality":"single","confidence":1.0,"polarity":"affirmed","claim_intent":"retract"}}`。`retracts_value` 必须明确指向用户当前撤回的值；不确定目标时不输出撤回候选。
 
 ## 示例
 
@@ -77,23 +79,29 @@
 已有记忆: (无已有记忆)
 对话: [用户] 我把新项目从 Python 换成了 Rust。[助手] 好选择！[用户] 目标 2026 Q3 发布。
 
-输出: {{"atomic_facts": [{{"key": "primary_language", "value": "Rust", "category": "technical_decision", "scope_kind": "project", "confidence": 1.0, "claim_intent": "correct"}}, {{"key": "release_date", "value": "2026 Q3", "category": "project", "confidence": 1.0}}]}}
+输出: {{"atomic_facts": [{{"key": "primary_language", "value": "Rust", "category": "technical_decision", "scope_kind": "project", "cardinality": "single", "confidence": 1.0, "claim_intent": "correct"}}, {{"key": "release_date", "value": "2026 Q3", "category": "project", "scope_kind": "project", "cardinality": "single", "confidence": 1.0}}]}}
 
 输入:
 已有记忆: - preferred_language: Python (category: preference)
 对话: [用户] 端口被占用了怎么办？[助手] 可以用 lsof -i :8080 找到占用进程后 kill。[用户] 用 lsof 那个方案吧。
 
-输出: {{"atomic_facts": [{{"key": "port_conflict_solution", "value": "lsof -i :<port> 查找占用进程后 kill", "category": "solution", "confidence": 0.9}}]}}
+输出: {{"atomic_facts": [{{"key": "port_conflict_solution", "value": "lsof -i :<port> 查找占用进程后 kill", "category": "solution", "scope_kind": "project", "cardinality": "single", "confidence": 0.9}}]}}
 
 输入:
 已有记忆: - language: Rust (category: preference)
 对话: [用户] Rust 编译太慢了，还是换回 Python 吧。[助手] 好的。
 
-输出: {{"atomic_facts": [{{"key": "preferred_language", "value": "Python", "category": "preference", "confidence": 1.0, "claim_intent": "correct"}}]}}
+输出: {{"atomic_facts": [{{"key": "preferred_language", "value": "Python", "category": "preference", "scope_kind": "global", "cardinality": "single", "confidence": 1.0, "claim_intent": "correct"}}]}}
+
+输入:
+已有记忆: (无已有记忆)
+对话: [用户] 我平时会用 Java 和 Python。
+
+输出: {{"atomic_facts": [{{"key": "used_languages", "value": "Java", "category": "profile", "scope_kind": "global", "cardinality": "set", "confidence": 1.0}}, {{"key": "used_languages", "value": "Python", "category": "profile", "scope_kind": "global", "cardinality": "set", "confidence": 1.0}}]}}
 
 ---
 
 对话内容:
 {conversation_text}
 
-规范事实键：最喜欢的水果用 favorite_fruit，喜欢的水果成员用 liked_fruit，个人首选语言用 preferred_language，项目主要语言用 primary_language，时区用 timezone，技能成员用 skills。相同含义始终使用同一个规范 key，不要生成同义别名。
+为相同含义稳定使用同一个语义 key；不能仅根据 key 的字面形式判断 cardinality。

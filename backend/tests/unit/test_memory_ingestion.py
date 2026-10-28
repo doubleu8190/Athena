@@ -15,6 +15,7 @@ from application.memory import (
 from application.runs import RunExecutionService
 from domain.memory import (
     CompletedTurn,
+    FactCardinality,
     MemoryCandidate,
     MemoryFact,
     MemoryListRequest,
@@ -44,8 +45,8 @@ class LLM:
         self.calls += 1
         import json
         return schema.model_validate_json(json.dumps({"atomic_facts": [
-            {"key": "favorite_fruit", "value": "苹果", "category": "preference", "scope_kind": "global", "confidence": 1.0},
-            {"key": "skills", "value": "Java、Python、Golang", "category": "profile", "scope_kind": "global", "confidence": 0.95},
+            {"key": "favorite_fruit", "value": "苹果", "category": "preference", "scope_kind": "global", "cardinality": "single", "confidence": 1.0},
+            {"key": "skills", "value": "Java、Python、Golang", "category": "profile", "scope_kind": "global", "cardinality": "set", "confidence": 0.95},
         ]}))
 
 
@@ -74,6 +75,11 @@ async def test_explicit_preferences_are_extracted_and_indexed() -> None:
         "favorite_fruit: 苹果",
         "skills: Java、Python、Golang",
     }
+    cardinalities = {
+        item.metadata["fact"]["fact_key"]: item.metadata["fact"]["cardinality"]
+        for item in memory.items.values()
+    }
+    assert cardinalities == {"favorite_fruit": "single", "skills": "set"}
     assert len(vectors.items) == 2
 
 
@@ -86,6 +92,7 @@ async def test_resolution_ignores_an_exact_duplicate() -> None:
         subject_key="user:self",
         fact_key="preferred_fruit",
         fact_value="苹果",
+        cardinality=FactCardinality.SINGLE,
         confidence=1.0,
         asserted_at=datetime.now(timezone.utc).isoformat(),
         source_refs=(

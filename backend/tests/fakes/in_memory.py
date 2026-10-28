@@ -37,6 +37,7 @@ import asyncio
 import hashlib
 import json
 from domain.memory import (
+    FactCardinality,
     MemoryEpisode,
     MemoryEpisodeRepositoryPort,
     MemoryEpisodeSearchRequest,
@@ -672,6 +673,7 @@ class InMemoryMemoryPort(MemoryRepositoryPort):
             subject_key=identity.subject_key,
             fact_key=identity.fact_key,
             fact_value="validation-seed",
+            cardinality=FactCardinality.UNKNOWN,
             confidence=1.0,
             asserted_at=now,
             source_refs=(MemorySourceReference(

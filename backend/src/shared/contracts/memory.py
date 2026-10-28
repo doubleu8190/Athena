@@ -8,6 +8,7 @@ from typing import Annotated, Literal, overload
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from domain.memory.contracts import (
+    FactCardinality,
     MemoryCandidate as DomainMemoryCandidate,
     MemoryEpisode as DomainMemoryEpisode,
     MemoryEpisodeProposal as DomainMemoryEpisodeProposal,
@@ -21,6 +22,18 @@ from domain.memory.contracts import (
     MemoryTaskOutcomeEvidence as DomainMemoryTaskOutcomeEvidence,
     MemoryToolOutcomeEvidence as DomainMemoryToolOutcomeEvidence,
 )
+
+
+def _parse_fact_cardinality(value: object) -> FactCardinality:
+    """将模型或 JSON 边界的字符串校验为受限基数枚举。"""
+    if isinstance(value, FactCardinality):
+        return value
+    if isinstance(value, str):
+        try:
+            return FactCardinality(value)
+        except ValueError:
+            pass
+    raise ValueError("memory_fact_cardinality_invalid")
 
 
 class MemorySourceReferenceSchema(BaseModel):
@@ -44,6 +57,7 @@ class MemoryFactSchema(BaseModel):
     subject_key: str = Field(min_length=1, max_length=100)
     fact_key: str = Field(min_length=1, max_length=30, pattern=r"^[a-z][a-z0-9_]*$")
     fact_value: str | None = Field(min_length=1, max_length=500)
+    cardinality: FactCardinality
     retracts_value: str | None = Field(default=None, min_length=1, max_length=500)
     polarity: Literal["affirmed", "negated"] = "affirmed"
     claim_intent: Literal["assert", "correct", "retract"] = "assert"
@@ -52,6 +66,12 @@ class MemoryFactSchema(BaseModel):
     valid_from: str | None = None
     valid_until: str | None = None
     source_refs: tuple[MemorySourceReferenceSchema, ...] = Field(min_length=1)
+
+    @field_validator("cardinality", mode="before")
+    @classmethod
+    def _validate_cardinality(cls, value: object) -> FactCardinality:
+        """校验持久化事实的基数枚举。"""
+        return _parse_fact_cardinality(value)
 
     @field_validator("source_refs", mode="before")
     @classmethod
@@ -206,9 +226,16 @@ class MemoryFactProposalSchema(BaseModel):
         "other",
     ]
     scope_kind: Literal["global", "project"]
+    cardinality: FactCardinality
     confidence: float = Field(ge=0.0, le=1.0)
     polarity: Literal["affirmed", "negated"] = "affirmed"
     claim_intent: Literal["assert", "correct", "retract"] = "assert"
+
+    @field_validator("cardinality", mode="before")
+    @classmethod
+    def _validate_cardinality(cls, value: object) -> FactCardinality:
+        """校验提取候选的基数枚举。"""
+        return _parse_fact_cardinality(value)
 
     @model_validator(mode="after")
     def validate_retraction_value(self) -> "MemoryFactProposalSchema":

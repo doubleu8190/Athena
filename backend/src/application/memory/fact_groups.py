@@ -6,9 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from domain.memory import MemoryFact, MemoryFactIdentity, MemoryRecord
-
-from application.memory.fact_policy import FactCardinality, cardinality_for
+from domain.memory import FactCardinality, MemoryFact, MemoryFactIdentity, MemoryRecord
 from shared.contracts.memory import MemoryFactSchema, memory_schema_to_domain
 
 
@@ -71,7 +69,16 @@ def build_fact_context_group(
     if not matching:
         matching = [(seed, seed_fact)]
 
-    cardinality = cardinality_for(seed_fact.fact_key)
+    cardinalities = {
+        fact.cardinality
+        for _, fact in matching
+        if fact.cardinality is not FactCardinality.UNKNOWN
+    }
+    cardinality = (
+        FactCardinality(next(iter(cardinalities)))
+        if len(cardinalities) == 1
+        else FactCardinality.UNKNOWN
+    )
     if cardinality is FactCardinality.SINGLE:
         members = matching
         conflicted = len(

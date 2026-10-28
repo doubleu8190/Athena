@@ -3,7 +3,7 @@
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.orm import aliased
 
+from backend.src.shared.logging import get_logger
 from domain.leases import LeaseGrant, LeaseKey
 from domain.memory import (
     MemoryResolution,
@@ -49,7 +50,11 @@ from domain.memory.suppression import (
 )
 from .lease_center import PostgresLeaseCenter
 from domain.memory.repository_ports import MemoryRepositoryPort
-from shared.contracts.memory import MemoryRecordMetadataSchema, memory_schema_to_domain, memory_domain_to_schema
+from shared.contracts.memory import (
+    MemoryRecordMetadataSchema,
+    memory_schema_to_domain,
+    memory_domain_to_schema,
+)
 
 from ..models import (
     MemoryModel,
@@ -58,14 +63,23 @@ from ..models import (
     MemoryEpisodeModel,
 )
 
+logger = get_logger(__name__)
 
-def _fact_identity_conditions(fact: MemoryFact | MemoryFactIdentity) -> list[ColumnElement[bool]]:
+
+def _fact_identity_conditions(
+    fact: MemoryFact | MemoryFactIdentity,
+) -> list[ColumnElement[bool]]:
     """按 JSON 中的规范身份限定范围、主体和事实键。"""
     stored = cast(MemoryModel.metadata_json, JSONB)["fact"]
-    return [stored[name].astext == value for name, value in (
-        ("scope_kind", fact.scope_kind), ("scope_id", fact.scope_id),
-        ("subject_key", fact.subject_key), ("fact_key", fact.fact_key),
-    )]
+    return [
+        stored[name].astext == value
+        for name, value in (
+            ("scope_kind", fact.scope_kind),
+            ("scope_id", fact.scope_id),
+            ("subject_key", fact.subject_key),
+            ("fact_key", fact.fact_key),
+        )
+    ]
 
 
 def _or_chinese_queries(terms: tuple[str, ...]):
@@ -85,7 +99,17 @@ def _metadata_json(metadata: dict[str, object]) -> str:
     """通过 JSON 边界校验新记忆元数据后生成稳定文本。"""
     raw_json = json.dumps(metadata, ensure_ascii=False)
     typed_metadata = MemoryRecordMetadataSchema.model_validate_json(raw_json)
-    return typed_metadata.model_dump_json(exclude_none=True, exclude={"session_id", "source_turn_id", "type", "category", "confidence", "source_kind"})
+    return typed_metadata.model_dump_json(
+        exclude_none=True,
+        exclude={
+            "session_id",
+            "source_turn_id",
+            "type",
+            "category",
+            "confidence",
+            "source_kind",
+        },
+    )
 
 
 def _metadata_fact(raw_fact: object) -> MemoryFact | None:
@@ -280,7 +304,7 @@ def _validate_fact_content(content: str, fact: MemoryFact | None) -> None:
 
 
 def _matching_fact_rows(
-    rows: list[MemoryModel],
+    rows: Sequence[MemoryModel],
     fact: MemoryFact,
 ) -> list[MemoryModel]:
     """按结构化身份、有效期和撤回目标筛选事实成员。"""
@@ -289,9 +313,17 @@ def _matching_fact_rows(
     matches: list[MemoryModel] = []
     for row in rows:
         if not _is_unexpired(row, now=now):
+            logger.info(
+                "memory_row_expired",
+                extra={"row_id": row.id, "expires_at": row.expires_at},
+            )
             continue
         metadata = _json(row.metadata_json)
         if not isinstance(metadata, dict):
+            logger.warning(
+                "memory_row_metadata_invalid",
+                extra={"row_id": row.id, "metadata_json": row.metadata_json},
+            )
             continue
         raw_fact = metadata.get("fact")
         stored_fact = _metadata_fact(raw_fact)
@@ -308,6 +340,9 @@ def _matching_fact_rows(
                 try:
                     valid_from = datetime.fromisoformat(stored_fact.valid_from)
                 except ValueError:
+                    logger.warning(
+                        "Invalid valid_from format.", extra={"row_id": row.id}
+                    )
                     continue
                 if valid_from.tzinfo is None:
                     valid_from = valid_from.replace(tzinfo=timezone.utc)
@@ -323,7 +358,7 @@ def _matching_fact_rows(
 
 
 def _matching_fact_identity_rows(
-    rows: list[MemoryModel], identity: MemoryFactIdentity
+    rows: Sequence[MemoryModel], identity: MemoryFactIdentity
 ) -> list[MemoryModel]:
     """加载同一身份下当前有效的结构化事实，不回退到旧文本推断。"""
     now = datetime.now(timezone.utc)
@@ -809,7 +844,9 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         """在独立事务内提交单个显式写入请求。"""
         async with self._session_factory() as session:
             async with session.begin():
-                return await self._create_memory_in_transaction(session, command, lease=lease)
+                return await self._create_memory_in_transaction(
+                    session, command, lease=lease
+                )
 
     async def _create_memory_in_transaction(
         self,
@@ -838,11 +875,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
             return key
         if typed_metadata.fact is not None:
             await session.execute(
-                select(
-                    func.pg_advisory_xact_lock(
-                        _fact_lock_id(typed_metadata.fact)
-                    )
-                )
+                select(func.pg_advisory_xact_lock(_fact_lock_id(typed_metadata.fact)))
             )
             existing = await session.get(MemoryModel, key)
             if existing is not None:
@@ -861,12 +894,8 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         )
         await _ensure_project_not_suppressed(session, project_id)
         await _ensure_project_turns_not_suppressed(session, source_ids)
-        await _lock_suppression_sources(
-            session, source_ids, suppression_fingerprint
-        )
-        await _ensure_not_suppressed(
-            session, source_ids, suppression_fingerprint
-        )
+        await _lock_suppression_sources(session, source_ids, suppression_fingerprint)
+        await _ensure_not_suppressed(session, source_ids, suppression_fingerprint)
         if typed_metadata.fact is not None:
             if command.expected_memory_ids is not None:
                 current_ids = await self._active_fact_group_ids(
@@ -895,11 +924,14 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 confidence=float(command.metadata.get("confidence", 0.0)),
                 source_kind="extraction",
                 status=MemoryStatus.ACTIVE.value,
-                source_turn_id=str(command.metadata.get("source_turn_id", ""))
-                or None,
+                source_turn_id=str(command.metadata.get("source_turn_id", "")) or None,
                 last_observed_at=_now(),
                 validity_status="valid",
-                valid_until=typed_metadata.fact.valid_until if typed_metadata.fact is not None else None,
+                valid_until=(
+                    typed_metadata.fact.valid_until
+                    if typed_metadata.fact is not None
+                    else None
+                ),
                 revision=1,
             )
             .on_conflict_do_nothing(index_elements=["id"])
@@ -961,7 +993,15 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         """在独立事务内提交单个显式写入请求。"""
         async with self._session_factory() as session:
             async with session.begin():
-                return await self._revise_in_transaction(session, memory_id, content, metadata=metadata, operation_key=operation_key, expected_memory_ids=expected_memory_ids, lease=lease)
+                return await self._revise_in_transaction(
+                    session,
+                    memory_id,
+                    content,
+                    metadata=metadata,
+                    operation_key=operation_key,
+                    expected_memory_ids=expected_memory_ids,
+                    lease=lease,
+                )
 
     async def _revise_in_transaction(
         self,
@@ -991,11 +1031,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
             return new_id
         if typed_metadata.fact is not None:
             await session.execute(
-                select(
-                    func.pg_advisory_xact_lock(
-                        _fact_lock_id(typed_metadata.fact)
-                    )
-                )
+                select(func.pg_advisory_xact_lock(_fact_lock_id(typed_metadata.fact)))
             )
             existing = await session.get(MemoryModel, new_id)
             if existing is not None:
@@ -1014,12 +1050,8 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         )
         await _ensure_project_not_suppressed(session, project_id)
         await _ensure_project_turns_not_suppressed(session, source_ids)
-        await _lock_suppression_sources(
-            session, source_ids, suppression_fingerprint
-        )
-        await _ensure_not_suppressed(
-            session, source_ids, suppression_fingerprint
-        )
+        await _lock_suppression_sources(session, source_ids, suppression_fingerprint)
+        await _ensure_not_suppressed(session, source_ids, suppression_fingerprint)
         if typed_metadata.fact is not None:
             if expected_memory_ids is not None:
                 current_ids = await self._active_fact_group_ids(
@@ -1030,19 +1062,13 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                     raise MemoryStateChangedError("memory_fact_group_changed")
         else:
             old_hint = await session.get(MemoryModel, memory_id)
-            identity = (
-                None if old_hint is None else _row_fact_identity(old_hint)
-            )
+            identity = None if old_hint is None else _row_fact_identity(old_hint)
             if identity is not None:
                 await session.execute(
-                    select(
-                        func.pg_advisory_xact_lock(_identity_lock_id(identity))
-                    )
+                    select(func.pg_advisory_xact_lock(_identity_lock_id(identity)))
                 )
         old = await session.scalar(
-            select(MemoryModel)
-            .where(MemoryModel.id == memory_id)
-            .with_for_update()
+            select(MemoryModel).where(MemoryModel.id == memory_id).with_for_update()
         )
         if old is None:
             return None
@@ -1073,8 +1099,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 confidence=metadata_payload.get("confidence", old.confidence),
                 source_kind=old.source_kind,
                 status=MemoryStatus.ACTIVE.value,
-                source_turn_id=str((metadata or {}).get("source_turn_id", ""))
-                or None,
+                source_turn_id=str((metadata or {}).get("source_turn_id", "")) or None,
                 last_observed_at=_now(),
                 validity_status=(
                     "invalid"
@@ -1128,7 +1153,14 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         """在独立事务内提交单个显式写入请求。"""
         async with self._session_factory() as session:
             async with session.begin():
-                await self._add_relation_in_transaction(session, source_memory_id, target_memory_id, kind, operation_id=operation_id, lease=lease)
+                await self._add_relation_in_transaction(
+                    session,
+                    source_memory_id,
+                    target_memory_id,
+                    kind,
+                    operation_id=operation_id,
+                    lease=lease,
+                )
 
     async def _add_relation_in_transaction(
         self,
@@ -1157,9 +1189,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
             locked = (
                 await session.scalars(
                     select(MemoryModel)
-                    .where(
-                        MemoryModel.id.in_((source_memory_id, target_memory_id))
-                    )
+                    .where(MemoryModel.id.in_((source_memory_id, target_memory_id)))
                     .order_by(MemoryModel.id)
                     .with_for_update()
                 )

@@ -98,6 +98,13 @@ class MemoryWriteWorkflow:
         for candidate in await self._extractor.extract(turn, lease=lease):
             operation_id = _operation_id(turn.turn_id, candidate)
             if await self._memory.get(operation_id) is not None:
+                logger.info(
+                    "memory_candidate_already_written",
+                    extra={
+                        "turn_id": turn.turn_id,
+                        "operation_id": operation_id,
+                    },
+                )
                 continue
             resolutions = await self._resolver.resolve([candidate])
             if len(resolutions) != 1:

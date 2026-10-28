@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import timezone
 from pathlib import Path
 
+from backend.src.shared.logging import get_logger
 from domain.leases import LeaseGrant
 
 from domain.integrations import LLMPort
@@ -32,7 +33,11 @@ from shared.contracts.memory import (
     memory_schema_to_domain,
 )
 
+logger = get_logger(__name__)
+
 _PERSONAL_CATEGORIES = {"preference", "profile"}
+
+
 def _same_fact_value(record: MemoryRecord, candidate: MemoryCandidate) -> bool:
     """比较事实值和肯定/否定极性，不比较正文格式或时间。"""
     candidate_fact = candidate.fact
@@ -78,10 +83,15 @@ class LLMFactExtractor(MemoryFactExtractor):
         self._snapshots = snapshots
         self._prompt_root = prompt_root
 
-    async def extract(self, turn: CompletedTurn, *, lease: LeaseGrant) -> list[MemoryCandidate]:
+    async def extract(
+        self, turn: CompletedTurn, *, lease: LeaseGrant
+    ) -> list[MemoryCandidate]:
         """提取并返回轮次候选；已存在冻结清单时不重复调用模型。"""
         saved = await self._snapshots.get_extraction_snapshot(turn.turn_id)
         if saved is not None:
+            logger.info(
+                "发现已有冻结事实候选，使用缓存数据。", extra={"turn_id": turn.turn_id}
+            )
             return list(saved.candidates)
         if not turn.project_id:
             raise ValueError("memory_turn_project_required")
@@ -100,19 +110,27 @@ class LLMFactExtractor(MemoryFactExtractor):
             },
         )
         output = await self._llm.invoke_structured(
-            [{"role": "system", "content": prompt}], MemoryFactExtractionOutputSchema,
+            [{"role": "system", "content": prompt}],
+            MemoryFactExtractionOutputSchema,
         )
         if not isinstance(output, MemoryFactExtractionOutputSchema):
             raise TypeError("memory_fact_extraction_schema_required")
+        logger.info(
+            "已从模型获取事实提取结果。", extra={"turn_id": turn.turn_id}, output=output
+        )
         candidates = [
             candidate
             for proposal in output.atomic_facts
-            if (candidate := self._candidate(turn, proposal, project_id=project_id)) is not None
+            if (candidate := self._candidate(turn, proposal, project_id=project_id))
+            is not None
         ]
         saved = await self._snapshots.save_extraction_snapshot(
-            MemoryFactExtractionSnapshot(turn_id=turn.turn_id, candidates=tuple(candidates)),
+            MemoryFactExtractionSnapshot(
+                turn_id=turn.turn_id, candidates=tuple(candidates)
+            ),
             lease=lease,
         )
+        logger.info("已保存冻结事实候选快照。")
         return list(saved.candidates)
 
     @staticmethod
@@ -122,7 +140,10 @@ class LLMFactExtractor(MemoryFactExtractor):
         """由模型字段和程序掌握的来源信息构造事实候选。"""
         if proposal.confidence < 0.6:
             return None
-        personal = proposal.scope_kind == "global" and proposal.category in _PERSONAL_CATEGORIES
+        personal = (
+            proposal.scope_kind == "global"
+            and proposal.category in _PERSONAL_CATEGORIES
+        )
         scope_kind = "global" if personal else "project"
         scope_id = "global" if personal else project_id
         subject_key = "user:self" if personal else f"project:{project_id}"
@@ -168,6 +189,7 @@ class LLMFactExtractor(MemoryFactExtractor):
             fact=fact,
         )
 
+
 class MemoryFactResolver(MemoryResolver):
     """按明确意图、事实基数和唯一目标执行确定性决策。"""
 
@@ -175,24 +197,55 @@ class MemoryFactResolver(MemoryResolver):
         """保存按事实身份查询的仓储。"""
         self._memory = memory
 
-    async def resolve(self, candidates: list[MemoryCandidate]) -> list[MemoryResolution]:
+    async def resolve(
+        self, candidates: list[MemoryCandidate]
+    ) -> list[MemoryResolution]:
         """读取每条候选的有效事实组，并附上提交时需要复核的 ID 集合。"""
         results: list[MemoryResolution] = []
         for candidate in candidates:
             fact = candidate.fact
-            if fact.claim_intent == "retract" and not _retraction_target_is_in_source(fact):
-                results.append(MemoryResolution(
-                    ResolutionAction.SKIP, candidate,
-                    reason_code="retraction_target_not_in_source",
-                ))
+            if fact.claim_intent == "retract" and not _retraction_target_is_in_source(
+                fact
+            ):
+                results.append(
+                    MemoryResolution(
+                        ResolutionAction.SKIP,
+                        candidate,
+                        reason_code="retraction_target_not_in_source",
+                    )
+                )
+                logger.info(
+                    "retraction_target_not_in_source",
+                    extra={
+                        "turn_id": candidate.source_turn_id,
+                        "fact_key": fact.fact_key,
+                        "fact_value": fact.fact_value,
+                    },
+                )
                 continue
             existing = await self._memory.list_fact_group(fact)
+            logger.info(
+                "existing_facts_for_candidate",
+                extra={
+                    "turn_id": candidate.source_turn_id,
+                    "fact_key": fact.fact_key,
+                    "fact_value": fact.fact_value,
+                    "existing": existing,
+                },
+            )
             decision = self._decide(candidate, existing)
-            results.append(replace(decision, expected_memory_ids=tuple(sorted(item.id for item in existing))))
+            results.append(
+                replace(
+                    decision,
+                    expected_memory_ids=tuple(sorted(item.id for item in existing)),
+                )
+            )
         return results
 
     @staticmethod
-    def _decide(candidate: MemoryCandidate, existing: list[MemoryRecord]) -> MemoryResolution:
+    def _decide(
+        candidate: MemoryCandidate, existing: list[MemoryRecord]
+    ) -> MemoryResolution:
         """根据候选意图和已存事实选择动作；歧义只跳过，不覆盖。"""
         fact = candidate.fact
         cardinality = cardinality_for(fact.fact_key)
@@ -200,43 +253,84 @@ class MemoryFactResolver(MemoryResolver):
 
         if fact.claim_intent == "retract":
             if len(existing) != 1:
-                return MemoryResolution(ResolutionAction.SKIP, candidate, reason_code="retraction_target_not_unique")
+                return MemoryResolution(
+                    ResolutionAction.SKIP,
+                    candidate,
+                    reason_code="retraction_target_not_unique",
+                )
             target = existing[0]
-            return MemoryResolution(ResolutionAction.REVISE, candidate,
-                target_memory_id=target.id, relation="supersedes")
+            return MemoryResolution(
+                ResolutionAction.REVISE,
+                candidate,
+                target_memory_id=target.id,
+                relation="supersedes",
+            )
 
         # 集合中的不同成员可以共存，只处理同成员的相反极性。
         targets = existing
         if cardinality is FactCardinality.SET:
-            targets = [item for item in existing
+            targets = [
+                item
+                for item in existing
                 if (stored := _record_fact(item)) is not None
                 and stored.fact_value == fact.fact_value
-                and stored.polarity != fact.polarity]
+                and stored.polarity != fact.polarity
+            ]
             if not targets:
                 if equivalent:
-                    return MemoryResolution(ResolutionAction.IGNORE, candidate, target_memory_id=equivalent[0].id)
+                    return MemoryResolution(
+                        ResolutionAction.IGNORE,
+                        candidate,
+                        target_memory_id=equivalent[0].id,
+                    )
                 if fact.claim_intent == "correct":
-                    return MemoryResolution(ResolutionAction.SKIP, candidate, reason_code="correction_target_missing")
+                    return MemoryResolution(
+                        ResolutionAction.SKIP,
+                        candidate,
+                        reason_code="correction_target_missing",
+                    )
                 return MemoryResolution(ResolutionAction.CREATE, candidate)
             if equivalent:
-                return MemoryResolution(ResolutionAction.SKIP, candidate, reason_code="set_member_conflict_requires_review")
+                return MemoryResolution(
+                    ResolutionAction.SKIP,
+                    candidate,
+                    reason_code="set_member_conflict_requires_review",
+                )
         else:
             if not existing:
                 return MemoryResolution(ResolutionAction.CREATE, candidate)
             if len(equivalent) == len(existing):
-                return MemoryResolution(ResolutionAction.IGNORE, candidate, target_memory_id=equivalent[0].id)
+                return MemoryResolution(
+                    ResolutionAction.IGNORE,
+                    candidate,
+                    target_memory_id=equivalent[0].id,
+                )
 
         # 多个冲突值不能只修订其中一条，避免留下新的分叉。
         if len(targets) != 1:
-            return MemoryResolution(ResolutionAction.SKIP, candidate, reason_code="conflict_group_requires_review")
+            return MemoryResolution(
+                ResolutionAction.SKIP,
+                candidate,
+                reason_code="conflict_group_requires_review",
+            )
         target = targets[0]
         if fact.claim_intent == "correct":
-            return MemoryResolution(ResolutionAction.REVISE, candidate,
-                target_memory_id=target.id, relation="supersedes")
+            return MemoryResolution(
+                ResolutionAction.REVISE,
+                candidate,
+                target_memory_id=target.id,
+                relation="supersedes",
+            )
         if cardinality is FactCardinality.UNKNOWN:
-            return MemoryResolution(ResolutionAction.SKIP, candidate, reason_code="fact_cardinality_unknown")
-        return MemoryResolution(ResolutionAction.CREATE, candidate,
-            target_memory_id=target.id, relation="contradicts")
+            return MemoryResolution(
+                ResolutionAction.SKIP, candidate, reason_code="fact_cardinality_unknown"
+            )
+        return MemoryResolution(
+            ResolutionAction.CREATE,
+            candidate,
+            target_memory_id=target.id,
+            relation="contradicts",
+        )
 
 
 __all__ = ["LLMFactExtractor", "MemoryFactResolver"]

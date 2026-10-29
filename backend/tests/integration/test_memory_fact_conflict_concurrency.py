@@ -10,9 +10,9 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from application.memory.extraction import MemoryFactResolver
 from application.memory.workflow import MemoryWriteWorkflow
@@ -21,6 +21,7 @@ from domain.memory import (
     FactCardinality,
     MemoryCandidate,
     MemoryFact,
+    MemoryFactIdentity,
     MemoryListRequest,
     MemoryResolution,
     MemorySourceReference,
@@ -37,6 +38,9 @@ from infrastructure.persistence.postgres.models import (
     MemorySourceSuppressionModel,
 )
 from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository
+from infrastructure.persistence.postgres.repositories import memory_repository as repository_module
+from domain.memory.suppression import PROJECT_SUPPRESSION_FINGERPRINT, source_suppression_lock_id
+from shared.contracts.memory import memory_domain_to_schema
 from tests.fakes.memory_pipeline import Embedder, dependencies
 from tests.fakes.leases import acquire_postgres_lease
 
@@ -46,7 +50,7 @@ DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None:
+async def test_concurrent_conflicting_fact_writes_preserve_both_values(monkeypatch: pytest.MonkeyPatch) -> None:
     """并发决策遇到过期快照时重试，并保留两个值及矛盾关系。"""
     if not DATABASE_URL:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
@@ -192,6 +196,23 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
             "timezone: Asia/Shanghai",
         }
         assert {item.validity_status for item in active_facts} == {"valid"}
+        original_fact = candidates[source_turn_ids[0]].fact
+        identity = MemoryFactIdentity(
+            scope_kind=original_fact.scope_kind,
+            scope_id=original_fact.scope_id,
+            subject_key=original_fact.subject_key,
+            fact_key=original_fact.fact_key,
+        )
+        assert len(await repository.list_fact_group_by_identity(identity)) == 2
+        retraction = replace(
+            original_fact,
+            fact_value=None,
+            claim_intent="retract",
+            retracts_value="UTC",
+        )
+        assert [item.content for item in await repository.list_fact_group(retraction)] == [
+            "timezone: UTC"
+        ]
 
         async with factory() as session:
             persisted_facts = (
@@ -250,6 +271,7 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
         assert revised.metadata["type"] == "note"
         assert revised.metadata["category"] == "other"
         assert revised.metadata["confidence"] == 0.8
+        await _assert_manual_project_lock_order(repository, factory, monkeypatch)
 
     finally:
         await engine.dispose()
@@ -257,6 +279,55 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values() -> None
             async with base_engine.begin() as connection:
                 await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await base_engine.dispose()
+
+
+async def _assert_manual_project_lock_order(
+    repository: PostgresMemoryRepository,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """人工创建和修订等待项目锁时不得占住事实锁，避免与后台写入互等。"""
+    original = repository_module._ensure_project_not_suppressed
+    reached_project = asyncio.Event()
+
+    async def observe_project_lock(session: AsyncSession, project_id: str | None) -> None:
+        """在项目检查前通知测试事务，仍执行真实的数据库加锁。"""
+        reached_project.set()
+        await original(session, project_id)
+
+    candidate = _candidate("manual-turn", "manual-session", "UTC", datetime.now(timezone.utc).isoformat())
+    fact = replace(candidate.fact, scope_kind="project", scope_id="lock-order-project")
+    metadata = {"fact": memory_domain_to_schema(fact).model_dump(mode="json")}
+    with monkeypatch.context() as patch:
+        patch.setattr(repository_module, "_ensure_project_not_suppressed", observe_project_lock)
+        memory_id = "manual-project"
+        for revise in (False, True):
+            reached_project.clear()
+            async with factory() as blocker:
+                async with blocker.begin():
+                    await blocker.execute(select(func.pg_advisory_xact_lock(
+                        source_suppression_lock_id(fact.scope_id, PROJECT_SUPPRESSION_FINGERPRINT)
+                    )))
+                    if revise:
+                        pending = asyncio.create_task(repository.revise(
+                            memory_id, candidate.content, metadata=metadata
+                        ))
+                    else:
+                        pending = asyncio.create_task(repository.create_memory(
+                            MemoryWriteCommand(candidate.content, metadata, operation_key=memory_id)
+                        ))
+                    try:
+                        await asyncio.wait_for(reached_project.wait(), timeout=5)
+                        fact_lock_available = await blocker.scalar(select(
+                            func.pg_try_advisory_xact_lock(repository_module._fact_lock_id(fact))
+                        ))
+                    except BaseException:
+                        pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
+                        raise
+            result = await asyncio.wait_for(pending, timeout=5)
+            assert result is not None
+            assert fact_lock_available, "人工写入在项目锁之前持有了事实组锁"
 
 
 @pytest.mark.integration
@@ -291,6 +362,7 @@ async def test_unknown_cardinality_promotion_persists_in_postgres() -> None:
                         MemoryRelationModel.__table__,
                         MemorySourceSuppressionModel.__table__,
                     ],
+                    checkfirst=False,
                 )
             )
         now = datetime.now(timezone.utc).isoformat()

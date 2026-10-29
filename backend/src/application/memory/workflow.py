@@ -133,7 +133,15 @@ class MemoryWriteWorkflow:
                     embedding=embedding,
                     lease=lease,
                 )
-            except MemorySuppressedError:
+            except MemorySuppressedError as exc:
+                logger.info(
+                    "memory_candidate_suppressed_error",
+                    extra={
+                        "turn_id": turn.turn_id,
+                        "operation_id": operation_id,
+                        "reason": str(exc),
+                    },
+                )
                 continue
             written += int(applied)
         return written

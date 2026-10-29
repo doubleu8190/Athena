@@ -17,9 +17,7 @@ from shared.contracts.memory import (
 class LLMMemoryEpisodeSummarizer:
     """用结构化 LLM 输出压缩一次真实任务的结果和边界。"""
 
-    def __init__(
-        self, llm: LLMPort, *, prompt_root: Path | None = None
-    ) -> None:
+    def __init__(self, llm: LLMPort, *, prompt_root: Path | None = None) -> None:
         """保存结构化模型端口和 episode 提示词路径。
 
         参数：``llm`` 是支持结构化输出的模型；``prompt_root`` 可覆盖默认提示词目录。
@@ -39,19 +37,17 @@ class LLMMemoryEpisodeSummarizer:
         evidence = turn.execution_evidence
         if evidence is None:
             return MemoryEpisodeProposal(retain=False)
-        prompt_template = (
-            read_system_prompt("episode_summarization.md")
-            if self._prompt_root is None
-            else (self._prompt_root / "episode_summarization.md").read_text(
-                encoding="utf-8"
-            )
+        prompt_template = read_system_prompt("episode_summarization.md")
+        prompt = render_prompt_template(
+            prompt_template,
+            {
+                "user_request": turn.user_text,
+                "assistant_response": turn.assistant_text,
+                "execution_evidence": memory_domain_to_schema(
+                    evidence
+                ).model_dump_json(),
+            },
         )
-        values = {
-            "user_request": turn.user_text,
-            "assistant_response": turn.assistant_text,
-            "execution_evidence": memory_domain_to_schema(evidence).model_dump_json(),
-        }
-        prompt = render_prompt_template(prompt_template, values)
         value = await self._llm.invoke_structured(
             [{"role": "system", "content": prompt}],
             MemoryEpisodeProposalSchema,

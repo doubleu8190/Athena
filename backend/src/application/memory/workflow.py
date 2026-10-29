@@ -161,6 +161,13 @@ class MemoryWriteWorkflow:
             if existing.source_fingerprint != evidence.source_fingerprint:
                 raise ValueError("memory_episode_source_fingerprint_conflict")
             episode = existing
+            logger.info(
+                "memory_episode_already_exists",
+                extra={
+                    "turn_id": turn.turn_id,
+                    "episode_id": episode.episode_id,
+                },
+            )
         else:
             project_id = turn.project_id
 

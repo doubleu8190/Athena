@@ -682,7 +682,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 await _ensure_project_turns_not_suppressed(
                     session, _source_turn_ids(metadata)
                 )
-                # 同事实组串行提交；重复请求在校验旧事实组之前返回。
+                # 这里先加锁，避免并发修改同一事实。
                 await session.execute(
                     select(func.pg_advisory_xact_lock(_fact_lock_id(candidate.fact)))
                 )

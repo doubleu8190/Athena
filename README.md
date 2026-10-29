@@ -1,6 +1,6 @@
 # Athena
 
-Athena 是一个面向本地运行的自主 AI Agent 桌面应用。项目将 LLM 与可控的执行框架分离，通过会话状态、工具治理、审批、预算、记忆和事件流，让 Agent 的执行过程可恢复、可观测。
+Athena 是一个面向本地运行的自主 AI Agent Web 应用。项目将 LLM 与可控的执行框架分离，通过会话状态、工具治理、审批、预算、记忆和事件流，让 Agent 的执行过程可恢复、可观测。
 
 ## 功能概览
 
@@ -142,12 +142,12 @@ npm run dev
 | Vite Web 开发服务器 | http://127.0.0.1:5173 |
 | SSE 事件流 | http://127.0.0.1:8000/api/sessions/{id}/events |
 
-5173 是前端 Vite 开发服务器地址；生产构建产物位于 `frontend/dist`。
+5173 是前端 Vite 开发服务器地址；生产构建产物位于 `frontend/dist`。当前界面请通过 `http://127.0.0.1:5173` 或 `frontend/dist` 访问。`frontend/out/renderer` 是历史 Electron 构建产物，使用旧的会话 API；不要直接打开或运行它。
 
 ### 启动脚本命令
 
 ```bash
-./start.sh start                       # 启动后端和桌面端
+./start.sh start                       # 启动后端和 Web 前端
 ./start.sh backend                     # 仅启动后端
 ./start.sh frontend                    # 仅启动 Vite Web 前端
 ./start.sh status                      # 查看进程、端口和健康状态

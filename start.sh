@@ -569,7 +569,7 @@ cmd_help() {
 | |_| || |_| | | |  __/ | | | (_| |
  \___/  \__|_| |_|\___|_| |_|\__,_|
 
-  Athena 自主 AI Agent 桌面应用 — 统一启动脚本
+  Athena 自主 AI Agent Web 应用 — 统一启动脚本
 
 USAGE:
   ./start.sh [COMMAND] [OPTIONS]

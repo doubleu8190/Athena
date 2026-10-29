@@ -22,7 +22,7 @@ from domain.retrieval.trace_contracts import (
     RetrievalProviderTrace,
     RetrievalRunTrace,
 )
-from shared.contracts.retrieval import (
+from application.contracts.retrieval import (
     RetrievalCandidateTraceSchema,
     RetrievalProviderTraceSchema,
     RetrievalRunTraceSchema,

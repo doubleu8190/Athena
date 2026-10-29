@@ -40,7 +40,7 @@ from infrastructure.persistence.postgres.models import (
 from infrastructure.persistence.postgres.repositories import PostgresMemoryRepository
 from infrastructure.persistence.postgres.repositories import memory_repository as repository_module
 from domain.memory.suppression import PROJECT_SUPPRESSION_FINGERPRINT, source_suppression_lock_id
-from shared.contracts.memory import memory_domain_to_schema
+from application.contracts.memory import memory_domain_to_schema
 from tests.fakes.memory_pipeline import Embedder, dependencies
 from tests.fakes.leases import acquire_postgres_lease
 

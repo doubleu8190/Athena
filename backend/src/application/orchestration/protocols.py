@@ -116,9 +116,7 @@ class GraphThreadLock(Protocol):
 class PlanLoader(Protocol):
     """Load persisted plan status and results for the Root workflow."""
 
-    async def __call__(
-        self, *, plan_id: str | None
-    ) -> Mapping[str, Any]: ...
+    async def __call__(self, *, plan_id: str | None) -> Mapping[str, Any]: ...
 
 
 class RootPlanCommandPort(Protocol):
@@ -162,9 +160,7 @@ class RootWorkflowPort(Protocol):
     async def wait_for_plan_completion(
         self, state: RootGraphState
     ) -> dict[str, Any]: ...
-    async def review_completed_round(
-        self, state: RootGraphState
-    ) -> dict[str, Any]: ...
+    async def review_completed_round(self, state: RootGraphState) -> dict[str, Any]: ...
     async def build_plan_response(self, state: RootGraphState) -> dict[str, Any]: ...
     async def assemble_final_response(
         self, state: RootGraphState

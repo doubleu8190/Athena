@@ -13,6 +13,8 @@ class AuthOptions:
     session_ttl_seconds: int = 24 * 3600
     host: str = "127.0.0.1"
     port: int = 8000
+    frontend_port: int = 5173
+    frontend_origin: str = ""
 
     @classmethod
     def from_settings(cls, settings: Any) -> "AuthOptions":
@@ -24,6 +26,8 @@ class AuthOptions:
             session_ttl_seconds=settings.auth_session_ttl_hours * 3600,
             host=settings.host,
             port=settings.port,
+            frontend_port=settings.frontend_port,
+            frontend_origin=settings.frontend_origin,
         )
 
 

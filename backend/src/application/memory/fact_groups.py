@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 
 from domain.memory import FactCardinality, MemoryFact, MemoryFactIdentity, MemoryRecord
-from shared.contracts.memory import MemoryFactSchema, memory_schema_to_domain
+from application.contracts.memory import MemoryFactSchema, memory_schema_to_domain
 
 
 @dataclass(frozen=True, slots=True)

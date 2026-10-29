@@ -40,7 +40,7 @@ from infrastructure.persistence.postgres.repositories.run_repository import (
     PostgresRunRepository,
 )
 from workers.root_resume_dispatcher import RootResumeDispatcher
-from shared.contracts.runs import RoundCompletedResumeValueSchema
+from application.contracts.runs import RoundCompletedResumeValueSchema
 
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")

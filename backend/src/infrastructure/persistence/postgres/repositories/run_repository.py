@@ -27,7 +27,7 @@ from domain.runs import (
 )
 from domain.runs.ports import RunLifecyclePort, RunQueuePort, RunSubmissionPort
 from domain.sessions import Session
-from shared.contracts.runs import RunStartPayloadSchema
+from application.contracts.runs import RunStartPayloadSchema
 
 from ..models import (
     AttachmentModel,

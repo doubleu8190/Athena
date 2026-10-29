@@ -28,7 +28,7 @@ from domain.memory import (
     MemoryTaskOutcomeEvidence,
     MemoryToolOutcomeEvidence,
 )
-from shared.contracts.memory import (
+from application.contracts.memory import (
     MemoryExecutionEvidenceSchema,
     memory_domain_to_schema,
     memory_schema_to_domain,

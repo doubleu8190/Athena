@@ -13,7 +13,7 @@ from application.orchestration.root_decision import AnswerIntent, RootAgentInput
 from application.runs.context import ContextAcquisitionService, ContextBundle, ContextItem, ContextPlan
 from domain.memory import FactCardinality, MemoryRecord, MemorySearchRequest
 from domain.retrieval.trace_contracts import RetrievalCandidateSelection
-from shared.contracts.memory import memory_domain_to_schema
+from application.contracts.memory import memory_domain_to_schema
 from tests.fakes.memory_pipeline import candidate
 
 

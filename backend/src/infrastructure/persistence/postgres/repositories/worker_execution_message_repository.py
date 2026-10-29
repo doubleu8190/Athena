@@ -19,7 +19,7 @@ from domain.orchestration import (
     WorkerExecutionMessageRepository,
     WorkerLLMRole,
 )
-from shared.contracts.worker_messages import WorkerExecutionMessageContentSchema
+from application.contracts.worker_messages import WorkerExecutionMessageContentSchema
 
 from ..models import WorkerExecutionMessageModel
 from .lease_center import PostgresLeaseCenter

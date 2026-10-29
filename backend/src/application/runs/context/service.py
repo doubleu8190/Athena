@@ -36,7 +36,7 @@ from .contracts import (
 from .protocols import ContextProvider
 from application.memory.fact_groups import build_fact_context_group, record_fact
 from application.memory.index_views import build_memory_index_item
-from shared.contracts.memory import (
+from application.contracts.memory import (
     MemoryFactIdentitySchema,
     memory_domain_to_schema,
     memory_schema_to_domain,

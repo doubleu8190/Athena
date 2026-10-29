@@ -40,7 +40,14 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         public = {"/health", "/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
         if options.enabled and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path not in public:
             origin = request.headers.get("origin")
-            allowed = {f"http://{options.host}:{options.port}", "http://localhost:5173", "http://127.0.0.1:5173"}
+            allowed = {
+                f"http://{options.host}:{options.port}",
+                f"http://{options.host}:{options.frontend_port}",
+                f"http://localhost:{options.frontend_port}",
+                f"http://127.0.0.1:{options.frontend_port}",
+            }
+            if options.frontend_origin:
+                allowed.add(options.frontend_origin.rstrip("/"))
             if origin and origin not in allowed:
                 return JSONResponse({"detail": "invalid_origin"}, status_code=403)
         if options.enabled and request.url.path not in public:

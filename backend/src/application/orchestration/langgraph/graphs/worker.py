@@ -50,7 +50,18 @@ def build_worker_graph(
         return await _request_worker_approval(workflow, state)
 
     graph.add_node("request_worker_approval", request_worker_approval)
-    graph.add_edge("request_worker_approval", "worker_agent_loop")
+    graph.add_conditional_edges(
+        "request_worker_approval",
+        lambda state: (
+            "execute_tool_batch"
+            if state.get("result", {}).get("tool_calls")
+            else "worker_agent_loop"
+        ),
+        {
+            "execute_tool_batch": "execute_tool_batch",
+            "worker_agent_loop": "worker_agent_loop",
+        },
+    )
     graph.add_edge("finish_worker", END)
     return graph.compile(checkpointer=checkpointer)
 

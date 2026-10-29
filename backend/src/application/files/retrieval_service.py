@@ -19,7 +19,7 @@ from domain.retrieval.trace_contracts import (
     RetrievalChannelTrace,
     RetrievalHitTrace,
 )
-from shared.contracts.retrieval import RetrievalHitTraceSchema
+from application.contracts.retrieval import RetrievalHitTraceSchema
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
 from application.runs.context.protocols import ContextProvider

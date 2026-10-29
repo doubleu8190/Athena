@@ -26,7 +26,7 @@ from application.memory.ports import (
     MemoryFactExtractor,
     MemoryResolver,
 )
-from shared.contracts.memory import memory_domain_to_schema
+from application.contracts.memory import memory_domain_to_schema
 
 logger = logging.getLogger(__name__)
 

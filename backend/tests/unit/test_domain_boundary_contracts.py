@@ -27,16 +27,16 @@ from domain.retrieval.trace_contracts import (
     RetrievalProviderTrace,
     RetrievalRunTrace,
 )
-from shared.contracts.memory import (
+from application.contracts.memory import (
     MemoryEpisodeProposalSchema,
     MemoryFactSchema,
     MemoryFactProposalSchema,
     memory_domain_to_schema,
     memory_schema_to_domain,
 )
-from shared.contracts.retrieval import RetrievalRunTraceSchema
-from shared.contracts.retrieval import RetrievalCandidateTraceSchema
-from shared.contracts.worker_messages import WorkerExecutionMessageContentSchema
+from application.contracts.retrieval import RetrievalRunTraceSchema
+from application.contracts.retrieval import RetrievalCandidateTraceSchema
+from application.contracts.worker_messages import WorkerExecutionMessageContentSchema
 
 
 def _fact() -> MemoryFact:

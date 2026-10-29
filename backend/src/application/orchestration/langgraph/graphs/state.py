@@ -62,6 +62,8 @@ class WorkerGraphState(TypedDict, total=False):
     error: dict[str, Any]
     tool_round: int
     pending_approval: dict[str, Any] | None
+    pending_tool_calls: list[dict[str, Any]]
+    pending_tool_index: int
 
 
 __all__ = [

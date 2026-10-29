@@ -69,7 +69,7 @@ from domain.runs import (
 )
 from .leases import lease_grant
 from domain.sessions import Message, MessageRepository, MessageRole, Session, SessionRepository
-from shared.contracts.memory import MemoryFactSchema, memory_schema_to_domain
+from application.contracts.memory import MemoryFactSchema, memory_schema_to_domain
 from domain.tools import (
     JsonSchema,
     MCPServerConfig,

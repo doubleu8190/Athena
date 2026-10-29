@@ -11,7 +11,7 @@ from domain.runs import (
     RunResumePayload,
     RunStartPayload,
 )
-from shared.contracts.runs import (
+from application.contracts.runs import (
     RoundCompletedResumeValueSchema,
     RunResumePayloadSchema,
     RunStartPayloadSchema,

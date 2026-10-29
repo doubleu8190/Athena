@@ -18,7 +18,7 @@ from domain.memory.suppression import (
     PROJECT_TURN_SUPPRESSION_FINGERPRINT,
     source_suppression_lock_id,
 )
-from shared.contracts.memory import MemoryRecordMetadataSchema, memory_schema_to_domain
+from application.contracts.memory import MemoryRecordMetadataSchema, memory_schema_to_domain
 
 from ..models import (
     AgentRunModel,

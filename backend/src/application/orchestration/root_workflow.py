@@ -68,7 +68,7 @@ from domain.retrieval.trace_contracts import (
     RetrievalCandidateTrace,
     RetrievalChannelTrace,
 )
-from shared.contracts.retrieval import (
+from application.contracts.retrieval import (
     RetrievalCandidateSelectionSchema,
     RetrievalCandidateTraceSchema,
     RetrievalChannelTraceSchema,

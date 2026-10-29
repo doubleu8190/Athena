@@ -50,7 +50,7 @@ from domain.memory.suppression import (
 )
 from .lease_center import PostgresLeaseCenter
 from domain.memory.repository_ports import MemoryRepositoryPort
-from shared.contracts.memory import (
+from application.contracts.memory import (
     MemoryRecordMetadataSchema,
     memory_schema_to_domain,
     memory_domain_to_schema,

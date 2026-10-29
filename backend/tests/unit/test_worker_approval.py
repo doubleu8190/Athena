@@ -14,7 +14,8 @@ from application.orchestration.langgraph.graphs.worker import (
 from application.orchestration.langgraph.runtime.worker_executor import (
     LangGraphWorkerExecutor,
 )
-from application.orchestration.worker_tools import WorkerToolExecutor
+from application.orchestration.worker_tools import WorkerToolExecutor, worker_tool_manifest
+from application.orchestration.root_decision import RootAgentInput, RootMessage
 from application.orchestration.worker_workflow import WorkerWorkflow
 from application.orchestration.worker_approval import WorkerApprovalService
 from domain.orchestration import (
@@ -82,6 +83,24 @@ class ToolService:
             duration_ms=1,
         )
 
+
+@pytest.mark.asyncio
+async def test_worker_manifest_is_valid_root_input():
+    class Tools:
+        async def list_tools(self):
+            return [SimpleNamespace(
+                name="read_file", description="Read a file", parameters={},
+                enabled=True, risk_level="low", require_approval=False,
+                execution_mode="native",
+            )]
+
+    manifest = await worker_tool_manifest(Tools())
+    root_input = RootAgentInput(
+        session_id="session", run_id="run", message_id="message",
+        messages=(RootMessage(role="user", content="hello"),),
+        worker_tools=manifest, remaining_turns=1,
+    )
+    assert root_input.worker_tools[0].name == "read_file"
 
 class WorkerAgent:
     def __init__(self):
@@ -382,9 +401,10 @@ async def test_resolving_worker_approval_enqueues_resume_job_in_same_repository_
     assert outbox.payload_json["decision"] == "approved"
 
 
+@pytest.mark.parametrize("job_type", ["execute", "resume_worker"])
 @pytest.mark.asyncio
 async def test_worker_approval_request_writes_outbox_in_execution_transaction(
-    monkeypatch,
+    monkeypatch, job_type,
 ):
     class Session:
         def __init__(self):
@@ -421,6 +441,7 @@ async def test_worker_approval_request_writes_outbox_in_execution_transaction(
         lease=lease_grant("worker_execution", "execution-1", fencing_token=3),
         cancellation_epoch=0,
         task=Task("task-1", "write", "write a file"),
+        job_type=job_type,
     )
     run = SimpleNamespace(run_id="run-1", session_id="session-1", status="running", cancellation_epoch=0)
     plan = SimpleNamespace(plan_id="plan-1", run_id="run-1", status="running", active_round_id="round-1", current_version=1, cancellation_epoch=0)
@@ -428,7 +449,7 @@ async def test_worker_approval_request_writes_outbox_in_execution_transaction(
     task = SimpleNamespace(task_id="task-1", plan_id="plan-1", run_id="run-1", status="running", active_execution_id="execution-1", updated_at=None)
     round_task = SimpleNamespace(status="running", active_execution_id="execution-1", terminal_at=None)
     execution = SimpleNamespace(execution_id="execution-1", worker_thread_id="task:task-1:exec:1", status="running", cancellation_epoch=0, lease_owner="dispatcher-1", fencing_token=3, task_id="task-1", round_id="round-1", updated_at=None)
-    job = SimpleNamespace(job_type="execute", status="running", lease_owner="dispatcher-1", execution_id="execution-1", updated_at=None)
+    job = SimpleNamespace(job_type=job_type, status="running", lease_owner="dispatcher-1", execution_id="execution-1", updated_at=None)
 
     from contextlib import asynccontextmanager
 
@@ -498,8 +519,78 @@ async def test_tool_results_before_approval_are_checkpointed_for_resume():
 
     assert patch["waiting"] is True
     assert patch["pending_approval"]["approval_id"] == "approval-1"
-    assert patch["tool_round"] == 3
+    assert patch["tool_round"] == 2
     assert patch["execution"]["tool_results"][0]["output"] == "contents"
+
+
+@pytest.mark.asyncio
+async def test_batch_continues_across_two_approvals_with_original_call_indices():
+    class BatchAgent:
+        def __init__(self):
+            self.calls = 0
+            self.results = None
+
+        async def __call__(self, *, execution, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "status": "running",
+                    "tool_calls": [
+                        {"name": "write_file", "arguments": {"path": str(i)}}
+                        for i in range(3)
+                    ],
+                }
+            self.results = execution["tool_results"]
+            return {"status": "completed"}
+
+    agent = BatchAgent()
+    tools = ToolService()
+    executor = LangGraphWorkerExecutor(
+        workflow_factory=lambda: WorkerWorkflow(
+            execute=agent, execute_tool=WorkerToolExecutor(tools)
+        ),
+        checkpointer=InMemorySaver(),
+    )
+    execution = TaskExecution(
+        plan_id="plan-1", run_id="run-1", session_id="session-1",
+        task=Task("task-1", "write", "write files", allowed_tools=("write_file",)),
+        execution_generation=1, execution_id="execution-1",
+        worker_thread_id="task:task-1:exec:1",
+        lease=lease_grant("worker_execution", "execution-1"),
+    )
+    result = await executor.execute(execution)
+    for index, decision in enumerate(("approved", "denied", "approved")):
+        assert result.status is TaskStatus.WAITING_APPROVAL
+        approval = await executor.pending_interrupt(execution)
+        assert approval is not None
+        assert approval["call_index"] == index
+        assert approval["tool_round"] == 0
+        result = await executor.resume(execution, {**approval, "decision": decision})
+        if index == 0:
+            new_interrupt = await executor.pending_interrupt(execution)
+            lease = WorkerJobLease(
+                job_id="resume-1", worker_id="worker", run_id="run-1",
+                plan_id="plan-1", round_id="round-1", plan_version=1,
+                task_id="task-1", execution_id="execution-1", session_id="session-1",
+                attempt=1, worker_thread_id="task:task-1:exec:1",
+                lease=execution.lease, cancellation_epoch=0, task=execution.task,
+                job_type="resume_worker", resume_value={**approval, "decision": decision},
+            )
+            dispatcher = WorkerJobDispatcher(
+                None, executor, None, worker_id="worker", lease_center=LeaseCenter(),
+                lease_seconds=10, max_concurrency=1, approval_service=None,
+                thread_lock=NoopGraphThreadLock(),
+            )
+            recovered = await dispatcher._invoke_worker(lease, execution)
+            assert recovered.status is TaskStatus.WAITING_APPROVAL
+            assert recovered.approval_batch == new_interrupt
+    assert result.status is TaskStatus.COMPLETED
+    assert agent.calls == 2
+    assert [item["status"] for item in agent.results] == ["success", "denied", "success"]
+    assert [request.operation_key for request in tools.executed] == [
+        "athena:run-1:task-1:1:0:0",
+        "athena:run-1:task-1:1:0:2",
+    ]
 
 
 @pytest.mark.asyncio

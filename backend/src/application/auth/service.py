@@ -76,7 +76,7 @@ class AuthenticationService:
 
     def __init__(self, config: AuthenticationConfig, signer: TokenSigner | None = None) -> None:
         self.config = config
-        self._signer = signer or HmacTokenSigner(config.session_secret or "disabled", config.session_ttl_seconds)
+        self._signer = signer or HmacTokenSigner(config.session_secret, config.session_ttl_seconds)
 
     async def login(self, username: str, password: str) -> LoginResponse:
         """校验配置账号并返回待写入 Cookie 的登录结果。"""
@@ -94,6 +94,8 @@ class AuthenticationService:
         """验证 Cookie 令牌并返回用户名。"""
         if not self.config.enabled:
             return self.config.username
+        if len(self.config.session_secret) < 32:
+            return None
         return self._signer.verify(token or "")
 
     def session(self, token: str | None) -> AuthSessionResponse:

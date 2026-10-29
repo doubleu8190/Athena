@@ -28,7 +28,7 @@ from application.orchestration.root_decision import (
 from domain.runs import RoundCompletedResumeValue
 from domain.leases import LeaseGrant
 from shared.serialization import json_value
-from shared.contracts.runs import RoundCompletedResumeValueSchema
+from application.contracts.runs import RoundCompletedResumeValueSchema
 from application.runs.request_contracts import RootRequestState
 from shared import get_logger
 

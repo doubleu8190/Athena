@@ -14,7 +14,7 @@ from application.common.responses import ToolResponse
 from application.tools.service import ToolService
 from application.orchestration.lease_context import lease_grant_from_context
 
-from backend.src.application.orchestration.root_decision import RootWorkerTool
+from application.orchestration.root_decision import RootWorkerTool
 from domain.tools import (
     ToolExecutionRequest,
     ToolExecutionResult,

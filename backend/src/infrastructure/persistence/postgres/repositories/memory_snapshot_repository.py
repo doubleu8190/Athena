@@ -16,7 +16,7 @@ from domain.memory import (
     MemorySnapshotPort,
     MemorySuppressedError,
 )
-from shared.contracts.memory import (
+from application.contracts.memory import (
     MemoryFactExtractionSnapshotSchema,
     memory_domain_to_schema,
     memory_schema_to_domain,

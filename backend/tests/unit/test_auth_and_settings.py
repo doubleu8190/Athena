@@ -19,6 +19,7 @@ from interfaces.http.auth.routes import (
 )
 from interfaces.http.auth import middleware as auth_middleware
 from interfaces.http.auth import routes as auth_routes
+from application.auth.service import HmacTokenSigner
 
 
 def test_target_settings_keep_database_and_provider_contract() -> None:
@@ -91,6 +92,38 @@ def test_auth_login_requires_strong_secret_when_enabled() -> None:
     app.include_router(build_auth_router(lambda: settings), prefix="/api")
     response = TestClient(app).post("/api/auth/login", json={"username": "alice", "password": "secret"})
     assert response.status_code == 503
+
+
+def test_auth_rejects_tokens_when_secret_is_not_configured() -> None:
+    for secret in ("", "short"):
+        settings = Settings(auth_enabled=True, auth_session_secret=secret)
+        forged = HmacTokenSigner(secret or "disabled", 3600).issue("alice")
+        assert not is_authenticated(_cookie_request(forged), settings)
+
+
+def test_auth_allows_configured_frontend_port() -> None:
+    settings = Settings(
+        auth_enabled=True, auth_username="alice", auth_password="secret",
+        auth_session_secret="s" * 32, host="192.168.1.10", frontend_port=5174,
+    )
+    app = create_app(auth_options=auth_routes._resolve_options(settings))
+    client = TestClient(app)
+    assert client.post("/api/auth/login", json={"username": "alice", "password": "secret"}).status_code == 200
+    assert client.post("/protected", headers={"origin": "http://localhost:5174"}).status_code == 404
+    assert client.post("/protected", headers={"origin": "http://192.168.1.10:5174"}).status_code == 404
+    assert client.post("/protected", headers={"origin": "http://localhost:5173"}).status_code == 403
+
+
+def test_auth_allows_explicit_frontend_origin_with_wildcard_bind() -> None:
+    settings = Settings(
+        auth_enabled=True, auth_username="alice", auth_password="secret",
+        auth_session_secret="s" * 32, host="0.0.0.0", frontend_port=5174,
+        frontend_origin="http://192.168.1.10:5174",
+    )
+    client = TestClient(create_app(auth_options=auth_routes._resolve_options(settings)))
+    assert client.post("/api/auth/login", json={"username": "alice", "password": "secret"}).status_code == 200
+    assert client.post("/protected", headers={"origin": "http://192.168.1.10:5174"}).status_code == 404
+    assert client.post("/protected", headers={"origin": "http://192.168.1.11:5174"}).status_code == 403
 
 
 def test_auth_session_endpoint_reports_authenticated_state() -> None:

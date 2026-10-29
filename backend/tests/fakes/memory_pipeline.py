@@ -6,7 +6,7 @@ from domain.memory import (
     MemoryRecord, MemoryStatus, MemorySourceReference, MemoryWriteCommand,
     MemoryStateChangedError, ResolutionAction,
 )
-from shared.contracts.memory import memory_domain_to_schema
+from application.contracts.memory import memory_domain_to_schema
 from tests.fakes.in_memory import InMemoryMemoryPort, InMemoryMemoryEpisodeRepository
 
 

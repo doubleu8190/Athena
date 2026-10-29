@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from backend.src.application.orchestration.protocols import WorkerWorkflowPort
+from application.orchestration.protocols import WorkerWorkflowPort
 from application.orchestration.lease_context import lease_grant_from_context
 from domain.orchestration import (
     WorkerExecutionEntryType,
@@ -109,7 +109,9 @@ class WorkerWorkflow(WorkerWorkflowPort):
                 "waiting": False,
             }
         tool_results: list[dict[str, Any]] = []
-        for index, item in enumerate(calls):
+        start_index = int(state.get("pending_tool_index", 0))
+        for offset, item in enumerate(calls):
+            index = start_index + offset
             result = as_dict(
                 await self.execute_tool(
                     tool_call=item,
@@ -137,6 +139,9 @@ class WorkerWorkflow(WorkerWorkflowPort):
                     else {},
                     "result": {"status": "waiting_approval"},
                     "waiting": True,
+                    "pending_tool_calls": list(calls[offset + 1 :]),
+                    "pending_tool_index": index + 1,
+                    "tool_round": tool_round,
                 }
             await self._persist_tool_results(
                 execution=state.get("execution", {}),
@@ -182,11 +187,20 @@ class WorkerWorkflow(WorkerWorkflowPort):
             tool_results=[result],
             tool_round=int(approval.get("tool_round", 0)),
         )
-        return await self._append_tool_results(
+        patch = await self._append_tool_results(
             state,
             [result],
             tool_round=int(approval.get("tool_round", 0)),
         )
+        remaining = state.get("pending_tool_calls", [])
+        if isinstance(remaining, list) and remaining:
+            patch.update(
+                result={"status": "running", "tool_calls": remaining},
+                tool_round=int(approval.get("tool_round", 0)),
+                pending_tool_index=int(state.get("pending_tool_index", 0)),
+            )
+        patch["pending_tool_calls"] = []
+        return patch
 
     @staticmethod
     def _restore_approval_execution(
@@ -340,6 +354,7 @@ class WorkerWorkflow(WorkerWorkflowPort):
             "waiting": False,
             "tool_round": tool_round + 1,
             "pending_approval": None,
+            "pending_tool_index": 0,
         }
 
     async def _persist_tool_results(

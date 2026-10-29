@@ -26,7 +26,7 @@ from domain.memory import (
 
 from application.memory.ports import MemoryFactExtractor, MemoryResolver
 from shared import read_system_prompt, render_prompt_template
-from shared.contracts.memory import (
+from application.contracts.memory import (
     MemoryFactExtractionOutputSchema,
     MemoryFactSchema,
     MemoryFactProposalSchema,

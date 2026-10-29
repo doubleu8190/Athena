@@ -7,7 +7,7 @@ from pathlib import Path
 from domain.integrations import LLMPort
 from domain.memory import CompletedTurn, MemoryEpisodeProposal
 from shared import read_system_prompt, render_prompt_template
-from shared.contracts.memory import (
+from application.contracts.memory import (
     MemoryEpisodeProposalSchema,
     memory_domain_to_schema,
     memory_schema_to_domain,

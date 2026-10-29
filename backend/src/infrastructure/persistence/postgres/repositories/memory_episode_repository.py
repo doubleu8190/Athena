@@ -27,7 +27,7 @@ from domain.memory.suppression import (
     PROJECT_TURN_SUPPRESSION_FINGERPRINT,
     source_suppression_lock_id,
 )
-from shared.contracts.memory import (
+from application.contracts.memory import (
     MemoryEpisodeSummarySchema,
     MemorySourceReferenceSchema,
     memory_domain_to_schema,

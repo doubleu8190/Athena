@@ -24,7 +24,7 @@ from domain.orchestration import (
 )
 from domain.runs import RunStartPayload
 from domain.leases import LeaseGrant, LeaseKey, LeaseLostError, LeaseRecord
-from shared.contracts.runs import RunStartPayloadSchema
+from application.contracts.runs import RunStartPayloadSchema
 from ..models import (
     AgentPlanModel,
     AgentRunModel,
@@ -187,7 +187,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 assert execution is not None
                 assert job is not None
                 if (
-                    lease.job_type != "execute"
+                    lease.job_type not in {"execute", "resume_worker"}
                     or not _owns_lease(
                         lease, run, plan, round_row, task, round_task, execution, job
                     )

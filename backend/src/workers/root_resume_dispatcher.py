@@ -71,7 +71,7 @@ class RootResumeDispatcher:
         while not self._stop.is_set():
             claimed = False
             try:
-                while not self._stop.is_set():
+                while not self._stop.is_set() and len(self._inflight) < 8:
                     lease = await self._jobs.claim_next(
                         self._worker_id, lease_seconds=self._lease_seconds
                     )
@@ -84,13 +84,11 @@ class RootResumeDispatcher:
                     self._inflight.add(task)
                     task.add_done_callback(self._on_task_done)
                     claimed = True
-                    if len(self._inflight) >= 8:
-                        break
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.error("root_resume_job_claim_failed", exc_info=True)
-            if not claimed:
+            if not claimed or len(self._inflight) >= 8:
                 try:
                     await asyncio.wait_for(
                         self._stop.wait(), timeout=self._poll_interval

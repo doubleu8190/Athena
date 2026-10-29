@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -22,6 +23,36 @@ from infrastructure.persistence.postgres.repositories.orchestration_repository i
     PostgresPlanLoader,
 )
 from workers.root_resume_dispatcher import RootResumeDispatcher
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_does_not_claim_more_than_eight_concurrent_jobs():
+    class Jobs:
+        def __init__(self):
+            self.claims = 0
+
+        async def claim_next(self, *_args, **_kwargs):
+            self.claims += 1
+            return SimpleNamespace(job_id=str(self.claims))
+
+    jobs = Jobs()
+    dispatcher = RootResumeDispatcher(
+        jobs, None, None, None, worker_id="test", poll_interval=0.01,
+        lease_center=LeaseCenter(),
+    )
+    release = asyncio.Event()
+
+    async def resume(_lease):
+        await release.wait()
+
+    dispatcher._resume = resume
+    await dispatcher.start()
+    try:
+        await asyncio.sleep(0.08)
+        assert jobs.claims == 8
+        assert len(dispatcher._inflight) == 8
+    finally:
+        await dispatcher.stop()
 
 
 async def invoke_root_graph(graph, **kwargs):

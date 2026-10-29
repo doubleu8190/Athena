@@ -298,15 +298,18 @@ class WorkerJobDispatcher:
         self, lease: WorkerJobLease, execution: TaskExecution
     ) -> TaskResult:
         """Invoke the Worker only while its thread lock is held."""
-        if lease.job_type == "resume_worker":
-            return await self._worker.resume(execution, dict(lease.resume_value))
         pending = await self._worker.pending_interrupt(execution)
-        if pending:
+        if pending and (
+            lease.job_type != "resume_worker"
+            or pending.get("interrupt_id") != lease.resume_value.get("interrupt_id")
+        ):
             return TaskResult(
                 task_id=lease.task_id,
                 status=TaskStatus.WAITING_APPROVAL,
                 approval_batch=pending,
             )
+        if lease.job_type == "resume_worker":
+            return await self._worker.resume(execution, dict(lease.resume_value))
         return await self._worker.execute(execution)
 
     def _terminal_result(self, result: TaskResult, task_id: str) -> TaskResult:

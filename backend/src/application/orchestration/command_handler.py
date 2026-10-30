@@ -29,9 +29,15 @@ class OrchestrationCommandHandler(RootPlanCommandPort):
     ) -> None:
         """保存编排命令仓储和确定性 Plan 校验器。
 
-        Args:
-            repository: 在一个事务中接受命令并保存业务状态的仓储。
-            validator: DAG、Task 和工具集合校验器。
+        参数：
+        - `repository`（OrchestrationCommandRepository）：在一个事务中接受命令并保存业务状态的仓储；约束：无额外运行时限制。
+        - `validator`（PlanValidator | None）：DAG、Task 和工具集合校验器；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         self._repository = repository
         self._validator = validator or PlanValidator()
@@ -46,17 +52,20 @@ class OrchestrationCommandHandler(RootPlanCommandPort):
     ) -> CommandReceipt:
         """验证并持久化首版 Plan。
 
-        Args:
-            command: 必须是首版 SubmitPlan，且绑定目标 Run。
-            plan: 与命令关联的初始 Plan。
-            tasks: 计划内所有 Task 定义。
+        参数：
+        - `command`（OrchestrationCommand）：必须是首版 SubmitPlan，且绑定目标 Run；约束：须通过方法内校验；失败条件见下方异常说明。
+        - `plan`（Plan）：与命令关联的初始 Plan；约束：须通过方法内校验；失败条件见下方异常说明。
+        - `tasks`（list[Task]）：计划内所有 Task 定义；约束：无额外运行时限制。
+        - `legal_tools`（Iterable[str] | None）：计划任务允许调用的工具名称集合；None 表示由上游规则确定；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
 
-        Returns:
-            首轮成员和稳定命令 ID 构成的回执。
+        返回：
+        - CommandReceipt：首轮成员和稳定命令 ID 构成的回执。
 
-        Raises:
-            ValueError: 命令类型或 Plan 身份不匹配。
-            PlanValidationError: Plan 的 DAG、任务或工具校验失败。
+        异常：
+        - ValueError：校验条件 `command.command_type != OrchestrationCommandType.SUBMIT_PLAN` 成立时（异常说明：submit_plan requires a SubmitPlan command）。
+        - ValueError：校验条件 `command.plan_id != plan.plan_id` 成立时（异常说明：command and plan IDs do not match）。
+        - ValueError：校验条件 `command.correlation_id != plan.run_id` 成立时（异常说明：command correlation_id must equal plan.run_id）。
+        - 未列出的依赖异常按当前实现传播。
         """
         if command.command_type != OrchestrationCommandType.SUBMIT_PLAN:
             raise ValueError("submit_plan requires a SubmitPlan command")
@@ -72,7 +81,22 @@ class OrchestrationCommandHandler(RootPlanCommandPort):
         command: OrchestrationCommand,
         decision: ReviewDecision,
     ) -> CommandReceipt:
-        """Bind a Root decision to the command type and reviewed identities."""
+        """将审查决策绑定到命令类型和 Round 身份，并提交幂等命令。
+
+        参数：
+        - `command`（OrchestrationCommand）：领域命令，携带幂等身份和目标对象；约束：须通过方法内校验；失败条件见下方异常说明。
+        - `decision`（ReviewDecision）：经过校验的决策内容，用于驱动后续状态转换；约束：须通过方法内校验；失败条件见下方异常说明。
+
+        返回：
+        - CommandReceipt：命令处理结果及其幂等标识、持久化状态。
+
+        异常：
+        - ValueError：校验条件 `command.command_type != expected_type` 成立时（异常说明：review_action_command_type_mismatch）。
+        - ValueError：校验条件 `command.plan_version is None or command.plan_version < 1` 成立时（异常说明：review_command_plan_version_required）。
+        - ValueError：校验条件 `not command.round_id` 成立时（异常说明：review_command_round_id_required）。
+        - ValueError：校验条件 `decision.action == ReviewAction.REPLAN and decision.revision is not None and (decision.revision.base_version != command.plan_version)` 成立时（异常说明：review_command_revision_version_mismatch）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         expected_type = {
             ReviewAction.CONTINUE: OrchestrationCommandType.CONTINUE_PLAN,
             ReviewAction.REPLAN: OrchestrationCommandType.REVISE_PLAN,
@@ -101,7 +125,21 @@ class OrchestrationCommandHandler(RootPlanCommandPort):
         plan_version: int,
         round_id: str,
     ) -> ReviewDecision | None:
-        """Recover an already committed decision before retrying the Root LLM."""
+        """按幂等身份读取已提交的审查决策，供模型重试前复用。
+
+        参数：
+        - `scope_key`（str）：限定幂等命令作用范围的稳定键；约束：无额外运行时限制。
+        - `idempotency_key`（str）：同一业务命令重试时保持不变的幂等键；约束：无额外运行时限制。
+        - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
+        - `plan_version`（int）：目标计划版本号，用于固定读取或恢复的版本；约束：无额外运行时限制。
+        - `round_id`（str）：目标执行轮次的稳定标识；约束：无额外运行时限制。
+
+        返回：
+        - ReviewDecision | None：Root 对已完成 Round 选择的继续、修订或结束动作。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return await self._repository.load_review_decision(
             scope_key=scope_key,
             idempotency_key=idempotency_key,

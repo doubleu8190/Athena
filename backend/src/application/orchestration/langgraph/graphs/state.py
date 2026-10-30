@@ -1,4 +1,5 @@
-"""JSON-safe state contracts used by the LangGraph adapters."""
+"""LangGraph 适配器使用的 JSON 安全状态契约。
+"""
 
 from __future__ import annotations
 
@@ -14,14 +15,7 @@ from application.runs.request_contracts import RootRequestState
 
 
 class RootGraphState(TypedDict, total=False):
-    """Recoverable Root state.
-
-    Structured values are stored as JSON dictionaries and parsed into their
-    concrete models when workflow nodes consume them.
-
-    Runtime objects such as an LLM, database session, event bus or stop signal
-    are deliberately kept out of this mapping.  They are supplied through
-    graph dependencies and invocation config instead.
+    """可恢复的 Root 图状态，保存请求输入、决策进度和等待身份。
     """
 
     request: dict[str, Any]
@@ -50,7 +44,8 @@ class RootGraphState(TypedDict, total=False):
 
 
 class WorkerGraphState(TypedDict, total=False):
-    """Recoverable state for exactly one Task execution."""
+    """单个 Task 执行代次使用的可恢复 Worker 图状态。
+    """
 
     execution: dict[str, Any]
     input: dict[str, Any]

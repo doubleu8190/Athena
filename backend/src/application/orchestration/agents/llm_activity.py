@@ -22,7 +22,22 @@ async def invoke_llm_with_activity(
     run_id: str,
     parent_activity_id: str,
 ) -> Any:
-    """调用普通模型输出并发布开始、完成或失败事件。"""
+    """调用普通模型输出并发布开始、完成或失败事件。
+
+    参数：
+    - `llm`（LLMPort）：执行模型请求的语言模型依赖；约束：无额外运行时限制。
+    - `event_publisher`（EventPort | None）：发布运行进度和领域事件的依赖；约束：允许为 None，按未提供值的分支处理。
+    - `messages`（list[Any]）：按顺序排列的模型对话消息；约束：无额外运行时限制。
+    - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+    - `parent_activity_id`（str）：当前模型活动的父级关联标识；约束：无额外运行时限制。
+
+    返回：
+    - Any：模型返回的消息对象；调用期间会发布活动开始、完成或失败事件。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return await _invoke_with_activity(
         lambda: llm.invoke(messages),
         event_publisher,
@@ -42,7 +57,23 @@ async def invoke_structured_llm_with_activity(
     run_id: str,
     parent_activity_id: str,
 ) -> Any:
-    """调用结构化模型输出并发布开始、完成或失败事件。"""
+    """调用结构化模型输出并发布开始、完成或失败事件。
+
+    参数：
+    - `llm`（LLMPort）：执行模型请求的语言模型依赖；约束：无额外运行时限制。
+    - `event_publisher`（EventPort | None）：发布运行进度和领域事件的依赖；约束：允许为 None，按未提供值的分支处理。
+    - `messages`（list[Any]）：按顺序排列的模型对话消息；约束：无额外运行时限制。
+    - `schema`（StructuredOutputSchema）：用于校验或序列化输入输出的契约类型；约束：无额外运行时限制。
+    - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+    - `parent_activity_id`（str）：当前模型活动的父级关联标识；约束：无额外运行时限制。
+
+    返回：
+    - Any：按指定 schema 解析的结构化模型结果；调用期间会发布活动事件。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return await _invoke_with_activity(
         lambda: llm.invoke_structured(messages, schema),
         event_publisher,
@@ -60,7 +91,22 @@ async def _invoke_with_activity(
     run_id: str,
     parent_activity_id: str,
 ) -> Any:
-    """统一包裹模型调用与活动事件；事件故障不覆盖模型结果。"""
+    """统一包裹模型调用与活动事件；事件故障不覆盖模型结果。
+
+    参数：
+    - `invoke`（Callable[[], Awaitable[Any]]）：执行一次模型或图调用的函数；约束：无额外运行时限制。
+    - `event_publisher`（EventPort | None）：发布运行进度和领域事件的依赖；约束：允许为 None，按未提供值的分支处理。
+    - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+    - `parent_activity_id`（str）：当前模型活动的父级关联标识；约束：无额外运行时限制。
+
+    返回：
+    - Any：底层模型调用的原始结果；异常会在发布失败事件后继续传播。
+
+    异常：
+    - Exception（重新抛出捕获的异常）：校验条件 `捕获 Exception 后` 成立时。
+    - 未列出的依赖异常按当前实现传播。
+    """
     call_id = f"llm:{uuid4().hex}"
     started_at = datetime.now(timezone.utc)
     started_clock = perf_counter()
@@ -117,7 +163,26 @@ async def _publish_llm_event(
     duration_ms: int | None = None,
     error: str | None = None,
 ) -> None:
-    """写入一条模型活动事件；遥测故障不能覆盖业务执行结果。"""
+    """写入一条模型活动事件；遥测故障不能覆盖业务执行结果。
+
+    参数：
+    - `event_publisher`（EventPort | None）：发布运行进度和领域事件的依赖；约束：允许为 None，按未提供值的分支处理。
+    - `event_type`（str）：要发布的事件类型名称；约束：无额外运行时限制。
+    - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+    - `call_id`（str）：当前调用的稳定标识；约束：无额外运行时限制。
+    - `parent_activity_id`（str）：当前模型活动的父级关联标识；约束：无额外运行时限制。
+    - `status`（str）：当前操作或记录的状态值；约束：无额外运行时限制。
+    - `started_at`（datetime）：操作开始时间，用于记录运行时间信息；约束：无额外运行时限制。
+    - `duration_ms`（int | None）：本阶段测得的耗时毫秒数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+    - `error`（str | None）：操作失败时捕获的异常或错误说明；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+    返回：
+    - None：操作完成后不提供返回数据。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if event_publisher is None:
         return
     payload: dict[str, Any] = {

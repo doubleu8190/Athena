@@ -1,4 +1,5 @@
-"""LangGraph topology and checkpoint-safe state definitions."""
+"""LangGraph 图拓扑和可持久化状态定义。
+"""
 
 from .root import build_root_graph, invoke_root_graph
 from .state import RootGraphState, WorkerGraphState

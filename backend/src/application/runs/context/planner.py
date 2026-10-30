@@ -1,3 +1,6 @@
+"""根据 Root 请求和可用资源生成有界的上下文检索计划。
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -34,9 +37,21 @@ class ContextPlanner:
     ) -> None:
         """保存检索资源限制和模型 token 计数器。
 
-        参数：各 ``max_*``/``limit_*`` 值限制检索规模；``token_counter`` 统计资料正文。
-        返回：无。
-        异常：无业务异常。
+        参数：
+        - `max_files`（int）：一次上下文计划最多纳入的文件数量；约束：可省略，默认值为 `5`。
+        - `limit_per_file`（int）：单个文件最多返回的候选数；约束：可省略，默认值为 `5`。
+        - `max_items`（int）：上下文最多保留的条目数；约束：可省略，默认值为 `12`。
+        - `max_tokens`（int）：上下文最多占用的 token 数；约束：可省略，默认值为 `4000`。
+        - `memory_token_budget`（int）：记忆来源可使用的 token 预算；约束：可省略，默认值为 `2000`。
+        - `recall_limit`（int）：本次召回阶段最多保留的候选数量；约束：可省略，默认值为 `30`。
+        - `rerank_limit`（int）：重排阶段最多处理的候选数；约束：可省略，默认值为 `10`。
+        - `token_counter`（Callable[[str], int] | None）：估算文本 token 数量的可注入函数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         self._max_files = max_files
         self._limit_per_file = limit_per_file
@@ -55,14 +70,19 @@ class ContextPlanner:
         knowledge_base_ids: tuple[str, ...],
     ) -> ContextPlan:
         """根据已校验查询生成 Provider 计划。
-        Args:
-            queries: 每个检索通道至多一个具体查询。
-            attachment_ids: 当前请求已验证且可读的附件 ID。
-            knowledge_base_ids: 当前系统中真实存在的知识库 ID。
-        Returns:
-            可直接交给 ContextAcquisitionService 的有界计划。
-        Raises:
-            InvalidContextResource: 查询引用了目录之外的附件或知识库。
+
+        参数：
+        - `queries`（tuple[ContextQuery, ...]）：每个检索通道至多一个具体查询；约束：无额外运行时限制。
+        - `attachment_ids`（tuple[str, ...]）：当前请求已验证且可读的附件 ID；约束：无额外运行时限制。
+        - `knowledge_base_ids`（tuple[str, ...]）：当前系统中真实存在的知识库 ID；约束：无额外运行时限制。
+
+        返回：
+        - ContextPlan：可直接交给 ContextAcquisitionService 的有界计划。
+
+        异常：
+        - InvalidContextResource：校验条件 `not (isinstance(query, MemoryQuery))；not (isinstance(query, EpisodeQuery))；isinstance(query, FileQuery)；not set(requested_ids).issubset(available_attachments)` 成立时（异常说明：context_file_outside_current_request）。
+        - InvalidContextResource：校验条件 `not (isinstance(query, MemoryQuery))；not (isinstance(query, EpisodeQuery))；not (isinstance(query, FileQuery))；isinstance(query, KnowledgeQuery)；not set(requested_ids).issubset(available_knowledge_bases)` 成立时（异常说明：context_knowledge_base_unavailable）。
+        - 未列出的依赖异常按当前实现传播。
         """
         available_attachments = set(attachment_ids)
         available_knowledge_bases = set(knowledge_base_ids)
@@ -74,6 +94,7 @@ class ContextPlanner:
         knowledge_query = ""
         selected_knowledge_base_ids: tuple[str, ...] = ()
         graph_query = ""
+        # 每种查询写入各自的计划字段，并在边界处确认资源属于当前请求。
         for query in queries:
             if isinstance(query, MemoryQuery):
                 memory_query = query.query
@@ -119,25 +140,60 @@ class ContextPlanner:
 
     @property
     def max_items(self) -> int:
-        """当前 ContextBundle 可保留的最大条目数。"""
+        """当前 ContextBundle 可保留的最大条目数。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - int：当前上下文计划允许保留的最大条目数。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return self._max_items
 
     @property
     def max_tokens(self) -> int:
-        """当前 ContextBundle 可保留的 token 上限。"""
+        """返回当前 ContextBundle 可保留的 token 上限。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - int：当前上下文计划允许使用的最大 token 数。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return self._max_tokens
 
     @property
     def memory_token_budget(self) -> int:
-        """长期记忆、派生目录和任务回顾共享的窗口预算。"""
+        """长期记忆、派生目录和任务回顾共享的窗口预算。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - int：长期记忆、派生索引和任务回顾共用的 token 预算。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return self._memory_token_budget
 
     def count_tokens(self, text: str) -> int:
         """使用装配时提供的计数器统计一段资料正文。
 
-        参数：``text`` 是待计数的资料正文。
-        返回：token 数量。
-        异常：计数器自身抛出的异常会传播给调用方。
+        参数：
+        - `text`（str）：待规范化、解析或展示的文本；约束：无额外运行时限制。
+
+        返回：
+        - int：按当前 token 估算器计算出的文本 token 数。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         return self._token_counter(text)
 

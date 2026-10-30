@@ -14,7 +14,18 @@ from .serialization import as_dict
 
 
 def plan_dict(plan: Plan, tasks: list[Task]) -> dict[str, Any]:
-    """将已提交的 Plan 与 Task 转为 checkpoint 可保存的字典。"""
+    """将已提交的 Plan 与 Task 转为 checkpoint 可保存的字典。
+
+    参数：
+    - `plan`（Plan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+    - `tasks`（list[Task]）：计划中定义的 Worker 任务集合；约束：无额外运行时限制。
+
+    返回：
+    - dict[str, Any]：包含任务、依赖和版本信息的可持久化计划字典。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return {
         "plan_id": plan.plan_id,
         "goal": plan.goal,
@@ -31,13 +42,18 @@ def coerce_plan(
     draft: PlanDraft, *, request: RootRequestState
 ) -> tuple[Plan, list[Task]]:
     """将契约已验证的草稿转换为领域 Plan 和 Task。
-    Args:
-        draft: 通过 RootDecision 校验的计划草稿。
-        request: 当前 Run 请求，用于绑定原始目标和领域身份。
-    Returns:
-        尚未作用域化、可继续验证的领域 Plan 与任务列表。
-    Raises:
-        ValueError: 当前 Run 身份或草稿中的重复任务 ID 无效。
+
+    参数：
+    - `draft`（PlanDraft）：通过 RootDecision 校验的计划草稿；约束：无额外运行时限制。
+    - `request`（RootRequestState）：当前 Run 请求，用于绑定原始目标和领域身份；约束：无额外运行时限制。
+
+    返回：
+    - tuple[Plan, list[Task]]：尚未作用域化、可继续验证的领域 Plan 与任务列表。
+
+    异常：
+    - ValueError：校验条件 `not run_id` 成立时（异常说明：run_id is required for plan materialization）。
+    - ValueError：校验条件 `len(task_ids) != len(set(task_ids))` 成立时（异常说明：root_plan_task_ids_must_be_unique）。
+    - 未列出的依赖异常按当前实现传播。
     """
     run_id = request.run_id
     if not run_id:
@@ -79,15 +95,22 @@ def scope_execution_plan(
     worker_tools: set[str],
 ) -> tuple[Plan, list[Task]]:
     """绑定本次 Run 的任务身份并拒绝系统未提供的工具。
-    Args:
-        plan: 已从具体草稿转换的领域计划。
-        tasks: 计划中的任务定义。
-        run_id: 当前 Run 身份。
-        worker_tools: 系统提供的 Worker 工具名集合。
-    Returns:
-        任务 ID 和计划边均绑定当前 Run 的领域对象。
-    Raises:
-        ValueError: 任务标识重复、依赖不存在或工具不在系统能力目录中。
+
+    参数：
+    - `plan`（Plan）：已从具体草稿转换的领域计划；约束：须通过方法内校验；失败条件见下方异常说明。
+    - `tasks`（list[Task]）：计划中的任务定义；约束：无额外运行时限制。
+    - `run_id`（str）：当前 Run 身份；约束：须通过方法内校验；失败条件见下方异常说明。
+    - `worker_tools`（set[str]）：系统提供的 Worker 工具名集合；约束：无额外运行时限制。
+
+    返回：
+    - tuple[Plan, list[Task]]：任务 ID 和计划边均绑定当前 Run 的领域对象。
+
+    异常：
+    - ValueError：校验条件 `not run_id` 成立时（异常说明：run_id is required for plan scoping）。
+    - ValueError：校验条件 `not task_ids or len(task_ids) != len(set(task_ids))` 成立时（异常说明：root_plan_task_ids_must_be_unique）。
+    - ValueError：校验条件 `unknown_edges` 成立时（异常说明：root_plan_edge_references_unknown_task）。
+    - ValueError：校验条件 `unavailable_tools` 成立时。
+    - 未列出的依赖异常按当前实现传播。
     """
     if not run_id:
         raise ValueError("run_id is required for plan scoping")

@@ -56,6 +56,18 @@ class PlanningFeedback(BaseModel):
     def non_empty_missing_information(
         cls, values: tuple[str, ...]
     ) -> tuple[str, ...]:
+        """去除空白项并规范化待补充信息列表。
+
+        参数：
+        - `values`（tuple[str, ...]）：待转换或校验的值集合；约束：无额外运行时限制。
+
+        返回：
+        - tuple[str, ...]：去除空项并保留原顺序的待补充信息列表。
+
+        异常：
+        - ValueError：校验条件 `any((not value for value in normalized))` 成立时（异常说明：root_planning_feedback_item_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = tuple(value.strip() for value in values)
         if any(not value for value in normalized):
             raise ValueError("root_planning_feedback_item_required")
@@ -64,6 +76,18 @@ class PlanningFeedback(BaseModel):
     @field_validator("reason")
     @classmethod
     def non_empty_reason(cls, value: str) -> str:
+        """去除首尾空白并拒绝空的阻塞原因。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且不能为空的决策原因。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：root_planning_feedback_reason_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("root_planning_feedback_reason_required")
@@ -104,7 +128,18 @@ class AnswerIntent(BaseModel):
     @field_validator("instructions")
     @classmethod
     def non_empty_instructions(cls, value: str) -> str:
-        """去掉生成要求的首尾空白并拒绝空内容。"""
+        """去掉生成要求的首尾空白并拒绝空内容。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除空项并保留原顺序的执行指令列表。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：root_answer_instructions_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("root_answer_instructions_required")
@@ -123,7 +158,18 @@ class PlanIntent(BaseModel):
     @field_validator("goal", "instructions")
     @classmethod
     def non_empty_plan_text(cls, value: str) -> str:
-        """去掉计划文字首尾空白并拒绝空值。"""
+        """去掉计划文字首尾空白并拒绝空值。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且不能为空的计划说明文本。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：root_plan_intent_text_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("root_plan_intent_text_required")
@@ -161,6 +207,18 @@ class ContextRequest(BaseModel):
     def unique_providers(
         cls, queries: tuple[ContextQuery, ...]
     ) -> tuple[ContextQuery, ...]:
+        """按 Provider 去重上下文查询，并保留首次出现的查询。
+
+        参数：
+        - `queries`（tuple[ContextQuery, ...]）：按检索通道组织的已校验查询；约束：无额外运行时限制。
+
+        返回：
+        - tuple[ContextQuery, ...]：按 Provider 去重并保留首次出现顺序的上下文查询。
+
+        异常：
+        - ValueError：校验条件 `len(providers) != len(set(providers))` 成立时（异常说明：one_query_per_context_provider）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         providers = [query.provider for query in queries]
         if len(providers) != len(set(providers)):
             raise ValueError("one_query_per_context_provider")
@@ -178,7 +236,18 @@ class PlanEdgeDraft(BaseModel):
     @field_validator("from_task_id", "to_task_id")
     @classmethod
     def non_empty_task_ids(cls, value: str) -> str:
-        """规范化计划边两端的任务 ID。"""
+        """规范化计划边两端的任务 ID。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去重并按稳定规则拼接的非空 Task 标识。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：root_plan_edge_task_id_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("root_plan_edge_task_id_required")
@@ -202,7 +271,18 @@ class PlanTaskDraft(BaseModel):
     @field_validator("task_id", "title", "objective")
     @classmethod
     def non_empty_task_text(cls, value: str) -> str:
-        """去掉必填任务文本的首尾空白。"""
+        """去掉必填任务文本的首尾空白。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且不能为空的 Task 描述文本。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：root_plan_task_text_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("root_plan_task_text_required")
@@ -211,6 +291,18 @@ class PlanTaskDraft(BaseModel):
     @field_validator("allowed_tools")
     @classmethod
     def unique_tool_names(cls, tools: tuple[str, ...]) -> tuple[str, ...]:
+        """清理允许工具名称并拒绝空名称或重复名称。
+
+        参数：
+        - `tools`（tuple[str, ...]）：待按名称去重的工具集合；约束：无额外运行时限制。
+
+        返回：
+        - tuple[str, ...]：去重并保留首次出现顺序的工具名称。
+
+        异常：
+        - ValueError：校验条件 `any((not tool for tool in normalized)) or len(normalized) != len(set(normalized))` 成立时（异常说明：plan_task_tools_must_be_unique_non_empty_names）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = tuple(tool.strip() for tool in tools)
         if any(not tool for tool in normalized) or len(normalized) != len(
             set(normalized)
@@ -221,6 +313,18 @@ class PlanTaskDraft(BaseModel):
     @field_validator("depends_on")
     @classmethod
     def unique_dependencies(cls, dependencies: tuple[str, ...]) -> tuple[str, ...]:
+        """规范化任务依赖标识，并拒绝空值或重复项。
+
+        参数：
+        - `dependencies`（tuple[str, ...]）：构建或执行当前流程所需的协作依赖；约束：无额外运行时限制。
+
+        返回：
+        - tuple[str, ...]：去重并保留首次出现顺序的依赖 Task 标识。
+
+        异常：
+        - ValueError：校验条件 `any((not dependency for dependency in normalized)) or len(normalized) != len(set(normalized))` 成立时（异常说明：plan_task_dependencies_must_be_unique_non_empty_ids）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = tuple(dependency.strip() for dependency in dependencies)
         if any(not dependency for dependency in normalized) or len(normalized) != len(
             set(normalized)
@@ -243,7 +347,18 @@ class PlanDraft(BaseModel):
     @field_validator("goal")
     @classmethod
     def non_empty_goal(cls, value: str) -> str:
-        """去掉计划目标的首尾空白并拒绝空目标。"""
+        """去掉计划目标的首尾空白并拒绝空目标。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且不能为空的计划目标文本。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：root_plan_goal_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("root_plan_goal_required")

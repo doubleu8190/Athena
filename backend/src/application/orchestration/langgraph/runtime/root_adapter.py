@@ -1,4 +1,5 @@
-"""LangGraph-backed implementation of the Root graph port."""
+"""由 LangGraph 实现的 Root 图应用端口。
+"""
 
 from __future__ import annotations
 
@@ -22,7 +23,8 @@ from ..graphs.root import build_root_graph, invoke_root_graph
 
 
 class LangGraphRootGraph(RootGraphPort):
-    """Concrete ``RootGraphPort`` backed by a compiled Root graph."""
+    """由已编译 Root 图支持的 RootGraphPort 实现。
+    """
 
     def __init__(
         self,
@@ -33,6 +35,21 @@ class LangGraphRootGraph(RootGraphPort):
         thread_lock: GraphThreadLock,
         lease_center: LeaseCenterPort,
     ) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `workflow`（RootWorkflowPort）：负责执行业务步骤的应用工作流；约束：无额外运行时限制。
+        - `dependencies`（RootWorkflowDependencies）：构建或执行当前流程所需的协作依赖；约束：无额外运行时限制。
+        - `checkpointer`（CheckpointerProvider）：保存和恢复图执行状态的检查点依赖；约束：无额外运行时限制。
+        - `thread_lock`（GraphThreadLock）：按检查点线程串行化图调用的锁依赖；约束：无额外运行时限制。
+        - `lease_center`（LeaseCenterPort）：协调后台作业租约的可选应用端口；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._workflow = workflow
         self._dependencies = dependencies
         self._checkpointer = checkpointer
@@ -41,7 +58,17 @@ class LangGraphRootGraph(RootGraphPort):
         self._graph: CompiledStateGraph[Any, Any, Any, Any] | None = None
 
     def _compiled_graph(self) -> CompiledStateGraph[Any, Any, Any, Any]:
-        """Compile lazily after the lifecycle-managed saver has started."""
+        """在检查点保存器启动后延迟编译并缓存 Root 图。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - CompiledStateGraph[Any, Any, Any, Any]：记录当前流程数据和阶段信息的 `CompiledStateGraph[Any, Any, Any, Any]` 状态对象。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if self._graph is None:
             self._graph = build_root_graph(
                 workflow=self._workflow,
@@ -63,7 +90,37 @@ class LangGraphRootGraph(RootGraphPort):
         resume_value: RoundCompletedResumeValue | None = None,
         stop_signal: asyncio.Event | None = None,
     ) -> object:
+        """按 Run 身份启动 Root 图，或恢复其持久化检查点。
+
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：无额外运行时限制。
+        - `user_message`（str）：本次 Run 对应的用户原始消息；约束：无额外运行时限制。
+        - `message_id`（str）：关联消息的稳定标识；None 表示未绑定消息；约束：可省略，默认值为 `''`。
+        - `run_sequence`（int）：会话内 Run 的单调递增序号；约束：可省略，默认值为 `1`。
+        - `attachment_ids`（list[str] | None）：当前请求已授权使用的附件标识集合；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `resume_value`（RoundCompletedResumeValue | None）：图中断后用于恢复执行的持久化值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `stop_signal`（asyncio.Event | None）：通知当前执行应停止的异步信号；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - object：Root 图执行后产生的状态映射；恢复调用复用对应检查点。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         async def invoke() -> object:
+            """按 Run 身份启动 Root 图，或恢复其持久化检查点。
+
+            参数：
+            - 无参数。
+
+            返回：
+            - object：Root 图执行后产生的状态映射；恢复调用复用对应检查点。
+
+            异常：
+            - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+            """
             return await invoke_root_graph(
                 self._compiled_graph(),
                 session_id=session_id,
@@ -91,7 +148,22 @@ class LangGraphRootGraph(RootGraphPort):
         interrupt_id: str,
         checkpoint_id: str,
     ) -> bool:
-        """检查当前 checkpoint 是否正等待指定版本和轮次的中断。"""
+        """检查当前 checkpoint 是否正等待指定版本和轮次的中断。
+
+        参数：
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
+        - `round_id`（str）：目标执行轮次的稳定标识；约束：无额外运行时限制。
+        - `plan_version`（int）：目标计划版本号，用于固定读取或恢复的版本；约束：无额外运行时限制。
+        - `interrupt_id`（str）：目标图中断的稳定标识；约束：无额外运行时限制。
+        - `checkpoint_id`（str）：目标 LangGraph 检查点的稳定标识；约束：无额外运行时限制。
+
+        返回：
+        - bool：操作是否成功或条件是否成立。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         pending = await self.find_pending_round_wait(
             run_id=run_id,
             plan_id=plan_id,
@@ -110,9 +182,17 @@ class LangGraphRootGraph(RootGraphPort):
     ) -> tuple[str, str] | None:
         """从持久 checkpoint 找回尚未登记到 Run 行的 Round 中断。
 
-        参数：run_id、plan_id、round_id 和 plan_version 标识待恢复的轮次。
-        返回：匹配时返回 (interrupt_id, checkpoint_id)，否则返回 None。
-        异常：checkpointer 读取失败时透传底层异常。
+        参数：
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
+        - `round_id`（str）：目标执行轮次的稳定标识；约束：无额外运行时限制。
+        - `plan_version`（int）：目标计划版本号，用于固定读取或恢复的版本；约束：无额外运行时限制。
+
+        返回：
+        - tuple[str, str] | None：检查点标识和中断标识；找不到符合条件的等待时返回 None。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         snapshot = await self._compiled_graph().aget_state(
             {"configurable": {"thread_id": f"run:{run_id}"}}

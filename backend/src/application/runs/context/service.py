@@ -1,3 +1,6 @@
+"""执行上下文检索、预算裁剪、记忆校验和追踪持久化。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -47,7 +50,17 @@ _EPISODE_SOURCE_MARKER = "\n\n按需展开的来源证据（可能截断）："
 
 
 def _strip_episode_sources(item: ContextItem) -> ContextItem:
-    """从恢复中的 Root 窗口删除未经本轮复核的原始来源片段。"""
+    """从恢复中的 Root 窗口删除未经本轮复核的原始来源片段。
+
+    参数：
+    - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+    返回：
+    - ContextItem：单条上下文内容及其来源、分数和元数据。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     summary = item.content.split(_EPISODE_SOURCE_MARKER, 1)[0]
     return replace(
         item,
@@ -64,7 +77,18 @@ def _strip_episode_sources(item: ContextItem) -> ContextItem:
 def _render_episode_sources(
     item: ContextItem, source_refs: tuple[MemorySourceReference, ...]
 ) -> ContextItem:
-    """用本次重新验证的来源替换旧 checkpoint 中的展开文本。"""
+    """用本次重新验证的来源替换旧 checkpoint 中的展开文本。
+
+    参数：
+    - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+    - `source_refs`（tuple[MemorySourceReference, ...]）：事实对应的来源引用集合；约束：无额外运行时限制。
+
+    返回：
+    - ContextItem：单条上下文内容及其来源、分数和元数据。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     summary = item.content.split(_EPISODE_SOURCE_MARKER, 1)[0]
     source_content = "\n".join(
         f"[{reference.source_type} | {reference.observed_at}] "
@@ -89,10 +113,21 @@ def _render_episode_sources(
 
 
 def _memory_record_is_current(record: Any) -> bool:
-    """Fail closed on inactive, uncertain, expired, or future-effective memory."""
+    """仅接受当前有效且已生效的记忆记录。
+
+    参数：
+    - `record`（Any）：当前领域记录，作为本次转换、筛选或渲染的输入；约束：无额外运行时限制。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if record.status != MemoryStatus.ACTIVE or record.validity_status != "valid":
         return False
     now = datetime.now(timezone.utc)
+    # 过期时间格式异常时按失效处理，避免不确定的记录进入模型上下文。
     for value in (record.expires_at, record.valid_until):
         if value is None:
             continue
@@ -118,7 +153,17 @@ def _memory_record_is_current(record: Any) -> bool:
 
 
 def _without_unvalidated_memory(bundle: ContextBundle) -> ContextBundle:
-    """Remove unverified memory and record why selected candidates were dropped."""
+    """移除未经验证的记忆，并记录候选被舍弃的原因。
+
+    参数：
+    - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+
+    返回：
+    - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     selections = tuple(
         replace(
             selection,
@@ -153,6 +198,22 @@ class ContextAcquisitionService:
         episode_repository: MemoryEpisodeRepositoryPort | None = None,
         token_counter: Callable[[str], int] | None = None,
     ) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `providers`（dict[str, ContextProvider]）：按名称索引的上下文检索提供方；约束：无额外运行时限制。
+        - `trace_repository`（RetrievalPort）：持久化检索选择与追踪信息的仓储；约束：无额外运行时限制。
+        - `event_publisher`（EventPort）：发布运行进度和领域事件的依赖；约束：无额外运行时限制。
+        - `memory_repository`（MemoryRepositoryPort | None）：读取、校验或提交记忆事实的仓储；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `episode_repository`（MemoryEpisodeRepositoryPort | None）：读取或写入记忆回顾记录的仓储；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `token_counter`（Callable[[str], int] | None）：估算文本 token 数量的可注入函数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._providers = dict(providers)
         self._token_counter = token_counter or (lambda value: len(value.split()))
         self._trace_repository = trace_repository
@@ -163,7 +224,19 @@ class ContextAcquisitionService:
     async def validate_memory_context(
         self, bundle: ContextBundle, *, timeout_seconds: float = 1.0
     ) -> ContextBundle:
-        """在选择落库和模型调用前，重新确认记忆仍然有效且冲突组完整。"""
+        """在选择落库和模型调用前，重新确认记忆仍然有效且冲突组完整。
+
+        参数：
+        - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+        - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：可省略，默认值为 `1.0`。
+
+        返回：
+        - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
+        # 按事实、目录索引和回顾来源分别复核，避免用事实有效期规则误判其他来源。
         memory_items = [item for item in bundle.items if item.provider == "memory"]
         index_items = [item for item in bundle.items if item.provider == "memory_index"]
         episode_items = [
@@ -182,6 +255,18 @@ class ContextAcquisitionService:
         episode_repository = self._episode_repository
 
         async def validate_one(item: ContextItem) -> ContextItem | None:
+            """验证单条记忆在当前会话和时间点是否可用。
+
+            参数：
+            - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+            返回：
+            - ContextItem | None：单条上下文内容及其来源、分数和元数据。
+
+            异常：
+            - asyncio.CancelledError（重新抛出捕获的异常）：校验条件 `捕获 asyncio.CancelledError 后` 成立时。
+            - 未列出的依赖异常按当前实现传播。
+            """
             try:
                 return await self._validate_memory_item(item)
             except asyncio.CancelledError:
@@ -193,13 +278,37 @@ class ContextAcquisitionService:
                 )
                 return None
 
+        # 限制并发校验数量，并让所有来源共用一个总时限。
         semaphore = asyncio.Semaphore(4)
 
         async def bounded_validate(item: ContextItem) -> ContextItem | None:
+            """在有界超时内验证单条记忆是否仍然可用。
+
+            参数：
+            - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+            返回：
+            - ContextItem | None：单条上下文内容及其来源、分数和元数据。
+
+            异常：
+            - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+            """
             async with semaphore:
                 return await validate_one(item)
 
         async def bounded_validate_index(item: ContextItem) -> ContextItem | None:
+            """在有界超时内验证记忆索引条目是否仍然有效。
+
+            参数：
+            - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+            返回：
+            - ContextItem | None：单条上下文内容及其来源、分数和元数据。
+
+            异常：
+            - asyncio.CancelledError（重新抛出捕获的异常）：校验条件 `捕获 asyncio.CancelledError 后` 成立时。
+            - 未列出的依赖异常按当前实现传播。
+            """
             async with semaphore:
                 try:
                     session_id = item.metadata.get("session_id")
@@ -229,6 +338,17 @@ class ContextAcquisitionService:
                     return None
 
         async def bounded_revalidate_episode(item: ContextItem) -> ContextItem:
+            """在有界超时内重新验证记忆回顾及其来源。
+
+            参数：
+            - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+            返回：
+            - ContextItem：单条上下文内容及其来源、分数和元数据。
+
+            异常：
+            - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+            """
             async with semaphore:
                 return await self._revalidate_episode_sources(
                     item, episode_repository
@@ -261,6 +381,7 @@ class ContextAcquisitionService:
             if current is not None and original.source_id is not None
         }
 
+        # 将事实组成员 ID 映射到复核后的规范条目，供后续选择追踪查找。
         for original, current in zip(memory_items, validated, strict=True):
             if current is None:
                 continue
@@ -276,6 +397,7 @@ class ContextAcquisitionService:
                 if alias:
                     validated_by_alias[alias] = current
 
+        # 按原始窗口顺序替换复核结果；失效记忆被省略，其他来源保持原位。
         validated_items: list[ContextItem] = []
         memory_index = 0
         for item in bundle.items:
@@ -300,6 +422,7 @@ class ContextAcquisitionService:
             if current is not None:
                 validated_items.append(current)
 
+        # 同步修正选择追踪，避免事件把已丢弃的候选仍标记为已选中。
         selections: list[RetrievalCandidateSelection] = []
         for selection in bundle.context_selection:
             if selection.provider == "memory_index" and selection.context_selected:
@@ -362,7 +485,19 @@ class ContextAcquisitionService:
         item: ContextItem,
         repository: MemoryEpisodeRepositoryPort | None,
     ) -> ContextItem:
-        """在每次模型调用前重新读取已展开的有限回顾来源。"""
+        """在每次模型调用前重新读取已展开的有限回顾来源。
+
+        参数：
+        - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+        - `repository`（MemoryEpisodeRepositoryPort | None）：负责读取或持久化领域数据的仓储依赖；约束：允许为 None，按未提供值的分支处理。
+
+        返回：
+        - ContextItem：单条上下文内容及其来源、分数和元数据。
+
+        异常：
+        - asyncio.CancelledError（重新抛出捕获的异常）：校验条件 `捕获 asyncio.CancelledError 后` 成立时。
+        - 未列出的依赖异常按当前实现传播。
+        """
         if repository is None or item.source_id is None:
             return _strip_episode_sources(item)
         session_id = item.metadata.get("session_id")
@@ -389,9 +524,21 @@ class ContextAcquisitionService:
         return _render_episode_sources(item, source_refs)
 
     async def _validate_memory_item(self, item: ContextItem) -> ContextItem | None:
+        """复核记忆条目的事实身份、有效状态和当前会话可见范围。
+
+        参数：
+        - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+        返回：
+        - ContextItem | None：单条上下文内容及其来源、分数和元数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         repository = self._memory_repository
         if repository is None:
             return None
+        # 优先从候选快照读取事实身份，只有缺少身份时才回查种子记录。
         identity_value = item.metadata.get("memory_fact_identity")
         identity: MemoryFactIdentity | None = None
         if identity_value is not None:
@@ -418,12 +565,14 @@ class ContextAcquisitionService:
                 return None
             return replace(item, content=seed.content, source_id=seed.id)
 
+        # 按完整事实身份重新读取成员，并排除失效记录后再重建冲突组。
         related = await repository.list_fact_group_by_identity(identity)
         related = [record for record in related if _memory_record_is_current(record)]
         if not related:
             return None
         seed = next((record for record in related if record.id == item.source_id), None)
         if seed is None:
+            # 多值事实需按成员值找回原锚点；未知基数无法安全选择代表值，因此拒绝使用。
             cardinality = item.metadata.get("fact_cardinality")
             if cardinality == "set":
                 member_value = item.metadata.get("memory_group_member_value")
@@ -478,10 +627,21 @@ class ContextAcquisitionService:
     ) -> ContextBundle:
         """执行同一阶段的检索并保存候选。
 
-        参数：session_id/run_id/message_id 关联请求；plan 限定查询和规模；
-        invocation_id 标识本批调用；stage 由工作流指定预检索或定向检索。
-        返回：ContextBundle，包含已裁剪资料和通道摘要。
-        异常：外部取消时传播 CancelledError；普通通道故障写入结果。
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+        - `invocation_id`（str）：本次图或模型调用的关联标识；约束：无额外运行时限制。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+        - `message_id`（str | None）：关联消息的稳定标识；None 表示未绑定消息；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `skipped_outcomes`（tuple[ContextQueryOutcome, ...]）：未实际调用检索通道时生成的跳过结果；约束：可省略，默认值为 `()`。
+
+        返回：
+        - ContextBundle：ContextBundle，包含已裁剪资料和通道摘要。
+
+        异常：
+        - asyncio.CancelledError：校验条件 `cancelled` 成立时。
+        - 未列出的依赖异常按当前实现传播。
         """
         started_clock = perf_counter()
         activity_id = f"retrieval:{invocation_id}"
@@ -556,7 +716,20 @@ class ContextAcquisitionService:
         run_id: str,
         stage: RetrievalStage,
     ) -> None:
-        """Publish truthful skip facts when a retrieval stage has no active provider."""
+        """为未执行的 Provider 查询发布明确的跳过结果。
+
+        参数：
+        - `outcomes`（tuple[ContextQueryOutcome, ...]）：检索查询对应的执行结果及状态；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         activity_id = f"retrieval:{run_id}:{stage}:skipped"
         await self._publish_skipped_provider_outcomes(
             outcomes,
@@ -574,7 +747,21 @@ class ContextAcquisitionService:
         selections: tuple[RetrievalCandidateSelection, ...],
         stage: RetrievalStage,
     ) -> None:
-        """记录 Root 最终窗口选择，并只为本轮保留的记忆计数。"""
+        """记录 Root 最终窗口选择，并只为本轮保留的记忆计数。
+
+        参数：
+        - `run_id`（str | None）：目标运行的稳定标识，用于关联执行及其记录；约束：允许为 None，按未提供值的分支处理。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `agent_run_id`（str）：负责本次上下文检索的 Agent Run 标识；约束：无额外运行时限制。
+        - `selections`（tuple[RetrievalCandidateSelection, ...]）：本次检索中逐候选项记录的选择结果；约束：无额外运行时限制。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         memory_ids = list(
             dict.fromkeys(
                 memory_id
@@ -630,7 +817,17 @@ class ContextAcquisitionService:
         )
 
     async def persist_revalidated_selection(self, bundle: ContextBundle) -> None:
-        """同步最终模型调用前的筛选结果，不重复增加记忆访问次数。"""
+        """同步最终模型调用前的筛选结果，不重复增加记忆访问次数。
+
+        参数：
+        - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if bundle.retrieval_run_id is None or not bundle.context_selection:
             return
         try:
@@ -659,6 +856,22 @@ class ContextAcquisitionService:
         persisted: bool,
         stage: RetrievalStage,
     ) -> None:
+        """发布 Root 最终上下文选择及其持久化状态。
+
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `agent_run_id`（str）：负责本次上下文检索的 Agent Run 标识；约束：无额外运行时限制。
+        - `run_id`（str | None）：目标运行的稳定标识，用于关联执行及其记录；约束：允许为 None，按未提供值的分支处理。
+        - `selections`（tuple[RetrievalCandidateSelection, ...]）：本次检索中逐候选项记录的选择结果；约束：无额外运行时限制。
+        - `persisted`（bool）：指示选择追踪记录是否已成功持久化；约束：无额外运行时限制。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         invocation_id = (
             run_id.removeprefix("retrieval_") if run_id is not None else "unknown"
         )
@@ -690,7 +903,21 @@ class ContextAcquisitionService:
         activity_id: str,
         stage: RetrievalStage,
     ) -> tuple[list[ProviderResult], bool]:
-        """并发调用已选模块；取消时保留已经完成的模块结果。"""
+        """并发调用已选模块；取消时保留已经完成的模块结果。
+
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+        - `activity_id`（str）：当前模型活动的稳定标识；约束：无额外运行时限制。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+
+        返回：
+        - tuple[list[ProviderResult], bool]：检索提供方的状态、候选结果和追踪信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         unknown = [name for name in plan.providers if name not in self._providers]
         results = [
             ProviderResult(name, "skipped", error_message="provider unavailable")
@@ -777,7 +1004,7 @@ class ContextAcquisitionService:
         except asyncio.CancelledError:
             logger.info("Context retrieval cancelled.")
             for task in tasks:
-                # 先取消还没有完成的任务
+                # 取消尚未结束的 Provider 任务，随后统一收集其最终状态。
                 if not task.done():
                     task.cancel()
             settled = await asyncio.gather(*tasks, return_exceptions=True)
@@ -798,7 +1025,7 @@ class ContextAcquisitionService:
                 elif isinstance(value, BaseException) and not isinstance(
                     value, asyncio.CancelledError
                 ):
-                    # 处理异常但是不是因为取消信号导致异常的任务
+                    # 保留取消过程中独立失败的 Provider 结果，避免将其误记为取消。
                     result = ProviderResult(
                         tasks[task], "failed", error_message=type(value).__name__
                     )
@@ -813,7 +1040,7 @@ class ContextAcquisitionService:
                         plan=plan,
                     )
                 else:
-                    # 处理取消的任务
+                    # 其余任务均因本次取消而结束，记录为 cancelled。
                     result = ProviderResult(
                         tasks[task], "cancelled", error_message="retrieval cancelled"
                     )
@@ -832,7 +1059,18 @@ class ContextAcquisitionService:
     def _build_bundle(
         self, results: list[ProviderResult], plan: ContextPlan
     ) -> ContextBundle:
-        """按现有条数和 token 规则裁剪，并给淘汰候选标原因。"""
+        """按现有条数和 token 规则裁剪，并给淘汰候选标原因。
+
+        参数：
+        - `results`（list[ProviderResult]）：本次处理产生的结果集合；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+
+        返回：
+        - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         all_items = [item for result in results for item in result.items]
         limit_rejected = all_items[max(0, plan.max_items) :]
         selected = all_items[: max(0, plan.max_items)]
@@ -843,6 +1081,7 @@ class ContextAcquisitionService:
         tokens = 0
         memory_tokens = 0
         token_stopped = False
+        # 先限制条目总数，再按 Provider 顺序分配 token；记忆超出子预算时跳过该条，总预算耗尽后停止收集。
         for item in selected:
             if token_stopped:
                 reasons[_item_key(item)] = "token_budget_stop"
@@ -892,7 +1131,24 @@ class ContextAcquisitionService:
         duration_ms: float,
         cancelled: bool,
     ) -> str | None:
-        """在短事务中保存全部模块候选；保存失败不影响资料返回。"""
+        """在短事务中保存全部模块候选；保存失败不影响资料返回。
+
+        参数：
+        - `invocation_id`（str）：本次图或模型调用的关联标识；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `message_id`（str | None）：关联消息的稳定标识；None 表示未绑定消息；约束：允许为 None，按未提供值的分支处理。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+        - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+        - `duration_ms`（float）：本阶段测得的耗时毫秒数；约束：无额外运行时限制。
+        - `cancelled`（bool）：指示本轮是否因取消信号终止；约束：无额外运行时限制。
+
+        返回：
+        - str | None：持久化检索追踪后返回的运行标识；未启用追踪时返回 None。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         provider_traces = tuple(
             RetrievalProviderTrace(
                 provider=result.provider,
@@ -952,7 +1208,23 @@ class ContextAcquisitionService:
         stage: RetrievalStage,
         plan: ContextPlan,
     ) -> None:
-        """为本次调用的每个检索模块发布结果活动。"""
+        """为本次调用的每个检索模块发布结果活动。
+
+        参数：
+        - `results`（list[ProviderResult]）：本次处理产生的结果集合；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `activity_id`（str）：当前模型活动的稳定标识；约束：无额外运行时限制。
+        - `retrieval_run_id`（str | None）：本次检索运行的标识；None 表示未关联持久化检索运行；约束：允许为 None，按未提供值的分支处理。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         for result in results:
             failed = result.status in {"failed", "timeout"}
             source_titles = [
@@ -1015,7 +1287,20 @@ class ContextAcquisitionService:
         run_id: str,
         activity_id: str,
     ) -> None:
-        """Expose skipped provider decisions without presenting them as active work."""
+        """发布带有阶段和跳过原因的 Provider 结果。
+
+        参数：
+        - `outcomes`（tuple[ContextQueryOutcome, ...]）：检索查询对应的执行结果及状态；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `activity_id`（str）：当前模型活动的稳定标识；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         for outcome in outcomes:
             if outcome.status != "skipped":
                 continue
@@ -1065,7 +1350,25 @@ class ContextAcquisitionService:
         cancelled: bool,
         stage: RetrievalStage,
     ) -> None:
-        """结束活动并发布实际获得的召回数量。"""
+        """结束活动并发布实际获得的召回数量。
+
+        参数：
+        - `results`（list[ProviderResult]）：本次处理产生的结果集合；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `activity_id`（str）：当前模型活动的稳定标识；约束：无额外运行时限制。
+        - `retrieval_run_id`（str | None）：本次检索运行的标识；None 表示未关联持久化检索运行；约束：允许为 None，按未提供值的分支处理。
+        - `duration_ms`（int）：本阶段测得的耗时毫秒数；约束：无额外运行时限制。
+        - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+        - `cancelled`（bool）：指示本轮是否因取消信号终止；约束：无额外运行时限制。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         status = _run_status(results, cancelled=cancelled)
         event_type = (
             "retrieval.failed"
@@ -1101,7 +1404,20 @@ class ContextAcquisitionService:
     def _activity_payload(
         activity_id: str, run_id: str, *, stage: RetrievalStage, status: str
     ) -> dict[str, str]:
-        """构造 Root 检索活动的关联字段。"""
+        """构造 Root 检索活动的关联字段。
+
+        参数：
+        - `activity_id`（str）：当前模型活动的稳定标识；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+        - `status`（str）：当前操作或记录的状态值；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, str]：用于进度事件的活动名称和值组成的字符串映射。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return {
             "activity_id": activity_id,
             "activity_type": "retrieval",
@@ -1122,10 +1438,18 @@ class ContextAcquisitionService:
     ) -> ProviderResult:
         """执行整个通道调用，保持快通道结果并限制预检索等待。
 
-        参数：name/provider 是通道及其实现；session_id/run_id 关联请求；
-        plan 的可选上限覆盖枚举文档、关键词和向量查询。
-        返回：ProviderResult，超时和普通异常分别标记。
-        异常：外部 CancelledError 原样传播。
+        参数：
+        - `name`（str）：目标名称，用于标识相应配置、工具或对象；约束：无额外运行时限制。
+        - `provider`（ContextProvider）：提供检索或执行能力的上下文提供方；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+
+        返回：
+        - ProviderResult：ProviderResult，超时和普通异常分别标记。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         started = perf_counter()
         try:
@@ -1171,7 +1495,21 @@ class ContextAcquisitionService:
         *,
         transition_id: str | None = None,
     ) -> None:
-        """尽力发布检索活动；事件故障不覆盖检索结果。"""
+        """尽力发布检索活动；事件故障不覆盖检索结果。
+
+        参数：
+        - `event_type`（str）：要发布的事件类型名称；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `payload`（dict[str, Any]）：随事件或消息传递的结构化内容；约束：无额外运行时限制。
+        - `transition_id`（str | None）：标识本次状态迁移或事件发布的稳定值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         try:
             from domain.events import ApplicationEvent, EventDurability
 
@@ -1195,7 +1533,17 @@ class ContextAcquisitionService:
 
 
 def _item_key(item: ContextItem) -> tuple[str, str]:
-    """为资料窗口和候选记录生成相同的模块来源键。"""
+    """为资料窗口和候选记录生成相同的模块来源键。
+
+    参数：
+    - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+    返回：
+    - tuple[str, str]：由 Provider 和来源标识组成的上下文条目去重键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     digest = sha256(item.content.encode("utf-8")).hexdigest()[:24]
     group_key = item.metadata.get("memory_group_key")
     source_id = (
@@ -1211,6 +1559,19 @@ def _mark_bundle_selection(
     kept_keys: set[tuple[str, str]],
     reasons: dict[tuple[str, str], str],
 ) -> ProviderResult:
+    """将上下文预算筛选结果写入 Provider 结果追踪。
+
+    参数：
+    - `result`（ProviderResult）：当前阶段生成的领域结果或操作回执；约束：无额外运行时限制。
+    - `kept_keys`（set[tuple[str, str]]）：上下文裁剪后保留的来源键集合；约束：无额外运行时限制。
+    - `reasons`（dict[tuple[str, str], str]）：每个来源被选择、保留或过滤的原因；约束：无额外运行时限制。
+
+    返回：
+    - ProviderResult：检索提供方的状态、候选结果和追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     candidates: list[RetrievalCandidateTrace] = []
     for candidate in result.candidates:
         key = (candidate.provider, candidate.source_id)
@@ -1238,6 +1599,18 @@ def _mark_bundle_selection(
 
 
 def _provider_query(plan: ContextPlan, provider: str) -> str | None:
+    """读取指定 Provider 对应的计划查询；未配置时返回 None。
+
+    参数：
+    - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+    - `provider`（str）：提供检索或执行能力的上下文提供方；约束：无额外运行时限制。
+
+    返回：
+    - str | None：计划中对应 Provider 的检索查询；未配置该 Provider 时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return {
         "memory": plan.memory_query,
         "episode": plan.episode_query,
@@ -1250,6 +1623,18 @@ def _provider_query(plan: ContextPlan, provider: str) -> str | None:
 def _run_status(
     results: list[ProviderResult] | tuple[ProviderResult, ...], *, cancelled: bool
 ) -> str:
+    """根据各 Provider 结果和取消状态汇总检索运行状态。
+
+    参数：
+    - `results`（list[ProviderResult] | tuple[ProviderResult, ...]）：本次处理产生的结果集合；约束：无额外运行时限制。
+    - `cancelled`（bool）：指示本轮是否因取消信号终止；约束：无额外运行时限制。
+
+    返回：
+    - str：根据 Provider 结果和取消信号汇总的检索运行状态。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if cancelled:
         return "cancelled"
     active = [result for result in results if result.status != "skipped"]
@@ -1269,7 +1654,17 @@ def _run_status(
 
 
 def _plan_query_summary(plan: ContextPlan) -> str:
-    """从各检索模块的实际查询构造召回摘要。"""
+    """从各检索模块的实际查询构造召回摘要。
+
+    参数：
+    - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+
+    返回：
+    - str：按 Provider 汇总的计划查询及其资源范围说明。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     queries = (
         ("memory", plan.memory_query),
         ("episode", plan.episode_query),

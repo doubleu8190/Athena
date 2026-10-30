@@ -23,7 +23,17 @@ class WorkerToolCallContentSchema(BaseModel):
     arguments: dict[str, Any]
 
     def to_domain(self) -> WorkerToolCallContent:
-        """转换为工具调用领域类型。"""
+        """转换为工具调用领域类型。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - WorkerToolCallContent：包含当前消息内容及工具调用信息的领域对象。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return WorkerToolCallContent(
             id=self.id,
             name=self.name,
@@ -32,7 +42,17 @@ class WorkerToolCallContentSchema(BaseModel):
 
     @classmethod
     def from_domain(cls, value: WorkerToolCallContent) -> WorkerToolCallContentSchema:
-        """将工具调用领域类型转换为 JSON schema。"""
+        """将工具调用领域类型转换为 JSON schema。
+
+        参数：
+        - `value`（WorkerToolCallContent）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - WorkerToolCallContentSchema：由领域消息内容及其工具调用构造的 schema。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls(id=value.id, name=value.name, arguments=value.arguments)
 
 
@@ -49,7 +69,17 @@ class WorkerToolResultContentSchema(BaseModel):
     truncated: bool | None = None
 
     def to_domain(self) -> WorkerToolResultContent:
-        """转换为工具结果领域类型，并保留提供方扩展字段。"""
+        """转换为工具结果领域类型，并保留提供方扩展字段。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - WorkerToolResultContent：包含当前消息内容及工具调用信息的领域对象。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return WorkerToolResultContent(
             status=self.status,
             output=self.output,
@@ -64,7 +94,17 @@ class WorkerToolResultContentSchema(BaseModel):
     def from_domain(
         cls, value: WorkerToolResultContent
     ) -> WorkerToolResultContentSchema:
-        """将工具结果领域类型转换为 JSON schema，展开扩展字段。"""
+        """将工具结果领域类型转换为 JSON schema，展开扩展字段。
+
+        参数：
+        - `value`（WorkerToolResultContent）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - WorkerToolResultContentSchema：由领域消息内容及其工具调用构造的 schema。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls.model_validate(
             {
                 "status": value.status,
@@ -88,7 +128,17 @@ class WorkerExecutionMessageContentSchema(BaseModel):
     tool_result: WorkerToolResultContentSchema | None = None
 
     def to_domain(self) -> WorkerExecutionMessageContent:
-        """转换为 Worker 消息领域类型。"""
+        """转换为 Worker 消息领域类型。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - WorkerExecutionMessageContent：包含当前消息内容及工具调用信息的领域对象。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return WorkerExecutionMessageContent(
             content=self.content,
             tool_calls=tuple(call.to_domain() for call in self.tool_calls),
@@ -101,7 +151,17 @@ class WorkerExecutionMessageContentSchema(BaseModel):
     def from_domain(
         cls, value: WorkerExecutionMessageContent
     ) -> WorkerExecutionMessageContentSchema:
-        """将 Worker 消息领域类型转换为 JSON schema。"""
+        """将 Worker 消息领域类型转换为 JSON schema。
+
+        参数：
+        - `value`（WorkerExecutionMessageContent）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - WorkerExecutionMessageContentSchema：由领域消息内容及其工具调用构造的 schema。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls(
             content=value.content,
             tool_calls=tuple(

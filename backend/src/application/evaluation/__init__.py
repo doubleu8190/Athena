@@ -1,4 +1,5 @@
-"""Evaluation application services."""
+"""评估应用层服务和用例。
+"""
 
 from .service import EvaluationService
 from .gates import evaluate_gates

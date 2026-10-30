@@ -1,3 +1,6 @@
+"""定义上下文检索计划、条目、Provider 结果和裁剪后资料包。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -22,6 +25,18 @@ class MemoryQuery(BaseModel):
     @field_validator("query")
     @classmethod
     def strip_query(cls, value: str) -> str:
+        """去除查询首尾空白，并将空字符串规范为 None。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且符合查询契约的文本。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：context_query_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("context_query_required")
@@ -39,6 +54,18 @@ class EpisodeQuery(BaseModel):
     @field_validator("query")
     @classmethod
     def strip_query(cls, value: str) -> str:
+        """去除查询首尾空白，并将空字符串规范为 None。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且符合查询契约的文本。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：context_query_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("context_query_required")
@@ -56,6 +83,18 @@ class FileQuery(BaseModel):
     @field_validator("query")
     @classmethod
     def strip_query(cls, value: str) -> str:
+        """去除查询首尾空白，并将空字符串规范为 None。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且符合查询契约的文本。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：context_query_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("context_query_required")
@@ -76,6 +115,18 @@ class KnowledgeQuery(BaseModel):
     @field_validator("query")
     @classmethod
     def strip_query(cls, value: str) -> str:
+        """去除查询首尾空白，并将空字符串规范为 None。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且符合查询契约的文本。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：context_query_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("context_query_required")
@@ -92,6 +143,18 @@ class GraphQuery(BaseModel):
     @field_validator("query")
     @classmethod
     def strip_query(cls, value: str) -> str:
+        """去除查询首尾空白，并将空字符串规范为 None。
+
+        参数：
+        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - str：去除首尾空白且符合查询契约的文本。
+
+        异常：
+        - ValueError：校验条件 `not normalized` 成立时（异常说明：context_query_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("context_query_required")
@@ -119,6 +182,8 @@ class ContextQueryOutcome(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class ContextPlan:
+    """限定检索 Provider、查询、资源范围和上下文预算的不可变计划。
+    """
     providers: tuple[str, ...] = ("conversation",)
     memory_query: str = ""
     episode_query: str = ""
@@ -138,12 +203,24 @@ class ContextPlan:
     provider_timeout_seconds: float | None = None
 
     def with_updates(self, **changes: Any) -> "ContextPlan":
-        """Return a plan with selected provider-specific values replaced."""
+        """返回替换指定 Provider 值后的计划副本。
+
+        参数：
+        - `changes`（Any）：用于覆盖 ContextPlan 字段的更新值；约束：无额外运行时限制。
+
+        返回：
+        - 'ContextPlan'：将指定 Provider 更新后的不可变 ContextPlan 副本。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return replace(self, **changes)
 
 
 @dataclass(frozen=True, slots=True)
 class ContextItem:
+    """由单个 Provider 返回并带来源元数据的上下文条目。
+    """
     provider: str
     content: str
     source_id: str | None = None
@@ -152,6 +229,8 @@ class ContextItem:
 
 @dataclass(frozen=True, slots=True)
 class ProviderResult:
+    """记录单个 Provider 的执行状态、候选、错误和追踪信息。
+    """
     provider: str
     status: str
     items: tuple[ContextItem, ...] = ()
@@ -168,6 +247,8 @@ class ProviderResult:
 
 @dataclass(frozen=True, slots=True)
 class ContextBundle:
+    """经过条数和 token 预算裁剪的上下文及选择追踪。
+    """
     items: tuple[ContextItem, ...]
     provider_results: tuple[ProviderResult, ...]
     providers_succeeded: tuple[str, ...] = ()

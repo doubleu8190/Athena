@@ -1,10 +1,4 @@
-"""Application orchestration graphs built with LangGraph.
-
-The package is organized by responsibility:
-
-* ``graphs`` defines checkpointable graph topology and invocation contracts.
-* ``runtime`` connects graphs to application ports and lifecycle-managed resources.
-* Root and Worker model agents live in the orchestration ``agents`` package.
+"""应用工作流的 LangGraph 适配层。
 """
 
 from .graphs import build_root_graph, invoke_root_graph

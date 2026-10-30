@@ -24,6 +24,24 @@ def partition_plan_versions(
 
     版本号是执行边界：依赖只能指向相同或更早版本，后续版本必须等待
     前一版本完成后再进入已有 Revision 流程。
+
+    参数：
+    - `plan`（Mapping[str, Any]）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+
+    返回：
+    - tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]：首轮可提交的计划及按后续版本分组的延迟任务。
+
+    异常：
+    - ValueError：校验条件 `not isinstance(raw_tasks, (list, tuple)) or not raw_tasks` 成立时（异常说明：root_plan_tasks_invalid）。
+    - ValueError：校验条件 `not isinstance(raw_task, Mapping)` 成立时（异常说明：root_plan_task_invalid）。
+    - ValueError：校验条件 `not isinstance(task_id, str) or not task_id.strip() or task_id in versions or (has_explicit_versions and 'plan_version' not in raw_task) or (not isinstance(version, int)) or isinstance(version, bool) or (version < 1)` 成立时（异常说明：root_plan_version_contract_invalid）。
+    - ValueError：校验条件 `version_numbers != list(range(1, version_numbers[-1] + 1))` 成立时（异常说明：root_plan_versions_must_be_contiguous）。
+    - ValueError：校验条件 `not isinstance(raw_edges, (list, tuple))` 成立时（异常说明：root_plan_edges_invalid）。
+    - ValueError：校验条件 `not isinstance(edge, Mapping)` 成立时（异常说明：root_plan_edge_invalid）。
+    - ValueError：校验条件 `not isinstance(source, str) or not isinstance(target, str) or source not in versions or (target not in versions) or (versions[source] > versions[target])` 成立时（异常说明：root_plan_version_dependency_invalid）。
+    - ValueError：校验条件 `not isinstance(dependencies, (list, tuple)) or any((not isinstance(dependency, str) or dependency not in versions for dependency in dependencies))` 成立时（异常说明：root_plan_task_dependencies_invalid）。
+    - ValueError：校验条件 `any((versions[dependency] > versions[task_id] for dependency in dependencies))` 成立时（异常说明：root_plan_version_dependency_invalid）。
+    - 未列出的依赖异常按当前实现传播。
     """
     raw_tasks = plan.get("tasks")
     if not isinstance(raw_tasks, (list, tuple)) or not raw_tasks:
@@ -33,6 +51,7 @@ def partition_plan_versions(
         for task in raw_tasks
     )
 
+    # 先收集任务版本，再用统一索引校验版本连续性和依赖方向。
     versions: dict[str, int] = {}
     tasks_by_version: dict[int, list[dict[str, Any]]] = {}
     for raw_task in raw_tasks:
@@ -78,6 +97,7 @@ def partition_plan_versions(
         incoming[target].append(source)
         normalized_edges.append((source, target))
 
+    # 边表和任务内依赖都归一到同一结构，确保后续版本校验不遗漏任一声明方式。
     raw_tasks_by_id = {str(task["task_id"]): task for task in raw_tasks}
     for task_id, raw_task in raw_tasks_by_id.items():
         dependencies = raw_task.get("depends_on", ())
@@ -93,6 +113,7 @@ def partition_plan_versions(
             raise ValueError("root_plan_version_dependency_invalid")
         incoming[task_id].extend(dependencies)
 
+    # 首轮只下发 V1；更高版本保留为延期任务，等待前序版本完成后再提交。
     current_ids = {
         task_id for task_id, version in versions.items() if version == 1
     }
@@ -137,7 +158,18 @@ def partition_plan_versions(
 def deferred_version_review_decision(
     context: ReviewContext, state: Mapping[str, Any]
 ) -> ReviewDecision | None:
-    """当前版本完成 Review 后，将已声明的下一版本转换为确定性修订。"""
+    """当前版本完成 Review 后，将已声明的下一版本转换为确定性修订。
+
+    参数：
+    - `context`（ReviewContext）：供决策或生成步骤使用的上下文资料；约束：无额外运行时限制。
+    - `state`（Mapping[str, Any]）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - ReviewDecision | None：Root 对已完成 Round 选择的继续、修订或结束动作。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     raw_tasks = _next_version_tasks(context, state)
     identity = _existing_plan_identity(context, state)
     if raw_tasks is None or identity is None:
@@ -164,7 +196,18 @@ def deferred_version_review_decision(
 def _next_version_tasks(
     context: ReviewContext, state: Mapping[str, Any]
 ) -> list[Any] | tuple[Any, ...] | None:
-    """仅在当前版本全部完成后返回用户声明的下一版任务。"""
+    """仅在当前版本全部完成后返回用户声明的下一版任务。
+
+    参数：
+    - `context`（ReviewContext）：供决策或生成步骤使用的上下文资料；约束：无额外运行时限制。
+    - `state`（Mapping[str, Any]）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - list[Any] | tuple[Any, ...] | None：目标后续版本对应的任务列表；计划没有后续版本时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     deferred = state.get("deferred_plan_versions")
     if not isinstance(deferred, Mapping):
         return None
@@ -182,7 +225,18 @@ def _next_version_tasks(
 def _existing_plan_identity(
     context: ReviewContext, state: Mapping[str, Any]
 ) -> tuple[tuple[str, ...], str] | None:
-    """读取版本修订需要保留的任务 ID 与当前 Run 身份。"""
+    """读取版本修订需要保留的任务 ID 与当前 Run 身份。
+
+    参数：
+    - `context`（ReviewContext）：供决策或生成步骤使用的上下文资料；约束：无额外运行时限制。
+    - `state`（Mapping[str, Any]）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - tuple[tuple[str, ...], str] | None：已有计划中的任务 ID 集合及其规范化签名；结构不合法时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     plan = state.get("plan", {})
     request = state.get("request", {})
     dag_nodes = context.full_dag_summary.get("nodes", ())
@@ -216,7 +270,19 @@ def _scope_deferred_tasks(
     existing_ids: tuple[str, ...],
     run_id: str,
 ) -> list[dict[str, Any]] | None:
-    """校验下一版任务及依赖，并绑定当前 Run 的任务 ID。"""
+    """校验下一版任务及依赖，并绑定当前 Run 的任务 ID。
+
+    参数：
+    - `raw_tasks`（list[Any] | tuple[Any, ...]）：Root 计划中原始任务定义集合；约束：无额外运行时限制。
+    - `existing_ids`（tuple[str, ...]）：已经存在的领域对象标识集合；约束：无额外运行时限制。
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+
+    返回：
+    - list[dict[str, Any]] | None：已分配作用域内新 ID 的后续任务列表；版本或依赖无法安全映射时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     new_task_ids = {
         item.get("task_id")
         for item in raw_tasks
@@ -257,7 +323,21 @@ def _scope_deferred_task(
     scoped_new_ids: set[str],
     run_id: str,
 ) -> dict[str, Any] | None:
-    """验证并规范化一个延期任务及其依赖。"""
+    """验证并规范化一个延期任务及其依赖。
+
+    参数：
+    - `item`（Any）：当前待处理的单个条目；约束：无额外运行时限制。
+    - `existing_id_set`（set[str]）：当前计划中已经占用的任务标识集合；约束：无额外运行时限制。
+    - `requested_to_scoped`（dict[str, str]）：将请求中的原任务标识映射到作用域内任务标识；约束：无额外运行时限制。
+    - `scoped_new_ids`（set[str]）：当前作用域内新分配的任务标识集合；约束：无额外运行时限制。
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+
+    返回：
+    - dict[str, Any] | None：依赖标识已转换到当前作用域的任务字典；任务不符合预期时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     try:
         task = PlanTaskDraft.model_validate(item)
     except ValidationError:

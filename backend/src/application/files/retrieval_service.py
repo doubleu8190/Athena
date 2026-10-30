@@ -26,6 +26,18 @@ from application.runs.context.protocols import ContextProvider
 
 
 def _keyword_score(content: str, query: str) -> float:
+    """计算查询词在候选文本中的匹配比例。
+
+    参数：
+    - `content`（str）：待处理或返回的正文内容；约束：无额外运行时限制。
+    - `query`（str）：用于检索、匹配或解析的原始查询文本；约束：无额外运行时限制。
+
+    返回：
+    - float：查询词在文本中的命中比例；查询词集合为空时返回 0.0。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     terms = {term.lower() for term in query.split() if term.strip()}
     if not terms:
         return 0.0
@@ -46,6 +58,20 @@ class FileContextProvider(ContextProvider):
         limit: int = 5,
         timeout_seconds: float = 5.0,
     ) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `chunks`（FileChunkRepository）：按顺序读取的文件字节块异步迭代器；约束：无额外运行时限制。
+        - `vector_indexer`（FileVectorSearchPort | None）：执行向量检索或索引操作的可选依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `limit`（int）：本次读取或处理的数量上限；约束：可省略，默认值为 `5`。
+        - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：可省略，默认值为 `5.0`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._chunks = chunks
         self._vector_indexer = vector_indexer
         self._limit = limit
@@ -58,6 +84,19 @@ class FileContextProvider(ContextProvider):
         run_id: str,
         plan: ContextPlan,
     ) -> ProviderResult:
+        """按计划检索文件或知识库上下文并生成候选项和通道追踪。
+
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+
+        返回：
+        - ProviderResult：检索提供方的状态、候选结果和追踪信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         started = time.perf_counter()
         query = plan.file_query
         file_ids = plan.file_ids
@@ -79,6 +118,7 @@ class FileContextProvider(ContextProvider):
         vector_completed = False
         try:
             async with asyncio.timeout(self._timeout_seconds):
+                # 只装载本次计划授权的附件文本，向量结果随后也必须命中该集合中的文本块 ID。
                 groups = await asyncio.gather(
                     *(self._chunks.list_by_attachment(file_id) for file_id in file_ids)
                 )
@@ -111,6 +151,7 @@ class FileContextProvider(ContextProvider):
                     vector_status = "succeeded"
                     vector_completed = True
 
+            # 丢弃越权或重复的向量命中，再与关键词排名融合，保持两条通道的来源一致。
             vector_chunks: list[tuple[int, Any, float]] = []
             seen_vector: set[str] = set()
             for rank, row in enumerate(vector_rows, 1):
@@ -266,6 +307,23 @@ class FileContextProvider(ContextProvider):
         rank: int,
         source_metadata: dict[str, Any],
     ) -> RetrievalCandidate:
+        """将文件文本块转换为统一检索候选项。
+
+        参数：
+        - `source_id`（str）：当前候选或记录的来源标识；约束：无额外运行时限制。
+        - `content`（str）：待处理或返回的正文内容；约束：无额外运行时限制。
+        - `score`（float | None）：候选项在当前检索通道中的相关性分数；约束：允许为 None，按未提供值的分支处理。
+        - `attachment_id`（str）：目标附件的稳定标识；约束：无额外运行时限制。
+        - `locator`（dict[str, Any]）：定位来源内容在原始文件中的位置说明；约束：无额外运行时限制。
+        - `rank`（int）：候选在所属检索通道中的名次；约束：无额外运行时限制。
+        - `source_metadata`（dict[str, Any]）：候选来源携带的附加字段；约束：无额外运行时限制。
+
+        返回：
+        - RetrievalCandidate：统一格式的检索候选内容及其来源信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return RetrievalCandidate(
             source_id,
             content,
@@ -295,6 +353,21 @@ class KnowledgeContextProvider(FileContextProvider):
         limit: int = 5,
         timeout_seconds: float = 5.0,
     ) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `chunks`（FileChunkRepository）：按顺序读取的文件字节块异步迭代器；约束：无额外运行时限制。
+        - `attachments`（AttachmentRepository）：当前请求关联或已校验的附件集合；约束：无额外运行时限制。
+        - `vector_indexer`（FileVectorSearchPort | None）：执行向量检索或索引操作的可选依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `limit`（int）：本次读取或处理的数量上限；约束：可省略，默认值为 `5`。
+        - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：可省略，默认值为 `5.0`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         super().__init__(
             chunks,
             vector_indexer,
@@ -310,6 +383,19 @@ class KnowledgeContextProvider(FileContextProvider):
         run_id: str,
         plan: ContextPlan,
     ) -> ProviderResult:
+        """按计划检索文件或知识库上下文并生成候选项和通道追踪。
+
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+
+        返回：
+        - ProviderResult：检索提供方的状态、候选结果和追踪信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         knowledge_ids = plan.knowledge_base_ids
         if not knowledge_ids:
             return ProviderResult(
@@ -401,6 +487,28 @@ def _file_failure(
     recall_limit: int,
     started: float,
 ) -> ProviderResult:
+    """构造包含检索通道状态和追踪信息的文件检索失败结果。
+
+    参数：
+    - `provider`（str）：提供检索或执行能力的上下文提供方；约束：无额外运行时限制。
+    - `status`（str）：当前操作或记录的状态值；约束：无额外运行时限制。
+    - `error`（str）：操作失败时捕获的异常或错误说明；约束：无额外运行时限制。
+    - `query`（str）：用于检索、匹配或解析的原始查询文本；约束：无额外运行时限制。
+    - `file_ids`（tuple[str, ...]）：当前请求允许检索的文件标识集合；约束：无额外运行时限制。
+    - `keyword_chunks`（list[Any]）：关键词检索返回的文件文本块；约束：无额外运行时限制。
+    - `vector_rows`（list[dict[str, Any]]）：向量检索通道返回的原始行集合；约束：无额外运行时限制。
+    - `allowed`（dict[str, Any]）：经过权限校验后允许参与检索的文件范围；约束：无额外运行时限制。
+    - `keyword_status`（str）：关键词检索阶段的状态；约束：无额外运行时限制。
+    - `vector_status`（str）：向量检索阶段的状态；约束：无额外运行时限制。
+    - `recall_limit`（int）：本次召回阶段最多保留的候选数量；约束：无额外运行时限制。
+    - `started`（float）：本阶段开始时记录的单调时钟值，用于计算剩余时限；约束：无额外运行时限制。
+
+    返回：
+    - ProviderResult：检索提供方的状态、候选结果和追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     candidates: dict[str, RetrievalCandidateTrace] = {}
     vector_hits: dict[str, RetrievalHitTrace] = {}
     for rank, row in enumerate(vector_rows, 1):
@@ -508,6 +616,17 @@ def _file_failure(
 
 
 def _score(value: Any) -> float | None:
+    """将输入分数转换为有限、可比较的数值。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - float | None：归一化后的有限相关性分数；输入缺失或非数值时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     try:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
@@ -515,6 +634,17 @@ def _score(value: Any) -> float | None:
 
 
 def _optional_text(value: Any) -> str | None:
+    """将可选输入规范化为非空文本或 None。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - str | None：去除首尾空白的非空文本；输入不是字符串或为空时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     text = str(value).strip() if value is not None else ""
     return text or None
 

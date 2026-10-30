@@ -65,6 +65,18 @@ class AnswerGenerationError(RuntimeError):
     """正文生成阶段可展示给调用方的明确错误。"""
 
     def __init__(self, code: str, message: str | None = None) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `code`（str）：用于区分错误或结果类型的代码；约束：无额外运行时限制。
+        - `message`（str | None）：当前待处理或要返回的消息对象；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         super().__init__(message or code)
         self.code = code
         self.phase = "answer_generation"
@@ -93,6 +105,23 @@ class AnswerGenerationService:
         options: AnswerStreamingOptions = AnswerStreamingOptions(),
         prompt: str,
     ) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `llm`（LLMPort）：执行模型请求的语言模型依赖；约束：无额外运行时限制。
+        - `events`（EventPort）：用于读取、写入或推送的事件存储依赖；约束：无额外运行时限制。
+        - `input_budget_tokens`（int）：生成请求输入允许使用的 token 上限；约束：可省略，默认值为 `8192`；须通过方法内校验；失败条件见下方异常说明。
+        - `options`（AnswerStreamingOptions）：控制调用或处理行为的可选配置；约束：可省略，默认值为 `AnswerStreamingOptions()`；须通过方法内校验；失败条件见下方异常说明。
+        - `prompt`（str）：发送给模型的提示文本或模板；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - ValueError：校验条件 `input_budget_tokens < 1` 成立时（异常说明：answer_input_budget_must_be_positive）。
+        - ValueError：校验条件 `min(options.flush_interval_ms, options.max_chunk_chars, options.first_text_timeout_ms, options.idle_timeout_ms, options.total_timeout_ms) < 1` 成立时（异常说明：answer_streaming_options_must_be_positive）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         if input_budget_tokens < 1:
             raise ValueError("answer_input_budget_must_be_positive")
         if min(
@@ -115,7 +144,27 @@ class AnswerGenerationService:
         *,
         stop_signal: asyncio.Event | None = None,
     ) -> AnswerGenerationResult:
-        """生成用户正文并在每次提交后发布持久增量事件。"""
+        """生成用户正文并在每次提交后发布持久增量事件。
+
+        参数：
+        - `inputs`（AnswerGenerationInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
+        - `stop_signal`（asyncio.Event | None）：通知当前执行应停止的异步信号；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`；须通过方法内校验；失败条件见下方异常说明。
+
+        返回：
+        - AnswerGenerationResult：回答正文、持久化消息标识和生成状态。
+
+        异常：
+        - asyncio.CancelledError：校验条件 `stop_signal is not None and stop_signal.is_set()` 成立时。
+        - AnswerGenerationError：校验条件 `elapsed >= self._options.total_timeout_ms / 1000` 成立时（异常说明：answer_generation_timeout）。
+        - AnswerGenerationError：校验条件 `idle >= deadline_ms / 1000` 成立时。
+        - AnswerGenerationError：校验条件 `not (isinstance(event, LLMTextDelta))；not (isinstance(event, LLMStreamEnd))` 成立时（异常说明：answer_stream_event_invalid）。
+        - AnswerGenerationError：校验条件 `finish_reason != 'stop'` 成立时（异常说明：answer_generation_incomplete）。
+        - AnswerGenerationError：校验条件 `not content.strip() or chunk_id < 1` 成立时（异常说明：answer_generation_empty）。
+        - asyncio.CancelledError（重新抛出捕获的异常）：校验条件 `捕获 asyncio.CancelledError 后` 成立时。
+        - (AnswerGenerationError, LeaseLostError)（重新抛出捕获的异常）：校验条件 `捕获 (AnswerGenerationError, LeaseLostError) 后` 成立时。
+        - AnswerGenerationError：校验条件 `捕获 Exception 后` 成立时（异常说明：answer_generation_failed）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         messages = self._fit_messages(inputs)
         if stop_signal is not None and stop_signal.is_set():
             raise asyncio.CancelledError
@@ -135,7 +184,17 @@ class AnswerGenerationService:
         finish_reason = "unknown"
 
         async def flush(*, force: bool = False) -> None:
-            """参数 force 决定是否提交短尾片段；成功更新游标，持久化异常透传。"""
+            """参数 force 决定是否提交短尾片段；成功更新游标，持久化异常透传。
+
+            参数：
+            - `force`（bool）：是否跳过常规幂等判断并强制执行；约束：可省略，默认值为 `False`。
+
+            返回：
+            - None：操作完成后不提供返回数据。
+
+            异常：
+            - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+            """
             nonlocal buffer, chunk_id, last_flush_clock
             while len(buffer) >= self._options.max_chunk_chars:
                 value, buffer = buffer[: self._options.max_chunk_chars], buffer[self._options.max_chunk_chars :]
@@ -262,7 +321,17 @@ class AnswerGenerationService:
                     pass
 
     def _messages(self, inputs: AnswerGenerationInput) -> list[dict[str, str]]:
-        """构造正文模型输入，显式标出参考资料和执行结果。"""
+        """构造正文模型输入，显式标出参考资料和执行结果。
+
+        参数：
+        - `inputs`（AnswerGenerationInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
+
+        返回：
+        - list[dict[str, str]]：包含系统指令和有预算限制的对话上下文的模型消息列表。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         context = [
             {"provider": item.provider, "content": item.content}
             for item in inputs.context_items
@@ -289,7 +358,18 @@ class AnswerGenerationService:
         ]
 
     def _fit_messages(self, inputs: AnswerGenerationInput) -> list[dict[str, str]]:
-        """裁剪历史和长结果预览，保留当前请求及任务状态等必要事实。"""
+        """裁剪历史和长结果预览，保留当前请求及任务状态等必要事实。
+
+        参数：
+        - `inputs`（AnswerGenerationInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
+
+        返回：
+        - list[dict[str, str]]：按输入 token 预算裁剪后的消息列表。
+
+        异常：
+        - AnswerGenerationError：执行到该异常分支时（异常说明：answer_context_too_large）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         history = list(inputs.messages)
         context = list(inputs.context_items)
         plan_results = deepcopy(inputs.plan_results)
@@ -324,7 +404,20 @@ class AnswerGenerationService:
         previous_chunk_id: int,
         delta: str,
     ) -> int:
-        """持久化一批正文后返回该批次的 chunk_id。"""
+        """持久化一批正文后返回该批次的 chunk_id。
+
+        参数：
+        - `inputs`（AnswerGenerationInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
+        - `stream_id`（str）：本次正文流的稳定标识；约束：无额外运行时限制。
+        - `previous_chunk_id`（int）：上一个已持久化文本块的标识；约束：无额外运行时限制。
+        - `delta`（str）：本次新增的文本内容；约束：无额外运行时限制。
+
+        返回：
+        - int：成功持久化的新增正文字符数。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         chunk_id = previous_chunk_id + 1
         await self._publish(
             inputs,
@@ -346,7 +439,22 @@ class AnswerGenerationService:
         transition_id: str,
         payload: dict[str, Any],
     ) -> None:
-        """发布必须成功持久化的正文事件。"""
+        """发布必须成功持久化的正文事件。
+
+        参数：
+        - `inputs`（AnswerGenerationInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
+        - `event_type`（EventType）：要发布的事件类型名称；约束：无额外运行时限制。
+        - `stream_id`（str）：本次正文流的稳定标识；约束：无额外运行时限制。
+        - `chunk_id`（int | None）：当前文本块的稳定标识；约束：允许为 None，按未提供值的分支处理。
+        - `transition_id`（str）：标识本次状态迁移或事件发布的稳定值；约束：无额外运行时限制。
+        - `payload`（dict[str, Any]）：随事件或消息传递的结构化内容；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         await self._events.publish_with_lease(
             ApplicationEvent(
                 event_type=event_type,
@@ -388,7 +496,17 @@ _RESULT_FACT_KEYS = frozenset(
 
 
 def _truncate_longest_result_preview(value: Any) -> bool:
-    """将最长的非状态文本预览减半，成功时返回 True。"""
+    """将最长的非状态文本预览减半，成功时返回 True。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     candidates: list[tuple[int, dict[str, Any] | list[Any], str | int]] = []
 
     def visit(
@@ -396,11 +514,25 @@ def _truncate_longest_result_preview(value: Any) -> bool:
         parent: dict[str, Any] | list[Any] | None = None,
         key: str | int | None = None,
     ) -> None:
+        """递归遍历结构化模型输出，提取可展示的文本内容。
+
+        参数：
+        - `item`（Any）：当前待处理的单个条目；约束：无额外运行时限制。
+        - `parent`（dict[str, Any] | list[Any] | None）：当前递归遍历节点的父级容器；None 表示根节点；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `key`（str | int | None）：当前字段或映射项的键；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if isinstance(item, str):
             if parent is not None and key is not None and len(item) > 256:
                 candidates.append((len(item), parent, key))
             return
         if isinstance(item, dict):
+            # 递归搜索可截断的长文本，但跳过结果身份、状态和错误等不可裁剪字段。
             for key, child in item.items():
                 if key not in _RESULT_FACT_KEYS:
                     visit(child, item, key)
@@ -411,6 +543,7 @@ def _truncate_longest_result_preview(value: Any) -> bool:
     visit(value)
     if not candidates:
         return False
+    # 只裁剪最长的普通正文，并避开状态、错误和身份字段，优先保留结构化结果。
     _, parent, key = max(candidates, key=lambda candidate: candidate[0])
     text = parent[key]
     retained = max(128, len(text) // 2)

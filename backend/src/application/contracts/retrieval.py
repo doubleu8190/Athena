@@ -26,12 +26,32 @@ class RetrievalHitTraceSchema(BaseModel):
     score: float | None = None
 
     def to_domain(self) -> RetrievalHitTrace:
-        """转换为检索命中领域类型。"""
+        """将检索追踪 schema 转换为对应的领域对象。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - RetrievalHitTrace：记录单条检索命中的通道、名次和分数。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return RetrievalHitTrace(channel=self.channel, rank=self.rank, score=self.score)
 
     @classmethod
     def from_domain(cls, value: RetrievalHitTrace) -> RetrievalHitTraceSchema:
-        """将检索命中领域类型转换为 JSON schema。"""
+        """将检索追踪领域对象转换为对应的 schema。
+
+        参数：
+        - `value`（RetrievalHitTrace）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - RetrievalHitTraceSchema：记录单条检索命中的通道、名次和分数。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls(channel=value.channel, rank=value.rank, score=value.score)
 
 
@@ -46,7 +66,17 @@ class RetrievalChannelTraceSchema(BaseModel):
     error_message: str | None = None
 
     def to_domain(self) -> RetrievalChannelTrace:
-        """转换为检索通道领域类型。"""
+        """将检索追踪 schema 转换为对应的领域对象。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - RetrievalChannelTrace：记录检索通道状态、命中数和可选错误信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return RetrievalChannelTrace(
             channel=self.channel,
             status=self.status,
@@ -56,7 +86,17 @@ class RetrievalChannelTraceSchema(BaseModel):
 
     @classmethod
     def from_domain(cls, value: RetrievalChannelTrace) -> RetrievalChannelTraceSchema:
-        """将检索通道领域类型转换为 JSON schema。"""
+        """将检索追踪领域对象转换为对应的 schema。
+
+        参数：
+        - `value`（RetrievalChannelTrace）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - RetrievalChannelTraceSchema：记录检索通道状态、命中数和可选错误信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls(
             channel=value.channel,
             status=value.status,
@@ -92,7 +132,17 @@ class RetrievalCandidateTraceSchema(BaseModel):
     selection_stage: Literal["provider", "bundle", "window"] | None = None
 
     def to_domain(self) -> RetrievalCandidateTrace:
-        """转换为候选处理领域类型。"""
+        """将检索追踪 schema 转换为对应的领域对象。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - RetrievalCandidateTrace：统一格式的检索候选内容及其来源信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return RetrievalCandidateTrace(
             provider=self.provider,
             source_type=self.source_type,
@@ -118,7 +168,17 @@ class RetrievalCandidateTraceSchema(BaseModel):
 
     @classmethod
     def from_domain(cls, value: RetrievalCandidateTrace) -> RetrievalCandidateTraceSchema:
-        """将候选处理领域类型转换为 JSON schema。"""
+        """将检索追踪领域对象转换为对应的 schema。
+
+        参数：
+        - `value`（RetrievalCandidateTrace）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - RetrievalCandidateTraceSchema：统一格式的检索候选内容及其来源信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls(
             provider=value.provider,
             source_type=value.source_type,
@@ -160,7 +220,17 @@ class RetrievalProviderTraceSchema(BaseModel):
     selected_count: int = Field(ge=0)
 
     def to_domain(self) -> RetrievalProviderTrace:
-        """转换为检索调用领域类型。"""
+        """将检索追踪 schema 转换为对应的领域对象。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - RetrievalProviderTrace：记录 Provider 查询、耗时、候选数和通道追踪。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return RetrievalProviderTrace(
             provider=self.provider,
             status=self.status,
@@ -176,7 +246,17 @@ class RetrievalProviderTraceSchema(BaseModel):
 
     @classmethod
     def from_domain(cls, value: RetrievalProviderTrace) -> RetrievalProviderTraceSchema:
-        """将检索调用领域类型转换为 JSON schema。"""
+        """将检索追踪领域对象转换为对应的 schema。
+
+        参数：
+        - `value`（RetrievalProviderTrace）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - RetrievalProviderTraceSchema：记录 Provider 查询、耗时、候选数和通道追踪。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls(
             provider=value.provider,
             query=value.query,
@@ -206,7 +286,17 @@ class RetrievalCandidateSelectionSchema(BaseModel):
     filter_reason: str | None = None
 
     def to_domain(self) -> RetrievalCandidateSelection:
-        """转换为候选选择领域类型。"""
+        """将检索追踪 schema 转换为对应的领域对象。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - RetrievalCandidateSelection：统一格式的检索候选内容及其来源信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return RetrievalCandidateSelection(
             provider=self.provider,
             source_id=self.source_id,
@@ -217,7 +307,17 @@ class RetrievalCandidateSelectionSchema(BaseModel):
 
     @classmethod
     def from_domain(cls, value: RetrievalCandidateSelection) -> RetrievalCandidateSelectionSchema:
-        """将候选选择领域类型转换为 JSON schema。"""
+        """将检索追踪领域对象转换为对应的 schema。
+
+        参数：
+        - `value`（RetrievalCandidateSelection）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - RetrievalCandidateSelectionSchema：统一格式的检索候选内容及其来源信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls(
             provider=value.provider,
             source_id=value.source_id,
@@ -239,7 +339,17 @@ class RetrievalRunTraceSchema(BaseModel):
     context_count: int | None = Field(default=None, ge=0)
 
     def to_domain(self) -> RetrievalRunTrace:
-        """转换为检索运行领域类型。"""
+        """将检索追踪 schema 转换为对应的领域对象。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - RetrievalRunTrace：记录一次检索运行的 Provider 结果及最终上下文选择。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return RetrievalRunTrace(
             raw_hit_count=self.raw_hit_count,
             providers=tuple(provider.to_domain() for provider in self.providers),
@@ -250,7 +360,17 @@ class RetrievalRunTraceSchema(BaseModel):
 
     @classmethod
     def from_domain(cls, value: RetrievalRunTrace) -> RetrievalRunTraceSchema:
-        """将检索运行领域类型转换为 JSON schema。"""
+        """将检索追踪领域对象转换为对应的 schema。
+
+        参数：
+        - `value`（RetrievalRunTrace）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - RetrievalRunTraceSchema：记录一次检索运行的 Provider 结果及最终上下文选择。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return cls(
             trace_version=value.trace_version,
             raw_hit_count=value.raw_hit_count,

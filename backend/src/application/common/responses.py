@@ -13,6 +13,8 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class SessionResponse:
+    """会话标识、项目归属和会话元数据的响应模型。
+    """
     id: str
     title: str
     active_run_id: str | None
@@ -25,6 +27,8 @@ class SessionResponse:
 
 @dataclass(frozen=True, slots=True)
 class ToolCallResponse:
+    """对话消息中工具调用名称、参数和标识的响应模型。
+    """
     id: str
     name: str
     args: dict[str, Any]
@@ -32,6 +36,8 @@ class ToolCallResponse:
 
 @dataclass(frozen=True, slots=True)
 class AttachmentRefResponse:
+    """消息引用的附件标识及简要元数据。
+    """
     id: str
     filename: str
     mime_type: str
@@ -41,6 +47,8 @@ class AttachmentRefResponse:
 
 @dataclass(frozen=True, slots=True)
 class MessageResponse:
+    """会话消息正文、角色、时间和附件引用。
+    """
     id: str
     session_id: str
     role: str
@@ -57,6 +65,8 @@ class MessageResponse:
 
 @dataclass(frozen=True, slots=True)
 class RunSummaryResponse:
+    """Run 状态、摘要、结果和时间信息的响应模型。
+    """
     run_id: str
     session_id: str
     message_id: str
@@ -72,6 +82,8 @@ class RunSummaryResponse:
 
 @dataclass(frozen=True, slots=True)
 class RunListResponse:
+    """Run 摘要列表、总数和分页状态。
+    """
     items: tuple[RunSummaryResponse, ...]
     total: int
     has_more: bool
@@ -79,6 +91,8 @@ class RunListResponse:
 
 @dataclass(frozen=True, slots=True)
 class RunTimelineEventResponse:
+    """Run 时间线中的单条事件及其关联字段。
+    """
     session_seq: int
     event_type: str
     occurred_at: datetime | str
@@ -88,6 +102,8 @@ class RunTimelineEventResponse:
 
 @dataclass(frozen=True, slots=True)
 class RunTimelineResponse:
+    """Run 摘要、分页事件和关联资源标识。
+    """
     run: RunSummaryResponse
     events: tuple[RunTimelineEventResponse, ...]
     next_after_seq: int
@@ -97,6 +113,8 @@ class RunTimelineResponse:
 
 @dataclass(frozen=True, slots=True)
 class RunEnqueueResponse:
+    """Run 提交成功后的标识和队列状态。
+    """
     session_id: str
     run_id: str
     message_id: str
@@ -107,6 +125,8 @@ class RunEnqueueResponse:
 
 @dataclass(frozen=True, slots=True)
 class RunStopResponse:
+    """Run 停止请求的状态及幂等处理结果。
+    """
     run_id: str | None
     status: str
     no_op: bool = False
@@ -115,6 +135,8 @@ class RunStopResponse:
 
 @dataclass(frozen=True, slots=True)
 class AttachmentResponse:
+    """附件标识、文件元数据和处理状态。
+    """
     id: str
     filename: str
     mime_type: str
@@ -136,6 +158,8 @@ class AttachmentResponse:
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeBaseResponse:
+    """知识库标识、名称、说明和文档统计。
+    """
     id: str
     name: str
     description: str
@@ -148,6 +172,8 @@ class KnowledgeBaseResponse:
 
 @dataclass(frozen=True, slots=True)
 class ToolResponse:
+    """工具配置、能力和治理策略。
+    """
     name: str
     description: str
     risk_level: str
@@ -158,7 +184,17 @@ class ToolResponse:
     last_called_at: str | None = None
 
     def __eq__(self, other: object) -> bool:
-        """允许测试将响应与工具实体按展示字段比较。"""
+        """允许测试将响应与工具实体按展示字段比较。
+
+        参数：
+        - `other`（object）：用于与当前值比较的对象；约束：无额外运行时限制。
+
+        返回：
+        - bool：操作是否成功或条件是否成立。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if isinstance(other, ToolResponse):
             return tuple(self.__dict__.values()) == tuple(other.__dict__.values()) if hasattr(self, "__dict__") else (
                 self.name, self.description, self.risk_level, self.execution_mode, self.require_approval, self.enabled, self.parameters
@@ -176,12 +212,25 @@ class ToolResponse:
 
 @dataclass(frozen=True, slots=True)
 class McpServerResponse:
+    """MCP 服务配置的可公开字段和运行状态。
+    """
     name: str
     config: dict[str, Any] = field(default_factory=dict)
     status: str | None = None
 
     def __getitem__(self, key: str) -> Any:
-        """允许调用方按字典方式读取公开字段。"""
+        """允许调用方按字典方式读取公开字段。
+
+        参数：
+        - `key`（str）：当前字段或映射项的键；约束：无额外运行时限制。
+
+        返回：
+        - Any：按字段名返回名称、配置或状态中的一个公开字段。
+
+        异常：
+        - KeyError：执行到该异常分支时。
+        - 未列出的依赖异常按当前实现传播。
+        """
         if key == "name":
             return self.name
         if key == "config":
@@ -193,6 +242,8 @@ class McpServerResponse:
 
 @dataclass(frozen=True, slots=True)
 class ApprovalResponse:
+    """审批请求身份、目标操作和当前决定。
+    """
     approval_id: str
     tool_name: str
     arguments: dict[str, Any]
@@ -210,6 +261,8 @@ class ApprovalResponse:
 
 @dataclass(frozen=True, slots=True)
 class ApprovalStatsResponse:
+    """审批状态分类统计和总数。
+    """
     pending: int
     approved: int
     denied: int
@@ -218,6 +271,8 @@ class ApprovalStatsResponse:
 
 @dataclass(frozen=True, slots=True)
 class MemoryResponse:
+    """记忆内容、作用域、有效状态和来源摘要。
+    """
     id: str
     content: str
     metadata: dict[str, Any]
@@ -235,6 +290,8 @@ class MemoryResponse:
 
 @dataclass(frozen=True, slots=True)
 class MemoryPageResponse:
+    """记忆分页条目、总数和分类统计。
+    """
     items: tuple[MemoryResponse, ...]
     total: int
     stats: dict[str, int] = field(default_factory=dict)
@@ -242,6 +299,8 @@ class MemoryPageResponse:
 
 @dataclass(frozen=True, slots=True)
 class RetrievalCandidateResponse:
+    """检索候选的来源、内容、分数和筛选状态。
+    """
     candidate_id: str
     run_id: str
     provider: str
@@ -270,6 +329,8 @@ class RetrievalCandidateResponse:
 
 @dataclass(frozen=True, slots=True)
 class RetrievalRunResponse:
+    """检索运行状态、Provider 结果和候选追踪。
+    """
     run_id: str
     query: str
     scope: str
@@ -295,6 +356,8 @@ class RetrievalRunResponse:
 
 @dataclass(frozen=True, slots=True)
 class EventResponse:
+    """会话事件序号、类型、载荷和发生时间。
+    """
     event_type: str
     durability: str
     session_id: str
@@ -314,6 +377,8 @@ class EventResponse:
 
 @dataclass(frozen=True, slots=True)
 class ProviderResponse:
+    """Provider 名称、启用状态和配置摘要。
+    """
     name: str
     provider: str
     model: str
@@ -326,17 +391,23 @@ class ProviderResponse:
 
 @dataclass(frozen=True, slots=True)
 class SettingsResponse:
+    """当前应用可公开的设置值。
+    """
     values: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class AuthSessionResponse:
+    """会话认证状态和已验证用户名。
+    """
     authenticated: bool
     username: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class LoginResponse:
+    """登录凭据校验后的认证结果。
+    """
     authenticated: bool
     username: str
 

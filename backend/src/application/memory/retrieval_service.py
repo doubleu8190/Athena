@@ -41,6 +41,18 @@ logger = logging.getLogger(__name__)
 
 
 def _keyword_score(content: str, query: str) -> float:
+    """计算查询词在候选文本中的匹配比例。
+
+    参数：
+    - `content`（str）：待处理或返回的正文内容；约束：无额外运行时限制。
+    - `query`（str）：用于检索、匹配或解析的原始查询文本；约束：无额外运行时限制。
+
+    返回：
+    - float：查询词在文本中的命中比例；查询词集合为空时返回 0.0。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     terms = {term.lower() for term in query.split() if term.strip()}
     if not terms:
         return 0.0
@@ -62,7 +74,6 @@ class _RetrievalState:
     keyword_status: str = "skipped"
     vector_status: str = "skipped"
     processing_stage: str = "keyword"
-    vector_completed: bool = False
     directory_item: ContextItem | None = None
     directory_status: str = "skipped"
 
@@ -83,15 +94,10 @@ class _CandidateState:
 class _FactContextState:
     """缓存候选事实的完整事实组和最终渲染分组。"""
 
-    fact_group_cache: dict[tuple[str, str, str, str], list[MemoryRecord]] = field(
-        default_factory=dict
-    )
-    facts_by_candidate: dict[str, MemoryFact] = field(default_factory=dict)
     groups_by_candidate: dict[str, MemoryFactContextGroup] = field(
         default_factory=dict
     )
     group_records: dict[str, MemoryRecord] = field(default_factory=dict)
-    seen_group_keys: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -101,7 +107,6 @@ class _SelectionState:
     selected_items: list[ContextItem]
     selected_limit: int
     seen_group_keys: set[str]
-    selected_group_keys: set[str]
     selected_group_members: dict[str, set[str]]
     selected_plain_ids: set[str]
 
@@ -120,7 +125,21 @@ class MemoryContextProvider(ContextProvider):
         timeout_seconds: float = 3.0,
         settings: SessionMemorySettingsPort | None = None,
     ) -> None:
-        """保存记忆仓库、向量索引及会话读取配置。"""
+        """保存记忆仓库、向量索引及会话读取配置。
+
+        参数：
+        - `repository`（MemoryRepositoryPort）：负责读取或持久化领域数据的仓储依赖；约束：无额外运行时限制。
+        - `vector_indexer`（MemoryVectorSearchPort | None）：执行向量检索或索引操作的可选依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `limit`（int）：本次读取或处理的数量上限；约束：可省略，默认值为 `8`。
+        - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：可省略，默认值为 `3.0`。
+        - `settings`（SessionMemorySettingsPort | None）：当前会话的记忆读取设置；None 表示未提供会话级覆盖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._repository = repository
         self._vector_indexer = vector_indexer
         self._limit = limit
@@ -134,7 +153,19 @@ class MemoryContextProvider(ContextProvider):
         run_id: str,
         plan: ContextPlan,
     ) -> ProviderResult:
-        """按计划召回记忆并组装可供后续采集的上下文结果。"""
+        """按计划召回记忆并组装可供后续采集的上下文结果。
+
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+
+        返回：
+        - ProviderResult：包含检索状态、候选内容和追踪信息的提供方结果。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         started = time.perf_counter()
         query = plan.memory_query
         if not query:
@@ -167,10 +198,7 @@ class MemoryContextProvider(ContextProvider):
             await self._retrieve_directory(state)
             await self._resolve_candidate_records(state, candidates)
             facts = await self._load_fact_context(state, candidates)
-            all_items = self._build_context_items(state, candidates, facts)
-            selection = self._select_context_items(
-                plan, state, all_items, facts.seen_group_keys
-            )
+            selection = self._select_context_items(plan, state, candidates, facts)
             traces = self._build_candidate_traces(
                 state, candidates, facts, selection
             )
@@ -183,7 +211,17 @@ class MemoryContextProvider(ContextProvider):
     async def _retrieve_candidates(
         self, state: _RetrievalState
     ) -> _CandidateState:
-        """在共享时限内读取关键词和向量通道，并生成初始候选。"""
+        """在共享时限内读取关键词和向量通道，并生成初始候选。
+
+        参数：
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - _CandidateState：记录当前流程数据和阶段信息的 `_CandidateState` 状态对象。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         candidates = _CandidateState()
         async with asyncio.timeout(self._timeout_seconds):
             state.keyword_rows = await self._repository.search(
@@ -233,12 +271,21 @@ class MemoryContextProvider(ContextProvider):
                     state.query, state.limit
                 )
                 state.vector_status = "succeeded"
-                state.vector_completed = True
             candidates.vector_candidates = self._vector_candidates(state.vector_rows)
         return candidates
 
     async def _retrieve_directory(self, state: _RetrievalState) -> None:
-        """尽力读取记忆目录；目录超时或失败不影响事实召回结果。"""
+        """读取并构建记忆目录；超时和普通异常记录状态，任务取消自然向上传播。
+
+        参数：
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         try:
             async with asyncio.timeout(
                 _remaining_timeout(state.started, self._timeout_seconds)
@@ -254,13 +301,9 @@ class MemoryContextProvider(ContextProvider):
                     session_id=state.session_id,
                     project_id=state.project_id,
                 )
-            state.directory_status = (
-                "succeeded" if state.directory_item else "skipped"
-            )
+            state.directory_status = "succeeded" if state.directory_item else "skipped"
         except TimeoutError:
             state.directory_status = "timeout"
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception(
                 "Memory topic directory retrieval failed; session_id=%s",
@@ -271,7 +314,18 @@ class MemoryContextProvider(ContextProvider):
     async def _resolve_candidate_records(
         self, state: _RetrievalState, candidates: _CandidateState
     ) -> None:
-        """融合通道候选，并复核向量命中记录的有效性与作用域。"""
+        """融合通道候选，并复核向量命中记录的有效性与作用域。
+
+        参数：
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `candidates`（_CandidateState）：各检索或计算阶段产生的候选项集合；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         inactive_ids = {
             record.id
             for record in state.keyword_rows
@@ -300,6 +354,17 @@ class MemoryContextProvider(ContextProvider):
             record_query_limit = asyncio.Semaphore(4)
 
             async def fetch_record(memory_id: str) -> MemoryRecord | None:
+                """按稳定标识读取记忆记录。
+
+                参数：
+                - `memory_id`（str）：目标记忆记录的稳定标识；约束：无额外运行时限制。
+
+                返回：
+                - MemoryRecord | None：具有状态、作用域、有效期和来源证据的记忆记录。
+
+                异常：
+                - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+                """
                 async with record_query_limit:
                     return await self._repository.get(memory_id)
 
@@ -335,8 +400,21 @@ class MemoryContextProvider(ContextProvider):
     async def _load_fact_context(
         self, state: _RetrievalState, candidates: _CandidateState
     ) -> _FactContextState:
-        """批量加载候选事实的相关记录，并合并相同身份的事实组。"""
+        """批量加载候选事实的相关记录，并合并相同身份的事实组。
+
+        参数：
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `candidates`（_CandidateState）：各检索或计算阶段产生的候选项集合；约束：无额外运行时限制。
+
+        返回：
+        - _FactContextState：记录当前流程数据和阶段信息的 `_FactContextState` 状态对象。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         facts = _FactContextState()
+        facts_by_candidate: dict[str, MemoryFact] = {}
+        fact_group_cache: dict[tuple[str, str, str, str], list[MemoryRecord]] = {}
         fact_requests: dict[tuple[str, str, str, str], MemoryFact] = {}
         for candidate in candidates.fused:
             fact = record_fact(candidates.record_by_id[candidate.source_id])
@@ -348,7 +426,7 @@ class MemoryContextProvider(ContextProvider):
                 fact.subject_key,
                 fact.fact_key,
             )
-            facts.facts_by_candidate[candidate.source_id] = fact
+            facts_by_candidate[candidate.source_id] = fact
             fact_requests.setdefault(identity, fact)
 
         if fact_requests:
@@ -358,6 +436,17 @@ class MemoryContextProvider(ContextProvider):
             async def fetch_fact_group(
                 identity: tuple[str, str, str, str]
             ) -> list[MemoryRecord]:
+                """按已校验的事实身份读取同一事实组中的记忆记录。
+
+                参数：
+                - `identity`（tuple[str, str, str, str]）：经校验的领域身份组合，用于确认操作范围；约束：无额外运行时限制。
+
+                返回：
+                - list[MemoryRecord]：符合条件的有序结果集合；集合成员。
+
+                异常：
+                - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+                """
                 fact = fact_requests[identity]
                 async with group_query_limit:
                     return await self._repository.list_fact_group(fact)
@@ -368,13 +457,13 @@ class MemoryContextProvider(ContextProvider):
                 related_groups = await asyncio.gather(
                     *(fetch_fact_group(identity) for identity in fact_identities)
                 )
-            facts.fact_group_cache = dict(
+            fact_group_cache = dict(
                 zip(fact_identities, related_groups, strict=True)
             )
 
-        # 同一事实身份只构造一个规范组，避免候选顺序造成重复上下文。
+        # 相同分组复用首个候选的渲染结果，扩展记录保留给 trace。
         canonical_groups: dict[str, MemoryFactContextGroup] = {}
-        for memory_id, fact in facts.facts_by_candidate.items():
+        for memory_id, fact in facts_by_candidate.items():
             identity = (
                 fact.scope_kind,
                 fact.scope_id,
@@ -383,21 +472,37 @@ class MemoryContextProvider(ContextProvider):
             )
             group = build_fact_context_group(
                 candidates.record_by_id[memory_id],
-                facts.fact_group_cache[identity],
+                fact_group_cache[identity],
             )
             if group is not None:
                 facts.groups_by_candidate[memory_id] = canonical_groups.setdefault(
                     group.group_key, group
                 )
+                for member in fact_group_cache[identity]:
+                    facts.group_records[member.id] = member
         return facts
 
-    def _build_context_items(
+    def _select_context_items(
         self,
+        plan: ContextPlan,
         state: _RetrievalState,
         candidates: _CandidateState,
         facts: _FactContextState,
-    ) -> list[ContextItem]:
-        """将普通命中和事实组渲染为有序上下文条目。"""
+    ) -> _SelectionState:
+        """按融合顺序渲染记忆、合并重复事实组，并按条目上限选取结果。
+
+        参数：
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `candidates`（_CandidateState）：各检索或计算阶段产生的候选项集合；约束：无额外运行时限制。
+        - `facts`（_FactContextState）：候选记忆对应的结构化事实及分组信息；约束：无额外运行时限制。
+
+        返回：
+        - _SelectionState：记录当前流程数据和阶段信息的 `_SelectionState` 状态对象。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         items: list[ContextItem] = []
         if state.directory_item is not None:
             items.append(state.directory_item)
@@ -421,19 +526,9 @@ class MemoryContextProvider(ContextProvider):
                 )
                 continue
 
-            fact = facts.facts_by_candidate[candidate.source_id]
-            identity = (
-                fact.scope_kind,
-                fact.scope_id,
-                fact.subject_key,
-                fact.fact_key,
-            )
-            for member in facts.fact_group_cache[identity]:
-                facts.group_records[member.id] = member
             if group.group_key in seen_group_keys:
                 continue
             seen_group_keys.add(group.group_key)
-            facts.seen_group_keys.add(group.group_key)
             items.append(
                 ContextItem(
                     self.name,
@@ -454,26 +549,12 @@ class MemoryContextProvider(ContextProvider):
                     },
                 )
             )
-        return items
-
-    def _select_context_items(
-        self,
-        plan: ContextPlan,
-        state: _RetrievalState,
-        items: list[ContextItem],
-        seen_group_keys: set[str],
-    ) -> _SelectionState:
-        """按提供方与计划上限裁剪条目，并记录各事实组的选中成员。"""
+        # 目录占一个额外名额，事实组作为整体参与裁剪。
         selected_limit = min(
             max(0, self._limit) + (1 if state.directory_item is not None else 0),
             max(0, plan.max_items),
         )
         selected_items = items[:selected_limit]
-        selected_group_keys = {
-            str(item.metadata["memory_group_key"])
-            for item in selected_items
-            if item.metadata.get("memory_group_key")
-        }
         selected_group_members = {
             str(item.metadata["memory_group_key"]): set(
                 item.metadata.get("memory_member_ids", ())
@@ -490,7 +571,6 @@ class MemoryContextProvider(ContextProvider):
             selected_items=selected_items,
             selected_limit=selected_limit,
             seen_group_keys=seen_group_keys,
-            selected_group_keys=selected_group_keys,
             selected_group_members=selected_group_members,
             selected_plain_ids=selected_plain_ids,
         )
@@ -502,7 +582,20 @@ class MemoryContextProvider(ContextProvider):
         facts: _FactContextState,
         selection: _SelectionState,
     ) -> dict[str, RetrievalCandidateTrace]:
-        """汇总有效、失效、扩展事实组及目录候选的检索轨迹。"""
+        """汇总有效、失效、扩展事实组及目录候选的检索轨迹。
+
+        参数：
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `candidates`（_CandidateState）：各检索或计算阶段产生的候选项集合；约束：无额外运行时限制。
+        - `facts`（_FactContextState）：候选记忆对应的结构化事实及分组信息；约束：无额外运行时限制。
+        - `selection`（_SelectionState）：按上下文预算确定的选取结果及其依据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, RetrievalCandidateTrace]：统一格式的检索候选内容及其来源信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         trace_by_id: dict[str, RetrievalCandidateTrace] = {}
         self._add_fused_traces(trace_by_id, candidates, facts, selection)
         self._add_stale_traces(trace_by_id, candidates.stale_candidates)
@@ -519,7 +612,20 @@ class MemoryContextProvider(ContextProvider):
         facts: _FactContextState,
         selection: _SelectionState,
     ) -> None:
-        """为融合候选记录排名、有效元数据和上下文筛选原因。"""
+        """为融合候选记录排名、有效元数据和上下文筛选原因。
+
+        参数：
+        - `traces`（dict[str, RetrievalCandidateTrace]）：记录候选来源、筛选过程及结果的追踪信息；约束：无额外运行时限制。
+        - `candidates`（_CandidateState）：各检索或计算阶段产生的候选项集合；约束：无额外运行时限制。
+        - `facts`（_FactContextState）：候选记忆对应的结构化事实及分组信息；约束：无额外运行时限制。
+        - `selection`（_SelectionState）：按上下文预算确定的选取结果及其依据；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         for rank, candidate in enumerate(candidates.fused, 1):
             record = candidates.record_by_id[candidate.source_id]
             group = facts.groups_by_candidate.get(candidate.source_id)
@@ -574,35 +680,47 @@ class MemoryContextProvider(ContextProvider):
         group: MemoryFactContextGroup | None,
         selection: _SelectionState,
     ) -> tuple[bool, str | None]:
-        """判断融合候选是否已进入结果，并给出其组内筛选原因。"""
+        """判断融合候选是否已进入结果，并给出其组内筛选原因。
+
+        参数：
+        - `candidate`（RetrievalCandidate）：当前待融合、筛选或追踪的候选项；约束：无额外运行时限制。
+        - `group`（MemoryFactContextGroup | None）：同一事实身份下合并得到的上下文分组；约束：允许为 None，按未提供值的分支处理。
+        - `selection`（_SelectionState）：按上下文预算确定的选取结果及其依据；约束：无额外运行时限制。
+
+        返回：
+        - tuple[bool, str | None]：候选是否进入最终上下文及对应的筛选原因。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if group is None:
             selected = candidate.source_id in selection.selected_plain_ids
-            group_filter_reason = None
-        else:
-            rendered_members = selection.selected_group_members.get(
-                group.group_key, set()
+            return selected, None if selected else "provider_top_k"
+        if candidate.source_id in selection.selected_group_members.get(
+            group.group_key, set()
+        ):
+            return True, None
+        if candidate.source_id not in group.member_ids:
+            return False, (
+                "fact_group_limit" if group.conflicted else "duplicate_equivalent_fact"
             )
-            selected = (
-                group.group_key in selection.selected_group_keys
-                and candidate.source_id in rendered_members
-            )
-            group_filter_reason = (
-                "fact_group_limit"
-                if group.conflicted and candidate.source_id not in group.member_ids
-                else (
-                    "duplicate_equivalent_fact"
-                    if not group.conflicted
-                    and candidate.source_id not in group.member_ids
-                    else None
-                )
-            )
-        return selected, None if selected else group_filter_reason or "provider_top_k"
+        return False, "provider_top_k"
 
     @staticmethod
     def _candidate_hits(
         candidate: RetrievalCandidate,
     ) -> tuple[RetrievalHitTrace, ...]:
-        """把候选元数据中的通道命中结构转换为领域 trace。"""
+        """将融合候选转换为检索命中追踪记录。
+
+        参数：
+        - `candidate`（RetrievalCandidate）：当前待融合、筛选或追踪的候选项；约束：无额外运行时限制。
+
+        返回：
+        - tuple[RetrievalHitTrace, ...]：记录单条检索命中的通道、名次和分数。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return tuple(
             RetrievalHitTraceSchema.model_validate(hit).to_domain()
             for hit in candidate.metadata.get("hits", [])
@@ -613,7 +731,18 @@ class MemoryContextProvider(ContextProvider):
         traces: dict[str, RetrievalCandidateTrace],
         stale_candidates: list[RetrievalCandidate],
     ) -> None:
-        """保留已失效关键词记录的轨迹，说明它们被排除的原因。"""
+        """保留已失效关键词记录的轨迹，说明它们被排除的原因。
+
+        参数：
+        - `traces`（dict[str, RetrievalCandidateTrace]）：记录候选来源、筛选过程及结果的追踪信息；约束：无额外运行时限制。
+        - `stale_candidates`（list[RetrievalCandidate]）：已失效或未通过当前状态校验的候选集合；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         for rank, candidate in enumerate(stale_candidates, 1):
             if candidate.source_id in traces:
                 continue
@@ -640,7 +769,19 @@ class MemoryContextProvider(ContextProvider):
         facts: _FactContextState,
         selection: _SelectionState,
     ) -> None:
-        """为事实组展开带入的非融合成员补齐来源和筛选状态。"""
+        """为事实组展开带入的非融合成员补齐来源和筛选状态。
+
+        参数：
+        - `traces`（dict[str, RetrievalCandidateTrace]）：记录候选来源、筛选过程及结果的追踪信息；约束：无额外运行时限制。
+        - `facts`（_FactContextState）：候选记忆对应的结构化事实及分组信息；约束：无额外运行时限制。
+        - `selection`（_SelectionState）：按上下文预算确定的选取结果及其依据；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         for memory_id, record in facts.group_records.items():
             if memory_id in traces:
                 continue
@@ -654,10 +795,8 @@ class MemoryContextProvider(ContextProvider):
             )
             if group is None:
                 continue
-            selected = (
-                group.group_key in selection.selected_group_keys
-                and memory_id
-                in selection.selected_group_members.get(group.group_key, set())
+            selected = memory_id in selection.selected_group_members.get(
+                group.group_key, set()
             )
             filter_reason = None if selected else (
                 "fact_group_limit"
@@ -690,7 +829,18 @@ class MemoryContextProvider(ContextProvider):
         traces: dict[str, RetrievalCandidateTrace],
         state: _RetrievalState,
     ) -> None:
-        """记录关键词命中的失效记忆，并附上同源向量命中信息。"""
+        """记录关键词命中的失效记忆，并附上同源向量命中信息。
+
+        参数：
+        - `traces`（dict[str, RetrievalCandidateTrace]）：记录候选来源、筛选过程及结果的追踪信息；约束：无额外运行时限制。
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         for rank, record in enumerate(state.keyword_rows, 1):
             if _is_active_record(record) or record.id in traces:
                 continue
@@ -736,7 +886,18 @@ class MemoryContextProvider(ContextProvider):
         traces: dict[str, RetrievalCandidateTrace],
         vector_rows: list[dict[str, Any]],
     ) -> None:
-        """为缺少记忆 ID 的向量命中生成可追踪的占位来源。"""
+        """为缺少记忆 ID 的向量命中生成可追踪的占位来源。
+
+        参数：
+        - `traces`（dict[str, RetrievalCandidateTrace]）：记录候选来源、筛选过程及结果的追踪信息；约束：无额外运行时限制。
+        - `vector_rows`（list[dict[str, Any]]）：向量检索通道返回的原始行集合；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         for rank, row in enumerate(vector_rows, 1):
             if str(row.get("memory_id") or "").strip():
                 continue
@@ -765,7 +926,19 @@ class MemoryContextProvider(ContextProvider):
         state: _RetrievalState,
         selected_items: list[ContextItem],
     ) -> None:
-        """将记忆目录条目纳入 trace，标记它是否进入最终结果。"""
+        """将记忆目录候选加入追踪并标记其最终选择状态。
+
+        参数：
+        - `traces`（dict[str, RetrievalCandidateTrace]）：记录候选来源、筛选过程及结果的追踪信息；约束：无额外运行时限制。
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `selected_items`（list[ContextItem]）：已按上下文预算选取并准备返回的条目；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         directory_item = state.directory_item
         if directory_item is None:
             return
@@ -797,7 +970,20 @@ class MemoryContextProvider(ContextProvider):
         selection: _SelectionState,
         traces: dict[str, RetrievalCandidateTrace],
     ) -> ProviderResult:
-        """根据选中条目和检索轨迹构造成功的提供方结果。"""
+        """根据选中条目和检索轨迹构造成功的提供方结果。
+
+        参数：
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：无额外运行时限制。
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `selection`（_SelectionState）：按上下文预算确定的选取结果及其依据；约束：无额外运行时限制。
+        - `traces`（dict[str, RetrievalCandidateTrace]）：记录候选来源、筛选过程及结果的追踪信息；约束：无额外运行时限制。
+
+        返回：
+        - ProviderResult：包含检索状态、候选内容和追踪信息的提供方结果。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         items = tuple(selection.selected_items)
         conflict_count = sum(
             bool(item.metadata.get("memory_conflict")) for item in items
@@ -855,12 +1041,24 @@ class MemoryContextProvider(ContextProvider):
     def _failure_result(
         self, state: _RetrievalState, status: str, error: str
     ) -> ProviderResult:
-        """按失败阶段修正通道状态，并返回已收集候选的诊断信息。"""
+        """按失败阶段修正通道状态，并返回已收集候选的诊断信息。
+
+        参数：
+        - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `status`（str）：当前操作或记录的状态值；约束：无额外运行时限制。
+        - `error`（str）：操作失败时捕获的异常或错误说明；约束：无额外运行时限制。
+
+        返回：
+        - ProviderResult：包含检索状态、候选内容和追踪信息的提供方结果。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         keyword_status = state.keyword_status
         vector_status = state.vector_status
         if state.processing_stage == "keyword":
             keyword_status = status
-        elif self._vector_indexer is not None and not state.vector_completed:
+        elif self._vector_indexer is not None and state.vector_status != "succeeded":
             vector_status = status
         return self._failed_result(
             status=status,
@@ -875,7 +1073,17 @@ class MemoryContextProvider(ContextProvider):
         )
 
     def _vector_candidates(self, rows: list[dict[str, Any]]) -> list[RetrievalCandidate]:
-        """把带记忆 ID 的向量结果转换为统一召回候选。"""
+        """把带记忆 ID 的向量结果转换为统一召回候选。
+
+        参数：
+        - `rows`（list[dict[str, Any]]）：从持久层或检索通道读取的原始记录；约束：无额外运行时限制。
+
+        返回：
+        - list[RetrievalCandidate]：符合条件的有序结果集合；集合成员。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         candidates: list[RetrievalCandidate] = []
         for rank, item in enumerate(rows, 1):
             memory_id = str(item.get("memory_id") or "").strip()
@@ -907,7 +1115,25 @@ class MemoryContextProvider(ContextProvider):
         limit: int,
         started: float,
     ) -> ProviderResult:
-        """在检索异常时返回失败状态及已取得的关键词、向量候选。"""
+        """在检索异常时返回失败状态及已取得的关键词、向量候选。
+
+        参数：
+        - `status`（str）：当前操作或记录的状态值；约束：无额外运行时限制。
+        - `error`（str）：操作失败时捕获的异常或错误说明；约束：无额外运行时限制。
+        - `query`（str）：用于检索、匹配或解析的原始查询文本；约束：无额外运行时限制。
+        - `keyword_rows`（list[Any]）：关键词检索通道返回的原始候选记录；约束：无额外运行时限制。
+        - `vector_rows`（list[dict[str, Any]]）：向量检索通道返回的原始行集合；约束：无额外运行时限制。
+        - `keyword_status`（str）：关键词检索阶段的状态；约束：无额外运行时限制。
+        - `vector_status`（str）：向量检索阶段的状态；约束：无额外运行时限制。
+        - `limit`（int）：本次读取或处理的数量上限；约束：无额外运行时限制。
+        - `started`（float）：本阶段开始时记录的单调时钟值，用于计算剩余时限；约束：无额外运行时限制。
+
+        返回：
+        - ProviderResult：包含检索状态、候选内容和追踪信息的提供方结果。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         candidates: dict[str, RetrievalCandidateTrace] = {}
         for rank, record in enumerate(keyword_rows, 1):
             vector_hits = [
@@ -1025,11 +1251,35 @@ class MemoryContextProvider(ContextProvider):
     def _candidate(
         source_id: str, content: str, score: float, metadata: dict[str, Any]
     ) -> RetrievalCandidate:
-        """创建带记忆来源标记的融合候选。"""
+        """创建带记忆来源标记的融合候选。
+
+        参数：
+        - `source_id`（str）：当前候选或记录的来源标识；约束：无额外运行时限制。
+        - `content`（str）：待处理或返回的正文内容；约束：无额外运行时限制。
+        - `score`（float）：候选项在当前检索通道中的相关性分数；约束：无额外运行时限制。
+        - `metadata`（dict[str, Any]）：随领域记录保存的结构化附加字段；约束：无额外运行时限制。
+
+        返回：
+        - RetrievalCandidate：统一格式的检索候选内容及其来源信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return RetrievalCandidate(source_id, content, "memory", score, metadata)
 
 
 def _score(value: Any) -> float | None:
+    """将输入分数转换为有限、可比较的数值。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - float | None：归一化后的有限相关性分数；输入缺失或非数值时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if value is None:
         return None
     try:
@@ -1039,20 +1289,53 @@ def _score(value: Any) -> float | None:
 
 
 def _optional_text(value: Any) -> str | None:
+    """将可选输入规范化为非空文本或 None。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - str | None：去除首尾空白的非空文本；输入不是字符串或为空时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     text = str(value).strip() if value is not None else ""
     return text or None
 
 
 def _remaining_timeout(started: float, timeout_seconds: float) -> float:
-    """保持全文检索、向量检索和事实组展开共享一个总时限。"""
+    """保持全文检索、向量检索和事实组展开共享一个总时限。
+
+    参数：
+    - `started`（float）：本阶段开始时记录的单调时钟值，用于计算剩余时限；约束：无额外运行时限制。
+    - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：无额外运行时限制。
+
+    返回：
+    - float：总时限扣除已用时间后的剩余秒数，最小为 0。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return max(0.0, timeout_seconds - (time.perf_counter() - started))
 
 
 def _is_active_record(record: MemoryRecord) -> bool:
-    """只允许当前有效且未到期的事实进入读取上下文。"""
+    """只允许当前有效且未到期的事实进入读取上下文。
+
+    参数：
+    - `record`（MemoryRecord）：当前领域记录，作为本次转换、筛选或渲染的输入；约束：无额外运行时限制。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if record.status != MemoryStatus.ACTIVE or record.validity_status != "valid":
         return False
     now = datetime.now(timezone.utc)
+    # 将无时区时间按 UTC 解释；无法解析的时间按失效处理，避免过期事实被召回。
     for value in (record.expires_at, record.valid_until):
         if value is None:
             continue
@@ -1080,7 +1363,19 @@ def _is_active_record(record: MemoryRecord) -> bool:
 def _is_in_scope(
     record: MemoryRecord, *, session_id: str, project_id: str | None
 ) -> bool:
-    """只允许全局、当前会话或明确绑定项目的记忆参与召回。"""
+    """只允许全局、当前会话或明确绑定项目的记忆参与召回。
+
+    参数：
+    - `record`（MemoryRecord）：当前领域记录，作为本次转换、筛选或渲染的输入；约束：无额外运行时限制。
+    - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+    - `project_id`（str | None）：项目空间的稳定标识；None 表示未绑定项目；约束：允许为 None，按未提供值的分支处理。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     fact = record_fact(record)
     if fact is not None:
         if fact.scope_kind == "global":

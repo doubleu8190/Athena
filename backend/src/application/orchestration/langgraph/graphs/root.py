@@ -1,4 +1,5 @@
-"""LangGraph adapter for the Root application workflow."""
+"""Root 应用工作流的 LangGraph 适配器。
+"""
 
 from __future__ import annotations
 
@@ -49,6 +50,25 @@ async def _publish(
     error: str | None = None,
     summary: str | None = None,
 ) -> None:
+    """发布带节点身份、执行耗时和结果摘要的 Root 工作流事件。
+
+    参数：
+    - `dependencies`（RootWorkflowDependencies）：构建或执行当前流程所需的协作依赖；约束：无额外运行时限制。
+    - `event_type`（str）：要发布的事件类型名称；约束：无额外运行时限制。
+    - `state`（Mapping[str, Any]）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+    - `node_name`（str）：当前图节点的稳定名称；约束：无额外运行时限制。
+    - `invocation_id`（str）：本次图或模型调用的关联标识；约束：无额外运行时限制。
+    - `started_at`（datetime | None）：操作开始时间，用于记录运行时间信息；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+    - `duration_ms`（int | None）：本阶段测得的耗时毫秒数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+    - `error`（str | None）：操作失败时捕获的异常或错误说明；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+    - `summary`（str | None）：面向用户或后续流程的简要结果说明；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+    返回：
+    - None：操作完成后不提供返回数据。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     try:
         request = RootRequestState.model_validate(state.get("request", {}))
         from domain.events import ApplicationEvent, EventDurability
@@ -104,7 +124,31 @@ def _node(
     handler: Callable[[RootGraphState], Awaitable[dict[str, Any]]],
     dependencies: RootWorkflowDependencies,
 ):
+    """包装 Root 工作流处理器，并统一记录节点开始、完成和失败事件。
+
+    参数：
+    - `name`（str）：目标名称，用于标识相应配置、工具或对象；约束：无额外运行时限制。
+    - `handler`（Callable[[RootGraphState], Awaitable[dict[str, Any]]]）：处理单个工作流节点的异步函数；约束：无额外运行时限制。
+    - `dependencies`（RootWorkflowDependencies）：构建或执行当前流程所需的协作依赖；约束：无额外运行时限制。
+
+    返回：
+    - Callable[..., Any]：供图构建器注册并处理 Root 节点状态的异步函数。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     async def wrapped(state: RootGraphState) -> dict[str, Any]:
+        """执行计划完成等待节点，并转换等待状态或异常。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：包含计划等待完成状态或错误信息的 Root 图状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         invocation_id = uuid4().hex
         started_at = datetime.now(timezone.utc)
         started_clock = perf_counter()
@@ -159,10 +203,22 @@ def _node(
 
 
 def _node_result_summary(node_name: str, value: Any) -> str | None:
-    """从节点返回值中提取适合展示的结果概述，不包含原文或模型推理。"""
+    """从节点返回值中提取适合展示的结果概述，不包含原文或模型推理。
+
+    参数：
+    - `node_name`（str）：当前图节点的稳定名称；约束：无额外运行时限制。
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - str | None：适合写入事件的结果摘要；无可展示字段时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if not isinstance(value, Mapping):
         return None
 
+    # 按节点挑选有限字段生成摘要，事件中不包含模型原文、用户正文或推理内容。
     if node_name == "prepare_request":
         request = value.get("request", {})
         attachments = (
@@ -224,26 +280,62 @@ def _node_result_summary(node_name: str, value: Any) -> str | None:
 
 
 def _route_after_request(state: RootGraphState) -> str:
-    """请求准备失败时终止；成功时先用原始问题预检索。"""
+    """请求准备失败时终止；成功时先用原始问题预检索。
+
+    参数：
+    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - str：Root 图中表示下一节点名称的路由键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return "assemble_final_response" if state.get("error") else "prefetch_context"
 
 
 def _route_after_prefetch(state: RootGraphState) -> str:
     """预检索可恢复结果进入首次决策；不可恢复错误直接终止。
 
-    参数：state 是预检索后的图状态。返回：下一个节点名。
-    异常：不主动抛出业务异常。
+    参数：
+    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - str：Root 图中表示下一节点名称的路由键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
     return "assemble_final_response" if state.get("error") else "decide_root_action"
 
 
 def _route_after_context(state: RootGraphState) -> str:
-    """不可恢复的采集错误终止；其余结果进入专用再决策节点。"""
+    """不可恢复的采集错误终止；其余结果进入专用再决策节点。
+
+    参数：
+    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - str：Root 图中表示下一节点名称的路由键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return "assemble_final_response" if state.get("error") else "redecide_root_action"
 
 
 def _route_after_decision(state: RootGraphState) -> str:
-    """按合法 action 分流，不再根据 mode 或返回字典猜测意图。"""
+    """校验 Root 决策后，按回答、检索、计划或终止动作选择后续节点。
+
+    参数：
+    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - str：Root 图中表示下一节点名称的路由键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if state.get("error"):
         return "assemble_final_response"
     try:
@@ -260,6 +352,17 @@ def _route_after_decision(state: RootGraphState) -> str:
 
 
 def _route_after_redecision(state: RootGraphState) -> str:
+    """根据重新生成的 Root 决策选择回答、计划或终止路径。
+
+    参数：
+    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - str：Root 图中表示下一节点名称的路由键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if state.get("error"):
         return "assemble_final_response"
     try:
@@ -274,6 +377,17 @@ def _route_after_redecision(state: RootGraphState) -> str:
 
 
 def _route_after_plan_generation(state: RootGraphState) -> str:
+    """根据错误、规划反馈和计划草稿选择 Root 后续节点。
+
+    参数：
+    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - str：由错误、规划反馈和计划草稿决定的 Root 后续节点名称。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if state.get("error"):
         return "assemble_final_response"
     if state.get("planning_feedback") is not None:
@@ -287,13 +401,50 @@ def _route_after_plan_generation(state: RootGraphState) -> str:
 
 
 def _route_after_wait(state: RootGraphState) -> str:
+    """根据等待状态选择继续等待或构建计划响应。
+
+    参数：
+    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - str：Root 图中表示下一节点名称的路由键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return "wait_for_plan_completion" if state.get("waiting") else "build_plan_response"
 
 
 def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
-    """Suspend Root until a durable Round completion resumes its checkpoint."""
+    """暂停 Root，直至持久化的 Round 完成事件恢复其 checkpoint。
+
+    参数：
+    - `workflow`（RootWorkflowPort）：负责执行业务步骤的应用工作流；约束：无额外运行时限制。
+
+    返回：
+    - Callable[..., Any]：等待计划轮次完成并返回图状态补丁的节点函数。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
 
     async def wait_for_plan_completion(state: RootGraphState) -> dict[str, Any]:
+        """暂停 Root 图，等待计划轮次完成后恢复。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：包含等待状态及恢复身份的 Root 图状态补丁。
+
+        异常：
+        - RuntimeError：校验条件 `not isinstance(wait_context, Mapping)` 成立时（异常说明：root_round_wait_identity_missing）。
+        - RuntimeError：校验条件 `捕获 ValidationError 后` 成立时（异常说明：root_round_wait_identity_missing）。
+        - RuntimeError：校验条件 `wait_identity.run_id != request.run_id` 成立时（异常说明：root_round_wait_run_mismatch）。
+        - RuntimeError：校验条件 `捕获 ValidationError 后` 成立时（异常说明：root_round_resume_value_invalid）。
+        - RuntimeError：校验条件 `any((getattr(resume_identity, name) != getattr(wait_identity, name) for name in ('run_id', 'plan_id', 'round_id', 'plan_version')))` 成立时（异常说明：root_round_resume_identity_mismatch）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         result = await workflow.wait_for_plan_completion(state)
         if not result.get("waiting"):
             return result
@@ -326,8 +477,7 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
                 ),
             }
         )
-        # A review can start another Round. Return its wait state so the graph
-        # re-enters this node as a new LangGraph task with a fresh interrupt.
+        # 审查可能开启新一轮；返回等待状态，让图以新的 LangGraph 任务重新进入此节点并创建新中断。
         return await workflow.wait_for_plan_completion(state)
 
     wait_for_plan_completion.__name__ = "wait_for_plan_completion"
@@ -340,7 +490,19 @@ def build_root_graph(
     dependencies: RootWorkflowDependencies,
     checkpointer: Any = None,
 ) -> Any:
-    """Compile a graph whose nodes delegate business work to an application port."""
+    """注册 Root 工作流节点和路由规则，并编译可恢复的 LangGraph。
+
+    参数：
+    - `workflow`（RootWorkflowPort）：负责执行业务步骤的应用工作流；约束：无额外运行时限制。
+    - `dependencies`（RootWorkflowDependencies）：构建或执行当前流程所需的协作依赖；约束：无额外运行时限制。
+    - `checkpointer`（Any）：保存和恢复图执行状态的检查点依赖；约束：可省略，默认值为 `None`。
+
+    返回：
+    - Any：已编译且可使用检查点恢复的 Root 工作流图。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     handlers = {
         "prepare_request": workflow.prepare_request,
         "prefetch_context": workflow.prefetch_context,
@@ -356,8 +518,7 @@ def build_root_graph(
     graph = StateGraph(RootGraphState)
     for name, handler in handlers.items():
         graph.add_node(name, _node(name, handler, dependencies))
-    # This node owns LangGraph's interrupt boundary and must not be wrapped by
-    # _node, which would catch and turn the interrupt into an application error.
+    # 此节点负责 LangGraph 中断边界，不能由 _node 包装，否则会捕获中断并将其误报为应用错误。
     graph.add_node("wait_for_plan_completion", _wait_for_plan_completion_node(workflow))
     graph.add_edge(START, "prepare_request")
     graph.add_conditional_edges(
@@ -455,9 +616,28 @@ async def invoke_root_graph(
 ) -> Mapping | dict[str, str] | Any:
     """启动 Root 图，或用已验证的 Round 身份恢复持久化 checkpoint。
 
-    参数：``resume_value`` 可为具体模型，或从命令存储读出的同构 JSON 对象。
-    返回：图执行状态；等待 Round 时包含 checkpoint 与 interrupt 信息。
-    异常：Run 身份缺失、恢复内容不符合当前契约或图执行失败时抛出。
+    参数：
+    - `graph`（CompiledStateGraph[Any, Any, Any, Any]）：已编译或待执行的工作流图；约束：无额外运行时限制。
+    - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：须通过方法内校验；失败条件见下方异常说明。
+    - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：无额外运行时限制。
+    - `user_message`（str）：本次 Run 对应的用户原始消息；约束：可省略，默认值为 `''`。
+    - `message_id`（str）：关联消息的稳定标识；None 表示未绑定消息；约束：可省略，默认值为 `''`。
+    - `run_sequence`（int）：会话内 Run 的单调递增序号；约束：可省略，默认值为 `1`。
+    - `attachment_ids`（list[str] | None）：当前请求已授权使用的附件标识集合；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+    - `resume_value`（RoundCompletedResumeValue | Mapping[str, Any] | None）：图中断后用于恢复执行的持久化值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`；须通过方法内校验；失败条件见下方异常说明。
+    - `stop_signal`（asyncio.Event | None）：通知当前执行应停止的异步信号；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+    返回：
+    - Mapping | dict[str, str] | Any：Root 图本次调用生成的状态映射。
+
+    异常：
+    - ValueError：校验条件 `not run_id` 成立时（异常说明：run_id is required）。
+    - RuntimeError：校验条件 `resume_value is not None；isinstance(resume_value, Mapping)；捕获 ValidationError 后` 成立时（异常说明：root_resume_value_type_invalid）。
+    - RuntimeError：校验条件 `resume_value is not None；not (isinstance(resume_value, Mapping))；not isinstance(resume_value, RoundCompletedResumeValue)` 成立时（异常说明：root_resume_value_type_invalid）。
+    - RuntimeError：校验条件 `resume_value is not None；resume_value.type != 'round_completed'` 成立时（异常说明：root_resume_value_type_invalid）。
+    - RuntimeError：校验条件 `isinstance(result, Mapping) and result.get('__interrupt__')；not checkpoint_id` 成立时（异常说明：root_wait_checkpoint_identity_missing）。
+    - 未列出的依赖异常按当前实现传播。
     """
     if not run_id:
         raise ValueError("run_id is required")
@@ -479,7 +659,6 @@ async def invoke_root_graph(
 
     if stop_signal is not None:
         config["configurable"]["stop_signal"] = stop_signal
-    # 恢复中断流程
     if resume_value is not None:
         if isinstance(resume_value, Mapping):
             try:
@@ -505,10 +684,9 @@ async def invoke_root_graph(
             config=config,
         )
     else:
-        # 任务启动流程
         logger.info(f"Invoking root graph for run {run_id}")
         result = await graph.ainvoke(state, config=config)
-    # 处理root agent interrupt事件
+    # 处理 Root Agent 中断事件。
     if isinstance(result, Mapping) and result.get("__interrupt__"):
         snapshot = await graph.aget_state(config)
         snapshot_config = snapshot.config

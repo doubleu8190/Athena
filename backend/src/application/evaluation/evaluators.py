@@ -1,4 +1,5 @@
-"""Built-in deterministic evaluator registry."""
+"""内置确定性指标评估器及其注册表。
+"""
 
 from __future__ import annotations
 
@@ -10,26 +11,71 @@ from domain.evaluation.metrics import evaluate_answer_rules, evaluate_retrieval_
 
 
 class RetrievalMetricsEvaluator(MetricEvaluator):
+    """计算检索相关性和候选覆盖等确定性指标。
+    """
     name = "retrieval_metrics"
     version = "1"
 
     async def evaluate(self, case: EvalCase, artifact: ExecutionArtifact, *, run_id: str) -> Sequence[MetricValue]:
+        """对单个评估用例计算当前评估器负责的指标。
+
+        参数：
+        - `case`（EvalCase）：当前待执行或评估的数据集用例；约束：无额外运行时限制。
+        - `artifact`（ExecutionArtifact）：当前用例执行产生的产物，供评估器计算指标；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+
+        返回：
+        - Sequence[MetricValue]：由当前评估器计算出的指标值集合。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return evaluate_retrieval_case(case, artifact, run_id=run_id)
 
 
 class AnswerRulesEvaluator(MetricEvaluator):
+    """按评估用例中的规则检查回答结果。
+    """
     name = "answer_rules"
     version = "1"
 
     async def evaluate(self, case: EvalCase, artifact: ExecutionArtifact, *, run_id: str) -> Sequence[MetricValue]:
+        """对单个评估用例计算当前评估器负责的指标。
+
+        参数：
+        - `case`（EvalCase）：当前待执行或评估的数据集用例；约束：无额外运行时限制。
+        - `artifact`（ExecutionArtifact）：当前用例执行产生的产物，供评估器计算指标；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+
+        返回：
+        - Sequence[MetricValue]：由当前评估器计算出的指标值集合。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return evaluate_answer_rules(case, artifact, run_id=run_id)
 
 
 class AgentRulesEvaluator(MetricEvaluator):
+    """按评估用例规则检查 Agent 执行产物。
+    """
     name = "agent_rules"
     version = "1"
 
     async def evaluate(self, case: EvalCase, artifact: ExecutionArtifact, *, run_id: str) -> Sequence[MetricValue]:
+        """对单个评估用例计算当前评估器负责的指标。
+
+        参数：
+        - `case`（EvalCase）：当前待执行或评估的数据集用例；约束：无额外运行时限制。
+        - `artifact`（ExecutionArtifact）：当前用例执行产生的产物，供评估器计算指标；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+
+        返回：
+        - Sequence[MetricValue]：由当前评估器计算出的指标值集合。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if case.agent is None:
             return ()
         calls = artifact.trace.get("tool_calls", ()) if isinstance(artifact.trace, dict) else ()
@@ -52,6 +98,17 @@ class AgentRulesEvaluator(MetricEvaluator):
 
 
 def default_evaluators() -> dict[str, object]:
+    """创建内置指标评估器映射。
+
+    参数：
+    - 无参数。
+
+    返回：
+    - dict[str, object]：以评估器名称为键、内置评估器为值的注册表。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return {
         RetrievalMetricsEvaluator.name: RetrievalMetricsEvaluator(),
         AnswerRulesEvaluator.name: AnswerRulesEvaluator(),

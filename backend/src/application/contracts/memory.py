@@ -25,7 +25,18 @@ from domain.memory.contracts import (
 
 
 def _parse_fact_cardinality(value: object) -> FactCardinality:
-    """将模型或 JSON 边界的字符串校验为受限基数枚举。"""
+    """将模型或 JSON 边界的字符串校验为受限基数枚举。
+
+    参数：
+    - `value`（object）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - FactCardinality：与输入值对应的事实基数枚举；不受支持的值会触发 ValueError。
+
+    异常：
+    - ValueError：执行到该异常分支时（异常说明：memory_fact_cardinality_invalid）。
+    - 未列出的依赖异常按当前实现传播。
+    """
     if isinstance(value, FactCardinality):
         return value
     if isinstance(value, str):
@@ -70,20 +81,51 @@ class MemoryFactSchema(BaseModel):
     @field_validator("cardinality", mode="before")
     @classmethod
     def _validate_cardinality(cls, value: object) -> FactCardinality:
-        """校验持久化事实的基数枚举。"""
+        """校验持久化事实的基数枚举。
+
+        参数：
+        - `value`（object）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - FactCardinality：表示事实单值或多值关系的枚举。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return _parse_fact_cardinality(value)
 
     @field_validator("source_refs", mode="before")
     @classmethod
     def _freeze_source_refs(cls, value: object) -> object:
-        """Normalize JSON-decoded arrays at the metadata persistence boundary."""
+        """在 metadata 持久化边界把 JSON 数组规范化为不可变来源引用。
+
+        参数：
+        - `value`（object）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - object：列表输入转换为元组，其余输入原样返回，供后续字段校验使用。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if isinstance(value, list):
             return tuple(value)
         return value
 
     @model_validator(mode="after")
     def validate_retraction_value(self) -> "MemoryFactSchema":
-        """撤回记录不携带新值，其他事实必须有明确值。"""
+        """撤回记录不携带新值，其他事实必须有明确值。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - 'MemoryFactSchema'：通过撤回值与事实值约束校验后的当前 schema 实例。
+
+        异常：
+        - ValueError：校验条件 `not (valid_retraction or valid_assertion)` 成立时（异常说明：memory_fact_retraction_value_invalid）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         valid_retraction = (
             self.claim_intent == "retract"
             and self.fact_value is None
@@ -179,7 +221,20 @@ class MemoryEpisodeProposalSchema(BaseModel):
 
     @model_validator(mode="after")
     def validate_retained_episode(self) -> "MemoryEpisodeProposalSchema":
-        """只保留同时具有摘要和来源的回顾。"""
+        """只保留同时具有摘要和来源的回顾。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - 'MemoryEpisodeProposalSchema'：保存对话摘要、来源和有效状态的记忆回顾记录。
+
+        异常：
+        - ValueError：校验条件 `self.retain and (self.summary is None or not self.source_ref_ids)` 成立时（异常说明：memory_episode_sources_required）。
+        - ValueError：校验条件 `not self.retain and (self.summary is not None or self.source_ref_ids)` 成立时（异常说明：memory_episode_discard_payload_invalid）。
+        - ValueError：校验条件 `len(set(self.source_ref_ids)) != len(self.source_ref_ids)` 成立时（异常说明：memory_episode_duplicate_source_ref）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         if self.retain and (self.summary is None or not self.source_ref_ids):
             raise ValueError("memory_episode_sources_required")
         if not self.retain and (self.summary is not None or self.source_ref_ids):
@@ -234,12 +289,33 @@ class MemoryFactProposalSchema(BaseModel):
     @field_validator("cardinality", mode="before")
     @classmethod
     def _validate_cardinality(cls, value: object) -> FactCardinality:
-        """校验提取候选的基数枚举。"""
+        """校验提取候选的基数枚举。
+
+        参数：
+        - `value`（object）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - FactCardinality：表示事实单值或多值关系的枚举。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return _parse_fact_cardinality(value)
 
     @model_validator(mode="after")
     def validate_retraction_value(self) -> "MemoryFactProposalSchema":
-        """只允许撤回候选省略新值。"""
+        """只允许撤回候选省略新值。
+
+        参数：
+        - 无参数。
+
+        返回：
+        - 'MemoryFactProposalSchema'：通过撤回值与事实值约束校验后的当前 schema 实例。
+
+        异常：
+        - ValueError：校验条件 `not (valid_retraction or valid_assertion)` 成立时（异常说明：memory_proposal_retraction_value_invalid）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         valid_retraction = (
             self.claim_intent == "retract"
             and self.value is None
@@ -318,73 +394,228 @@ _DOMAIN_TO_SCHEMA = {
 @overload
 def memory_schema_to_domain(
     value: MemorySourceReferenceSchema,
-) -> DomainMemorySourceReference: ...
+) -> DomainMemorySourceReference:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemorySourceReferenceSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemorySourceReference：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
-def memory_schema_to_domain(value: MemoryFactSchema) -> DomainMemoryFact: ...
+def memory_schema_to_domain(value: MemoryFactSchema) -> DomainMemoryFact:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryFactSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryFact：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryFactIdentitySchema,
-) -> DomainMemoryFactIdentity: ...
+) -> DomainMemoryFactIdentity:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryFactIdentitySchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryFactIdentity：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryToolOutcomeEvidenceSchema,
-) -> DomainMemoryToolOutcomeEvidence: ...
+) -> DomainMemoryToolOutcomeEvidence:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryToolOutcomeEvidenceSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryToolOutcomeEvidence：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryTaskOutcomeEvidenceSchema,
-) -> DomainMemoryTaskOutcomeEvidence: ...
+) -> DomainMemoryTaskOutcomeEvidence:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryTaskOutcomeEvidenceSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryTaskOutcomeEvidence：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryExecutionEvidenceSchema,
-) -> DomainMemoryExecutionEvidence: ...
+) -> DomainMemoryExecutionEvidence:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryExecutionEvidenceSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryExecutionEvidence：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryEpisodeSummarySchema,
-) -> DomainMemoryEpisodeSummary: ...
+) -> DomainMemoryEpisodeSummary:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryEpisodeSummarySchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryEpisodeSummary：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryEpisodeProposalSchema,
-) -> DomainMemoryEpisodeProposal: ...
+) -> DomainMemoryEpisodeProposal:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryEpisodeProposalSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryEpisodeProposal：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
-def memory_schema_to_domain(value: MemoryEpisodeSchema) -> DomainMemoryEpisode: ...
+def memory_schema_to_domain(value: MemoryEpisodeSchema) -> DomainMemoryEpisode:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryEpisodeSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryEpisode：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryFactExtractionSnapshotSchema,
-) -> DomainMemoryFactExtractionSnapshot: ...
+) -> DomainMemoryFactExtractionSnapshot:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryFactExtractionSnapshotSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryFactExtractionSnapshot：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryCandidateSchema,
-) -> DomainMemoryCandidate: ...
+) -> DomainMemoryCandidate:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryCandidateSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryCandidate：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 @overload
 def memory_schema_to_domain(
     value: MemoryRecordMetadataSchema,
-) -> DomainMemoryRecordMetadata: ...
+) -> DomainMemoryRecordMetadata:
+    """将已校验的记忆 schema 递归恢复为领域对象。
+
+    参数：
+    - `value`（MemoryRecordMetadataSchema）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - DomainMemoryRecordMetadata：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    ...
 
 
 def memory_schema_to_domain(value: object) -> object:
-    """把已校验的记忆边界 schema 递归转换为领域 dataclass。"""
+    """把已校验的记忆边界 schema 递归转换为领域 dataclass。
+
+    参数：
+    - `value`（object）：待解析、校验或转换的输入值；约束：须通过方法内校验；失败条件见下方异常说明。
+
+    返回：
+    - object：与输入 schema 对应的记忆领域对象；容器及其成员会递归转换。
+
+    异常：
+    - TypeError：校验条件 `isinstance(value, BaseModel)；domain_type is None` 成立时。
+    - 未列出的依赖异常按当前实现传播。
+    """
     if isinstance(value, BaseModel):
         domain_type = _SCHEMA_TO_DOMAIN.get(type(value))
         if domain_type is None:
@@ -406,7 +637,19 @@ def memory_schema_to_domain(value: object) -> object:
 
 
 def memory_domain_to_schema(value: object) -> BaseModel:
-    """把领域记忆对象递归转换为待持久化或外发的 Pydantic schema。"""
+    """把领域记忆对象递归转换为待持久化或外发的 Pydantic schema。
+
+    参数：
+    - `value`（object）：待解析、校验或转换的输入值；约束：须通过方法内校验；失败条件见下方异常说明。
+
+    返回：
+    - BaseModel：与输入领域对象对应且已完成校验的 Pydantic schema。
+
+    异常：
+    - TypeError：校验条件 `not is_dataclass(value)` 成立时。
+    - TypeError：校验条件 `schema_type is None` 成立时。
+    - 未列出的依赖异常按当前实现传播。
+    """
     if not is_dataclass(value):
         raise TypeError(f"memory_domain_type_not_supported:{type(value).__name__}")
     schema_type = _DOMAIN_TO_SCHEMA.get(type(value))
@@ -428,7 +671,17 @@ def memory_domain_to_schema(value: object) -> BaseModel:
 
 
 def _domain_value_to_schema_value(value: object) -> object:
-    """递归转换嵌套领域对象和不可变集合。"""
+    """递归转换嵌套领域对象和不可变集合。
+
+    参数：
+    - `value`（object）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - object：嵌套领域对象、序列和映射递归转换后的值。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if is_dataclass(value):
         return memory_domain_to_schema(value)
     if isinstance(value, tuple):

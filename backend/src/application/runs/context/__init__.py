@@ -1,4 +1,5 @@
-"""Context planning and acquisition use cases."""
+"""上下文规划、检索和校验用例。
+"""
 
 from .contracts import (
     ContextBundle,

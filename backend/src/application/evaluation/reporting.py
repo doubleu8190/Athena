@@ -1,4 +1,5 @@
-"""Stable JSON and Markdown evaluation reports."""
+"""生成格式稳定的 JSON 和 Markdown 评估报告。
+"""
 
 from __future__ import annotations
 
@@ -10,10 +11,36 @@ from domain.evaluation import CaseResult, EvalRun, GateResult, MetricValue
 
 
 def _metric_dict(metric: MetricValue) -> dict[str, Any]:
+    """将评估指标转换为报告使用的字典。
+
+    参数：
+    - `metric`（MetricValue）：当前评估指标；约束：无额外运行时限制。
+
+    返回：
+    - dict[str, Any]：包含指标名称、数值、样本、证据和结构化值的报告字段。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return {"metric_name": metric.metric_name, "value": metric.value, "case_id": metric.case_id, "value_json": dict(metric.value_json), "evidence": list(metric.evidence)}
 
 
 def write_report(output_root: str | Path, run: EvalRun, results: list[CaseResult], metrics: list[MetricValue], gates: list[GateResult]) -> Path:
+    """将评估运行、用例结果、指标和门槛写入报告文件。
+
+    参数：
+    - `output_root`（str | Path）：报告文件的输出根目录；约束：无额外运行时限制。
+    - `run`（EvalRun）：需要转换为查询响应或报告内容的评估运行；约束：无额外运行时限制。
+    - `results`（list[CaseResult]）：本次处理产生的结果集合；约束：无额外运行时限制。
+    - `metrics`（list[MetricValue]）：评估运行产生的指标集合；约束：无额外运行时限制。
+    - `gates`（list[GateResult]）：根据指标判定运行是否通过的门槛结果集合；约束：无额外运行时限制。
+
+    返回：
+    - Path：本次运行报告所在的目录路径；目录中包含 JSON、Markdown 和逐用例 JSONL 文件。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     directory = Path(output_root) / run.run_id
     directory.mkdir(parents=True, exist_ok=True)
     payload = {

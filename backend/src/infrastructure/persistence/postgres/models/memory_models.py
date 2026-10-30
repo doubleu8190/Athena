@@ -7,7 +7,6 @@ from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
-from .project_models import ProjectModel
 from .runtime_models import MemoryModel
 
 

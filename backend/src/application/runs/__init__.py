@@ -1,4 +1,5 @@
-"""Run submission, execution, preparation and query use cases."""
+"""Run 提交、执行、请求准备和查询用例。
+"""
 
 from .query_service import RunNotFoundError, RunQueryService
 from .run_service import RunRejectedError, RunService

@@ -339,7 +339,7 @@ def _matching_fact_rows(
     for row in rows:
         if not _is_unexpired(row, now=now):
             logger.info(
-                "memory_row_expired",
+                "记忆已过期，跳过",
                 extra={"row_id": row.id, "expires_at": row.expires_at},
             )
             continue
@@ -372,6 +372,14 @@ def _matching_fact_rows(
                 and identity.claim_intent == "retract"
                 and stored_fact.fact_value != identity.retracts_value
             ):
+                logger.info(
+                    "记忆指跟要求撤回的目标值不匹配，跳过",
+                    extra={
+                        "row_id": row.id,
+                        "stored_value": stored_fact.fact_value,
+                        "retracts_value": identity.retracts_value,
+                    },
+                )
                 continue
             matches.append(row)
     return sorted(matches, key=lambda row: row.id)

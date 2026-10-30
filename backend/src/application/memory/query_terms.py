@@ -8,14 +8,14 @@ import re
 def extract_memory_query_terms(query: str) -> tuple[str, ...]:
     """提取最多 16 个英文词项和中文相邻字词项。
 
-    Args:
-        query: 原始自然语言检索问题。
+    参数：
+    - `query`（str）：原始自然语言检索问题；约束：无额外运行时限制。
 
-    Returns:
-        有序去重的非空词项；无法切词时返回截断后的原查询。
+    返回：
+    - tuple[str, ...]：有序去重的非空词项；无法切词时返回截断后的原查询。
 
-    Raises:
-        不主动抛出业务异常。
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
     normalized = query.casefold()
     terms = [

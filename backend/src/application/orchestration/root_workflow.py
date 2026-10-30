@@ -1,8 +1,4 @@
-"""Root run workflow independent from LangGraph.
-
-This module owns the application steps required to prepare a request, acquire
-context, execute an agent and materialize a worker plan.  The LangGraph
-adapter only supplies state and connects these steps into a graph.
+"""不依赖 LangGraph 的 Root Run 应用工作流。
 """
 
 from __future__ import annotations
@@ -108,11 +104,14 @@ class _ReviewIdentity:
 def _result_text(value: Any) -> str:
     """从 Worker 结果中提取适合展示给用户的文本。
 
-    Args:
-        value: Worker 返回的结果对象；可以是嵌套映射、字符串或空值。
+    参数：
+    - `value`（Any）：Worker 返回的结果对象；可以是嵌套映射、字符串或空值；约束：无额外运行时限制。
 
-    Returns:
-        最内层的标准输出、文本内容或错误说明；没有可展示内容时返回空字符串。
+    返回：
+    - str：最内层的标准输出、文本内容或错误说明；没有可展示内容时返回空字符串。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
     if isinstance(value, Mapping):
         # 命令工具的结构化结果把实际输出放在 stdout 中，优先提取它以免丢失执行结果。
@@ -133,6 +132,18 @@ def _result_text(value: Any) -> str:
 def render_plan_results(
     results: Mapping[str, Any], tasks: list[Mapping[str, Any]] | None = None
 ) -> str:
+    """按任务标题整理计划执行结果，供 Root 生成最终回答。
+
+    参数：
+    - `results`（Mapping[str, Any]）：本次处理产生的结果集合；约束：无额外运行时限制。
+    - `tasks`（list[Mapping[str, Any]] | None）：计划中定义的 Worker 任务集合；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+    返回：
+    - str：按任务标题和结果状态整理的计划执行文本。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if not results:
         return "计划已完成，但没有可展示的任务结果。"
     titles = {
@@ -161,15 +172,23 @@ async def _load_or_create_review_decision(
     tuple[RootWorkerTool, ...],
 ]:
     """复用已保存决策，或从固定 Round 快照生成新决策。
-    Args:
-        deps: Root 工作流依赖。
-        identity: 已校验的 Run、Plan、Round 和版本身份。
-        request: 当前用户请求元数据。
-        state: 用于确定性延后版本审查的图状态。
-    Returns:
-        审查决策和新决策所依据的上下文；复用已保存决策时上下文为空。
-    Raises:
-        RuntimeError: 上下文仓储、上下文身份或 Agent 决策无效时。
+
+    参数：
+    - `deps`（RootWorkflowDependencies）：Root 工作流依赖；约束：须通过方法内校验；失败条件见下方异常说明。
+    - `identity`（_ReviewIdentity）：已校验的 Run、Plan、Round 和版本身份；约束：须通过方法内校验；失败条件见下方异常说明。
+    - `request`（Mapping[str, Any]）：当前用户请求元数据；约束：无额外运行时限制。
+    - `state`（Mapping[str, Any]）：用于确定性延后版本审查的图状态；约束：无额外运行时限制。
+
+    返回：
+    - tuple[ReviewDecision, ReviewContext | None, tuple[RootWorkerTool, ...]]：审查决策和新决策所依据的上下文；复用已保存决策时上下文为空。
+
+    异常：
+    - RuntimeError：校验条件 `handler is None` 成立时（异常说明：root_review_command_handler_not_configured）。
+    - RuntimeError：校验条件 `decision is not None；not isinstance(decision, ReviewDecision)` 成立时（异常说明：root_review_decision_invalid）。
+    - RuntimeError：校验条件 `deps.review_context_repository is None` 成立时（异常说明：root_review_context_repository_not_configured）。
+    - RuntimeError：校验条件 `context.round_id != identity.round_id or context.plan_id != identity.plan_id or context.plan_version != identity.plan_version` 成立时（异常说明：root_review_context_identity_mismatch）。
+    - RuntimeError：校验条件 `not isinstance(decision, ReviewDecision)` 成立时（异常说明：root_review_decision_invalid）。
+    - 未列出的依赖异常按当前实现传播。
     """
     handler = deps.orchestration_command_handler
     if handler is None:
@@ -216,7 +235,19 @@ async def _load_or_create_review_decision(
 def _review_command(
     identity: _ReviewIdentity, decision: ReviewDecision, lease: LeaseGrant
 ) -> OrchestrationCommand:
-    """将审查动作绑定到唯一 Round 和幂等键。"""
+    """将审查动作绑定到唯一 Round 和幂等键。
+
+    参数：
+    - `identity`（_ReviewIdentity）：经校验的领域身份组合，用于确认操作范围；约束：无额外运行时限制。
+    - `decision`（ReviewDecision）：经过校验的决策内容，用于驱动后续状态转换；约束：无额外运行时限制。
+    - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：无额外运行时限制。
+
+    返回：
+    - OrchestrationCommand：绑定本次审查决策、轮次身份和幂等键的领域命令。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     command_type = {
         ReviewAction.CONTINUE: OrchestrationCommandType.CONTINUE_PLAN,
         ReviewAction.REPLAN: OrchestrationCommandType.REVISE_PLAN,
@@ -239,13 +270,19 @@ def _review_command(
 
 
 def _review_identity(state: Mapping[str, Any]) -> _ReviewIdentity:
-    """校验 Resume、Root Wait 与当前 Run 的身份一致。
-    Args:
-        state: Root 图的当前状态。
-    Returns:
-        供幂等命令和上下文查询使用的固定身份。
-    Raises:
-        RuntimeError: 恢复类型、身份字段或计划版本不合法时。
+    """从已校验请求中恢复 Run、Plan、Round 和版本身份。
+
+    参数：
+    - `state`（Mapping[str, Any]）：Root 图的当前状态；约束：无额外运行时限制。
+
+    返回：
+    - _ReviewIdentity：供幂等命令和上下文查询使用的固定身份。
+
+    异常：
+    - RuntimeError：校验条件 `捕获 ValidationError 后` 成立时（异常说明：root_review_resume_identity_missing）。
+    - RuntimeError：校验条件 `not identities_match` 成立时（异常说明：root_review_resume_identity_mismatch）。
+    - RuntimeError：校验条件 `request.run_id != resume_value.run_id` 成立时（异常说明：root_review_run_identity_mismatch）。
+    - 未列出的依赖异常按当前实现传播。
     """
     try:
         resume_value = RootResumeIdentity.model_validate(state.get("resume_value", {}))
@@ -284,17 +321,24 @@ async def _apply_review_decision_with_fallback(
     lease: LeaseGrant,
 ) -> tuple[ReviewDecision, CommandReceipt]:
     """应用审查动作，并对阻塞的 Continue 执行一次有界恢复。
-    Args:
-        deps: Root 工作流依赖。
-        identity: 需要完成审查的 Round 身份。
-        decision: 首次或已持久化的审查决策。
-        context: 可用于追问 Root 的固定审查上下文。
-        request: 当前用户请求元数据。
-    Returns:
-        最终采用的决策及命令回执。
-    Raises:
-        RuntimeError: 命令处理器未配置时。
-        PlanCommandRejected: 非依赖阻塞的命令拒绝继续向上传递。
+
+    参数：
+    - `deps`（RootWorkflowDependencies）：Root 工作流依赖；约束：无额外运行时限制。
+    - `identity`（_ReviewIdentity）：需要完成审查的 Round 身份；约束：无额外运行时限制。
+    - `decision`（ReviewDecision）：首次或已持久化的审查决策；约束：须通过方法内校验；失败条件见下方异常说明。
+    - `context`（ReviewContext | None）：可用于追问 Root 的固定审查上下文；约束：允许为 None，按未提供值的分支处理。
+    - `request`（Mapping[str, Any]）：当前用户请求元数据；约束：无额外运行时限制。
+    - `worker_tools`（tuple[RootWorkerTool, ...]）：当前系统允许 Worker 调用的工具集合；约束：无额外运行时限制。
+    - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：无额外运行时限制。
+
+    返回：
+    - tuple[ReviewDecision, CommandReceipt]：最终采用的决策及命令回执。
+
+    异常：
+    - RuntimeError：校验条件 `handler is None` 成立时（异常说明：root_review_command_handler_not_configured）。
+    - PlanCommandRejected（重新抛出捕获的异常）：校验条件 `捕获 PlanCommandRejected 后；error.code != 'BLOCKED_DEPENDENCIES' or decision.action != ReviewAction.CONTINUE` 成立时。
+    - PlanCommandRejected（重新抛出捕获的异常）：校验条件 `捕获 PlanCommandRejected 后；error.code != 'BLOCKED_DEPENDENCIES'` 成立时。
+    - 未列出的依赖异常按当前实现传播。
     """
     handler = deps.orchestration_command_handler
     if handler is None:
@@ -308,6 +352,7 @@ async def _apply_review_decision_with_fallback(
         )
         return decision, receipt
     except PlanCommandRejected as error:
+        # 只有 Continue 因依赖阻塞时才触发一次恢复；其他拒绝保持原样向上游传播。
         if (
             error.code != "BLOCKED_DEPENDENCIES"
             or decision.action != ReviewAction.CONTINUE
@@ -331,6 +376,7 @@ async def _apply_review_decision_with_fallback(
         if isinstance(candidate, ReviewDecision):
             _validate_review_tools(candidate, available_tools)
             replacement = candidate
+    # 恢复预算固定为一次；Root 未给出可执行修订或仍选择 Continue 时安全收尾。
     if replacement is None or replacement.action == ReviewAction.CONTINUE:
         replacement = ReviewDecision(
             ReviewAction.FINISH,
@@ -344,6 +390,7 @@ async def _apply_review_decision_with_fallback(
     except PlanCommandRejected as error:
         if error.code != "BLOCKED_DEPENDENCIES":
             raise
+        # 第二次仍被依赖阻塞时直接结束，避免重复调用模型或无限修订。
         replacement = ReviewDecision(
             ReviewAction.FINISH,
             "Root 修订后仍没有可运行任务，按有界 Review 预算结束 Plan。",
@@ -356,7 +403,19 @@ async def _apply_review_decision_with_fallback(
 
 
 def _validate_review_tools(decision: ReviewDecision, available_tools: set[str]) -> None:
-    """拒绝 Review/Revision 中系统当前没有提供的 Worker 工具。"""
+    """拒绝 Review/Revision 中系统当前没有提供的 Worker 工具。
+
+    参数：
+    - `decision`（ReviewDecision）：经过校验的决策内容，用于驱动后续状态转换；约束：无额外运行时限制。
+    - `available_tools`（set[str]）：当前运行时实际提供的工具名集合；约束：无额外运行时限制。
+
+    返回：
+    - None：操作完成后不提供返回数据。
+
+    异常：
+    - ValueError：校验条件 `unavailable_tools` 成立时。
+    - 未列出的依赖异常按当前实现传播。
+    """
     if decision.action != ReviewAction.REPLAN or decision.revision is None:
         return
     requested_tools: set[str] = set()
@@ -371,7 +430,17 @@ def _validate_review_tools(decision: ReviewDecision, available_tools: set[str]) 
 
 
 def _root_budget_exhausted(turn_count: int) -> dict[str, Any]:
-    """构造 Root 轮数耗尽时统一使用的失败状态。"""
+    """构造 Root 轮数耗尽时统一使用的失败状态。
+
+    参数：
+    - `turn_count`（int）：当前 Root 请求已消耗的决策轮数；约束：无额外运行时限制。
+
+    返回：
+    - dict[str, Any]：表示 Root 决策预算耗尽及终止原因的状态字段映射。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     error = {
         "code": "root_budget_exhausted",
         "message": f"Root 已用完允许的 {turn_count} 次决策轮数。",
@@ -385,7 +454,17 @@ def _root_budget_exhausted(turn_count: int) -> dict[str, Any]:
 
 
 def _context_bundle_from_state(value: Mapping[str, Any]) -> ContextBundle:
-    """把 checkpoint 中的 JSON 对象恢复成当前参考窗口。"""
+    """把 checkpoint 中的 JSON 对象恢复成当前参考窗口。
+
+    参数：
+    - `value`（Mapping[str, Any]）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return ContextBundle(
         items=tuple(
             ContextItem(**item)
@@ -410,12 +489,32 @@ def _context_bundle_from_state(value: Mapping[str, Any]) -> ContextBundle:
 
 
 def _request_state(state: Mapping[str, Any]) -> RootRequestState:
-    """将 checkpoint 中的请求字典恢复为有类型的请求内容。"""
+    """将 checkpoint 中的请求字典恢复为有类型的请求内容。
+
+    参数：
+    - `state`（Mapping[str, Any]）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+    返回：
+    - RootRequestState：记录当前流程数据和阶段信息的 `RootRequestState` 状态对象。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return RootRequestState.model_validate(state.get("request", {}))
 
 
 def _provider_result_from_state(value: Mapping[str, Any]) -> ProviderResult:
-    """恢复采集服务 checkpoint 中的模块摘要和候选类型。"""
+    """恢复采集服务 checkpoint 中的模块摘要和候选类型。
+
+    参数：
+    - `value`（Mapping[str, Any]）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - ProviderResult：检索提供方的状态、候选结果和追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     values = dict(value)
     values["candidates"] = tuple(
         RetrievalCandidateTraceSchema.model_validate(item).to_domain()
@@ -439,7 +538,22 @@ def _merge_context_window(
     memory_token_budget: int | None = None,
     token_counter: Callable[[str], int],
 ) -> ContextBundle:
-    """优先保留新资料，再用配置模型的 tokenizer 限制窗口大小。"""
+    """优先保留新资料，再用配置模型的 tokenizer 限制窗口大小。
+
+    参数：
+    - `previous`（ContextBundle）：前一状态或版本对象；约束：无额外运行时限制。
+    - `current`（ContextBundle）：当前状态或版本对象；约束：无额外运行时限制。
+    - `max_items`（int）：上下文最多保留的条目数；约束：无额外运行时限制。
+    - `max_tokens`（int）：上下文最多占用的 token 数；约束：无额外运行时限制。
+    - `memory_token_budget`（int | None）：记忆来源可使用的 token 预算；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+    - `token_counter`（Callable[[str], int]）：估算文本 token 数量的可注入函数；约束：无额外运行时限制。
+
+    返回：
+    - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if memory_token_budget is None:
         memory_token_budget = max_tokens
     selected: list[ContextItem] = []
@@ -449,6 +563,7 @@ def _merge_context_window(
     tokens = 0
     memory_tokens = 0
     truncated = current.truncated
+    # 以本轮资料优先，再补入上一窗口内容，保证新增检索结果不会被旧内容挤掉。
     all_items = (*current.items, *previous.items)
     for index, item in enumerate(all_items):
         key = _context_item_identity(item)
@@ -487,6 +602,7 @@ def _merge_context_window(
         exceeds_memory_budget = (
             is_memory and memory_tokens + item_tokens > memory_token_budget
         )
+        # 同时执行总 token、条数和记忆专属预算，拒绝超限项并记录具体过滤原因。
         if (
             len(selected) >= max_items
             or tokens + item_tokens > max_tokens
@@ -540,7 +656,21 @@ def _enforce_context_window_budget(
     memory_token_budget: int,
     token_counter: Callable[[str], int],
 ) -> ContextBundle:
-    """核验后若记忆组变大，仍按完整 ContextItem 重做窗口预算。"""
+    """核验后若记忆组变大，仍按完整 ContextItem 重做窗口预算。
+
+    参数：
+    - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+    - `max_items`（int）：上下文最多保留的条目数；约束：无额外运行时限制。
+    - `max_tokens`（int）：上下文最多占用的 token 数；约束：无额外运行时限制。
+    - `memory_token_budget`（int）：记忆来源可使用的 token 预算；约束：无额外运行时限制。
+    - `token_counter`（Callable[[str], int]）：估算文本 token 数量的可注入函数；约束：无额外运行时限制。
+
+    返回：
+    - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     selected: list[ContextItem] = []
     tokens = 0
     memory_tokens = 0
@@ -586,6 +716,17 @@ def _enforce_context_window_budget(
 
 
 def _context_item_identity(item: ContextItem) -> tuple[str, str]:
+    """生成上下文条目的稳定身份键。
+
+    参数：
+    - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+    返回：
+    - tuple[str, str]：由 Provider 名称和来源 ID 组成的稳定去重键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     group_key = item.metadata.get("memory_group_key")
     if item.provider == "memory" and isinstance(group_key, str) and group_key:
         return item.provider, group_key
@@ -601,9 +742,23 @@ def _filter_memory_context_scope(
     project_id: str | None,
     enabled: bool,
 ) -> ContextBundle:
-    """每次模型调用前按最新会话绑定重新过滤记忆和任务回顾。"""
+    """每次模型调用前按最新会话绑定重新过滤记忆和任务回顾。
+
+    参数：
+    - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+    - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+    - `project_id`（str | None）：项目空间的稳定标识；None 表示未绑定项目；约束：允许为 None，按未提供值的分支处理。
+    - `enabled`（bool）：功能是否启用；None 表示不修改现有配置；约束：无额外运行时限制。
+
+    返回：
+    - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     retained: list[ContextItem] = []
     rejected_source_ids: set[tuple[str, str]] = set()
+    # 先保留非记忆资料；记忆、索引和回顾分别按功能开关及会话/项目归属核验。
     for item in bundle.items:
         if item.provider not in {"memory", "memory_index", "episode"}:
             retained.append(item)
@@ -682,7 +837,18 @@ def _filter_memory_context_scope(
 
 
 def _has_context_progress(previous: ContextBundle, current: ContextBundle) -> bool:
-    """判断采集后是否新增或替换了非空资料。"""
+    """判断采集后是否新增或替换了非空资料。
+
+    参数：
+    - `previous`（ContextBundle）：前一状态或版本对象；约束：无额外运行时限制。
+    - `current`（ContextBundle）：当前状态或版本对象；约束：无额外运行时限制。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     previous_content = {
         _context_item_identity(item): item.content.strip()
         for item in previous.items
@@ -696,6 +862,17 @@ def _has_context_progress(previous: ContextBundle, current: ContextBundle) -> bo
 
 
 def _selection_source_id(item: ContextItem) -> str:
+    """从选取结果中读取其来源标识。
+
+    参数：
+    - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+    返回：
+    - str：当前筛选结果对应的规范化来源标识。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if item.source_id:
         return item.source_id
     digest = sha256(item.content.encode("utf-8")).hexdigest()[:24]
@@ -703,7 +880,17 @@ def _selection_source_id(item: ContextItem) -> str:
 
 
 def _selection_source_ids(item: ContextItem) -> tuple[str, ...]:
-    """展开事实组的真实成员 ID，供选择轨迹和访问统计共用。"""
+    """展开事实组的真实成员 ID，供选择轨迹和访问统计共用。
+
+    参数：
+    - `item`（ContextItem）：当前待处理的单个条目；约束：无额外运行时限制。
+
+    返回：
+    - tuple[str, ...]：按稳定顺序排列且去重后的来源标识。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     raw_ids = item.metadata.get("memory_member_ids")
     member_ids = (
         tuple(value for value in raw_ids if isinstance(value, str) and value)
@@ -721,7 +908,19 @@ def _filter_context_queries(
     available_providers: tuple[str, ...],
     stage: RetrievalStage,
 ) -> tuple[tuple[ContextQuery, ...], list[ContextQueryOutcome]]:
-    """过滤未装配的通道，并为 Root 保留明确的跳过原因。"""
+    """过滤未装配的通道，并为 Root 保留明确的跳过原因。
+
+    参数：
+    - `queries`（tuple[ContextQuery, ...]）：按检索通道组织的已校验查询；约束：无额外运行时限制。
+    - `available_providers`（tuple[str, ...]）：当前可用的检索提供方集合；约束：无额外运行时限制。
+    - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+
+    返回：
+    - tuple[tuple[ContextQuery, ...], list[ContextQueryOutcome]]：允许执行的查询列表及被拒绝查询的原因记录。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     available = tuple(
         query for query in queries if query.provider in available_providers
     )
@@ -744,7 +943,19 @@ def _context_query_outcomes(
     bundle: ContextBundle,
     stage: RetrievalStage,
 ) -> list[ContextQueryOutcome]:
-    """将 Provider 结果收敛为 Root 下一轮使用的轻量状态。"""
+    """将 Provider 结果收敛为 Root 下一轮使用的轻量状态。
+
+    参数：
+    - `queries`（tuple[ContextQuery, ...]）：按检索通道组织的已校验查询；约束：无额外运行时限制。
+    - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+    - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+
+    返回：
+    - list[ContextQueryOutcome]：按 Provider 汇总的上下文查询状态和结果列表。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     results = {result.provider: result for result in bundle.provider_results}
     outcomes: list[ContextQueryOutcome] = []
     for query in queries:
@@ -792,7 +1003,24 @@ async def _retrieve_context_batch(
     provider_timeout_seconds: float | None,
     skipped_outcomes: tuple[ContextQueryOutcome, ...] = (),
 ) -> tuple[ContextBundle, list[ContextQueryOutcome], ContextPlan | None]:
-    """校验资源范围并执行一批已筛选的上下文查询。"""
+    """校验资源范围并执行一批已筛选的上下文查询。
+
+    参数：
+    - `deps`（RootWorkflowDependencies）：Root 工作流当前使用的依赖集合；约束：无额外运行时限制。
+    - `queries`（tuple[ContextQuery, ...]）：按检索通道组织的已校验查询；约束：无额外运行时限制。
+    - `request`（RootRequestState）：当前请求及其关联身份，用于限定操作范围；约束：无额外运行时限制。
+    - `attachment_ids`（tuple[str, ...]）：当前请求已授权使用的附件标识集合；约束：无额外运行时限制。
+    - `knowledge_base_ids`（tuple[str, ...]）：本次请求允许访问的知识库标识集合；约束：无额外运行时限制。
+    - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+    - `provider_timeout_seconds`（float | None）：单个检索提供方允许使用的最长秒数；约束：允许为 None，按未提供值的分支处理。
+    - `skipped_outcomes`（tuple[ContextQueryOutcome, ...]）：未实际调用检索通道时生成的跳过结果；约束：可省略，默认值为 `()`。
+
+    返回：
+    - tuple[ContextBundle, list[ContextQueryOutcome], ContextPlan | None]：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     try:
         plan = deps.context_planner.plan(
             queries,
@@ -838,14 +1066,36 @@ async def _retrieve_context_batch(
 
 
 class RootWorkflow(RootWorkflowPort):
-    """Execute Root application steps without depending on LangGraph."""
+    """独立于 LangGraph 执行 Root 应用步骤的工作流。
+    """
 
     def __init__(self, dependencies: RootWorkflowDependencies) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `dependencies`（RootWorkflowDependencies）：构建或执行当前流程所需的协作依赖；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self.dependencies = dependencies
 
     @staticmethod
     def _conversation_messages(state: Mapping[str, Any]) -> tuple[RootMessage, ...]:
-        """从请求与历史构造 Root/计划/正文共同使用的对话。"""
+        """从请求与历史构造 Root/计划/正文共同使用的对话。
+
+        参数：
+        - `state`（Mapping[str, Any]）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - tuple[RootMessage, ...]：供 Root Agent 使用的、按时间排列的对话消息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         request = _request_state(state)
         current_message_id = request.message_id
         messages = [
@@ -862,7 +1112,18 @@ class RootWorkflow(RootWorkflowPort):
         *,
         remaining_turns: int,
     ) -> RootAgentInput:
-        """从当前 checkpoint 构造统一的 Root 决策输入。"""
+        """从当前 checkpoint 构造统一的 Root 决策输入。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `remaining_turns`（int）：当前流程剩余的决策轮数；约束：无额外运行时限制。
+
+        返回：
+        - RootAgentInput：包含请求、对话、附件、知识库和上下文资料的 Root Agent 输入。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         request = _request_state(state)
         bundle = await self._effective_context_bundle(
             request.session_id,
@@ -900,7 +1161,18 @@ class RootWorkflow(RootWorkflowPort):
     async def _effective_context_bundle(
         self, session_id: str, bundle: ContextBundle
     ) -> ContextBundle:
-        """每次模型调用前应用读取开关并复核记忆仍然有效。"""
+        """每次模型调用前应用读取开关并复核记忆仍然有效。
+
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
+
+        返回：
+        - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         settings_port = self.dependencies.memory_settings
         settings = (
             await settings_port.get(session_id) if settings_port is not None else None
@@ -941,6 +1213,17 @@ class RootWorkflow(RootWorkflowPort):
         return effective
 
     async def prepare_request(self, state: RootGraphState) -> dict[str, Any]:
+        """恢复或初始化 Root 请求状态及其固定输入。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：Root 请求输入、恢复状态和初始化字段对应的状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         deps = self.dependencies
         request_state = _request_state(state)
         updated_request = await deps.request_preparation.prepare(request=request_state)
@@ -972,9 +1255,14 @@ class RootWorkflow(RootWorkflowPort):
     async def prefetch_context(self, state: RootGraphState) -> dict[str, Any]:
         """用原始问题预检索记忆、可用任务回顾和就绪知识库，不占决策轮数。
 
-        参数：state 是请求准备后的 RootGraphState，包含原文与资源目录。
-        返回：dict，更新同一资料窗口和带阶段的查询摘要。
-        异常：资源契约错误向上传播；取消时传播 CancelledError。
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：记忆、任务回顾和知识库预取结果对应的状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         request = _request_state(state)
         query = request.user_message.strip()[:500]
@@ -1005,13 +1293,15 @@ class RootWorkflow(RootWorkflowPort):
 
     async def decide_root_action(self, state: RootGraphState) -> dict[str, Any]:
         """调用 Root 一次并保存决策及本次轮数。
-        Args:
-            state: 已准备请求、资源目录和当前检索窗口的图状态。
-        Returns:
-            新决策、更新后的轮数以及适用的响应或错误。
-        Raises:
-            ValidationError: checkpoint 中保存的输入摘要不符合 Root 契约。
-            ValueError: Root 无法修复无效决策时。
+
+        参数：
+        - `state`（RootGraphState）：已准备请求、资源目录和当前检索窗口的图状态；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：新决策、更新后的轮数以及适用的响应或错误。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         deps = self.dependencies
         turn_count = state.get("root_turn_count", 0)
@@ -1062,7 +1352,17 @@ class RootWorkflow(RootWorkflowPort):
         return update
 
     async def redecide_root_action(self, state: RootGraphState) -> dict[str, Any]:
-        """采集完成后按三结果契约作一次再决策。"""
+        """采集完成后按三结果契约作一次再决策。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：Root 再决策结果及上下文查询计划对应的状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         deps = self.dependencies
         turn_count = int(state.get("root_turn_count", 0))
         remaining_turns = deps.root_max_turns - turn_count
@@ -1103,13 +1403,16 @@ class RootWorkflow(RootWorkflowPort):
 
     async def acquire_context(self, state: RootGraphState) -> dict[str, Any]:
         """执行 Root 请求的检索并更新有界参考资料窗口。
-        Args:
-            state: 包含 ContextRequest、资源目录及旧资料窗口的图状态。
-        Returns:
-            新资料窗口和本轮各查询的轻量结果摘要。
-        Raises:
-            CancelledError: Run 被取消时由采集服务传播。
-            ValueError: 图状态中的决策不再是有效 ContextRequest 时。
+
+        参数：
+        - `state`（RootGraphState）：包含 ContextRequest、资源目录及旧资料窗口的图状态；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：新资料窗口和本轮各查询的轻量结果摘要。
+
+        异常：
+        - ValueError：校验条件 `not isinstance(decision, ContextRequest)` 成立时（异常说明：root_context_request_missing）。
+        - 未列出的依赖异常按当前实现传播。
         """
         decision = ROOT_DECISION_ADAPTER.validate_python(state.get("root_decision", {}))
         if not isinstance(decision, ContextRequest):
@@ -1128,10 +1431,17 @@ class RootWorkflow(RootWorkflowPort):
     ) -> dict[str, Any]:
         """共用两阶段的范围校验、采集、窗口合并与选择确认。
 
-        参数：state 提供请求与旧窗口；queries 为具体查询；stage 由程序指定；
-        provider_timeout_seconds 仅在预检索设置。
-        返回：dict，包含新的窗口、累积摘要和规划进展。
-        异常：取消时传播 CancelledError；损坏的状态契约向上传播。
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `queries`（tuple[ContextQuery, ...]）：按检索通道组织的已校验查询；约束：无额外运行时限制。
+        - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
+        - `provider_timeout_seconds`（float | None）：单个检索提供方允许使用的最长秒数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - dict[str, Any]：上下文查询结果、选择追踪和状态摘要对应的状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         deps = self.dependencies
         request_state = _request_state(state)
@@ -1238,7 +1548,17 @@ class RootWorkflow(RootWorkflowPort):
         }
 
     async def generate_plan(self, state: RootGraphState) -> dict[str, Any]:
-        """根据轻量计划意图生成草稿或返回必要信息缺口。"""
+        """根据轻量计划意图生成草稿或返回必要信息缺口。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：计划草稿、补充信息或失败原因对应的状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         deps = self.dependencies
         request_state = _request_state(state)
         decision = ROOT_DECISION_ADAPTER.validate_python(state.get("root_decision", {}))
@@ -1285,9 +1605,17 @@ class RootWorkflow(RootWorkflowPort):
     async def materialize_execution_plan(self, state: RootGraphState) -> dict[str, Any]:
         """验证并提交首版计划，再写回可恢复的运行状态。
 
-        参数：``state``（``RootGraphState``）包含请求、计划决策和系统工具目录。
-        返回：提交后的计划、延期版本及运行状态。
-        异常：草稿、资源范围或计划命令无效时向图节点传播异常。
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：已持久化计划身份、版本和执行状态对应的状态补丁。
+
+        异常：
+        - ValueError：校验条件 `not isinstance(draft_value, Mapping)` 成立时（异常说明：root_plan_draft_missing）。
+        - RuntimeError：校验条件 `deps.orchestration_command_handler is None` 成立时（异常说明：root_orchestration_command_handler_not_configured）。
+        - ValueError：校验条件 `not run_id` 成立时（异常说明：run_id is required for SubmitPlan）。
+        - 未列出的依赖异常按当前实现传播。
         """
         deps = self.dependencies
         request_state = _request_state(state)
@@ -1344,6 +1672,17 @@ class RootWorkflow(RootWorkflowPort):
         }
 
     async def wait_for_plan_completion(self, state: RootGraphState) -> dict[str, Any]:
+        """读取已完成轮次并准备 Root 后续审查状态。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：轮次等待状态、完成结果或恢复身份对应的状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         deps = self.dependencies
         request_state = _request_state(state)
         plan = RootPlanIdentity.model_validate(state.get("plan", {}))
@@ -1380,13 +1719,16 @@ class RootWorkflow(RootWorkflowPort):
 
     async def review_completed_round(self, state: RootGraphState) -> dict[str, Any]:
         """恢复固定 Round 身份，取得审查决策并原子提交对应命令。
-        Args:
-            state: 包含 Run 请求、Root 等待身份和恢复值的图状态。
-        Returns:
-            已持久化审查动作、理由及命令回执。
-        Raises:
-            RuntimeError: 恢复身份、审查上下文、Agent 或命令处理器无效时。
-            PlanCommandRejected: 非可恢复的计划状态转换被拒绝时。
+
+        参数：
+        - `state`（RootGraphState）：包含 Run 请求、Root 等待身份和恢复值的图状态；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：已持久化审查动作、理由及命令回执。
+
+        异常：
+        - RuntimeError：校验条件 `handler is None` 成立时（异常说明：root_review_command_handler_not_configured）。
+        - 未列出的依赖异常按当前实现传播。
         """
         deps = self.dependencies
         identity = _review_identity(state)
@@ -1413,7 +1755,17 @@ class RootWorkflow(RootWorkflowPort):
         }
 
     async def build_plan_response(self, state: RootGraphState) -> dict[str, Any]:
-        """把完成计划的任务结果整理为统一正文生成输入。"""
+        """把完成计划的任务结果整理为统一正文生成输入。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：计划执行结果及其面向 Root 的摘要状态字段。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         answer_input = RootAnswerInputState(
             source="plan_summary",
             kind="final",
@@ -1425,7 +1777,18 @@ class RootWorkflow(RootWorkflowPort):
         }
 
     async def generate_answer(self, state: RootGraphState) -> dict[str, Any]:
-        """流式生成直接答复、澄清问题或计划完成总结。"""
+        """流式生成直接答复、澄清问题或计划完成总结。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：回答正文、流式状态和持久化消息标识对应的状态补丁。
+
+        异常：
+        - ValueError：校验条件 `not (isinstance(answer_input_value, Mapping))；not isinstance(decision, AnswerIntent)` 成立时（异常说明：root_answer_intent_missing）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         from .answer_generation import AnswerGenerationInput
 
         deps = self.dependencies
@@ -1479,7 +1842,17 @@ class RootWorkflow(RootWorkflowPort):
         }
 
     async def assemble_final_response(self, state: RootGraphState) -> dict[str, Any]:
-        """Build the terminal result and status from the accumulated graph state."""
+        """整理最终回答和终态字段，并发布 Run 完成事件。
+
+        参数：
+        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：最终回答、Run 终态和错误信息对应的状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         response = dict(state.get("response", {}))
         if not response and state.get("error"):
             response = {"error": state.get("error")}

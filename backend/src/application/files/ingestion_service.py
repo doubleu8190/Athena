@@ -36,6 +36,24 @@ class IngestionService:
         clock: Callable[[], datetime] | None = None,
         lease_center: LeaseCenterPort | None = None,
     ) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `attachments`（AttachmentRepository）：当前请求关联或已校验的附件集合；约束：无额外运行时限制。
+        - `chunks`（FileChunkRepository）：按顺序读取的文件字节块异步迭代器；约束：无额外运行时限制。
+        - `parser`（DocumentParserPort）：解析上传文件内容的适配器；约束：无额外运行时限制。
+        - `vector_indexer`（VectorIndexerPort）：执行向量检索或索引操作的可选依赖；约束：无额外运行时限制。
+        - `graph_indexer`（GraphIndexerPort | None）：写入或删除知识图谱索引的依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `chunker`（Callable[[str], list[FileChunk]]）：将解析文本拆分为检索文本块的依赖；约束：无额外运行时限制。
+        - `clock`（Callable[[], datetime] | None）：生成当前时间的可注入函数，可用于控制时间来源；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `lease_center`（LeaseCenterPort | None）：协调后台作业租约的可选应用端口；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._attachments = attachments
         self._chunks = chunks
         self._parser = parser
@@ -48,6 +66,21 @@ class IngestionService:
     async def process_attachment(
         self, attachment_id: str, *, lease: LeaseGrant
     ) -> dict[str, object]:
+        """解析附件、创建文本块并更新向量及图谱索引。
+
+        参数：
+        - `attachment_id`（str）：目标附件的稳定标识；约束：须通过方法内校验；失败条件见下方异常说明。
+        - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：须通过方法内校验；失败条件见下方异常说明。
+
+        返回：
+        - dict[str, object]：附件处理状态及已创建文本块、索引和错误信息的结果映射。
+
+        异常：
+        - ValueError：校验条件 `lease.key != LeaseKey('document_ingestion', attachment_id)` 成立时（异常说明：document_ingestion_lease_mismatch）。
+        - LookupError：校验条件 `attachment is None` 成立时。
+        - LookupError：校验条件 `attachment.status is AttachmentStatus.DELETED` 成立时（异常说明：attachment_deleted）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         if lease.key != LeaseKey("document_ingestion", attachment_id):
             raise ValueError("document_ingestion_lease_mismatch")
         await self._leases.assert_current(lease)
@@ -87,6 +120,17 @@ class IngestionService:
         }
 
     async def delete_indexes(self, attachment_id: str) -> None:
+        """删除附件对应的向量索引和图谱索引。
+
+        参数：
+        - `attachment_id`（str）：目标附件的稳定标识；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         await self._vector_indexer.delete_attachment(attachment_id)
         if self._graph_indexer is not None:
             await self._graph_indexer.delete_attachment(attachment_id)

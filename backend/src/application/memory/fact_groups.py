@@ -28,7 +28,17 @@ class MemoryFactContextGroup:
 
 
 def record_fact(record: MemoryRecord) -> MemoryFact | None:
-    """从持久化 metadata 中读取严格结构化事实。"""
+    """从持久化 metadata 中读取严格结构化事实。
+
+    参数：
+    - `record`（MemoryRecord）：当前领域记录，作为本次转换、筛选或渲染的输入；约束：无额外运行时限制。
+
+    返回：
+    - MemoryFact | None：从记忆记录 metadata 读取并校验的结构化事实；缺少或无效时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     value = record.metadata.get("fact")
     if value is None:
         return None
@@ -44,7 +54,18 @@ def build_fact_context_group(
     seed: MemoryRecord,
     related: list[MemoryRecord],
 ) -> MemoryFactContextGroup | None:
-    """把同一事实范围内需要一起理解的成员合并为一个上下文项。"""
+    """按事实身份和基数合并记忆，保留冲突立场并限制展示成员数量。
+
+    参数：
+    - `seed`（MemoryRecord）：触发当前事实组构建的命中记录；约束：无额外运行时限制。
+    - `related`（list[MemoryRecord]）：与命中记录处于同一事实身份下的相关记录；约束：无额外运行时限制。
+
+    返回：
+    - MemoryFactContextGroup | None：按事实身份和冲突关系合并的上下文成员组。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     seed_fact = record_fact(seed)
     if seed_fact is None:
         return None
@@ -75,31 +96,28 @@ def build_fact_context_group(
         if fact.cardinality is not FactCardinality.UNKNOWN
     }
     cardinality = (
-        FactCardinality(next(iter(cardinalities)))
+        next(iter(cardinalities))
         if len(cardinalities) == 1
         else FactCardinality.UNKNOWN
     )
-    if cardinality is FactCardinality.SINGLE:
-        members = matching
-        conflicted = len(
-            {(fact.fact_value, fact.polarity) for _, fact in members}
-        ) > 1
-        key_discriminator: str | None = None
-    elif cardinality is FactCardinality.SET:
+    members = matching
+    key_discriminator: str | None = None
+    if cardinality is FactCardinality.SET:
         members = [
             (record, fact)
             for record, fact in matching
             if fact.fact_value == seed_fact.fact_value
         ]
-        conflicted = len({fact.polarity for _, fact in members}) > 1
         key_discriminator = seed_fact.fact_value or ""
-    else:
+    elif cardinality is FactCardinality.UNKNOWN:
         members = [(seed, seed_fact)]
-        conflicted = False
         key_discriminator = seed.id
 
+    # 单值事实区分值与立场，集合事实只在同一成员的立场相反时冲突。
+    conflicted = len(
+        {_conflict_signature(fact, cardinality) for _, fact in members}
+    ) > 1
     members.sort(key=lambda pair: pair[0].id)
-    all_member_ids = tuple(record.id for record, _ in members)
     if conflicted:
         shown_members = _select_members(
             seed.id,
@@ -111,15 +129,12 @@ def build_fact_context_group(
         seed_member = next((pair for pair in members if pair[0].id == seed.id), None)
         shown_members = [seed_member] if seed_member is not None else members[:1]
     member_ids = tuple(record.id for record, _ in shown_members)
-    if not conflicted:
-        all_member_ids = member_ids
+    all_member_ids = (
+        tuple(record.id for record, _ in members) if conflicted else member_ids
+    )
     total_member_count = len(members) if conflicted else 1
     complete = not conflicted or len(shown_members) == len(members)
-    anchor_id = (
-        seed.id
-        if any(record.id == seed.id for record, _ in shown_members)
-        else shown_members[0][0].id
-    )
+    anchor_id = seed.id if seed.id in member_ids else member_ids[0]
     group_key = _group_key(identity, key_discriminator)
     content = (
         _render_conflict(
@@ -158,6 +173,18 @@ def build_fact_context_group(
 def _group_key(
     identity: tuple[str, str, str, str], discriminator: str | None
 ) -> str:
+    """根据事实身份和区分值生成稳定分组键。
+
+    参数：
+    - `identity`（tuple[str, str, str, str]）：经校验的领域身份组合，用于确认操作范围；约束：无额外运行时限制。
+    - `discriminator`（str | None）：参与稳定分组键计算的额外区分值；约束：允许为 None，按未提供值的分支处理。
+
+    返回：
+    - str：由事实身份和区分值确定的稳定分组键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     raw = json.dumps(
         [*identity, discriminator],
         ensure_ascii=False,
@@ -173,6 +200,20 @@ def _render_conflict(
     total_count: int,
     complete: bool,
 ) -> str:
+    """将未解决的事实冲突渲染为带证据和完整度说明的文本。
+
+    参数：
+    - `fact_key`（str）：事实字段名称，用于标识事实主题；约束：无额外运行时限制。
+    - `members`（list[tuple[MemoryRecord, MemoryFact]]）：处于同一事实身份下、参与冲突判断或渲染的记录集合；约束：无额外运行时限制。
+    - `total_count`（int）：完整事实组中的成员总数；约束：无额外运行时限制。
+    - `complete`（bool）：指示当前展示是否包含完整成员集合；约束：无额外运行时限制。
+
+    返回：
+    - str：描述事实组成员、冲突立场及完整度的上下文文本。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if complete:
         heading = f"未解决的记忆冲突（{fact_key}；共 {total_count} 条事实）："
     else:
@@ -203,11 +244,25 @@ def _select_members(
     cardinality: FactCardinality,
     limit: int,
 ) -> list[tuple[MemoryRecord, MemoryFact]]:
-    """优先保留命中来源和每个冲突立场，再按 ID 稳定补足。"""
+    """优先保留命中来源和每个冲突立场，再按 ID 稳定补足。
+
+    参数：
+    - `seed_id`（str）：用于优先保留或锚定事实组的种子记录标识；约束：无额外运行时限制。
+    - `members`（list[tuple[MemoryRecord, MemoryFact]]）：处于同一事实身份下、参与冲突判断或渲染的记录集合；约束：无额外运行时限制。
+    - `cardinality`（FactCardinality）：事实的基数类型，用于判断成员关系和冲突语义；约束：无额外运行时限制。
+    - `limit`（int）：本次读取或处理的数量上限；约束：无额外运行时限制。
+
+    返回：
+    - list[tuple[MemoryRecord, MemoryFact]]：符合条件的有序结果集合；集合成员。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     selected: list[tuple[MemoryRecord, MemoryFact]] = []
     seed = next((pair for pair in members if pair[0].id == seed_id), None)
     if seed is not None:
         selected.append(seed)
+    # 先覆盖不同冲突签名，避免条数上限只保留同一立场的重复记录。
     represented = {
         _conflict_signature(fact, cardinality) for _, fact in selected
     }
@@ -231,6 +286,18 @@ def _select_members(
 def _conflict_signature(
     fact: MemoryFact, cardinality: FactCardinality
 ) -> tuple[str | None, str]:
+    """按事实基数生成用于冲突判断的值与立场签名。
+
+    参数：
+    - `fact`（MemoryFact）：从记忆记录中解析出的结构化事实；约束：无额外运行时限制。
+    - `cardinality`（FactCardinality）：事实的基数类型，用于判断成员关系和冲突语义；约束：无额外运行时限制。
+
+    返回：
+    - tuple[str | None, str]：用于比较事实值和立场的二元签名。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if cardinality is FactCardinality.SINGLE:
         return fact.fact_value, fact.polarity
     return None, fact.polarity

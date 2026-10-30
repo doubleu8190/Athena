@@ -18,21 +18,33 @@ class LLMMemoryEpisodeSummarizer:
     """用结构化 LLM 输出压缩一次真实任务的结果和边界。"""
 
     def __init__(self, llm: LLMPort, *, prompt_root: Path | None = None) -> None:
-        """保存结构化模型端口和 episode 提示词路径。
+        """保存模型依赖，并配置可选的回顾提示词目录。
 
-        参数：``llm`` 是支持结构化输出的模型；``prompt_root`` 可覆盖默认提示词目录。
-        返回：无。
-        异常：不主动抛出业务异常。
+        参数：
+        - `llm`（LLMPort）：执行模型请求的语言模型依赖；约束：无额外运行时限制。
+        - `prompt_root`（Path | None）：提示模板文件所在目录；None 表示使用默认目录；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         self._llm = llm
         self._prompt_root = prompt_root
 
     async def summarize(self, turn: CompletedTurn) -> MemoryEpisodeProposal:
-        """根据用户目标、最终答复和冻结执行证据生成回顾。
+        """调用模型生成结构化记忆回顾提案。
 
-        参数：turn 是已经冻结 Run/Worker 来源的完成轮次。
-        返回：可保存的任务回顾提案；无可复用内容时 retain 为 False。
-        异常：模型调用失败或输出不符合严格契约时向上传播，供作业重试。
+        参数：
+        - `turn`（CompletedTurn）：当前已经完成的对话轮次及其消息；约束：无额外运行时限制。
+
+        返回：
+        - MemoryEpisodeProposal：保存对话摘要、来源和有效状态的记忆回顾记录。
+
+        异常：
+        - TypeError：校验条件 `not isinstance(value, MemoryEpisodeProposalSchema)` 成立时（异常说明：memory_episode_proposal_schema_required）。
+        - 未列出的依赖异常按当前实现传播。
         """
         evidence = turn.execution_evidence
         if evidence is None:

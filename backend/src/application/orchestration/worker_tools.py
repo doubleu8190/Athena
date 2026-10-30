@@ -1,4 +1,5 @@
-"""Governed tools available to independent Worker executions."""
+"""Worker 独立执行期间可调用的受治理工具。
+"""
 
 from __future__ import annotations
 
@@ -39,7 +40,17 @@ class _PreparedWorkerToolCall:
 async def worker_tool_manifest(
     tool_service: ToolService | None,
 ) -> tuple[RootWorkerTool, ...]:
-    """Return enabled native tools with their deterministic approval policy."""
+    """返回启用的原生工具及其确定性审批策略。
+
+    参数：
+    - `tool_service`（ToolService | None）：查询工具能力并执行工具调用的应用服务；约束：允许为 None，按未提供值的分支处理。
+
+    返回：
+    - tuple[RootWorkerTool, ...]：按名称排序且已解析审批策略的 Worker 工具定义。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if tool_service is None:
         return ()
     configured = await tool_service.list_tools()
@@ -59,7 +70,8 @@ async def worker_tool_manifest(
 
 
 class WorkerToolExecutor:
-    """Execute task-authorized native tools through deterministic governance."""
+    """通过确定性权限和风险规则执行 Task 已授权的原生工具。
+    """
 
     def __init__(
         self,
@@ -69,6 +81,20 @@ class WorkerToolExecutor:
         operation_ledger: WorkerToolOperationLedger | None = None,
         events: EventPort | None = None,
     ) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `tool_service`（ToolService）：查询工具能力并执行工具调用的应用服务；约束：无额外运行时限制。
+        - `result_store`（WorkerResultStore | None）：存取大型或非内联工具结果的依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `operation_ledger`（WorkerToolOperationLedger | None）：记录副作用操作幂等状态的依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `events`（EventPort | None）：用于读取、写入或推送的事件存储依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._tool_service = tool_service
         self._result_store = result_store
         self._operation_ledger = operation_ledger
@@ -84,16 +110,19 @@ class WorkerToolExecutor:
         **_kwargs: Any,
     ) -> dict[str, Any]:
         """校验 Worker 工具权限，处理审批与幂等执行，并整理工具结果。
-        Args:
-            tool_call: Worker 生成的工具名称、参数及审批信息。
-            execution: 当前 Run、Task、执行代次和租约身份。
-            tool_round: 当前 Worker 工具调用轮次。
-            call_index: 当前轮次中的工具调用序号。
-            **_kwargs: LangGraph 注入的其他执行参数，不参与工具决策。
-        Returns:
-            包含工具状态和结果的字典；拒绝或等待审批时返回对应治理结果。
-        Raises:
-            RuntimeError: 幂等账本缺少已完成结果或未能持久化执行结果时。
+
+        参数：
+        - `tool_call`（Any）：Worker 生成的工具名称、参数及审批信息；约束：无额外运行时限制。
+        - `execution`（Mapping[str, Any]）：当前 Run、Task、执行代次和租约身份；约束：无额外运行时限制。
+        - `tool_round`（int）：当前 Worker 工具调用轮次；约束：无额外运行时限制。
+        - `call_index`（int）：当前工具轮次中的调用序号，用于构造稳定身份；约束：无额外运行时限制。
+        - `_kwargs`（Any）：调用适配器额外注入的关键字参数；当前处理不读取这些值；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：包含工具状态和结果的字典；拒绝或等待审批时返回对应治理结果。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         if not isinstance(tool_call, Mapping):
             return _denied("invalid_tool_call")
@@ -155,13 +184,18 @@ class WorkerToolExecutor:
         call_index: int,
     ) -> _PreparedWorkerToolCall | dict[str, Any]:
         """校验任务授权并生成稳定的执行身份或审批请求。
-        Args:
-            tool_call: Worker 请求执行的工具和参数。
-            execution: 当前执行上下文。
-            tool_round: 工具调用轮次。
-            call_index: 轮次内的调用序号。
-        Returns:
-            已准备的工具调用，或可直接返回给 Worker 的拒绝/审批结果。
+
+        参数：
+        - `tool_call`（Mapping[str, Any]）：Worker 请求执行的工具和参数；约束：无额外运行时限制。
+        - `execution`（Mapping[str, Any]）：当前执行上下文；约束：无额外运行时限制。
+        - `tool_round`（int）：工具调用轮次；约束：无额外运行时限制。
+        - `call_index`（int）：轮次内的调用序号；约束：无额外运行时限制。
+
+        返回：
+        - _PreparedWorkerToolCall | dict[str, Any]：已准备的工具调用，或可直接返回给 Worker 的拒绝/审批结果。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         name = str(tool_call.get("name", "")).strip()
         task = execution.get("task", {})
@@ -260,7 +294,29 @@ class WorkerToolExecutor:
         tool_round: int,
         call_index: int,
     ) -> dict[str, Any]:
-        """构造绑定当前执行代次和参数哈希的审批请求。"""
+        """构造绑定当前执行代次和参数哈希的审批请求。
+
+        参数：
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `task_id`（str）：目标 Worker 任务的稳定标识；约束：无额外运行时限制。
+        - `execution_id`（str）：本次 Worker 执行的稳定标识；约束：无额外运行时限制。
+        - `worker_thread_id`（str）：Worker 图使用的检查点线程标识；约束：无额外运行时限制。
+        - `tool_call_id`（str）：与模型工具调用消息对应的稳定标识；约束：无额外运行时限制。
+        - `name`（str）：目标名称，用于标识相应配置、工具或对象；约束：无额外运行时限制。
+        - `arguments`（dict[str, Any]）：调用工具或构造操作所需的参数映射；约束：无额外运行时限制。
+        - `risk_level`（str）：工具操作的风险等级；约束：无额外运行时限制。
+        - `args_hash`（str）：规范化工具参数计算出的摘要，用于审批绑定；约束：无额外运行时限制。
+        - `operation_key`（str）：标识同一工具副作用操作的幂等键；约束：无额外运行时限制。
+        - `tool_round`（int）：Worker 当前工具调用轮次，用于关联本轮调用；约束：无额外运行时限制。
+        - `call_index`（int）：当前工具轮次中的调用序号，用于构造稳定身份；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：包含待审批操作身份、参数摘要和当前决定的响应映射。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         approval_id = (
             "approval:"
             + hashlib.sha256(
@@ -302,7 +358,26 @@ class WorkerToolExecutor:
         operation_key: str,
         logical_operation_key: str,
     ) -> ToolExecutionRequest:
-        """把已校验身份转换为底层工具服务使用的请求。"""
+        """把已校验身份转换为底层工具服务使用的请求。
+
+        参数：
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+        - `tool_name`（str）：目标工具的名称；约束：无额外运行时限制。
+        - `arguments`（dict[str, Any]）：调用工具或构造操作所需的参数映射；约束：无额外运行时限制。
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `approval_decision`（str | None）：已持久化的审批决定；约束：允许为 None，按未提供值的分支处理。
+        - `task_id`（str）：目标 Worker 任务的稳定标识；约束：无额外运行时限制。
+        - `tool_call_id`（str）：与模型工具调用消息对应的稳定标识；约束：无额外运行时限制。
+        - `operation_key`（str）：标识同一工具副作用操作的幂等键；约束：无额外运行时限制。
+        - `logical_operation_key`（str）：跨执行重试保持稳定的逻辑操作键；约束：无额外运行时限制。
+
+        返回：
+        - ToolExecutionRequest：绑定执行身份、审批结果、幂等键和租约的工具执行请求。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         return ToolExecutionRequest(
             tool_name=tool_name,
             arguments=arguments,
@@ -327,8 +402,21 @@ class WorkerToolExecutor:
     async def _execute_prepared_call(
         self, prepared: _PreparedWorkerToolCall
     ) -> ToolExecutionResult | dict[str, Any]:
-        """按幂等账本状态恢复结果或执行一次工具副作用。"""
+        """按幂等账本状态恢复结果或执行一次工具副作用。
+
+        参数：
+        - `prepared`（_PreparedWorkerToolCall）：已完成权限、参数和风险校验的工具调用；约束：须通过方法内校验；失败条件见下方异常说明。
+
+        返回：
+        - ToolExecutionResult | dict[str, Any]：封装本次操作输出或状态的 `ToolExecutionResult | dict[str, Any]` 结果对象。
+
+        异常：
+        - RuntimeError：校验条件 `self._operation_ledger is not None；ledger_claim.status == ToolOperationClaimStatus.COMPLETED；ledger_claim.result is None` 成立时（异常说明：worker_tool_operation_result_missing）。
+        - RuntimeError：校验条件 `self._operation_ledger is not None；not (ledger_claim.status == ToolOperationClaimStatus.COMPLETED)；ledger_claim.status == ToolOperationClaimStatus.ACQUIRED；not await self._operation_ledger.complete(prepared.request, args_hash=prepared.args_hash, result=result)` 成立时（异常说明：worker_tool_operation_result_not_persisted）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         if self._operation_ledger is not None:
+            # 先认领幂等键，再按账本状态复用结果或执行副作用，防止重试重复操作。
             ledger_claim = await self._operation_ledger.claim(
                 prepared.request, args_hash=prepared.args_hash
             )
@@ -348,6 +436,7 @@ class WorkerToolExecutor:
                     output_preview=_safe_output_preview(result.output),
                 )
             elif ledger_claim.status == ToolOperationClaimStatus.ACQUIRED:
+                # 执行结果必须先持久化成功，之后才发布完成事件并允许后续重试复用。
                 await self._publish_tool_started(
                     execution=_execution_from_request(prepared.request),
                     tool_call_id=prepared.tool_call_id,
@@ -427,7 +516,21 @@ class WorkerToolExecutor:
         operation_key: str | None,
         arguments: Any = None,
     ) -> None:
-        """Publish the durable start fact immediately before a tool operation."""
+        """在副作用操作开始前发布持久化的启动事件。
+
+        参数：
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+        - `tool_call_id`（str）：与模型工具调用消息对应的稳定标识；约束：无额外运行时限制。
+        - `tool_name`（str）：目标工具的名称；约束：无额外运行时限制。
+        - `operation_key`（str | None）：标识同一工具副作用操作的幂等键；约束：允许为 None，按未提供值的分支处理。
+        - `arguments`（Any）：调用工具或构造操作所需的参数映射；约束：可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         await self._publish_tool_lifecycle(
             EventType.TOOL_STARTED,
             execution=execution,
@@ -452,7 +555,25 @@ class WorkerToolExecutor:
         output_length: int | None = None,
         output_preview: str | None = None,
     ) -> None:
-        """Publish a safe, idempotent tool completion fact."""
+        """发布可安全重放且具幂等身份的工具完成事件。
+
+        参数：
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+        - `tool_call_id`（str）：与模型工具调用消息对应的稳定标识；约束：无额外运行时限制。
+        - `tool_name`（str）：目标工具的名称；约束：无额外运行时限制。
+        - `operation_key`（str | None）：标识同一工具副作用操作的幂等键；约束：允许为 None，按未提供值的分支处理。
+        - `status`（str）：当前操作或记录的状态值；约束：无额外运行时限制。
+        - `error`（Any）：操作失败时捕获的异常或错误说明；约束：无额外运行时限制。
+        - `duration_ms`（float | None）：本阶段测得的耗时毫秒数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `output_length`（int | None）：工具输出的完整字符数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `output_preview`（str | None）：供事件或审计记录使用的工具输出摘要；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         error_detail = (
             error.get("code") or error.get("message")
             if isinstance(error, Mapping)
@@ -487,7 +608,27 @@ class WorkerToolExecutor:
         output_length: int | None = None,
         output_preview: str | None = None,
     ) -> None:
-        """Store each lifecycle boundary under its own stable transition key."""
+        """用独立稳定转换键保存各工具生命周期边界。
+
+        参数：
+        - `event_type`（EventType）：要发布的事件类型名称；约束：无额外运行时限制。
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+        - `tool_call_id`（str）：与模型工具调用消息对应的稳定标识；约束：无额外运行时限制。
+        - `tool_name`（str）：目标工具的名称；约束：无额外运行时限制。
+        - `operation_key`（str | None）：标识同一工具副作用操作的幂等键；约束：允许为 None，按未提供值的分支处理。
+        - `status`（str）：当前操作或记录的状态值；约束：无额外运行时限制。
+        - `error`（str | None）：操作失败时捕获的异常或错误说明；约束：允许为 None，按未提供值的分支处理。
+        - `arguments`（Any）：调用工具或构造操作所需的参数映射；约束：可省略，默认值为 `None`。
+        - `duration_ms`（float | None）：本阶段测得的耗时毫秒数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `output_length`（int | None）：工具输出的完整字符数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `output_preview`（str | None）：供事件或审计记录使用的工具输出摘要；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if self._events is None:
             return
         task = execution.get("task", {})
@@ -515,6 +656,7 @@ class WorkerToolExecutor:
             payload["output_preview"] = output_preview
         if error:
             payload["error"] = {"code": error}
+        # started/completed 共用工具调用身份但使用不同阶段键，允许事件持久化幂等重放。
         await self._events.publish(
             ApplicationEvent(
                 event_type=event_type,
@@ -532,7 +674,18 @@ class WorkerToolExecutor:
         prepared: _PreparedWorkerToolCall,
         result: ToolExecutionResult,
     ) -> dict[str, Any]:
-        """格式化工具结果，并将超长文本保存为执行内可读引用。"""
+        """格式化工具结果，并将超长文本保存为执行内可读引用。
+
+        参数：
+        - `prepared`（_PreparedWorkerToolCall）：已完成权限、参数和风险校验的工具调用；约束：无额外运行时限制。
+        - `result`（ToolExecutionResult）：当前阶段生成的领域结果或操作回执；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：将工具执行结果整理为 Worker 消息可消费的字段映射。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         payload = {
             "id": prepared.tool_call_id,
             "name": prepared.request.tool_name,
@@ -556,7 +709,17 @@ class WorkerToolExecutor:
 
 
 def _is_worker_tool(config: ToolResponse) -> bool:
-    """Workers may use enabled native tools with a known risk classification."""
+    """判断工具是否属于 Worker 可调用的原生工具。
+
+    参数：
+    - `config`（ToolResponse）：当前操作使用的已解析配置；约束：无额外运行时限制。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     risk_level = _risk_level(config)
     return (
         config.enabled
@@ -566,12 +729,32 @@ def _is_worker_tool(config: ToolResponse) -> bool:
 
 
 def _risk_level(config: ToolResponse) -> str:
-    """Normalize the application tool response risk value."""
+    """将工具返回的风险值规范为受支持的等级。
+
+    参数：
+    - `config`（ToolResponse）：当前操作使用的已解析配置；约束：无额外运行时限制。
+
+    返回：
+    - str：规范化为受支持等级的工具风险名称。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return config.risk_level.lower()
 
 
 def _requires_approval(config: ToolResponse) -> bool:
-    """Require approval when configured or when risk is medium/high."""
+    """根据治理配置和风险等级判断是否需要人工审批。
+
+    参数：
+    - `config`（ToolResponse）：当前操作使用的已解析配置；约束：无额外运行时限制。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return config.require_approval or _risk_level(config) in {"medium", "high"}
 
 
@@ -582,7 +765,21 @@ def _operation_key(
     tool_round: int,
     call_index: int,
 ) -> str:
-    """Build a stable side-effect key within the database column limit."""
+    """构造满足数据库长度限制的稳定副作用幂等键。
+
+    参数：
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+    - `task_id`（str）：目标 Worker 任务的稳定标识；约束：无额外运行时限制。
+    - `generation`（int）：Worker 执行代次，用于隔离重试和副作用身份；约束：无额外运行时限制。
+    - `tool_round`（int）：Worker 当前工具调用轮次，用于关联本轮调用；约束：无额外运行时限制。
+    - `call_index`（int）：当前工具轮次中的调用序号，用于构造稳定身份；约束：无额外运行时限制。
+
+    返回：
+    - str：满足持久层长度限制的操作幂等键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     value = f"athena:{run_id}:{task_id}:{generation}:{tool_round}:{call_index}"
     if len(value) <= 128:
         return value
@@ -595,12 +792,35 @@ def _logical_operation_key(
     tool_round: int,
     call_index: int,
 ) -> str:
-    """Identify the same planned tool-call position across execution attempts."""
+    """为跨执行重试的同一工具调用位置生成稳定键。
+
+    参数：
+    - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+    - `task_id`（str）：目标 Worker 任务的稳定标识；约束：无额外运行时限制。
+    - `tool_round`（int）：Worker 当前工具调用轮次，用于关联本轮调用；约束：无额外运行时限制。
+    - `call_index`（int）：当前工具轮次中的调用序号，用于构造稳定身份；约束：无额外运行时限制。
+
+    返回：
+    - str：跨执行重试保持稳定的逻辑操作幂等键。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return f"athena:{run_id}:{task_id}:logical:{tool_round}:{call_index}"
 
 
 def _strict_json(value: Any) -> str:
-    """Serialize an operation deterministically for approval binding."""
+    """以稳定字段顺序序列化 JSON，供审批摘要和幂等校验使用。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - str：字段顺序稳定且不含非标准值的 JSON 文本。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -611,6 +831,18 @@ def _strict_json(value: Any) -> str:
 
 
 def _denied(code: str, *, name: str | None = None) -> dict[str, Any]:
+    """构造包含错误代码和工具名称的拒绝回执。
+
+    参数：
+    - `code`（str）：用于区分错误或结果类型的代码；约束：无额外运行时限制。
+    - `name`（str | None）：目标名称，用于标识相应配置、工具或对象；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+    返回：
+    - dict[str, Any]：包含拒绝状态、错误代码和工具标识的调用回执。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     result: dict[str, Any] = {"status": "denied", "error": {"code": code}}
     if name:
         result["name"] = name
@@ -618,7 +850,17 @@ def _denied(code: str, *, name: str | None = None) -> dict[str, Any]:
 
 
 def _safe_argument_summary(arguments: Any) -> dict[str, str]:
-    """Expose only a small allowlist of user-recognizable tool inputs."""
+    """仅提取允许展示的工具参数，避免泄露敏感字段。
+
+    参数：
+    - `arguments`（Any）：调用工具或构造操作所需的参数映射；约束：无额外运行时限制。
+
+    返回：
+    - dict[str, str]：仅包含白名单参数且已遮蔽敏感值的摘要映射。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if not isinstance(arguments, Mapping):
         return {}
     allowed = {
@@ -647,7 +889,17 @@ def _safe_argument_summary(arguments: Any) -> dict[str, str]:
 
 
 def _safe_output_preview(output: Any) -> str | None:
-    """Return a short, expandable preview with common credential values masked."""
+    """生成经过凭据遮蔽且长度受限的工具输出预览。
+
+    参数：
+    - `output`（Any）：待处理或生成的输出内容；约束：无额外运行时限制。
+
+    返回：
+    - str | None：经过凭据遮蔽和长度限制的输出预览；无有效文本时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if output is None:
         return None
     preview = str(output).strip()[:500]
@@ -665,7 +917,19 @@ def _safe_output_preview(output: Any) -> str | None:
 def _tool_call_id(
     execution: Mapping[str, Any], tool_round: int, call_index: int
 ) -> str:
-    """Match the ID stored with the Worker assistant tool-call message."""
+    """读取并规范化 Worker 助手消息中的工具调用标识。
+
+    参数：
+    - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+    - `tool_round`（int）：Worker 当前工具调用轮次，用于关联本轮调用；约束：无额外运行时限制。
+    - `call_index`（int）：当前工具轮次中的调用序号，用于构造稳定身份；约束：无额外运行时限制。
+
+    返回：
+    - str：Worker 助手消息中经规范化的稳定工具调用标识。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     task = execution.get("task", {})
     task = task if isinstance(task, Mapping) else {}
     return (
@@ -676,7 +940,17 @@ def _tool_call_id(
 
 
 def _execution_from_request(request: ToolExecutionRequest) -> dict[str, Any]:
-    """Recover the minimal public execution identity carried by a tool request."""
+    """从工具请求恢复最小化的公开执行身份。
+
+    参数：
+    - `request`（ToolExecutionRequest）：当前请求及其关联身份，用于限定操作范围；约束：无额外运行时限制。
+
+    返回：
+    - dict[str, Any]：供事件记录使用的最小公开执行身份字段。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return {
         "session_id": request.session_id,
         "run_id": request.run_id,
@@ -688,7 +962,17 @@ def _execution_from_request(request: ToolExecutionRequest) -> dict[str, Any]:
 
 
 def _generation_from_tool_call_id(tool_call_id: str) -> int:
-    """Extract generation from the stable Worker tool-call identity."""
+    """从稳定工具调用标识中解析 Worker 执行代次。
+
+    参数：
+    - `tool_call_id`（str）：与模型工具调用消息对应的稳定标识；约束：无额外运行时限制。
+
+    返回：
+    - int：从稳定工具调用标识解析出的执行代次；格式无效时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     parts = tool_call_id.split(":")
     try:
         return int(parts[2])

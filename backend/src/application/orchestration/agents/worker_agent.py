@@ -32,7 +32,8 @@ logger = get_logger(__name__)
 
 
 class ConfiguredWorkerAgent:
-    """Run one persisted task with the configured model."""
+    """使用已配置模型执行一个持久化 Worker 任务。
+    """
 
     def __init__(
         self,
@@ -41,6 +42,20 @@ class ConfiguredWorkerAgent:
         tool_service: ToolService | None = None,
         execution_messages: WorkerExecutionMessageRepository | None = None,
     ) -> None:
+        """保存对象依赖并初始化运行所需状态。
+
+        参数：
+        - `llm`（LLMPort）：执行模型请求的语言模型依赖；约束：无额外运行时限制。
+        - `event_publisher`（EventPort | None）：发布运行进度和领域事件的依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `tool_service`（ToolService | None）：查询工具能力并执行工具调用的应用服务；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `execution_messages`（WorkerExecutionMessageRepository | None）：读取和追加 Worker 执行对话记录的仓储依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._llm = llm
         self._events = event_publisher
         self._tool_service = tool_service
@@ -53,6 +68,19 @@ class ConfiguredWorkerAgent:
         state: Mapping[str, Any] | None = None,
         **_kwargs: Any,
     ) -> dict[str, Any]:
+        """读取执行上下文并调用模型，返回 Worker 图状态更新。
+
+        参数：
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+        - `state`（Mapping[str, Any] | None）：当前可恢复的工作流状态，包含本阶段所需数据；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `_kwargs`（Any）：调用适配器额外注入的关键字参数；当前处理不读取这些值；约束：无额外运行时限制。
+
+        返回：
+        - dict[str, Any]：提供给 Worker 图的回答正文或工具调用状态补丁。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         task = execution.get("task", {})
         task = task if isinstance(task, Mapping) else {}
         allowed_tools = tuple(
@@ -133,7 +161,19 @@ class ConfiguredWorkerAgent:
         invocation_id: str,
         messages: list[dict[str, Any]],
     ) -> None:
-        """Record the exact system/user values sent to the configured provider."""
+        """记录发送给 Provider 的系统提示和用户消息原文。
+
+        参数：
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+        - `invocation_id`（str）：本次图或模型调用的关联标识；约束：无额外运行时限制。
+        - `messages`（list[dict[str, Any]]）：按顺序排列的模型对话消息；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if self._execution_messages is None:
             return
         for index, message in enumerate(messages):
@@ -159,7 +199,20 @@ class ConfiguredWorkerAgent:
         tool_calls: list[dict[str, Any]],
         value: Any,
     ) -> None:
-        """Record the actual assistant payload and its normalized tool calls."""
+        """记录助手实际返回内容及规范化后的工具调用。
+
+        参数：
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+        - `invocation_id`（str）：本次图或模型调用的关联标识；约束：无额外运行时限制。
+        - `tool_calls`（list[dict[str, Any]]）：模型本轮请求执行的工具调用集合；约束：无额外运行时限制。
+        - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if self._execution_messages is None:
             return
         normalized_calls = tuple(
@@ -189,6 +242,18 @@ class ConfiguredWorkerAgent:
         )
 
     async def _invoke(self, messages: list[Any], execution: Mapping[str, Any]) -> Any:
+        """通过 LLM 活动封装执行一次模型调用。
+
+        参数：
+        - `messages`（list[Any]）：按顺序排列的模型对话消息；约束：无额外运行时限制。
+        - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+
+        返回：
+        - Any：Provider 返回的助手消息，供 Worker 解析正文或工具调用。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         task = execution.get("task", {})
         task_id = str(task.get("task_id", "")) if isinstance(task, Mapping) else ""
         generation = execution.get("execution_generation", 0)
@@ -204,13 +269,35 @@ class ConfiguredWorkerAgent:
 
 
 def _task_id(execution: Mapping[str, Any]) -> str:
-    """Read the stable Task identity from an execution snapshot."""
+    """从执行快照读取稳定 Task 身份。
+
+    参数：
+    - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+
+    返回：
+    - str：执行快照中经过规范化的 Task 标识。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     task = execution.get("task", {})
     return str(task.get("task_id", "")) if isinstance(task, Mapping) else ""
 
 
 def _invocation_id(execution: Mapping[str, Any], tool_round: int) -> str:
-    """Build an idempotent identity for one model invocation in a generation."""
+    """根据执行代次生成幂等的模型调用身份。
+
+    参数：
+    - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+    - `tool_round`（int）：Worker 当前工具调用轮次，用于关联本轮调用；约束：须通过方法内校验；失败条件见下方异常说明。
+
+    返回：
+    - str：由执行代次和调用位置稳定生成的幂等调用标识。
+
+    异常：
+    - ValueError：校验条件 `not task_id or generation < 1 or tool_round < 0` 成立时（异常说明：worker_model_invocation_identity_missing）。
+    - 未列出的依赖异常按当前实现传播。
+    """
     task_id = _task_id(execution)
     generation = int(execution.get("execution_generation", 0))
     if not task_id or generation < 1 or tool_round < 0:
@@ -227,7 +314,22 @@ def _transcript_message(
     role: WorkerLLMRole,
     content: WorkerExecutionMessageContent,
 ) -> WorkerExecutionMessageAppend:
-    """Construct one validated execution-scoped transcript append."""
+    """构造经过校验且绑定执行范围的对话追加记录。
+
+    参数：
+    - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+    - `message_id`（str）：关联消息的稳定标识；None 表示未绑定消息；约束：无额外运行时限制。
+    - `invocation_id`（str）：本次图或模型调用的关联标识；约束：无额外运行时限制。
+    - `entry_type`（WorkerExecutionEntryType）：Worker 执行记录的条目类型；约束：无额外运行时限制。
+    - `role`（WorkerLLMRole）：消息在对话中的角色；约束：无额外运行时限制。
+    - `content`（WorkerExecutionMessageContent）：待处理或返回的正文内容；约束：无额外运行时限制。
+
+    返回：
+    - WorkerExecutionMessageAppend：绑定 Worker 执行代次、租约和调用身份的持久化消息记录。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     return WorkerExecutionMessageAppend(
         message_id=message_id,
         session_id=str(execution.get("session_id", "")),
@@ -245,7 +347,17 @@ def _transcript_message(
 
 
 def _assistant_content(value: Any) -> Any:
-    """Return the provider-visible assistant content without LangChain wrappers."""
+    """提取 Provider 返回且不含 LangChain 包装的助手正文。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - Any：从 Provider 响应中提取的助手正文；无法识别的内容按输入值返回。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if isinstance(value, BaseMessage):
         return value.content
     if isinstance(value, Mapping) and "content" in value:
@@ -260,7 +372,20 @@ def _worker_messages(
     allowed_tools: tuple[str, ...],
     tool_specs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """构造包含任务输入、上游结果与可用工具的模型消息。"""
+    """构造包含任务输入、上游结果与可用工具的模型消息。
+
+    参数：
+    - `execution`（Mapping[str, Any]）：当前执行上下文，用于核对任务、代次和租约身份；约束：无额外运行时限制。
+    - `task`（Mapping[str, Any]）：当前 Worker 任务定义；约束：无额外运行时限制。
+    - `allowed_tools`（tuple[str, ...]）：当前任务明确授权使用的工具名集合；约束：无额外运行时限制。
+    - `tool_specs`（list[dict[str, Any]]）：工具目录中的名称、参数和风险定义；约束：无额外运行时限制。
+
+    返回：
+    - list[dict[str, Any]]：包含系统指令、任务内容、上游结果及工具定义的模型消息列表。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     system_message = (
         "You are an independent worker. Complete the assigned objective. "
         "You may request only the tools in the supplied tool manifest. "
@@ -287,7 +412,18 @@ def _worker_messages(
 
 
 def _worker_result(value: Any) -> dict[str, Any]:
-    """把 Provider 回复统一为 Worker 的结果与工具调用契约。"""
+    """把 Provider 回复统一为 Worker 的结果与工具调用契约。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - dict[str, Any]：符合 Worker 状态契约的正文、工具调用或失败结果映射。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    # 兼容 LangChain 消息和普通响应映射，统一从各自边界提取正文及原始工具调用。
     content = value.get("content", value) if isinstance(value, Mapping) else value
     if isinstance(value, BaseMessage):
         content = value.content
@@ -298,6 +434,7 @@ def _worker_result(value: Any) -> dict[str, Any]:
     tool_calls = _normalize_tool_calls(parsed.get("tool_calls", raw_calls))
     output = parsed.get("output")
     if output is None:
+        # 无显式 output 时，将非控制字段视为任务结果；工具调用单独保留在 tool_calls。
         output = {} if tool_calls else {
             key: item
             for key, item in parsed.items()
@@ -338,7 +475,17 @@ def _worker_result(value: Any) -> dict[str, Any]:
 
 
 def _decode_worker_reply(content: Any) -> dict[str, Any]:
-    """Decode the Worker's JSON envelope while preserving plain-text answers."""
+    """解析 Worker JSON 封装，同时保留普通文本回答。
+
+    参数：
+    - `content`（Any）：待处理或返回的正文内容；约束：无额外运行时限制。
+
+    返回：
+    - dict[str, Any]：解析后的 Worker 正文或工具调用状态字段。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if isinstance(content, Mapping):
         return dict(content)
     text = str(content or "").strip()
@@ -357,13 +504,20 @@ def _decode_worker_reply(content: Any) -> dict[str, Any]:
 
 
 def _decode_provider_tool_calls(text: str) -> list[dict[str, Any]] | None:
-    """Decode Qwen-style textual function calls into the Worker JSON contract.
-    The configured provider can return a tool call as ``<tool_call>`` text even
-    when the prompt requests JSON. The result still goes through the same
-    task allowlist, approval, and execution checks as a JSON tool call.
+    """将 Provider 的文本函数调用解析为 Worker 工具契约。
+
+    参数：
+    - `text`（str）：待规范化、解析或展示的文本；约束：无额外运行时限制。
+
+    返回：
+    - list[dict[str, Any]] | None：解析后的工具调用列表；文本格式缺失、重复参数或结构不完整时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
     if "<tool_call>" not in text:
         return None
+    # 按 Provider 文本协议逐段解码；任一段结构不完整时整体拒绝，避免部分执行。
     blocks = re.findall(r"<tool_call>(.*?)</tool_call>", text, flags=re.DOTALL)
     if not blocks:
         return None
@@ -396,7 +550,17 @@ def _decode_provider_tool_calls(text: str) -> list[dict[str, Any]] | None:
 
 
 def _normalize_tool_calls(value: Any) -> list[dict[str, Any]]:
-    """Normalize JSON or LangChain tool-call records for the Worker graph."""
+    """将 JSON 或 LangChain 工具调用记录规范为 Worker 图输入。
+
+    参数：
+    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+
+    返回：
+    - list[dict[str, Any]]：字段统一且参数为映射的 Worker 工具调用列表。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if not isinstance(value, (list, tuple)):
         return []
     calls: list[dict[str, Any]] = []

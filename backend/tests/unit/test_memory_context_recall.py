@@ -57,6 +57,40 @@ def test_context_fact_group_uses_declared_cardinality_and_detects_disagreement()
     assert mixed_group.member_ids == ("single-1",)
 
 
+def test_context_fact_group_preserves_seed_when_conflict_is_truncated() -> None:
+    """冲突超过展示上限时仍保留命中来源和完整成员统计。"""
+    records = [
+        _fact_record(f"fact-{index}", str(index), FactCardinality.SINGLE)
+        for index in range(8)
+    ]
+    group = build_fact_context_group(records[-1], records)
+    assert group is not None
+    assert group.conflicted
+    assert not group.complete
+    assert len(group.member_ids) == 6
+    assert group.anchor_id == records[-1].id
+    assert records[-1].id in group.member_ids
+    assert group.all_member_ids == tuple(record.id for record in records)
+    assert group.total_member_count == 8
+
+
+@pytest.mark.parametrize("cardinality", [FactCardinality.SINGLE, FactCardinality.SET])
+def test_context_fact_group_collapses_equivalent_records(
+    cardinality: FactCardinality,
+) -> None:
+    """等价记录折叠为命中来源的一条上下文，不计为冲突或截断。"""
+    first = _fact_record("first", "blue", cardinality)
+    seed = _fact_record("seed", "blue", cardinality)
+    group = build_fact_context_group(seed, [first, seed])
+    assert group is not None
+    assert not group.conflicted
+    assert group.complete
+    assert group.member_ids == group.all_member_ids == (seed.id,)
+    assert group.anchor_id == seed.id
+    assert group.total_member_count == 1
+    assert group.content == seed.content
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replacement", [False, True])
 async def test_final_validation_keeps_the_original_set_member(replacement: bool) -> None:

@@ -25,7 +25,19 @@ logger = logging.getLogger(__name__)
 
 
 def _score(content: str, query: str, terms: tuple[str, ...]) -> tuple[float, tuple[str, ...]]:
-    """按命中词项比例和完整查询命中计算轻量相关度。"""
+    """按命中词项比例和完整查询命中计算轻量相关度。
+
+    参数：
+    - `content`（str）：待处理或返回的正文内容；约束：无额外运行时限制。
+    - `query`（str）：用于检索、匹配或解析的原始查询文本；约束：无额外运行时限制。
+    - `terms`（tuple[str, ...]）：从查询中提取并用于关键词检索的词项；约束：无额外运行时限制。
+
+    返回：
+    - tuple[float, tuple[str, ...]]：候选文本的相关性分数及命中的查询词项。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     normalized = content.casefold()
     matched = tuple(term for term in terms if term.casefold() in normalized)
     score = len(matched) / max(1, len(terms))
@@ -49,10 +61,17 @@ class MemoryEpisodeContextProvider(ContextProvider):
     ) -> None:
         """保存回顾检索依赖。
 
-        参数：repository 执行会话隔离搜索；limit 限制返回项数；timeout_seconds 限制
-        仓储等待；settings 在关闭记忆读取时阻止本通道返回资料。
-        返回：无。
-        异常：不主动抛出业务异常。
+        参数：
+        - `repository`（MemoryEpisodeRepositoryPort）：负责读取或持久化领域数据的仓储依赖；约束：无额外运行时限制。
+        - `limit`（int）：本次读取或处理的数量上限；约束：可省略，默认值为 `5`。
+        - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：可省略，默认值为 `3.0`。
+        - `settings`（SessionMemorySettingsPort | None）：当前会话的记忆读取设置；None 表示未提供会话级覆盖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         self._repository = repository
         self._limit = limit
@@ -68,10 +87,17 @@ class MemoryEpisodeContextProvider(ContextProvider):
     ) -> ProviderResult:
         """只搜索本会话任务回顾并生成候选和选择轨迹。
 
-        参数：session_id 限定可读范围；run_id 由 Provider 协议提供；plan 携带
-        查询和共享资料预算。
-        返回：带有有界摘要、候选轨迹和词法通道状态的 ProviderResult。
-        异常：仓储超时由上层采集服务标记为 timeout；其他异常由上层记录为 failed。
+        参数：
+        - `session_id`（str）：目标会话的稳定标识，用于限定数据范围；约束：无额外运行时限制。
+        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `plan`（ContextPlan）：当前计划对象，提供请求的检索或执行安排；约束：须通过方法内校验；失败条件见下方异常说明。
+
+        返回：
+        - ProviderResult：包含词法召回候选、选中回顾摘要及可选来源证据的 Provider 结果。
+
+        异常：
+        - asyncio.CancelledError（重新抛出捕获的异常）：校验条件 `plan.episode_include_sources and selected；捕获 asyncio.CancelledError 后` 成立时。
+        - 未列出的依赖异常按当前实现传播。
         """
         del run_id
         started = time.perf_counter()
@@ -91,6 +117,7 @@ class MemoryEpisodeContextProvider(ContextProvider):
                 resource_scope={"scope": "session", "memory_suppressed": True},
             )
 
+        # 用词项提升召回覆盖，再以轻量相关度和创建时间稳定排序候选。
         terms = extract_memory_query_terms(query)
         logger.info(
             "memory_episode_retrieval_started",
@@ -126,6 +153,7 @@ class MemoryEpisodeContextProvider(ContextProvider):
         expanded_sources: dict[str, tuple[MemorySourceReference, ...]] = {}
         source_expansion_status = "skipped"
         if plan.episode_include_sources and selected:
+            # 来源只为最终选中的回顾展开，并复用检索剩余时限，避免放大查询成本。
             try:
                 async with asyncio.timeout(
                     max(0.001, self._timeout_seconds - (time.perf_counter() - started))
@@ -156,6 +184,7 @@ class MemoryEpisodeContextProvider(ContextProvider):
                     session_id,
                 )
                 source_expansion_status = "failed"
+        # 保留全部候选的选择轨迹，同时只把 top-k 回顾正文及其可选来源加入上下文。
         candidates: list[RetrievalCandidateTrace] = []
         items: list[ContextItem] = []
         for rank, (score, matched, episode) in enumerate(ranked, 1):

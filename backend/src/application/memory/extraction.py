@@ -39,7 +39,18 @@ _PERSONAL_CATEGORIES = {"preference", "profile"}
 
 
 def _same_fact_value(record: MemoryRecord, candidate: MemoryCandidate) -> bool:
-    """比较事实值和肯定/否定极性，不比较正文格式或时间。"""
+    """比较事实值和肯定/否定极性，不比较正文格式或时间。
+
+    参数：
+    - `record`（MemoryRecord）：当前领域记录，作为本次转换、筛选或渲染的输入；约束：无额外运行时限制。
+    - `candidate`（MemoryCandidate）：当前待融合、筛选或追踪的候选项；约束：无额外运行时限制。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     candidate_fact = candidate.fact
     record_fact = _record_fact(record)
     if record_fact is None:
@@ -51,7 +62,17 @@ def _same_fact_value(record: MemoryRecord, candidate: MemoryCandidate) -> bool:
 
 
 def _retraction_target_is_in_source(fact: MemoryFact) -> bool:
-    """确认撤回目标出现在已保存的用户原文片段中。"""
+    """确认撤回目标出现在已保存的用户原文片段中。
+
+    参数：
+    - `fact`（MemoryFact）：从记忆记录中解析出的结构化事实；约束：无额外运行时限制。
+
+    返回：
+    - bool：操作是否成功或条件是否成立。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     if not fact.retracts_value:
         return False
     target = fact.retracts_value.casefold()
@@ -59,7 +80,17 @@ def _retraction_target_is_in_source(fact: MemoryFact) -> bool:
 
 
 def _record_fact(record: MemoryRecord) -> MemoryFact | None:
-    """读取结构化事实；非事实记录不参与事实组决策。"""
+    """读取结构化事实；非事实记录不参与事实组决策。
+
+    参数：
+    - `record`（MemoryRecord）：当前领域记录，作为本次转换、筛选或渲染的输入；约束：无额外运行时限制。
+
+    返回：
+    - MemoryFact | None：从记录 metadata 读取并校验的结构化事实；记录不含有效事实时返回 None。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     value = record.metadata.get("fact")
     if value is None:
         return None
@@ -78,7 +109,19 @@ class LLMFactExtractor(MemoryFactExtractor):
         snapshots: MemorySnapshotPort,
         prompt_root: Path | None = None,
     ) -> None:
-        """保存提取模型、冻结候选仓储和可选提示词目录。"""
+        """保存提取模型、冻结候选仓储和可选提示词目录。
+
+        参数：
+        - `llm`（LLMPort）：执行模型请求的语言模型依赖；约束：无额外运行时限制。
+        - `snapshots`（MemorySnapshotPort）：读取记忆抽取所需一致性快照的应用端口；约束：无额外运行时限制。
+        - `prompt_root`（Path | None）：提示模板文件所在目录；None 表示使用默认目录；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._llm = llm
         self._snapshots = snapshots
         self._prompt_root = prompt_root
@@ -86,7 +129,20 @@ class LLMFactExtractor(MemoryFactExtractor):
     async def extract(
         self, turn: CompletedTurn, *, lease: LeaseGrant
     ) -> list[MemoryCandidate]:
-        """提取并返回轮次候选；已存在冻结清单时不重复调用模型。"""
+        """提取并返回轮次候选；已存在冻结清单时不重复调用模型。
+
+        参数：
+        - `turn`（CompletedTurn）：当前已经完成的对话轮次及其消息；约束：须通过方法内校验；失败条件见下方异常说明。
+        - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：无额外运行时限制。
+
+        返回：
+        - list[MemoryCandidate]：符合条件的有序结果集合；集合成员。
+
+        异常：
+        - ValueError：校验条件 `not turn.project_id` 成立时（异常说明：memory_turn_project_required）。
+        - TypeError：校验条件 `not isinstance(output, MemoryFactExtractionOutputSchema)` 成立时（异常说明：memory_fact_extraction_schema_required）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         saved = await self._snapshots.get_extraction_snapshot(turn.turn_id)
         if saved is not None:
             logger.info(
@@ -137,7 +193,19 @@ class LLMFactExtractor(MemoryFactExtractor):
     def _candidate(
         turn: CompletedTurn, proposal: MemoryFactProposalSchema, *, project_id: str
     ) -> MemoryCandidate | None:
-        """由模型字段和程序掌握的来源信息构造事实候选。"""
+        """由模型字段和程序掌握的来源信息构造事实候选。
+
+        参数：
+        - `turn`（CompletedTurn）：当前已经完成的对话轮次及其消息；约束：无额外运行时限制。
+        - `proposal`（MemoryFactProposalSchema）：待审查或提交的事实候选；约束：无额外运行时限制。
+        - `project_id`（str）：项目空间的稳定标识；None 表示未绑定项目；约束：无额外运行时限制。
+
+        返回：
+        - MemoryCandidate | None：待审查和归并的结构化记忆候选。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         if proposal.confidence < 0.6:
             return None
         personal = (
@@ -195,13 +263,33 @@ class MemoryFactResolver(MemoryResolver):
     """按明确意图、事实基数和唯一目标执行确定性决策。"""
 
     def __init__(self, memory: MemoryRepositoryPort) -> None:
-        """保存按事实身份查询的仓储。"""
+        """保存按事实身份查询的仓储。
+
+        参数：
+        - `memory`（MemoryRepositoryPort）：读取、更新或持久化记忆事实的应用端口；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._memory = memory
 
     async def resolve(
         self, candidates: list[MemoryCandidate]
     ) -> list[MemoryResolution]:
-        """读取每条候选的有效事实组，并附上提交时需要复核的 ID 集合。"""
+        """读取每条候选的有效事实组，并附上提交时需要复核的 ID 集合。
+
+        参数：
+        - `candidates`（list[MemoryCandidate]）：各检索或计算阶段产生的候选项集合；约束：无额外运行时限制。
+
+        返回：
+        - list[MemoryResolution]：符合条件的有序结果集合；集合成员。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         results: list[MemoryResolution] = []
         for candidate in candidates:
             fact = candidate.fact
@@ -247,7 +335,18 @@ class MemoryFactResolver(MemoryResolver):
     def _decide(
         candidate: MemoryCandidate, existing: list[MemoryRecord]
     ) -> MemoryResolution:
-        """根据候选意图和已存事实选择动作；歧义只跳过，不覆盖。"""
+        """根据候选意图和已存事实选择动作；歧义只跳过，不覆盖。
+
+        参数：
+        - `candidate`（MemoryCandidate）：当前待融合、筛选或追踪的候选项；约束：无额外运行时限制。
+        - `existing`（list[MemoryRecord]）：当前作用域内已存在的记忆记录；约束：无额外运行时限制。
+
+        返回：
+        - MemoryResolution：针对记忆候选作出的创建、修订、忽略或跳过决议。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         fact = candidate.fact
         stored_facts = [(item, _record_fact(item)) for item in existing]
         known_cardinalities = {
@@ -302,7 +401,7 @@ class MemoryFactResolver(MemoryResolver):
                 relation="supersedes",
             )
 
-        # 集合中的不同成员可以共存，只处理同成员的相反极性。
+        # 集合中的不同成员可以共存；这里只处理同一成员的相反立场。
         targets = existing
         if cardinality is FactCardinality.SET:
             targets = [
@@ -314,14 +413,14 @@ class MemoryFactResolver(MemoryResolver):
             ]
             if not targets:
                 if equivalent:
-                    # 如果集合中已经存在相同记忆了，就忽略新候选
+                    # 已存在相同成员时忽略重复候选，避免重复创建记录。
                     return MemoryResolution(
                         ResolutionAction.IGNORE,
                         candidate,
                         target_memory_id=equivalent[0].id,
                     )
                 if fact.claim_intent == "correct":
-                    # 如果集合中没有相同ID的记忆需要纠正，就跳过新候选
+                    # 更正声明必须能定位到现有成员；缺少目标时不自动新增。
                     return MemoryResolution(
                         ResolutionAction.SKIP,
                         candidate,
@@ -329,7 +428,7 @@ class MemoryFactResolver(MemoryResolver):
                     )
                 return MemoryResolution(ResolutionAction.CREATE, candidate)
             if equivalent:
-                # 如果集合中同时存在相同记忆和不同极性的记忆，就跳过新候选
+                # 相同成员同时存在相反立场时需要审查，不能自动覆盖集合事实。
                 return MemoryResolution(
                     ResolutionAction.SKIP,
                     candidate,

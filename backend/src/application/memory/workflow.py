@@ -35,7 +35,17 @@ class MemoryEmbedder(Protocol):
     """生成待写入事实的检索向量。"""
 
     async def embed_query(self, text: str) -> list[float]:
-        """返回 text 的向量；服务不可用时向上传播异常。"""
+        """为记忆检索查询生成向量表示。
+
+        参数：
+        - `text`（str）：待规范化、解析或展示的文本；约束：无额外运行时限制。
+
+        返回：
+        - list[float]：与输入文本对应的向量分量列表。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         ...
 
 
@@ -52,7 +62,22 @@ class MemoryWriteWorkflow:
         episode_summarizer: MemoryEpisodeSummarizer,
         episodes: MemoryEpisodeRepositoryPort,
     ) -> None:
-        """保存完整生产依赖；事实和向量必须共同提交，回顾使用独立仓储。"""
+        """保存完整生产依赖；事实和向量必须共同提交，回顾使用独立仓储。
+
+        参数：
+        - `memory`（MemoryRepositoryPort）：读取、更新或持久化记忆事实的应用端口；约束：无额外运行时限制。
+        - `extractor`（MemoryFactExtractor）：从对话中抽取事实候选的依赖；约束：无额外运行时限制。
+        - `resolver`（MemoryResolver）：对候选事实进行去重和冲突处理的依赖；约束：无额外运行时限制。
+        - `embedder`（MemoryEmbedder）：为文本生成向量表示的依赖；约束：无额外运行时限制。
+        - `episode_summarizer`（MemoryEpisodeSummarizer）：将对话片段整理为回顾记录的依赖；约束：无额外运行时限制。
+        - `episodes`（MemoryEpisodeRepositoryPort）：本次查询涉及的回顾记录集合；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
         self._memory = memory
         self._extractor = extractor
         self._resolver = resolver
@@ -63,7 +88,23 @@ class MemoryWriteWorkflow:
     async def process_completed_turn(
         self, turn: CompletedTurn, *, lease: LeaseGrant
     ) -> int:
-        """返回新写入事实数；任一分支失败会重试，但仍执行另一分支。"""
+        """返回新写入事实数；任一分支失败会重试，但仍执行另一分支。
+
+        参数：
+        - `turn`（CompletedTurn）：当前已经完成的对话轮次及其消息；约束：须通过方法内校验；失败条件见下方异常说明。
+        - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：须通过方法内校验；失败条件见下方异常说明。
+
+        返回：
+        - int：本轮成功创建或更新的记忆事实数量。
+
+        异常：
+        - ValueError：校验条件 `lease.key.resource_type != 'memory_processing' or lease.key.resource_id != turn.turn_id` 成立时（异常说明：memory_processing_lease_mismatch）。
+        - ValueError：校验条件 `not turn.project_id` 成立时（异常说明：memory_turn_project_required）。
+        - LeaseLostError（重新抛出捕获的异常）：校验条件 `捕获 LeaseLostError 后` 成立时。
+        - ExceptionGroup：校验条件 `len(errors) > 1` 成立时（异常说明：memory_write_branches_failed）。
+        - errors[0]：校验条件 `errors` 成立时。
+        - 未列出的依赖异常按当前实现传播。
+        """
         if (
             lease.key.resource_type != "memory_processing"
             or lease.key.resource_id != turn.turn_id
@@ -93,7 +134,19 @@ class MemoryWriteWorkflow:
         return written
 
     async def _write_facts(self, turn: CompletedTurn, *, lease: LeaseGrant) -> int:
-        """逐条提交冻结候选；已提交 ID 在重新决策前跳过。"""
+        """逐条提交冻结候选；已提交 ID 在重新决策前跳过。
+
+        参数：
+        - `turn`（CompletedTurn）：当前已经完成的对话轮次及其消息；约束：无额外运行时限制。
+        - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：无额外运行时限制。
+
+        返回：
+        - int：本次提交成功写入的事实数量。
+
+        异常：
+        - RuntimeError：校验条件 `len(resolutions) != 1` 成立时（异常说明：memory_resolver_result_count_mismatch）。
+        - 未列出的依赖异常按当前实现传播。
+        """
         written = 0
         for candidate in await self._extractor.extract(turn, lease=lease):
             operation_id = _operation_id(turn.turn_id, candidate)
@@ -149,13 +202,23 @@ class MemoryWriteWorkflow:
     async def _write_episode(self, turn: CompletedTurn, *, lease: LeaseGrant) -> None:
         """仅用冻结 Run 证据创建同轮唯一的任务回顾。
 
-        参数：turn 是记忆作业领取时恢复的完成轮次。
-        返回：无；无执行证据或提案不保留时跳过。
-        异常：模型、来源约束或持久化失败时向上传播以触发作业重试。
+        参数：
+        - `turn`（CompletedTurn）：当前已经完成的对话轮次及其消息；约束：无额外运行时限制。
+        - `lease`（LeaseGrant）：当前后台作业持有的租约授权及执行代次；约束：无额外运行时限制。
+
+        返回：
+        - None：操作完成后不提供返回数据。
+
+        异常：
+        - ValueError：校验条件 `existing is not None；existing.source_fingerprint != evidence.source_fingerprint` 成立时（异常说明：memory_episode_source_fingerprint_conflict）。
+        - ValueError：校验条件 `not (existing is not None)；proposal.summary is None` 成立时（异常说明：memory_episode_summary_missing）。
+        - ValueError：校验条件 `not (existing is not None)；unknown_source_ids` 成立时（异常说明：memory_episode_source_reference_invalid）。
+        - 未列出的依赖异常按当前实现传播。
         """
         evidence = turn.execution_evidence
         if evidence is None:
             return
+        # 已有回顾只允许在来源指纹一致时复用，避免同一 Turn 的证据被静默替换。
         existing = await self._episodes.get_by_turn(turn.turn_id)
         if existing is not None:
             if existing.source_fingerprint != evidence.source_fingerprint:
@@ -179,6 +242,7 @@ class MemoryWriteWorkflow:
             source_refs_by_id = {
                 reference.source_id: reference for reference in evidence.source_refs
             }
+            # 提案只能引用冻结快照中的来源，拒绝模型或旧结果引入的未知引用。
             unknown_source_ids = set(proposal.source_ref_ids).difference(
                 source_refs_by_id
             )
@@ -193,6 +257,7 @@ class MemoryWriteWorkflow:
             source_refs = tuple(
                 source_refs_by_id[source_id] for source_id in proposal.source_ref_ids
             )
+            # 从 Turn ID 派生稳定主键，使并发或重试提交收敛到同一条回顾记录。
             proposed_episode = MemoryEpisode(
                 episode_id="episode_"
                 + hashlib.sha256(turn.turn_id.encode()).hexdigest()[:32],
@@ -213,7 +278,18 @@ class MemoryWriteWorkflow:
 
 
 def _operation_id(turn_id: str, candidate: MemoryCandidate) -> str:
-    """根据轮次和规范候选内容生成与数组顺序无关的 ID。"""
+    """根据轮次和规范候选内容生成与数组顺序无关的 ID。
+
+    参数：
+    - `turn_id`（str）：已完成对话轮次的稳定标识；约束：无额外运行时限制。
+    - `candidate`（MemoryCandidate）：当前待融合、筛选或追踪的候选项；约束：无额外运行时限制。
+
+    返回：
+    - str：由租约身份、会话和 Run 稳定计算出的记忆作业操作标识。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
     canonical = json.dumps(
         memory_domain_to_schema(candidate).model_dump(mode="json"),
         ensure_ascii=False,
@@ -229,9 +305,14 @@ def _episode_outcome(
 ) -> Literal["completed", "partial", "failed", "cancelled", "unknown"]:
     """从冻结任务终态确定回顾状态，避免模型把失败说成完成。
 
-    参数：``evidence`` 是同一 Run 首次领取时冻结的任务状态集合。
-    返回：只由任务终态决定的回顾 outcome。
-    异常：不主动抛出业务异常。
+    参数：
+    - `evidence`（MemoryExecutionEvidence）：支持当前事实判断的来源证据；约束：无额外运行时限制。
+
+    返回：
+    - Literal['completed', 'partial', 'failed', 'cancelled', 'unknown']：由完成、失败、取消和工具结果推导出的回顾状态枚举值。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
     statuses = {task.status.casefold() for task in evidence.tasks}
     if not statuses:
@@ -252,9 +333,14 @@ def _episode_outcome(
 def _episode_content(summary: MemoryEpisodeSummary) -> str:
     """把结构化回顾整理成后续检索可读的纯文本。
 
-    参数：``summary`` 是已按字段长度约束的任务回顾。
-    返回：最多 8000 字符的稳定展示正文。
-    异常：不主动抛出业务异常。
+    参数：
+    - `summary`（MemoryEpisodeSummary）：面向用户或后续流程的简要结果说明；约束：无额外运行时限制。
+
+    返回：
+    - str：最多 8000 字符的稳定展示正文。 本次操作生成、读取、规范化或渲染后的文本。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
     lines = [
         f"任务回顾：{summary.title}",

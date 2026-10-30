@@ -379,20 +379,18 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
 
         task.status = status
         task.output_json = (
-            _strict_json(
-                {
+            {
                     "result_ref": execution.result_ref,
                     "result_bytes": result_bytes,
                     "result_sha256": result_sha256,
-                }
-            )
+            }
             if execution.result_ref is not None
-            else _strict_json(dict(event.result))
+            else dict(event.result)
         )
         task.error_json = (
-            _strict_json(dict(event.error)) if event.error is not None else None
+            dict(event.error) if event.error is not None else None
         )
-        task.updated_at = now.isoformat()
+        task.updated_at = now
         round_task.status = status
         round_task.terminal_at = now
         self._write_task_terminal_outbox(
@@ -607,7 +605,7 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
         task.execution_generation = attempt
         task.worker_thread_id = worker_thread_id
         task.active_execution_id = execution_id
-        task.updated_at = now.isoformat()
+        task.updated_at = now
         round_task.status = "pending"
         round_task.active_execution_id = execution_id
         round_task.terminal_at = None

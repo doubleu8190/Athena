@@ -28,19 +28,19 @@ from .gates import evaluate_gates
 from .ports import EvaluationEventSink, EvaluationTarget, MetricEvaluator
 
 
-def _now() -> str:
-    """生成当前 UTC 时间的 ISO 8601 字符串。
+def _now() -> datetime:
+    """生成当前 UTC 时间。
 
     参数：
     - 无参数。
 
     返回：
-    - str：当前 UTC 时间的 ISO 8601 文本。
+    - datetime：当前带时区的 UTC 时间。
 
     异常：
     - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc)
 
 
 class EvaluationService:

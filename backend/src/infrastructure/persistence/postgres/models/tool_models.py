@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Integer, String, Text
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import Boolean, DateTime, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -18,12 +22,12 @@ class ToolModel(Base):
     server_name: Mapped[str | None] = mapped_column(String, nullable=True)
     remote_name: Mapped[str | None] = mapped_column(String, nullable=True)
     description: Mapped[str] = mapped_column(Text, default="")
-    parameters_schema_json: Mapped[str] = mapped_column(Text, default="{}")
+    parameters_schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     risk_level: Mapped[str] = mapped_column(String, default="medium")
-    require_approval: Mapped[int] = mapped_column(Integer, default=1)
-    enabled: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
+    require_approval: Mapped[bool] = mapped_column(Boolean, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class MCPServerModel(Base):
@@ -32,6 +36,6 @@ class MCPServerModel(Base):
     __tablename__ = "mcp_servers"
 
     name: Mapped[str] = mapped_column(String, primary_key=True)
-    config_json: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[str] = mapped_column(String)
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deleted_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

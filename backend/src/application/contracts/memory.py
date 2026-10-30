@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
+from datetime import datetime
 from typing import Annotated, Literal, overload
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -177,6 +178,12 @@ class MemoryTaskOutcomeEvidenceSchema(BaseModel):
     result_ref: str | None = None
     tool_outcomes: tuple[MemoryToolOutcomeEvidenceSchema, ...] = Field(max_length=4)
 
+    @field_validator("tool_outcomes", mode="before")
+    @classmethod
+    def _freeze_tool_outcomes(cls, value: object) -> object:
+        """将 JSON 数组转为不可变的工具结果集合。"""
+        return tuple(value) if isinstance(value, list) else value
+
 
 class MemoryExecutionEvidenceSchema(BaseModel):
     """Run 的冻结执行摘要，只存状态和来源引用，不复制完整工具输出。"""
@@ -189,6 +196,12 @@ class MemoryExecutionEvidenceSchema(BaseModel):
     truncated: bool
     tasks: tuple[MemoryTaskOutcomeEvidenceSchema, ...] = Field(max_length=12)
     source_refs: tuple[MemorySourceReferenceSchema, ...] = Field(max_length=80)
+
+    @field_validator("tasks", "source_refs", mode="before")
+    @classmethod
+    def _freeze_collections(cls, value: object) -> object:
+        """将 JSON 数组转为不可变的任务和来源集合。"""
+        return tuple(value) if isinstance(value, list) else value
 
 
 class MemoryEpisodeSummarySchema(BaseModel):
@@ -259,7 +272,7 @@ class MemoryEpisodeSchema(BaseModel):
         min_length=1, max_length=80
     )
     source_fingerprint: str = Field(min_length=64, max_length=64)
-    created_at: str
+    created_at: datetime
 
 
 class MemoryFactProposalSchema(BaseModel):
@@ -346,6 +359,12 @@ class MemoryFactExtractionSnapshotSchema(BaseModel):
 
     turn_id: str = Field(min_length=1)
     candidates: tuple["MemoryCandidateSchema", ...]
+
+    @field_validator("candidates", mode="before")
+    @classmethod
+    def _freeze_candidates(cls, value: object) -> object:
+        """将 JSON 数组转为不可变的候选集合。"""
+        return tuple(value) if isinstance(value, list) else value
 
 
 class MemoryCandidateSchema(BaseModel):

@@ -87,7 +87,7 @@ class PostgresAdapterRegistryRepository(AdapterRegistryRepository):
 
     async def replace_all(self, adapters: list[AdapterInfo]) -> None:
         """用当前适配器集合替换持久化注册表。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         names = [item.name for item in adapters]
         async with self._session_factory() as db:
             async with db.begin():

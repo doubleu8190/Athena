@@ -4,7 +4,7 @@
 
 ## 1. 长期记忆模型
 
-记忆记录包含 id、logical_memory_id、session_id、content、embedding、metadata、expires_at、last_accessed_at、access_count、memory_type、category、confidence、source_kind、status、source_turn_id、last_observed_at、validity_status、valid_until、revision 和 deleted_time。状态 active/superseded/deleted；事实有效性 valid/uncertain/invalid 独立于 TTL 和访问热度。
+`memories` 表包含 id、logical_memory_id、session_id、content、embedding、content_fts、metadata_json、expires_at、created_at、last_accessed_at、access_count、category、confidence、status、source_turn_id、validity_status、valid_until、revision 和 deleted_time。`metadata_json` 使用 JSONB 保存 type、source_kind、事实内容及扩展属性；`created_at`、`expires_at`、`last_accessed_at`、`valid_until`、`deleted_time` 使用带时区时间类型。状态 active/superseded/deleted；事实有效性 valid/uncertain/invalid 独立于 TTL 和访问热度。
 
 正文在 PostgreSQL，`content_fts` 是中文 FTS 计算列，embedding 在 pgvector，记忆实体/修订/关系在 Neo4j。embedding metadata 保存 provider:model:version:dimension 签名；更换签名会清理旧向量，原始记忆仍保留等待重建。
 
@@ -22,7 +22,7 @@
 
 访问统计在本批资料合并进入 Root 窗口后，由 confirm_selection 提交 PostgreSQL，按 ID 去重，以原子加一更新 access_count 和 last_accessed_at；仅召回但未选入窗口、管理页 search/get/list 不增加访问热度。第二批沿用旧窗口条目时不重复计数；同一记忆在两个独立批次分别召回并选中时仍分别计数。flush_access_stats 没有待刷新数据，返回 0。
 
-last_observed_at 是创建或修订时观察事实的时间，last_accessed_at 是召回使用时间，两者独立。expires_at 是记忆 TTL，valid_until 是事实有效截止时间；任一期限到达均不再参与关键词或向量召回。空值表示该期限不受限，访问不会延长这两个期限。修订保留旧记录的期限。
+API 返回的 last_observed_at 由记忆版本的 created_at 派生；last_accessed_at 是召回使用时间。expires_at 是记忆 TTL，valid_until 是事实有效截止时间；任一期限到达均不再参与关键词或向量召回。空值表示该期限不受限，访问不会延长这两个期限。修订保留旧记录的期限。
 
 列表、详情、修订和搜索 API 均返回 created_at、expires_at、last_accessed_at、access_count、last_observed_at、valid_until 和 validity_status。列表统计返回 total、expired、recent_week；expired 筛选同时检查两种期限。
 

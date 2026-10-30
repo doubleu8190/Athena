@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Index, String
+from datetime import datetime
+
+from sqlalchemy import DateTime, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -16,9 +18,9 @@ class ProjectModel(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-    updated_at: Mapped[str] = mapped_column(String, nullable=False)
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 __all__ = ["ProjectModel"]

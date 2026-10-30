@@ -83,8 +83,8 @@ async def test_run_snapshot_and_plan_version_read_postgres_facts() -> None:
                     root_thread_id="root-thread-1",
                     cancellation_epoch=2,
                     cancellation_external_effect_status="unknown",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 ))
                 session.add(AgentPlanModel(
                     plan_id="plan-read-1",
@@ -95,8 +95,8 @@ async def test_run_snapshot_and_plan_version_read_postgres_facts() -> None:
                     max_parallelism=2,
                     current_version=1,
                     cancellation_epoch=2,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 ))
                 await session.flush()
                 session.add(PlanVersionModel(
@@ -113,15 +113,15 @@ async def test_run_snapshot_and_plan_version_read_postgres_facts() -> None:
                     run_id="run-read-1",
                     title="Research",
                     objective="Find the source material",
-                    input_json="{}",
-                    expected_output_json="{}",
-                    allowed_tools_json="[]",
+                    input_json={},
+                    expected_output_json={},
+                    allowed_tools_json=[],
                     worker_type="general",
                     timeout_seconds=60,
                     status="completed",
                     execution_generation=1,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 ))
                 await session.flush()
                 session.add(PlanRoundModel(
@@ -178,12 +178,12 @@ async def test_run_snapshot_and_plan_version_read_postgres_facts() -> None:
                     interrupt_id="interrupt-read-1",
                     tool_call_id="call-read-1",
                     tool_name="write_file",
-                    arguments_json='{"content":"private"}',
+                    arguments_json={'content': 'private'},
                     risk_level="high",
                     status="approved",
                     decision="approve",
-                    created_at=now.isoformat(),
-                    decided_at=now.isoformat(),
+                    created_at=now,
+                    decided_at=now,
                 ))
 
         repository = PostgresOrchestrationRepository(session_factory)

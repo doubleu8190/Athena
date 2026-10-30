@@ -125,17 +125,17 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             session.add(ProjectModel(
                 id=project_id,
                 name="Stream recovery",
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             ))
             await session.flush()
             session.add(SessionModel(
                 id=session_id,
                 project_id=project_id,
                 title="stream recovery",
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
-                last_activity_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
+                last_activity_at=now,
             ))
             await session.commit()
         final_result = {

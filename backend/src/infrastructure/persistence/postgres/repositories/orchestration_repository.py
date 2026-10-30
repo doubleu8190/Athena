@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -34,23 +33,6 @@ from .lease_center import PostgresLeaseCenter
 from .task_execution_results import load_task_execution_outputs
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _dump(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _load(value: str | None, default):
-    if not value:
-        return default
-    try:
-        return json.loads(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _review_task_result(
     round_task: RoundTaskModel,
     task_row: AgentTaskModel,
@@ -77,7 +59,7 @@ def _review_task_result(
     error = (
         execution.error_json
         if execution is not None and isinstance(execution.error_json, Mapping)
-        else _load(task_row.error_json, None)
+        else task_row.error_json
     )
     return {
         "task_id": round_task.task_id,
@@ -585,7 +567,7 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
             raw_output = (
                 resolved_output
                 if resolved_output is not None
-                else _load(row.output_json, {})
+                else (row.output_json if row.output_json is not None else {})
             )
             if (
                 resolved_output is None
@@ -604,7 +586,7 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                 row.task_id,
                 status,
                 dict(raw_output),
-                error=_load(row.error_json, None),
+                error=row.error_json,
             )
         return results
 

@@ -92,8 +92,8 @@ async def test_session_repository_against_postgresql(isolated_engine) -> None:
                 ProjectModel(
                     id=project_id,
                     name="Integration project",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
         session = Session(
@@ -180,7 +180,7 @@ async def test_memory_access_and_expiration_against_postgresql(isolated_engine) 
     try:
         for memory_id in ids:
             await repository.create_memory(MemoryWriteCommand(prefix, operation_key=memory_id))
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        past = datetime.now(timezone.utc) - timedelta(days=1)
         async with factory() as session, session.begin():
             await session.execute(update(MemoryModel).where(MemoryModel.id == ids[1]).values(expires_at=past))
             await session.execute(update(MemoryModel).where(MemoryModel.id == ids[2]).values(valid_until=past))

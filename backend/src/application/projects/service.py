@@ -87,7 +87,7 @@ class ProjectService:
         normalized = name.strip()
         if not normalized or len(normalized) > 120:
             raise ValueError("project_name_invalid")
-        now = self._clock().astimezone(timezone.utc).isoformat()
+        now = self._clock().astimezone(timezone.utc)
         return await self._repository.create(
             Project(
                 id=self._id_factory(),

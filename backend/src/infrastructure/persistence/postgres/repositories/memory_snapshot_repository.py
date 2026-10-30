@@ -27,9 +27,9 @@ from .memory_suppression import project_turn_is_writable
 from ..models import MemoryExtractionSnapshotModel
 
 
-def _now() -> str:
+def _now() -> datetime:
     """生成 UTC 持久化时间。"""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc)
 
 
 class PostgresMemorySnapshotRepository(MemorySnapshotPort):
@@ -56,7 +56,7 @@ class PostgresMemorySnapshotRepository(MemorySnapshotPort):
         if row is None:
             return None
         return memory_schema_to_domain(
-            MemoryFactExtractionSnapshotSchema.model_validate_json(row.snapshot_json)
+            MemoryFactExtractionSnapshotSchema.model_validate(row.snapshot_json)
         )
 
     async def save_extraction_snapshot(
@@ -74,7 +74,9 @@ class PostgresMemorySnapshotRepository(MemorySnapshotPort):
                     pg_insert(MemoryExtractionSnapshotModel)
                     .values(
                         turn_id=snapshot.turn_id,
-                        snapshot_json=memory_domain_to_schema(snapshot).model_dump_json(),
+                        snapshot_json=memory_domain_to_schema(snapshot).model_dump(
+                            mode="json", exclude_none=True
+                        ),
                         created_at=_now(),
                     )
                     .on_conflict_do_nothing(index_elements=["turn_id"])
@@ -88,7 +90,7 @@ class PostgresMemorySnapshotRepository(MemorySnapshotPort):
                     raise RuntimeError("memory_extraction_snapshot_not_saved")
                 await self._leases.assert_current_in_transaction(session, lease)
                 return memory_schema_to_domain(
-                    MemoryFactExtractionSnapshotSchema.model_validate_json(
+                    MemoryFactExtractionSnapshotSchema.model_validate(
                         row.snapshot_json
                     )
                 )

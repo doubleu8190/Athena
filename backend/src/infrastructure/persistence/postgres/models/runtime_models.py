@@ -1,16 +1,28 @@
 """ORM mappings for runs, orchestration, memory, events and retrieval.
 
-These mappings keep the deployed PostgreSQL schema intact while the use cases
-move to the target domain ports.  They deliberately contain no repositories or
-application behavior.
+These mappings define the target PostgreSQL schema and contain no repositories
+or application behavior.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import Computed, DateTime, ForeignKey, Index, Integer, String, Text, Float, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy import (
+    Boolean,
+    Computed,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 
@@ -33,8 +45,8 @@ class IdempotencyReceiptModel(Base):
     scope: Mapped[str] = mapped_column(String, primary_key=True)
     request_id: Mapped[str] = mapped_column(String, primary_key=True)
     parameter_hash: Mapped[str] = mapped_column(String, nullable=False)
-    response_json: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AgentRunModel(Base):
@@ -50,13 +62,13 @@ class AgentRunModel(Base):
     message_id: Mapped[str] = mapped_column(String, nullable=False)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, default="queued")
-    request_json: Mapped[str] = mapped_column(Text, default="{}")
-    response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    response_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     root_thread_id: Mapped[str] = mapped_column(String)
     root_wait_generation: Mapped[int] = mapped_column(Integer, default=0)
     root_wait_checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    root_wait_armed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    root_wait_armed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     root_wait_round_id: Mapped[str | None] = mapped_column(String, nullable=True)
     root_wait_plan_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     root_wait_interrupt_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -65,8 +77,8 @@ class AgentRunModel(Base):
         String, default="none"
     )
     display_cutoff_session_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AgentPlanModel(Base):
@@ -81,8 +93,8 @@ class AgentPlanModel(Base):
     current_version: Mapped[int] = mapped_column(Integer, default=1)
     active_round_id: Mapped[str | None] = mapped_column(String, nullable=True)
     cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AgentTaskModel(Base):
@@ -93,20 +105,20 @@ class AgentTaskModel(Base):
     run_id: Mapped[str] = mapped_column(String)
     title: Mapped[str] = mapped_column(String)
     objective: Mapped[str] = mapped_column(Text)
-    input_json: Mapped[str] = mapped_column(Text, default="{}")
-    expected_output_json: Mapped[str] = mapped_column(Text, default="{}")
-    allowed_tools_json: Mapped[str] = mapped_column(Text, default="[]")
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    expected_output_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    allowed_tools_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
     worker_type: Mapped[str] = mapped_column(String, default="general")
     timeout_seconds: Mapped[float] = mapped_column(Float, default=3600.0)
     status: Mapped[str] = mapped_column(String, default="pending")
-    output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     execution_generation: Mapped[int] = mapped_column(Integer, default=0)
     worker_thread_id: Mapped[str | None] = mapped_column(String, nullable=True)
     active_execution_id: Mapped[str | None] = mapped_column(String, nullable=True)
     llm_turn_count: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AgentEventModel(Base):
@@ -131,11 +143,11 @@ class AgentEventModel(Base):
     durability: Mapped[str] = mapped_column(String)
     stream_id: Mapped[str | None] = mapped_column(String, nullable=True)
     stream_type: Mapped[str | None] = mapped_column(String, nullable=True)
-    is_complete: Mapped[int] = mapped_column(Integer, default=0)
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     parent_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
     transition_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    payload_json: Mapped[str] = mapped_column(Text, default="{}")
-    occurred_at: Mapped[str] = mapped_column(String)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ApprovalRecordModel(Base):
@@ -161,16 +173,16 @@ class ApprovalRecordModel(Base):
     interrupt_id: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_call_id: Mapped[str] = mapped_column(String)
     tool_name: Mapped[str] = mapped_column(String)
-    arguments_json: Mapped[str] = mapped_column(Text, default="{}")
+    arguments_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     risk_level: Mapped[str] = mapped_column(String, default="low")
     args_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     operation_key: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
     decision: Mapped[str | None] = mapped_column(String, nullable=True)
     decided_by: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    decided_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class StepModel(Base):
@@ -184,13 +196,13 @@ class StepModel(Base):
     parent_step_id: Mapped[str | None] = mapped_column(String, nullable=True)
     parent_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String)
-    started_at: Mapped[str] = mapped_column(String)
-    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[float] = mapped_column(Float, default=0)
     llm_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     llm_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    deleted_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ToolCallModel(Base):
@@ -203,15 +215,15 @@ class ToolCallModel(Base):
     attempt_number: Mapped[int] = mapped_column(Integer, default=1)
     approval_id: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_name: Mapped[str] = mapped_column(String)
-    arguments_json: Mapped[str] = mapped_column(Text, default="{}")
+    arguments_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     raw_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String)
-    started_at: Mapped[str] = mapped_column(String)
-    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[float] = mapped_column(Float, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_stack: Mapped[str | None] = mapped_column(Text, nullable=True)
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    deleted_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MemoryModel(Base):
@@ -223,22 +235,27 @@ class MemoryModel(Base):
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
     content_fts: Mapped[str] = mapped_column(TSVECTOR, Computed("to_tsvector('chinese'::regconfig, content)", persisted=True))
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
-    expires_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[str] = mapped_column(String)
-    last_accessed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_accessed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     access_count: Mapped[int] = mapped_column(Integer, default=0)
-    memory_type: Mapped[str | None] = mapped_column(String, nullable=True)
     category: Mapped[str | None] = mapped_column(String, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="active")
     source_turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_observed_at: Mapped[str | None] = mapped_column(String, nullable=True)
     validity_status: Mapped[str] = mapped_column(String, default="valid")
-    valid_until: Mapped[str | None] = mapped_column(String, nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     revision: Mapped[int] = mapped_column(Integer, default=1)
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    deleted_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class KnowledgeDocumentJobModel(Base):
@@ -248,11 +265,11 @@ class KnowledgeDocumentJobModel(Base):
     attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"), unique=True)
     status: Mapped[str] = mapped_column(String, default="queued")
     attempt: Mapped[int] = mapped_column(Integer, default=0)
-    available_at: Mapped[str] = mapped_column(String)
-    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class RetrievalRunModel(Base):
@@ -262,7 +279,7 @@ class RetrievalRunModel(Base):
     query: Mapped[str] = mapped_column(Text)
     scope: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="running")
-    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     index_generation: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     agent_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -272,8 +289,8 @@ class RetrievalRunModel(Base):
     injected_count: Mapped[int] = mapped_column(Integer, default=0)
     duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[str] = mapped_column(String)
-    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class RetrievalCandidateModel(Base):
@@ -294,13 +311,13 @@ class RetrievalCandidateModel(Base):
     rerank_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rerank_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     filter_reason: Mapped[str | None] = mapped_column(String, nullable=True)
-    selected_for_result: Mapped[int] = mapped_column(Integer, default=0)
-    injected_into_context: Mapped[int] = mapped_column(Integer, default=0)
+    selected_for_result: Mapped[bool] = mapped_column(Boolean, default=False)
+    injected_into_context: Mapped[bool] = mapped_column(Boolean, default=False)
     content_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_title: Mapped[str | None] = mapped_column(String, nullable=True)
-    locator_json: Mapped[str] = mapped_column(Text, default="{}")
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[str] = mapped_column(String)
+    locator_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 __all__ = [name for name in globals() if name.endswith("Model")]
@@ -323,7 +340,7 @@ class MemoryProcessingJobModel(Base):
     assistant_text: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String, default="queued")
     attempt: Mapped[int] = mapped_column(Integer, default=0)
-    available_at: Mapped[str] = mapped_column(String)
-    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

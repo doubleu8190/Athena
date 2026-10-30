@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import (
+    DateTime,
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 
@@ -17,9 +30,9 @@ class KnowledgeBaseModel(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String)
     description: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deleted_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AttachmentModel(Base):
@@ -54,13 +67,13 @@ class AttachmentModel(Base):
     adapter_name: Mapped[str | None] = mapped_column(String, nullable=True)
     adapter_version: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="uploaded")
-    capabilities_json: Mapped[str] = mapped_column(Text, default="[]")
-    parsed_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    capabilities_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    parsed_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_index_revision_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[str] = mapped_column(String)
-    updated_at: Mapped[str] = mapped_column(String)
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deleted_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class FileChunkModel(Base):
@@ -86,10 +99,10 @@ class FileChunkModel(Base):
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
-    locator_json: Mapped[str] = mapped_column(Text, default="{}")
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    locator_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     native_score: Mapped[float | None] = mapped_column(nullable=True)
-    deleted_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    deleted_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class FileArtifactModel(Base):
@@ -107,8 +120,8 @@ class FileArtifactModel(Base):
     cache_key: Mapped[str] = mapped_column(String)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     storage_key: Mapped[str | None] = mapped_column(String, nullable=True)
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[str] = mapped_column(String)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AdapterRegistryModel(Base):
@@ -118,8 +131,8 @@ class AdapterRegistryModel(Base):
 
     name: Mapped[str] = mapped_column(String, primary_key=True)
     version: Mapped[str] = mapped_column(String)
-    mime_types_json: Mapped[str] = mapped_column(Text, default="[]")
-    extensions_json: Mapped[str] = mapped_column(Text, default="[]")
-    capabilities_json: Mapped[str] = mapped_column(Text, default="[]")
-    enabled: Mapped[int] = mapped_column(Integer, default=1)
-    updated_at: Mapped[str] = mapped_column(String)
+    mime_types_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    extensions_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    capabilities_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

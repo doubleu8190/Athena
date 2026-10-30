@@ -25,7 +25,7 @@ from domain.evaluation import (
     RelevanceLabel,
     RetrievalExpectation,
 )
-from shared import dumps, loads, new_id
+from shared import json_value, new_id
 
 from ..models import (
     EvalCaseAttemptModel,
@@ -38,8 +38,8 @@ from ..models import (
 )
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _case_payload(case: EvalCase) -> dict[str, Any]:
@@ -77,9 +77,9 @@ class PostgresEvaluationRepository:
                 dataset_id = manifest.dataset_name
                 if await session.get(EvalDatasetModel, dataset_id) is None:
                     session.add(EvalDatasetModel(dataset_id=dataset_id, name=manifest.dataset_name, created_at=now, updated_at=now))
-                session.add(EvalDatasetVersionModel(version_id=manifest.version_id, dataset_id=dataset_id, version=manifest.version_id, manifest_sha256=manifest.manifest_sha256, status="frozen", case_count=manifest.case_count, schema_version=manifest.schema_version, manifest_json=dumps({"corpus": dict(manifest.corpus), "tag_counts": dict(manifest.tag_counts)}), created_at=now))
+                session.add(EvalDatasetVersionModel(version_id=manifest.version_id, dataset_id=dataset_id, version=manifest.version_id, manifest_sha256=manifest.manifest_sha256, status="frozen", case_count=manifest.case_count, schema_version=manifest.schema_version, manifest_json=json_value({"corpus": dict(manifest.corpus), "tag_counts": dict(manifest.tag_counts)}), created_at=now))
                 for case in manifest.cases:
-                    session.add(EvalCaseModel(case_id=case.case_id, version_id=manifest.version_id, task_type=case.task_type, case_json=dumps(_case_payload(case)), tags_json=dumps(list(case.tags)), created_at=now))
+                    session.add(EvalCaseModel(case_id=case.case_id, version_id=manifest.version_id, task_type=case.task_type, case_json=json_value(_case_payload(case)), tags_json=list(case.tags), created_at=now))
 
     async def get_manifest(self, version_id: str) -> DatasetManifest | None:
         async with self._session_factory() as session:
@@ -87,8 +87,8 @@ class PostgresEvaluationRepository:
             if version is None:
                 return None
             rows = (await session.execute(select(EvalCaseModel).where(EvalCaseModel.version_id == version_id).order_by(EvalCaseModel.case_id))).scalars().all()
-            info = loads(version.manifest_json, {})
-            cases = tuple(_case_from_json(loads(row.case_json, {})) for row in rows)
+            info = version.manifest_json
+            cases = tuple(_case_from_json(row.case_json) for row in rows)
             return DatasetManifest(version_id=version.version_id, dataset_name=version.dataset_id, manifest_sha256=version.manifest_sha256, schema_version=version.schema_version, case_count=version.case_count, tag_counts=dict(info.get("tag_counts") or {}), cases=cases, corpus=dict(info.get("corpus") or {}))
 
     async def list_manifests(self) -> Sequence[DatasetManifest]:
@@ -105,7 +105,7 @@ class PostgresEvaluationRepository:
         now = _now()
         async with self._session_factory() as session:
             async with session.begin():
-                session.add(EvalRunModel(run_id=run.run_id, version_id=run.dataset_version, mode=str(run.mode), status=str(run.status), name=run.name, git_sha=run.git_sha, config_json=dumps(dict(run.config)), baseline_run_id=run.baseline_run_id, case_count=run.case_count, completed_count=run.completed_count, failed_count=run.failed_count, started_at=str(run.started_at) if run.started_at else None, completed_at=str(run.completed_at) if run.completed_at else None, created_at=now, error_message=run.error_message))
+                session.add(EvalRunModel(run_id=run.run_id, version_id=run.dataset_version, mode=str(run.mode), status=str(run.status), name=run.name, git_sha=run.git_sha, config_json=json_value(dict(run.config)), baseline_run_id=run.baseline_run_id, case_count=run.case_count, completed_count=run.completed_count, failed_count=run.failed_count, started_at=run.started_at, completed_at=run.completed_at, created_at=now, error_message=run.error_message))
 
     async def update_run(self, run: EvalRun) -> None:
         async with self._session_factory() as session:
@@ -113,7 +113,7 @@ class PostgresEvaluationRepository:
                 row = await session.get(EvalRunModel, run.run_id)
                 if row is None:
                     raise KeyError(run.run_id)
-                row.status = str(run.status); row.completed_count = run.completed_count; row.failed_count = run.failed_count; row.completed_at = str(run.completed_at) if run.completed_at else None; row.error_message = run.error_message
+                row.status = str(run.status); row.completed_count = run.completed_count; row.failed_count = run.failed_count; row.completed_at = run.completed_at; row.error_message = run.error_message
 
     async def cancel_run(self, run_id: str) -> EvalRun | None:
         async with self._session_factory() as session:
@@ -136,7 +136,7 @@ class PostgresEvaluationRepository:
                     if run is None:
                         raise KeyError(result.run_id)
                     trace = {**dict(artifact.trace), "ranking": list(artifact.ranking)}
-                    session.add(EvalCaseAttemptModel(attempt_id=result.attempt.attempt_id, run_id=result.run_id, version_id=run.version_id, case_id=result.case_id, attempt_number=result.attempt.attempt_number, status=result.status, input_snapshot_json=dumps(dict(result.attempt.input_snapshot)), output_text=artifact.output_text, trace_json=dumps(trace), retrieval_run_id=artifact.retrieval_run_id, agent_run_id=artifact.agent_run_id, duration_ms=artifact.duration_ms, input_tokens=artifact.input_tokens, output_tokens=artifact.output_tokens, estimated_cost=artifact.estimated_cost, error_message=result.error_message, created_at=str(result.attempt.created_at or _now())))
+                    session.add(EvalCaseAttemptModel(attempt_id=result.attempt.attempt_id, run_id=result.run_id, version_id=run.version_id, case_id=result.case_id, attempt_number=result.attempt.attempt_number, status=result.status, input_snapshot_json=json_value(dict(result.attempt.input_snapshot)), output_text=artifact.output_text, trace_json=json_value(trace), retrieval_run_id=artifact.retrieval_run_id, agent_run_id=artifact.agent_run_id, duration_ms=artifact.duration_ms, input_tokens=artifact.input_tokens, output_tokens=artifact.output_tokens, estimated_cost=artifact.estimated_cost, error_message=result.error_message, created_at=result.attempt.created_at or _now()))
 
     async def save_metric(self, metric: MetricValue) -> None:
         async with self._session_factory() as session:
@@ -144,12 +144,12 @@ class PostgresEvaluationRepository:
                 run = await session.get(EvalRunModel, metric.run_id)
                 if run is None:
                     raise KeyError(metric.run_id)
-                session.add(EvalMetricValueModel(metric_id=new_id("metric"), run_id=metric.run_id, version_id=run.version_id, case_id=metric.case_id, metric_name=metric.metric_name, value_numeric=metric.value, value_json=dumps(dict(metric.value_json)), evaluator_version=metric.evaluator_version, evidence_json=dumps(list(metric.evidence)), created_at=_now()))
+                session.add(EvalMetricValueModel(metric_id=new_id("metric"), run_id=metric.run_id, version_id=run.version_id, case_id=metric.case_id, metric_name=metric.metric_name, value_numeric=metric.value, value_json=json_value(dict(metric.value_json)), evaluator_version=metric.evaluator_version, evidence_json=list(metric.evidence), created_at=_now()))
 
     async def save_gate(self, gate: GateResult) -> None:
         async with self._session_factory() as session:
             async with session.begin():
-                session.add(EvalGateModel(gate_id=new_id("gate"), run_id=gate.run_id, metric=gate.metric, status=gate.status, rule_json=dumps({"metric": gate.rule.metric, "op": gate.rule.op, "value": gate.rule.value, "required": gate.rule.required}), actual=gate.actual, baseline=gate.baseline, reason=gate.reason, created_at=_now()))
+                session.add(EvalGateModel(gate_id=new_id("gate"), run_id=gate.run_id, metric=gate.metric, status=gate.status, rule_json={"metric": gate.rule.metric, "op": gate.rule.op, "value": gate.rule.value, "required": gate.rule.required}, actual=gate.actual, baseline=gate.baseline, reason=gate.reason, created_at=_now()))
 
     async def get_run(self, run_id: str) -> EvalRun | None:
         async with self._session_factory() as session:
@@ -171,7 +171,7 @@ class PostgresEvaluationRepository:
     async def list_case_results(self, run_id: str) -> Sequence[CaseResult]:
         async with self._session_factory() as session:
             rows = (await session.execute(select(EvalCaseAttemptModel).where(EvalCaseAttemptModel.run_id == run_id).order_by(EvalCaseAttemptModel.case_id, EvalCaseAttemptModel.attempt_number))).scalars().all()
-            return tuple(CaseResult(row.run_id, row.case_id, row.status, CaseAttempt(row.attempt_id, row.run_id, row.case_id, row.attempt_number, row.status, ExecutionArtifact(row.output_text, tuple(loads(row.trace_json, {}).get("ranking", ())), row.retrieval_run_id, row.agent_run_id, loads(row.trace_json, {}), row.duration_ms, row.input_tokens, row.output_tokens, row.estimated_cost, row.error_message), row.created_at, loads(row.input_snapshot_json, {})), (), row.error_message) for row in rows)
+            return tuple(CaseResult(row.run_id, row.case_id, row.status, CaseAttempt(row.attempt_id, row.run_id, row.case_id, row.attempt_number, row.status, ExecutionArtifact(row.output_text, tuple(row.trace_json.get("ranking", ())), row.retrieval_run_id, row.agent_run_id, row.trace_json, row.duration_ms, row.input_tokens, row.output_tokens, row.estimated_cost, row.error_message), row.created_at, row.input_snapshot_json), (), row.error_message) for row in rows)
 
     async def list_metrics(self, run_id: str, *, metric_name: str | None = None) -> Sequence[MetricValue]:
         async with self._session_factory() as session:
@@ -179,7 +179,7 @@ class PostgresEvaluationRepository:
             if metric_name:
                 query = query.where(EvalMetricValueModel.metric_name == metric_name)
             rows = (await session.execute(query.order_by(EvalMetricValueModel.metric_name, EvalMetricValueModel.case_id))).scalars().all()
-            return tuple(MetricValue(row.run_id, row.metric_name, row.value_numeric, row.case_id, loads(row.value_json, {}), row.evaluator_version, tuple(loads(row.evidence_json, []))) for row in rows)
+            return tuple(MetricValue(row.run_id, row.metric_name, row.value_numeric, row.case_id, row.value_json, row.evaluator_version, tuple(row.evidence_json)) for row in rows)
 
     async def list_gates(self, run_id: str) -> Sequence[GateResult]:
         async with self._session_factory() as session:
@@ -188,11 +188,11 @@ class PostgresEvaluationRepository:
 
     @staticmethod
     def _run(row: EvalRunModel) -> EvalRun:
-        return EvalRun(row.run_id, row.version_id, row.mode, row.status, row.name, loads(row.config_json, {}), row.git_sha, row.baseline_run_id, row.case_count, row.completed_count, row.failed_count, row.started_at, row.completed_at, row.error_message)
+        return EvalRun(row.run_id, row.version_id, row.mode, row.status, row.name, row.config_json, row.git_sha, row.baseline_run_id, row.case_count, row.completed_count, row.failed_count, row.started_at, row.completed_at, row.error_message)
 
     @staticmethod
     def _gate(row: EvalGateModel) -> GateResult:
-        rule = loads(row.rule_json, {})
+        rule = row.rule_json
         return GateResult(row.run_id, row.metric, row.status, row.actual, GateRule(str(rule.get("metric", row.metric)), str(rule.get("op", ">=")), float(rule.get("value", 0)), bool(rule.get("required", True))), row.baseline, row.reason)
 
 

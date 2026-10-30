@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,7 +82,7 @@ async def project_turn_is_writable(
 
 
 async def record_project_turn_suppression(
-    session: AsyncSession, turn_id: str, *, now: str
+    session: AsyncSession, turn_id: str, *, now: datetime
 ) -> None:
     """Persist a minimal marker for a Run that raced with project deletion."""
     await session.execute(
@@ -109,7 +111,7 @@ async def ensure_writable_run_scope(
     *,
     session_id: str,
     turn_id: str,
-    now: str,
+    now: datetime,
 ) -> bool:
     """Resolve the immutable session project and enforce all forget markers.
 

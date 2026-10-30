@@ -235,13 +235,13 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
             project_id = f"project-{run_id}"
             session.add(ProjectModel(
                 id=project_id, name="Worker parallelism",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=project_id, title="Worker parallelism",
                 active_run_id=run_id, last_run_sequence=1,
-                created_at=now.isoformat(), updated_at=now.isoformat(),
-                last_activity_at=now.isoformat(),
+                created_at=now, updated_at=now,
+                last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -252,8 +252,8 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
                     status="running",
                     root_thread_id=f"run:{run_id}",
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             session.add(
@@ -267,8 +267,8 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
                     current_version=1,
                     active_round_id=round_id,
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             await session.flush()
@@ -311,13 +311,13 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
                         run_id=run_id,
                         title=f"Task {index}",
                         objective=f"Complete fixed Round member {index}",
-                        allowed_tools_json="[]",
+                        allowed_tools_json=[],
                         status="pending",
                         execution_generation=1,
                         active_execution_id=execution_id,
                         worker_thread_id=thread_id,
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
+                        created_at=now,
+                        updated_at=now,
                     )
                 )
             await session.flush()
@@ -328,13 +328,13 @@ async def test_two_app_instances_respect_plan_parallelism_with_ten_ready_tasks()
                     run_id=run_id,
                     title="Next layer",
                     objective="Wait until Root reviews the first fixed Round",
-                    allowed_tools_json="[]",
+                    allowed_tools_json=[],
                     status="pending",
                     execution_generation=0,
                     active_execution_id=None,
                     worker_thread_id=None,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             await session.flush()
@@ -632,8 +632,8 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
             session.add(ProjectModel(
                 id=f"project-{run_id}",
                 name="Worker restart recovery",
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id,
@@ -641,9 +641,9 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
                 title="Worker restart recovery",
                 active_run_id=run_id,
                 last_run_sequence=1,
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
-                last_activity_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
+                last_activity_at=now,
             ))
             await session.flush()
             session.add(
@@ -654,8 +654,8 @@ async def test_worker_restart_reclaims_failed_attempt_without_closing_round() ->
                     session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 
@@ -849,13 +849,13 @@ async def _seed_expired_worker_job(
     async with session_factory() as session, session.begin():
         session.add(ProjectModel(
             id="project-1", name="Worker lease recovery",
-            created_at=now.isoformat(), updated_at=now.isoformat(),
+            created_at=now, updated_at=now,
         ))
         session.add(SessionModel(
             id="session-1", project_id="project-1", title="Worker lease recovery",
             active_run_id="run-1", last_run_sequence=1,
-            created_at=now.isoformat(), updated_at=now.isoformat(),
-            last_activity_at=now.isoformat(),
+            created_at=now, updated_at=now,
+            last_activity_at=now,
         ))
         session.add(
             AgentRunModel(
@@ -866,8 +866,8 @@ async def _seed_expired_worker_job(
                 status="running",
                 root_thread_id="run:run-1",
                 cancellation_epoch=0,
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -882,8 +882,8 @@ async def _seed_expired_worker_job(
                 current_version=1,
                 active_round_id="round-1",
                 cancellation_epoch=0,
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -894,13 +894,13 @@ async def _seed_expired_worker_job(
                 run_id="run-1",
                 title="Recover task",
                 objective="Resume after Worker process loss",
-                allowed_tools_json='["exec_shell"]',
+                allowed_tools_json=['exec_shell'],
                 timeout_seconds=600,
                 status="running",
                 execution_generation=1,
                 active_execution_id="execution-1",
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             )
         )
         session.add(

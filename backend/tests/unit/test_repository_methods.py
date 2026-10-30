@@ -122,8 +122,8 @@ def attachment_row(value=None):
         filename=value.filename, mime_type=value.mime_type, size_bytes=value.size_bytes,
         sha256=value.sha256, storage_key=value.storage_key, adapter_name=value.adapter_name,
         adapter_version=value.adapter_version, status=value.status.value,
-        capabilities_json="[]", parsed_metadata_json="{}", error_message=None,
-        created_at=value.created_at.isoformat(), updated_at=value.updated_at.isoformat(),
+        capabilities_json=[], parsed_metadata_json={}, error_message=None,
+        created_at=value.created_at, updated_at=value.updated_at,
         deleted_time=None,
     )
 
@@ -135,9 +135,9 @@ async def test_session_and_message_repositories_cover_crud_and_attachment_reader
     assert await repo.create(value) == value
     session_row = SimpleNamespace(
         id="s-1", title="Title", active_run_id=None, last_run_sequence=0,
-        created_at=now().isoformat(), updated_at=now().isoformat(),
+        created_at=now(), updated_at=now(),
         project_id="project-1",
-        last_activity_at=now().isoformat(), compression_summary=None,
+        last_activity_at=now(), compression_summary=None,
         last_compressed_message_id=None, last_summarized_message_id=None,
     )
     db.results = [Result(scalar=session_row)]
@@ -155,8 +155,8 @@ async def test_session_and_message_repositories_cover_crud_and_attachment_reader
     messages.results = [Result(scalar=session_row)]
     assert await mrepo.save(message()) == "m-1"
     row = SimpleNamespace(id="m-1", session_id="s-1", role="user", content="hello",
-        tool_calls_json="[]", tool_call_id=None, run_id=None, tool_call_record_id=None,
-        tool_name=None, message_type=None, timestamp=now().isoformat(), deleted_time=None)
+        tool_calls_json=[], tool_call_id=None, run_id=None, tool_call_record_id=None,
+        tool_name=None, message_type=None, timestamp=now(), deleted_time=None)
     messages.results = [Result(scalar=row)]
     assert (await mrepo.get("m-1")).content == "hello"
     messages.results = [Result(rows=[row])]
@@ -191,7 +191,7 @@ async def test_file_and_knowledge_repositories_cover_versions_and_cleanup():
         "a-1", [chunk], lease=lease_grant("document_ingestion", "a-1")
     )
     db.results = [Result(rows=[SimpleNamespace(id="c-1", attachment_id="a-1", ordinal=0,
-        content="hello", token_count=1, locator_json="{}", metadata_json="{}", native_score=None)])]
+        content="hello", token_count=1, locator_json={}, metadata_json={}, native_score=None)])]
     assert (await chunks.list_by_attachment("a-1"))[0].id == "c-1"
 
     docs = PostgresKnowledgeDocumentRepository(
@@ -224,22 +224,22 @@ async def test_tool_mcp_knowledge_and_artifact_repositories_cover_crud():
     tools = PostgresToolConfigRepository(factory(db)); db.get_values = [None]
     assert await tools.upsert(config) == config
     row = SimpleNamespace(tool_name="search", execution_mode="native", server_name=None, remote_name=None,
-        description="Search", parameters_schema_json="{}", risk_level="low", require_approval=0,
-        enabled=1, created_at=stamp.isoformat(), updated_at=stamp.isoformat())
+        description="Search", parameters_schema_json={}, risk_level="low", require_approval=False,
+        enabled=True, created_at=stamp, updated_at=stamp)
     db.get_values = [row]; assert (await tools.get("search")).tool_name == "search"
     db.results = [Result(rows=[row])]; assert len(await tools.list_tools()) == 1
     db.get_values = [row]; assert await tools.update(config) == config
 
     server = MCPServer("srv", MCPServerConfig("python", (), {}, None, "none", True), stamp)
     mcp = PostgresMCPServerRepository(factory(db)); db.get_values = [None]; assert await mcp.upsert(server) == server
-    mrow = SimpleNamespace(name="srv", config_json='{"command":"python","args":[],"env":{},"enabled":true}', created_at=stamp.isoformat(), deleted_time=None)
+    mrow = SimpleNamespace(name="srv", config_json={'command': 'python', 'args': [], 'env': {}, 'enabled': True}, created_at=stamp, deleted_time=None)
     db.results = [Result(scalar=mrow)]; assert (await mcp.get("srv")).name == "srv"
     db.results = [Result(rows=[mrow])]; assert len(await mcp.list_servers()) == 1
     db.results = [Result()]; assert await mcp.delete("srv")
 
     kb = KnowledgeBase("kb-1", "KB", "", 0, 0, 0, stamp, stamp)
     kbr = PostgresKnowledgeBaseRepository(factory(db)); assert await kbr.create(kb) == kb
-    krow = SimpleNamespace(id="kb-1", name="KB", description="", created_at=stamp.isoformat(), updated_at=stamp.isoformat())
+    krow = SimpleNamespace(id="kb-1", name="KB", description="", created_at=stamp, updated_at=stamp)
     db.results = [Result(scalar=krow), Result(rows=[attachment_row(attachment(knowledge=True))])]
     assert (await kbr.get("kb-1")).document_count == 1
     db.results = [Result(rows=[krow]), Result(rows=[attachment_row(attachment(knowledge=True))])]
@@ -253,5 +253,5 @@ async def test_tool_mcp_knowledge_and_artifact_repositories_cover_crud():
     assert await far.put(artifact) == artifact
     registry = PostgresAdapterRegistryRepository(factory(db))
     await registry.replace_all([AdapterInfo("text", "1", ("text/plain",), (".txt",), ("text",))])
-    db.results = [Result(rows=[SimpleNamespace(name="text", version="1", mime_types_json='["text/plain"]', extensions_json='[".txt"]', capabilities_json='["text"]', enabled=1)])]
+    db.results = [Result(rows=[SimpleNamespace(name="text", version="1", mime_types_json=["text/plain"], extensions_json=[".txt"], capabilities_json=["text"], enabled=True)])]
     assert (await registry.list_adapters())[0].name == "text"

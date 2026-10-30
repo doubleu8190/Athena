@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 
-from sqlalchemy import cast, delete as sql_delete, func, select, update
-from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
+from sqlalchemy import delete as sql_delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.projects import Project, ProjectRepositoryPort
@@ -137,7 +136,7 @@ class PostgresProjectRepository(ProjectRepositoryPort):
 
     async def rename(self, project_id: str, name: str) -> Project | None:
         """只更新显示名称，不改变项目 ID 和聊天活动时间。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.scalar(
@@ -157,7 +156,7 @@ class PostgresProjectRepository(ProjectRepositoryPort):
 
     async def delete(self, project_id: str) -> bool:
         """清理项目记忆并软删除项目下的聊天；活动 Run 会拒绝删除。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(
@@ -221,7 +220,7 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                     .on_conflict_do_nothing()
                 )
 
-                metadata = cast(MemoryModel.metadata_json, JSONB)
+                metadata = MemoryModel.metadata_json
                 fact = metadata["fact"]
                 project_memory_scope = (
                     (fact["scope_kind"].astext == "project")
@@ -244,14 +243,11 @@ class PostgresProjectRepository(ProjectRepositoryPort):
                 turn_ids: set[str] = set()
                 for memory in project_rows:
                     raw_metadata = memory.metadata_json
-                    if isinstance(raw_metadata, str):
-                        try:
-                            raw_metadata = json.loads(raw_metadata)
-                        except (TypeError, ValueError):
-                            raw_metadata = {}
                     turn_ids.update(_source_turn_ids(raw_metadata))
+                    if memory.source_turn_id:
+                        turn_ids.add(memory.source_turn_id)
                     memory.status = "deleted"
-                    memory.deleted_time = now
+                    memory.deleted_time = datetime.now(timezone.utc)
 
                 project_episode_rows = (
                     await session.execute(

@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Computed, ForeignKey, Index, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import (
+    Computed,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -16,8 +27,8 @@ class MemoryExtractionSnapshotModel(Base):
     __tablename__ = "memory_extraction_snapshots"
 
     turn_id: Mapped[str] = mapped_column(String, primary_key=True)
-    snapshot_json: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[str] = mapped_column(String)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class MemoryRunEvidenceSnapshotModel(Base):
@@ -27,8 +38,8 @@ class MemoryRunEvidenceSnapshotModel(Base):
 
     turn_id: Mapped[str] = mapped_column(String, primary_key=True)
     source_fingerprint: Mapped[str] = mapped_column(String)
-    snapshot_json: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[str] = mapped_column(String)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class MemoryEpisodeModel(Base):
@@ -54,10 +65,10 @@ class MemoryEpisodeModel(Base):
         TSVECTOR,
         Computed("to_tsvector('chinese'::regconfig, content)", persisted=True),
     )
-    summary_json: Mapped[str] = mapped_column(Text, nullable=False)
-    source_refs_json: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_refs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     source_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class MemorySourceSuppressionModel(Base):
@@ -68,7 +79,7 @@ class MemorySourceSuppressionModel(Base):
     source_type: Mapped[str] = mapped_column(String, primary_key=True)
     source_id: Mapped[str] = mapped_column(String, primary_key=True)
     item_fingerprint: Mapped[str] = mapped_column(String, primary_key=True)
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class MemoryRelationModel(Base):
@@ -89,7 +100,7 @@ class MemoryRelationModel(Base):
     )
     kind: Mapped[str] = mapped_column(String)
     operation_id: Mapped[str] = mapped_column(String, unique=True)
-    created_at: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 __all__ = [

@@ -9,22 +9,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import (
-    DateTime,
     and_,
-    cast,
     delete as sql_delete,
     func,
     or_,
     select,
     update,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.orm import aliased
 
 from backend.src.shared.logging import get_logger
+from shared import json_value
 from domain.leases import LeaseGrant, LeaseKey
 from domain.memory import (
     MemoryResolution,
@@ -70,7 +68,7 @@ def _fact_identity_conditions(
     fact: MemoryFact | MemoryFactIdentity,
 ) -> list[ColumnElement[bool]]:
     """按 JSON 中的规范身份限定范围、主体和事实键。"""
-    stored = cast(MemoryModel.metadata_json, JSONB)["fact"]
+    stored = MemoryModel.metadata_json["fact"]
     return [
         stored[name].astext == value
         for name, value in (
@@ -86,7 +84,7 @@ def _visible_scope_condition(
     session_id: str, project_id: str | None
 ) -> ColumnElement[bool]:
     """构造当前会话可访问的事实及非事实记忆范围。"""
-    metadata = cast(MemoryModel.metadata_json, JSONB)
+    metadata = MemoryModel.metadata_json
     fact = metadata["fact"]
     non_fact_scopes = [
         MemoryModel.session_id == session_id,
@@ -116,23 +114,36 @@ def _or_chinese_queries(terms: tuple[str, ...]):
     return combined
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _now() -> datetime:
+    """返回带时区的数据库时间值。"""
+    return datetime.now(timezone.utc)
 
 
-def _metadata_json(metadata: dict[str, object]) -> str:
-    """通过 JSON 边界校验新记忆元数据后生成稳定文本。"""
-    raw_json = json.dumps(metadata, ensure_ascii=False)
-    typed_metadata = MemoryRecordMetadataSchema.model_validate_json(raw_json)
-    return typed_metadata.model_dump_json(
+def _datetime_value(value: str | datetime | None) -> datetime | None:
+    """把领域时间文本转换为 PostgreSQL timestamptz 值。"""
+    if value is None:
+        return None
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _datetime_text(value: datetime | None) -> str | None:
+    """把数据库时间值转换为领域接口使用的 ISO 文本。"""
+    return value.isoformat() if value is not None else None
+
+
+def _metadata_json(metadata: dict[str, object]) -> dict[str, Any]:
+    """通过明确的记忆 metadata schema 校验并生成 JSONB 内容。"""
+    typed_metadata = MemoryRecordMetadataSchema.model_validate(json_value(metadata))
+    return typed_metadata.model_dump(
+        mode="json",
         exclude_none=True,
         exclude={
             "session_id",
             "source_turn_id",
-            "type",
             "category",
             "confidence",
-            "source_kind",
+            "expires_at",
         },
     )
 
@@ -385,12 +396,11 @@ def _matching_fact_rows(
     return sorted(matches, key=lambda row: row.id)
 
 
-def _json(value: str) -> dict[str, Any]:
-    """严格解析当前 JSON 对象；损坏数据直接报告，不回退旧格式。"""
-    parsed = json.loads(value)
-    if not isinstance(parsed, dict):
+def _json(value: dict[str, Any]) -> dict[str, Any]:
+    """读取 JSONB 对象并复制为普通字典。"""
+    if not isinstance(value, dict):
         raise ValueError("memory_metadata_object_required")
-    return parsed
+    return dict(value)
 
 
 def _is_unexpired(row: MemoryModel, *, now: datetime) -> bool:
@@ -398,12 +408,7 @@ def _is_unexpired(row: MemoryModel, *, now: datetime) -> bool:
     for value in (row.expires_at, row.valid_until):
         if value is None:
             continue
-        try:
-            deadline = datetime.fromisoformat(value)
-        except (TypeError, ValueError):
-            return False
-        if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
+        deadline = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
         if deadline <= now:
             return False
     return True
@@ -506,8 +511,8 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 conditions.append(MemoryModel.session_id == request.session_id)
             base_conditions = list(conditions)
             expired_condition = or_(
-                cast(MemoryModel.expires_at, DateTime(timezone=True)) <= func.now(),
-                cast(MemoryModel.valid_until, DateTime(timezone=True)) <= func.now(),
+                MemoryModel.expires_at <= func.now(),
+                MemoryModel.valid_until <= func.now(),
             )
             if request.expired_only:
                 conditions.append(expired_condition)
@@ -547,7 +552,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                     .select_from(MemoryModel)
                     .where(
                         *base_conditions,
-                        cast(MemoryModel.created_at, DateTime(timezone=True))
+                        MemoryModel.created_at
                         >= datetime.now(timezone.utc) - timedelta(days=7),
                     )
                 )
@@ -768,9 +773,11 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         key = (
             command.operation_key or f"memory-{datetime.now(timezone.utc).timestamp()}"
         )
-        metadata_json = _metadata_json(command.metadata)
+        metadata_payload = dict(command.metadata)
+        metadata_payload.setdefault("source_kind", "extraction")
+        metadata_json = _metadata_json(metadata_payload)
         typed_metadata = memory_schema_to_domain(
-            MemoryRecordMetadataSchema.model_validate_json(metadata_json)
+            MemoryRecordMetadataSchema.model_validate(metadata_json)
         )
         _validate_fact_content(command.content, typed_metadata.fact)
         source_ids = _source_turn_ids(command.metadata)
@@ -829,16 +836,14 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 content=command.content,
                 metadata_json=metadata_json,
                 created_at=_now(),
-                memory_type=str(command.metadata.get("type", "")) or None,
+                expires_at=_datetime_value(command.metadata.get("expires_at")),
                 category=str(command.metadata.get("category", "")) or None,
                 confidence=float(command.metadata.get("confidence", 0.0)),
-                source_kind="extraction",
                 status=MemoryStatus.ACTIVE.value,
                 source_turn_id=str(command.metadata.get("source_turn_id", "")) or None,
-                last_observed_at=_now(),
                 validity_status="valid",
                 valid_until=(
-                    typed_metadata.fact.valid_until
+                    _datetime_value(typed_metadata.fact.valid_until)
                     if typed_metadata.fact is not None
                     else None
                 ),
@@ -895,7 +900,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         metadata_payload = metadata or {}
         metadata_json = _metadata_json(metadata_payload)
         typed_metadata = memory_schema_to_domain(
-            MemoryRecordMetadataSchema.model_validate_json(metadata_json)
+            MemoryRecordMetadataSchema.model_validate(metadata_json)
         )
         _validate_fact_content(content, typed_metadata.fact)
         source_ids = _source_turn_ids(metadata_payload)
@@ -963,6 +968,15 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
             await self._leases.assert_current_in_transaction(session, lease)
         elif lease is None and metadata_payload.get("source") == "extraction":
             raise ValueError("background_memory_write_requires_lease")
+        old_metadata = old.metadata_json
+        for key, fallback in (
+            ("type", old_metadata.get("type", "fact")),
+            ("source_kind", old_metadata.get("source_kind", "extraction")),
+            ("category", old.category),
+            ("confidence", old.confidence),
+        ):
+            metadata_payload.setdefault(key, fallback)
+        metadata_json = _metadata_json(metadata_payload)
         old.status = MemoryStatus.SUPERSEDED.value
         session.add(
             MemoryModel(
@@ -972,13 +986,10 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 content=content,
                 metadata_json=metadata_json,
                 created_at=_now(),
-                memory_type=metadata_payload.get("type", old.memory_type),
                 category=metadata_payload.get("category", old.category),
                 confidence=metadata_payload.get("confidence", old.confidence),
-                source_kind=old.source_kind,
                 status=MemoryStatus.ACTIVE.value,
                 source_turn_id=str((metadata or {}).get("source_turn_id", "")) or None,
-                last_observed_at=_now(),
                 validity_status=(
                     "invalid"
                     if typed_metadata.fact is not None
@@ -990,12 +1001,14 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                     )
                 ),
                 valid_until=(
-                    typed_metadata.fact.valid_until
+                    _datetime_value(typed_metadata.fact.valid_until)
                     if typed_metadata.fact is not None
                     else old.valid_until
                 ),
                 expires_at=(
-                    None if typed_metadata.fact is not None else old.expires_at
+                    None
+                    if typed_metadata.fact is not None
+                    else old.expires_at
                 ),
                 revision=old.revision + 1,
             )
@@ -1085,7 +1098,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 if row is None:
                     return False
                 row.validity_status = validity_status
-                row.valid_until = valid_until
+                row.valid_until = _datetime_value(valid_until)
         return True
 
     async def delete(self, memory_id: str) -> bool:
@@ -1183,7 +1196,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
     def _unexpired_conditions() -> list[ColumnElement[bool]]:
         """生成有效期限条件；无参数，返回 SQL 条件列表，不主动抛出业务异常。"""
         return [
-            or_(column.is_(None), cast(column, DateTime(timezone=True)) > func.now())
+            or_(column.is_(None), column > func.now())
             for column in (MemoryModel.expires_at, MemoryModel.valid_until)
         ]
 
@@ -1197,23 +1210,26 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
         metadata.update(
             session_id=row.session_id,
             source_turn_id=row.source_turn_id,
-            type=row.memory_type,
             category=row.category,
             confidence=row.confidence,
         )
+        source_kind = metadata.pop("source_kind", None)
+        expires_at = _datetime_text(row.expires_at)
+        if expires_at is not None:
+            metadata["expires_at"] = expires_at
         return MemoryRecord(
             row.id,
             row.content,
             metadata,
             score,
-            row.source_kind,
+            source_kind,
             MemoryStatus(row.status),
-            created_at=row.created_at,
-            expires_at=row.expires_at,
-            last_accessed_at=row.last_accessed_at,
+            created_at=_datetime_text(row.created_at) or "",
+            expires_at=_datetime_text(row.expires_at),
+            last_accessed_at=_datetime_text(row.last_accessed_at),
             access_count=row.access_count,
-            last_observed_at=row.last_observed_at,
-            valid_until=row.valid_until,
+            last_observed_at=_datetime_text(row.created_at),
+            valid_until=_datetime_text(row.valid_until),
             validity_status=row.validity_status,
         )
 

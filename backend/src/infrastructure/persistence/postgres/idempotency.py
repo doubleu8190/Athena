@@ -53,7 +53,7 @@ async def execute_idempotent(
     if existing is not None:
         if existing.parameter_hash != parameter_hash:
             raise IdempotencyConflictError("idempotency_conflict")
-        return decode(json.loads(existing.response_json)), True
+        return decode(existing.response_json), True
 
     value = await action()
     session.add(
@@ -61,10 +61,8 @@ async def execute_idempotent(
             scope=scope,
             request_id=request_id,
             parameter_hash=parameter_hash,
-            response_json=json.dumps(
-                encode(value), ensure_ascii=False, separators=(",", ":")
-            ),
-            created_at=datetime.now(timezone.utc).isoformat(),
+            response_json=encode(value),
+            created_at=datetime.now(timezone.utc),
         )
     )
     await session.flush()

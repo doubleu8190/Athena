@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -52,13 +51,9 @@ def session_model_to_domain(row: SessionModel) -> Session:
         project_id=row.project_id,
         title=row.title,
         active_run_id=row.active_run_id,
-        created_at=datetime.fromisoformat(row.created_at),
-        updated_at=datetime.fromisoformat(row.updated_at),
-        last_activity_at=(
-            datetime.fromisoformat(row.last_activity_at)
-            if row.last_activity_at is not None
-            else None
-        ),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        last_activity_at=row.last_activity_at,
         compression_summary=row.compression_summary,
         last_compressed_message_id=row.last_compressed_message_id,
         last_summarized_message_id=row.last_summarized_message_id,
@@ -72,13 +67,9 @@ def session_domain_to_model(value: Session) -> SessionModel:
         project_id=value.project_id,
         title=value.title,
         active_run_id=value.active_run_id,
-        created_at=value.created_at.isoformat(),
-        updated_at=value.updated_at.isoformat(),
-        last_activity_at=(
-            value.last_activity_at.isoformat()
-            if value.last_activity_at is not None
-            else None
-        ),
+        created_at=value.created_at,
+        updated_at=value.updated_at,
+        last_activity_at=value.last_activity_at,
         compression_summary=value.compression_summary,
         last_compressed_message_id=value.last_compressed_message_id,
         last_summarized_message_id=value.last_summarized_message_id,
@@ -97,7 +88,7 @@ def message_model_to_domain(
         session_id=row.session_id,
         role=MessageRole(row.role),
         content=row.content,
-        timestamp=datetime.fromisoformat(row.timestamp),
+        timestamp=row.timestamp,
         tool_calls=tuple(
             ToolCall(
                 id=item.get("id", ""),
@@ -130,27 +121,19 @@ def message_domain_to_model(value: Message) -> MessageModel:
         session_id=value.session_id,
         role=value.role.value,
         content=value.content,
-        tool_calls_json=json.dumps(tool_calls, ensure_ascii=False),
+        tool_calls_json=tool_calls,
         tool_call_id=value.tool_call_id,
         run_id=value.run_id,
         tool_call_record_id=value.tool_call_record_id,
         tool_name=value.tool_name,
         message_type=value.message_type,
-        timestamp=value.timestamp.isoformat(),
+        timestamp=value.timestamp,
     )
 
 
-def _load_tool_calls(value: str | None) -> list[dict[str, Any]]:
+def _load_tool_calls(value: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """解析消息工具调用 JSON，异常或非列表内容按空列表处理。"""
-    if not value:
-        return []
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-    return [item for item in parsed if isinstance(item, dict)]
+    return [item for item in value if isinstance(item, dict)] if value else []
 
 
 def attachment_model_to_domain(row: AttachmentModel) -> Attachment:
@@ -173,11 +156,9 @@ def attachment_model_to_domain(row: AttachmentModel) -> Attachment:
         capabilities=tuple(_load_json_list(row.capabilities_json)),
         metadata=FileMetadata(_load_json_dict(row.parsed_metadata_json)),
         error_message=row.error_message,
-        created_at=datetime.fromisoformat(row.created_at),
-        updated_at=datetime.fromisoformat(row.updated_at),
-        deleted_time=(
-            datetime.fromisoformat(row.deleted_time) if row.deleted_time else None
-        ),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        deleted_time=row.deleted_time,
         active_index_revision_id=getattr(row, "active_index_revision_id", None),
     )
 
@@ -199,12 +180,12 @@ def attachment_domain_to_model(value: Attachment) -> AttachmentModel:
         adapter_name=value.adapter_name,
         adapter_version=value.adapter_version,
         status=value.status.value,
-        capabilities_json=json.dumps(list(value.capabilities), ensure_ascii=False),
-        parsed_metadata_json=json.dumps(value.metadata.values, ensure_ascii=False),
+        capabilities_json=list(value.capabilities),
+        parsed_metadata_json=value.metadata.values,
         error_message=value.error_message,
-        created_at=value.created_at.isoformat(),
-        updated_at=value.updated_at.isoformat(),
-        deleted_time=value.deleted_time.isoformat() if value.deleted_time else None,
+        created_at=value.created_at,
+        updated_at=value.updated_at,
+        deleted_time=value.deleted_time,
         active_index_revision_id=value.active_index_revision_id,
     )
 
@@ -232,8 +213,8 @@ def file_chunk_domain_to_model(value: FileChunk) -> FileChunkModel:
         ordinal=value.ordinal,
         content=value.content,
         token_count=value.token_count,
-        locator_json=json.dumps(value.locator.values, ensure_ascii=False),
-        metadata_json=json.dumps(value.metadata.values, ensure_ascii=False),
+        locator_json=value.locator.values,
+        metadata_json=value.metadata.values,
         native_score=value.native_score,
         index_revision_id=value.index_revision_id,
     )
@@ -249,7 +230,7 @@ def file_artifact_model_to_domain(row: FileArtifactModel) -> FileArtifact:
         content=row.content,
         storage_key=row.storage_key,
         metadata=FileMetadata(_load_json_dict(row.metadata_json)),
-        created_at=datetime.fromisoformat(row.created_at),
+        created_at=row.created_at,
     )
 
 
@@ -262,8 +243,8 @@ def file_artifact_domain_to_model(value: FileArtifact) -> FileArtifactModel:
         cache_key=value.cache_key,
         content=value.content,
         storage_key=value.storage_key,
-        metadata_json=json.dumps(value.metadata.values, ensure_ascii=False),
-        created_at=value.created_at.isoformat(),
+        metadata_json=value.metadata.values,
+        created_at=value.created_at,
     )
 
 
@@ -272,22 +253,24 @@ def adapter_model_to_domain(row: AdapterRegistryModel) -> AdapterInfo:
     return AdapterInfo(
         name=row.name,
         version=row.version,
-        mime_types=tuple(str(item) for item in _load_json_list(row.mime_types_json)),
-        extensions=tuple(str(item) for item in _load_json_list(row.extensions_json)),
-        capabilities=tuple(str(item) for item in _load_json_list(row.capabilities_json)),
-        enabled=bool(row.enabled),
+        mime_types=tuple(str(item) for item in row.mime_types_json),
+        extensions=tuple(str(item) for item in row.extensions_json),
+        capabilities=tuple(str(item) for item in row.capabilities_json),
+        enabled=row.enabled,
     )
 
 
-def adapter_domain_to_model(value: AdapterInfo, *, updated_at: str) -> AdapterRegistryModel:
+def adapter_domain_to_model(
+    value: AdapterInfo, *, updated_at: datetime
+) -> AdapterRegistryModel:
     """把适配器注册值对象转换为 ORM 行。"""
     return AdapterRegistryModel(
         name=value.name,
         version=value.version,
-        mime_types_json=json.dumps(list(value.mime_types), ensure_ascii=False),
-        extensions_json=json.dumps(list(value.extensions), ensure_ascii=False),
-        capabilities_json=json.dumps(list(value.capabilities), ensure_ascii=False),
-        enabled=int(value.enabled),
+        mime_types_json=list(value.mime_types),
+        extensions_json=list(value.extensions),
+        capabilities_json=list(value.capabilities),
+        enabled=value.enabled,
         updated_at=updated_at,
     )
 
@@ -306,8 +289,8 @@ def knowledge_base_model_to_domain(
         document_count=len(documents),
         ready_document_count=len(ready),
         total_size_bytes=sum(item.size_bytes for item in documents),
-        created_at=datetime.fromisoformat(row.created_at),
-        updated_at=datetime.fromisoformat(row.updated_at),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -317,8 +300,8 @@ def knowledge_base_domain_to_model(value: KnowledgeBase) -> KnowledgeBaseModel:
         id=value.id,
         name=value.name,
         description=value.description,
-        created_at=value.created_at.isoformat(),
-        updated_at=value.updated_at.isoformat(),
+        created_at=value.created_at,
+        updated_at=value.updated_at,
     )
 
 
@@ -332,10 +315,10 @@ def tool_model_to_domain(row: ToolModel) -> ToolConfig:
         description=row.description,
         parameters=JsonSchema(_load_json_dict(row.parameters_schema_json)),
         risk_level=RiskLevel(row.risk_level),
-        require_approval=bool(row.require_approval),
-        enabled=bool(row.enabled),
-        created_at=datetime.fromisoformat(row.created_at),
-        updated_at=datetime.fromisoformat(row.updated_at),
+        require_approval=row.require_approval,
+        enabled=row.enabled,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -347,12 +330,12 @@ def tool_domain_to_model(value: ToolConfig) -> ToolModel:
         server_name=value.server_name,
         remote_name=value.remote_name,
         description=value.description,
-        parameters_schema_json=json.dumps(value.parameters.values, ensure_ascii=False),
+        parameters_schema_json=value.parameters.values,
         risk_level=value.risk_level.value,
-        require_approval=int(value.require_approval),
-        enabled=int(value.enabled),
-        created_at=value.created_at.isoformat(),
-        updated_at=value.updated_at.isoformat(),
+        require_approval=value.require_approval,
+        enabled=value.enabled,
+        created_at=value.created_at,
+        updated_at=value.updated_at,
     )
 
 
@@ -370,10 +353,8 @@ def mcp_server_model_to_domain(row: MCPServerModel) -> MCPServer:
             network_policy=str(value.get("network_policy", "none")),
             enabled=bool(value.get("enabled", True)),
         ),
-        created_at=datetime.fromisoformat(row.created_at),
-        deleted_time=(
-            datetime.fromisoformat(row.deleted_time) if row.deleted_time else None
-        ),
+        created_at=row.created_at,
+        deleted_time=row.deleted_time,
     )
 
 
@@ -382,35 +363,24 @@ def mcp_server_domain_to_model(value: MCPServer) -> MCPServerModel:
     command = value.config.command
     return MCPServerModel(
         name=value.name,
-        config_json=json.dumps(
-            {
-                "command": list(command) if isinstance(command, tuple) else command,
-                "args": list(value.config.args),
-                "env": value.config.env,
-                "image_id": value.config.image_id,
-                "network_policy": value.config.network_policy,
-                "enabled": value.config.enabled,
-            },
-            ensure_ascii=False,
-        ),
-        created_at=value.created_at.isoformat(),
-        deleted_time=value.deleted_time.isoformat() if value.deleted_time else None,
+        config_json={
+            "command": list(command) if isinstance(command, tuple) else command,
+            "args": list(value.config.args),
+            "env": value.config.env,
+            "image_id": value.config.image_id,
+            "network_policy": value.config.network_policy,
+            "enabled": value.config.enabled,
+        },
+        created_at=value.created_at,
+        deleted_time=value.deleted_time,
     )
 
 
-def _load_json_dict(value: str | None) -> dict[str, Any]:
-    """读取 JSON 对象，格式错误时返回空对象。"""
-    try:
-        parsed = json.loads(value or "{}")
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+def _load_json_dict(value: dict[str, Any]) -> dict[str, Any]:
+    """读取 JSONB 对象，复制为领域值对象使用的字典。"""
+    return dict(value) if isinstance(value, dict) else {}
 
 
-def _load_json_list(value: str | None) -> list[Any]:
-    """读取 JSON 列表，格式错误时返回空列表。"""
-    try:
-        parsed = json.loads(value or "[]")
-    except (TypeError, ValueError):
-        return []
-    return parsed if isinstance(parsed, list) else []
+def _load_json_list(value: list[Any]) -> list[Any]:
+    """读取 JSONB 列表，复制为领域值对象使用的列表。"""
+    return list(value) if isinstance(value, list) else []

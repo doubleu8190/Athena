@@ -124,13 +124,13 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
         async with session_factory() as session, session.begin():
             session.add(ProjectModel(
                 id=f"project-{run_id}", name="Worker approvals",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=f"project-{run_id}",
                 title="Worker approvals", active_run_id=run_id,
-                last_run_sequence=1, created_at=now.isoformat(),
-                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+                last_run_sequence=1, created_at=now,
+                updated_at=now, last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -140,8 +140,8 @@ async def test_resolving_one_worker_approval_only_unblocks_its_execution() -> No
                     sequence=1,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 
@@ -400,13 +400,13 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
         async with session_factory() as session, session.begin():
             session.add(ProjectModel(
                 id=f"project-{run_id}", name="Worker stop race",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=f"project-{run_id}",
                 title="Worker stop race", active_run_id=run_id,
-                last_run_sequence=1, created_at=now.isoformat(),
-                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+                last_run_sequence=1, created_at=now,
+                updated_at=now, last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -416,8 +416,8 @@ async def test_stop_racing_last_worker_terminal_event_leaves_no_root_resume() ->
                     sequence=1,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 
@@ -586,13 +586,13 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
         async with session_factory() as session, session.begin():
             session.add(ProjectModel(
                 id=f"project-{run_id}", name="Root resume approvals",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=f"project-{run_id}",
                 title="Root resume approvals", active_run_id=run_id,
-                last_run_sequence=1, created_at=now.isoformat(),
-                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+                last_run_sequence=1, created_at=now,
+                updated_at=now, last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -602,8 +602,8 @@ async def test_root_resume_waits_for_approved_worker_to_finish_same_round() -> N
                     sequence=1,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 

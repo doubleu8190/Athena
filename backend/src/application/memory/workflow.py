@@ -268,7 +268,7 @@ class MemoryWriteWorkflow:
                 summary=summary,
                 source_refs=source_refs,
                 source_fingerprint=evidence.source_fingerprint,
-                created_at=turn.completed_at.astimezone(timezone.utc).isoformat(),
+                created_at=turn.completed_at.astimezone(timezone.utc),
             )
             episode = await self._episodes.create_if_absent(
                 proposed_episode, lease=lease

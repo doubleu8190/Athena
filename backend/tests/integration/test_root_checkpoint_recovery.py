@@ -120,13 +120,13 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
         async with session_factory() as session, session.begin():
             session.add(ProjectModel(
                 id=f"project-{run_id}", name="Root checkpoint recovery",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=f"project-{run_id}",
                 title="Root checkpoint recovery", active_run_id=run_id,
-                last_run_sequence=1, created_at=now.isoformat(),
-                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+                last_run_sequence=1, created_at=now,
+                updated_at=now, last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -143,8 +143,8 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                     root_wait_interrupt_id=None,
                     root_wait_checkpoint_id=None,
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             session.add(
@@ -158,8 +158,8 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                     current_version=1,
                     active_round_id=round_id,
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             await session.flush()
@@ -278,7 +278,7 @@ async def test_root_resume_recovers_checkpoint_written_before_run_arm() -> None:
                     run = await session.get(AgentRunModel, run_id)
                     assert run is not None
                     run.status = "completed"
-                    run.updated_at = datetime.now(timezone.utc).isoformat()
+                    run.updated_at = datetime.now(timezone.utc)
                 return result
 
         dispatcher = RootResumeDispatcher(

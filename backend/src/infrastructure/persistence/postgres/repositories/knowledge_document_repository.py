@@ -63,7 +63,7 @@ class PostgresKnowledgeDocumentRepository(KnowledgeDocumentRepository):
                         ).all()
                         for job in old_jobs:
                             job.status = "cancelled"
-                            job.updated_at = attachment.created_at.isoformat()
+                            job.updated_at = attachment.created_at
                         old_rows = (
                             await db.scalars(
                                 select(AttachmentModel)
@@ -91,7 +91,7 @@ class PostgresKnowledgeDocumentRepository(KnowledgeDocumentRepository):
                             == attachment.knowledge_base_id,
                             AttachmentModel.deleted_time.is_(None),
                         )
-                        .values(deleted_time=attachment.created_at.isoformat())
+                        .values(deleted_time=attachment.created_at)
                     )
                 db.add(attachment_domain_to_model(attachment))
         return attachment
@@ -179,7 +179,7 @@ class PostgresKnowledgeDocumentRepository(KnowledgeDocumentRepository):
         return None if row is None else attachment_model_to_domain(row)
 
     async def soft_delete(self, attachment_id: str, *, knowledge_base_id: str) -> bool:
-        deleted_at = datetime.now(timezone.utc).isoformat()
+        deleted_at = datetime.now(timezone.utc)
         async with self._session_factory() as db:
             async with db.begin():
                 job = await db.scalar(

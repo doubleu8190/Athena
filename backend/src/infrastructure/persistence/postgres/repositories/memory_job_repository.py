@@ -48,13 +48,13 @@ from .memory_suppression import ensure_writable_run_scope, project_scope_is_writ
 logger = get_logger(__name__)
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 async def enqueue_memory_job_in_transaction(
     session: AsyncSession, *, turn_id: str, session_id: str,
-    user_text: str, assistant_text: str, now: str,
+    user_text: str, assistant_text: str, now: datetime,
 ) -> bool:
     """在调用方事务内创建唯一轮次作业；空输入或已遗忘范围返回 False。"""
     if not user_text.strip() or not await ensure_writable_run_scope(
@@ -132,9 +132,9 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                     project_id=project_id,
                     status=row.status,
                     attempt=row.attempt,
-                    created_at=row.created_at,
-                    updated_at=row.updated_at,
-                    available_at=row.available_at,
+                    created_at=row.created_at.isoformat(),
+                    updated_at=row.updated_at.isoformat(),
+                    available_at=row.available_at.isoformat(),
                 )
                 for row, project_id in rows
             ],
@@ -298,7 +298,7 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                                 session_id=row.session_id,
                                 user_text=row.user_text,
                                 assistant_text=row.assistant_text,
-                                completed_at=datetime.fromisoformat(row.created_at),
+                                completed_at=row.created_at,
                                 execution_evidence=execution_evidence,
                                 project_id=project_id,
                             ),
@@ -352,14 +352,14 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                 if row is None or row.status != "processing":
                     return
                 await self._leases.assert_current_in_transaction(session, lease)
-                row.error_json = json.dumps({"message": error}, ensure_ascii=False)
+                row.error_json = {"message": error}
                 row.updated_at = _now()
                 if retry and row.attempt < self._max_attempts:
                     delay = min(300, 5 * (2 ** max(0, row.attempt - 1)))
                     row.status = "queued"
                     row.available_at = (
                         datetime.now(timezone.utc) + timedelta(seconds=delay)
-                    ).isoformat()
+                    )
                 else:
                     row.status = "failed"
                 if not await self._leases.finish_in_transaction(
@@ -387,7 +387,7 @@ async def _load_or_freeze_execution_evidence(
     if frozen_row is not None:
         # 重试时优先获取上次执行任务时收集的证据
         evidence = memory_schema_to_domain(
-            MemoryExecutionEvidenceSchema.model_validate_json(frozen_row.snapshot_json)
+            MemoryExecutionEvidenceSchema.model_validate(frozen_row.snapshot_json)
         )
         if evidence.source_fingerprint != frozen_row.source_fingerprint:
             raise RuntimeError("memory_run_evidence_fingerprint_mismatch")
@@ -578,7 +578,7 @@ async def _load_or_freeze_execution_evidence(
         .values(
             turn_id=turn_id,
             source_fingerprint=source_fingerprint,
-            snapshot_json=canonical_json,
+            snapshot_json=frozen_payload,
             created_at=_now(),
         )
         .on_conflict_do_nothing(index_elements=["turn_id"])
@@ -587,27 +587,21 @@ async def _load_or_freeze_execution_evidence(
     if frozen_row is None:
         raise RuntimeError("memory_run_evidence_snapshot_missing")
     frozen_evidence = memory_schema_to_domain(
-        MemoryExecutionEvidenceSchema.model_validate_json(frozen_row.snapshot_json)
+        MemoryExecutionEvidenceSchema.model_validate(frozen_row.snapshot_json)
     )
     if frozen_evidence.source_fingerprint != frozen_row.source_fingerprint:
         raise RuntimeError("memory_run_evidence_fingerprint_mismatch")
     return frozen_evidence
 
 
-def _error_code(error_json: str | None) -> str | None:
+def _error_code(error_json: dict[str, Any] | None) -> str | None:
     """只从任务错误摘要中读取稳定错误码，不把堆栈带入记忆。
 
-    参数：``error_json`` 是任务终态保存的 JSON 错误摘要。
+    参数：``error_json`` 是任务终态保存的 JSONB 错误摘要。
     返回：最多 100 字符的错误码；没有稳定错误码时返回 None。
     异常：非法 JSON 被视为没有错误码，不向上传播。
     """
-    if not error_json:
-        return None
-    try:
-        parsed = json.loads(error_json)
-    except (TypeError, ValueError):
-        return None
-    code = parsed.get("code") if isinstance(parsed, dict) else None
+    code = error_json.get("code") if error_json is not None else None
     return code[:100] if isinstance(code, str) and code else None
 
 

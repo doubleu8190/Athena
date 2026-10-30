@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
-from typing import Any
 
 from sqlalchemy import DateTime, cast, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -33,16 +31,6 @@ _EXECUTION_OUTPUT_EVENTS = frozenset({
 })
 
 
-def _json(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-    except (TypeError, ValueError):
-        return default
-    return parsed
-
-
 def _event_model(value: ApplicationEvent) -> AgentEventModel:
     """将事件信封转换为 ORM 行。"""
     return AgentEventModel(
@@ -55,17 +43,17 @@ def _event_model(value: ApplicationEvent) -> AgentEventModel:
         durability=str(value.durability),
         stream_id=value.stream_id,
         stream_type=value.stream_type,
-        is_complete=int(value.is_complete),
+        is_complete=value.is_complete,
         parent_run_id=value.parent_run_id,
         transition_id=value.transition_id,
-        payload_json=json.dumps(value.payload, ensure_ascii=False),
-        occurred_at=value.occurred_at.isoformat(),
+        payload_json=dict(value.payload),
+        occurred_at=value.occurred_at,
     )
 
 
 def _event_from_model(row: AgentEventModel) -> ApplicationEvent:
     """还原已持久化事件，供幂等重放和 SSE 广播共用。"""
-    payload = _json(row.payload_json, {})
+    payload = dict(row.payload_json)
     return ApplicationEvent(
         row.event_type,
         row.durability,
@@ -81,10 +69,10 @@ def _event_from_model(row: AgentEventModel) -> ApplicationEvent:
             if isinstance(payload, dict)
             else None
         ),
-        bool(row.is_complete),
+        row.is_complete,
         row.parent_run_id,
         row.transition_id,
-        datetime.fromisoformat(row.occurred_at),
+        row.occurred_at,
         payload,
     )
 

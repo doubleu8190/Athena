@@ -48,14 +48,14 @@ from ..models import (
 from .lease_center import PostgresLeaseCenter
 
 
-def _now() -> str:
+def _now() -> datetime:
     """生成当前 UTC 时间。
 
     参数：无。
-    返回：适合写入文本时间列的 ISO 8601 字符串。
+    返回：可直接写入 PostgreSQL 时间列的 UTC 时间。
     异常：不主动抛出业务异常。
     """
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc)
 
 
 def _episode_suppression_lock_id(turn_id: str) -> int:
@@ -161,15 +161,13 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
             "session_id": episode.session_id,
             "project_id": episode.project_id,
             "content": episode.content,
-            "summary_json": memory_domain_to_schema(episode.summary).model_dump_json(),
-            "source_refs_json": json.dumps(
-                [
-                    memory_domain_to_schema(item).model_dump(mode="json")
-                    for item in episode.source_refs
-                ],
-                ensure_ascii=False,
-                separators=(",", ":"),
+            "summary_json": memory_domain_to_schema(episode.summary).model_dump(
+                mode="json", exclude_none=True
             ),
+            "source_refs_json": [
+                memory_domain_to_schema(item).model_dump(mode="json", exclude_none=True)
+                for item in episode.source_refs
+            ],
             "source_fingerprint": episode.source_fingerprint,
             "created_at": episode.created_at or _now(),
         }
@@ -422,7 +420,7 @@ class PostgresMemoryEpisodeRepository(MemoryEpisodeRepositoryPort):
                 memory_schema_to_domain(
                     MemorySourceReferenceSchema.model_validate(value)
                 )
-                for value in json.loads(episode.source_refs_json)
+                for value in episode.source_refs_json
             )[:bounded_limit]
             expanded: list[MemorySourceReference] = []
             for reference in references:
@@ -455,13 +453,13 @@ def _to_domain(
         project_id=project_id,
         content=row.content,
         summary=memory_schema_to_domain(
-            MemoryEpisodeSummarySchema.model_validate_json(row.summary_json)
+            MemoryEpisodeSummarySchema.model_validate(row.summary_json)
         ),
         source_refs=tuple(
             memory_schema_to_domain(
                 MemorySourceReferenceSchema.model_validate(value)
             )
-            for value in json.loads(row.source_refs_json)
+            for value in row.source_refs_json
         ),
         source_fingerprint=row.source_fingerprint,
         created_at=row.created_at,

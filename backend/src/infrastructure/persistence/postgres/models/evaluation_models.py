@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, ForeignKeyConstraint, Index, Integer, Text, UniqueConstraint
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -17,8 +29,8 @@ class EvalDatasetModel(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     task_type: Mapped[str] = mapped_column(default="retrieval")
     owner: Mapped[str | None] = mapped_column(nullable=True)
-    created_at: Mapped[str] = mapped_column()
-    updated_at: Mapped[str] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class EvalDatasetVersionModel(Base):
@@ -32,8 +44,8 @@ class EvalDatasetVersionModel(Base):
     status: Mapped[str] = mapped_column(default="frozen")
     case_count: Mapped[int] = mapped_column(Integer, default=0)
     schema_version: Mapped[int] = mapped_column(Integer, default=1)
-    manifest_json: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[str] = mapped_column()
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class EvalCaseModel(Base):
@@ -43,9 +55,9 @@ class EvalCaseModel(Base):
     case_id: Mapped[str] = mapped_column(primary_key=True)
     version_id: Mapped[str] = mapped_column(ForeignKey("eval_dataset_versions.version_id"), primary_key=True, index=True)
     task_type: Mapped[str] = mapped_column()
-    case_json: Mapped[str] = mapped_column(Text, default="{}")
-    tags_json: Mapped[str] = mapped_column(Text, default="[]")
-    created_at: Mapped[str] = mapped_column()
+    case_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    tags_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class EvalRunModel(Base):
@@ -58,16 +70,16 @@ class EvalRunModel(Base):
     status: Mapped[str] = mapped_column(default="queued")
     name: Mapped[str] = mapped_column()
     git_sha: Mapped[str | None] = mapped_column(nullable=True)
-    config_json: Mapped[str] = mapped_column(Text, default="{}")
-    model_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
-    judge_config_json: Mapped[str] = mapped_column(Text, default="{}")
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    model_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    judge_config_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     baseline_run_id: Mapped[str | None] = mapped_column(nullable=True)
     case_count: Mapped[int] = mapped_column(Integer, default=0)
     completed_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
-    started_at: Mapped[str | None] = mapped_column(nullable=True)
-    completed_at: Mapped[str | None] = mapped_column(nullable=True)
-    created_at: Mapped[str] = mapped_column()
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -85,9 +97,9 @@ class EvalCaseAttemptModel(Base):
     version_id: Mapped[str] = mapped_column(ForeignKey("eval_dataset_versions.version_id"), index=True)
     attempt_number: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column()
-    input_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    input_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     output_text: Mapped[str] = mapped_column(Text, default="")
-    trace_json: Mapped[str] = mapped_column(Text, default="{}")
+    trace_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     retrieval_run_id: Mapped[str | None] = mapped_column(nullable=True)
     agent_run_id: Mapped[str | None] = mapped_column(nullable=True)
     duration_ms: Mapped[float | None] = mapped_column(nullable=True)
@@ -95,7 +107,7 @@ class EvalCaseAttemptModel(Base):
     output_tokens: Mapped[int | None] = mapped_column(nullable=True)
     estimated_cost: Mapped[float | None] = mapped_column(nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[str] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class EvalMetricValueModel(Base):
@@ -109,10 +121,10 @@ class EvalMetricValueModel(Base):
     attempt_id: Mapped[str | None] = mapped_column(nullable=True)
     metric_name: Mapped[str] = mapped_column()
     value_numeric: Mapped[float | None] = mapped_column(nullable=True)
-    value_json: Mapped[str] = mapped_column(Text, default="{}")
+    value_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     evaluator_version: Mapped[str] = mapped_column(default="1")
-    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
-    created_at: Mapped[str] = mapped_column()
+    evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class EvalGateModel(Base):
@@ -123,11 +135,11 @@ class EvalGateModel(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("eval_runs.run_id"), index=True)
     metric: Mapped[str] = mapped_column()
     status: Mapped[str] = mapped_column()
-    rule_json: Mapped[str] = mapped_column(Text, default="{}")
+    rule_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     actual: Mapped[float | None] = mapped_column(nullable=True)
     baseline: Mapped[float | None] = mapped_column(nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[str] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 __all__ = [name for name in globals() if name.endswith("Model")]

@@ -69,7 +69,7 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
             )
             assert await connection.scalar(text("SELECT current_schema()")) == schema
         factory = async_sessionmaker(engine, expire_on_commit=False)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         async with factory() as session, session.begin():
             session.add(ProjectModel(
                 id="project-1", name="首次发送", created_at=now, updated_at=now
@@ -132,7 +132,7 @@ async def test_rejected_first_run_rolls_back_the_new_session(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """新会话插入后若 Run 范围被拒绝，事务必须撤销该空会话。"""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
     async with session_factory() as session, session.begin():
         session.add(MemorySourceSuppressionModel(
             source_type="project_turn", source_id="blocked-run",

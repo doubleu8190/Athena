@@ -78,8 +78,8 @@ async def test_legacy_run_level_approval_is_not_resolvable() -> None:
                     status="running",
                     root_thread_id=f"run:{run_id}",
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             session.add(
@@ -94,11 +94,11 @@ async def test_legacy_run_level_approval_is_not_resolvable() -> None:
                     interrupt_id=None,
                     tool_call_id=f"call-{approval_id}",
                     tool_name="write_file",
-                    arguments_json='{"path":"private.txt"}',
+                    arguments_json={'path': 'private.txt'},
                     risk_level="high",
                     status="pending",
                     decision=None,
-                    created_at=now.isoformat(),
+                    created_at=now,
                 )
             )
 

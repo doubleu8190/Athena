@@ -150,5 +150,5 @@ def test_file_artifact_and_adapter_converters_preserve_cache_contract() -> None:
 
     assert file_artifact_model_to_domain(file_artifact_domain_to_model(artifact)) == artifact
     assert adapter_model_to_domain(
-        adapter_domain_to_model(adapter, updated_at=NOW.isoformat())
+        adapter_domain_to_model(adapter, updated_at=NOW)
     ) == adapter

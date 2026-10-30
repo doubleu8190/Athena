@@ -127,13 +127,13 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
         async with session_factory() as session, session.begin():
             session.add(ProjectModel(
                 id=f"project-{run_id}", name="Plan submission",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=f"project-{run_id}", title="Plan submission",
                 active_run_id=run_id, last_run_sequence=1,
-                created_at=now.isoformat(), updated_at=now.isoformat(),
-                last_activity_at=now.isoformat(),
+                created_at=now, updated_at=now,
+                last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -143,8 +143,8 @@ async def test_round_barrier_holds_dependent_task_and_resumes_root_once() -> Non
                     session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 
@@ -476,13 +476,13 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
         async with session_factory() as session, session.begin():
             session.add(ProjectModel(
                 id=f"project-{run_id}", name="Plan submission",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=f"project-{run_id}", title="Plan submission",
                 active_run_id=run_id, last_run_sequence=1,
-                created_at=now.isoformat(), updated_at=now.isoformat(),
-                last_activity_at=now.isoformat(),
+                created_at=now, updated_at=now,
+                last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -492,8 +492,8 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
                     session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 
@@ -573,7 +573,7 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
                 task.status = TaskStatus.COMPLETED.value
                 round_task.status = TaskStatus.COMPLETED.value
                 if task_id == "task-a":
-                    task.output_json = '{"answer":"preserve this result"}'
+                    task.output_json = {"answer": "preserve this result"}
 
         revision = PlanRevision(
             base_version=1,
@@ -636,7 +636,7 @@ async def test_submit_and_replan_preserve_completed_results_in_postgres() -> Non
             created = await session.get(AgentTaskModel, new_task_id)
             assert retained is not None
             assert retained.status == TaskStatus.COMPLETED.value
-            assert retained.output_json == '{"answer":"preserve this result"}'
+            assert retained.output_json == {"answer": "preserve this result"}
             assert removed_pending is not None
             assert removed_pending.status == TaskStatus.CANCELLED.value
             assert created is not None

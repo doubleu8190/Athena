@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -265,7 +266,7 @@ class MemoryEpisode:
     summary: MemoryEpisodeSummary
     source_refs: tuple[MemorySourceReference, ...]
     source_fingerprint: str
-    created_at: str
+    created_at: datetime
     project_id: str = field(kw_only=True)
 
     def __post_init__(self) -> None:

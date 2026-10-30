@@ -48,7 +48,7 @@ class PostgresSessionMemorySettingsRepository(SessionMemorySettingsPort):
         self, settings: SessionMemorySettings
     ) -> SessionMemorySettings:
         """原子写入读取设置，避免并发 PUT 覆盖其他设置。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
             async with session.begin():
                 active_session_id = await session.scalar(

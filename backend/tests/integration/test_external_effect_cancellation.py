@@ -121,8 +121,8 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
                 ProjectModel(
                     id=f"project-{run_id}",
                     name="Cancellation test",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             session.add(
@@ -132,9 +132,9 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
                     title="Cancellation test",
                     active_run_id=run_id,
                     last_run_sequence=1,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
-                    last_activity_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
+                    last_activity_at=now,
                 )
             )
             session.add(
@@ -147,8 +147,8 @@ async def test_external_effect_survives_cancel_as_unknown_and_is_audited() -> No
                     root_thread_id=f"run:{run_id}",
                     cancellation_epoch=0,
                     cancellation_external_effect_status="none",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 

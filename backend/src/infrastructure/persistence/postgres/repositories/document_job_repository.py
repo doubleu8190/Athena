@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta, timezone
@@ -13,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.files import AttachmentStatus, DocumentJobPort, DocumentJobQueue
 from domain.leases import LeaseGrant, LeaseKey, LeaseLostError
+from shared import json_value
 
 from ..models import (
     AttachmentModel,
@@ -21,9 +21,9 @@ from ..models import (
 from .lease_center import PostgresLeaseCenter
 
 
-def _now() -> str:
+def _now() -> datetime:
     """生成 UTC 持久化时间。"""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc)
 
 
 class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
@@ -163,10 +163,9 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
                             continue
                         if row.attempt >= max_attempts:
                             row.status = "failed"
-                            row.error_json = json.dumps(
-                                {"message": "maximum document ingestion attempts reached"},
-                                ensure_ascii=False,
-                            )
+                            row.error_json = {
+                                "message": "maximum document ingestion attempts reached"
+                            }
                             row.updated_at = _now()
                             attachment.status = AttachmentStatus.FAILED.value
                             attachment.error_message = "maximum document ingestion attempts reached"
@@ -222,26 +221,23 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
                 attachment.active_index_revision_id = revision_id
                 attachment.status = AttachmentStatus.READY.value
                 attachment.error_message = None
-                attachment.parsed_metadata_json = json.dumps(
-                    metadata if isinstance(metadata, dict) else {}, ensure_ascii=False
+                attachment.parsed_metadata_json = (
+                    json_value(metadata) if isinstance(metadata, dict) else {}
                 )
                 attachment.adapter_name = _optional_string(result.get("_adapter_name"))
                 attachment.adapter_version = _optional_string(result.get("_adapter_version"))
                 capabilities = result.get("_capabilities")
-                attachment.capabilities_json = json.dumps(
-                    capabilities if isinstance(capabilities, list) else [],
-                    ensure_ascii=False,
+                attachment.capabilities_json = (
+                    list(capabilities) if isinstance(capabilities, list) else []
                 )
                 attachment.updated_at = _now()
                 job.status = "succeeded"
-                job.result_json = json.dumps(
+                job.result_json = json_value(
                     {
                         key: value
                         for key, value in result.items()
                         if not key.startswith("_")
                     },
-                    default=str,
-                    ensure_ascii=False,
                 )
                 job.error_json = None
                 job.updated_at = _now()
@@ -275,12 +271,12 @@ class PostgresDocumentJobRepository(DocumentJobPort, DocumentJobQueue):
                 await self._leases.assert_current_in_transaction(session, lease)
                 should_retry = retry and attachment.deleted_time is None
                 job.status = "queued" if should_retry else "failed"
-                job.error_json = json.dumps({"message": error}, ensure_ascii=False)
+                job.error_json = {"message": error}
                 if should_retry:
                     delay = min(2 ** max(0, job.attempt - 1), 300)
                     job.available_at = (
                         datetime.now(timezone.utc) + timedelta(seconds=delay)
-                    ).isoformat()
+                    )
                     attachment.status = (
                         AttachmentStatus.READY.value
                         if attachment.active_index_revision_id

@@ -152,7 +152,7 @@ class CaseAttempt:
     attempt_number: int
     status: str
     artifact: ExecutionArtifact
-    created_at: datetime | str | None = None
+    created_at: datetime | None = None
     input_snapshot: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -179,8 +179,8 @@ class EvalRun:
     case_count: int = 0
     completed_count: int = 0
     failed_count: int = 0
-    started_at: datetime | str | None = None
-    completed_at: datetime | str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     error_message: str | None = None
 
 

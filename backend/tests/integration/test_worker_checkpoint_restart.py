@@ -383,13 +383,13 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
         async with session_factory() as session, session.begin():
             session.add(ProjectModel(
                 id=f"project-{run_id}", name="Worker checkpoint restart",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=f"project-{run_id}",
                 title="Worker checkpoint restart", active_run_id=run_id,
-                last_run_sequence=1, created_at=now.isoformat(),
-                updated_at=now.isoformat(), last_activity_at=now.isoformat(),
+                last_run_sequence=1, created_at=now,
+                updated_at=now, last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -399,8 +399,8 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
                     session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 

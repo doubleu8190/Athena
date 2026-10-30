@@ -77,8 +77,8 @@ def test_message_converter_ignores_malformed_tool_call_json() -> None:
         session_id="session-1",
         role="assistant",
         content="done",
-        tool_calls_json='{"unexpected": true}',
-        timestamp="2026-01-01T00:00:00+00:00",
+        tool_calls_json={'unexpected': True},
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
     restored = message_model_to_domain(model)

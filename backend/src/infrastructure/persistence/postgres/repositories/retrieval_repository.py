@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -11,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import cast, func, select
-from sqlalchemy.dialects.postgresql import JSONB, insert
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.retrieval.query_ports import RetrievalPort
@@ -31,17 +30,8 @@ from application.contracts.retrieval import (
 from ..models import RetrievalCandidateModel, RetrievalRunModel
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _json(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    try:
-        return json.loads(value) if isinstance(value, str) else value
-    except (TypeError, ValueError):
-        return default
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class PostgresRetrievalRepository(RetrievalPort):
@@ -77,7 +67,7 @@ class PostgresRetrievalRepository(RetrievalPort):
                 RetrievalRunModel.query.ilike(f"%{escaped}%", escape="\\")
             )
         if provider:
-            providers_json = cast(RetrievalRunModel.config_json, JSONB)["providers"]
+            providers_json = RetrievalRunModel.config_json["providers"]
             conditions.append(providers_json.contains([{"provider": provider}]))
 
         async with self._session_factory() as session:
@@ -150,9 +140,9 @@ class PostgresRetrievalRepository(RetrievalPort):
             "query": query,
             "scope": "context",
             "status": status,
-            "config_json": RetrievalRunTraceSchema.from_domain(
-                run_trace
-            ).model_dump_json(),
+            "config_json": RetrievalRunTraceSchema.from_domain(run_trace).model_dump(
+                mode="json"
+            ),
             "session_id": session_id,
             "agent_run_id": agent_run_id,
             "message_id": message_id,
@@ -210,7 +200,7 @@ class PostgresRetrievalRepository(RetrievalPort):
                 for row in candidates:
                     key = (row.provider, row.source_id)
                     selection = selection_by_key.get(key)
-                    metadata = _json(row.metadata_json, {})
+                    metadata = row.metadata_json
                     if not isinstance(metadata, dict):
                         metadata = {}
                     analysis = metadata.get("retrieval_analysis", {})
@@ -236,11 +226,11 @@ class PostgresRetrievalRepository(RetrievalPort):
                         }
                     )
                     metadata["retrieval_analysis"] = analysis
-                    row.metadata_json = json.dumps(metadata, ensure_ascii=False)
+                    row.metadata_json = metadata
                     row.filter_reason = reason
-                    row.injected_into_context = 0
+                    row.injected_into_context = False
 
-                trace_data = _json(run.config_json, {})
+                trace_data = run.config_json
                 trace = RetrievalRunTraceSchema.model_validate(trace_data).to_domain()
                 context_count = sum(
                     selection.context_selected for selection in selections
@@ -251,7 +241,7 @@ class PostgresRetrievalRepository(RetrievalPort):
                         selection_status="complete",
                         context_count=context_count,
                     )
-                ).model_dump_json()
+                ).model_dump(mode="json")
                 await session.flush()
         return True
 
@@ -259,7 +249,7 @@ class PostgresRetrievalRepository(RetrievalPort):
     def _candidate_model(
         run_id: str,
         candidate: RetrievalCandidateTrace,
-        created_at: str,
+        created_at: datetime,
     ) -> RetrievalCandidateModel:
         candidate_data = RetrievalCandidateTraceSchema.from_domain(
             candidate
@@ -286,18 +276,18 @@ class PostgresRetrievalRepository(RetrievalPort):
             rerank_rank=candidate.rerank_rank,
             rerank_score=candidate.rerank_score,
             filter_reason=candidate.filter_reason,
-            selected_for_result=int(candidate.selected_for_result),
-            injected_into_context=0,
+            selected_for_result=candidate.selected_for_result,
+            injected_into_context=False,
             content_preview=candidate.content_preview,
             source_title=candidate.source_title,
-            locator_json=json.dumps(candidate_data["locator"], ensure_ascii=False),
-            metadata_json=json.dumps(metadata, ensure_ascii=False),
+            locator_json=candidate_data["locator"],
+            metadata_json=metadata,
             created_at=created_at,
         )
 
     @staticmethod
     def _row(row: RetrievalRunModel) -> dict[str, object]:
-        config = _json(row.config_json, {})
+        config = row.config_json
         trace: RetrievalRunTrace | None = None
         try:
             trace = RetrievalRunTraceSchema.model_validate(config).to_domain()
@@ -338,13 +328,15 @@ class PostgresRetrievalRepository(RetrievalPort):
             "index_generation": row.index_generation,
             "duration_ms": row.duration_ms,
             "error_message": row.error_message,
-            "created_at": row.created_at,
-            "completed_at": row.completed_at,
+            "created_at": row.created_at.isoformat(),
+            "completed_at": (
+                row.completed_at.isoformat() if row.completed_at is not None else None
+            ),
         }
 
     @staticmethod
     def _candidate_row(row: RetrievalCandidateModel) -> dict[str, object]:
-        metadata = _json(row.metadata_json, {})
+        metadata = row.metadata_json
         if not isinstance(metadata, dict):
             metadata = {}
         analysis = metadata.get("retrieval_analysis", {})
@@ -365,16 +357,16 @@ class PostgresRetrievalRepository(RetrievalPort):
             "fused_score": row.fused_score,
             "rerank_rank": row.rerank_rank,
             "rerank_score": row.rerank_score,
-            "selected_for_result": bool(row.selected_for_result),
+            "selected_for_result": row.selected_for_result,
             "filter_reason": row.filter_reason,
             "content_preview": row.content_preview,
             "source_title": row.source_title,
-            "locator": _json(row.locator_json, {}),
+            "locator": row.locator_json,
             "hits": analysis.get("hits", []),
             "context_selected": analysis.get("context_selected"),
             "selection_stage": analysis.get("selection_stage"),
             "metadata": metadata,
-            "created_at": row.created_at,
+            "created_at": row.created_at.isoformat(),
         }
 
 

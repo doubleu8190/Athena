@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from shared import json_value
 
 from domain.orchestration import (
     CommandReceipt,
@@ -258,8 +259,8 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                 current_version=1,
                 active_round_id=round_snapshot.round_id,
                 cancellation_epoch=0,
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             )
         )
         # 显式 flush 保证无 ORM relationship 时复合外键目标先于引用行落库。
@@ -283,25 +284,17 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                 run_id=plan.run_id,
                 title=task.title,
                 objective=task.objective,
-                input_json=json.dumps(
-                    dict(task.input), ensure_ascii=False, default=_json_default
-                ),
-                expected_output_json=json.dumps(
-                    dict(task.expected_output),
-                    ensure_ascii=False,
-                    default=_json_default,
-                ),
-                allowed_tools_json=json.dumps(
-                    list(task.allowed_tools), ensure_ascii=False
-                ),
+                input_json=json_value(dict(task.input)),
+                expected_output_json=json_value(dict(task.expected_output)),
+                allowed_tools_json=list(task.allowed_tools),
                 worker_type=task.worker_type,
                 timeout_seconds=task.timeout_seconds,
                 status="pending",
                 execution_generation=1,
                 worker_thread_id=f"task:{task.task_id}:exec:1",
                 llm_turn_count=0,
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             )
             for task in tasks
         }
@@ -401,7 +394,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
     ) -> None:
         """在首轮记录完成后写入 Run、幂等回执和接受事件。"""
         run.status = "running"
-        run.updated_at = now.isoformat()
+        run.updated_at = now
         session.add(
             OrchestrationCommandModel(
                 message_id=command.message_id,
@@ -656,12 +649,10 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         for task_row in rows.task_by_id.values():
             if task_row.status == TaskStatus.PENDING.value:
                 task_row.status = TaskStatus.CANCELLED.value
-                task_row.error_json = json.dumps(
-                    {"reason": "plan_finished"}, ensure_ascii=False
-                )
-                task_row.updated_at = now.isoformat()
+                task_row.error_json = {"reason": "plan_finished"}
+                task_row.updated_at = now
         rows.plan.status = plan_status.value
-        rows.plan.updated_at = now.isoformat()
+        rows.plan.updated_at = now
         receipt = CommandReceipt(
             message_id=command.message_id,
             plan_id=rows.plan.plan_id,
@@ -717,10 +708,8 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         for task_id in cancelled:
             row = rows.task_by_id[task_id]
             row.status = TaskStatus.CANCELLED.value
-            row.error_json = json.dumps(
-                {"reason": "dependency_failed"}, ensure_ascii=False
-            )
-            row.updated_at = now.isoformat()
+            row.error_json = {"reason": "dependency_failed"}
+            row.updated_at = now
 
         try:
             next_round = freeze_ready_round(
@@ -784,10 +773,8 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
             row = rows.task_by_id[task_id]
             if row.status == TaskStatus.PENDING.value:
                 row.status = TaskStatus.CANCELLED.value
-                row.error_json = json.dumps(
-                    {"reason": "removed_by_root_revision"}, ensure_ascii=False
-                )
-                row.updated_at = now.isoformat()
+                row.error_json = {"reason": "removed_by_root_revision"}
+                row.updated_at = now
         for task in newly_added:
             task_row = AgentTaskModel(
                 task_id=task.task_id,
@@ -795,23 +782,15 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
                 run_id=rows.run.run_id,
                 title=task.title,
                 objective=task.objective,
-                input_json=json.dumps(
-                    dict(task.input), ensure_ascii=False, default=_json_default
-                ),
-                expected_output_json=json.dumps(
-                    dict(task.expected_output),
-                    ensure_ascii=False,
-                    default=_json_default,
-                ),
-                allowed_tools_json=json.dumps(
-                    list(task.allowed_tools), ensure_ascii=False
-                ),
+                input_json=json_value(dict(task.input)),
+                expected_output_json=json_value(dict(task.expected_output)),
+                allowed_tools_json=list(task.allowed_tools),
                 worker_type=task.worker_type,
                 timeout_seconds=task.timeout_seconds,
                 status=TaskStatus.PENDING.value,
                 execution_generation=0,
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             )
             rows.task_by_id[task.task_id] = task_row
             session.add(task_row)
@@ -922,7 +901,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
         """Persist an immutable Round membership and its queued executions."""
         plan_row.status = PlanStatus.RUNNING.value
         plan_row.active_round_id = round_snapshot.round_id
-        plan_row.updated_at = now.isoformat()
+        plan_row.updated_at = now
         session.add(
             PlanRoundModel(
                 round_id=round_snapshot.round_id,
@@ -949,7 +928,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
             task_row.active_execution_id = execution_id
             task_row.status = TaskStatus.PENDING.value
             task_row.error_json = None
-            task_row.updated_at = now.isoformat()
+            task_row.updated_at = now
             session.add(
                 RoundTaskModel(
                     round_id=round_snapshot.round_id,

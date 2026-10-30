@@ -124,8 +124,8 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     run_row = SimpleNamespace(
         run_id="r-1", session_id="s-1", message_id="message-1", sequence=1,
         status="queued", root_thread_id="t",
-        request_json='{"message":"hello"}', error_json=None,
-        created_at=NOW.isoformat(), updated_at=NOW.isoformat(),
+        request_json={'message': 'hello'}, error_json=None,
+        created_at=NOW, updated_at=NOW,
     )
     db.results = [Result(rows=[run_row]), Result(rows=[])]
     listed = await runs.list_for_session("s-1")
@@ -147,13 +147,13 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     assert stored.session_seq == 1
     queue, watermark = await events.open_subscription("s-1")
     assert watermark == 0
-    db.results = [Result(rows=[SimpleNamespace(event_type="run.started", durability="durable", session_id="s-1", session_seq=1, run_id=None, message_id=None, attachment_id=None, stream_id=None, stream_type=None, is_complete=0, parent_run_id=None, transition_id=None, payload_json="{}", occurred_at=NOW.isoformat())])]
+    db.results = [Result(rows=[SimpleNamespace(event_type="run.started", durability="durable", session_id="s-1", session_seq=1, run_id=None, message_id=None, attachment_id=None, stream_id=None, stream_type=None, is_complete=False, parent_run_id=None, transition_id=None, payload_json={}, occurred_at=NOW)])]
     assert len(await events.list_events_between("s-1")) == 1
     await events.publish_realtime(ApplicationEvent(EventType.MESSAGE_DELTA, EventDurability.REALTIME, "s-1"))
     await events.close_subscription("s-1", queue)
 
     approvals = PostgresApprovalRepository(factory(db))
-    row = SimpleNamespace(approval_id="a-1", session_id="s-1", run_id="r-1", approval_batch_id="b-1", plan_id=None, task_id="t-1", tool_call_id="call", tool_name="shell", arguments_json='{"x":1}', risk_level="high", status="pending", decision=None, created_at=NOW.isoformat(), decided_at=None)
+    row = SimpleNamespace(approval_id="a-1", session_id="s-1", run_id="r-1", approval_batch_id="b-1", plan_id=None, task_id="t-1", tool_call_id="call", tool_name="shell", arguments_json={'x': 1}, risk_level="high", status="pending", decision=None, created_at=NOW, decided_at=None)
     db.get_values = [row]
     assert (await approvals.get("a-1")).approval_id == "a-1"
     db.results = [Result(rows=[row])]
@@ -174,9 +174,14 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     assert cancelled_history[0].status.value == "cancelled"
 
     memory = PostgresMemoryRepository(factory(db))
-    mem_row = SimpleNamespace(logical_memory_id="m-1", revision=1, session_id="s-1", source_turn_id=None, memory_type="fact", category="fact", confidence=1.0, id="m-1", content="hello memory", metadata_json='{"x":1}', source_kind="chat", status="active", created_at=NOW.isoformat(), expires_at=None, last_accessed_at=None, access_count=0, last_observed_at=NOW.isoformat(), valid_until=None, validity_status="valid")
+    mem_row = SimpleNamespace(logical_memory_id="m-1", revision=1, session_id="s-1", source_turn_id=None, category="fact", confidence=1.0, id="m-1", content="hello memory", metadata_json={"x": 1, "source": "import", "source_kind": "chat", "type": "fact"}, status="active", created_at=NOW, expires_at=None, last_accessed_at=None, access_count=0, valid_until=None, validity_status="valid")
     db.results = [Result(rows=[(mem_row, 1.0)])]
-    assert (await memory.search(MemorySearchRequest("hello")))[0].id == "m-1"
+    memory_record = (await memory.search(MemorySearchRequest("hello")))[0]
+    assert memory_record.id == "m-1"
+    assert memory_record.metadata["type"] == "fact"
+    assert memory_record.metadata["source"] == "import"
+    assert memory_record.source == "chat"
+    assert "source_kind" not in memory_record.metadata
     db.results = [Result(rows=[mem_row])]
     db.scalar_values = [1]
     assert (await memory.list_memories(MemoryListRequest())).total == 1
@@ -193,10 +198,10 @@ async def test_target_runtime_repositories_cover_queue_events_approval_memory_an
     retrieval = PostgresRetrievalRepository(factory(db))
     retrieval_row = SimpleNamespace(
         run_id="rr", session_id="s-1", agent_run_id="r-1", message_id="m-1",
-        query="q", scope="session", status="done", config_json="{}",
+        query="q", scope="session", status="done", config_json={},
         candidate_count=1, selected_count=1, injected_count=0,
         index_generation=None, duration_ms=0.0, error_message=None,
-        created_at=NOW.isoformat(), completed_at=None,
+        created_at=NOW, completed_at=None,
     )
     db.results = [Result(rows=[retrieval_row])]
     db.scalar_values = [1]
@@ -219,11 +224,11 @@ async def test_postgres_event_repository_reuses_transition_identity():
         attachment_id=None,
         stream_id=None,
         stream_type=None,
-        is_complete=0,
+        is_complete=False,
         parent_run_id=None,
         transition_id="orchestration-outbox:message-1",
-        payload_json='{"status":"cancelled"}',
-        occurred_at=NOW.isoformat(),
+        payload_json={'status': 'cancelled'},
+        occurred_at=NOW,
     )
     db.results = [Result(scalar=existing)]
 

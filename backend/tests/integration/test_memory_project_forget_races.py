@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-from datetime import datetime, timezone
 from dataclasses import replace
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -73,7 +72,8 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
     previous_turn_id = f"previous-turn-{uuid4().hex}"
     operation_id = f"operation-{uuid4().hex}"
     memory_id = f"memory-{uuid4().hex}"
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     projects = PostgresProjectRepository(factory)
     runs = PostgresRunRepository(factory)
@@ -159,38 +159,40 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                         logical_memory_id=memory_id,
                         session_id=session_id,
                         content="project_decision: Keep current project",
-                        metadata_json=json.dumps(
-                            {
+                        metadata_json={
+                            "scope_kind": "project",
+                            "scope_id": project_id,
+                            "source_turn_id": run_id,
+                            "fact": {
                                 "scope_kind": "project",
                                 "scope_id": project_id,
-                                "source_turn_id": run_id,
-                                "fact": {
-                                    "scope_kind": "project",
-                                    "scope_id": project_id,
-                                    "subject_key": f"project:{project_id}",
-                                    "fact_key": "project_decision",
-                                    "fact_value": "Keep current project",
-                                    "cardinality": "single",
-                                    "confidence": 1.0,
-                                    "asserted_at": now,
-                                    "source_refs": [{"source_type": "turn", "source_id": run_id,
-                                        "excerpt": "Keep current project", "observed_at": now}],
-                                },
-                            }
-                        ),
+                                "subject_key": f"project:{project_id}",
+                                "fact_key": "project_decision",
+                                "fact_value": "Keep current project",
+                                "cardinality": "single",
+                                "confidence": 1.0,
+                                "asserted_at": now_text,
+                                "source_refs": [{
+                                    "source_type": "turn",
+                                    "source_id": run_id,
+                                    "excerpt": "Keep current project",
+                                    "observed_at": now_text,
+                                }],
+                            },
+                        },
                         created_at=now,
                         status="active",
                         validity_status="valid",
                     ),
                     MemoryExtractionSnapshotModel(
                         turn_id=previous_turn_id,
-                        snapshot_json=json.dumps({"turn_id": previous_turn_id, "candidates": []}),
+                        snapshot_json={"turn_id": previous_turn_id, "candidates": []},
                         created_at=now,
                     ),
                     MemoryRunEvidenceSnapshotModel(
                         turn_id=previous_turn_id,
                         source_fingerprint="a" * 64,
-                        snapshot_json="{}",
+                        snapshot_json={},
                         created_at=now,
                     ),
                     MemoryEpisodeModel(
@@ -199,8 +201,8 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
                         session_id=session_id,
                         project_id=project_id,
                         content="previous project episode",
-                        summary_json=json.dumps({"title": "项目回顾", "goal": "Keep current project", "outcome": "completed", "result": "project episode persisted"}),
-                        source_refs_json=json.dumps([{"source_type": "run", "source_id": previous_turn_id, "excerpt": "project completed", "observed_at": now}]),
+                        summary_json={"title": "项目回顾", "goal": "Keep current project", "outcome": "completed", "result": "project episode persisted"},
+                        source_refs_json=[{"source_type": "run", "source_id": previous_turn_id, "excerpt": "project completed", "observed_at": now_text}],
                         source_fingerprint="a" * 64,
                         created_at=now,
                     ),

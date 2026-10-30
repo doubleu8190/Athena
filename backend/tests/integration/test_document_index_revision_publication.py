@@ -87,7 +87,7 @@ async def document_revision_store():
         jobs = PostgresDocumentJobRepository(sessions, lease_center=leases)
         attachments = PostgresAttachmentRepository(sessions, lease_center=leases)
         chunks = PostgresFileChunkRepository(sessions, lease_center=leases)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         async with sessions() as session, session.begin():
             session.add(
                 AttachmentModel(
@@ -105,8 +105,8 @@ async def document_revision_store():
                     adapter_name="text",
                     adapter_version="1",
                     status="uploaded",
-                    capabilities_json="[]",
-                    parsed_metadata_json="{}",
+                    capabilities_json=[],
+                    parsed_metadata_json={},
                     error_message=None,
                     active_index_revision_id=None,
                     created_at=now,

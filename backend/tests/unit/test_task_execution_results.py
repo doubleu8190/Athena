@@ -90,7 +90,7 @@ def test_worker_upstream_result_preserves_evidence_from_resolved_output():
     row = SimpleNamespace(
         task_id="task-1",
         status="completed",
-        output_json='{"result_ref":"task-result:execution-1"}',
+        output_json={"result_ref": "task-result:execution-1"},
         error_json=None,
     )
     resolved_output = {
@@ -111,10 +111,11 @@ def test_worker_upstream_result_fails_if_projection_reference_is_unresolved():
     row = SimpleNamespace(
         task_id="task-1",
         status="completed",
-        output_json=(
-            '{"result_ref":"task-result:execution-1",'
-            '"result_bytes":80000,"result_sha256":"sha256"}'
-        ),
+        output_json={
+            "result_ref": "task-result:execution-1",
+            "result_bytes": 80000,
+            "result_sha256": "sha256",
+        },
         error_json=None,
     )
 

@@ -1,6 +1,5 @@
 """PostgreSQL approval persistence implementation."""
 
-import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
@@ -24,15 +23,6 @@ from ..models import (
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-def _json(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-    except (TypeError, ValueError):
-        return default
-    return parsed
 
 class PostgresApprovalRepository(ApprovalRepository):
     def __init__(
@@ -149,7 +139,7 @@ class PostgresApprovalRepository(ApprovalRepository):
                     .values(
                         status=ApprovalStatus.RESOLVED.value,
                         decision=decision.value,
-                        decided_at=now.isoformat(),
+                        decided_at=now,
                     )
                 )
                 if result.rowcount:
@@ -281,7 +271,7 @@ class PostgresApprovalRepository(ApprovalRepository):
 
                     approval.status = ApprovalStatus.EXPIRED.value
                     approval.decision = ApprovalDecision.EXPIRED.value
-                    approval.decided_at = now.isoformat()
+                    approval.decided_at = now
                     active_plan = (
                         run is not None
                         and run.status == "running"
@@ -362,15 +352,15 @@ class PostgresApprovalRepository(ApprovalRepository):
             row.run_id,
             row.tool_call_id,
             row.tool_name,
-            _json(row.arguments_json, {}),
+            row.arguments_json,
             row.risk_level,
             row.task_id,
             row.plan_id,
             row.approval_batch_id,
             ApprovalStatus(row.status),
             ApprovalDecision(row.decision) if row.decision else None,
-            datetime.fromisoformat(row.created_at),
-            datetime.fromisoformat(row.decided_at) if row.decided_at else None,
+            row.created_at,
+            row.decided_at,
             getattr(row, "execution_id", None),
             getattr(row, "worker_thread_id", None),
             getattr(row, "interrupt_id", None),

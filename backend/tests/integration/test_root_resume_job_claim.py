@@ -98,13 +98,13 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
             project_id = f"project-{run_id}"
             session.add(ProjectModel(
                 id=project_id, name="Root resume claim",
-                created_at=now.isoformat(), updated_at=now.isoformat(),
+                created_at=now, updated_at=now,
             ))
             session.add(SessionModel(
                 id=session_id, project_id=project_id, title="Root resume claim",
                 active_run_id=run_id, last_run_sequence=1,
-                created_at=now.isoformat(), updated_at=now.isoformat(),
-                last_activity_at=now.isoformat(),
+                created_at=now, updated_at=now,
+                last_activity_at=now,
             ))
             session.add(
                 AgentRunModel(
@@ -121,8 +121,8 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
                     root_wait_plan_version=1,
                     root_wait_interrupt_id=None,
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             session.add(
@@ -136,8 +136,8 @@ async def test_two_app_instances_claim_one_root_resume_and_wait_for_interrupt() 
                     current_version=1,
                     active_round_id=round_id,
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             await session.flush()

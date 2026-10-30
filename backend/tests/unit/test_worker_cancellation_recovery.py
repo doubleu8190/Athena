@@ -187,9 +187,9 @@ async def test_worker_claim_commits_task_started_outbox_with_execution_lease(
         worker_thread_id="task:task-1:exec:1",
         title="Write report",
         objective="Write the requested report",
-        input_json="{}",
-        expected_output_json="{}",
-        allowed_tools_json="[]",
+        input_json={},
+        expected_output_json={},
+        allowed_tools_json=[],
         worker_type="general",
         updated_at=None,
     )
@@ -323,6 +323,7 @@ async def test_worker_acknowledges_only_its_fenced_cancellation():
 async def test_reconciler_finishes_cancel_when_no_workers_remain():
     run = SimpleNamespace(
         run_id="run-1",
+        request_json={},
         session_id="session-1",
         status="stopping",
         cancellation_epoch=5,
@@ -358,6 +359,7 @@ async def test_reconciler_finishes_cancel_when_no_workers_remain():
 async def test_reconciler_persists_task_cancelled_when_worker_lease_expires():
     run = SimpleNamespace(
         run_id="run-1",
+        request_json={},
         session_id="session-1",
         status="stopping",
         cancellation_epoch=5,

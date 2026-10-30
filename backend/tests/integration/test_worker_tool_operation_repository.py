@@ -136,8 +136,8 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
                     status="running",
                     root_thread_id="run:run-1",
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             await session.flush()
@@ -152,8 +152,8 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
                     current_version=1,
                     active_round_id="round-1",
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             await session.flush()
@@ -165,13 +165,13 @@ async def test_postgres_replays_completed_effect_across_attempts() -> None:
                         run_id="run-1",
                         title="Write report",
                         objective="write a report",
-                        allowed_tools_json='["write_file"]',
+                        allowed_tools_json=['write_file'],
                         timeout_seconds=3600,
                         status="running",
                         execution_generation=2,
                         active_execution_id="execution-2",
-                        created_at=now.isoformat(),
-                        updated_at=now.isoformat(),
+                        created_at=now,
+                        updated_at=now,
                     ),
                     PlanVersionModel(
                         plan_id="plan-1",

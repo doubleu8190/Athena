@@ -207,8 +207,8 @@ async def test_outbox_replay_after_publish_before_ack_persists_one_event() -> No
                     session_id="session-outbox-1",
                     status="cancelled",
                     root_thread_id="run:run-outbox-1",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             session.add(

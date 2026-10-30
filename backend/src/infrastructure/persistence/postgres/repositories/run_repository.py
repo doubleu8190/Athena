@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
@@ -56,18 +55,8 @@ from ..mappers.converters import session_domain_to_model
 from ..idempotency import execute_idempotent
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _json(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-    except (TypeError, ValueError):
-        return default
-    return parsed
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _final_answer_text(result: dict[str, object]) -> str:
@@ -152,11 +141,13 @@ def _stop_from_json(value: dict[str, Any]) -> RunCancellationResult:
     )
 
 
-def _run_start_payload_or_none(request_json: str) -> RunStartPayload | None:
+def _run_start_payload_or_none(
+    request_json: dict[str, Any] | None,
+) -> RunStartPayload | None:
     """Treat an empty run request as absent; validate every populated request."""
-    if not request_json or request_json.strip() == "{}":
+    if not request_json:
         return None
-    return RunStartPayloadSchema.model_validate_json(request_json).to_domain()
+    return RunStartPayloadSchema.model_validate(request_json).to_domain()
 
 
 class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, RunQueryPort):
@@ -188,7 +179,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
     ) -> tuple[RunEnqueueResult, bool]:
         """Atomically persist an idempotent user message and queued Run."""
         now = datetime.now(timezone.utc)
-        now_iso = now.isoformat()
 
         async with self._session_factory() as db:
             async with db.begin():
@@ -223,7 +213,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     if project_id is not None and session_row.project_id != project_id:
                         raise ValueError("session_project_mismatch")
                     writable = await ensure_writable_run_scope(
-                        db, session_id=session_id, turn_id=run_id, now=now_iso
+                        db, session_id=session_id, turn_id=run_id, now=now
                     )
                     if not writable:
                         raise ValueError("project_not_found")
@@ -249,30 +239,26 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
 
                     sequence = int(session_row.last_run_sequence or 0) + 1
                     session_row.last_run_sequence = sequence
-                    session_row.updated_at = now_iso
-                    session_row.last_activity_at = now_iso
+                    session_row.updated_at = now
+                    session_row.last_activity_at = now
                     db.add(
                         MessageModel(
                             id=payload.message_id,
                             session_id=session_id,
                             role="user",
                             content=payload.message,
-                            tool_calls_json="[]",
+                            tool_calls_json=[],
                             run_id=run_id,
-                            timestamp=now_iso,
+                            timestamp=now,
                         )
                     )
                     for attachment in attachment_rows:
                         attachment.message_id = payload.message_id
 
                     persisted_payload = replace(payload, sequence=sequence)
-                    request_json = json.dumps(
-                        RunStartPayloadSchema.from_domain(persisted_payload).model_dump(
-                            mode="json", exclude_none=True
-                        ),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
+                    request_json = RunStartPayloadSchema.from_domain(
+                        persisted_payload
+                    ).model_dump(mode="json", exclude_none=True)
                     db.add(
                         AgentRunModel(
                             run_id=run_id,
@@ -282,8 +268,8 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                             status=RunStatus.QUEUED.value,
                             request_json=request_json,
                             root_thread_id=f"thread-{run_id}",
-                            created_at=now_iso,
-                            updated_at=now_iso,
+                            created_at=now,
+                            updated_at=now,
                         )
                     )
                     await self._write_queued_events(
@@ -292,7 +278,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         run_id=run_id,
                         message_id=payload.message_id,
                         sequence=sequence,
-                        occurred_at=now_iso,
+                        occurred_at=now,
                         content=payload.message,
                         request_id=request_id,
                         attachment_ids=payload.attachment_ids,
@@ -326,7 +312,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         run_id: str,
         message_id: str,
         sequence: int,
-        occurred_at: str,
+        occurred_at: datetime,
         content: str,
         request_id: str,
         attachment_ids: Sequence[str],
@@ -353,7 +339,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     "message.persisted",
                     {
                         "role": "user",
-                        "timestamp": occurred_at,
+                        "timestamp": occurred_at.isoformat(),
                         "content": content,
                         "request_id": request_id,
                         "attachment_ids": list(attachment_ids),
@@ -371,7 +357,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     message_id=message_id,
                     event_type=event_type,
                     durability="durable",
-                    payload_json=json.dumps(payload, ensure_ascii=False),
+                    payload_json=payload,
                     occurred_at=occurred_at,
                 )
             )
@@ -383,7 +369,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         now = datetime.now(timezone.utc)
-        now_iso = now.isoformat()
         async with self._session_factory() as db:
             async with db.begin():
                 after_resource_id: str | None = None
@@ -439,8 +424,8 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     payload = _run_start_payload_or_none(run.request_json)
                     if payload is None:
                         run.status = RunStatus.FAILED.value
-                        run.error_json = json.dumps({"code": "run_request_missing"})
-                        run.updated_at = now_iso
+                        run.error_json = {"code": "run_request_missing"}
+                        run.updated_at = now
                         await self._leases.complete_unclaimed_in_transaction(
                             db, LeaseKey("root_execution", run.run_id)
                         )
@@ -455,7 +440,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         )
                         return None
                     run.status = RunStatus.RUNNING.value
-                    run.updated_at = now_iso
+                    run.updated_at = now
                     lease = await self._leases.acquire_in_transaction(
                         db,
                         LeaseKey("root_execution", run.run_id),
@@ -472,7 +457,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         session_id=run.session_id,
                         run_id=run.run_id,
                         payload=payload,
-                        issued_at=datetime.fromisoformat(run.created_at),
+                        issued_at=run.created_at,
                         schema_version=1,
                         lease=lease,
                     )
@@ -721,10 +706,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     run_id=run_id,
                     event_type="run.root_suspended",
                     durability="durable",
-                    payload_json=json.dumps(wait_payload or {
+                    payload_json=wait_payload or {
                         "activity_id": f"run:{run_id}", "activity_type": "run",
                         "name": "run", "status": "waiting",
-                    }, ensure_ascii=False),
+                    },
                     occurred_at=_now(),
                 ))
                 if not await self._leases.finish_in_transaction(session, lease):
@@ -851,7 +836,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         *, root_execution_lease: LeaseGrant | None = None,
     ) -> None:
         """在 Session、Run 锁内保存失败原因并启动同一套取消栅栏。"""
-        run.error_json = json.dumps(error, ensure_ascii=False)
+        run.error_json = error
         plan = await db.scalar(
             select(AgentPlanModel).where(AgentPlanModel.run_id == run.run_id).with_for_update()
         )
@@ -926,7 +911,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 )
                 if grant is None:
                     return None
-                run.updated_at = now.isoformat()
+                run.updated_at = now
                 return grant
 
     async def renew_execution_lease(
@@ -950,7 +935,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 if now is None:
                     raise RuntimeError("database_clock_unavailable")
                 now = now.astimezone(timezone.utc)
-                now_iso = now.isoformat()
                 session_id = await db.scalar(
                     select(AgentRunModel.session_id).where(AgentRunModel.run_id == run_id)
                 )
@@ -1002,9 +986,9 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 failed = failed or run.error_json is not None
                 terminal = RunStatus.FAILED if failed else RunStatus.CANCELLED
                 run.status = terminal.value
-                run.updated_at = now_iso
+                run.updated_at = now
                 session_row.active_run_id = None
-                await self._enqueue_memory_job(db, run, assistant_text="", now_iso=now_iso)
+                await self._enqueue_memory_job(db, run, assistant_text="", now=now)
                 self._add_completion_outbox(
                     db,
                     run=run,
@@ -1012,7 +996,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     event_type="RunFailed" if failed else "RunCancelled",
                     dedupe_key=f"run:{run_id}:{terminal.value}",
                     payload_json={
-                        "error": _json(run.error_json, {"code": "run_failed"}) if failed else None,
+                        "error": (run.error_json if run.error_json is not None else {"code": "run_failed"}) if failed else None,
                         "external_effect_status": run.cancellation_external_effect_status,
                     },
                     now=now,
@@ -1141,14 +1125,13 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         *, root_execution_lease: LeaseGrant | None = None,
     ) -> RunCancellationResult:
         """Set the stop fence and revoke pending work while retaining the pointer."""
-        now_iso = now.isoformat()
         external_effect_status = (
             "unknown" if run.status == RunStatus.RUNNING.value else "none"
         )
         run.status = RunStatus.STOPPING.value
         run.cancellation_epoch = int(run.cancellation_epoch or 0) + 1
         run.cancellation_external_effect_status = external_effect_status
-        run.updated_at = now_iso
+        run.updated_at = now
         await self._cancel_root_resume_jobs(session, run_id, now)
         await self._cancel_pending_approvals(session, run_id=run_id, plan=None, now=now)
         await self._revoke_run_leases(
@@ -1194,7 +1177,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         root_execution_lease: LeaseGrant | None = None,
     ) -> RunCancellationResult:
         """在 Run 锁内推进 Plan 取消并撤销尚未开始的工作。"""
-        now_iso = now.isoformat()
         external_effect_status = (
             "unknown"
             if run.status == RunStatus.RUNNING.value or active_execution_count
@@ -1206,10 +1188,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         run.status = RunStatus.STOPPING.value
         run.cancellation_epoch = cancellation_epoch
         run.cancellation_external_effect_status = external_effect_status
-        run.updated_at = now_iso
+        run.updated_at = now
         plan.status = "cancelling"
         plan.cancellation_epoch = cancellation_epoch
-        plan.updated_at = now_iso
+        plan.updated_at = now
 
         await self._cancel_pending_plan_tasks(
             session,
@@ -1317,7 +1299,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 AgentTaskModel.plan_id == plan.plan_id,
                 AgentTaskModel.status.in_(("pending", "waiting_approval")),
             )
-            .values(status="cancelled", updated_at=now.isoformat())
+            .values(status="cancelled", updated_at=now)
         )
         for task in pending_tasks:
             session.add(
@@ -1358,7 +1340,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 AgentTaskModel.plan_id == plan.plan_id,
                 AgentTaskModel.status == "running",
             )
-            .values(status="cancelling", updated_at=now.isoformat())
+            .values(status="cancelling", updated_at=now)
         )
 
     async def _cancel_active_plan_executions(
@@ -1546,15 +1528,15 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         run: AgentRunModel,
         *,
         assistant_text: str,
-        now_iso: str,
+        now: datetime,
     ) -> None:
         """在 Run 终态事务内排队记忆作业。"""
-        request = _run_start_payload_or_none(getattr(run, "request_json", "{}"))
+        request = _run_start_payload_or_none(run.request_json)
         user_text = request.message.strip() if request is not None else ""
         if not user_text:
             return
         await enqueue_memory_job_in_transaction(session, turn_id=run.run_id,
-            session_id=run.session_id, user_text=user_text, assistant_text=assistant_text, now=now_iso)
+            session_id=run.session_id, user_text=user_text, assistant_text=assistant_text, now=now)
 
     async def _finish(
         self,
@@ -1568,7 +1550,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         if lease.key != LeaseKey("root_execution", run_id):
             return False
         now = datetime.now(timezone.utc)
-        now_iso = now.isoformat()
         async with self._session_factory() as session:
             async with session.begin():
                 session_id = await session.scalar(
@@ -1612,11 +1593,11 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 except LeaseLostError:
                     return False
                 run.status = status.value
-                run.updated_at = now_iso
+                run.updated_at = now
                 if response is not None:
-                    run.response_json = json.dumps(response, ensure_ascii=False)
+                    run.response_json = response
                 if error is not None:
-                    run.error_json = json.dumps(error, ensure_ascii=False)
+                    run.error_json = error
                 session_row.active_run_id = None
                 changed = True
                 if changed:
@@ -1635,7 +1616,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                                 session,
                                 run,
                                 assistant_text=content,
-                                now_iso=now_iso,
+                                now=now,
                             )
                             if user_message_id and content:
                                 assistant_message_id = f"assistant:{run_id}"
@@ -1644,7 +1625,9 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                                     raise ValueError(
                                         "answer_stream_message_id_mismatch"
                                     )
-                                started_at = str(stream["started_at"])
+                                started_at = datetime.fromisoformat(
+                                    str(stream["started_at"])
+                                )
                                 await session.execute(
                                     pg_insert(MessageModel)
                                     .values(
@@ -1652,18 +1635,18 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                                         session_id=run.session_id,
                                         role="assistant",
                                         content=content,
-                                        tool_calls_json="[]",
+                                        tool_calls_json=[],
                                         run_id=run_id,
                                         timestamp=started_at,
                                     )
                                     .on_conflict_do_nothing(index_elements=["id"])
                                 )
-                                session_row.updated_at = now_iso
+                                session_row.updated_at = now
                                 if (
                                     session_row.last_activity_at is None
-                                    or now_iso > session_row.last_activity_at
+                                    or now > session_row.last_activity_at
                                 ):
-                                    session_row.last_activity_at = now_iso
+                                    session_row.last_activity_at = now
                                 self._add_completion_outbox(
                                     session,
                                     run=run,
@@ -1673,7 +1656,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                                     payload_json={
                                         "message_id": assistant_message_id,
                                         "reply_to_message_id": user_message_id,
-                                        "timestamp": started_at,
+                                        "timestamp": started_at.isoformat(),
                                         "stream_id": stream["stream_id"],
                                         "stream_type": "answer",
                                         "content": content,
@@ -1700,7 +1683,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                                 session,
                                 run,
                                 assistant_text="",
-                                now_iso=now_iso,
+                                now=now,
                             )
                             self._add_completion_outbox(
                                 session,
@@ -1762,7 +1745,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         Raises:
             ValueError: 数据库时间字符串无法解析。
         """
-        request = _json(row.request_json, {})
+        request = row.request_json
         message = request.get("message", "") if isinstance(request, dict) else ""
         return RunSummary(
             row.run_id,
@@ -1771,9 +1754,9 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             row.sequence,
             row.status,
             row.root_thread_id,
-            _json(row.error_json, None),
-            datetime.fromisoformat(row.created_at),
-            datetime.fromisoformat(row.updated_at),
+            row.error_json,
+            row.created_at,
+            row.updated_at,
             started_at=started_at,
             title=message[:120] if isinstance(message, str) else "",
         )

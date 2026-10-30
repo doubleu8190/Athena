@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from itertools import count
@@ -107,8 +106,8 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
                     session_id=session_id,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             session.add(
@@ -122,8 +121,8 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
                     current_version=1,
                     active_round_id=round_id,
                     cancellation_epoch=0,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             await session.flush()
@@ -156,16 +155,16 @@ async def test_root_review_reuses_decision_after_commit_before_checkpoint() -> N
                     run_id=run_id,
                     title="Task A",
                     objective="Complete Task A",
-                    input_json="{}",
-                    expected_output_json="{}",
-                    allowed_tools_json="[]",
+                    input_json={},
+                    expected_output_json={},
+                    allowed_tools_json=[],
                     worker_type="general",
                     timeout_seconds=60,
                     status="completed",
-                    output_json=json.dumps({"result": "done"}),
+                    output_json={"result": "done"},
                     execution_generation=1,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 

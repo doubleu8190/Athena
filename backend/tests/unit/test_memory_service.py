@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from application.memory import MemoryService
@@ -81,17 +83,19 @@ async def test_memory_metadata_survives_repository_to_http_boundary() -> None:
     from application.memory.service import _to_response
     from interfaces.http.controllers.query_controller import _memory_response
 
+    created_at = datetime.fromisoformat("2026-10-01T00:00:00+00:00")
+    last_accessed_at = datetime.fromisoformat("2026-10-20T00:00:00+00:00")
+    valid_until = datetime.fromisoformat("2026-11-01T00:00:00+00:00")
     row = MemoryModel(
-        id="m-1", content="fact", metadata_json="{}", source_kind="extraction",
-        status="active", created_at="2026-10-01T00:00:00+00:00",
-        access_count=3, last_accessed_at="2026-10-20T00:00:00+00:00",
-        last_observed_at="2026-10-01T00:00:00+00:00", expires_at=None,
-        valid_until="2026-11-01T00:00:00+00:00", validity_status="valid",
+        id="m-1", content="fact", metadata_json={"source": "extraction"},
+        status="active", created_at=created_at,
+        access_count=3, last_accessed_at=last_accessed_at,
+        expires_at=None, valid_until=valid_until, validity_status="valid",
     )
     result = _memory_response(_to_response(PostgresMemoryRepository._domain(row)))
-    assert result["created_at"] == row.created_at
+    assert result["created_at"] == created_at.isoformat()
     assert result["access_count"] == 3
-    assert result["last_accessed_at"] == row.last_accessed_at
-    assert result["last_observed_at"] == row.last_observed_at
+    assert result["last_accessed_at"] == last_accessed_at.isoformat()
+    assert result["last_observed_at"] == created_at.isoformat()
     assert result["expires_at"] is None
-    assert result["valid_until"] == row.valid_until
+    assert result["valid_until"] == valid_until.isoformat()

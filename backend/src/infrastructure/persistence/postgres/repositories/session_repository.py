@@ -143,7 +143,7 @@ class PostgresSessionRepository(SessionRepository):
                         SessionModel.deleted_time.is_(None),
                     )
                     .values(
-                        updated_at=session.updated_at.isoformat(),
+                        updated_at=session.updated_at,
                         compression_summary=session.compression_summary,
                         last_compressed_message_id=session.last_compressed_message_id,
                         last_summarized_message_id=session.last_summarized_message_id,
@@ -166,13 +166,13 @@ class PostgresSessionRepository(SessionRepository):
                 if row is None:
                     raise LookupError("session_not_found")
                 row.title = session.title
-                row.updated_at = session.updated_at.isoformat()
+                row.updated_at = session.updated_at
                 await db.flush()
                 return session_model_to_domain(row)
 
     async def delete(self, session_id: str) -> bool:
         """软删除会话并返回是否存在目标。"""
-        deleted_at = datetime.now(timezone.utc).isoformat()
+        deleted_at = datetime.now(timezone.utc)
         async with self._session_factory() as db:
             async with db.begin():
                 session_row = await db.scalar(

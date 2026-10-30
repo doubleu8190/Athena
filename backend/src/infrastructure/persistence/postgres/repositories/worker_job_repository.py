@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
@@ -225,17 +224,12 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                         interrupt_id=str(approval["interrupt_id"]),
                         tool_call_id=str(approval["tool_call_id"]),
                         tool_name=str(approval["tool_name"]),
-                        arguments_json=json.dumps(
-                            dict(approval.get("arguments", {})),
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
+                        arguments_json=dict(approval.get("arguments", {})),
                         risk_level=str(approval.get("risk_level", "high")),
                         args_hash=str(approval["args_hash"]),
                         operation_key=str(approval["operation_key"]),
                         status="pending",
-                        created_at=now.isoformat(),
+                        created_at=now,
                         expires_at=approval.get("expires_at"),
                     )
                 )
@@ -279,11 +273,8 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 job.status = "completed"
                 job.updated_at = now
                 task.status = "waiting_approval"
-                task.error_json = json.dumps(
-                    {"approval_id": str(approval["approval_id"])},
-                    ensure_ascii=False,
-                )
-                task.updated_at = now.isoformat()
+                task.error_json = {"approval_id": str(approval["approval_id"])}
+                task.updated_at = now
                 round_task.status = "waiting_approval"
                 round_task.terminal_at = None
                 if not await self._leases.finish_in_transaction(
@@ -340,7 +331,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 execution.status = "cancelled"
                 execution.updated_at = now
                 task.status = "cancelled"
-                task.updated_at = now.isoformat()
+                task.updated_at = now
                 round_task.status = "cancelled"
                 round_task.terminal_at = now
                 round_row.terminal_task_count = min(
@@ -433,7 +424,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         if plan is None or plan.status in {"completed", "failed", "cancelled"}:
             failed = run.error_json is not None
             run.status = "failed" if failed else "cancelled"
-            run.updated_at = now.isoformat()
+            run.updated_at = now
             if root_lease is not None:
                 await self._leases.acknowledge_stopped_in_transaction(
                     session, _lease_grant_from_record(root_lease), completed=True
@@ -453,7 +444,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                     payload_json={
                         "cancellation_epoch": run.cancellation_epoch,
                         "external_effect_status": run.cancellation_external_effect_status,
-                        "error": json.loads(run.error_json) if failed else None,
+                        "error": run.error_json if failed else None,
                     },
                     schema_version=1,
                     status="pending",
@@ -602,7 +593,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                     AgentTaskModel.task_id == task_id,
                     AgentTaskModel.status == "cancelling",
                 )
-                .values(status="cancelled", updated_at=now.isoformat())
+                .values(status="cancelled", updated_at=now)
             )
             await session.execute(
                 update(RoundTaskModel)
@@ -682,7 +673,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 AgentTaskModel.plan_id == plan.plan_id,
                 AgentTaskModel.status == "cancelling",
             )
-            .values(status="cancelled", updated_at=now.isoformat())
+            .values(status="cancelled", updated_at=now)
         )
         await session.execute(
             update(RoundTaskModel)
@@ -709,10 +700,10 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             )
         )
         plan.status = "cancelled"
-        plan.updated_at = now.isoformat()
+        plan.updated_at = now
         failed = run.error_json is not None
         run.status = "failed" if failed else "cancelled"
-        run.updated_at = now.isoformat()
+        run.updated_at = now
         session_row = await session.get(SessionModel, run.session_id)
         if session_row is not None and session_row.active_run_id == run.run_id:
             session_row.active_run_id = None
@@ -763,17 +754,14 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
     ) -> None:
         """在取消终态事务内提交回顾作业和冻结的项目绑定。"""
         try:
-            request = RunStartPayloadSchema.model_validate_json(
-                getattr(run, "request_json", "{}")
-            ).to_domain()
+            request = RunStartPayloadSchema.model_validate(run.request_json).to_domain()
         except (TypeError, ValueError):
             return
         user_text = request.message.strip()
         if not user_text:
             return
-        now_iso = now.isoformat()
         await enqueue_memory_job_in_transaction(session, turn_id=run.run_id,
-            session_id=run.session_id, user_text=user_text, assistant_text="", now=now_iso)
+            session_id=run.session_id, user_text=user_text, assistant_text="", now=now)
 
     def _cancellation_outbox(
         self,
@@ -796,7 +784,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
             payload_json={
                 "cancellation_epoch": run.cancellation_epoch,
                 "external_effect_status": run.cancellation_external_effect_status,
-                **({"error": json.loads(run.error_json)} if event_type == "RunFailed" and run.error_json else {}),
+                **({"error": run.error_json} if event_type == "RunFailed" and run.error_json else {}),
             },
             schema_version=1,
             status="pending",
@@ -944,7 +932,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         is_resume = candidate.job_type == "resume_worker"
         if candidate.job_type not in {"execute", "resume_worker"}:
             return None
-        resume_value = _load_json(candidate.resume_value, {})
+        resume_value = candidate.resume_value if candidate.resume_value is not None else {}
         if is_resume:
             approval = (
                 await session.get(ApprovalRecordModel, candidate.approval_id)
@@ -1025,7 +1013,7 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
         task_row.status = "running"
         task_row.execution_generation = execution.attempt
         task_row.worker_thread_id = execution.worker_thread_id
-        task_row.updated_at = now.isoformat()
+        task_row.updated_at = now
         round_task.status = "running"
 
         task = _task_from_row(task_row)
@@ -1276,8 +1264,8 @@ def _task_from_row(row: AgentTaskModel) -> Task:
         task_id=row.task_id,
         title=row.title,
         objective=row.objective,
-        input=_load_json(row.input_json, {}),
-        expected_output=_load_json(row.expected_output_json, {}),
+        input=row.input_json,
+        expected_output=row.expected_output_json,
         allowed_tools=_load_json_string_list(row.allowed_tools_json),
         worker_type=row.worker_type,
         timeout_seconds=getattr(row, "timeout_seconds", 3600.0) or 3600.0,
@@ -1292,7 +1280,7 @@ def _result_from_row(
     raw = (
         resolved_output
         if resolved_output is not None
-        else _load_json(row.output_json, {})
+        else (row.output_json if row.output_json is not None else {})
     )
     if (
         resolved_output is None
@@ -1307,7 +1295,7 @@ def _result_from_row(
         status = TaskStatus(row.status)
     except ValueError:
         status = TaskStatus.FAILED
-    error = _load_json(row.error_json, None)
+    error = row.error_json
     return TaskResult(
         task_id=row.task_id,
         status=status,
@@ -1319,35 +1307,13 @@ def _result_from_row(
     )
 
 
-def _load_json(value: str | dict[str, Any] | None, default: Any) -> Any:
-    """从 Text JSON 列或 JSONB 列读取对象。"""
-    if value is None or value == "":
-        return default
-    if isinstance(value, dict):
-        return value
-    try:
-        loaded = json.loads(value)
-    except (TypeError, ValueError):
-        return default
-    return loaded if isinstance(loaded, dict) else default
-
-
-def _load_json_string_list(value: str | list[Any] | None) -> tuple[str, ...]:
-    """读取 JSON 字符串列表；格式错误或元素类型不符时返回空元组。"""
-    if isinstance(value, list):
-        loaded = value
-    elif value:
-        try:
-            loaded = json.loads(value)
-        except (TypeError, ValueError):
-            return ()
-    else:
-        return ()
-    if not isinstance(loaded, list) or any(
-        not isinstance(item, str) for item in loaded
+def _load_json_string_list(value: object) -> tuple[str, ...]:
+    """读取 JSONB 字符串列表；元素类型不符时返回空元组。"""
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) for item in value
     ):
         return ()
-    return tuple(loaded)
+    return tuple(value)
 
 
 def _utc(value: datetime) -> datetime:

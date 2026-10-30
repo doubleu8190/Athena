@@ -104,7 +104,7 @@ class PostgresAttachmentRepository(AttachmentRepository):
 
     async def soft_delete(self, attachment_id: str, *, session_id: str) -> bool:
         """按会话所有权软删除附件。"""
-        deleted_at = datetime.now(timezone.utc).isoformat()
+        deleted_at = datetime.now(timezone.utc)
         async with self._session_factory() as db:
             async with db.begin():
                 job = await db.scalar(

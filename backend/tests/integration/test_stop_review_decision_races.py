@@ -129,8 +129,8 @@ async def test_stop_racing_continue_or_revise_cancels_all_worker_jobs(
                 ProjectModel(
                     id=f"project-{run_id}",
                     name="Stop and review race",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             session.add(
@@ -140,9 +140,9 @@ async def test_stop_racing_continue_or_revise_cancels_all_worker_jobs(
                     title="Stop and review race",
                     active_run_id=run_id,
                     last_run_sequence=1,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
-                    last_activity_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
+                    last_activity_at=now,
                 )
             )
             session.add(
@@ -153,8 +153,8 @@ async def test_stop_racing_continue_or_revise_cancels_all_worker_jobs(
                     sequence=1,
                     status="running",
                     root_thread_id=f"run:{run_id}",
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat(),
+                    created_at=now,
+                    updated_at=now,
                 )
             )
 

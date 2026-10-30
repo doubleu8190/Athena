@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,9 +12,9 @@ class Project:
 
     id: str
     name: str
-    created_at: str
-    updated_at: str
-    deleted_time: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    deleted_time: datetime | None = None
 
 
 __all__ = ["Project"]

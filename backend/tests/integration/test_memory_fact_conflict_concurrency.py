@@ -256,7 +256,7 @@ async def test_concurrent_conflicting_fact_writes_preserve_both_values(monkeypat
             rows = (await session.scalars(select(MemoryModel))).all()
             assert len(rows) == 2
             assert all(row.embedding is not None for row in rows)
-            assert all("session_id" not in __import__("json").loads(row.metadata_json) for row in rows)
+            assert all("session_id" not in row.metadata_json for row in rows)
         # 重放已提交候选不会重新决策或创建关系。
         for turn_id in source_turn_ids:
             assert await workflows[turn_id].process_completed_turn(turns[turn_id], lease=leases[turn_id]) == 0

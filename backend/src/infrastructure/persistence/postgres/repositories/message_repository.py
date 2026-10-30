@@ -46,7 +46,7 @@ class PostgresMessageRepository(MessageRepository):
                         raise LookupError("session_not_found")
                 db.add(message_domain_to_model(message))
                 if session_row is not None:
-                    timestamp = message.timestamp.isoformat()
+                    timestamp = message.timestamp
                     session_row.updated_at = timestamp
                     if (
                         session_row.last_activity_at is None

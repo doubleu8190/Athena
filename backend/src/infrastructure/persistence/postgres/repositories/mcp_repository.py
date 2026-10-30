@@ -71,7 +71,7 @@ class PostgresMCPServerRepository(MCPServerRepository):
                         MCPServerModel.name == name,
                         MCPServerModel.deleted_time.is_(None),
                     )
-                    .values(deleted_time=datetime.now(timezone.utc).isoformat())
+                    .values(deleted_time=datetime.now(timezone.utc))
                     .returning(MCPServerModel.name)
                 )
                 deleted_name = result.scalar_one_or_none()

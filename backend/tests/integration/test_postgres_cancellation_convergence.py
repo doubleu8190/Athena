@@ -117,7 +117,7 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         from datetime import datetime, timezone
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         async with factory() as session, session.begin():
             session.add(
                 ProjectModel(
@@ -303,8 +303,8 @@ async def test_same_session_runs_are_fifo_and_stop_keeps_the_pointer_until_relea
         first_message = await session.get(MessageModel, first.message_id)
         second_message = await session.get(MessageModel, second.message_id)
         assert first_message is not None and second_message is not None
-        first_message.timestamp = "2030-01-01T00:00:00+00:00"
-        second_message.timestamp = "2020-01-01T00:00:00+00:00"
+        first_message.timestamp = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        second_message.timestamp = datetime(2020, 1, 1, tzinfo=timezone.utc)
     ordered_messages = await PostgresMessageRepository(session_factory).list_by_session(
         first.session_id
     )
@@ -366,8 +366,8 @@ async def test_same_session_runs_are_fifo_and_stop_keeps_the_pointer_until_relea
                 run_id=first.run_id,
                 event_type="thinking.completed",
                 durability="durable",
-                payload_json='{"content":"late thinking"}',
-                occurred_at="2026-01-01T00:00:00+00:00",
+                payload_json={"content": "late thinking"},
+                occurred_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
         )
     assert await event_repository.list_events_between(first.session_id, after=4) == []
@@ -511,13 +511,13 @@ async def test_memory_evidence_limits_are_applied_before_domain_validation(
     async with session_factory() as session, session.begin():
         session.add(AgentPlanModel(plan_id="evidence-plan", run_id=run.run_id, session_id=run.session_id,
             status="completed", user_goal="goal", current_version=1,
-            created_at=now.isoformat(), updated_at=now.isoformat()))
+            created_at=now, updated_at=now))
         await session.flush()
         session.add(PlanVersionModel(plan_id="evidence-plan", version=1, dag_json={}, created_at=now))
         session.add_all([
             AgentTaskModel(task_id=f"evidence-task-{index:02d}", plan_id="evidence-plan", run_id=run.run_id,
                 title="task", objective="work", status="completed", execution_generation=1,
-                created_at=now.isoformat(), updated_at=now.isoformat())
+                created_at=now, updated_at=now)
             for index in range(task_count)
         ])
         await session.flush()
@@ -565,7 +565,7 @@ async def test_checkpoint_wait_keeps_session_and_allows_new_resume_generation(
         run.root_wait_round_id = "round-wait"
         run.root_wait_plan_version = 1
         run.root_wait_checkpoint_id = "checkpoint-wait"
-        run.root_wait_armed_at = now.isoformat()
+        run.root_wait_armed_at = now
         run.root_wait_interrupt_id = "interrupt-wait"
         session.add(
             AgentPlanModel(
@@ -576,8 +576,8 @@ async def test_checkpoint_wait_keeps_session_and_allows_new_resume_generation(
                 user_goal="wait for review",
                 current_version=1,
                 active_round_id="round-wait",
-                created_at=now.isoformat(),
-                updated_at=now.isoformat(),
+                created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -627,12 +627,12 @@ async def test_failed_root_waits_for_live_worker_before_next_run(
     async with session_factory() as session, session.begin():
         session.add(AgentPlanModel(plan_id="plan-failure", run_id=first.run_id, session_id=first.session_id,
             status="running", user_goal="goal", current_version=1, active_round_id="round-failure",
-            created_at=now.isoformat(), updated_at=now.isoformat()))
+            created_at=now, updated_at=now))
         await session.flush()
         session.add_all([
             AgentTaskModel(task_id="task-failure", plan_id="plan-failure", run_id=first.run_id,
                 title="task", objective="work", status="running", active_execution_id="execution-failure",
-                created_at=now.isoformat(), updated_at=now.isoformat()),
+                created_at=now, updated_at=now),
             PlanVersionModel(plan_id="plan-failure", version=1, dag_json={}, created_at=now),
         ])
         await session.flush()

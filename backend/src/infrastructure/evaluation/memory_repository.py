@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime, timezone
 
 from domain.evaluation import CaseResult, DatasetManifest, EvalRun, GateResult, MetricValue
 
@@ -35,7 +36,11 @@ class InMemoryEvaluationRepository:
         run = self.runs.get(run_id)
         if run is None:
             return None
-        value = replace(run, status="cancelled", completed_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())
+        value = replace(
+            run,
+            status="cancelled",
+            completed_at=datetime.now(timezone.utc),
+        )
         self.runs[run_id] = value
         return value
 

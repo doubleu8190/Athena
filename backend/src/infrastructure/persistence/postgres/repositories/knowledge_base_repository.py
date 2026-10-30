@@ -106,7 +106,7 @@ class PostgresKnowledgeBaseRepository(KnowledgeBaseRepository):
                     .values(
                         name=knowledge_base.name,
                         description=knowledge_base.description,
-                        updated_at=knowledge_base.updated_at.isoformat(),
+                        updated_at=knowledge_base.updated_at,
                     )
                 )
         return knowledge_base
@@ -121,7 +121,7 @@ class PostgresKnowledgeBaseRepository(KnowledgeBaseRepository):
                         KnowledgeBaseModel.id == knowledge_base_id,
                         KnowledgeBaseModel.deleted_time.is_(None),
                     )
-                    .values(deleted_time=datetime.now(timezone.utc).isoformat())
+                    .values(deleted_time=datetime.now(timezone.utc))
                     .returning(KnowledgeBaseModel.id)
                 )
         return result.scalar_one_or_none() is not None
